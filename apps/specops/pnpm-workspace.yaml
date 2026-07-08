@@ -1,0 +1,6 @@
+allowBuilds:
+  bun: true
+  esbuild: true
+onlyBuiltDependencies:
+  - bun
+  - esbuild

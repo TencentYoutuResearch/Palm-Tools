@@ -1,0 +1,25 @@
+[package]
+name = "kode-core"
+version = "0.2.0-dev"
+edition = "2021"
+description = "UI-agnostic core for kode (kill la kode): PTY, sessions, jsonl tail, config"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs"] }
+portable-pty = "0.9"
+vt100 = { package = "vt100-ctt", version = "0.17" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+tracing = "0.1"
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+# Phase 11.2:`SessionTransport` trait 的 async 方法需要 async-trait,
+# 因为 RemoteTransport 实现要做 HTTP / WS 异步 IO。本地实现不需要 async,
+# 但 trait 必须统一签名。
+async-trait = "0.1"
+# kode-memory:Session::new 在 spawn 子进程时通过 prompt::build 拿到要注入的
+# system prompt 段(给所有 backend 写"你的工具叫 memory_search/propose"指令)。
+# path 依赖,不引网络包。
+kode-memory = { path = "../kode-memory" }

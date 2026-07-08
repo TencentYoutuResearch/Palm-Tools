@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capabilities",
+  "identifier": "specops-window-drag",
+  "description": "Allow the SpecOps console (loaded from a loopback HTTP origin) to drag and maximize its own window. The SpecOps Rail renders a `data-tauri-drag-region` strip; Tauri's injected drag.js calls `plugin:window|start_dragging` / `internal_toggle_maximize` over IPC. Because the console is an EXTERNAL (remote) URL, those window commands are denied unless the origin is listed under `remote.urls` here. Scope is intentionally narrow: only the two drag/maximize commands, only for specops-* windows, only from the loopback origin.",
+  "windows": ["specops-*"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*"]
+  },
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}

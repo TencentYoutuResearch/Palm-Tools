@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "intake_id": "355425ba-d70b-484e-a254-d290fa4433ca",
+  "status": "completed",
+  "primary": ".specops/changes/355425ba",
+  "documents": [
+    ".specops/changes/355425ba",
+    ".specops/changes/355425ba/proposal.md",
+    ".specops/changes/355425ba/tasks.md",
+    ".specops/changes/355425ba/design.md"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@kode/i18n",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/runtime.ts"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs"
+  }
+}

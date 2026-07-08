@@ -1,0 +1,32 @@
+// 30 个模拟查询。每行:{ query, expected_id }
+// expected_id 必须出现在 seeds.jsonl 里。Top-1/Top-5 命中率作为召回基准。
+{"query":"PtyHost 死锁怎么解决","expected_id":"pty-clone-killer"}
+{"query":"clone_killer 是干嘛的","expected_id":"pty-clone-killer"}
+{"query":"reaper 和 killer 一起持锁会怎样","expected_id":"pty-clone-killer"}
+{"query":"codebuddy 默认 args 能不能加东西","expected_id":"codebuddy-no-positional"}
+{"query":"为什么不能给 codebuddy 加 positional","expected_id":"codebuddy-no-positional"}
+{"query":"外层终端能进 alt-screen 吗","expected_id":"no-alt-screen-outer"}
+{"query":"嵌套 alt-screen 会黑屏","expected_id":"no-alt-screen-outer"}
+{"query":"vt100 怎么 resize","expected_id":"vt100-resize-api"}
+{"query":"set_size 怎么调","expected_id":"vt100-resize-api"}
+{"query":"启动子 agent 要注入什么参数","expected_id":"session-id-injection"}
+{"query":"jsonl 文件在哪里","expected_id":"jsonl-path-codebuddy"}
+{"query":"claude 的状态文件路径","expected_id":"jsonl-path-claude"}
+{"query":"claude jsonl 字段 模型在哪","expected_id":"jsonl-fields-claude"}
+{"query":"用户改的标题怎么不被覆盖","expected_id":"title-pinned"}
+{"query":"日志写文件还是 stderr","expected_id":"trace-debug-only"}
+{"query":"cargo test 为啥要 --test-threads=1","expected_id":"cargo-test-singlethread"}
+{"query":"crates.io 网络慢怎么办","expected_id":"cargo-mirror-rsproxy"}
+{"query":"为什么用 vt100-ctt 不用 vt100","expected_id":"vt100-ctt-fork"}
+{"query":"后台 tab 切回会卡吗","expected_id":"backend-tab-keep-feed"}
+{"query":"GUI 字节流怎么传","expected_id":"gui-channel-not-emit"}
+{"query":"PTY bytes 怎么合批","expected_id":"gui-byte-coalescing"}
+{"query":"webgl 不可用怎么办","expected_id":"gui-webgl-fallback"}
+{"query":"窗口拉伸卡顿","expected_id":"gui-resize-debounce"}
+{"query":"切显示器后字符模糊","expected_id":"gui-hidpi-refresh"}
+{"query":"xterm 实例多了内存爆","expected_id":"gui-xterm-lru-cache"}
+{"query":"持久化文件路径","expected_id":"persist-state-json"}
+{"query":"恢复会话用什么参数","expected_id":"resume-session-id"}
+{"query":"远程协议鉴权方式","expected_id":"protocol-bearer-auth"}
+{"query":"GUI 桥默认端口","expected_id":"bridge-port-default"}
+{"query":"FTS5 中文搜不到怎么办","expected_id":"trigram-tokenizer"}

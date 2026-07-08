@@ -1,0 +1,1 @@
+"{\"x\":1160,\"y\":8,\"w\":28,\"h\":28,\"display\":\"flex\",\"visibility\":\"visible\",\"opacity\":\"1\",\"zIndex\":\"6\",\"color\":\"rgb(168, 174, 167)\",\"parent\":\"module\"}"

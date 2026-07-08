@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kill la Code Theme</title>
+
+  <style>
+    /* =========================
+   DARK MODE (default)
+========================= */
+    :root {
+      --bg-primary: #0B0B0D;
+      --bg-secondary: #141417;
+      --bg-tertiary: #1C1C20;
+
+      --red-primary: #FF2B2B;
+      --red-deep: #C1121F;
+      --red-glow: #FF4D4D;
+
+      --accent-yellow: #FFB703;
+      --accent-orange: #FB5607;
+
+      --text-primary: #F5F5F5;
+      --text-secondary: #B0B0B5;
+      --text-muted: #6B6B70;
+
+      --border: #2A2A2E;
+    }
+
+    /* =========================
+   LIGHT MODE
+========================= */
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg-primary: #F6F6F7;
+        --bg-secondary: #EDEDF0;
+        --bg-tertiary: #E2E2E6;
+
+        --red-primary: #E01E37;
+        --red-deep: #9D0208;
+        --red-glow: #FF6B6B;
+
+        --accent-yellow: #F4A261;
+        --accent-orange: #F77F00;
+
+        --text-primary: #111113;
+        --text-secondary: #44444A;
+        --text-muted: #7A7A80;
+
+        --border: #D0D0D5;
+      }
+    }
+
+    /* =========================
+   BASE
+========================= */
+    body {
+      margin: 0;
+      font-family: "SF Mono", monospace;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+
+    /* =========================
+   APP CONTAINER
+========================= */
+    .app {
+      padding: 24px;
+    }
+
+    /* =========================
+   TERMINAL PANEL
+========================= */
+    .terminal {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      padding: 16px;
+      border-radius: 12px;
+      box-shadow: 0 0 0px transparent;
+      transition: 0.2s ease;
+    }
+
+    /* hover = Kill la Kill风：红色闪一下 */
+    .terminal:hover {
+      box-shadow: 0 0 12px var(--red-primary);
+    }
+
+    /* =========================
+   TERMINAL HEADER
+========================= */
+    .terminal-header {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .dot.red {
+      background: var(--red-primary);
+    }
+
+    .dot.yellow {
+      background: var(--accent-yellow);
+    }
+
+    .dot.gray {
+      background: var(--text-muted);
+    }
+
+    /* =========================
+   TERMINAL CONTENT
+========================= */
+    .line {
+      margin: 4px 0;
+    }
+
+    .prompt {
+      color: var(--red-primary);
+    }
+
+    .command {
+      color: var(--text-primary);
+    }
+
+    .keyword {
+      color: var(--red-primary);
+    }
+
+    .string {
+      color: var(--accent-yellow);
+    }
+
+    .comment {
+      color: var(--text-muted);
+    }
+
+    /* =========================
+   CURSOR
+========================= */
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 16px;
+      background: var(--red-primary);
+      margin-left: 4px;
+      animation: blink 0.8s infinite;
+    }
+
+    @keyframes blink {
+
+      0%,
+      50%,
+      100% {
+        opacity: 1;
+      }
+
+      25%,
+      75% {
+        opacity: 0;
+      }
+    }
+
+    /* =========================
+   BUTTON (风格强化)
+========================= */
+    .btn {
+      margin-top: 16px;
+      padding: 10px 16px;
+      background: var(--red-primary);
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: bold;
+      transition: 0.15s;
+    }
+
+    /* Kill la Kill 风：不是渐变，是“爆发” */
+    .btn:hover {
+      background: var(--red-glow);
+      transform: scale(1.05);
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+
+    <h2>Kill la Code Terminal</h2>
+
+    <div class="terminal">
+      <div class="terminal-header">
+        <div class="dot red"></div>
+        <div class="dot yellow"></div>
+        <div class="dot gray"></div>
+      </div>
+
+      <div class="line">
+        <span class="prompt">$</span>
+        <span class="command"> run build</span>
+      </div>
+
+      <div class="line">
+        <span class="comment"># compiling modules...</span>
+      </div>
+
+      <div class="line">
+        <span class="keyword">SUCCESS</span> →
+        <span class="string"> build complete</span>
+      </div>
+
+      <div class="line">
+        <span class="prompt">$</span>
+        <span class="command"> _</span>
+        <span class="cursor"></span>
+      </div>
+    </div>
+
+    <button class="btn">Execute</button>
+
+  </div>
+</body>
+
+</html>

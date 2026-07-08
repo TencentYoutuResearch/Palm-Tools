@@ -1,0 +1,1194 @@
+{
+  "settings.title": {
+    "message": "Settings",
+    "description": "Settings dialog title and navigation brand"
+  },
+  "settings.close": {
+    "message": "Close",
+    "description": "Close settings dialog"
+  },
+  "settings.dismiss": {
+    "message": "Dismiss",
+    "description": "Dismiss an inline alert"
+  },
+  "settings.language.title": {
+    "message": "Language",
+    "description": "Settings section for UI language"
+  },
+  "settings.language.description": {
+    "message": "Controls the kode GUI and SpecOps console. Agent-generated documents keep following the request language.",
+    "description": "Explains the scope of the UI language setting"
+  },
+  "settings.language.system": {
+    "message": "System",
+    "description": "Use operating system/browser language"
+  },
+  "settings.language.english": {
+    "message": "English",
+    "description": "English language option"
+  },
+  "settings.language.chinese": {
+    "message": "中文",
+    "description": "Simplified Chinese language option"
+  },
+  "settings.language.saved": {
+    "message": "Language set to {language}",
+    "description": "Toast after changing language"
+  },
+  "settings.backends.title": {
+    "message": "Backends",
+    "description": "Settings tab for AI CLI backends"
+  },
+  "settings.backends.description": {
+    "message": "Toggle which AI backends appear in the new-tab picker.",
+    "description": "Backends settings description"
+  },
+  "settings.memory.title": {
+    "message": "Memory",
+    "description": "Settings tab for shared memory"
+  },
+  "settings.memory.description": {
+    "message": "Persistent facts shared across tabs.",
+    "description": "Memory settings description"
+  },
+  "settings.memory.promptInjection": {
+    "message": "Prompt injection",
+    "description": "Memory prompt injection setting title"
+  },
+  "settings.memory.promptEnabled": {
+    "message": "Memory facts injected into new tabs",
+    "description": "Enabled prompt injection status"
+  },
+  "settings.memory.promptDisabled": {
+    "message": "Disabled - applies to next new tab",
+    "description": "Disabled prompt injection status"
+  },
+  "settings.memory.promptToast": {
+    "message": "Memory prompt injection {state}",
+    "description": "Toast after toggling memory prompt injection"
+  },
+  "settings.memory.gitSync": {
+    "message": "Git sync",
+    "description": "Memory git sync setting title"
+  },
+  "settings.memory.gitSyncDescription": {
+    "message": "Remote and auto-push for the memory vault",
+    "description": "Memory git sync setting description"
+  },
+  "settings.configure": {
+    "message": "Configure...",
+    "description": "Open a configuration panel"
+  },
+  "settings.state.enabled": {
+    "message": "enabled",
+    "description": "Lowercase enabled state"
+  },
+  "settings.state.disabled": {
+    "message": "disabled",
+    "description": "Lowercase disabled state"
+  },
+  "memory.common.close": {
+    "message": "Close",
+    "description": "Close memory dialog"
+  },
+  "memory.common.cancel": {
+    "message": "Cancel",
+    "description": "Cancel current memory action"
+  },
+  "memory.common.save": {
+    "message": "Save",
+    "description": "Save memory settings"
+  },
+  "memory.common.loading": {
+    "message": "Loading...",
+    "description": "Loading state"
+  },
+  "memory.common.local": {
+    "message": "Local",
+    "description": "Local memory source"
+  },
+  "memory.common.remote": {
+    "message": "Remote: {name}",
+    "description": "Remote memory source label"
+  },
+  "memory.sync.title": {
+    "message": "Memory Git Sync",
+    "description": "Memory sync panel title"
+  },
+  "memory.sync.remoteUrl": {
+    "message": "Remote URL",
+    "description": "Git remote URL section"
+  },
+  "memory.sync.remoteHint": {
+    "message": "Leave empty for local-only. You can also run",
+    "description": "Hint before git remote command"
+  },
+  "memory.sync.remoteHintSuffix": {
+    "message": "it will be auto-detected.",
+    "description": "Hint after git remote command"
+  },
+  "memory.sync.behavior": {
+    "message": "Behavior",
+    "description": "Behavior section title"
+  },
+  "memory.sync.autoSync": {
+    "message": "Auto sync",
+    "description": "Auto sync setting"
+  },
+  "memory.sync.autoSyncHint": {
+    "message": "Periodically pull and push every 5 minutes",
+    "description": "Auto sync hint"
+  },
+  "memory.sync.autoPush": {
+    "message": "Auto push on approve",
+    "description": "Auto push setting"
+  },
+  "memory.sync.autoPushHint": {
+    "message": "Push to remote after each memory approval",
+    "description": "Auto push hint"
+  },
+  "memory.sync.saving": {
+    "message": "Saving...",
+    "description": "Saving button state"
+  },
+  "memory.sync.syncing": {
+    "message": "Syncing...",
+    "description": "Syncing button state"
+  },
+  "memory.sync.initAndSync": {
+    "message": "Init & Sync",
+    "description": "Initialize git repo and sync"
+  },
+  "memory.sync.syncNow": {
+    "message": "Sync Now",
+    "description": "Run sync now"
+  },
+  "memory.sync.firstSyncHint": {
+    "message": "First sync will initialize the git repo. If remote is filled in, it will also push there.",
+    "description": "First sync explanation"
+  },
+  "memory.sync.branch": {
+    "message": "Branch:",
+    "description": "Git branch label"
+  },
+  "memory.sync.remote": {
+    "message": "Remote:",
+    "description": "Git remote label"
+  },
+  "memory.sync.loadFailed": {
+    "message": "Failed to load sync config: {error}",
+    "description": "Sync config load error"
+  },
+  "memory.sync.saveFailed": {
+    "message": "Failed to save: {error}",
+    "description": "Sync save error"
+  },
+  "memory.sync.failed": {
+    "message": "Sync failed: {error}",
+    "description": "Sync run error"
+  },
+  "memory.sync.skipped": {
+    "message": "Skipped: {reason}",
+    "description": "Sync skipped result"
+  },
+  "memory.sync.initialized": {
+    "message": "Initialized git repo",
+    "description": "Sync initialized result"
+  },
+  "memory.sync.noChanges": {
+    "message": "No changes to sync",
+    "description": "Sync no changes result"
+  },
+  "memory.sync.summary": {
+    "message": "Pulled: {pulled}, Pushed: {pushed}, Reconciled: {reconciled}",
+    "description": "Sync summary result"
+  },
+  "memory.sync.initializedSummary": {
+    "message": "Initialized git repo; Pulled: {pulled}, Pushed: {pushed}, Reconciled: {reconciled}",
+    "description": "Initial sync summary result"
+  },
+  "memory.mcp.dismiss": {
+    "message": "Don't show again",
+    "description": "Dismiss Memory MCP banner"
+  },
+  "memory.mcp.copyCommand": {
+    "message": "Copy command",
+    "description": "Copy install command"
+  },
+  "memory.mcp.successAuto": {
+    "message": "Automatically connected {backends} to Memory MCP. Restart codebuddy/claude tabs to apply.",
+    "description": "Auto Memory MCP setup success"
+  },
+  "memory.mcp.success": {
+    "message": "Memory MCP is configured. Restart codebuddy tabs to apply.",
+    "description": "Memory MCP setup success"
+  },
+  "memory.mcp.cliMissing": {
+    "message": "No codebuddy or claude-internal command was detected on PATH. Install one and restart kode.",
+    "description": "Memory MCP no backend CLI warning"
+  },
+  "memory.mcp.binaryMissing": {
+    "message": "Memory MCP backend kode-memory-mcp was not found. Reinstall kode or run this in development:",
+    "description": "Memory MCP binary missing warning"
+  },
+  "memory.mcp.enableTitle": {
+    "message": "Enable Memory shared facts",
+    "description": "Memory MCP banner title"
+  },
+  "memory.mcp.enableDescription": {
+    "message": "Agents can share reviewed facts across tabs. Facts are isolated by scope, such as project:<cwd>.",
+    "description": "Memory MCP banner description"
+  },
+  "memory.mcp.pendingBoth": {
+    "message": "Still pending: codebuddy + claude-internal",
+    "description": "Both backends pending Memory MCP setup"
+  },
+  "memory.mcp.pendingOne": {
+    "message": "Still pending: {backend}",
+    "description": "One backend pending Memory MCP setup"
+  },
+  "memory.mcp.configuring": {
+    "message": "Configuring...",
+    "description": "Memory MCP setup in progress"
+  },
+  "memory.mcp.enableBackend": {
+    "message": "Enable {backend}",
+    "description": "Enable Memory MCP for backend"
+  },
+  "memory.mcp.failed": {
+    "message": "Failed: {error}",
+    "description": "Memory MCP setup failure"
+  },
+  "memory.mcp.closeTitle": {
+    "message": "Close without changing persistent settings",
+    "description": "Memory MCP banner close tooltip"
+  },
+  "memory.review.title": {
+    "message": "Memory Review",
+    "description": "Memory review queue title"
+  },
+  "memory.review.unavailable": {
+    "message": "Memory subsystem unavailable",
+    "description": "Memory review unavailable error"
+  },
+  "memory.review.emptyTitle": {
+    "message": "No pending proposals",
+    "description": "Empty memory review queue title"
+  },
+  "memory.review.emptyDescription": {
+    "message": "Agents will appear here when they suggest new facts.",
+    "description": "Empty memory review queue description"
+  },
+  "memory.review.body": {
+    "message": "Body",
+    "description": "Memory fact body section"
+  },
+  "memory.review.rationale": {
+    "message": "Rationale",
+    "description": "Memory proposal rationale section"
+  },
+  "memory.review.rationaleHint": {
+    "message": "why agent proposed",
+    "description": "Rationale hint"
+  },
+  "memory.review.rejectReason": {
+    "message": "Reject reason",
+    "description": "Reject memory proposal reason"
+  },
+  "memory.review.blacklistReason": {
+    "message": "Blacklist reason",
+    "description": "Blacklist memory proposal reason"
+  },
+  "memory.review.cancelEdit": {
+    "message": "Cancel edit",
+    "description": "Cancel memory proposal edit"
+  },
+  "memory.review.select": {
+    "message": "Select a proposal to review",
+    "description": "No selected memory proposal"
+  },
+  "memory.review.remoteNote": {
+    "message": "Remote review does not load local related-fact links.",
+    "description": "Remote memory review note"
+  },
+  "memory.browse.title": {
+    "message": "Memory",
+    "description": "Memory browse panel title"
+  },
+  "memory.browse.allSources": {
+    "message": "All sources",
+    "description": "All memory sources filter option"
+  },
+  "memory.browse.allScopes": {
+    "message": "All scopes",
+    "description": "All memory scopes filter option"
+  },
+  "memory.browse.searchPlaceholder": {
+    "message": "Search memories...",
+    "description": "Memory browse search placeholder"
+  },
+  "memory.browse.clear": {
+    "message": "Clear",
+    "description": "Clear search"
+  },
+  "memory.browse.allKinds": {
+    "message": "All",
+    "description": "All memory kinds filter"
+  },
+  "memory.browse.includeDeprecated": {
+    "message": "Include deprecated facts",
+    "description": "Include deprecated memory facts filter"
+  },
+  "memory.browse.searching": {
+    "message": "Searching...",
+    "description": "Memory search loading state"
+  },
+  "memory.browse.noFacts": {
+    "message": "No facts yet",
+    "description": "No memory facts"
+  },
+  "memory.browse.noMatches": {
+    "message": "No matches for \"{query}\"",
+    "description": "No memory search matches"
+  },
+  "memory.browse.lowConfidence": {
+    "message": "Low confidence",
+    "description": "Low confidence tooltip"
+  },
+  "memory.browse.remoteNote": {
+    "message": "Remote fact - review, deprecate, and scope edits are local-only.",
+    "description": "Remote memory fact note"
+  },
+  "memory.browse.sharedPool": {
+    "message": "Shared pool (cross-project)",
+    "description": "Shared scope tooltip"
+  },
+  "memory.browse.scopePlaceholder": {
+    "message": "scope (global / shared / project:name)",
+    "description": "Memory scope edit placeholder"
+  },
+  "memory.browse.currentScope": {
+    "message": "Current scope",
+    "description": "Current memory scope tooltip"
+  },
+  "memory.browse.deprecatePlaceholder": {
+    "message": "deprecate reason (optional)",
+    "description": "Deprecate memory fact placeholder"
+  },
+  "memory.browse.selectDetail": {
+    "message": "Select a result to view detail",
+    "description": "No selected memory fact"
+  },
+  "memory.detail.loadFailed": {
+    "message": "Failed to load fact",
+    "description": "Memory fact load failure"
+  },
+  "memory.detail.confidence": {
+    "message": "Confidence",
+    "description": "Memory fact confidence label"
+  },
+  "memory.detail.content": {
+    "message": "Content",
+    "description": "Memory fact content label"
+  },
+  "memory.detail.tags": {
+    "message": "Tags",
+    "description": "Memory fact tags label"
+  },
+  "memory.detail.metadata": {
+    "message": "Metadata",
+    "description": "Memory fact metadata label"
+  },
+  "memory.detail.type": {
+    "message": "Type",
+    "description": "Memory fact type label"
+  },
+  "memory.detail.scope": {
+    "message": "Scope",
+    "description": "Memory fact scope label"
+  },
+  "memory.detail.author": {
+    "message": "Author",
+    "description": "Memory fact author label"
+  },
+  "memory.detail.frontmatter": {
+    "message": "Frontmatter",
+    "description": "Memory fact frontmatter label"
+  },
+  "memory.related.searchPlaceholder": {
+    "message": "search facts to link...",
+    "description": "Related fact search placeholder"
+  },
+  "memory.related.addRelated": {
+    "message": "add as related",
+    "description": "Add related fact tooltip"
+  },
+  "memory.related.addContradicts": {
+    "message": "add as contradicts",
+    "description": "Add contradicting fact tooltip"
+  },
+  "memory.related.remove": {
+    "message": "remove",
+    "description": "Remove linked fact"
+  },
+  "command.palette.title": {
+    "message": "Command palette",
+    "description": "Command palette dialog aria label"
+  },
+  "command.palette.search": {
+    "message": "Search commands...",
+    "description": "Command palette search placeholder"
+  },
+  "command.palette.clear": {
+    "message": "Clear",
+    "description": "Clear command palette search"
+  },
+  "command.palette.noMatches": {
+    "message": "No matching commands",
+    "description": "Empty command search result"
+  },
+  "command.palette.navigate": {
+    "message": "navigate",
+    "description": "Keyboard hint for navigation"
+  },
+  "command.palette.run": {
+    "message": "run",
+    "description": "Keyboard hint for executing command"
+  },
+  "command.palette.close": {
+    "message": "close",
+    "description": "Keyboard hint for closing command palette"
+  },
+  "command.group.tab": {
+    "message": "Tab",
+    "description": "Command group: tab"
+  },
+  "command.group.view": {
+    "message": "View",
+    "description": "Command group: view"
+  },
+  "command.group.memory": {
+    "message": "Memory",
+    "description": "Command group: memory"
+  },
+  "command.group.remote": {
+    "message": "Remote",
+    "description": "Command group: remote"
+  },
+  "command.group.other": {
+    "message": "Other",
+    "description": "Command group: other"
+  },
+  "command.tab.close": {
+    "message": "Close active tab",
+    "description": "Command: close active tab"
+  },
+  "command.tab.rename": {
+    "message": "Rename active tab title",
+    "description": "Command: rename active tab"
+  },
+  "command.tab.newWindow": {
+    "message": "New window",
+    "description": "Command: create new window"
+  },
+  "command.view.showPaths": {
+    "message": "Show paths banner...",
+    "description": "Command: show paths banner"
+  },
+  "command.view.hidePaths": {
+    "message": "Hide paths banner",
+    "description": "Command: hide paths banner"
+  },
+  "command.view.sidebar": {
+    "message": "Sidebar: {mode}",
+    "description": "Command: sidebar mode"
+  },
+  "command.view.theme": {
+    "message": "Theme: {theme}",
+    "description": "Command: theme mode"
+  },
+  "command.view.showWorkspace": {
+    "message": "Show workspace inspector",
+    "description": "Command: show workspace inspector"
+  },
+  "command.view.hideWorkspace": {
+    "message": "Hide workspace inspector",
+    "description": "Command: hide workspace inspector"
+  },
+  "command.memory.review": {
+    "message": "Memory review queue...",
+    "description": "Command: open memory review"
+  },
+  "command.memory.reviewPending": {
+    "message": "Memory review queue ({count} pending)...",
+    "description": "Command: open memory review with pending count"
+  },
+  "command.memory.sync": {
+    "message": "Memory: Sync settings...",
+    "description": "Command: open memory sync settings"
+  },
+  "command.memory.browse": {
+    "message": "Memory: Browse facts...",
+    "description": "Command: browse memory facts"
+  },
+  "command.memory.switchScope": {
+    "message": "Memory: Switch scope ({scope})...",
+    "description": "Command: switch memory scope"
+  },
+  "command.memory.mcpSetup": {
+    "message": "Memory MCP: Recheck / configure...",
+    "description": "Command: recheck Memory MCP setup"
+  },
+  "command.memory.promptPreview": {
+    "message": "Memory Prompt: Preview injection... ({bytes}B)",
+    "description": "Command: preview memory prompt injection"
+  },
+  "command.memory.promptPreviewDisabled": {
+    "message": "Memory Prompt: Preview injection... (disabled)",
+    "description": "Command: preview disabled memory prompt injection"
+  },
+  "command.memory.promptDisable": {
+    "message": "Memory Prompt: Disable injection",
+    "description": "Command: disable memory prompt injection"
+  },
+  "command.memory.promptEnable": {
+    "message": "Memory Prompt: Enable injection",
+    "description": "Command: enable memory prompt injection"
+  },
+  "command.remote.endpoints": {
+    "message": "Remote endpoints...",
+    "description": "Command: manage remote endpoints"
+  },
+  "command.remote.deployBridge": {
+    "message": "Deploy remote Bridge...",
+    "description": "Command: deploy remote bridge"
+  },
+  "endpoint.title": {
+    "message": "Remote endpoints",
+    "description": "Remote endpoint dialog title"
+  },
+  "endpoint.list.title": {
+    "message": "Added",
+    "description": "Endpoint list section title"
+  },
+  "endpoint.list.empty": {
+    "message": "No remote endpoints yet. Add one below.",
+    "description": "Empty endpoint list"
+  },
+  "endpoint.status.connected": {
+    "message": "connected",
+    "description": "Endpoint connected status tooltip"
+  },
+  "endpoint.status.disconnected": {
+    "message": "not connected",
+    "description": "Endpoint disconnected status tooltip"
+  },
+  "endpoint.form.title": {
+    "message": "Add new endpoint",
+    "description": "Add endpoint form title"
+  },
+  "endpoint.form.pairHintBefore": {
+    "message": "Paste",
+    "description": "Text before pairing URI example"
+  },
+  "endpoint.form.pairHintAfter": {
+    "message": "into Base URL to split fields automatically, or fill the fields manually.",
+    "description": "Text after pairing URI example"
+  },
+  "endpoint.form.idLabel": {
+    "message": "Id (local label, cannot contain ':' '/' or spaces)",
+    "description": "Endpoint id field label"
+  },
+  "endpoint.form.displayNameLabel": {
+    "message": "Display name (optional, shown in UI)",
+    "description": "Endpoint display name field label"
+  },
+  "endpoint.form.displayNamePlaceholder": {
+    "message": "Company dev box",
+    "description": "Endpoint display name placeholder"
+  },
+  "endpoint.form.connectionMode": {
+    "message": "Connection mode",
+    "description": "Connection mode segmented control aria label"
+  },
+  "endpoint.form.directHttp": {
+    "message": "Direct HTTP",
+    "description": "Direct HTTP connection mode"
+  },
+  "endpoint.form.sshTunnel": {
+    "message": "SSH tunnel",
+    "description": "SSH tunnel connection mode"
+  },
+  "endpoint.form.baseUrlPlaceholder": {
+    "message": "http://127.0.0.1:9870 or https://dev.tail.ts.net",
+    "description": "Base URL placeholder"
+  },
+  "endpoint.form.baseUrlLabel": {
+    "message": "Base URL",
+    "description": "Base URL field label"
+  },
+  "endpoint.form.sshHintBefore": {
+    "message": "The GUI automatically starts an",
+    "description": "SSH tunnel hint before command"
+  },
+  "endpoint.form.sshHintMiddle": {
+    "message": "tunnel to a server that only listens on remote 127.0.0.1. It reuses your",
+    "description": "SSH tunnel hint between command and ssh config"
+  },
+  "endpoint.form.sshHintAfter": {
+    "message": "/ key / agent, with no public exposure required.",
+    "description": "SSH tunnel hint after ssh config"
+  },
+  "endpoint.form.sshHostLabel": {
+    "message": "SSH host (user@remote or ~/.ssh/config alias)",
+    "description": "SSH host field label"
+  },
+  "endpoint.form.sshHostPlaceholder": {
+    "message": "dev@10.0.0.5 or mydevbox",
+    "description": "SSH host placeholder"
+  },
+  "endpoint.form.sshPortLabel": {
+    "message": "SSH service port (default 22)",
+    "description": "SSH port field label"
+  },
+  "endpoint.form.remotePortLabel": {
+    "message": "Remote server port (default 9870)",
+    "description": "Remote server port field label"
+  },
+  "endpoint.form.tokenPlaceholder": {
+    "message": "32-char hex or JWT",
+    "description": "Bearer token placeholder"
+  },
+  "endpoint.form.tokenLabel": {
+    "message": "Bearer token",
+    "description": "Bearer token field label"
+  },
+  "endpoint.action.confirmRemove": {
+    "message": "Confirm Remove",
+    "description": "Confirm endpoint removal button"
+  },
+  "endpoint.action.remove": {
+    "message": "Remove",
+    "description": "Remove endpoint button"
+  },
+  "endpoint.action.editName": {
+    "message": "Edit name",
+    "description": "Edit endpoint display name button"
+  },
+  "endpoint.action.save": {
+    "message": "Save",
+    "description": "Save endpoint display name button"
+  },
+  "endpoint.action.saving": {
+    "message": "saving...",
+    "description": "Save endpoint display name busy state"
+  },
+  "endpoint.action.test": {
+    "message": "Test",
+    "description": "Test endpoint connection button"
+  },
+  "endpoint.action.testing": {
+    "message": "testing...",
+    "description": "Testing endpoint connection button busy state"
+  },
+  "endpoint.action.add": {
+    "message": "Add",
+    "description": "Add endpoint button"
+  },
+  "endpoint.action.adding": {
+    "message": "adding...",
+    "description": "Add endpoint button busy state"
+  },
+  "endpoint.test.ok": {
+    "message": "Connection OK, server backends: {backends}",
+    "description": "Endpoint connection test success"
+  },
+  "endpoint.test.emptyBackends": {
+    "message": "(empty)",
+    "description": "No backend list from endpoint"
+  },
+  "endpoint.test.failed": {
+    "message": "Connection failed: {detail}",
+    "description": "Endpoint connection test failure"
+  },
+  "endpoint.warning.tokenBefore": {
+    "message": "Warning: token is currently stored as plaintext in",
+    "description": "Endpoint token storage warning before state file"
+  },
+  "endpoint.warning.tokenAfter": {
+    "message": " (user-private directory). Phase 11+ will move it to the system keychain.",
+    "description": "Endpoint token storage warning after state file"
+  },
+  "endpoint.footer": {
+    "message": "Direct mode connects to the server in the background immediately after adding. SSH mode is lazy: the tunnel starts only when the first tab for that endpoint is created. Choose the Remote group in BackendChooser when creating a new tab.",
+    "description": "Endpoint dialog footer"
+  },
+  "endpoint.error.tokenRequired": {
+    "message": "Token is required",
+    "description": "Endpoint validation error: token required"
+  },
+  "endpoint.error.sshHostRequired": {
+    "message": "SSH host is required in SSH mode (for example user@remote)",
+    "description": "Endpoint validation error: SSH host required"
+  },
+  "endpoint.error.baseUrlAndTokenRequired": {
+    "message": "base_url and token are required",
+    "description": "Endpoint validation error: base URL and token required"
+  },
+  "endpoint.error.idRequired": {
+    "message": "id cannot be empty",
+    "description": "Endpoint validation error: id required"
+  },
+  "endpoint.error.idInvalid": {
+    "message": "id cannot contain ':' '/' or spaces",
+    "description": "Endpoint validation error: invalid id"
+  },
+  "endpoint.error.idExists": {
+    "message": "id '{id}' already exists (remove it first, then add it again)",
+    "description": "Endpoint validation error: duplicate id"
+  },
+  "endpoint.error.removeFailed": {
+    "message": "remove {id}: {error}",
+    "description": "Endpoint remove error"
+  },
+  "endpoint.error.updateNameFailed": {
+    "message": "failed to update {id} name: {error}",
+    "description": "Endpoint display name update error"
+  },
+  "deploy.title": {
+    "message": "Deploy Remote Bridge",
+    "description": "Remote bridge deploy dialog title"
+  },
+  "deploy.error.hostRequired": {
+    "message": "Enter user@host",
+    "description": "Validation error when SSH host is empty"
+  },
+  "deploy.success.title": {
+    "message": "Deployment succeeded",
+    "description": "Remote deploy success title"
+  },
+  "deploy.success.created": {
+    "message": "Created endpoint",
+    "description": "Success message when deploy creates a new endpoint"
+  },
+  "deploy.success.reused": {
+    "message": "Reused endpoint",
+    "description": "Success message when deploy reuses an existing endpoint"
+  },
+  "deploy.success.tokenUpdated": {
+    "message": " (token updated)",
+    "description": "Suffix after reused endpoint id"
+  },
+  "deploy.success.hint": {
+    "message": "You can now choose Remote → {endpoint} in BackendChooser to open a new tab.",
+    "description": "Post-deploy hint"
+  },
+  "deploy.ssh.title": {
+    "message": "SSH Connection",
+    "description": "SSH connection section title"
+  },
+  "deploy.ssh.hostPlaceholder": {
+    "message": "user@example.com or ~/.ssh/config alias",
+    "description": "SSH host input placeholder"
+  },
+  "deploy.ssh.hostHintBefore": {
+    "message": "Reuses your",
+    "description": "Text before SSH config code in host hint"
+  },
+  "deploy.ssh.hostHintAfter": {
+    "message": ", keys, and ssh-agent. Hosts requiring passwords will fail (BatchMode).",
+    "description": "Text after SSH config code in host hint"
+  },
+  "deploy.remoteName": {
+    "message": "Remote name",
+    "description": "Display name field label for deployed endpoint"
+  },
+  "deploy.remoteNamePlaceholder": {
+    "message": "Company devbox / staging",
+    "description": "Display name field placeholder for deployed endpoint"
+  },
+  "deploy.remoteNameHint": {
+    "message": "Used only for UI display. Leave empty to use user@host. Re-deploying the same host updates the name only when this field is filled.",
+    "description": "Display name field hint for deployed endpoint"
+  },
+  "deploy.ssh.port": {
+    "message": "SSH Port",
+    "description": "SSH port field label"
+  },
+  "deploy.remotePort": {
+    "message": "Remote bridge port",
+    "description": "Remote bridge port field label"
+  },
+  "deploy.action.deploy": {
+    "message": "Deploy",
+    "description": "Deploy button label"
+  },
+  "deploy.action.deploying": {
+    "message": "Deploying...",
+    "description": "Deploy button busy state"
+  },
+  "deploy.progress.title": {
+    "message": "Deployment Progress",
+    "description": "Deployment progress section title"
+  },
+  "deploy.progress.message.uploaded": {
+    "message": "uploaded",
+    "description": "Deployment progress message: upload completed"
+  },
+  "deploy.progress.message.stopped (or none was running)": {
+    "message": "stopped (or none was running)",
+    "description": "Deployment progress message: old service stopped"
+  },
+  "deploy.progress.message.extracted": {
+    "message": "extracted",
+    "description": "Deployment progress message: package extracted"
+  },
+  "deploy.progress.message.started": {
+    "message": "started",
+    "description": "Deployment progress message: service started"
+  },
+  "deploy.progress.message.healthy": {
+    "message": "healthy",
+    "description": "Deployment progress message: health check passed"
+  },
+  "deploy.progress.message.token retrieved": {
+    "message": "token retrieved",
+    "description": "Deployment progress message: token fetched"
+  },
+  "deploy.progress.message.registering endpoint": {
+    "message": "registering endpoint",
+    "description": "Deployment progress message: endpoint registration running"
+  },
+  "deploy.progress.message.endpoint created": {
+    "message": "endpoint created",
+    "description": "Deployment progress message: endpoint created"
+  },
+  "deploy.progress.message.endpoint updated (reused)": {
+    "message": "endpoint updated (reused)",
+    "description": "Deployment progress message: endpoint reused"
+  },
+  "deploy.progress.message.deployment complete": {
+    "message": "deployment complete",
+    "description": "Deployment progress message: deploy done"
+  },
+  "deploy.step.Uploading": {
+    "message": "Upload package",
+    "description": "Deployment step: uploading package"
+  },
+  "deploy.step.StoppingOld": {
+    "message": "Stop old service",
+    "description": "Deployment step: stopping old service"
+  },
+  "deploy.step.Extracting": {
+    "message": "Extract install",
+    "description": "Deployment step: extracting package"
+  },
+  "deploy.step.StartingNew": {
+    "message": "Start new service",
+    "description": "Deployment step: starting new service"
+  },
+  "deploy.step.HealthCheck": {
+    "message": "Health check",
+    "description": "Deployment step: health check"
+  },
+  "deploy.step.FetchingToken": {
+    "message": "Fetch auth token",
+    "description": "Deployment step: fetching token"
+  },
+  "deploy.step.CreatingEndpoint": {
+    "message": "Create endpoint",
+    "description": "Deployment step: creating endpoint"
+  },
+  "deploy.step.Done": {
+    "message": "Done",
+    "description": "Deployment step: done"
+  },
+  "deploy.notes.title": {
+    "message": "Notes",
+    "description": "Deploy notes section title"
+  },
+  "deploy.notes.flowStart": {
+    "message": "Flow: scp uploads the static musl package → pkill stops the old bridge → extract to ",
+    "description": "Deploy flow note before install directory"
+  },
+  "deploy.notes.flowMiddle": {
+    "message": " → nohup starts the new process → /healthz health check → read bridge_token from ",
+    "description": "Deploy flow note between install directory and state file"
+  },
+  "deploy.notes.flowEnd": {
+    "message": " → create or reuse the endpoint automatically.",
+    "description": "Deploy flow note after state file"
+  },
+  "deploy.notes.requirementsBefore": {
+    "message": "Remote host must have ",
+    "description": "Deploy requirements note before tool list"
+  },
+  "deploy.notes.requirementsAfter": {
+    "message": ". Re-deploying the same host reuses the existing endpoint and only updates the token.",
+    "description": "Deploy requirements note after tool list"
+  },
+  "command.other.settings": {
+    "message": "Settings...",
+    "description": "Command: open settings"
+  },
+  "command.other.openSpecOpsWindow": {
+    "message": "Open SpecOps window",
+    "description": "Command: open existing SpecOps window"
+  },
+  "command.other.openSpecOpsConsole": {
+    "message": "Open SpecOps console...",
+    "description": "Command: open SpecOps console"
+  },
+  "command.other.pairMobile": {
+    "message": "Show Pairing QR...",
+    "description": "Command: show mobile pairing QR"
+  },
+  "specops.health.connecting": {
+    "message": "Connecting...",
+    "description": "SpecOps health state while connecting"
+  },
+  "specops.rail.documents": {
+    "message": "Documents",
+    "description": "SpecOps rail tab for documents"
+  },
+  "specops.rail.sessions": {
+    "message": "Sessions",
+    "description": "SpecOps rail tab for sessions"
+  },
+  "specops.rail.theme": {
+    "message": "Theme",
+    "description": "SpecOps rail theme toggle"
+  },
+  "specops.empty.title": {
+    "message": "Select a constraint",
+    "description": "SpecOps empty document state title"
+  },
+  "specops.empty.description": {
+    "message": "Inspect its source, verify bindings, and check drift diagnostics.",
+    "description": "SpecOps empty document state description"
+  },
+  "specops.action.save": {
+    "message": "Save",
+    "description": "Save current document"
+  },
+  "specops.action.runInWorktree": {
+    "message": "Run in worktree",
+    "description": "Start isolated implementation run"
+  },
+  "specops.action.openInKode": {
+    "message": "Open in kode",
+    "description": "Open backing kode session"
+  },
+  "specops.action.resume": {
+    "message": "Resume",
+    "description": "Resume session"
+  },
+  "specops.action.cancel": {
+    "message": "Cancel",
+    "description": "Cancel current form"
+  },
+  "specops.action.send": {
+    "message": "Send",
+    "description": "Send chat message"
+  },
+  "specops.action.close": {
+    "message": "Close",
+    "description": "Close current panel"
+  },
+  "specops.session.status": {
+    "message": "Session Status",
+    "description": "SpecOps session status panel title"
+  },
+  "specops.session.none": {
+    "message": "No session",
+    "description": "No selected session"
+  },
+  "specops.session.idle": {
+    "message": "Idle",
+    "description": "Idle session phase"
+  },
+  "specops.session.select": {
+    "message": "Select a session",
+    "description": "Prompt to select a session"
+  },
+  "specops.composer.ask": {
+    "message": "Ask a question",
+    "description": "Composer mode label"
+  },
+  "specops.composer.placeholder": {
+    "message": "Ask a follow-up...",
+    "description": "Composer placeholder"
+  },
+  "specops.create.title": {
+    "message": "What should change?",
+    "description": "New SpecOps request dialog title"
+  },
+  "specops.create.intro": {
+    "message": "Describe the feature, bug, or refactor in your own words. An agent inspects the repo and creates the SpecOps document - no worktree or source changes during analysis.",
+    "description": "New SpecOps request dialog intro"
+  },
+  "specops.create.direct": {
+    "message": "Direct intake",
+    "description": "SpecOps intake mode"
+  },
+  "specops.create.directDesc": {
+    "message": "Analyze and create the spec now",
+    "description": "SpecOps direct intake mode description"
+  },
+  "specops.create.planFirst": {
+    "message": "Plan first",
+    "description": "SpecOps plan-first mode"
+  },
+  "specops.create.planFirstDesc": {
+    "message": "Draft a plan, then create the spec",
+    "description": "SpecOps plan-first mode description"
+  },
+  "specops.create.clarifyFirst": {
+    "message": "Clarify first",
+    "description": "SpecOps clarify-first mode"
+  },
+  "specops.create.clarifyFirstDesc": {
+    "message": "Ask questions, then create the spec",
+    "description": "SpecOps clarify-first mode description"
+  },
+  "specops.create.request": {
+    "message": "Your request",
+    "description": "SpecOps request field label"
+  },
+  "specops.create.analyze": {
+    "message": "Analyze request",
+    "description": "Submit new SpecOps request"
+  },
+  "specops.create.answer": {
+    "message": "Your answer",
+    "description": "Clarify answer field label"
+  },
+  "specops.create.sendAnswer": {
+    "message": "Send answer",
+    "description": "Send clarify answer"
+  },
+  "specops.create.startIntake": {
+    "message": "Start intake",
+    "description": "Promote clarify session into intake"
+  },
+  "tab.menu.rename": {
+    "message": "Rename",
+    "description": "Tab context menu: rename this tab"
+  },
+  "tab.menu.duplicate": {
+    "message": "Duplicate",
+    "description": "Tab context menu: duplicate this tab"
+  },
+  "tab.menu.close": {
+    "message": "Close",
+    "description": "Tab context menu: close this tab"
+  },
+  "tab.action.moreActions": {
+    "message": "More actions",
+    "description": "Tab more-actions button tooltip/aria-label"
+  },
+  "tab.action.closeTab": {
+    "message": "Close tab",
+    "description": "Tab close button aria-label"
+  },
+  "tab.action.closeTabTooltip": {
+    "message": "Close tab (⌘W)",
+    "description": "Tab close button tooltip with shortcut"
+  },
+  "tab.action.newTab": {
+    "message": "New tab",
+    "description": "New tab button aria-label"
+  },
+  "tab.action.newTabTooltip": {
+    "message": "New tab (⌘T)",
+    "description": "New tab button tooltip with shortcut"
+  },
+  "tab.action.doubleClickRename": {
+    "message": "Double-click to rename",
+    "description": "Tab title aria-label hint"
+  },
+  "tab.attention.ask": {
+    "message": "Waiting for your answer",
+    "description": "Tab attention badge: agent is waiting for a reply"
+  },
+  "tab.attention.plan": {
+    "message": "Plan awaiting accept/reject",
+    "description": "Tab attention badge: plan awaiting decision"
+  },
+  "event_center.title": {
+    "message": "Event center",
+    "description": "Tooltip and aria-label for the event center bell button"
+  },
+  "event_center.header": {
+    "message": "Events",
+    "description": "Header title in the event center popover"
+  },
+  "event_center.empty": {
+    "message": "No active events",
+    "description": "Subtitle when there are no active events"
+  },
+  "event_center.activeCount": {
+    "message": "{count} active",
+    "description": "Subtitle showing the number of active events"
+  },
+  "event_center.noEvents": {
+    "message": "No events",
+    "description": "Empty state text in the event list"
+  },
+  "event_center.clearResolved": {
+    "message": "Clear resolved",
+    "description": "Tooltip for the button that clears resolved events"
+  },
+  "event_center.clearAll": {
+    "message": "Clear all",
+    "description": "Tooltip for the button that clears all events"
+  },
+  "event_center.clearOne": {
+    "message": "Clear event",
+    "description": "Tooltip for the per-event clear button"
+  },
+  "event_center.openTab": {
+    "message": "Open {title}",
+    "description": "Tooltip for an event row that jumps to a tab"
+  },
+  "event_center.time.now": {
+    "message": "now",
+    "description": "Relative time label for events less than a minute old"
+  },
+  "event_center.kind.turn_finished": {
+    "message": "Response complete",
+    "description": "Event title when an agent finishes a turn"
+  },
+  "event_center.kind.attention_ask": {
+    "message": "Awaiting answer",
+    "description": "Event title when an agent is waiting for a reply"
+  },
+  "event_center.kind.attention_plan": {
+    "message": "Plan awaiting decision",
+    "description": "Event title when a plan is awaiting accept/reject"
+  },
+  "event_center.kind.session_exited": {
+    "message": "Session exited",
+    "description": "Event title when a session exits"
+  },
+  "event_center.fallbackSource": {
+    "message": "kode",
+    "description": "Fallback source label when an event has no source or detail"
+  },
+  "attention.banner.ask": {
+    "message": "Awaiting answer",
+    "description": "Top banner text when agent is waiting for a reply"
+  },
+  "attention.banner.askHint": {
+    "message": "— answer the prompt in the terminal below.",
+    "description": "Hint shown after the ask banner title"
+  },
+  "attention.banner.plan": {
+    "message": "Plan awaiting decision",
+    "description": "Top banner text when a plan is awaiting accept/reject"
+  },
+  "attention.banner.planHint": {
+    "message": "— accept or reject below.",
+    "description": "Hint shown after the plan banner title"
+  }
+}

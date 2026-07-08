@@ -1,0 +1,79 @@
+[package]
+name = "kode-gui"
+version = "0.2.0-dev"
+edition = "2021"
+description = "kill la kode GUI: Tauri 2 + xterm.js + Svelte 5"
+
+[lib]
+name = "kode_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+kode-core = { path = "../../../crates/kode-core" }
+kode-bridge = { path = "../../../crates/kode-bridge" }
+# M4:GUI 集成 memory review queue。带能量账本 + 待审 propose。
+# 默认 root 走 ~/.kode-memory(env KODE_MEMORY_ROOT 可覆盖),与 CLI / MCP 共享。
+kode-memory = { path = "../../../crates/kode-memory" }
+# devtools 改为可选 feature:release 打包不带,避免右键 Inspect Element / F12 / Cmd+Opt+I
+# 在最终用户机器上打开 WKWebView 调试器。`./run.sh dev` 会传 --features devtools。
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-os = "2"
+tauri-plugin-dialog = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 2026-06:GUI 管理 backend 时改写 ~/.config/kode/config.toml,要求保留用户注释/顺序。
+# 普通 toml crate 是「parse-then-stringify」会丢注释,toml_edit 维持 DOM 增量修改。
+toml_edit = { version = "0.22", features = ["serde"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+base64 = "0.22"
+dirs = "5"
+arboard = { version = "3", default-features = false }
+# Phase 11.2:LocalTransport 实现 SessionTransport trait,需要 async-trait
+async-trait = "0.1"
+# Phase 11.3:RemoteTransport 走 reqwest REST + tokio-tungstenite WS。
+# rustls-tls 跟 dev-deps 保持一致,不引 OpenSSL。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+url = "2"
+# Phase 9.1 远程桥:HTTP / WS server。axum 0.7 用 tokio + hyper 1。
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+uuid = { version = "1", features = ["v4"] }
+# 枚举本机网络接口拿 LAN IP(配对 QR 码),不依赖外网可达性
+local-ip-address = "0.6"
+
+# 修双击 .app 启动时 PATH 只有 launchd 最小集(/usr/bin:/bin:...)的问题。
+# Tauri 官方维护的 crate,会读 login shell(.zshrc / .bash_profile)拿到
+# 用户终端里看到的 PATH,然后 set_var 回当前进程,这样后续 spawn codebuddy /
+# claude 这种装在 /opt/homebrew/bin、~/.cargo/bin、~/.local/bin 的命令才能找到。
+# 必须在 tauri::Builder 创建之前调用,因为 portable_pty 拿的是当前进程 env 快照。
+fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
+
+# macOS-only:进程内写 NSUserDefaults(关 ApplePressAndHoldEnabled,
+# 修复"长按字母不重复 + 快连打丢字符"问题)。
+# objc2-foundation 是 Tauri 自身已经传递的依赖,不增加体积。
+# 注意此 [target...] 块必须放最后,否则后续顶层依赖会被吸进 macOS-only。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
+
+[features]
+# 默认关闭所有 Tauri allowlist,只显式开启用得到的
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# 开发模式下启用 WKWebView devtools(右键 Inspect / F12 / Cmd+Opt+I)。
+# `./run.sh dev` 会传 --features devtools;`./run.sh app` 不传,release 包彻底关闭。
+devtools = ["tauri/devtools"]
+
+[dev-dependencies]
+# 端到端集成测试用:reqwest 走 REST,tokio-tungstenite 走 WS
+# (生产代码也用,移到上面 [dependencies] 后这里只剩 dev-only feature)
+tokio = { version = "1", features = ["full", "test-util"] }

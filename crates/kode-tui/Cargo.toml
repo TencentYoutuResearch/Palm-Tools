@@ -1,0 +1,25 @@
+[package]
+name = "kode-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Console-based multi-tab AI session manager (frozen at v0.1.0-tui-final; depends on kode-core)"
+
+[[bin]]
+name = "kode"
+path = "src/main.rs"
+
+[dependencies]
+kode-core = { path = "../kode-core" }
+
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs"] }
+tokio-stream = "0.1"
+futures = "0.3"
+vt100 = { package = "vt100-ctt", version = "0.17" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+dirs = "5"

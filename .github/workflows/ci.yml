@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89'
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -- --test-threads=1
+
+  specops:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.2.2'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: apps/specops/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/specops
+      - run: pnpm check
+        working-directory: apps/specops
+      - run: pnpm test
+        working-directory: apps/specops
+      - run: pnpm build
+        working-directory: apps/specops
+      - if: github.event_name == 'pull_request'
+        run: node apps/specops/dist/cli/main.js gate --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --verify specops

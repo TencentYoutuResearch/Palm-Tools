@@ -1,0 +1,304 @@
+/* =========================================================
+ * SpecOps design tokens — mirrored from kode GUI (apps/gui/index.html)
+ * so the console shares the same quiet Codex-style workbench language.
+ * ======================================================= */
+:root {
+  color-scheme: light dark;
+
+  /* spacing 4px scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* radius */
+  --rad-sm: 4px;
+  --rad-md: 6px;
+  --rad-lg: 8px;
+  --rad-xl: 8px;
+
+  /* typography */
+  --font-ui: 'Avenir Next', 'SF Pro Text', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fw-reg: 400;
+  --fw-med: 500;
+  --fw-semi: 700;
+
+  /* dark theme (default) */
+  --bg-base: #0d0f0e;
+  --bg-sidebar: #111413;
+  --bg-elevated: #181b19;
+  --bg-input: #0a0c0b;
+  --bg-tab-hover: rgba(238, 240, 235, 0.055);
+  --bg-tab-active: rgba(165, 214, 167, 0.105);
+  --bg-status: rgba(238, 240, 235, 0.035);
+  --bg-modal-backdrop: rgba(4, 5, 5, 0.72);
+  --bg-hover: rgba(238, 240, 235, 0.045);
+  --bg-selected: rgba(159, 232, 112, 0.08);
+  --bg-chip: rgba(238, 240, 235, 0.045);
+  --bg-pre: rgba(238, 240, 235, 0.025);
+  --bg-card: #15171a;
+
+  --fg-primary: #edefeb;
+  --fg-secondary: #a8aea7;
+  --fg-tertiary: #70776f;
+  --fg-on-accent: #07100b;
+
+  --bd-default: #262b28;
+  --bd-strong: #3a413c;
+  --bd-muted: #1e2320;
+  --bd-focus: var(--acc);
+
+  --acc: #9fe870;
+  --acc-hover: #b7f397;
+  --acc-soft: rgba(159, 232, 112, 0.14);
+
+  --st-ok: #9fe870;
+  --st-idle: #71d47d;
+  --st-busy: #e6b450;
+  --st-warn: #e6b450;
+  --st-err: #ff6b6b;
+  --st-info: #8fd3ff;
+  --st-accent: #9fe870;
+  --st-tokens: #e6b450;
+
+  --sh-sm: 0 1px 2px rgba(0, 0, 0, 0.36);
+  --sh-md: 0 10px 28px rgba(0, 0, 0, 0.28), 0 0 0 1px var(--bd-default);
+  --sh-lg: 0 22px 70px rgba(0, 0, 0, 0.34), 0 0 0 1px var(--bd-default);
+  --sh-modal: 0 30px 90px rgba(0, 0, 0, 0.52), 0 0 0 1px var(--bd-strong),
+    0 0 0 1px rgba(159, 232, 112, 0.1) inset;
+
+  --t-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
+  --t-base: 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --bg-base: #f7f7f3;
+    --bg-sidebar: #ecede8;
+    --bg-elevated: #ffffff;
+    --bg-input: #fbfbf8;
+    --bg-tab-hover: rgba(22, 28, 24, 0.055);
+    --bg-tab-active: rgba(32, 110, 69, 0.105);
+    --bg-status: rgba(22, 28, 24, 0.035);
+    --bg-modal-backdrop: rgba(12, 14, 13, 0.34);
+    --bg-hover: rgba(22, 28, 24, 0.04);
+    --bg-selected: rgba(33, 110, 69, 0.08);
+    --bg-chip: rgba(22, 28, 24, 0.04);
+    --bg-pre: rgba(22, 28, 24, 0.02);
+    --bg-card: #ffffff;
+
+    --fg-primary: #171a18;
+    --fg-secondary: #4f5750;
+    --fg-tertiary: #7a827b;
+    --fg-on-accent: #ffffff;
+
+    --bd-default: #d9ddd5;
+    --bd-strong: #aeb7ae;
+    --bd-muted: #e4e8e2;
+
+    --acc: #216e45;
+    --acc-hover: #1a5c39;
+    --acc-soft: rgba(33, 110, 69, 0.12);
+
+    --st-ok: #216e45;
+    --st-idle: #2f8f58;
+    --st-busy: #b7791f;
+    --st-warn: #b7791f;
+    --st-err: #c24141;
+    --st-info: #146c94;
+    --st-accent: #216e45;
+    --st-tokens: #9a6700;
+
+    --sh-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+    --sh-md: 0 10px 30px rgba(25, 30, 26, 0.1), 0 0 0 1px var(--bd-default);
+    --sh-lg: 0 26px 76px rgba(25, 30, 26, 0.14), 0 0 0 1px var(--bd-default);
+    --sh-modal: 0 28px 80px rgba(25, 30, 26, 0.2), 0 0 0 1px var(--bd-strong),
+      0 0 0 1px rgba(33, 110, 69, 0.08) inset;
+  }
+}
+
+:root[data-theme='light'] {
+  --bg-base: #f7f7f3;
+  --bg-sidebar: #ecede8;
+  --bg-elevated: #ffffff;
+  --bg-input: #fbfbf8;
+  --bg-tab-hover: rgba(22, 28, 24, 0.055);
+  --bg-tab-active: rgba(32, 110, 69, 0.105);
+  --bg-status: rgba(22, 28, 24, 0.035);
+  --bg-modal-backdrop: rgba(12, 14, 13, 0.34);
+  --bg-hover: rgba(22, 28, 24, 0.04);
+  --bg-selected: rgba(33, 110, 69, 0.08);
+  --bg-chip: rgba(22, 28, 24, 0.04);
+  --bg-pre: rgba(22, 28, 24, 0.02);
+  --bg-card: #ffffff;
+
+  --fg-primary: #171a18;
+  --fg-secondary: #4f5750;
+  --fg-tertiary: #7a827b;
+  --fg-on-accent: #ffffff;
+
+  --bd-default: #d9ddd5;
+  --bd-strong: #aeb7ae;
+  --bd-muted: #e4e8e2;
+  --acc: #216e45;
+  --acc-hover: #1a5c39;
+  --acc-soft: rgba(33, 110, 69, 0.12);
+
+  --st-ok: #216e45;
+  --st-idle: #2f8f58;
+  --st-busy: #b7791f;
+  --st-warn: #b7791f;
+  --st-err: #c24141;
+  --st-info: #146c94;
+  --st-accent: #216e45;
+  --st-tokens: #9a6700;
+
+  --sh-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --sh-md: 0 10px 30px rgba(25, 30, 26, 0.1), 0 0 0 1px var(--bd-default);
+  --sh-lg: 0 26px 76px rgba(25, 30, 26, 0.14), 0 0 0 1px var(--bd-default);
+  --sh-modal: 0 28px 80px rgba(25, 30, 26, 0.2), 0 0 0 1px var(--bd-strong),
+    0 0 0 1px rgba(33, 110, 69, 0.08) inset;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--fg-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* === App scaffold grid: [rail | module | (handled inside module)] + status bar === */
+.root {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) 28px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.module {
+  position: relative;
+  display: grid;
+  grid-template-columns:
+    var(--col-left, 260px) minmax(360px, 1fr) var(--col-right, 0px);
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  transition: grid-template-columns var(--t-base);
+}
+
+.module.right-open {
+  /* --col-right is set inline based on rightOpen state */
+}
+
+/* common panel surface — used by left/mid/right columns inside a module */
+.panel {
+  background: var(--bg-elevated);
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-left {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--bd-default);
+}
+
+.panel-right {
+  border-left: 1px solid var(--bd-default);
+}
+
+.panel-mid {
+  background: var(--bg-base);
+}
+
+/* section header (column titles, small caps) */
+.col-title {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+  /* Match the middle column header height (44px) so the right panel's title
+     row lines up with .chat-head / .iwiki-head when the panel is open. The
+     right padding leaves room for the PanelToggle pinned at the window edge. */
+  display: flex;
+  align-items: center;
+  height: 44px;
+  min-height: 44px;
+  padding: 0 52px 0 var(--sp-3);
+  border-bottom: 1px solid var(--bd-muted);
+  background: color-mix(in srgb, var(--bg-sidebar) 88%, var(--bg-base));
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* FAB — used by AskFloat (phase F) */
+.fab {
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--acc) 38%, var(--bd-default));
+  background: var(--acc);
+  color: var(--fg-on-accent);
+  box-shadow: var(--sh-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--t-fast), box-shadow var(--t-fast);
+}
+
+.fab:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--sh-lg);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bd-default);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--bd-strong);
+  background-clip: padding-box;
+}

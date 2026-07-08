@@ -1,0 +1,16 @@
+# 国内镜像加速。项目级配置,不影响系统其它 Rust 项目。
+# rsproxy(字节跳动)— 全球可用、sparse 协议
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy]
+registry = "https://rsproxy.cn/crates.io-index"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "https://rsproxy.cn/crates.io-index"
+
+[net]
+git-fetch-with-cli = true

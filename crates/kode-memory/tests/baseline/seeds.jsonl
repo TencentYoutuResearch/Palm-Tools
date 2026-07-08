@@ -1,0 +1,54 @@
+// 50 条种子 fact,从 CODEBUDDY.md / ROADMAP.md 提炼。
+// 每行一个 JSON 对象:{ id, scope, body, tags }
+// id 是稳定的人类可读 slug,baseline 测试用它对应 query.expected_id
+{"id":"pty-clone-killer","scope":"project:kode","body":"PtyHost::kill 必须用 clone_killer() 拿独立 kill 句柄。原因:reaper 和 killer 同时持 Mutex<Child> 会死锁。","tags":["pty","deadlock","gotcha"]}
+{"id":"codebuddy-no-positional","scope":"project:kode","body":"codebuddy 命令的第一个 positional 参数会被当作 prompt 直接发给 LLM。绝不能在默认 args 里加 positional。回归测试:default_codebuddy_backend_has_no_positional_args。","tags":["codebuddy","config","gotcha"]}
+{"id":"no-alt-screen-outer","scope":"project:kode","body":"外层 kode 绝不能进 alt-screen(EnterAlternateScreen)。子 TUI(codebuddy/claude)会用 alt-screen,嵌套会黑屏 / 错乱。","tags":["tui","alt-screen","gotcha"]}
+{"id":"vt100-resize-api","scope":"project:kode","body":"vt100 的 resize 用 screen_mut().set_size(rows, cols),不是 parser.set_size(后者不存在)。","tags":["vt100","api"]}
+{"id":"session-id-injection","scope":"project:kode","body":"kode 启动 codebuddy / claude / claude-internal 时强制注入 --session-id <uuid>,否则找不到 jsonl 状态文件。","tags":["session","jsonl"]}
+{"id":"jsonl-path-codebuddy","scope":"project:kode","body":"codebuddy 状态 jsonl 路径:~/.codebuddy/projects/<cwd-slug>/<session-id>.jsonl(slug 不带前导 dash)。","tags":["jsonl","codebuddy"]}
+{"id":"jsonl-path-claude","scope":"project:kode","body":"claude / claude-internal 状态 jsonl 路径:~/.claude/projects/<cwd-slug>/<session-id>.jsonl(slug 带前导 dash)。","tags":["jsonl","claude"]}
+{"id":"jsonl-fields-codebuddy","scope":"project:kode","body":"codebuddy jsonl 解析关键字段:providerData.requestModelName / providerData.usage.totalTokens / aiTitle。","tags":["jsonl","codebuddy"]}
+{"id":"jsonl-fields-claude","scope":"project:kode","body":"claude jsonl 字段:模型在 message.model;usage 字段 snake_case;cached 来自 cache_read_input_tokens。claude 没有 ai-title,用第一条非命令前缀的 user message 作 title fallback。","tags":["jsonl","claude"]}
+{"id":"title-pinned","scope":"project:kode","body":"用户手动 Ctrl-b , 改过 title 后,title_pinned=true,jsonl 里 ai-title 不再覆盖。","tags":["session","title"]}
+{"id":"prefix-keymap","scope":"project:kode","body":"TUI 版键位用 Ctrl-b prefix(tmux 风),Ctrl-b Ctrl-b 可向 PTY 发真实 Ctrl-b。GUI 版废弃 prefix,改全自治 Cmd 快捷键。","tags":["keymap","tui"]}
+{"id":"trace-debug-only","scope":"project:kode","body":"用 tracing::info! 写日志必须带 --debug 启用文件 appender,否则日志污染 stderr,可能被 PTY 路径吃掉。","tags":["logging","gotcha"]}
+{"id":"cargo-test-singlethread","scope":"project:kode","body":"cargo test 必须 --test-threads=1 跑。PTY 测试有 fd 竞争,并发会随机失败。","tags":["test","pty"]}
+{"id":"cargo-mirror-rsproxy","scope":"project:kode","body":".cargo/config.toml 配置 rsproxy.cn 镜像,因国内网络环境直接走 crates.io 经常失败。","tags":["build","mirror"]}
+{"id":"rust-toolchain-1.89","scope":"project:kode","body":"项目 rust-toolchain.toml 锁 1.89,因为上游依赖(vt100-ctt)需要 edition 2024 解析能力。","tags":["build","toolchain"]}
+{"id":"vt100-ctt-fork","scope":"project:kode","body":"用的是 vt100-ctt 0.17 fork,不是上游 vt100。fork 修了上游缺失的 set_size、screen_mut 等 API。","tags":["vt100","dep"]}
+{"id":"backend-tab-keep-feed","scope":"project:kode","body":"后台 tab 也持续 feed 给 vt100 Parser → 切回零延迟。Parser 是纯数据 ~50KB/tab,常驻无成本。","tags":["render","perf"]}
+{"id":"frame-tick-60fps","scope":"project:kode","body":"TUI 渲染用 60 FPS 固定 tick + 每帧 dirty 检查避免无脏不画。改进方向:event-driven 取代固定 tick。","tags":["render","perf"]}
+{"id":"core-no-action","scope":"project:kode","body":"crates/kode-core 完全无 UI 依赖,不暴露 Action 枚举,只暴露 CoreEvent。GUI/TUI 各自把 CoreEvent 包成自己的 Action variant。","tags":["arch","core"]}
+{"id":"core-event-types","scope":"project:kode","body":"CoreEvent 有三种:PtyBytes / PtyExited / JsonlMeta。Session::new 接 mpsc::UnboundedSender<CoreEvent>,完全不知道 Action 存在。","tags":["arch","core"]}
+{"id":"gui-channel-not-emit","scope":"project:kode","body":"GUI 后端字节流必须用 tauri::ipc::Channel<Vec<u8>> 而不是 emit。emit 走 JSON IPC,每帧 base64 + JSON parse 高频时延迟高。","tags":["gui","perf","tauri"]}
+{"id":"gui-byte-coalescing","scope":"project:kode","body":"GUI 字节合批:每 session 后端起 tokio::time::interval(8ms),把 PTY 小块累积一次发出。cat 大文件时 IPC 频率从 1000+/s 降到 ~120/s。","tags":["gui","perf"]}
+{"id":"gui-xterm-writeutf8","scope":"project:kode","body":"xterm 用 term.writeUtf8(Uint8Array) 直接吃二进制,不要用 term.write(string)(后者 UTF-16 重编码慢)。","tags":["gui","xterm","perf"]}
+{"id":"gui-webgl-fallback","scope":"project:kode","body":"WebGL 失败 fallback 必须有:try { loadAddon(WebglAddon) } catch { /* canvas */ }。Intel macOS 老 GPU 黑屏率约 5%。","tags":["gui","xterm","compat"]}
+{"id":"gui-font-block-mount","scope":"project:kode","body":"字体加载会阻塞首次渲染:await document.fonts.load('14px JetBrains Mono') 后再 mount xterm,避免字体替换时的重排。","tags":["gui","xterm","render"]}
+{"id":"gui-resize-debounce","scope":"project:kode","body":"resize 必须 debounce 50ms。窗口拉伸不要每像素都触发 term.fit() + PTY resize,否则 SIGWINCH 风暴。","tags":["gui","resize","perf"]}
+{"id":"gui-hidpi-refresh","scope":"project:kode","body":"HiDPI 切显示器:监听 devicePixelRatio 变化触发 term.refresh(0, term.rows-1),Mac 外接 4K 不会模糊。","tags":["gui","hidpi"]}
+{"id":"gui-xterm-lru-cache","scope":"project:kode","body":"xterm 实例不全部常驻 DOM。前端 LRU 缓存 1-3 个 xterm 实例,切到非缓存 tab 时 Rust dump vt100 screen 当前快照(get_screen_snapshot)→ xterm writeUtf8 重建画面。","tags":["gui","xterm","memory"]}
+{"id":"gui-snapshot-rebuild","scope":"project:kode","body":"切 tab 流程:目标 id 已在 LRU → display:block;不在 → 找 LRU 最旧 dispose,新建 xterm 实例,invoke get_screen_snapshot 拿快照写入,挂到 active 容器。","tags":["gui","xterm","tab"]}
+{"id":"gui-bg-tab-no-loss","scope":"project:kode","body":"后台 tab 永不丢字节:Rust 端 vt100 持续 feed,前端只是没渲染;切回时拿最新 snapshot 即对。","tags":["gui","tab"]}
+{"id":"persist-state-json","scope":"project:kode","body":"会话列表持久化到 ~/Library/Application Support/kode/state.json (macOS)/ ~/.config/kode/state.json (Linux)。schema v1 含 backend_key / title / cwd / session_id。","tags":["persist"]}
+{"id":"persist-debounce","scope":"project:kode","body":"持久化写入 debounce 500ms(后端 PersistWriter),前端再 200ms throttle。","tags":["persist","perf"]}
+{"id":"resume-session-id","scope":"project:kode","body":"持久化 schema v2 加 session_id 字段(v1→v2 兼容,旧文件无字段反序列化为 None)。恢复时通过 --resume <sid> 让子进程加载历史 + 复用同一 jsonl 文件。","tags":["persist","resume"]}
+{"id":"new-window-skip-persist","scope":"project:kode","body":"Cmd+N 创建新 webview window(label kode-{ts}),通过 ?skip_persist=1 query string 跳过 restore,独立 tab 列表。capabilities windows: ['main', 'kode-*']。","tags":["window"]}
+{"id":"model-alias-cn","scope":"project:kode","body":"kode-core 有 model_alias.rs 统一短名归一(GUI 前端 model_alias.ts 镜像)。codebuddy 是 claude-opus-4.7,claude code 是 claude-4.7-opus(顺序反了),short_model_name 加 swap_ver_tier_if_needed 分支统一处理。","tags":["model","alias"]}
+{"id":"context-table","scope":"project:kode","body":"kode-core 的 context.rs 是模型 → context window 静态表。jsonl_tail 解析 inputTokens / outputTokens / inputTokensDetails[0].cached_tokens。","tags":["model","context"]}
+{"id":"cost-cached-discount","scope":"project:kode","body":"cost.rs 的 cost_usd(model, in, out, cached) 精确版:cache 90% off。","tags":["cost","model"]}
+{"id":"context-bar-thresholds","scope":"project:kode","body":"侧栏 context 进度条阈值:< 50% 绿、< 80% 黄、≥ 80% 红。","tags":["ui","context"]}
+{"id":"protocol-version-v1","scope":"project:kode","body":"远程协议 v1:URL 前缀 /api/v1/,事件 envelope 有 protocol_version 字段。破坏性变更必须升 v2,新增字段不算破坏。","tags":["protocol","version"]}
+{"id":"protocol-bearer-auth","scope":"project:kode","body":"协议鉴权:HTTP Authorization: Bearer <token>;WebSocket 用 ?token=<token> 或 Authorization header。token 是 opaque string(Rust 桥)或 JWT(Go server),客户端不解析。","tags":["protocol","auth"]}
+{"id":"bridge-port-default","scope":"project:kode","body":"GUI Rust 桥默认监听 0.0.0.0:47870(从 9870 改,避开 VS Code 等占用 127.0.0.1:9870)。env KODE_BRIDGE_PORT/BIND/DISABLE 可覆盖。bind_listener 绑 0.0.0.0 前会探测 127.0.0.1:port 是否被占,被占则 fallback 换随机端口避免被劫流量。","tags":["bridge","port"]}
+{"id":"bridge-token-storage","scope":"project:kode","body":"GUI 启动时 persistence::load_or_init_bridge_token() 读 / 生成 32-hex token 写入 state.json。常量时间比对避免侧信道。","tags":["bridge","auth"]}
+{"id":"bridge-history-cutoff","scope":"project:kode","body":"BridgeBus broadcast 容量 256 + 历史 ring buffer 1000/session。meta 类型只留最新一条(避免回放污染)。","tags":["bridge","events"]}
+{"id":"semantic-events","scope":"project:kode","body":"语义事件:message / tool_use / tool_result / meta(model/title/tokens/...)/ ask_user_question / plan_proposed / task_create-update。不暴露 raw jsonl。","tags":["protocol","semantic"]}
+{"id":"go-server-no-cgo","scope":"project:kode","body":"Go server 用 modernc.org/sqlite(纯 Go,无需 cgo,Alpine 镜像构建简单)+ net/http(Go 1.22 path patterns)+ gorilla/websocket + creack/pty。不用 Gin。","tags":["go","server","dep"]}
+{"id":"go-server-jwt-bcrypt","scope":"project:kode","body":"Go server 鉴权:JWT(golang-jwt/jwt/v5)+ bcrypt 密码。kode-server -hash <password> 子命令为 deploy 生成 bcrypt hash 写 yaml。","tags":["go","auth"]}
+{"id":"distroless-image","scope":"project:kode","body":"Go server Dockerfile 用 distroless gcr.io/distroless/base-debian12:nonroot。CGO_ENABLED=0,镜像 < 30 MB。","tags":["docker","deploy"]}
+{"id":"flutter-auto-pair","scope":"project:kode","body":"Flutter macOS 自动配对:启动时读 ~/Library/Application Support/kode/state.json 拿 bridge_token,候选端口 [KODE_BRIDGE_PORT, 47870, 9870, 29870, 18870] 依次 probe,/healthz + /sessions 都通的胜出。Debug 必须关 sandbox(app-sandbox=false)。","tags":["flutter","pair"]}
+{"id":"flutter-secure-storage","scope":"project:kode","body":"Flutter flutter_secure_storage 在没 keychain entitlement 时抛 -34018。bootstrap 加 1.5s 超时 + 吞错(只丢失持久化,endpoint 仍推给 UI)。","tags":["flutter","keychain"]}
+{"id":"protocol-smoke-script","scope":"project:kode","body":"docs/protocol-smoke.sh 是统一 12 步 smoke 脚本:--rust 跑 Rust bridge,--go 跑 Go server,验 healthz/401/403/spawn/list/get/input/history/answer-501/delete/404/WS hello。双实现行为对齐靠它锁。","tags":["test","protocol"]}
+{"id":"trigram-tokenizer","scope":"shared","body":"SQLite FTS5 默认 unicode61 tokenizer 不分词中文,搜中文关键词召回为零。改用 tokenize='trigram' 解决,代价是索引体积变大。","tags":["sqlite","fts5","cjk"]}

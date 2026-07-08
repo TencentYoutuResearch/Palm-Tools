@@ -1,0 +1,44 @@
+name: kode_mobile
+description: "kode mobile companion app — 实时观察 / 操作桌面 GUI 上跑的 codebuddy / claude session"
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # 状态管理 + 路由
+  flutter_riverpod: ^2.6.1
+  go_router: ^14.6.2
+
+  # HTTP + WebSocket(协议 §4 / §5)
+  dio: ^5.7.0
+  web_socket_channel: ^3.0.1
+
+  # 持久化:JWT + endpoint 存 secure storage(钥匙串 / Android Keystore)
+  flutter_secure_storage: ^9.2.2
+
+  # 离线缓存历史消息(协议 §4.4 增量拉取)
+  sqflite: ^2.4.1
+  path_provider: ^2.1.5
+
+  # 配对扫码 (MIT; ZXing C++ core Apache 2.0 — iOS 无专有传递依赖)
+  # 此前用 mobile_scanner,在 iOS 拉 GoogleMLKit/BarcodeScanning(Google 专有 "Copyright" license,非 OSI)
+  flutter_zxing: ^2.3.0
+
+  # 消息气泡 / Plan 卡片渲染 markdown(GFM:表、代码块、checklist)
+  # flutter_markdown 官方已弃维护,社区主推此 fork,API 一致
+  flutter_markdown_plus: ^1.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

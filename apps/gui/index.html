@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>kode</title>
+    <style>
+      /* =========================================================
+       * kode design tokens —— quiet Codex-style workbench.
+       * High contrast where the terminal needs it, restrained chrome
+       * everywhere else, and one crisp accent for action.
+       * ======================================================= */
+      :root {
+        color-scheme: light dark;
+
+        /* spacing 4px scale */
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --sp-3: 12px;
+        --sp-4: 16px;
+        --sp-5: 24px;
+        --sp-6: 32px;
+
+        /* radius —— 12px 给卡片/panel,16px 给大 modal,对齐 Linear/Vercel/Raycast */
+        --rad-sm: 4px;
+        --rad-md: 6px;
+        --rad-lg: 12px;
+        --rad-xl: 16px;
+
+        /* typography */
+        --font-ui:
+          'Avenir Next', 'SF Pro Text', -apple-system, BlinkMacSystemFont,
+          'Segoe UI', system-ui, sans-serif;
+        --font-mono:
+          ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+        --fs-xs: 11px;
+        --fs-sm: 12px;
+        --fs-md: 13px;
+        --fs-lg: 15px;
+        --fs-xl: 18px;
+        --fw-reg: 400;
+        --fw-med: 500;
+        --fw-semi: 700;
+
+        /* dark theme */
+        --bg-base: #0D0F0E;
+        --bg-sidebar: #111413;
+        --bg-elevated: #181B19;
+        --bg-input: #0A0C0B;
+        --bg-tab-hover: rgba(238, 240, 235, 0.055);
+        --bg-tab-active: rgba(165, 214, 167, 0.105);
+        --bg-status: rgba(238, 240, 235, 0.035);
+        --bg-modal-backdrop: rgba(4, 5, 5, 0.72);
+        --bg-hover: rgba(238, 240, 235, 0.045);
+        --bg-selected: rgba(159, 232, 112, 0.08);
+        --bg-chip: rgba(238, 240, 235, 0.045);
+        --bg-pre: rgba(238, 240, 235, 0.025);
+        --bg-card: #15171a;
+
+        --fg-primary: #EDEFEB;
+        --fg-secondary: #A8AEA7;
+        --fg-tertiary: #70776F;
+        --fg-on-accent: #07100B;
+
+        --bd-default: #262B28;
+        --bd-strong: #3A413C;
+        --bd-muted: #1E2320;
+        --bd-focus: var(--acc);
+
+        --acc: #9FE870;
+        --acc-hover: #B7F397;
+        --acc-soft: rgba(159, 232, 112, 0.14);
+
+        --st-ok: #9FE870;
+        --st-idle: #71D47D;
+        --st-busy: #E6B450;
+        --st-warn: #E6B450;
+        --st-err: #FF6B6B;
+        --st-info: #8FD3FF;
+        --st-accent: #9FE870;
+        --st-tokens: #E6B450;
+
+        /* 双层 soft shadow —— modern elevation:contact + ambient + 1px ring */
+        --sh-sm: 0 1px 2px rgba(0, 0, 0, 0.36);
+        --sh-md:
+          0 1px 2px rgba(0, 0, 0, 0.20),
+          0 8px 24px rgba(0, 0, 0, 0.28),
+          0 0 0 1px var(--bd-default);
+        --sh-lg:
+          0 1px 2px rgba(0, 0, 0, 0.20),
+          0 20px 60px rgba(0, 0, 0, 0.36),
+          0 0 0 1px var(--bd-default);
+        --sh-modal:
+          0 30px 90px rgba(0, 0, 0, 0.52),
+          0 0 0 1px var(--bd-strong),
+          0 0 0 1px rgba(159, 232, 112, 0.10) inset;
+
+        /* modal backdrop 玻璃感 —— 统一所有 modal 的 backdrop-filter 引用 */
+        --blur-modal: blur(20px) saturate(1.5);
+
+        --t-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
+        --t-base: 180ms cubic-bezier(0.2, 0, 0, 1);
+      }
+
+      /* === Light tokens 集中定义,被三处复用:
+       *   1. system 模式且系统偏好 light:`@media (prefers-color-scheme: light)`
+       *   2. 用户显式选 light(强制):`:root[data-theme="light"]`
+       *
+       * 关键:`@media` 选择器特异性 = (0,1,0)(基于 :root 一个 class-equivalent),
+       * `:root[data-theme="dark"]` 特异性 = (0,2,0),所以用户显式选 dark 时
+       * 不会被 media 的 light 覆盖。一致性靠把 light tokens 在两个选择器里复制
+       * 同样的内容保证。Dark 是 :root 默认值,显式 [data-theme="dark"] 不需要再重写
+       * 任何 token —— 但要写一个空选择器以提升特异性,挡住 media query 的 light。
+       */
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme="dark"]) {
+          --bg-base: #F7F7F3;
+          --bg-sidebar: #ECEDE8;
+          --bg-elevated: #FFFFFF;
+          --bg-input: #FBFBF8;
+          --bg-tab-hover: rgba(22, 28, 24, 0.055);
+          --bg-tab-active: rgba(32, 110, 69, 0.105);
+          --bg-status: rgba(22, 28, 24, 0.035);
+          --bg-modal-backdrop: rgba(12, 14, 13, 0.34);
+          --bg-hover: rgba(22, 28, 24, 0.04);
+          --bg-selected: rgba(33, 110, 69, 0.08);
+          --bg-chip: rgba(22, 28, 24, 0.04);
+          --bg-pre: rgba(22, 28, 24, 0.02);
+          --bg-card: #ffffff;
+
+          --fg-primary: #171A18;
+          --fg-secondary: #4F5750;
+          --fg-tertiary: #7A827B;
+          --fg-on-accent: #FFFFFF;
+
+          --bd-default: #D9DDD5;
+          --bd-strong: #AEB7AE;
+          --bd-muted: #E4E8E2;
+
+          --acc: #216E45;
+          --acc-hover: #1A5C39;
+          --acc-soft: rgba(33, 110, 69, 0.12);
+
+          --st-ok: #216E45;
+          --st-idle: #2F8F58;
+          --st-busy: #B7791F;
+          --st-warn: #B7791F;
+          --st-err: #C24141;
+          --st-info: #146C94;
+          --st-accent: #216E45;
+          --st-tokens: #9A6700;
+
+          --sh-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+          --sh-md:
+            0 1px 2px rgba(25, 30, 26, 0.06),
+            0 8px 24px rgba(25, 30, 26, 0.10),
+            0 0 0 1px var(--bd-default);
+          --sh-lg:
+            0 1px 2px rgba(25, 30, 26, 0.06),
+            0 20px 60px rgba(25, 30, 26, 0.14),
+            0 0 0 1px var(--bd-default);
+          --sh-modal:
+            0 28px 80px rgba(25, 30, 26, 0.20),
+            0 0 0 1px var(--bd-strong),
+            0 0 0 1px rgba(33, 110, 69, 0.08) inset;
+
+          /* light 下 saturate 略低,避免过饱和 */
+          --blur-modal: blur(20px) saturate(1.4);
+        }
+      }
+
+      /* 用户显式选 light:无视系统偏好,强制 light token(高于 :root 的 dark 默认 + media)。
+       * `:root[data-theme="light"]` 特异性 (0,2,0) > media 内 (0,2,0) 平手时由源码后置规则胜出。 */
+      :root[data-theme="light"] {
+        --bg-base: #F7F7F3;
+        --bg-sidebar: #ECEDE8;
+        --bg-elevated: #FFFFFF;
+        --bg-input: #FBFBF8;
+        --bg-tab-hover: rgba(22, 28, 24, 0.055);
+        --bg-tab-active: rgba(32, 110, 69, 0.105);
+        --bg-status: rgba(22, 28, 24, 0.035);
+        --bg-modal-backdrop: rgba(12, 14, 13, 0.34);
+        --bg-hover: rgba(22, 28, 24, 0.04);
+        --bg-selected: rgba(33, 110, 69, 0.08);
+        --bg-chip: rgba(22, 28, 24, 0.04);
+        --bg-pre: rgba(22, 28, 24, 0.02);
+        --bg-card: #ffffff;
+
+        --fg-primary: #171A18;
+        --fg-secondary: #4F5750;
+        --fg-tertiary: #7A827B;
+        --fg-on-accent: #FFFFFF;
+
+        --bd-default: #D9DDD5;
+        --bd-strong: #AEB7AE;
+        --bd-muted: #E4E8E2;
+        --acc: #216E45;
+        --acc-hover: #1A5C39;
+        --acc-soft: rgba(33, 110, 69, 0.12);
+
+        --st-ok: #216E45;
+        --st-idle: #2F8F58;
+        --st-busy: #B7791F;
+        --st-warn: #B7791F;
+        --st-err: #C24141;
+        --st-info: #146C94;
+        --st-accent: #216E45;
+        --st-tokens: #9A6700;
+
+        --sh-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+        --sh-md:
+          0 1px 2px rgba(25, 30, 26, 0.06),
+          0 8px 24px rgba(25, 30, 26, 0.10),
+          0 0 0 1px var(--bd-default);
+        --sh-lg:
+          0 1px 2px rgba(25, 30, 26, 0.06),
+          0 20px 60px rgba(25, 30, 26, 0.14),
+          0 0 0 1px var(--bd-default);
+        --sh-modal:
+          0 28px 80px rgba(25, 30, 26, 0.20),
+          0 0 0 1px var(--bd-strong),
+          0 0 0 1px rgba(33, 110, 69, 0.08) inset;
+
+        /* light 下 saturate 略低,避免过饱和 */
+        --blur-modal: blur(20px) saturate(1.4);
+      }
+
+      /* [data-theme="dark"] 不需要重新声明 token —— :root 的默认值就是 dark。
+       * 上面 `@media :not([data-theme="dark"])` 把这个 attr 排除在 light 覆盖之外,
+       * 系统偏好 light 时强制 dark 也能保持。 */
+
+      /* 阻塞首屏渲染,避免 FOUC;xterm 的 css 在组件 onMount 后再加 */
+      /* 透明窗口(tauri transparent:true)+ 原生圆角:
+       * html/body 必须透明,否则方角实底会盖住 .root 的圆角,露出黑/白方角。
+       * 实际背景 + noise/grid overlay 都搬到 .root 内(随 .root 的 border-radius
+       * + overflow:hidden 一起被裁成圆角),见 App.svelte 的 .root::before/::after。 */
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        color: var(--fg-primary);
+        font-family: var(--font-ui);
+        font-size: var(--fs-md);
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        position: relative;
+      }
+      #app { height: 100%; position: relative; z-index: 1; background: transparent; }
+
+      /* 全局:任何 button / input 字体继承 UI 字体,避免 Tauri webview 默认 Times/serif */
+      button, input, select, textarea {
+        font-family: inherit;
+      }
+
+      /* 自定义 scrollbar(macOS 风,只在 hover 区域显示) */
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb {
+        background: var(--bd-default);
+        border-radius: 6px;
+        border: 2px solid transparent;
+        background-clip: padding-box;
+      }
+      ::-webkit-scrollbar-thumb:hover { background: var(--bd-strong); background-clip: padding-box; border: 2px solid transparent; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

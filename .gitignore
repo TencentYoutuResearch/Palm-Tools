@@ -1,0 +1,37 @@
+/target
+/.pnpm-store
+/node_modules
+/.codebuddy/scheduled_tasks.lock
+apps/gui/node_modules
+apps/gui/dist
+apps/gui/.svelte-kit
+apps/specops/node_modules
+apps/specops/dist
+apps/specops/coverage
+# Compiled JS files in specops src (tsc output — tests load .ts via vitest, .js shadows them).
+# Note: .d.ts 不忽略 —— src/assets.d.ts 是手写的 ambient declaration(*.md / *.css 等
+# 资源模块类型),tsc 输出的 .d.ts 只会落 dist/,不会写进 src/。
+apps/specops/src/**/*.js
+!apps/specops/src/server/public/app.js
+apps/specops/src/**/*.js.map
+# SpecOps 前端(Svelte/Vite)独立子项目
+apps/specops/frontend/node_modules
+apps/specops/frontend/dist
+apps/specops/frontend/.svelte-kit
+apps/gui/src-tauri/gen
+apps/gui/src-tauri/target
+apps/gui/src-tauri/binaries
+# 部署用 musl tarball —— build-remote-memory-bridge.sh --musl 产出后 copy 进来,
+# 不入库(dev 模式下 Tauri 找不到也不报错,只有 release 打包才需要)
+apps/gui/src-tauri/resources/*.tar.gz
+services/kode-server-go/deploy/config.yaml
+# Flutter 默认在 mobile 项目里生成 build/(.gitignore 自带),
+# 但 flutter create 偶尔在 apps/ 顶层生成空 build/ios SourcePackages 缓存,
+# 一并忽略以免污染主仓
+apps/build/
+
+# macOS Finder 元数据,跨开发机会污染 diff
+.DS_Store
+
+# 图标 / 资源换肤时 tauri-icon 留的旧版本备份,长期留在仓库无意义
+*.bak

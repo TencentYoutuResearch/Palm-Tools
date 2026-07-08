@@ -1,0 +1,22 @@
+schema_version = 1
+
+[project]
+name = "kode"
+
+[gate]
+strict_wild_specs = false
+
+[gate.suppress]
+suppress_codes = ["missing_reference", "unknown_reference"]
+suppress_commit_types = ["chore", "feat", "fix", "refactor", "test", "debug", "docs"]
+
+[verify.rust]
+command = ["cargo", "test", "--", "--test-threads=1"]
+timeout_ms = 300000
+output_limit_bytes = 1048576
+
+[verify.specops]
+command = ["pnpm", "test"]
+cwd = "apps/specops"
+timeout_ms = 120000
+output_limit_bytes = 1048576
