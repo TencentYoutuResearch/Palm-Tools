@@ -23,14 +23,14 @@ The backend chooser is a cold snapshot at startup; manage backends from `Setting
 No accounts, no telemetry, no cloud sync. Your code, tokens, and conversations stay on your machine.
 
 <p align="center">
-  <video src="docs/videos/new-session-demo.mp4" poster="docs/images/screenshot-main.png" controls muted loop playsinline width="880"></video>
+  <img src="docs/videos/new-session-demo.gif" alt="New session demo — pick a backend, choose a working directory" width="880" />
 </p>
 <p align="center"><sub>Pick a backend, choose a working directory, and a live session spins up in a new tab.</sub></p>
 
 Every backend gets an icon in the chooser and sidebar. Drop in any PNG and name your own preset:
 
 <p align="center">
-  <video src="docs/videos/custom-avatar-demo.mp4" controls muted loop playsinline width="720"></video>
+  <img src="docs/videos/custom-avatar-demo.gif" alt="Custom avatar demo — drop a PNG and name your preset" width="720" />
 </p>
 
 ## Memory that survives the session.
@@ -38,7 +38,7 @@ Every backend gets an icon in the chooser and sidebar. Drop in any PNG and name 
 Agents forget. `kode` doesn't. A shared memory pool (`~/.kode-memory/`) is exposed to every agent through an MCP server (`kode-memory-mcp`). Agents `memory_propose`; you review in the GUI (`⌘⇧M`); approved facts land in a retrieval pool that every subsequent agent — across tabs, sessions, and backend types — can `memory_search` from.
 
 <p align="center">
-  <video src="docs/videos/memory-demo.mp4" poster="docs/images/screenshot-memory.png" controls muted loop playsinline width="880"></video>
+  <img src="docs/videos/memory-demo.gif" alt="Memory demo — agent proposes, you approve, next session recalls" width="880" />
 </p>
 <p align="center"><sub>An agent proposes a fact, you approve it in the review queue, and the next session recalls it.</sub></p>
 
@@ -73,7 +73,7 @@ Open the SpecOps console with `⌘S` and pick a Git workspace. The TypeScript/Bu
 SSH-tunneled remote tabs come built-in: `ssh -N -L` brings a no-public-IP devcloud server into your local tab list without Tailscale. Run agents on a beefy remote box; read the output on your laptop.
 
 <p align="center">
-  <video src="docs/videos/remote-ssh-demo.mp4" controls muted loop playsinline width="720"></video>
+  <img src="docs/videos/remote-ssh-demo.gif" alt="Remote SSH demo — tunnel a remote box into a local tab" width="720" />
 </p>
 <p align="center"><sub>An SSH tunnel brings a remote box into a local tab — PTY bytes stream back over the bridge.</sub></p>
 
