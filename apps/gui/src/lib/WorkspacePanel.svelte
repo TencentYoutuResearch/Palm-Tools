@@ -40,6 +40,16 @@
     entry: WorkspaceEntry
   }
 
+  /// 按 session 缓存 WorkspacePanel 的用户视图状态,跨 tab 切换 + 跨组件 unmount 存活。
+  /// 只缓存"位置信息",不缓存 PreviewState 内容(切回时重新 previewFile 拿最新内容)
+  /// 和 snapshot(每次切回 refresh)。childrenByPath 由 refreshExpanded 重新填充。
+  type SavedPanelState = {
+    selectedPath: string
+    selectedGitKey: string
+    expandedPaths: Set<string>
+  }
+  const panelStateCache = new Map<number, SavedPanelState>()
+
   let { tab, homeDir, onClose }: Props = $props()
 
   let activePanel = $state<PanelTab>('files')
@@ -116,7 +126,21 @@
   /// 当前是否显示隐藏文件。无存储值时按侧别取默认(local=true, remote=false)。
   const showHidden = $derived(showHiddenMap[sideKey] ?? sideKey === 'local')
 
+  /// 跟踪上一次 effect 运行时的 tab.id,用于在切换前把视图状态存入 panelStateCache。
+  let prevTabId: number | null = null
+
   $effect(() => {
+    const currentTabId = tab?.id ?? null
+    // 1. 离开旧 tab:保存当前视图状态(此时 $state 还是旧 tab 的值)
+    if (prevTabId != null && prevTabId !== currentTabId) {
+      panelStateCache.set(prevTabId, {
+        selectedPath,
+        selectedGitKey,
+        expandedPaths: new Set(expandedPaths),
+      })
+    }
+
+    // 2. 无 cwd:全重置
     if (!cwd) {
       snapshot = null
       error = null
@@ -127,17 +151,41 @@
       selectedPath = ''
       selectedGitKey = ''
       preview = emptyPreview()
+      prevTabId = currentTabId
       return
     }
+
+    // 3. cwd 变化:按 cache 决定是否保留视图状态
     if (loadedCwd !== cwd && !loading) {
-      expandedPaths = new Set()
-      loadingPaths = new Set()
-      childrenByPath = {}
-      selectedPath = ''
-      selectedGitKey = ''
-      preview = emptyPreview()
-      void refresh()
+      const saved = currentTabId != null ? panelStateCache.get(currentTabId) : undefined
+      if (saved) {
+        // 恢复:保留 expandedPaths/selectedPath,只清 loading/children,稍后 refreshExpanded 重建
+        loadingPaths = new Set()
+        childrenByPath = {}
+        expandedPaths = new Set(saved.expandedPaths)
+        selectedPath = saved.selectedPath
+        selectedGitKey = saved.selectedGitKey
+        preview = emptyPreview()
+        void refresh().then(async () => {
+          // refresh 拉了 snapshot;再补 expanded 目录的子项 + 重新预览 selectedPath
+          if (expandedPaths.size > 0) await refreshExpanded()
+          if (selectedPath) {
+            const entry = findEntryByPath(selectedPath)
+            if (entry && !entry.is_dir) void previewFile(entry)
+          }
+        })
+      } else {
+        // 无 cache:原 reset 逻辑
+        expandedPaths = new Set()
+        loadingPaths = new Set()
+        childrenByPath = {}
+        selectedPath = ''
+        selectedGitKey = ''
+        preview = emptyPreview()
+        void refresh()
+      }
     }
+    prevTabId = currentTabId
   })
 
   function emptyPreview(): PreviewState {
@@ -248,6 +296,26 @@
         }
       }),
     )
+  }
+
+  /// 在 snapshot.entries + childrenByPath 里递归找 path 对应的 entry。
+  /// 用于切回 session 后从 selectedPath 恢复 preview(需 refreshExpanded 完成后调用,
+  /// 否则 childrenByPath 为空,深层文件找不到)。
+  function findEntryByPath(
+    path: string,
+    entries: WorkspaceEntry[] = snapshot?.entries ?? [],
+  ): WorkspaceEntry | null {
+    for (const e of entries) {
+      if (e.path === path) return e
+      if (e.is_dir) {
+        const children = childrenByPath[e.path]
+        if (children) {
+          const found = findEntryByPath(path, children)
+          if (found) return found
+        }
+      }
+    }
+    return null
   }
 
   function openContextMenu(event: MouseEvent, entry: WorkspaceEntry) {
