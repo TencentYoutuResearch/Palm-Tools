@@ -464,7 +464,12 @@
     wsShadows = [...(e.detail.items as WsGroup[])]
   }
   function onWsDndFinalize(e: CustomEvent<DndEvent>) {
-    const finalGroups = e.detail.items as WsGroup[]
+    // 过滤 shadow item(svelte-dnd-action 的占位),只保留真实 workspace。
+    // isDndShadowItem 是运行时注入的标记,不在 WsGroup 类型里,用 as any 读取。
+    const finalGroups = (e.detail.items as WsGroup[]).filter(
+      (g): g is WsGroup =>
+        !!g && !(g as any).isDndShadowItem && Array.isArray(g.tabs),
+    )
     // 保护:数量或 cwd 集合不一致时回滚,避免脏数据落盘。
     const origCwds = new Set(wsGroups.map((g) => g.cwd))
     if (
@@ -1428,7 +1433,7 @@
           onconsider={onWsDndConsider}
           onfinalize={onWsDndFinalize}
         >
-          {#each wsShadows as group, gi (group.cwd)}
+          {#each wsShadows as group, gi (group.id)}
             <div class="ws-group" class:dragging={dragging} data-cwd={group.cwd}>
               {#if useGroupedLayout}
                 <button
