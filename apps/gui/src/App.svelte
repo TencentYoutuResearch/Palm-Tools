@@ -53,7 +53,7 @@
     setTabAvatar,
     type TabInfo,
   } from './lib/sessions'
-  import { dndzone } from 'svelte-dnd-action'
+  import { dndzone, dragHandleZone, dragHandle } from 'svelte-dnd-action'
   import type { DndEvent } from 'svelte-dnd-action'
   import { longpressGate, TAB_DRAG_LONG_PRESS_MS } from './lib/longpress_gate'
   import { outsidePressClose } from './lib/outside_close'
@@ -213,6 +213,13 @@
     const next: Record<string, TabInfo[]> = {}
     for (const g of wsGroups) next[g.cwd] = g.tabs
     groupShadows = next
+  })
+
+  /** workspace 分组顺序的影子数组;拖拽时跟随,非拖拽时由 $effect 同步。 */
+  let wsShadows = $state<WsGroup[]>([])
+  $effect(() => {
+    if (dragging) return
+    wsShadows = [...wsGroups]
   })
 
   /** 折叠的 workspace cwd 集合;持久化到 localStorage,默认全展开。 */
@@ -443,6 +450,34 @@
     for (const g of wsGroups) {
       const src = g.cwd === cwd ? finalItems : g.tabs
       for (const t of src) nextOrder.push(t.id)
+    }
+    reorderTabs(nextOrder)
+    dragging = false
+  }
+
+  /** workspace 分组级别的拖拽回调:把整个分组上下重排。 */
+  function onWsDndConsider(e: CustomEvent<DndEvent>) {
+    dragging = true
+    menuOpenId = null
+    wsShadows = [...(e.detail.items as WsGroup[])]
+  }
+  function onWsDndFinalize(e: CustomEvent<DndEvent>) {
+    const finalGroups = e.detail.items as WsGroup[]
+    // 保护:数量或 cwd 集合不一致时回滚,避免脏数据落盘。
+    const origCwds = new Set(wsGroups.map((g) => g.cwd))
+    if (
+      finalGroups.length !== wsGroups.length ||
+      finalGroups.some((g) => !origCwds.has(g.cwd))
+    ) {
+      dragging = false
+      wsShadows = [...wsGroups]
+      return
+    }
+    wsShadows = [...finalGroups]
+    // 把 wsGroups 新顺序映射回 $tabs:按新 workspace 顺序拼接所有 tab id。
+    const nextOrder: SessionId[] = []
+    for (const g of finalGroups) {
+      for (const t of g.tabs) nextOrder.push(t.id)
     }
     reorderTabs(nextOrder)
     dragging = false
@@ -1379,46 +1414,61 @@
       {:else}
         <!-- 多 workspace 且非 compact:渲染可折叠的分组 header + 每组独立 dndzone。
              单 workspace / compact:跳过 header,直接堆叠各组 tab(语义不变)。
-             compact 多 workspace:组间加 1px 细分隔线(VS Code/Slack 式),不占横向空间。 -->
+             compact 多 workspace:组间加 1px 细分隔线(VS Code/Slack 式),不占横向空间。
+             外层 .ws-list 挂 workspace 级 dndzone(type: 'workspace-group'),dragHandle
+             指向 .ws-group-header —— 只有 header 可拖,tab 内容不误触。
+             非 grouped 模式下 .ws-group-header 不渲染,dndzone 自然无法触发,安全。 -->
         {@const useGroupedLayout = wsGrouped && sidebarMode !== 'compact'}
-        {#each wsGroups as group, gi (group.cwd)}
-          {#if useGroupedLayout}
-            <button
-              type="button"
-              class="ws-group-header"
-              class:collapsed={collapsedCwds.has(group.cwd)}
-              title={group.fullPath}
-              aria-expanded={!collapsedCwds.has(group.cwd)}
-              onclick={() => toggleCollapse(group.cwd)}
-            >
-              <span class="ws-chevron">
-                <Icon name={collapsedCwds.has(group.cwd) ? 'chevron-right' : 'chevron-down'} size={12} />
-              </span>
-              <span class="ws-icon"><Icon name="folder" size={13} /></span>
-              <span class="ws-name">{group.name}</span>
-              <span class="ws-count">{group.tabs.length}</span>
-            </button>
-          {:else if wsGrouped && gi > 0}
-            <!-- compact 多 workspace:组间细分隔线 -->
-            <div class="ws-group-separator" aria-hidden="true"></div>
-          {/if}
-          {#if !useGroupedLayout || !collapsedCwds.has(group.cwd)}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <div
-              class="ws-group-tabs"
-              data-cwd={group.cwd}
-              use:dndzone={{ items: groupShadows[group.cwd] ?? group.tabs, type: `ws-tab:${group.cwd}`, delayTouchStart: TAB_DRAG_LONG_PRESS_MS }}
-              use:longpressGate
-              onconsider={onDndConsider}
-              onfinalize={onDndFinalize}
-            >
-              {#each (groupShadows[group.cwd] ?? group.tabs) as t (t.id)}
-                {@const i = wsGlobalIdx.get(t.id) ?? 0}
-                {@render tabRow(t, i)}
-              {/each}
+        <div
+          class="ws-list"
+          use:dragHandleZone={{ items: wsShadows, type: 'workspace-group', delayTouchStart: TAB_DRAG_LONG_PRESS_MS }}
+          use:longpressGate
+          onconsider={onWsDndConsider}
+          onfinalize={onWsDndFinalize}
+        >
+          {#each wsShadows as group, gi (group.cwd)}
+            <div class="ws-group" class:dragging={dragging} data-cwd={group.cwd}>
+              {#if useGroupedLayout}
+                <button
+                  type="button"
+                  class="ws-group-header"
+                  class:collapsed={collapsedCwds.has(group.cwd)}
+                  title={group.fullPath}
+                  aria-expanded={!collapsedCwds.has(group.cwd)}
+                  onclick={() => toggleCollapse(group.cwd)}
+                  use:dragHandle
+                >
+                  <span class="ws-grip" aria-hidden="true"><Icon name="grip-vertical" size={14} /></span>
+                  <span class="ws-chevron">
+                    <Icon name={collapsedCwds.has(group.cwd) ? 'chevron-right' : 'chevron-down'} size={12} />
+                  </span>
+                  <span class="ws-icon"><Icon name="folder" size={13} /></span>
+                  <span class="ws-name">{group.name}</span>
+                  <span class="ws-count">{group.tabs.length}</span>
+                </button>
+              {:else if wsGrouped && gi > 0}
+                <!-- compact 多 workspace:组间细分隔线 -->
+                <div class="ws-group-separator" aria-hidden="true"></div>
+              {/if}
+              {#if !useGroupedLayout || !collapsedCwds.has(group.cwd)}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div
+                  class="ws-group-tabs"
+                  data-cwd={group.cwd}
+                  use:dndzone={{ items: groupShadows[group.cwd] ?? group.tabs, type: `ws-tab:${group.cwd}`, delayTouchStart: TAB_DRAG_LONG_PRESS_MS }}
+                  use:longpressGate
+                  onconsider={onDndConsider}
+                  onfinalize={onDndFinalize}
+                >
+                  {#each (groupShadows[group.cwd] ?? group.tabs) as t (t.id)}
+                    {@const i = wsGlobalIdx.get(t.id) ?? 0}
+                    {@render tabRow(t, i)}
+                  {/each}
+                </div>
+              {/if}
             </div>
-          {/if}
-        {/each}
+          {/each}
+        </div>
       {/if}
     </div>
   </aside>
@@ -2171,6 +2221,18 @@
   }
   .boot-error { color: var(--st-err); white-space: pre-wrap; }
 
+  /* ===== workspace 分组容器 =====
+     .ws-list 是外层 dndzone 容器(workspace 级拖拽);
+     .ws-group 是每个 workspace 的整体(header + tabs);
+     .ws-grip 是 header 左侧的拖拽手柄视觉线索。 */
+  .ws-list { display: flex; flex-direction: column; }
+  .ws-group { display: flex; flex-direction: column; }
+  .ws-group.dragging {
+    opacity: 0.5;
+    transform: scale(0.98);
+    transition: opacity var(--t-fast), transform var(--t-fast);
+  }
+
   /* ===== workspace 分组 header ===== */
   .ws-group-header {
     display: flex;
@@ -2186,10 +2248,19 @@
     font-size: var(--fs-xs, 11px);
     font-weight: 600;
     text-align: left;
-    cursor: pointer;
+    cursor: grab;
     transition: background var(--t-fast), color var(--t-fast);
   }
+  .ws-group-header:active { cursor: grabbing; }
   .ws-group-header:hover { background: var(--bg-tab-hover); color: var(--fg-primary); }
+  .ws-group-header .ws-grip {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--fg-tertiary);
+    opacity: 0.4;
+    transition: opacity var(--t-fast);
+  }
+  .ws-group-header:hover .ws-grip { opacity: 1; }
   .ws-group-header .ws-chevron {
     display: inline-flex;
     color: var(--fg-tertiary);

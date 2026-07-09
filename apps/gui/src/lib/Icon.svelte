@@ -46,6 +46,7 @@
     | 'more-horizontal'
     | 'maximize-2'
     | 'minimize-2'
+    | 'grip-vertical'
 
   /// 24×24 viewBox 下的 stroke path 片段。新增图标在这里加。
   /// 内容不包括 <svg> 外层 —— 由组件统一加。
@@ -185,6 +186,14 @@
       '<polyline points="20 10 14 10 14 4"/>' +
       '<line x1="14" y1="10" x2="21" y2="3"/>' +
       '<line x1="3" y1="21" x2="10" y2="14"/>',
+    // lucide:grip-vertical —— 两列各 3 个圆点,拖拽手柄
+    'grip-vertical':
+      '<circle cx="9" cy="6" r="1"/>' +
+      '<circle cx="9" cy="12" r="1"/>' +
+      '<circle cx="9" cy="18" r="1"/>' +
+      '<circle cx="15" cy="6" r="1"/>' +
+      '<circle cx="15" cy="12" r="1"/>' +
+      '<circle cx="15" cy="18" r="1"/>',
   }
 
   export function pathOf(name: IconName): string {
