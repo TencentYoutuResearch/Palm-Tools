@@ -171,9 +171,10 @@
    * hook 遍历 node.children 绑 mousedown,若 items 初始为空或与实际 DOM 不同步,
    * mousedown 绑不上;拖拽开始后 shadow item 不会进入 DOM,被拖的 tab 会“消失”。
    */
-  type WsGroup = { cwd: string; name: string; fullPath: string; tabs: TabInfo[] }
+  type WsGroup = { id: string; cwd: string; name: string; fullPath: string; tabs: TabInfo[] }
 
-  /** 按 cwd 分组(保留首次出现顺序);cwd 缺失归入 '(no cwd)' 组,显示名 Other。 */
+  /** 按 cwd 分组(保留首次出现顺序);cwd 缺失归入 '(no cwd)' 组,显示名 Other。
+   *  id 字段值 = cwd,仅用于 svelte-dnd-action 的 item 标识(它强制要求 id 属性)。 */
   const wsGroups = $derived.by<WsGroup[]>(() => {
     const order: string[] = []
     const map = new Map<string, TabInfo[]>()
@@ -188,6 +189,7 @@
       arr.push(t)
     }
     return order.map((cwd) => ({
+      id: cwd,
       cwd,
       name: cwd === '(no cwd)' ? 'Other' : wsBasename(cwd),
       fullPath: cwd === '(no cwd)' ? '' : wsCompactPath(cwd, homeDir),
