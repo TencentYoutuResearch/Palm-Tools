@@ -61,6 +61,37 @@
     content: '',
   })
 
+  /// 文件树(nav-pane)宽度 —— 与 preview-pane 之间可拖拽变宽。
+  /// 默认 246px(保持旧值),范围 [180, 480]。持久化到 localStorage。
+  const NAV_WIDTH_KEY = 'kode:workspace-nav-width'
+  const NAV_MIN = 180
+  const NAV_MAX = 480
+  function loadNavWidth(): number {
+    const v = Number(localStorage.getItem(NAV_WIDTH_KEY))
+    return Number.isFinite(v) && v >= NAV_MIN && v <= NAV_MAX ? v : 246
+  }
+  let navWidth = $state<number>(loadNavWidth())
+  let navResizing = $state(false)
+  function startNavResize(e: PointerEvent) {
+    e.preventDefault()
+    navResizing = true
+    const startX = e.clientX
+    const startW = navWidth
+    const onMove = (ev: PointerEvent) => {
+      // nav-pane 在右,鼠标向右 → 变宽
+      const next = startW + (ev.clientX - startX)
+      navWidth = Math.min(NAV_MAX, Math.max(NAV_MIN, next))
+    }
+    const onUp = () => {
+      navResizing = false
+      try { localStorage.setItem(NAV_WIDTH_KEY, String(navWidth)) } catch { /* ignore */ }
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
   /// 隐藏文件显示开关 —— 按 local / remote 分侧持久化到 localStorage。
   /// 默认:local=true(显示 dotfiles,保留旧行为),remote=false(隐藏 dotfiles,保留远端旧行为)。
   const SHOW_HIDDEN_KEY = 'kode:workspace-show-hidden-v1'
@@ -460,7 +491,12 @@
 
 <svelte:window onclick={() => (contextMenu = null)} onkeydown={(e) => e.key === 'Escape' && (contextMenu = null)} />
 
-<aside class="workspace-panel" aria-label="Workspace inspector">
+<aside
+  class="workspace-panel"
+  class:nav-resizing={navResizing}
+  style="--nav-w:{navWidth}px"
+  aria-label="Workspace inspector"
+>
   <!-- 顶部一排(拉通整个右边栏):Files/Git 靠左,刷新 + inspector 关闭 靠右 -->
   <div class="nav-top">
     <div class="tabs" role="tablist" aria-label="Workspace views">
@@ -527,6 +563,19 @@
           <pre class="preview-text" class:diff={preview.kind === 'diff'}>{#each preview.content.split('\n') as line}<span class={lineClass(line)}>{line || ' '}</span>{/each}</pre>
         {/if}
         </section>
+      {/if}
+
+      <!-- preview 与 nav 之间的拖拽分隔条:只有 preview 显示时才有意义 -->
+      {#if preview.kind !== 'empty'}
+        <div
+          class="nav-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize file tree"
+          title="Drag to resize file tree"
+          onpointerdown={startNavResize}
+          ondblclick={() => (navWidth = 246)}
+        ></div>
       {/if}
 
       <!-- 右:搜索框(上) + 文件/git 列表(下) -->
@@ -690,6 +739,15 @@
     box-shadow: none;
     overflow: hidden;
   }
+  /* 拖拽中:禁用 grid 列宽过渡(避免跟手延迟)+ 禁止文本选择 */
+  .workspace-panel.nav-resizing {
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: col-resize;
+  }
+  .workspace-panel.nav-resizing .panel-body {
+    transition: none;
+  }
 
   /* 无底框,跟主区标题栏按钮风格一致 */
   .tool-btn {
@@ -813,12 +871,33 @@
     flex: 1 1 auto;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 246px;
+    /* 三列:preview(1fr) | resizer(auto) | nav(变量宽) —— 双方都可拖拽变宽 */
+    grid-template-columns: minmax(0, 1fr) auto var(--nav-w, 246px);
     grid-template-rows: minmax(0, 1fr);
   }
-  /* 未打开文件/diff 时不渲染 preview-pane,nav-pane 占满整列 */
+  /* 未打开文件/diff 时不渲染 preview-pane 和 resizer,nav-pane 占满整列 */
   .panel-body.no-preview { grid-template-columns: 1fr; }
   .panel-body.no-preview .nav-pane { border-left: 0; }
+  /* preview 与 nav 之间的拖拽分隔条 —— 复用 App.svelte 的 inspector-resizer 视觉语言 */
+  .nav-resizer {
+    position: relative;
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+    border-left: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    flex-shrink: 0;
+  }
+  .nav-resizer::before {
+    content: '';
+    position: absolute;
+    top: 0; bottom: 0; left: 0;
+    width: 1px;
+    background: transparent;
+    transition: background var(--t-fast);
+  }
+  .nav-resizer:hover::before { background: var(--acc); }
+  .nav-resizing .nav-resizer { background: color-mix(in srgb, var(--acc) 10%, transparent); }
+  .nav-resizing .nav-resizer::before { background: var(--acc); }
   .nav-pane {
     min-width: 0;
     min-height: 0;
