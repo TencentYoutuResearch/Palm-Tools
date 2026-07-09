@@ -971,7 +971,8 @@
     min-width: 100%;
     min-height: 27px;
     display: grid;
-    grid-template-columns: 16px 18px auto auto;
+    /* 4 列:chevron | icon | name(占满) | size(贴右) */
+    grid-template-columns: 16px 18px minmax(0, 1fr) auto;
     align-items: center;
     gap: 4px;
     border: 0;
