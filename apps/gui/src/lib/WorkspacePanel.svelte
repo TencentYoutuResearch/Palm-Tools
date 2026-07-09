@@ -78,8 +78,8 @@
     const startX = e.clientX
     const startW = navWidth
     const onMove = (ev: PointerEvent) => {
-      // nav-pane 在右,鼠标向右 → 变宽
-      const next = startW + (ev.clientX - startX)
+      // nav-pane 在右,resizer 跟随鼠标:鼠标向右 → preview 变宽、nav 变窄。
+      const next = startW - (ev.clientX - startX)
       navWidth = Math.min(NAV_MAX, Math.max(NAV_MIN, next))
     }
     const onUp = () => {
