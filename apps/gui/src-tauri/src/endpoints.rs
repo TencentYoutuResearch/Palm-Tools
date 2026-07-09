@@ -764,15 +764,21 @@ fn lookup_remote_transport(
 pub async fn endpoint_workspace_snapshot(
     id: String,
     cwd: String,
+    show_hidden: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceSnapshot, String> {
     let transport = lookup_remote_transport(&state, &id)?;
     // files=true 才返回文件(workspace 需要),默认 false 只目录(RemoteCwdPicker 用)
+    // show_hidden 仅在 true 时显式传给 bridge(bridge 默认 false = 隐藏 dotfiles)
+    let hidden = show_hidden.unwrap_or(false);
+    let hidden_flag = if hidden { "true" } else { "false" };
+    let query: &[(&str, &str)] = if hidden {
+        &[("path", cwd.as_str()), ("files", "true"), ("show_hidden", hidden_flag)]
+    } else {
+        &[("path", cwd.as_str()), ("files", "true")]
+    };
     let (entries, exists): (Vec<WorkspaceEntry>, bool) = match transport
-        .rest_get(
-            "/api/v1/fs/list",
-            &[("path", cwd.as_str()), ("files", "true")],
-        )
+        .rest_get("/api/v1/fs/list", query)
         .await
     {
         Ok(fs_resp) => {
@@ -821,14 +827,19 @@ pub async fn endpoint_workspace_snapshot(
 pub async fn endpoint_workspace_list_dir(
     id: String,
     path: String,
+    show_hidden: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkspaceEntry>, String> {
     let transport = lookup_remote_transport(&state, &id)?;
+    let hidden = show_hidden.unwrap_or(false);
+    let hidden_flag = if hidden { "true" } else { "false" };
+    let query: &[(&str, &str)] = if hidden {
+        &[("path", path.as_str()), ("files", "true"), ("show_hidden", hidden_flag)]
+    } else {
+        &[("path", path.as_str()), ("files", "true")]
+    };
     let resp = transport
-        .rest_get(
-            "/api/v1/fs/list",
-            &[("path", path.as_str()), ("files", "true")],
-        )
+        .rest_get("/api/v1/fs/list", query)
         .await
         .map_err(|e| e.to_string())?;
     let entries: Vec<WorkspaceEntry> = resp

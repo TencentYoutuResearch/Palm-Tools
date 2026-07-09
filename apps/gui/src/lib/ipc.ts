@@ -287,10 +287,11 @@ export const ipc = {
   getHomeDir: () => invoke<string>('get_home_dir'),
 
   /// 读取本地工作目录的文件列表和 Git 摘要。仅用于 Local tab。
-  workspaceSnapshot: (cwd: string) =>
-    invoke<WorkspaceSnapshot>('workspace_snapshot', { cwd }),
-  workspaceListDir: (path: string) =>
-    invoke<WorkspaceEntry[]>('workspace_list_dir', { path }),
+  /// showHidden 省略时后端默认 true(保留本地显示 dotfiles 的旧行为)。
+  workspaceSnapshot: (cwd: string, showHidden?: boolean) =>
+    invoke<WorkspaceSnapshot>('workspace_snapshot', { cwd, showHidden: showHidden ?? null }),
+  workspaceListDir: (path: string, showHidden?: boolean) =>
+    invoke<WorkspaceEntry[]>('workspace_list_dir', { path, showHidden: showHidden ?? null }),
   workspacePreviewFile: (path: string) =>
     invoke<FilePreview>('workspace_preview_file', { path }),
   workspaceGitDiff: (cwd: string, path: string, bucket: string) =>
@@ -528,12 +529,13 @@ export const endpointIpc = {
       backendKey,
       cwd,
     }),
-  /** 远端 tab WorkspacePanel:列文件 + git 摘要(对齐 ipc.workspaceSnapshot) */
-  workspaceSnapshot: (id: string, cwd: string) =>
-    invoke<WorkspaceSnapshot>('endpoint_workspace_snapshot', { id, cwd }),
+  /** 远端 tab WorkspacePanel:列文件 + git 摘要(对齐 ipc.workspaceSnapshot)。
+   *  showHidden 省略时后端默认 false(保留远端隐藏 dotfiles 的旧行为)。 */
+  workspaceSnapshot: (id: string, cwd: string, showHidden?: boolean) =>
+    invoke<WorkspaceSnapshot>('endpoint_workspace_snapshot', { id, cwd, showHidden: showHidden ?? null }),
   /** 远端 tab:展开目录(对齐 ipc.workspaceListDir) */
-  workspaceListDir: (id: string, path: string) =>
-    invoke<WorkspaceEntry[]>('endpoint_workspace_list_dir', { id, path }),
+  workspaceListDir: (id: string, path: string, showHidden?: boolean) =>
+    invoke<WorkspaceEntry[]>('endpoint_workspace_list_dir', { id, path, showHidden: showHidden ?? null }),
   /** 远端 tab:预览文件(对齐 ipc.workspacePreviewFile) */
   workspacePreviewFile: (id: string, path: string) =>
     invoke<FilePreview>('endpoint_workspace_preview_file', { id, path }),

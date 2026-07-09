@@ -61,8 +61,29 @@
     content: '',
   })
 
+  /// 隐藏文件显示开关 —— 按 local / remote 分侧持久化到 localStorage。
+  /// 默认:local=true(显示 dotfiles,保留旧行为),remote=false(隐藏 dotfiles,保留远端旧行为)。
+  const SHOW_HIDDEN_KEY = 'kode:workspace-show-hidden-v1'
+
+  function loadShowHiddenMap(): Record<string, boolean> {
+    try {
+      const raw = localStorage.getItem(SHOW_HIDDEN_KEY)
+      if (raw) {
+        const obj = JSON.parse(raw)
+        if (obj && typeof obj === 'object') return obj as Record<string, boolean>
+      }
+    } catch { /* localStorage 不可用时静默 */ }
+    return {}
+  }
+
+  let showHiddenMap = $state<Record<string, boolean>>(loadShowHiddenMap())
+
   const cwd = $derived(tab?.cwd ?? '')
   const gitDirtyCount = $derived(dirtyCount(snapshot))
+  /// 当前 tab 的侧别键(local / remote),用于查 showHiddenMap。
+  const sideKey = $derived(remoteId() ? 'remote' : 'local')
+  /// 当前是否显示隐藏文件。无存储值时按侧别取默认(local=true, remote=false)。
+  const showHidden = $derived(showHiddenMap[sideKey] ?? sideKey === 'local')
 
   $effect(() => {
     if (!cwd) {
@@ -106,8 +127,8 @@
     try {
       const rid = remoteId()
       snapshot = rid
-        ? await endpointIpc.workspaceSnapshot(rid, cwd)
-        : await ipc.workspaceSnapshot(cwd)
+        ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden)
+        : await ipc.workspaceSnapshot(cwd, showHidden)
       loadedCwd = cwd
       if (!selectedPath && snapshot.entries.length > 0) {
         selectedPath = snapshot.entries[0].path
@@ -141,8 +162,8 @@
     try {
       const rid = remoteId()
       const children = rid
-        ? await endpointIpc.workspaceListDir(rid, entry.path)
-        : await ipc.workspaceListDir(entry.path)
+        ? await endpointIpc.workspaceListDir(rid, entry.path, showHidden)
+        : await ipc.workspaceListDir(entry.path, showHidden)
       childrenByPath = { ...childrenByPath, [entry.path]: children }
     } catch (e) {
       preview = {
@@ -165,6 +186,37 @@
     } else {
       void previewFile(entry)
     }
+  }
+
+  /// 切换"显示/隐藏 隐藏文件"。按当前侧别(local/remote)持久化,
+  /// 然后重新拉 snapshot + 所有已展开目录的 children,保留展开状态。
+  function toggleShowHidden() {
+    const k = sideKey
+    showHiddenMap = { ...showHiddenMap, [k]: !showHidden }
+    try {
+      localStorage.setItem(SHOW_HIDDEN_KEY, JSON.stringify(showHiddenMap))
+    } catch { /* localStorage 不可用时静默 */ }
+    void refresh()
+    void refreshExpanded()
+  }
+
+  /// 重新拉所有已展开目录的 children(切换 showHidden 时用),保留展开状态。
+  async function refreshExpanded() {
+    const rid = remoteId()
+    const paths = [...expandedPaths]
+    if (paths.length === 0) return
+    await Promise.all(
+      paths.map(async (p) => {
+        try {
+          const children = rid
+            ? await endpointIpc.workspaceListDir(rid, p, showHidden)
+            : await ipc.workspaceListDir(p, showHidden)
+          childrenByPath = { ...childrenByPath, [p]: children }
+        } catch {
+          /* 单个目录失败时保留旧 children,不阻塞其它目录 */
+        }
+      }),
+    )
   }
 
   function openContextMenu(event: MouseEvent, entry: WorkspaceEntry) {
@@ -421,6 +473,17 @@
       </button>
     </div>
     <div class="nav-top-actions">
+      <button
+        class="tool-btn"
+        class:active={showHidden}
+        title={showHidden ? 'Hide hidden files' : 'Show hidden files'}
+        aria-label={showHidden ? 'Hide hidden files' : 'Show hidden files'}
+        aria-pressed={showHidden}
+        onclick={toggleShowHidden}
+        disabled={!cwd}
+      >
+        <Icon name={showHidden ? 'eye' : 'eye-off'} size={14} />
+      </button>
       <button class="tool-btn" title="Refresh" aria-label="Refresh workspace" onclick={refresh} disabled={loading || !cwd}>
         <Icon name="refresh-cw" size={14} />
       </button>

@@ -62,20 +62,28 @@ pub struct GitDiffPreview {
 }
 
 #[tauri::command]
-pub async fn workspace_snapshot(cwd: String) -> Result<WorkspaceSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || workspace_snapshot_sync(&cwd))
-        .await
-        .map_err(|e| format!("workspace snapshot task failed: {e}"))?
+pub async fn workspace_snapshot(
+    cwd: String,
+    show_hidden: Option<bool>,
+) -> Result<WorkspaceSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_snapshot_sync(&cwd, show_hidden.unwrap_or(true))
+    })
+    .await
+    .map_err(|e| format!("workspace snapshot task failed: {e}"))?
 }
 
 #[tauri::command]
-pub async fn workspace_list_dir(path: String) -> Result<Vec<WorkspaceEntry>, String> {
+pub async fn workspace_list_dir(
+    path: String,
+    show_hidden: Option<bool>,
+) -> Result<Vec<WorkspaceEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = absolute_path(&path)?;
         if !path.is_dir() {
             return Err(format!("not a directory: {}", path.display()));
         }
-        list_workspace_entries(&path)
+        list_workspace_entries(&path, show_hidden.unwrap_or(true))
     })
     .await
     .map_err(|e| format!("workspace list task failed: {e}"))?
@@ -104,11 +112,11 @@ pub fn open_path(path: String) -> Result<(), String> {
     open_path_sync(&path)
 }
 
-fn workspace_snapshot_sync(cwd: &str) -> Result<WorkspaceSnapshot, String> {
+fn workspace_snapshot_sync(cwd: &str, show_hidden: bool) -> Result<WorkspaceSnapshot, String> {
     let path = absolute_path(cwd)?;
     let exists = path.is_dir();
     let entries = if exists {
-        list_workspace_entries(&path)?
+        list_workspace_entries(&path, show_hidden)?
     } else {
         Vec::new()
     };
@@ -134,11 +142,16 @@ fn absolute_path(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn list_workspace_entries(path: &Path) -> Result<Vec<WorkspaceEntry>, String> {
+fn list_workspace_entries(path: &Path, show_hidden: bool) -> Result<Vec<WorkspaceEntry>, String> {
     let mut entries = std::fs::read_dir(path)
         .map_err(|e| format!("read workspace {}: {e}", path.display()))?
         .filter_map(Result::ok)
+        // .git 始终过滤(与 bridge /api/v1/fs/list 一致),即便 show_hidden=true 也不展示
         .filter(|entry| entry.file_name().to_string_lossy() != ".git")
+        .filter(|entry| {
+            // dotfiles 受 show_hidden 开关控制;默认本地 show_hidden=true 保留旧行为
+            show_hidden || !entry.file_name().to_string_lossy().starts_with('.')
+        })
         .filter_map(|entry| entry_to_workspace_entry(entry))
         .collect::<Vec<_>>();
 
