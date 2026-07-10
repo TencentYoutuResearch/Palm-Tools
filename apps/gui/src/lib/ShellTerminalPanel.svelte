@@ -68,12 +68,53 @@
   const MIN_COLS = 20
   const MIN_ROWS = 5
 
-  // ── 字体大小(全局共享,持久化到 localStorage)──────────────────
+  // ── 字体(全局共享,持久化到 localStorage)──────────────────
   const FONT_SIZE_KEY = 'kode.shellTerminal.fontSize'
+  const FONT_FAMILY_KEY = 'kode.shellTerminal.fontFamily'
   const FONT_SIZE_DEFAULT = 13
   const FONT_SIZE_MIN = 8
   const FONT_SIZE_MAX = 32
   let fontSize = $state<number>(loadFontSize())
+  let fontFamily = $state<string>(loadFontFamily())
+
+  /// 常见等宽字体预设,作为下拉的默认选项。
+  /// queryLocalFonts() 可能不可用(Tauri WKWebView 权限),此时只有这些预设。
+  const MONO_FONT_PRESETS = [
+    'JetBrains Mono',
+    'SF Mono',
+    'Menlo',
+    'Monaco',
+    'Courier New',
+    'Fira Code',
+    'Cascadia Code',
+    'IBM Plex Mono',
+    'Source Code Pro',
+    'Hack',
+    'Meslo LG M',
+    'monospace',
+  ]
+
+  /// 系统已安装的字体列表(通过 queryLocalFonts API 枚举)。
+  /// queryLocalFonts 需要用户在浏览器里授权;Tauri 里一般直接可用。
+  let systemFonts = $state<string[]>([])
+  let fontDropdownOpen = $state(false)
+
+  async function loadSystemFonts() {
+    try {
+      const query = (window as any).queryLocalFonts
+      if (typeof query !== 'function') return
+      const faces: FontFace[] = await query()
+      const families = new Set<string>()
+      for (const f of faces) {
+        if (f.family) families.add(f.family)
+      }
+      // 去重 + 排序,合并预设
+      const all = new Set([...MONO_FONT_PRESETS, ...families])
+      systemFonts = [...all].sort((a, b) => a.localeCompare(b))
+    } catch {
+      // 权限拒绝或 API 不存在,静默降级到预设列表
+    }
+  }
 
   function loadFontSize(): number {
     try {
@@ -85,8 +126,31 @@
     } catch {}
     return FONT_SIZE_DEFAULT
   }
+  function loadFontFamily(): string {
+    try {
+      const v = localStorage.getItem(FONT_FAMILY_KEY)
+      if (v) return v
+    } catch {}
+    return 'JetBrains Mono'
+  }
   function saveFontSize() {
     try { localStorage.setItem(FONT_SIZE_KEY, String(fontSize)) } catch {}
+  }
+  function saveFontFamily() {
+    try { localStorage.setItem(FONT_FAMILY_KEY, fontFamily) } catch {}
+  }
+  function selectFontFamily(name: string) {
+    fontFamily = name
+    saveFontFamily()
+    fontDropdownOpen = false
+    for (const { term, fitAddon, container } of termInstances.values()) {
+      try {
+        term.options.fontFamily = `${name}, monospace`
+        if (container?.offsetWidth && container?.offsetHeight) {
+          try { fitAddon?.fit() } catch {}
+        }
+      } catch {}
+    }
   }
   function adjustFontSize(delta: number) {
     const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, fontSize + delta))
@@ -96,7 +160,6 @@
     for (const { term, fitAddon, container } of termInstances.values()) {
       try {
         term.options.fontSize = fontSize
-        // fit 后重绘,让 xterm 重算 cell size
         if (container?.offsetWidth && container?.offsetHeight) {
           try { fitAddon?.fit() } catch {}
         }
@@ -188,7 +251,7 @@
     if (destroyed) return
 
     const term = new Terminal({
-      fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
+      fontFamily: `"${fontFamily}", "SF Mono", Menlo, monospace`,
       fontSize: fontSize,
       cursorBlink: true,
       allowProposedApi: true,
@@ -468,7 +531,18 @@
     }
     termInstances.clear()
   })
+  // 点击外部关闭字体下拉
+  function onGlobalClick(e: MouseEvent) {
+    if (fontDropdownOpen) {
+      const target = e.target as HTMLElement
+      if (!target?.closest('.font-picker')) {
+        fontDropdownOpen = false
+      }
+    }
+  }
 </script>
+
+<svelte:window onclick={onGlobalClick} />
 
 <div class="shell-terminal-panel">
   <!-- 顶部 tab 栏 -->
@@ -504,6 +578,39 @@
       {/each}
     </div>
     <div class="tab-bar-actions">
+      <!-- 字体选择下拉 -->
+      <div class="font-picker">
+        <button
+          class="tab-action-btn font-trigger"
+          title="Font: {fontFamily} (click to change)"
+          onclick={(e) => {
+            e.stopPropagation()
+            fontDropdownOpen = !fontDropdownOpen
+            if (fontDropdownOpen && systemFonts.length === 0) {
+              loadSystemFonts()
+            }
+          }}
+        >
+          <span class="font-label">{fontFamily}</span>
+          <Icon name="chevron-down" size={10} />
+        </button>
+        {#if fontDropdownOpen}
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <div class="font-dropdown" onclick={(e) => e.stopPropagation()}>
+            {#each (systemFonts.length > 0 ? systemFonts : MONO_FONT_PRESETS) as f}
+              <button
+                class="font-option"
+                class:active={f === fontFamily}
+                style="font-family: '{f}', monospace"
+                onclick={() => selectFontFamily(f)}
+              >
+                {f}
+                {#if f === fontFamily}<Icon name="check" size={11} />{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
       <button class="tab-action-btn" onclick={newTerminal} title="New terminal">
         <Icon name="plus" size={13} />
       </button>
@@ -650,6 +757,63 @@
   .tab-action-btn:hover {
     background: var(--bg-tab-hover);
     color: var(--fg-primary);
+  }
+
+  /* ── 字体选择下拉 ── */
+  .font-picker {
+    position: relative;
+    flex: 0 0 auto;
+  }
+  .font-trigger {
+    width: auto;
+    height: 24px;
+    gap: 3px;
+    padding: 0 6px;
+    font-size: 11px;
+  }
+  .font-label {
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .font-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    min-width: 180px;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-md);
+    box-shadow: var(--sh-md);
+    z-index: 100;
+    padding: 4px;
+  }
+  .font-option {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 8px;
+    border: none;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: var(--fg-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    text-align: left;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  .font-option:hover {
+    background: var(--bg-tab-hover);
+    color: var(--fg-primary);
+  }
+  .font-option.active {
+    color: var(--acc);
   }
 
   /* ── 终端区域 ── */
