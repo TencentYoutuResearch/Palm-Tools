@@ -19,6 +19,7 @@ mod endpoints;
 mod memory;
 mod memory_mcp;
 mod persistence;
+mod shell_pty;
 mod specops;
 mod state;
 mod transport;
@@ -88,6 +89,7 @@ pub fn run() {
             }
             let ctx_for_bridge = std::sync::Arc::clone(&app_state.protocol_ctx);
             app.manage(app_state);
+            app.manage(shell_pty::ShellPtyManager::new());
             // Phase 9.1:启动远程桥(0.0.0.0:47870 默认)
             spawn_bridge(ctx_for_bridge, BridgeConfig::default());
             // M4:memory review queue —— 共享 ~/.kode-memory(env KODE_MEMORY_ROOT 可覆盖),
@@ -210,6 +212,14 @@ pub fn run() {
             endpoints::endpoint_workspace_git_diff,
             // 远端 Bridge 部署安装(SSH 推 tarball + 停旧 + 起新 + 取 token)
             deploy::deploy_remote_bridge,
+            // Shell PTY(工作区终端面板)
+            shell_pty::spawn_shell,
+            shell_pty::write_shell,
+            shell_pty::resize_shell,
+            shell_pty::kill_shell,
+            shell_pty::subscribe_shell_bytes,
+            shell_pty::unsubscribe_shell_bytes,
+            shell_pty::get_shell_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

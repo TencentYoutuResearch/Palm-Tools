@@ -33,6 +33,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 base64 = "0.22"
+portable-pty = "0.9"
 dirs = "5"
 arboard = { version = "3", default-features = false }
 # Phase 11.2:LocalTransport 实现 SessionTransport trait,需要 async-trait

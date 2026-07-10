@@ -51,6 +51,8 @@ pub struct FilePreview {
     pub content: String,
     pub size: u64,
     pub truncated: bool,
+    #[serde(default)]
+    pub mime: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +190,7 @@ fn entry_to_workspace_entry(entry: std::fs::DirEntry) -> Option<WorkspaceEntry> 
 
 fn preview_file_sync(raw: &str) -> Result<FilePreview, String> {
     const MAX_BYTES: usize = 220 * 1024;
+    const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024; // 10MB
     let path = absolute_path(raw)?;
     if path.is_dir() {
         return Err(format!(
@@ -197,13 +200,48 @@ fn preview_file_sync(raw: &str) -> Result<FilePreview, String> {
     }
     let metadata = std::fs::metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
     let size = metadata.len();
-    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let truncated = bytes.len() > MAX_BYTES;
-    let sample = &bytes[..bytes.len().min(MAX_BYTES)];
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+    // Image detection by extension — before null-byte binary check, since
+    // images are binary but we want to render them inline as <img>.
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if let Some(mime) = image_mime_for_ext(&ext) {
+        if size > MAX_IMAGE_BYTES as u64 {
+            return Ok(FilePreview {
+                path: path.to_string_lossy().into_owned(),
+                name,
+                kind: "image".into(),
+                content: String::new(),
+                size,
+                truncated: true,
+                mime,
+            });
+        }
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        return Ok(FilePreview {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            kind: "image".into(),
+            content: b64,
+            size,
+            truncated: false,
+            mime,
+        });
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let truncated = bytes.len() > MAX_BYTES;
+    let sample = &bytes[..bytes.len().min(MAX_BYTES)];
 
     if sample.iter().any(|b| *b == 0) {
         return Ok(FilePreview {
@@ -213,6 +251,7 @@ fn preview_file_sync(raw: &str) -> Result<FilePreview, String> {
             content: String::new(),
             size,
             truncated,
+            mime: String::new(),
         });
     }
 
@@ -224,7 +263,22 @@ fn preview_file_sync(raw: &str) -> Result<FilePreview, String> {
         content,
         size,
         truncated,
+        mime: String::new(),
     })
+}
+
+/// Map image file extension to MIME type. Returns None for non-image extensions.
+fn image_mime_for_ext(ext: &str) -> Option<String> {
+    match ext {
+        "png" => Some("image/png".into()),
+        "jpg" | "jpeg" => Some("image/jpeg".into()),
+        "gif" => Some("image/gif".into()),
+        "webp" => Some("image/webp".into()),
+        "svg" => Some("image/svg+xml".into()),
+        "bmp" => Some("image/bmp".into()),
+        "ico" => Some("image/x-icon".into()),
+        _ => None,
+    }
 }
 
 fn read_git_summary(path: &Path) -> WorkspaceGitSummary {
@@ -536,4 +590,83 @@ fn open_path_sync(path: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_preview_returns_base64_for_png() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "kode-test-img-{}.png",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Minimal 1x1 red PNG
+        let png_bytes: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        ];
+        std::fs::write(&path, png_bytes).unwrap();
+        let result = preview_file_sync(path.to_str().unwrap()).unwrap();
+        assert_eq!(result.kind, "image");
+        assert_eq!(result.mime, "image/png");
+        assert!(!result.content.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn svg_rendered_as_image() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "kode-test-img-{}.svg",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "<svg></svg>").unwrap();
+        let result = preview_file_sync(path.to_str().unwrap()).unwrap();
+        assert_eq!(result.kind, "image");
+        assert_eq!(result.mime, "image/svg+xml");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn text_file_still_works() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "kode-test-img-{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "hello world").unwrap();
+        let result = preview_file_sync(path.to_str().unwrap()).unwrap();
+        assert_eq!(result.kind, "text");
+        assert_eq!(result.mime, "");
+        assert_eq!(result.content, "hello world");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn binary_file_still_works() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "kode-test-img-{}.bin",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, [0u8, 1, 0, 2, 0]).unwrap();
+        let result = preview_file_sync(path.to_str().unwrap()).unwrap();
+        assert_eq!(result.kind, "binary");
+        assert_eq!(result.mime, "");
+        let _ = std::fs::remove_file(&path);
+    }
 }

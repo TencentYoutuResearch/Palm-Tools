@@ -27,12 +27,14 @@
     content: string
     binary?: boolean
     truncated?: boolean
-    // 文件预览的渲染方式:markdown=渲染成 HTML;code=语法高亮;plain=纯文本逐行
-    renderKind?: 'markdown' | 'code' | 'plain'
+    // 文件预览的渲染方式:markdown=渲染成 HTML;code=语法高亮;plain=纯文本逐行;image=内嵌图片
+    renderKind?: 'markdown' | 'code' | 'plain' | 'image'
     // markdown / code 渲染产出的 HTML(已转义,经 marked / hljs 处理)
     html?: string
     // code 高亮识别出的语言(用于角标显示)
     lang?: string
+    // image: MIME type (e.g. "image/png"),content 为 base64
+    mime?: string
   }
   type ContextMenuState = {
     x: number
@@ -343,6 +345,30 @@
       const data: FilePreview = rid
         ? await endpointIpc.workspacePreviewFile(rid, entry.path)
         : await ipc.workspacePreviewFile(entry.path)
+
+      // Image files: base64 content rendered as <img>
+      if (data.kind === 'image') {
+        if (data.truncated && !data.content) {
+          preview = {
+            kind: 'error',
+            title: data.name,
+            subtitle: `${formatBytes(data.size)} · ${compactPath(data.path, 42)}`,
+            content: 'Image too large to preview (max 10MB). Use Open to view it in the system app.',
+          }
+        } else {
+          preview = {
+            kind: 'file',
+            title: data.name,
+            subtitle: `${formatBytes(data.size)} · ${compactPath(data.path, 42)}`,
+            content: data.content,
+            truncated: data.truncated,
+            renderKind: 'image',
+            mime: data.mime || 'image/png',
+          }
+        }
+        return
+      }
+
       const isBinary = data.kind === 'binary'
       let renderKind: PreviewState['renderKind'] = 'plain'
       let html: string | undefined
@@ -620,6 +646,10 @@
           <p class="muted pad">Loading...</p>
         {:else if preview.kind === 'error'}
           <pre class="preview-text error-text">{preview.content}</pre>
+        {:else if preview.kind === 'file' && preview.renderKind === 'image'}
+          <div class="preview-image">
+            <img src={`data:${preview.mime};base64,${preview.content}`} alt={preview.title} />
+          </div>
         {:else if preview.binary}
           <p class="muted pad">Binary file. Use Open to view it in the system app.</p>
         {:else if preview.kind === 'file' && preview.renderKind === 'markdown'}
@@ -1177,6 +1207,22 @@
     color: var(--fg-tertiary);
     font-family: var(--font-mono);
     font-size: 10px;
+  }
+
+  .preview-image {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+  }
+  .preview-image img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 4px;
   }
 
   .preview-text {

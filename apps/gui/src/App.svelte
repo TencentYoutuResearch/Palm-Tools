@@ -30,6 +30,7 @@
   import DeployPanel from './lib/DeployPanel.svelte'
   import MetricsHoverCard from './lib/MetricsHoverCard.svelte'
   import WorkspacePanel from './lib/WorkspacePanel.svelte'
+  import ShellTerminalPanel from './lib/ShellTerminalPanel.svelte'
   import Icon from './lib/Icon.svelte'
   import BackendIcon from './lib/BackendIcon.svelte'
   import AvatarSprite from './lib/AvatarSprite.svelte'
@@ -109,6 +110,12 @@
   let inspectorWidth = $state(420)
   let inspectorResizing = $state(false)
 
+  // 终端面板(工作区检查器底部)
+  let terminalPanelOpen = $state(false)
+  let terminalHeight = $state(280)
+  const TERMINAL_MIN_H = 80
+  const TERMINAL_MAX_H = 800
+
   async function refreshEndpoints() {
     try {
       endpoints = await endpointIpc.list()
@@ -137,6 +144,23 @@
     }
     const onUp = () => {
       inspectorResizing = false
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  function startTerminalResize(e: PointerEvent) {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = terminalHeight
+    const onMove = (ev: PointerEvent) => {
+      // 把手在终端面板上缘:向上拖(clientY 变小)→ 变高
+      const next = startH + (startY - ev.clientY)
+      terminalHeight = Math.min(TERMINAL_MAX_H, Math.max(TERMINAL_MIN_H, next))
+    }
+    const onUp = () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
     }
@@ -1541,6 +1565,18 @@
           >
             <Icon name="panel-right" size={15} />
           </button>
+        {:else}
+          <!-- 工作区打开时:显示终端面板开关 -->
+          <button
+            class="titlebar-tool"
+            class:active={terminalPanelOpen}
+            title={terminalPanelOpen ? 'Hide terminal' : 'Show terminal'}
+            aria-label={terminalPanelOpen ? 'Hide terminal' : 'Show terminal'}
+            aria-pressed={terminalPanelOpen}
+            onclick={() => (terminalPanelOpen = !terminalPanelOpen)}
+          >
+            <Icon name="terminal" size={15} />
+          </button>
         {/if}
       </div>
     </header>
@@ -1655,11 +1691,33 @@
         onpointerdown={startInspectorResize}
         ondblclick={() => (inspectorWidth = 420)}
       ></div>
-      <WorkspacePanel
-        tab={$activeTab}
-        {homeDir}
-        onClose={() => { workspacePanelOpen = false }}
-      />
+      <div class="inspector-content">
+        <div class="inspector-workspace">
+          <WorkspacePanel
+            tab={$activeTab}
+            {homeDir}
+            onClose={() => { workspacePanelOpen = false }}
+          />
+        </div>
+        {#if terminalPanelOpen}
+          <div
+            class="terminal-resizer"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize terminal panel"
+            title="Drag to resize"
+            onpointerdown={startTerminalResize}
+            ondblclick={() => (terminalHeight = 280)}
+          ></div>
+          <div class="inspector-terminal" style="height: {terminalHeight}px">
+            <ShellTerminalPanel
+              tab={$activeTab}
+              isDark={theme === 'dark' || (theme === 'system' && systemPrefersDark)}
+              onClose={() => (terminalPanelOpen = false)}
+            />
+          </div>
+        {/if}
+      </div>
     {/if}
   </div>
 
@@ -3096,10 +3154,42 @@
     /* 常驻渲染:关闭时列宽→0,这里裁掉内容,避免内容溢出到主区 */
     overflow: hidden;
     transition: border-left-color 180ms ease;
+    display: flex;
+    flex-direction: column;
   }
   .inspector-shell:not(.open) {
     border-left-color: transparent;
     pointer-events: none;
+  }
+  .inspector-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .inspector-workspace {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .terminal-resizer {
+    flex: 0 0 6px;
+    cursor: row-resize;
+    -webkit-app-region: no-drag;
+    background: transparent;
+    border-top: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    position: relative;
+    transition: background var(--t-fast);
+  }
+  .terminal-resizer:hover {
+    background: color-mix(in srgb, var(--acc) 12%, transparent);
+  }
+  .inspector-terminal {
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: hidden;
+    border-top: 1px solid color-mix(in srgb, var(--bd-default) 60%, transparent);
   }
   /* 左缘拖拽把手:6px 宽的命中区,hover/拖拽时高亮一条竖线 */
   .inspector-resizer {

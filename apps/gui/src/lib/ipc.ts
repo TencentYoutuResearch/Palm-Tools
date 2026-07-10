@@ -365,10 +365,11 @@ export interface WorkspaceSnapshot {
 export interface FilePreview {
   path: string
   name: string
-  kind: 'text' | 'binary' | string
+  kind: 'text' | 'binary' | 'image' | string
   content: string
   size: number
   truncated: boolean
+  mime: string
 }
 
 export interface GitDiffPreview {
@@ -597,6 +598,42 @@ export const cwdHistoryIpc = {
   /** 把一个 cwd 推进某 bucket(去重、top5、立即落盘)。空串会被忽略。 */
   push: (bucket: string, cwd: string) =>
     invoke<void>('cwd_history_push', { bucket, cwd }),
+}
+
+// ============== Shell PTY (terminal panel) ==============
+
+export type ShellId = number
+
+export const shellIpc = {
+  /** Spawn a shell PTY ($SHELL). Returns the shell ID. */
+  spawn: (cwd: string, cols: number, rows: number) =>
+    invoke<ShellId>('spawn_shell', { cwd, cols, rows }),
+
+  /** Write bytes to the shell PTY stdin. */
+  write: (id: ShellId, bytes: Uint8Array) =>
+    invoke<void>('write_shell', { id, bytes: Array.from(bytes) }),
+
+  /** Resize the shell PTY. */
+  resize: (id: ShellId, cols: number, rows: number) =>
+    invoke<void>('resize_shell', { id, cols, rows }),
+
+  /** Kill the shell PTY and remove it from the manager. */
+  kill: (id: ShellId) => invoke<void>('kill_shell', { id }),
+
+  /**
+   * Subscribe to shell PTY byte stream. On subscribe, the ring buffer
+   * (~50KB) is replayed first, then live bytes stream in.
+   * Returns an unsubscribe function.
+   */
+  subscribeBytes: async (
+    id: ShellId,
+    onBytes: (data: Uint8Array) => void,
+  ): Promise<() => Promise<void>> => {
+    const ch = new Channel<number[]>()
+    ch.onmessage = (data) => onBytes(new Uint8Array(data))
+    await invoke<void>('subscribe_shell_bytes', { id, onBytes: ch })
+    return () => invoke<void>('unsubscribe_shell_bytes', { id })
+  },
 }
 
 export interface PairingPayload {

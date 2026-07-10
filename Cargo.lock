@@ -2327,6 +2327,7 @@ dependencies = [
  "local-ip-address",
  "objc2-foundation",
  "parking_lot",
+ "portable-pty",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

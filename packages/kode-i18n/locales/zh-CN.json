@@ -128,6 +128,8 @@
   "command.view.theme": { "message": "主题：{theme}" },
   "command.view.showWorkspace": { "message": "显示 workspace 检查器" },
   "command.view.hideWorkspace": { "message": "隐藏 workspace 检查器" },
+  "command.view.showTerminal": { "message": "显示终端面板" },
+  "command.view.hideTerminal": { "message": "隐藏终端面板" },
   "command.memory.review": { "message": "Memory 审核队列..." },
   "command.memory.reviewPending": { "message": "Memory 审核队列（{count} 条待审）..." },
   "command.memory.sync": { "message": "Memory：同步设置..." },

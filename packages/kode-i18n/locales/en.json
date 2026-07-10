@@ -515,6 +515,14 @@
     "message": "Hide workspace inspector",
     "description": "Command: hide workspace inspector"
   },
+  "command.view.showTerminal": {
+    "message": "Show terminal panel",
+    "description": "Command: show terminal panel in workspace inspector"
+  },
+  "command.view.hideTerminal": {
+    "message": "Hide terminal panel",
+    "description": "Command: hide terminal panel"
+  },
   "command.memory.review": {
     "message": "Memory review queue...",
     "description": "Command: open memory review"

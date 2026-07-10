@@ -48,6 +48,7 @@
     | 'maximize-2'
     | 'minimize-2'
     | 'grip-vertical'
+    | 'terminal'
 
   /// 24×24 viewBox 下的 stroke path 片段。新增图标在这里加。
   /// 内容不包括 <svg> 外层 —— 由组件统一加。
@@ -201,6 +202,10 @@
       '<circle cx="15" cy="6" r="1"/>' +
       '<circle cx="15" cy="12" r="1"/>' +
       '<circle cx="15" cy="18" r="1"/>',
+    // lucide:terminal —— 提示符 > + 下方横线
+    terminal:
+      '<polyline points="4 17 10 11 4 5"/>' +
+      '<line x1="12" y1="19" x2="20" y2="19"/>',
   }
 
   export function pathOf(name: IconName): string {
