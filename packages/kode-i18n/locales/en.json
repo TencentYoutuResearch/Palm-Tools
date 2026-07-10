@@ -1099,6 +1099,22 @@
     "message": "Close tab (⌘W)",
     "description": "Tab close button tooltip with shortcut"
   },
+  "tab.closeConfirm.title": {
+    "message": "Close this tab?",
+    "description": "Close-tab confirmation dialog title"
+  },
+  "tab.closeConfirm.message": {
+    "message": "The underlying CLI session will be killed. This cannot be undone.",
+    "description": "Close-tab confirmation dialog body explaining the consequence"
+  },
+  "tab.closeConfirm.confirm": {
+    "message": "Close",
+    "description": "Close-tab confirmation dialog confirm button"
+  },
+  "tab.closeConfirm.cancel": {
+    "message": "Cancel",
+    "description": "Close-tab confirmation dialog cancel button"
+  },
   "tab.action.newTab": {
     "message": "New tab",
     "description": "New tab button aria-label"

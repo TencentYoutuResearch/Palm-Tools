@@ -17,6 +17,7 @@
   import Terminal from './lib/Terminal.svelte'
   import CommandPalette, { type Command } from './lib/CommandPalette.svelte'
   import RenameDialog from './lib/RenameDialog.svelte'
+  import ConfirmDialog from './lib/ConfirmDialog.svelte'
   import BackendChooser from './lib/BackendChooser.svelte'
   import PairingDialog from './lib/PairingDialog.svelte'
   import EndpointDialog from './lib/EndpointDialog.svelte'
@@ -313,6 +314,20 @@
   }
   function closeMenu() {
     menuOpenId = null
+  }
+  /** 关闭 tab 前的二次确认。killSession 不可撤销,弹窗确认后再执行 closeTab。 */
+  let closeConfirm = $state<{ id: SessionId; title: string } | null>(null)
+  function requestCloseTab(id: SessionId, title: string) {
+    closeConfirm = { id, title }
+  }
+  function confirmCloseTab() {
+    if (!closeConfirm) return
+    const id = closeConfirm.id
+    closeConfirm = null
+    closeTab(id)
+  }
+  function cancelCloseTab() {
+    closeConfirm = null
   }
   /** 打开 avatar picker,锚定到触发元素的位置 */
   function openAvatarPicker(
@@ -1331,6 +1346,7 @@
         {/if}
       </div>
     </div>
+    <div class="close-mask" aria-hidden="true"></div>
     <button
       class="more-btn"
       title={tr('tab.action.moreActions')}
@@ -1367,7 +1383,7 @@
         <button
           role="menuitem"
           class="danger"
-          onclick={(e) => { e.stopPropagation(); closeTab(t.id); closeMenu() }}
+          onclick={(e) => { e.stopPropagation(); requestCloseTab(t.id, t.title); closeMenu() }}
         >
           <Icon name="x" size={13} /> {tr('tab.menu.close')}
         </button>
@@ -1377,7 +1393,7 @@
       class="close-btn"
       title={tr('tab.action.closeTabTooltip')}
       aria-label={tr('tab.action.closeTab')}
-      onclick={(e) => { e.stopPropagation(); closeTab(t.id) }}
+      onclick={(e) => { e.stopPropagation(); requestCloseTab(t.id, t.title) }}
     >
       <Icon name="x" size={12} />
     </button>
@@ -1819,6 +1835,18 @@
         console.error(e)
       }
     }}
+  />
+{/if}
+
+{#if closeConfirm}
+  <ConfirmDialog
+    title={tr('tab.closeConfirm.title')}
+    message={tr('tab.closeConfirm.message')}
+    confirmLabel={tr('tab.closeConfirm.confirm')}
+    cancelLabel={tr('tab.closeConfirm.cancel')}
+    danger
+    onConfirm={confirmCloseTab}
+    onClose={cancelCloseTab}
   />
 {/if}
 
@@ -2488,6 +2516,7 @@
   }
   .sidebar.compact .tab-body { display: none; }
   .sidebar.compact .close-btn { display: none; }
+  .sidebar.compact .close-mask { display: none; }
   .sidebar.compact .compact-only { display: none; }
   .sidebar.compact .status-dot { margin-top: 0; }
   /* tile-idx:浮在 tile 左下角的小 chip,不挡 icon 中心像素。
@@ -2778,26 +2807,26 @@
   }
   .exited-tag { color: var(--st-warn); margin-left: auto; font-size: var(--fs-xs); }
 
-  /* 右侧浮层关闭按钮 + 渐变蒙版。
+  /* 右侧渐变蒙版 + 关闭按钮。
    * 设计意图:
    *   - 默认完全不显示(包括 active tab),只在 hover 这个 tab 时淡入
-   *   - X 落在 tab 最右侧,会盖住标题尾部/chips —— button 自身带右实左淡的渐变背景托底,
-   *     让 X 浮在"干净背景"上,而不是直接叠在文字上读不清
+   *   - X 落在 tab 最右侧,会盖住标题尾部/chips —— 渐变蒙版托底,让 X 浮在
+   *     "干净背景"上,而不是直接叠在文字上读不清
+   *   - 蒙版与按钮解耦:.close-mask 只负责视觉(70px 渐变,pointer-events:none);
+   *     .close-btn 缩到 icon 本身大小(18×18),可点区域 = 图标本身
    *   - X 本体:18×18 方形圆角(rad-sm)的 svg,hover button 时 svg 变红底反色
    *   - 标题尾部在 hover 时被蒙版盖住是 OK 的:标题有 ellipsis,hover 态下用户关注关闭操作
    *     鼠标移开蒙版消失,标题恢复完整
    *
-   * 层叠(从底到顶):.close-btn(42px 宽渐变蒙版,贴 tab 右缘)
-   *                 → svg(18×18 方形圆角 X,右 6px 处,hover 变红)
+   * 层叠(从底到顶):.close-mask(70px 渐变,pointer-events:none)
+   *                 → .close-btn(18×18 按钮,可点) → svg(hover 变红)
    */
-  .close-btn {
+  .close-mask {
     position: absolute;
     right: 0;
     top: 0;
     bottom: 0;
     width: 70px;
-    padding: 0;
-    border: none;
     background: linear-gradient(
       to left,
       var(--bg-sidebar) 0%,
@@ -2805,18 +2834,35 @@
       color-mix(in srgb, var(--bg-sidebar) 58%, transparent) 78%,
       transparent 100%
     );
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--t-fast);
+    z-index: 2;
+    border-radius: 0 var(--rad-lg) var(--rad-lg) 0;
+  }
+  .tab:hover .close-mask {
+    opacity: 1;
+  }
+  .close-btn {
+    position: absolute;
+    right: 6px;
+    top: 0;
+    bottom: 0;
+    margin: auto 0;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    background: transparent;
     color: var(--fg-secondary);
     cursor: pointer;
     display: inline-flex;
     align-items: center;
-    justify-content: flex-end;
-    padding-right: 6px;
+    justify-content: center;
     opacity: 0;
     transform: translateX(2px);
     transition: opacity var(--t-fast), transform var(--t-fast);
     z-index: 3;
-    pointer-events: auto;
-    border-radius: 0 var(--rad-lg) var(--rad-lg) 0;
   }
   /* 只在 hover tab 时显示;active 不显示(用户已聚焦此 tab,关 tab 不是高频操作) */
   .tab:hover .close-btn {
@@ -2839,7 +2885,7 @@
   }
 
   /* ===== ⋯ overflow 按钮 + 菜单 =====
-   * .more-btn 不单独画渐变 —— 右侧统一由 .close-btn 的 70px 渐变蒙版覆盖,
+   * .more-btn 不单独画渐变 —— 右侧统一由 .close-mask 的 70px 渐变蒙版覆盖,
    * 同时托住 ⋯ 和 X,避免两个渐变叠出断层。
    */
   .more-btn {
