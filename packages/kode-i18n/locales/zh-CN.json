@@ -269,6 +269,7 @@
   "specops.create.startIntake": { "message": "开始分析" },
   "tab.menu.rename": { "message": "重命名" },
   "tab.menu.duplicate": { "message": "复制" },
+  "tab.menu.restore": { "message": "恢复" },
   "tab.menu.close": { "message": "关闭" },
   "tab.action.moreActions": { "message": "更多操作" },
   "tab.action.closeTab": { "message": "关闭 tab" },

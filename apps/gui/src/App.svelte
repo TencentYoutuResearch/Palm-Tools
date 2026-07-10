@@ -50,6 +50,7 @@
     renameTab,
     reorderTabs,
     duplicateTab,
+    restoreTab,
     setTabAvatar,
     type TabInfo,
   } from './lib/sessions'
@@ -1354,6 +1355,14 @@
         >
           <Icon name="copy" size={13} /> {tr('tab.menu.duplicate')}
         </button>
+        {#if t.sessionId}
+          <button
+            role="menuitem"
+            onclick={(e) => { e.stopPropagation(); restoreTab(t.id); closeMenu() }}
+          >
+            <Icon name="refresh-cw" size={13} /> {tr('tab.menu.restore')}
+          </button>
+        {/if}
         <div class="menu-sep"></div>
         <button
           role="menuitem"

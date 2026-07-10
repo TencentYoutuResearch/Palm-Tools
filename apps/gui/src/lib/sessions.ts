@@ -610,3 +610,50 @@ export async function duplicateTab(id: SessionId) {
     schedulePersist()
   }
 }
+
+/**
+ * 恢复 tab:用 `--resume <sessionId>` 重启 CLI,保留对话历史。
+ *
+ * 与 duplicateTab 的区别:带 resumeSessionId(继承 jsonl 历史)+ 关掉旧 tab +
+ * 新 tab 插到旧 tab 原位置(原地刷新,不挪位)。
+ *
+ * 没有 sessionId 的 tab 无法 restore(调用方应隐藏菜单项)。继承配置与
+ * duplicateTab 一致:backendKey / cwd / model / permissionMode / endpointId,
+ * 额外继承 avatarId 与 titlePinned(用户定制不应被刷新冲掉)。
+ */
+export async function restoreTab(id: SessionId) {
+  const src = get(tabs).find((t) => t.id === id)
+  if (!src || !src.sessionId) return
+  const oldIndex = get(tabs).findIndex((t) => t.id === id)
+  const model = src.model && src.model !== 'auto' ? sanitizeModelName(src.model) || null : null
+  const restored = await newTab(src.backendKey, {
+    cwd: src.cwd,
+    model,
+    permissionMode: src.permissionMode ?? null,
+    endpointId: src.endpointId,
+    resumeSessionId: src.sessionId,
+  })
+  // 继承用户定制:avatar + pinned title(刷新不应冲掉这些)
+  if (src.avatarId || src.titlePinned) {
+    tabs.update((arr) =>
+      arr.map((t) => {
+        if (t.id !== restored.id) return t
+        const patch: Partial<TabInfo> = {}
+        if (src.avatarId) patch.avatarId = src.avatarId
+        if (src.titlePinned) { patch.title = src.title; patch.titlePinned = true }
+        return { ...t, ...patch }
+      }),
+    )
+  }
+  // 新 tab 插到旧 tab 原位置(原地刷新,不挪到末尾)
+  tabs.update((arr) => {
+    const newEntry = arr.find((t) => t.id === restored.id)
+    if (!newEntry) return arr
+    const rest = arr.filter((t) => t.id !== restored.id)
+    const insertAt = Math.max(0, Math.min(oldIndex, rest.length))
+    rest.splice(insertAt, 0, newEntry)
+    return rest
+  })
+  // 关掉旧 tab(PTY kill + 事件清理;newTab 已把 activeId 指向新 tab,closeTab 不会切走)
+  await closeTab(id)
+}

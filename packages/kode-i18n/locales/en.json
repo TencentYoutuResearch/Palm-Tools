@@ -1079,6 +1079,10 @@
     "message": "Duplicate",
     "description": "Tab context menu: duplicate this tab"
   },
+  "tab.menu.restore": {
+    "message": "Restore",
+    "description": "Tab context menu: restart this session with --resume, keeping conversation history"
+  },
   "tab.menu.close": {
     "message": "Close",
     "description": "Tab context menu: close this tab"
