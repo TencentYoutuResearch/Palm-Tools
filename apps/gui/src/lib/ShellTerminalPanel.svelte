@@ -6,10 +6,10 @@
    * 不走 kode-core 的 Session/CoreEvent/jsonl 体系。
    *
    * 特性:
-   *   - 多开(每个 tab 一个独立 shell PTY)
-   *   - 终端 tab 竖排在面板最右侧
+   *   - 多开(每个 tab 一个独立 shell PTY),tab 栏在顶部,双击重命名
    *   - per-session 缓存(shellStateCache):切换 session 时保存/恢复终端列表
    *   - shell PTY 在 session 切换时保持存活,切回时重新 subscribe + ring buffer 回放
+   *   - 字体大小可调(Cmd+= / Cmd+- / Cmd+0,持久化到 localStorage)
    *
    * xterm.js 初始化逻辑从 Terminal.svelte 精简而来:
    *   - 保留:lazy import、buildXtermTheme、IME #5887 patch、modifier-scroll patch、
@@ -17,7 +17,7 @@
    *   - 去掉:screen snapshot(ring buffer 回放替代)、link provider、search addon、
    *           viewport repair(主终端专用,shell 终端不需要)
    */
-  import { onMount, onDestroy } from 'svelte'
+  import { onDestroy } from 'svelte'
   import { shellIpc, type ShellId } from './ipc'
   import type { TabInfo } from './sessions'
   import Icon from './Icon.svelte'
@@ -55,16 +55,7 @@
   >()
   let containerEls = new Map<ShellId, HTMLDivElement>()
 
-  /// bind:this 回调:不能直接 bind 到 Map.get(),用 setter 函数中转
-  function setContainerEl(id: ShellId): (el: HTMLDivElement) => void {
-    return (el: HTMLDivElement) => {
-      if (el) containerEls.set(id, el)
-      else containerEls.delete(id)
-    }
-  }
-
   /// Svelte action:元素 mount 时注册到 containerEls,unmount 时移除。
-  /// bind:this 不支持函数调用表达式,用 action 是等价方案。
   function registerContainer(node: HTMLDivElement, id: ShellId) {
     containerEls.set(id, node)
     return {
@@ -76,6 +67,54 @@
 
   const MIN_COLS = 20
   const MIN_ROWS = 5
+
+  // ── 字体大小(全局共享,持久化到 localStorage)──────────────────
+  const FONT_SIZE_KEY = 'kode.shellTerminal.fontSize'
+  const FONT_SIZE_DEFAULT = 13
+  const FONT_SIZE_MIN = 8
+  const FONT_SIZE_MAX = 32
+  let fontSize = $state<number>(loadFontSize())
+
+  function loadFontSize(): number {
+    try {
+      const v = localStorage.getItem(FONT_SIZE_KEY)
+      if (v) {
+        const n = parseInt(v, 10)
+        if (n >= FONT_SIZE_MIN && n <= FONT_SIZE_MAX) return n
+      }
+    } catch {}
+    return FONT_SIZE_DEFAULT
+  }
+  function saveFontSize() {
+    try { localStorage.setItem(FONT_SIZE_KEY, String(fontSize)) } catch {}
+  }
+  function adjustFontSize(delta: number) {
+    const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, fontSize + delta))
+    if (next === fontSize) return
+    fontSize = next
+    saveFontSize()
+    for (const { term, fitAddon, container } of termInstances.values()) {
+      try {
+        term.options.fontSize = fontSize
+        // fit 后重绘,让 xterm 重算 cell size
+        if (container?.offsetWidth && container?.offsetHeight) {
+          try { fitAddon?.fit() } catch {}
+        }
+      } catch {}
+    }
+  }
+  function resetFontSize() {
+    fontSize = FONT_SIZE_DEFAULT
+    saveFontSize()
+    for (const { term, fitAddon, container } of termInstances.values()) {
+      try {
+        term.options.fontSize = fontSize
+        if (container?.offsetWidth && container?.offsetHeight) {
+          try { fitAddon?.fit() } catch {}
+        }
+      } catch {}
+    }
+  }
 
   let destroyed = false
 
@@ -130,7 +169,11 @@
   }
 
   /// 初始化一个 shell 的 xterm 实例。在容器 DOM 就绪后调用。
+  /// 重新初始化时(切回 session),先清空容器 innerHTML,防止旧 xterm DOM 残留。
   async function initShellTerminal(shellId: ShellId, container: HTMLDivElement) {
+    // 清空容器:上次 term.dispose() 可能残留 xterm 内部 DOM
+    container.innerHTML = ''
+
     try {
       await (document as any).fonts?.load?.('14px JetBrains Mono')
     } catch {}
@@ -146,7 +189,7 @@
 
     const term = new Terminal({
       fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
-      fontSize: 13,
+      fontSize: fontSize,
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 5000,
@@ -231,6 +274,23 @@
       console.warn('[shell-term] modifier-scroll patch failed:', e)
     }
 
+    // 字体缩放快捷键拦截(Cmd+= / Cmd+- / Cmd+0)
+    function onKeydown(e: KeyboardEvent) {
+      if (e.metaKey) {
+        if (e.key === '=' || e.key === '+') {
+          e.preventDefault()
+          adjustFontSize(1)
+        } else if (e.key === '-') {
+          e.preventDefault()
+          adjustFontSize(-1)
+        } else if (e.key === '0') {
+          e.preventDefault()
+          resetFontSize()
+        }
+      }
+    }
+    container.addEventListener('keydown', onKeydown)
+
     await waitForLayout(container)
     if (destroyed || !term) return
     if (container.offsetWidth > 0 && container.offsetHeight > 0) {
@@ -303,6 +363,34 @@
     }
   }
 
+  // ── 重命名 ──────────────────────────────────────────────
+  let renamingId = $state<ShellId | null>(null)
+  let renameValue = $state('')
+  let renameInputEl: HTMLInputElement | null = $state(null)
+
+  function startRename(id: ShellId, currentTitle: string) {
+    renamingId = id
+    renameValue = currentTitle
+    // 等 input 渲染后聚焦 + 全选
+    requestAnimationFrame(() => {
+      renameInputEl?.focus()
+      renameInputEl?.select()
+    })
+  }
+  function commitRename() {
+    if (renamingId == null) return
+    const v = renameValue.trim()
+    if (v) {
+      terminals = terminals.map((t) =>
+        t.id === renamingId ? { ...t, title: v } : t,
+      )
+    }
+    renamingId = null
+  }
+  function cancelRename() {
+    renamingId = null
+  }
+
   // ── per-session 缓存:save / restore ──────────────────────
 
   $effect(() => {
@@ -341,9 +429,8 @@
     prevTabId = currentTabId
   })
 
-  // 当 activeTerminalId 或 terminals 变化时,为新增的 shell 初始化 xterm
+  // 当 terminals 变化时,为新增的 shell 初始化 xterm
   $effect(() => {
-    // 读 terminals 和 activeTerminalId 建依赖
     void terminals
     void activeTerminalId
     for (const t of terminals) {
@@ -364,6 +451,14 @@
     }
   })
 
+  // fontSize 变化时同步到所有 xterm 实例
+  $effect(() => {
+    void fontSize
+    for (const { term } of termInstances.values()) {
+      try { term.options.fontSize = fontSize } catch {}
+    }
+  })
+
   onDestroy(() => {
     destroyed = true
     for (const { unsub, resizeObs, term } of termInstances.values()) {
@@ -376,6 +471,46 @@
 </script>
 
 <div class="shell-terminal-panel">
+  <!-- 顶部 tab 栏 -->
+  <div class="tab-bar">
+    <div class="tabs-scroll">
+      {#each terminals as t (t.id)}
+        <div class="tab-item" class:active={t.id === activeTerminalId}>
+          {#if renamingId === t.id}
+            <input
+              bind:this={renameInputEl}
+              bind:value={renameValue}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+                else if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+              }}
+              onblur={commitRename}
+              spellcheck="false"
+            />
+          {:else}
+            <button
+              class="tab-label"
+              onclick={() => (activeTerminalId = t.id)}
+              ondblclick={(e) => { e.stopPropagation(); startRename(t.id, t.title) }}
+              title={t.title + ' (double-click to rename)'}
+            >
+              {t.title}
+            </button>
+          {/if}
+          <button class="tab-close" onclick={() => closeTerminal(t.id)} title="Close">
+            <Icon name="x" size={10} />
+          </button>
+        </div>
+      {/each}
+    </div>
+    <div class="tab-bar-actions">
+      <button class="tab-action-btn" onclick={newTerminal} title="New terminal">
+        <Icon name="plus" size={13} />
+      </button>
+    </div>
+  </div>
+
+  <!-- 终端区域 -->
   <div class="terminal-area">
     {#each terminals as t (t.id)}
       <div
@@ -393,33 +528,134 @@
       </div>
     {/if}
   </div>
-  <div class="tab-strip">
-    {#each terminals as t (t.id)}
-      <button
-        class="tab-item"
-        class:active={t.id === activeTerminalId}
-        onclick={() => (activeTerminalId = t.id)}
-        title={t.cwd}
-      >
-        <Icon name="terminal" size={13} />
-      </button>
-    {/each}
-    <button class="new-tab-btn" onclick={newTerminal} title="New terminal">
-      <Icon name="plus" size={13} />
-    </button>
-  </div>
 </div>
 
 <style>
   .shell-terminal-panel {
     display: flex;
+    flex-direction: column;
     height: 100%;
     min-height: 0;
     background: var(--bg-base);
   }
+
+  /* ── 顶部 tab 栏 ── */
+  .tab-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0;
+    height: 30px;
+    padding: 0 4px 0 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    background: var(--bg-sidebar);
+    overflow: hidden;
+  }
+  .tabs-scroll {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tabs-scroll::-webkit-scrollbar { display: none; }
+  .tab-item {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 24px;
+    padding: 0 4px 0 8px;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    border: 1px solid transparent;
+    transition: background var(--t-fast), border-color var(--t-fast);
+  }
+  .tab-item:hover {
+    background: var(--bg-tab-hover);
+  }
+  .tab-item.active {
+    background: color-mix(in srgb, var(--acc) 12%, transparent);
+    border-color: color-mix(in srgb, var(--acc) 24%, transparent);
+  }
+  .tab-label {
+    border: none;
+    background: transparent;
+    color: var(--fg-secondary);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+    padding: 0;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tab-item.active .tab-label {
+    color: var(--fg-primary);
+  }
+  .tab-item input {
+    width: 80px;
+    border: 1px solid var(--acc);
+    border-radius: 3px;
+    background: var(--bg-input);
+    color: var(--fg-primary);
+    font: inherit;
+    font-size: var(--fs-xs);
+    padding: 0 4px;
+    outline: none;
+  }
+  .tab-close {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--fg-tertiary);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
+  }
+  .tab-item:hover .tab-close { opacity: 1; }
+  .tab-close:hover {
+    background: var(--st-err);
+    color: var(--fg-on-accent);
+  }
+  .tab-bar-actions {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+  }
+  .tab-action-btn {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: var(--fg-secondary);
+    cursor: pointer;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  .tab-action-btn:hover {
+    background: var(--bg-tab-hover);
+    color: var(--fg-primary);
+  }
+
+  /* ── 终端区域 ── */
   .terminal-area {
     flex: 1 1 auto;
-    min-width: 0;
+    min-height: 0;
     position: relative;
     overflow: hidden;
   }
@@ -457,56 +693,5 @@
     background: var(--bg-hover);
     color: var(--fg-primary);
     border-color: var(--acc);
-  }
-
-  .tab-strip {
-    flex: 0 0 auto;
-    width: 32px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 4px 0;
-    border-left: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
-    background: var(--bg-sidebar);
-  }
-  .tab-item {
-    width: 28px;
-    height: 28px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid transparent;
-    border-radius: var(--rad-sm);
-    background: transparent;
-    color: var(--fg-secondary);
-    cursor: pointer;
-    transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
-  }
-  .tab-item:hover {
-    background: var(--bg-tab-hover);
-    color: var(--fg-primary);
-  }
-  .tab-item.active {
-    background: var(--acc-soft);
-    color: var(--acc);
-    border-color: color-mix(in srgb, var(--acc) 30%, transparent);
-  }
-  .new-tab-btn {
-    width: 28px;
-    height: 28px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid transparent;
-    border-radius: var(--rad-sm);
-    background: transparent;
-    color: var(--fg-secondary);
-    cursor: pointer;
-    transition: background var(--t-fast), color var(--t-fast);
-  }
-  .new-tab-btn:hover {
-    background: var(--bg-tab-hover);
-    color: var(--fg-primary);
   }
 </style>
