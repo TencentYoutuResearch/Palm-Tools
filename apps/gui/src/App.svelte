@@ -1565,18 +1565,6 @@
           >
             <Icon name="panel-right" size={15} />
           </button>
-        {:else}
-          <!-- 工作区打开时:显示终端面板开关 -->
-          <button
-            class="titlebar-tool"
-            class:active={terminalPanelOpen}
-            title={terminalPanelOpen ? 'Hide terminal' : 'Show terminal'}
-            aria-label={terminalPanelOpen ? 'Hide terminal' : 'Show terminal'}
-            aria-pressed={terminalPanelOpen}
-            onclick={() => (terminalPanelOpen = !terminalPanelOpen)}
-          >
-            <Icon name="terminal" size={15} />
-          </button>
         {/if}
       </div>
     </header>
@@ -1697,6 +1685,8 @@
             tab={$activeTab}
             {homeDir}
             onClose={() => { workspacePanelOpen = false }}
+            terminalOpen={terminalPanelOpen}
+            onToggleTerminal={() => (terminalPanelOpen = !terminalPanelOpen)}
           />
         </div>
         {#if terminalPanelOpen}

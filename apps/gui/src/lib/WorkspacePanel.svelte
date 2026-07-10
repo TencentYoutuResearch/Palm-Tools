@@ -17,6 +17,8 @@
     tab: TabInfo | null
     homeDir: string
     onClose: () => void
+    terminalOpen?: boolean
+    onToggleTerminal?: () => void
   }
 
   type PanelTab = 'files' | 'git'
@@ -52,7 +54,7 @@
   }
   const panelStateCache = new Map<number, SavedPanelState>()
 
-  let { tab, homeDir, onClose }: Props = $props()
+  let { tab, homeDir, onClose, terminalOpen = false, onToggleTerminal }: Props = $props()
 
   let activePanel = $state<PanelTab>('files')
   let filterQuery = $state('')
@@ -617,6 +619,18 @@
       <button class="tool-btn" title="Refresh" aria-label="Refresh workspace" onclick={refresh} disabled={loading || !cwd}>
         <Icon name="refresh-cw" size={14} />
       </button>
+      {#if onToggleTerminal}
+        <button
+          class="tool-btn"
+          class:active={terminalOpen}
+          title={terminalOpen ? 'Hide terminal' : 'Show terminal'}
+          aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
+          aria-pressed={terminalOpen}
+          onclick={onToggleTerminal}
+        >
+          <Icon name="terminal" size={14} />
+        </button>
+      {/if}
       <button class="tool-btn active" title="Hide workspace inspector" aria-label="Hide workspace inspector" aria-pressed="true" onclick={onClose}>
         <Icon name="panel-right-open" size={15} />
       </button>
