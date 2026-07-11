@@ -17,7 +17,7 @@
    *   - 去掉:screen snapshot(ring buffer 回放替代)、link provider、search addon、
    *           viewport repair(主终端专用,shell 终端不需要)
    */
-  import { onDestroy } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { shellIpc, type ShellId } from './ipc'
   import type { TabInfo } from './sessions'
   import Icon from './Icon.svelte'
@@ -51,13 +51,24 @@
   // xterm 实例 + 容器 + unsubscribe,按 shell ID 索引
   const termInstances = new Map<
     ShellId,
-    { term: any; fitAddon: any; unsub: (() => Promise<void>) | null; resizeObs: ResizeObserver | null; container: HTMLDivElement | null }
+    { term: any; fitAddon: any; unsub: (() => Promise<void>) | null; resizeObs: ResizeObserver | null; container: HTMLDivElement | null; markDisposed: () => void }
   >()
   let containerEls = new Map<ShellId, HTMLDivElement>()
+  // 正在 init 的 shell id,防止并发 init(action 触发 + effect fallback 同时跑)
+  const initializing = new Set<ShellId>()
 
   /// Svelte action:元素 mount 时注册到 containerEls,unmount 时移除。
+  /// init xterm 也在这里触发 —— 不能放 $effect 里,因为 Svelte 5 后续更新里
+  /// effect 在 DOM 更新**之前**跑,此时 containerEls 还是旧值,init 会被跳过。
+  /// action 在元素插入后同步执行,container 一定就绪。
   function registerContainer(node: HTMLDivElement, id: ShellId) {
     containerEls.set(id, node)
+    // container 就绪,立即触发 init(防并发守卫在 initShellTerminal 内)
+    if (!termInstances.has(id) && !initializing.has(id)) {
+      initShellTerminal(id, node).catch((e) =>
+        console.error('[shell-term] init failed:', e),
+      )
+    }
     return {
       destroy() {
         containerEls.delete(id)
@@ -231,45 +242,50 @@
     try { fitAddon.fit(); return true } catch { return false }
   }
 
-  /// 初始化一个 shell 的 xterm 实例。在容器 DOM 就绪后调用。
+  /// 初始化一个 shell 的 xterm 实例。在容器 DOM 就绪后调用(registerContainer action 触发)。
   /// 重新初始化时(切回 session),先清空容器 innerHTML,防止旧 xterm DOM 残留。
+  /// 关键:每个 await 后都要检查 container 是否还有效(containerEls.get(shellId) === container)。
+  /// 切 tab 时 container 会被 action destroy 删除并换成新的,旧 init 必须中止,否则 xterm 挂到离队 DOM。
   async function initShellTerminal(shellId: ShellId, container: HTMLDivElement) {
-    // 清空容器:上次 term.dispose() 可能残留 xterm 内部 DOM
-    container.innerHTML = ''
-
+    if (initializing.has(shellId) || termInstances.has(shellId)) return
+    initializing.add(shellId)
     try {
-      await (document as any).fonts?.load?.('14px JetBrains Mono')
-    } catch {}
-    if (destroyed) return
+      // 清空容器:上次 term.dispose() 可能残留 xterm 内部 DOM
+      container.innerHTML = ''
 
-    const [{ Terminal }, { FitAddon }] = await Promise.all([
-      import('@xterm/xterm'),
-      import('@xterm/addon-fit'),
-    ])
-    if (destroyed) return
-    await import('@xterm/xterm/css/xterm.css')
-    if (destroyed) return
+      try {
+        await (document as any).fonts?.load?.('14px JetBrains Mono')
+      } catch {}
+      if (containerEls.get(shellId) !== container) return
 
-    const term = new Terminal({
-      fontFamily: `"${fontFamily}", "SF Mono", Menlo, monospace`,
-      fontSize: fontSize,
-      cursorBlink: true,
-      allowProposedApi: true,
-      scrollback: 5000,
-      theme: buildXtermTheme(isDark),
-      convertEol: false,
-      minimumContrastRatio: 4.5,
-    })
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import('@xterm/xterm'),
+        import('@xterm/addon-fit'),
+      ])
+      if (containerEls.get(shellId) !== container) return
+      await import('@xterm/xterm/css/xterm.css')
+      if (containerEls.get(shellId) !== container) return
 
-    const fitAddon = new FitAddon()
-    term.loadAddon(fitAddon)
-    term.open(container)
-    if (destroyed) { term.dispose(); return }
+      const term = new Terminal({
+        fontFamily: `"${fontFamily}", "SF Mono", Menlo, monospace`,
+        fontSize: fontSize,
+        cursorBlink: true,
+        allowProposedApi: true,
+        scrollback: 5000,
+        theme: buildXtermTheme(isDark),
+        convertEol: false,
+        minimumContrastRatio: 4.5,
+      })
+
+      const fitAddon = new FitAddon()
+      term.loadAddon(fitAddon)
+      term.open(container)
+      if (containerEls.get(shellId) !== container) { term.dispose(); return }
 
     // WebGL 优先
     try {
       const { WebglAddon } = await import('@xterm/addon-webgl')
-      if (destroyed || !term) { term.dispose(); return }
+      if (containerEls.get(shellId) !== container || !term) { term?.dispose(); return }
       const wg = new WebglAddon()
       wg.onContextLoss(() => { try { wg.dispose() } catch {} })
       term.loadAddon(wg)
@@ -355,7 +371,7 @@
     container.addEventListener('keydown', onKeydown)
 
     await waitForLayout(container)
-    if (destroyed || !term) return
+    if (containerEls.get(shellId) !== container || !term) return
     if (container.offsetWidth > 0 && container.offsetHeight > 0) {
       safeFit(term, fitAddon)
     }
@@ -367,10 +383,20 @@
     })
 
     // 订阅字节流(ring buffer 会先回放)
+    // alive flag:disposeShellTerminal 同步置 false 后,Rust 侧 unsub 还在途,
+    // 这段时间到达的旧 channel 字节直接丢弃,避免写已 dispose 的 term。
+    const state = { alive: true }
     const unsub = await shellIpc.subscribeBytes(shellId, (bytes) => {
-      if (destroyed || !term) return
+      if (!state.alive || !term) return
       term.write(bytes)
     })
+    // subscribe 期间可能切走了,再检查一次
+    if (containerEls.get(shellId) !== container) {
+      state.alive = false
+      try { term.dispose() } catch {}
+      unsub?.().catch(() => {})
+      return
+    }
 
     // 首次 resize
     if (term.cols >= MIN_COLS && term.rows >= MIN_ROWS) {
@@ -382,7 +408,7 @@
     const resizeObs = new ResizeObserver(() => {
       if (resizeTimer != null) clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => {
-        if (destroyed || !term) return
+        if (!state.alive || !term) return
         if (container.offsetWidth === 0 || container.offsetHeight === 0) return
         if (!safeFit(term, fitAddon)) return
         if (term.cols < MIN_COLS || term.rows < MIN_ROWS) return
@@ -391,18 +417,26 @@
     })
     resizeObs.observe(container)
 
-    termInstances.set(shellId, { term, fitAddon, unsub, resizeObs, container })
+    termInstances.set(shellId, { term, fitAddon, unsub, resizeObs, container, markDisposed: () => { state.alive = false } })
+    } finally {
+      initializing.delete(shellId)
+    }
   }
 
-  /// 清理一个 shell 的 xterm 实例(不杀 PTY,只断开前端)
-  async function disposeShellTerminal(shellId: ShellId) {
+  /// 清理一个 shell 的 xterm 实例(不杀 PTY,只断开前端)。
+  /// 必须同步:切 session 时 registerContainer action 重建 DOM 后会检查
+  /// `!termInstances.has(id)`,若这里还 await 着 unsub IPC,termInstances 没及时 delete,
+  /// action 会跳过 init → 空白。
+  /// unsub 不 await:IPC 消息按发送顺序到达 Rust,unsub 一定先于后续 subscribe 被处理,
+  /// 所以不会出现旧 unsub 把新 channel 清掉的反序。
+  function disposeShellTerminal(shellId: ShellId) {
     const inst = termInstances.get(shellId)
-    if (inst) {
-      await inst.unsub?.().catch(() => {})
-      inst.resizeObs?.disconnect()
-      try { inst.term.dispose() } catch {}
-      termInstances.delete(shellId)
-    }
+    if (!inst) return
+    inst.markDisposed?.()
+    inst.resizeObs?.disconnect()
+    try { inst.term.dispose() } catch {}
+    termInstances.delete(shellId)
+    inst.unsub?.().catch(() => {})
   }
 
   // ── tab 操作 ──────────────────────────────────────────────
@@ -416,8 +450,16 @@
     activeTerminalId = id
   }
 
+  // 点击右上角终端图标直接开 shell:面板挂载时若当前 tab 没有终端,自动 spawn 一个。
+  // 仅在挂载时触发一次;用户手动关掉全部 shell 后仍保留 empty-state 按钮作为再开入口。
+  onMount(() => {
+    if (terminals.length === 0 && tab?.cwd) {
+      newTerminal().catch((e) => console.error('[shell-term] auto-spawn failed:', e))
+    }
+  })
+
   async function closeTerminal(id: ShellId) {
-    await disposeShellTerminal(id)
+    disposeShellTerminal(id)
     await shellIpc.kill(id).catch(() => {})
     terminals = terminals.filter((t) => t.id !== id)
     containerEls.delete(id)
@@ -467,7 +509,7 @@
       })
       // 断开所有 xterm 订阅(PTY 在 Rust 保持存活)
       for (const t of terminals) {
-        disposeShellTerminal(t.id).catch(() => {})
+        disposeShellTerminal(t.id)
       }
     }
 
@@ -490,20 +532,6 @@
       }
     }
     prevTabId = currentTabId
-  })
-
-  // 当 terminals 变化时,为新增的 shell 初始化 xterm
-  $effect(() => {
-    void terminals
-    void activeTerminalId
-    for (const t of terminals) {
-      const container = containerEls.get(t.id)
-      if (container && !termInstances.has(t.id)) {
-        initShellTerminal(t.id, container).catch((e) =>
-          console.error('[shell-term] init failed:', e),
-        )
-      }
-    }
   })
 
   // isDark 变化时更新主题
@@ -647,6 +675,8 @@
   }
 
   /* ── 顶部 tab 栏 ── */
+  /* overflow: visible —— 不能 hidden,否则字体下拉(font-dropdown,absolute 向下展开)
+     会被 30px 高的 tab-bar 裁掉。水平裁剪由 .tabs-scroll 自己的 overflow-x:auto 负责。 */
   .tab-bar {
     flex: 0 0 auto;
     display: flex;
@@ -656,7 +686,7 @@
     padding: 0 4px 0 6px;
     border-bottom: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
     background: var(--bg-sidebar);
-    overflow: hidden;
+    overflow: visible;
   }
   .tabs-scroll {
     flex: 1 1 auto;
