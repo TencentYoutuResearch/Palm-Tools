@@ -606,19 +606,20 @@ export type ShellId = number
 
 export const shellIpc = {
   /** Spawn a shell PTY ($SHELL). Returns the shell ID. */
-  spawn: (cwd: string, cols: number, rows: number) =>
-    invoke<ShellId>('spawn_shell', { cwd, cols, rows }),
+  spawn: (cwd: string, cols: number, rows: number, endpoint_id?: EndpointId | null) =>
+    invoke<ShellId>('spawn_shell', { cwd, cols, rows, endpointId: endpoint_id ?? null }),
 
   /** Write bytes to the shell PTY stdin. */
-  write: (id: ShellId, bytes: Uint8Array) =>
-    invoke<void>('write_shell', { id, bytes: Array.from(bytes) }),
+  write: (id: ShellId, bytes: Uint8Array, endpoint_id?: EndpointId | null) =>
+    invoke<void>('write_shell', { id, bytes: Array.from(bytes), endpointId: endpoint_id ?? null }),
 
   /** Resize the shell PTY. */
-  resize: (id: ShellId, cols: number, rows: number) =>
-    invoke<void>('resize_shell', { id, cols, rows }),
+  resize: (id: ShellId, cols: number, rows: number, endpoint_id?: EndpointId | null) =>
+    invoke<void>('resize_shell', { id, cols, rows, endpointId: endpoint_id ?? null }),
 
   /** Kill the shell PTY and remove it from the manager. */
-  kill: (id: ShellId) => invoke<void>('kill_shell', { id }),
+  kill: (id: ShellId, endpoint_id?: EndpointId | null) =>
+    invoke<void>('kill_shell', { id, endpointId: endpoint_id ?? null }),
 
   /**
    * Subscribe to shell PTY byte stream. On subscribe, the ring buffer
@@ -627,12 +628,13 @@ export const shellIpc = {
    */
   subscribeBytes: async (
     id: ShellId,
+    endpoint_id: EndpointId | null | undefined,
     onBytes: (data: Uint8Array) => void,
   ): Promise<() => Promise<void>> => {
     const ch = new Channel<number[]>()
     ch.onmessage = (data) => onBytes(new Uint8Array(data))
-    await invoke<void>('subscribe_shell_bytes', { id, onBytes: ch })
-    return () => invoke<void>('unsubscribe_shell_bytes', { id })
+    await invoke<void>('subscribe_shell_bytes', { id, endpointId: endpoint_id ?? null, onBytes: ch })
+    return () => invoke<void>('unsubscribe_shell_bytes', { id, endpointId: endpoint_id ?? null })
   },
 }
 

@@ -14,9 +14,12 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+use kode_core::EndpointId;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tauri::ipc::Channel;
+
+use crate::state::AppState;
 
 const RING_BUFFER_CAPACITY: usize = 50 * 1024; // ~50KB
 
@@ -51,6 +54,7 @@ impl ShellPty {
 
 pub struct ShellPtyManager {
     pub shells: Arc<Mutex<HashMap<u32, ShellPty>>>,
+    remote_subs: Arc<Mutex<HashMap<(String, u32), tauri::async_runtime::JoinHandle<()>>>>,
     next_id: Arc<Mutex<u32>>,
 }
 
@@ -58,6 +62,7 @@ impl ShellPtyManager {
     pub fn new() -> Self {
         Self {
             shells: Arc::new(Mutex::new(HashMap::new())),
+            remote_subs: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
         }
     }
@@ -76,16 +81,50 @@ impl Default for ShellPtyManager {
     }
 }
 
+fn endpoint_or_local(endpoint_id: Option<EndpointId>) -> EndpointId {
+    endpoint_id.unwrap_or(EndpointId::Local)
+}
+
+fn remote_key(endpoint_id: &EndpointId) -> Option<String> {
+    match endpoint_id {
+        EndpointId::Local => None,
+        EndpointId::Remote { id } => Some(id.clone()),
+    }
+}
+
+fn get_remote_transport(
+    app_state: &AppState,
+    endpoint_id: &EndpointId,
+) -> Result<Arc<crate::transport::RemoteTransport>, String> {
+    let Some(id) = remote_key(endpoint_id) else {
+        return Err("local endpoint has no remote transport".into());
+    };
+    app_state
+        .remote_transports
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("remote transport not registered: {id}"))
+}
+
 // ── Tauri commands ──────────────────────────────────────────────
 
 /// Spawn a shell PTY (`$SHELL`, fallback `/bin/zsh`). Returns the shell ID.
 #[tauri::command]
-pub fn spawn_shell(
+pub async fn spawn_shell(
     cwd: String,
     cols: u16,
     rows: u16,
+    endpoint_id: Option<EndpointId>,
     state: tauri::State<'_, ShellPtyManager>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<u32, String> {
+    let endpoint_id = endpoint_or_local(endpoint_id);
+    if !matches!(endpoint_id, EndpointId::Local) {
+        let remote = get_remote_transport(&app_state, &endpoint_id)?;
+        return remote.shell_spawn(cwd, cols, rows).await;
+    }
+
     let id = state.alloc_id();
     let pty_system = native_pty_system();
     let size = PtySize {
@@ -177,11 +216,19 @@ pub fn spawn_shell(
 
 /// Write bytes to the shell PTY stdin.
 #[tauri::command]
-pub fn write_shell(
+pub async fn write_shell(
     id: u32,
     bytes: Vec<u8>,
+    endpoint_id: Option<EndpointId>,
     state: tauri::State<'_, ShellPtyManager>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let endpoint_id = endpoint_or_local(endpoint_id);
+    if !matches!(endpoint_id, EndpointId::Local) {
+        let remote = get_remote_transport(&app_state, &endpoint_id)?;
+        return remote.shell_write(id, &bytes).await;
+    }
+
     let g = state.shells.lock();
     let shell = g.get(&id).ok_or("shell not found")?;
     let mut w = shell.writer.lock();
@@ -192,12 +239,20 @@ pub fn write_shell(
 
 /// Resize the shell PTY.
 #[tauri::command]
-pub fn resize_shell(
+pub async fn resize_shell(
     id: u32,
     cols: u16,
     rows: u16,
+    endpoint_id: Option<EndpointId>,
     state: tauri::State<'_, ShellPtyManager>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let endpoint_id = endpoint_or_local(endpoint_id);
+    if !matches!(endpoint_id, EndpointId::Local) {
+        let remote = get_remote_transport(&app_state, &endpoint_id)?;
+        return remote.shell_resize(id, cols, rows).await;
+    }
+
     let mut g = state.shells.lock();
     let shell = g.get_mut(&id).ok_or("shell not found")?;
     let size = PtySize {
@@ -214,7 +269,21 @@ pub fn resize_shell(
 
 /// Kill the shell PTY and remove it from the manager.
 #[tauri::command]
-pub fn kill_shell(id: u32, state: tauri::State<'_, ShellPtyManager>) -> Result<(), String> {
+pub async fn kill_shell(
+    id: u32,
+    endpoint_id: Option<EndpointId>,
+    state: tauri::State<'_, ShellPtyManager>,
+    app_state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let endpoint_id = endpoint_or_local(endpoint_id);
+    if let Some(key) = remote_key(&endpoint_id) {
+        if let Some(handle) = state.remote_subs.lock().remove(&(key, id)) {
+            handle.abort();
+        }
+        let remote = get_remote_transport(&app_state, &endpoint_id)?;
+        return remote.shell_kill(id).await;
+    }
+
     let mut g = state.shells.lock();
     if let Some(shell) = g.get_mut(&id) {
         let mut k = shell.killer.lock();
@@ -227,11 +296,24 @@ pub fn kill_shell(id: u32, state: tauri::State<'_, ShellPtyManager>) -> Result<(
 /// Subscribe to shell PTY byte stream.
 /// On subscribe, the ring buffer (~50KB) is replayed first, then live bytes stream in.
 #[tauri::command]
-pub fn subscribe_shell_bytes(
+pub async fn subscribe_shell_bytes(
     id: u32,
+    endpoint_id: Option<EndpointId>,
     on_bytes: Channel<Vec<u8>>,
     state: tauri::State<'_, ShellPtyManager>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let endpoint_id = endpoint_or_local(endpoint_id);
+    if let Some(key) = remote_key(&endpoint_id) {
+        let remote = get_remote_transport(&app_state, &endpoint_id)?;
+        if let Some(old) = state.remote_subs.lock().remove(&(key.clone(), id)) {
+            old.abort();
+        }
+        let handle = remote.shell_subscribe_bytes(id, on_bytes).await?;
+        state.remote_subs.lock().insert((key, id), handle);
+        return Ok(());
+    }
+
     let mut g = state.shells.lock();
     let shell = g.get_mut(&id).ok_or("shell not found")?;
 
@@ -250,8 +332,17 @@ pub fn subscribe_shell_bytes(
 #[tauri::command]
 pub fn unsubscribe_shell_bytes(
     id: u32,
+    endpoint_id: Option<EndpointId>,
     state: tauri::State<'_, ShellPtyManager>,
 ) -> Result<(), String> {
+    let endpoint_id = endpoint_or_local(endpoint_id);
+    if let Some(key) = remote_key(&endpoint_id) {
+        if let Some(handle) = state.remote_subs.lock().remove(&(key, id)) {
+            handle.abort();
+        }
+        return Ok(());
+    }
+
     let mut g = state.shells.lock();
     let shell = g.get_mut(&id).ok_or("shell not found")?;
     shell.channel = None;

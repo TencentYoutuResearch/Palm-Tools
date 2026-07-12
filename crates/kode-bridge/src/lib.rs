@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::io::BufRead;
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use axum::{
     http::{header, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Json, Router,
 };
 use base64::Engine;
@@ -29,6 +29,7 @@ use kode_memory::{
     MemoryStore,
 };
 use parking_lot::Mutex;
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
@@ -49,6 +50,7 @@ pub struct Ctx {
     pub next_id: Arc<Mutex<SessionId>>,
     pub bus: Arc<BridgeBus>,
     pub token: Arc<String>,
+    pub shells: Arc<ShellManager>,
     pub memory: Option<Arc<MemoryHandle>>,
     pub listen_addr: Arc<Mutex<Option<SocketAddr>>>,
     /// HookRelay UDS 路径。None = relay 未启用,create_session 不注入 KODE_HOOK_SOCK。
@@ -84,6 +86,54 @@ impl MemoryHandle {
             store: tokio::sync::Mutex::new(store),
             budget: tokio::sync::Mutex::new(budget),
         }))
+    }
+}
+
+const SHELL_RING_BUFFER_CAPACITY: usize = 50 * 1024;
+
+pub struct ShellManager {
+    shells: Arc<Mutex<HashMap<u32, BridgeShell>>>,
+    next_id: Mutex<u32>,
+}
+
+struct BridgeShell {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    master: Box<dyn MasterPty + Send>,
+    ring_buffer: VecDeque<u8>,
+    cwd: String,
+}
+
+impl BridgeShell {
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if self.ring_buffer.len() >= SHELL_RING_BUFFER_CAPACITY {
+                self.ring_buffer.pop_front();
+            }
+            self.ring_buffer.push_back(b);
+        }
+    }
+}
+
+impl ShellManager {
+    pub fn new() -> Self {
+        Self {
+            shells: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Mutex::new(1),
+        }
+    }
+
+    fn alloc_id(&self) -> u32 {
+        let mut g = self.next_id.lock();
+        let id = *g;
+        *g += 1;
+        id
+    }
+}
+
+impl Default for ShellManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -139,7 +189,7 @@ impl BridgeBus {
     }
 
     pub fn emit(&self, env: EventEnvelope) {
-        if env.r#type != "pty_bytes" {
+        if env.r#type != "pty_bytes" && env.r#type != "shell.pty_bytes" {
             let mut h = self.history.lock();
             let list = h.entry(env.session_id).or_default();
             list.push(env.clone());
@@ -213,6 +263,7 @@ pub async fn run() -> anyhow::Result<()> {
         next_id: Arc::new(Mutex::new(1)),
         bus: Arc::new(BridgeBus::new()),
         token: Arc::new(token),
+        shells: Arc::new(ShellManager::new()),
         memory: MemoryHandle::open(),
         listen_addr: Arc::new(Mutex::new(None)),
         hook_relay_socket,
@@ -305,6 +356,7 @@ pub fn build_test_ctx(config: Config, token: String) -> Arc<Ctx> {
         next_id: Arc::new(Mutex::new(1)),
         bus: Arc::new(BridgeBus::new()),
         token: Arc::new(token),
+        shells: Arc::new(ShellManager::new()),
         memory: None,
         listen_addr: Arc::new(Mutex::new(None)),
         hook_relay_socket: None,
@@ -556,6 +608,11 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         )
         .route("/api/v1/sessions/:id/mode", post(post_mode))
         .route("/api/v1/sessions/:id/resize", post(post_resize))
+        .route("/api/v1/shells", post(shell_spawn))
+        .route("/api/v1/shells/:id", delete(shell_kill))
+        .route("/api/v1/shells/:id/input", post(shell_input))
+        .route("/api/v1/shells/:id/resize", post(shell_resize))
+        .route("/api/v1/shells/:id/snapshot", get(shell_snapshot))
         .route("/api/v1/backends", get(list_backends))
         .route("/api/v1/fs/list", get(fs_list))
         .route("/api/v1/fs/preview", get(fs_preview))
@@ -1369,6 +1426,199 @@ async fn post_resize(
         .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
     s.resize(req.cols as u16, req.rows as u16);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ShellSpawnReq {
+    cwd: String,
+    cols: u16,
+    rows: u16,
+}
+
+#[derive(Serialize)]
+struct ShellDto {
+    id: u32,
+    cwd: String,
+}
+
+#[derive(Deserialize)]
+struct ShellInputReq {
+    bytes_b64: String,
+}
+
+async fn shell_spawn(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Json(req): Json<ShellSpawnReq>,
+) -> Result<Json<ShellDto>, ApiError> {
+    if req.cwd.trim().is_empty() {
+        return Err(ApiError::BadRequest("cwd is required".into()));
+    }
+    let id = ctx.shells.alloc_id();
+    let pty_system = native_pty_system();
+    let size = PtySize {
+        cols: req.cols.max(1),
+        rows: req.rows.max(1),
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let pair = pty_system
+        .openpty(size)
+        .map_err(|e| ApiError::Internal(format!("openpty: {e}")))?;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let mut cmd = CommandBuilder::new(&shell);
+    cmd.cwd(FsPath::new(&req.cwd));
+    if std::env::var_os("TERM").is_none() {
+        cmd.env("TERM", "xterm-256color");
+    }
+    if std::env::var_os("COLORTERM").is_none() {
+        cmd.env("COLORTERM", "truecolor");
+    }
+    let has_locale = std::env::var_os("LC_ALL").is_some()
+        || std::env::var_os("LANG").is_some()
+        || std::env::var_os("LC_CTYPE").is_some();
+    if !has_locale {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
+
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| ApiError::Internal(format!("spawn shell: {e}")))?;
+    let killer = child.clone_killer();
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| ApiError::Internal(format!("clone shell reader: {e}")))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| ApiError::Internal(format!("take shell writer: {e}")))?;
+    let writer = Arc::new(Mutex::new(writer));
+    let cwd = req.cwd;
+    ctx.shells.shells.lock().insert(
+        id,
+        BridgeShell {
+            writer,
+            killer: Mutex::new(killer),
+            master: pair.master,
+            ring_buffer: VecDeque::with_capacity(SHELL_RING_BUFFER_CAPACITY),
+            cwd: cwd.clone(),
+        },
+    );
+
+    let shells = Arc::clone(&ctx.shells.shells);
+    let bus = Arc::clone(&ctx.bus);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let data = &buf[..n];
+                    let mut g = shells.lock();
+                    if let Some(shell) = g.get_mut(&id) {
+                        shell.push_bytes(data);
+                    } else {
+                        break;
+                    }
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+                    bus.emit(EventEnvelope::new(
+                        id as u64,
+                        "shell.pty_bytes",
+                        json!({ "bytes_b64": b64 }),
+                    ));
+                }
+            }
+        }
+    });
+
+    let shells_reaper = Arc::clone(&ctx.shells.shells);
+    let bus_reaper = Arc::clone(&ctx.bus);
+    std::thread::spawn(move || {
+        let code = child.wait().ok().map(|s| s.exit_code() as i32);
+        shells_reaper.lock().remove(&id);
+        bus_reaper.emit(EventEnvelope::new(
+            id as u64,
+            "shell.exited",
+            json!({ "exit_code": code }),
+        ));
+    });
+
+    Ok(Json(ShellDto { id, cwd }))
+}
+
+async fn shell_input(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<u32>,
+    Json(req): Json<ShellInputReq>,
+) -> Result<StatusCode, ApiError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.bytes_b64.as_bytes())
+        .map_err(|e| ApiError::BadRequest(format!("invalid base64: {e}")))?;
+    let g = ctx.shells.shells.lock();
+    let shell = g
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("shell {id}")))?;
+    let mut writer = shell.writer.lock();
+    writer
+        .write_all(&bytes)
+        .map_err(|e| ApiError::Internal(format!("shell write: {e}")))?;
+    writer.flush().ok();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn shell_resize(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<u32>,
+    Json(req): Json<ResizeReq>,
+) -> Result<StatusCode, ApiError> {
+    if req.cols <= 0 || req.rows <= 0 || req.cols > 10000 || req.rows > 10000 {
+        return Err(ApiError::BadRequest(format!(
+            "invalid size: {}x{}",
+            req.cols, req.rows
+        )));
+    }
+    let mut g = ctx.shells.shells.lock();
+    let shell = g
+        .get_mut(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("shell {id}")))?;
+    shell
+        .master
+        .resize(PtySize {
+            cols: req.cols as u16,
+            rows: req.rows as u16,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| ApiError::Internal(format!("shell resize: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn shell_kill(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<u32>,
+) -> Result<StatusCode, ApiError> {
+    let mut g = ctx.shells.shells.lock();
+    if let Some(shell) = g.get_mut(&id) {
+        let mut killer = shell.killer.lock();
+        let _ = killer.kill();
+    }
+    g.remove(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn shell_snapshot(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, ApiError> {
+    let g = ctx.shells.shells.lock();
+    let shell = g
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("shell {id}")))?;
+    let snapshot: Vec<u8> = shell.ring_buffer.iter().copied().collect();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(snapshot);
+    Ok(Json(json!({ "bytes_b64": b64, "cwd": shell.cwd })))
 }
 
 #[derive(Serialize)]

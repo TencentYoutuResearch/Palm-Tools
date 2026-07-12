@@ -44,7 +44,8 @@
     entry: WorkspaceEntry
   }
 
-  /// 按 session 缓存 WorkspacePanel 的用户视图状态,跨 tab 切换 + 跨组件 unmount 存活。
+  /// 按 workspace(endpoint + cwd)缓存 WorkspacePanel 的用户视图状态。
+  /// 同一路径下的不同 kode session 共享右侧栏状态;不同 endpoint 的同名路径隔离。
   /// 只缓存"位置信息",不缓存 PreviewState 内容(切回时重新 previewFile 拿最新内容)
   /// 和 snapshot(每次切回 refresh)。childrenByPath 由 refreshExpanded 重新填充。
   type SavedPanelState = {
@@ -52,7 +53,7 @@
     selectedGitKey: string
     expandedPaths: Set<string>
   }
-  const panelStateCache = new Map<number, SavedPanelState>()
+  const panelStateCache = new Map<string, SavedPanelState>()
 
   let { tab, homeDir, onClose, terminalOpen = false, onToggleTerminal }: Props = $props()
 
@@ -61,7 +62,7 @@
   let snapshot: WorkspaceSnapshot | null = $state(null)
   let error: string | null = $state(null)
   let loading = $state(false)
-  let loadedCwd = $state('')
+  let loadedWorkspaceKey = $state('')
   let expandedPaths = $state<Set<string>>(new Set())
   let loadingPaths = $state<Set<string>>(new Set())
   let childrenByPath = $state<Record<string, WorkspaceEntry[]>>({})
@@ -130,14 +131,22 @@
   /// 当前是否显示隐藏文件。无存储值时按侧别取默认(local=true, remote=false)。
   const showHidden = $derived(showHiddenMap[sideKey] ?? sideKey === 'local')
 
-  /// 跟踪上一次 effect 运行时的 tab.id,用于在切换前把视图状态存入 panelStateCache。
-  let prevTabId: number | null = null
+  function workspaceKeyFor(t: TabInfo | null): string | null {
+    const path = t?.cwd?.trim()
+    if (!path) return null
+    const endpointId = t?.endpointId
+    const endpoint = endpointId?.kind === 'remote' ? `remote:${endpointId.id}` : 'local'
+    return `${endpoint}\u0000${path}`
+  }
+
+  /// 跟踪上一次 effect 运行时的 workspace key,用于切换前保存视图状态。
+  let prevWorkspaceKey: string | null = null
 
   $effect(() => {
-    const currentTabId = tab?.id ?? null
-    // 1. 离开旧 tab:保存当前视图状态(此时 $state 还是旧 tab 的值)
-    if (prevTabId != null && prevTabId !== currentTabId) {
-      panelStateCache.set(prevTabId, {
+    const currentWorkspaceKey = workspaceKeyFor(tab)
+    // 1. 离开旧 workspace:保存当前视图状态(此时 $state 还是旧 workspace 的值)
+    if (prevWorkspaceKey != null && prevWorkspaceKey !== currentWorkspaceKey) {
+      panelStateCache.set(prevWorkspaceKey, {
         selectedPath,
         selectedGitKey,
         expandedPaths: new Set(expandedPaths),
@@ -145,23 +154,23 @@
     }
 
     // 2. 无 cwd:全重置
-    if (!cwd) {
+    if (!currentWorkspaceKey) {
       snapshot = null
       error = null
-      loadedCwd = ''
+      loadedWorkspaceKey = ''
       expandedPaths = new Set()
       loadingPaths = new Set()
       childrenByPath = {}
       selectedPath = ''
       selectedGitKey = ''
       preview = emptyPreview()
-      prevTabId = currentTabId
+      prevWorkspaceKey = currentWorkspaceKey
       return
     }
 
-    // 3. cwd 变化:按 cache 决定是否保留视图状态
-    if (loadedCwd !== cwd && !loading) {
-      const saved = currentTabId != null ? panelStateCache.get(currentTabId) : undefined
+    // 3. workspace 变化:按 cache 决定是否保留视图状态
+    if (loadedWorkspaceKey !== currentWorkspaceKey && !loading) {
+      const saved = panelStateCache.get(currentWorkspaceKey)
       if (saved) {
         // 恢复:保留 expandedPaths/selectedPath,只清 loading/children,稍后 refreshExpanded 重建
         loadingPaths = new Set()
@@ -189,7 +198,7 @@
         void refresh()
       }
     }
-    prevTabId = currentTabId
+    prevWorkspaceKey = currentWorkspaceKey
   })
 
   function emptyPreview(): PreviewState {
@@ -212,14 +221,14 @@
       snapshot = rid
         ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden)
         : await ipc.workspaceSnapshot(cwd, showHidden)
-      loadedCwd = cwd
+      loadedWorkspaceKey = workspaceKeyFor(tab) ?? ''
       if (!selectedPath && snapshot.entries.length > 0) {
         selectedPath = snapshot.entries[0].path
       }
     } catch (e) {
       snapshot = null
       error = String(e)
-      loadedCwd = cwd
+      loadedWorkspaceKey = workspaceKeyFor(tab) ?? ''
     } finally {
       loading = false
     }

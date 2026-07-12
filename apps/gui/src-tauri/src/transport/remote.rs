@@ -53,6 +53,7 @@ use kode_core::{
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
 use crate::transport::ssh_tunnel::SshTunnel;
@@ -302,6 +303,168 @@ impl RemoteTransport {
             status: None,
             message: format!("decode {path}: {e}"),
         })
+    }
+
+    pub async fn shell_spawn(&self, cwd: String, cols: u16, rows: u16) -> Result<u32, String> {
+        let base = self.ensure_tunnel().await?;
+        let url = RemoteConfig::rest_url_for(&base, "/api/v1/shells");
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.cfg.token)
+            .json(&json!({ "cwd": cwd, "cols": cols, "rows": rows }))
+            .send()
+            .await
+            .map_err(|e| format!("POST /shells: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            if status.as_u16() == 404 {
+                return Err("remote bridge does not support shell terminals yet; redeploy/update kode-bridge on this endpoint".into());
+            }
+            return Err(format!("POST /shells http {status}: {detail}"));
+        }
+        let dto: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("decode shell DTO: {e}"))?;
+        dto.get("id")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .ok_or_else(|| "missing id in shell response".to_string())
+    }
+
+    pub async fn shell_write(&self, id: u32, bytes: &[u8]) -> Result<(), String> {
+        let base = self.ensure_tunnel().await?;
+        let url = RemoteConfig::rest_url_for(&base, &format!("/api/v1/shells/{id}/input"));
+        let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.cfg.token)
+            .json(&json!({ "bytes_b64": bytes_b64 }))
+            .send()
+            .await
+            .map_err(|e| format!("POST /shells/{id}/input: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!(
+                "POST /shells/{id}/input http {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn shell_resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+        let base = self.ensure_tunnel().await?;
+        let url = RemoteConfig::rest_url_for(&base, &format!("/api/v1/shells/{id}/resize"));
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.cfg.token)
+            .json(&json!({ "cols": cols, "rows": rows }))
+            .send()
+            .await
+            .map_err(|e| format!("POST /shells/{id}/resize: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!(
+                "POST /shells/{id}/resize http {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn shell_kill(&self, id: u32) -> Result<(), String> {
+        let base = self.ensure_tunnel().await?;
+        let url = RemoteConfig::rest_url_for(&base, &format!("/api/v1/shells/{id}"));
+        let resp = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.cfg.token)
+            .send()
+            .await
+            .map_err(|e| format!("DELETE /shells/{id}: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() && status.as_u16() != 404 {
+            return Err(format!(
+                "DELETE /shells/{id} http {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn shell_snapshot(&self, id: u32) -> Result<Vec<u8>, String> {
+        let base = self.ensure_tunnel().await?;
+        let url = RemoteConfig::rest_url_for(&base, &format!("/api/v1/shells/{id}/snapshot"));
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.cfg.token)
+            .send()
+            .await
+            .map_err(|e| format!("GET /shells/{id}/snapshot: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!(
+                "GET /shells/{id}/snapshot http {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        let dto: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("decode shell snapshot: {e}"))?;
+        let b64 = dto.get("bytes_b64").and_then(|v| v.as_str()).unwrap_or("");
+        base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("decode shell snapshot bytes: {e}"))
+    }
+
+    pub async fn shell_subscribe_bytes(
+        &self,
+        id: u32,
+        on_bytes: Channel<Vec<u8>>,
+    ) -> Result<tauri::async_runtime::JoinHandle<()>, String> {
+        let base = self.ensure_tunnel().await?;
+        let url = self.cfg.ws_url_for(&base);
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .map_err(|e| format!("shell ws connect: {e}"))?;
+        if let Ok(snapshot) = self.shell_snapshot(id).await {
+            if !snapshot.is_empty() {
+                let _ = on_bytes.send(snapshot);
+            }
+        }
+        let handle = tauri::async_runtime::spawn(async move {
+            while let Some(msg) = ws.next().await {
+                match msg {
+                    Ok(WsMessage::Text(text)) => {
+                        let Ok(env) = serde_json::from_str::<EventEnvelope>(&text) else {
+                            continue;
+                        };
+                        if env.session_id != id as u64 || env.r#type != "shell.pty_bytes" {
+                            continue;
+                        }
+                        let Some(b64) = env.payload.get("bytes_b64").and_then(|v| v.as_str())
+                        else {
+                            continue;
+                        };
+                        if let Ok(bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())
+                        {
+                            let _ = on_bytes.send(bytes);
+                        }
+                    }
+                    Ok(WsMessage::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+        });
+        Ok(handle)
     }
 
     /// SSH 懒加载模式下从 `&self`(spawn)里拉起 WS:升级 `self_weak` → ensure_ws。

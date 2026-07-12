@@ -68,6 +68,7 @@ async fn memory_recent_returns_approved_facts() {
         next_id: Arc::clone(&base.next_id),
         bus: Arc::clone(&base.bus),
         token: Arc::clone(&base.token),
+        shells: Arc::clone(&base.shells),
         memory: Some(mem),
         listen_addr: Arc::clone(&base.listen_addr),
         hook_relay_socket: None,

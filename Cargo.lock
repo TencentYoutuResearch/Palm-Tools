@@ -2283,6 +2283,7 @@ dependencies = [
  "kode-core",
  "kode-memory",
  "parking_lot",
+ "portable-pty",
  "serde",
  "serde_json",
  "tokio",

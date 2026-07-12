@@ -129,6 +129,7 @@ impl AppState {
             next_id: Arc::clone(&ctx.next_id),
             bus: Arc::clone(&ctx.bus),
             token: Arc::clone(&ctx.token),
+            shells: Arc::new(kode_bridge::ShellManager::new()),
             memory: kode_bridge::MemoryHandle::open(),
             listen_addr: Arc::clone(&ctx.listen_addr),
             hook_relay_socket: hook_relay_socket.clone(),

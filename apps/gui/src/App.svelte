@@ -112,6 +112,7 @@
 
   // 终端面板(工作区检查器底部)
   let terminalPanelOpen = $state(false)
+  let terminalEnsureToken = $state(0)
   let terminalHeight = $state(280)
   const TERMINAL_MIN_H = 80
   const TERMINAL_MAX_H = 800
@@ -127,6 +128,15 @@
   async function onDeployCompleted() {
     await refreshEndpoints()
     window.dispatchEvent(new CustomEvent('kode:endpoints-changed'))
+  }
+
+  function toggleTerminalPanel() {
+    if (terminalPanelOpen) {
+      terminalPanelOpen = false
+      return
+    }
+    terminalPanelOpen = true
+    terminalEnsureToken += 1
   }
 
   function startInspectorResize(e: PointerEvent) {
@@ -197,15 +207,25 @@
    * hook 遍历 node.children 绑 mousedown,若 items 初始为空或与实际 DOM 不同步,
    * mousedown 绑不上;拖拽开始后 shadow item 不会进入 DOM,被拖的 tab 会“消失”。
    */
-  type WsGroup = { id: string; cwd: string; name: string; fullPath: string; tabs: TabInfo[] }
+  type WsGroup = {
+    id: string
+    cwd: string
+    name: string
+    fullPath: string
+    pathHint: string
+    showPathHint: boolean
+    endpointKind: 'local' | 'remote'
+    endpointLabel: string
+    tabs: TabInfo[]
+  }
 
-  /** 按 cwd 分组(保留首次出现顺序);cwd 缺失归入 '(no cwd)' 组,显示名 Other。
-   *  id 字段值 = cwd,仅用于 svelte-dnd-action 的 item 标识(它强制要求 id 属性)。 */
+  /** 按 endpoint + cwd 分组(保留首次出现顺序);cwd 缺失归入 '(no cwd)' 组,显示名 Other。
+   *  id 字段值 = endpoint + cwd,用于 dnd item 标识、折叠状态和同路径 local/remote 隔离。 */
   const wsGroups = $derived.by<WsGroup[]>(() => {
     const order: string[] = []
     const map = new Map<string, TabInfo[]>()
     for (const t of $tabs) {
-      const key = t.cwd ?? '(no cwd)'
+      const key = wsGroupKey(t)
       let arr = map.get(key)
       if (!arr) {
         arr = []
@@ -214,12 +234,31 @@
       }
       arr.push(t)
     }
-    return order.map((cwd) => ({
-      id: cwd,
-      cwd,
-      name: cwd === '(no cwd)' ? 'Other' : wsBasename(cwd),
-      fullPath: cwd === '(no cwd)' ? '' : wsCompactPath(cwd, homeDir),
-      tabs: map.get(cwd)!,
+
+    const draft = order.map((key) => {
+      const tabs = map.get(key)!
+      const first = tabs[0]
+      const cwd = first.cwd ?? '(no cwd)'
+      const endpoint = wsEndpointInfo(first)
+      const name = cwd === '(no cwd)' ? 'Other' : wsBasename(cwd)
+      return {
+        id: key,
+        cwd,
+        name,
+        fullPath: cwd === '(no cwd)' ? '' : wsCompactPath(cwd, homeDir),
+        pathHint: cwd === '(no cwd)' ? '' : wsPathHint(cwd, homeDir),
+        showPathHint: false,
+        endpointKind: endpoint.kind,
+        endpointLabel: endpoint.label,
+        tabs,
+      }
+    })
+
+    const nameCounts = new Map<string, number>()
+    for (const g of draft) nameCounts.set(g.name, (nameCounts.get(g.name) ?? 0) + 1)
+    return draft.map((g) => ({
+      ...g,
+      showPathHint: (nameCounts.get(g.name) ?? 0) > 1 && !!g.pathHint,
     }))
   })
 
@@ -239,7 +278,7 @@
   $effect(() => {
     if (dragging) return
     const next: Record<string, TabInfo[]> = {}
-    for (const g of wsGroups) next[g.cwd] = g.tabs
+    for (const g of wsGroups) next[g.id] = g.tabs
     groupShadows = next
   })
 
@@ -268,10 +307,10 @@
       return new Set()
     }
   }
-  function toggleCollapse(cwd: string) {
+  function toggleCollapse(groupId: string) {
     const next = new Set(collapsedCwds)
-    if (next.has(cwd)) next.delete(cwd)
-    else next.add(cwd)
+    if (next.has(groupId)) next.delete(groupId)
+    else next.add(groupId)
     collapsedCwds = next
   }
 
@@ -290,14 +329,24 @@
     if (!at) { lastExpandedForActiveId = null; return }
     if (at.id !== lastExpandedForActiveId) {
       lastExpandedForActiveId = at.id
-      if (at.cwd && collapsedCwds.has(at.cwd)) {
+      const groupId = wsGroupKey(at)
+      if (collapsedCwds.has(groupId)) {
         const next = new Set(collapsedCwds)
-        next.delete(at.cwd)
+        next.delete(groupId)
         collapsedCwds = next
       }
     }
   })
 
+  function wsEndpointInfo(tab: TabInfo): { kind: 'local' | 'remote'; label: string } {
+    if (tab.endpointId?.kind === 'remote') return { kind: 'remote', label: tab.endpointId.id }
+    return { kind: 'local', label: 'local' }
+  }
+  function wsGroupKey(tab: TabInfo): string {
+    const cwd = tab.cwd ?? '(no cwd)'
+    const endpoint = wsEndpointInfo(tab)
+    return `${endpoint.kind}:${endpoint.label}\u0000${cwd}`
+  }
   function wsBasename(cwd: string): string {
     const parts = cwd.split('/').filter(Boolean)
     return parts[parts.length - 1] ?? cwd
@@ -308,6 +357,17 @@
       return '~' + cwd.slice(home.length)
     }
     return cwd
+  }
+  function wsPathHint(cwd: string, home: string): string {
+    const compact = wsCompactPath(cwd, home)
+    const idx = compact.lastIndexOf('/')
+    const parent = idx > 0 ? compact.slice(0, idx) : compact
+    if (parent.length <= 34) return parent
+    const parts = parent.split('/').filter(Boolean)
+    const tail = parts.slice(-2).join('/')
+    if (parent.startsWith('~/')) return `~/…/${tail}`
+    if (parent.startsWith('/')) return `…/${tail}`
+    return `…/${tail}`
   }
 
   /**
@@ -473,24 +533,24 @@
     menuOpenId = null
     // consider 频繁触发 —— 只改当前组的影子数组,不写 store,不 schedulePersist。
     // detail.items 包含 shadow item,必须用于渲染,否则被拖 tab 会从 DOM 中“消失”。
-    const cwd = (e.currentTarget as HTMLElement).dataset.cwd ?? ''
-    groupShadows = { ...groupShadows, [cwd]: [...(e.detail.items as TabInfo[])] }
+    const groupId = (e.currentTarget as HTMLElement).dataset.groupId ?? ''
+    groupShadows = { ...groupShadows, [groupId]: [...(e.detail.items as TabInfo[])] }
   }
   function onDndFinalize(e: CustomEvent<DndEvent>) {
-    const cwd = (e.currentTarget as HTMLElement).dataset.cwd ?? ''
+    const groupId = (e.currentTarget as HTMLElement).dataset.groupId ?? ''
     const finalItems = e.detail.items as TabInfo[]
-    const original = wsGroups.find((g) => g.cwd === cwd)?.tabs ?? []
+    const original = wsGroups.find((g) => g.id === groupId)?.tabs ?? []
     // 保护持久状态:异常空 items / 跨组混入绝不能落盘。
     if (finalItems.length !== original.length || finalItems.some((t) => !original.some((o) => o.id === t.id))) {
       dragging = false
-      groupShadows = { ...groupShadows, [cwd]: [...original] }
+      groupShadows = { ...groupShadows, [groupId]: [...original] }
       return
     }
-    groupShadows = { ...groupShadows, [cwd]: [...finalItems] }
+    groupShadows = { ...groupShadows, [groupId]: [...finalItems] }
     // 重建完整 $tabs 顺序:其他组保持原序,当前组用 finalize 后的新序。
     const nextOrder: SessionId[] = []
     for (const g of wsGroups) {
-      const src = g.cwd === cwd ? finalItems : g.tabs
+      const src = g.id === groupId ? finalItems : g.tabs
       for (const t of src) nextOrder.push(t.id)
     }
     reorderTabs(nextOrder)
@@ -510,11 +570,11 @@
       (g): g is WsGroup =>
         !!g && !(g as any).isDndShadowItem && Array.isArray(g.tabs),
     )
-    // 保护:数量或 cwd 集合不一致时回滚,避免脏数据落盘。
-    const origCwds = new Set(wsGroups.map((g) => g.cwd))
+    // 保护:数量或 workspace id 集合不一致时回滚,避免脏数据落盘。
+    const origIds = new Set(wsGroups.map((g) => g.id))
     if (
       finalGroups.length !== wsGroups.length ||
-      finalGroups.some((g) => !origCwds.has(g.cwd))
+      finalGroups.some((g) => !origIds.has(g.id))
     ) {
       dragging = false
       wsShadows = [...wsGroups]
@@ -1483,40 +1543,55 @@
           onfinalize={onWsDndFinalize}
         >
           {#each wsShadows as group, gi (group.id)}
-            <div class="ws-group" class:dragging={dragging} data-cwd={group.cwd}>
+            <div class="ws-group" class:dragging={dragging} data-cwd={group.cwd} data-group-id={group.id}>
               {#if useGroupedLayout}
                 <button
                   type="button"
                   class="ws-group-header"
-                  class:collapsed={collapsedCwds.has(group.cwd)}
+                  class:collapsed={collapsedCwds.has(group.id)}
+                  class:remote={group.endpointKind === 'remote'}
+                  class:local={group.endpointKind === 'local'}
                   title={group.fullPath}
-                  aria-expanded={!collapsedCwds.has(group.cwd)}
-                  onclick={() => toggleCollapse(group.cwd)}
+                  aria-expanded={!collapsedCwds.has(group.id)}
+                  onclick={() => toggleCollapse(group.id)}
                   use:dragHandle
                 >
                   <span class="ws-grip" aria-hidden="true"><Icon name="grip-vertical" size={14} /></span>
                   <span class="ws-chevron">
-                    <Icon name={collapsedCwds.has(group.cwd) ? 'chevron-right' : 'chevron-down'} size={12} />
+                    <Icon name={collapsedCwds.has(group.id) ? 'chevron-right' : 'chevron-down'} size={12} />
                   </span>
-                  <span class="ws-icon"><Icon name="folder" size={13} /></span>
-                  <span class="ws-name">{group.name}</span>
+                  <span class="ws-icon" class:remote={group.endpointKind === 'remote'} class:local={group.endpointKind === 'local'}>
+                    <Icon name={group.endpointKind === 'remote' ? 'folder-open' : 'folder'} size={13} />
+                  </span>
+                  <span class="ws-title">
+                    <span class="ws-title-row">
+                      <span class="ws-name">{group.name}</span>
+                      <span class="ws-scope" class:remote={group.endpointKind === 'remote'} class:local={group.endpointKind === 'local'}>
+                        {group.endpointKind === 'remote' ? group.endpointLabel : 'local'}
+                      </span>
+                    </span>
+                    {#if group.showPathHint}
+                      <span class="ws-path">{group.pathHint}</span>
+                    {/if}
+                  </span>
                   <span class="ws-count">{group.tabs.length}</span>
                 </button>
               {:else if wsGrouped && gi > 0}
                 <!-- compact 多 workspace:组间细分隔线 -->
                 <div class="ws-group-separator" aria-hidden="true"></div>
               {/if}
-              {#if !useGroupedLayout || !collapsedCwds.has(group.cwd)}
+              {#if !useGroupedLayout || !collapsedCwds.has(group.id)}
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   class="ws-group-tabs"
                   data-cwd={group.cwd}
-                  use:dndzone={{ items: groupShadows[group.cwd] ?? group.tabs, type: `ws-tab:${group.cwd}`, delayTouchStart: TAB_DRAG_LONG_PRESS_MS }}
+                  data-group-id={group.id}
+                  use:dndzone={{ items: groupShadows[group.id] ?? group.tabs, type: `ws-tab:${group.id}`, delayTouchStart: TAB_DRAG_LONG_PRESS_MS }}
                   use:longpressGate
                   onconsider={onDndConsider}
                   onfinalize={onDndFinalize}
                 >
-                  {#each (groupShadows[group.cwd] ?? group.tabs) as t (t.id)}
+                  {#each (groupShadows[group.id] ?? group.tabs) as t (t.id)}
                     {@const i = wsGlobalIdx.get(t.id) ?? 0}
                     {@render tabRow(t, i)}
                   {/each}
@@ -1686,7 +1761,7 @@
             {homeDir}
             onClose={() => { workspacePanelOpen = false }}
             terminalOpen={terminalPanelOpen}
-            onToggleTerminal={() => (terminalPanelOpen = !terminalPanelOpen)}
+            onToggleTerminal={toggleTerminalPanel}
           />
         </div>
         {#if terminalPanelOpen}
@@ -1704,6 +1779,7 @@
               tab={$activeTab}
               isDark={theme === 'dark' || (theme === 'system' && systemPrefersDark)}
               onClose={() => (terminalPanelOpen = false)}
+              ensureTerminalToken={terminalEnsureToken}
             />
           </div>
         {/if}
@@ -1987,19 +2063,6 @@
     font-size: var(--fs-md);
     /* 左右栏展开/收起:列宽过渡(180ms)给出顺滑的滑入滑出动画 */
     transition: grid-template-columns 180ms cubic-bezier(0.2, 0, 0, 1);
-  }
-
-  /* ── Background grid overlay(原 body::before,迁入 .root 以随圆角裁切)── */
-  .root::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background-image:
-      linear-gradient(rgba(159, 232, 112, 0.02) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(159, 232, 112, 0.02) 1px, transparent 1px);
-    background-size: 40px 40px;
   }
 
   /* ── Noise texture overlay(原 body::after,迁入 .root)──
@@ -2331,9 +2394,9 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 7px 8px 5px;
+    padding: 7px 8px 6px;
     margin: 6px 0 2px;
-    border: 0;
+    border: 1px solid transparent;
     border-radius: var(--rad-md);
     background: transparent;
     color: var(--fg-secondary);
@@ -2341,10 +2404,14 @@
     font-weight: 600;
     text-align: left;
     cursor: grab;
-    transition: background var(--t-fast), color var(--t-fast);
+    transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
   }
   .ws-group-header:active { cursor: grabbing; }
   .ws-group-header:hover { background: var(--bg-tab-hover); color: var(--fg-primary); }
+  .ws-group-header.remote {
+    border-color: color-mix(in srgb, var(--acc) 14%, transparent);
+    background: color-mix(in srgb, var(--acc) 4%, transparent);
+  }
   .ws-group-header .ws-grip {
     display: inline-flex;
     flex-shrink: 0;
@@ -2359,11 +2426,39 @@
     transition: transform var(--t-fast);
   }
   .ws-group-header .ws-icon {
+    position: relative;
     display: inline-flex;
+    flex-shrink: 0;
     color: color-mix(in srgb, var(--acc) 70%, var(--fg-secondary));
   }
-  .ws-group-header .ws-name {
+  .ws-group-header .ws-icon.remote {
+    color: color-mix(in srgb, var(--st-info, #8fd3ff) 82%, var(--fg-secondary));
+  }
+  .ws-group-header .ws-icon.remote::after {
+    content: '';
+    position: absolute;
+    right: -2px;
+    bottom: -1px;
+    width: 5px;
+    height: 5px;
+    border: 1px solid var(--bg-sidebar);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--st-info, #8fd3ff) 92%, var(--acc));
+  }
+  .ws-group-header .ws-title {
     flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 1px;
+  }
+  .ws-group-header .ws-title-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .ws-group-header .ws-name {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2371,6 +2466,35 @@
     font-family: var(--font-ui);
     text-transform: none;
     letter-spacing: 0;
+  }
+  .ws-group-header .ws-scope {
+    flex-shrink: 0;
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    color: var(--fg-tertiary);
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 14px;
+    text-transform: uppercase;
+  }
+  .ws-group-header .ws-scope.remote {
+    background: color-mix(in srgb, var(--st-info, #8fd3ff) 16%, transparent);
+    color: color-mix(in srgb, var(--st-info, #8fd3ff) 84%, var(--fg-secondary));
+  }
+  .ws-group-header .ws-path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg-tertiary);
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 12px;
   }
   .ws-group-header .ws-count {
     flex-shrink: 0;
