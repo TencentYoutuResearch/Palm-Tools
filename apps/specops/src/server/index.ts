@@ -6,6 +6,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 
 import { scanWorkspace, archiveChange } from '../domain/commands.js'
+import { SpecOpsError } from '../core/errors.js'
 import { driftWorkspace, analyzeWorkspace } from '../domain/gate.js'
 import { parseDocument, defaultStatusForKind } from '../domain/spec.js'
 import { applyCompletedRun, applyWithVerify, decideRun, launchRun, verifyRun } from '../domain/run-loop.js'
@@ -30,6 +31,7 @@ import {
   RESUMABLE_SESSION_PHASES,
   resumeUuidForPhase,
   updateSpecOpsSession,
+  type SpecOpsSessionRecord,
 } from '../domain/session.js'
 import { specOpsSessionEvents } from '../domain/session-events.js'
 import { watchSpecOpsSessionTranscript } from '../domain/session-monitor.js'
@@ -453,6 +455,49 @@ async function reattachLiveSessionMonitors(kode: KodeClient, workspace: string):
   }
 }
 
+async function rebuildSpecOpsExecution(
+  kode: KodeClient,
+  workspace: string,
+  session: SpecOpsSessionRecord,
+  continuationPrompt?: string,
+): Promise<{ session: SpecOpsSessionRecord; promptDelivered: boolean }> {
+  if (!RESUMABLE_SESSION_PHASES.has(session.phase)) {
+    throw new SpecOpsError('session_not_recoverable', `Session phase ${session.phase} does not own a CLI execution session`)
+  }
+  const resumeUuid = resumeUuidForPhase(session)
+  let cwd = workspace
+  let runContext = ''
+  if (session.run_id !== null) {
+    const run = await readRun(workspace, session.run_id)
+    cwd = run.worktree_path
+    const task = run.tasks[run.current_task]
+    runContext = [
+      '',
+      'Current run state:',
+      `- State: ${run.state}`,
+      `- Iteration: ${run.iteration}/${run.max_iterations}`,
+      `- Current task: ${task?.title ?? 'None'}`,
+      `- Task prompt: ${task?.prompt ?? 'None'}`,
+      `- Required verification: ${task?.verify.join(', ') || 'None'}`,
+      `- Latest verification evidence: ${JSON.stringify(run.verify_results).slice(-4000) || 'None'}`,
+    ].join('\n')
+  }
+  const freshContext = resumeUuid === null
+    ? `${buildSessionResumeContext(session)}${runContext}${continuationPrompt === undefined ? '' : `\n\nNew user message:\n${continuationPrompt}`}`
+    : undefined
+  const ks = await kode.createSession(session.backend_key, cwd, freshContext, resumeUuid ?? undefined)
+  await updateSpecOpsSession(workspace, session.id, (record) => {
+    record.kode_session_id = ks.id
+    record.state = 'active'
+  })
+  await recordAgent(workspace, session.id, ks, 'repair')
+  if (session.run_id !== null) watchRun(session.run_id, workspace, ks.id)
+  watchSpecOpsSessionTranscript(kode, workspace, session.id, ks.id)
+  const updated = await readSpecOpsSession(workspace, session.id)
+  specOpsSessionEvents.publish('session.updated', session.id, { phase: updated.phase, state: updated.state, kode_session_id: ks.id })
+  return { session: updated, promptDelivered: freshContext !== undefined && continuationPrompt !== undefined }
+}
+
 function findLatestReceiptId(text: string): string | null {
   const matches = [...text.matchAll(/\.specops\/state\/intakes\/([0-9a-f-]{36})\.json/g)]
   return matches.length === 0 ? null : matches[matches.length - 1]?.[1] ?? null
@@ -584,12 +629,29 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           }
           if (request.method === 'POST' && action === 'input') {
             if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-            const session = await readSpecOpsSession(workspace, sessionId)
-            if (session.kode_session_id === null) return json(response, 409, { error: 'kode_session_missing' })
             const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
             if (typeof raw.text !== 'string' || raw.text.trim() === '') return json(response, 400, { error: 'text is required' })
-            await kode.sendPrompt(session.kode_session_id, raw.text.trim())
-            const updated = await appendTranscript(workspace, sessionId, 'user', raw.text.trim(), session.kode_session_id)
+            const prompt = raw.text.trim()
+            let session = await readSpecOpsSession(workspace, sessionId)
+            let promptDelivered = false
+            if (session.kode_session_id === null) {
+              const rebuilt = await rebuildSpecOpsExecution(kode, workspace, session, prompt)
+              session = rebuilt.session
+              promptDelivered = rebuilt.promptDelivered
+            }
+            if (session.kode_session_id === null) return json(response, 409, { error: 'kode_session_missing' })
+            if (!promptDelivered) {
+              try {
+                await kode.sendPrompt(session.kode_session_id, prompt)
+              } catch (error) {
+                if (!(error instanceof KodeRequestError) || error.status !== 404) throw error
+                await detachKodeSessionAttachment(workspace, sessionId, session.kode_session_id)
+                const rebuilt = await rebuildSpecOpsExecution(kode, workspace, await readSpecOpsSession(workspace, sessionId), prompt)
+                session = rebuilt.session
+                if (!rebuilt.promptDelivered && session.kode_session_id !== null) await kode.sendPrompt(session.kode_session_id, prompt)
+              }
+            }
+            const updated = await appendTranscript(workspace, sessionId, 'user', prompt, session.kode_session_id)
             const entry = updated.transcript[updated.transcript.length - 1]
             specOpsSessionEvents.publish('session.transcript_appended', sessionId, entry === undefined ? { role: 'user' } : { entries: [entry] })
             return json(response, 200, { session: updated })
@@ -758,53 +820,8 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                     }
                   } catch { /* session not found — fall through to rebuild */ }
                 }
-                // 2. Rebuild a kode session, resuming from the codebuddy UUID
-                //    recorded on the agent that drove this phase. When no UUID
-                //    is available (e.g. agents predate the session_uuid field),
-                //    start a fresh session without --resume rather than passing
-                //    a numeric id that would silently fail to restore history.
-                const resumeUuid = resumeUuidForPhase(session)
-                let cwd: string
-                let runContext = ''
-                if ((session.phase === 'run_in_worktree' || session.phase === 'analyze_request') && session.run_id !== null) {
-                  const run = await readRun(workspace, session.run_id)
-                  cwd = run.worktree_path
-                  const task = run.tasks[run.current_task]
-                  runContext = [
-                    '',
-                    'Current run state:',
-                    `- State: ${run.state}`,
-                    `- Iteration: ${run.iteration}/${run.max_iterations}`,
-                    `- Current task: ${task?.title ?? 'None'}`,
-                    `- Task prompt: ${task?.prompt ?? 'None'}`,
-                    `- Required verification: ${task?.verify.join(', ') || 'None'}`,
-                    `- Latest verification evidence: ${JSON.stringify(run.verify_results).slice(-4000) || 'None'}`,
-                  ].join('\n')
-                } else {
-                  cwd = workspace
-                }
-                const ks = await kode.createSession(
-                  session.backend_key,
-                  cwd,
-                  resumeUuid === null ? `${buildSessionResumeContext(session)}${runContext}` : undefined,
-                  resumeUuid ?? undefined,
-                )
-                await updateSpecOpsSession(workspace, sessionId, (r) => {
-                  r.kode_session_id = ks.id
-                  r.state = 'active'
-                })
-                await recordAgent(workspace, sessionId, ks, 'repair')
-                if (session.run_id !== null) watchRun(session.run_id, workspace, ks.id)
-                watchSpecOpsSessionTranscript(kode, workspace, sessionId, ks.id)
-                const updated = await readSpecOpsSession(workspace, sessionId)
-                specOpsSessionEvents.publish('session.updated', sessionId, { phase: updated.phase, state: updated.state })
-                return json(response, 200, { session: updated })
-              }
-              if (session.phase === 'review' || session.phase === 'apply_patch') {
-                // Return current state — frontend will show review/apply UI
-                const updated = await updateSpecOpsSession(workspace, sessionId, (r) => { r.state = 'active' })
-                specOpsSessionEvents.publish('session.updated', sessionId, { phase: updated.phase, state: updated.state })
-                return json(response, 200, { session: updated })
+                const rebuilt = await rebuildSpecOpsExecution(kode, workspace, session)
+                return json(response, 200, { session: rebuilt.session })
               }
               return json(response, 400, { error: 'unsupported_resume_phase', phase: session.phase })
             }

@@ -490,8 +490,11 @@ describe('SpecOps server', () => {
   function buildKodeMock(overrides: {
     getSession?: (id: number) => KodeSession | Promise<KodeSession>
     createSession?: (backendKey: string, cwd: string, initialPrompt?: string, resumeSessionUuid?: string, model?: string) => KodeSession | Promise<KodeSession>
-  } = {}): { kode: KodeClient; calls: { createSession: Array<{ backendKey: string; cwd: string; initialPrompt: string | undefined; resumeSessionUuid: string | undefined }> } } {
-    const calls = { createSession: [] as Array<{ backendKey: string; cwd: string; initialPrompt: string | undefined; resumeSessionUuid: string | undefined }> }
+  } = {}): { kode: KodeClient; calls: { createSession: Array<{ backendKey: string; cwd: string; initialPrompt: string | undefined; resumeSessionUuid: string | undefined }>; sendPrompt: Array<{ id: number; prompt: string }> } } {
+    const calls = {
+      createSession: [] as Array<{ backendKey: string; cwd: string; initialPrompt: string | undefined; resumeSessionUuid: string | undefined }>,
+      sendPrompt: [] as Array<{ id: number; prompt: string }>,
+    }
     const socket = { on: () => socket, close: () => undefined }
     const defaultGetSession = async (id: number) => ({ id, backend_key: 'codebuddy', status: 'idle' })
     const defaultCreateSession = async (backendKey: string, cwd: string, initialPrompt?: string, resumeSessionUuid?: string) => {
@@ -501,6 +504,7 @@ describe('SpecOps server', () => {
     const kode = {
       getSession: overrides.getSession ?? defaultGetSession,
       createSession: overrides.createSession ?? defaultCreateSession,
+      sendPrompt: async (id: number, prompt: string) => { calls.sendPrompt.push({ id, prompt }) },
       subscribe: () => socket,
       history: async () => ({ events: [], next_from: 0 }),
       killSession: async () => undefined,
@@ -662,6 +666,41 @@ describe('SpecOps server', () => {
     expect(recovered?.execution).toMatchObject({ state: 'resumable', resume_mode: 'exact' })
     expect(recovered?.agents[0]).toMatchObject({ kode_session_id: 66, status: 'exited' })
     expect(recovered?.agents[0]?.ended_at).not.toBeNull()
+  })
+
+  test('sending in review auto-resumes a destroyed kode session before delivering input', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const specopsSession = await createSpecOpsSession(workspace, {
+      title: 'Review discussion',
+      backend_key: 'codebuddy',
+      kode_session_id: null,
+      phase: 'review',
+      state: 'awaiting_user',
+    })
+    await attachSessionAgent(workspace, specopsSession.id, {
+      kode_session_id: 77,
+      session_uuid: 'review-resume-uuid-77',
+      backend_key: 'codebuddy',
+      model: null,
+      purpose: 'review',
+      status: 'exited',
+    })
+    const { kode, calls } = buildKodeMock()
+    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
+    servers.push(server)
+
+    const response = await fetch(`${server.origin}/api/sessions/${specopsSession.id}/input`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ text: 'Please revise this review finding.' }),
+    }))
+    expect(response.status).toBe(200)
+    expect(calls.createSession[0]?.resumeSessionUuid).toBe('review-resume-uuid-77')
+    expect(calls.sendPrompt).toEqual([{ id: 9001, prompt: 'Please revise this review finding.' }])
+    const body = await response.json() as { session: { kode_session_id: number; transcript: Array<{ text: string; kode_session_id: number }> } }
+    expect(body.session.kode_session_id).toBe(9001)
+    expect(body.session.transcript.at(-1)).toMatchObject({ text: 'Please revise this review finding.', kode_session_id: 9001 })
   })
 
   test('resume on run_in_worktree rebuilds inside the run worktree with the implement agent UUID', async () => {

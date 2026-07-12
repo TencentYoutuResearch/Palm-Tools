@@ -536,6 +536,9 @@ export const RESUMABLE_SESSION_PHASES = new Set<SpecOpsPhase>([
   'plan_discussion',
   'solution_options',
   'plan_approved',
+  'verify',
+  'review',
+  'apply_patch',
 ])
 
 export function isTerminalSessionState(state: SpecOpsSessionState): boolean {
@@ -608,6 +611,17 @@ export function resumeUuidForPhase(record: SpecOpsSessionRecord): string | null 
     if (purpose !== undefined && agent.purpose === purpose && agent.session_uuid !== null) {
       return agent.session_uuid
     }
+  }
+  // Post-implementation gates must never fall back to an unrelated intake or
+  // plan conversation. If the implementation/review execution has no UUID,
+  // rebuild from the durable Run + Decision context instead.
+  if (record.phase === 'verify' || record.phase === 'review' || record.phase === 'apply_patch') {
+    const allowed = new Set<AgentPurpose>(['implement', 'repair', 'review'])
+    for (let i = record.agents.length - 1; i >= 0; i -= 1) {
+      const agent = record.agents[i]!
+      if (allowed.has(agent.purpose) && agent.session_uuid !== null) return agent.session_uuid
+    }
+    return null
   }
   for (let i = record.agents.length - 1; i >= 0; i -= 1) {
     const agent = record.agents[i]!

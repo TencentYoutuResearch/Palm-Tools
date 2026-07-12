@@ -50,6 +50,13 @@
     verify: string[];
   }
 
+  type WorkflowStripState = 'done' | 'active' | 'waiting' | 'failed';
+
+  interface WorkflowStripStep {
+    label: string;
+    state: WorkflowStripState;
+  }
+
   let { source, path, title, status, session = null, files = [] }: Props = $props();
 
   let hostEl: HTMLElement | null = $state(null);
@@ -65,14 +72,11 @@
   let overrides = $state<Record<string, string>>({});
   let activity = $state<ActivityItem[]>([]);
 
-  const workflow = [
-    { label: 'Intake', state: 'done' },
-    { label: 'Plan', state: 'active' },
-    { label: 'Build', state: 'waiting' },
-    { label: 'Verify', state: 'waiting' },
-    { label: 'Apply', state: 'waiting' },
-  ];
-
+  let workflow = $derived(buildWorkflowStrip(session, status));
+  let workflowIndex = $derived.by(() => {
+    const current = workflow.findIndex((step) => step.state === 'active' || step.state === 'failed');
+    return current === -1 ? workflow.length : current;
+  });
   let blocks = $derived(buildBlocks(source, overrides));
   let planBlocks = $derived(blocks.filter((block) => block.kind === 'plan' || block.kind === 'flow').slice(0, 3));
   let taskBlocks = $derived(blocks.filter((block) => block.kind === 'task_list').slice(0, 4));
@@ -83,6 +87,37 @@
   let launchTasks = $derived(buildLaunchTasks(tasksSource ?? source, title, path));
   let canLaunchRun = $derived(session !== null && requiredAction?.kind === 'run_in_worktree');
   let canLaunchStandalone = $derived(session === null && status === 'proposed' && path.replace(/\/+$/, '').startsWith('.specops/changes/'));
+
+  function buildWorkflowStrip(current: SpecOpsSession | null, documentStatus: string): WorkflowStripStep[] {
+    const groups = [
+      { label: 'Intake', phases: ['clarify', 'analyze_request'] },
+      { label: 'Plan', phases: ['plan_discussion', 'solution_options', 'plan_approved'] },
+      { label: 'Build', phases: ['run_in_worktree'] },
+      { label: 'Verify', phases: ['verify'] },
+      { label: 'Review', phases: ['review'] },
+      { label: 'Apply', phases: ['apply_patch', 'completed'] },
+    ];
+    if (current === null) {
+      if (documentStatus === 'completed' || documentStatus === 'archived') {
+        return groups.map((group) => ({ label: group.label, state: 'done' }));
+      }
+      return groups.map((group, index) => ({ label: group.label, state: index === 0 ? 'done' : index === 1 ? 'active' : 'waiting' }));
+    }
+    if (current.state === 'completed') return groups.map((group) => ({ label: group.label, state: 'done' }));
+    const phase = current.workflow?.current_phase ?? current.phase ?? '';
+    const activeIndex = groups.findIndex((group) => group.phases.includes(phase));
+    const safeIndex = activeIndex === -1 ? 0 : activeIndex;
+    return groups.map((group, index) => ({
+      label: group.label,
+      state: index < safeIndex
+        ? 'done'
+        : index > safeIndex
+          ? 'waiting'
+          : current.state === 'failed' || current.state === 'cancelled'
+            ? 'failed'
+            : 'active',
+    }));
+  }
 
   $effect(() => {
     const taskPath = taskDocumentPath(path, files);
@@ -103,8 +138,9 @@
   }
 
   function blockStatus(kind: SpecBlock['kind'], index: number): SpecBlock['status'] {
-    if (kind === 'plan' || kind === 'flow') return 'active';
-    if (kind === 'task_list' || kind === 'test_matrix') return index < 3 ? 'waiting' : 'draft';
+    if (kind === 'plan' || kind === 'flow') return workflowIndex > 1 ? 'applied' : workflowIndex === 1 ? 'active' : 'draft';
+    if (kind === 'task_list') return workflowIndex > 2 ? 'applied' : workflowIndex === 2 ? 'active' : 'waiting';
+    if (kind === 'test_matrix') return workflowIndex > 3 ? 'applied' : workflowIndex === 3 ? 'active' : 'waiting';
     return 'draft';
   }
 
@@ -454,7 +490,7 @@
     <div class="tracker">
       <span class="tracker-label">Plan</span>
       <strong>{planBlocks.length || 1}</strong>
-      <span>active block{planBlocks.length === 1 ? '' : 's'}</span>
+      <span>documented block{planBlocks.length === 1 ? '' : 's'}</span>
     </div>
     <div class="tracker">
       <span class="tracker-label">Tasks</span>
@@ -791,6 +827,13 @@
   .step[data-state='active'] .dot {
     background: var(--st-info);
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--st-info) 16%, transparent);
+  }
+  .step[data-state='failed'] {
+    color: var(--st-err);
+  }
+  .step[data-state='failed'] .dot {
+    background: var(--st-err);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--st-err) 14%, transparent);
   }
   .trackers {
     display: grid;

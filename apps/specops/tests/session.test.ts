@@ -109,6 +109,28 @@ describe('resumeUuidForPhase', () => {
     })
     expect(resumeUuidForPhase(await readSpecOpsSession(workspace, created.id))).toBeNull()
   })
+
+  test('review does not resume an unrelated plan agent when implementation has no UUID', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const created = await createSpecOpsSession(workspace, {
+      title: 'Review recovery',
+      backend_key: 'codebuddy',
+      kode_session_id: null,
+      phase: 'review',
+      state: 'awaiting_user',
+    })
+    await updateSpecOpsSession(workspace, created.id, (record) => {
+      record.agents = [
+        { kode_session_id: 1, session_uuid: 'plan-only-uuid', backend_key: 'codebuddy', model: null, purpose: 'plan', status: 'exited', started_at: '2026-01-01T00:00:00Z', ended_at: '2026-01-01T01:00:00Z' },
+        { kode_session_id: 2, session_uuid: null, backend_key: 'codebuddy', model: null, purpose: 'implement', status: 'exited', started_at: '2026-01-02T00:00:00Z', ended_at: '2026-01-02T01:00:00Z' },
+      ]
+    })
+    const loaded = await readSpecOpsSession(workspace, created.id)
+    expect(resumeUuidForPhase(loaded)).toBeNull()
+    expect(loaded.execution).toMatchObject({ state: 'restartable', resume_mode: 'fresh_context' })
+  })
 })
 
 describe('buildSessionResumeContext', () => {
