@@ -168,6 +168,63 @@ describe('branch-based apply', () => {
     await cleanupRun(run)
   })
 
+  test('already-landed implementation closes as a no-op and preserves newer canonical docs', async () => {
+    const { workspace, cache } = await fixture()
+    const changeId = 'already-landed-change'
+    const folder = path.join(workspace, '.specops', 'changes', changeId)
+    await mkdir(folder, { recursive: true })
+    const proposal = [
+      '---',
+      'schema_version: 1',
+      `id: ${changeId}`,
+      'kind: change',
+      'title: Already landed',
+      'status: proposed',
+      '---',
+      '',
+      '# Already landed',
+      '',
+      'Canonical main document.',
+      '',
+    ].join('\n')
+    await writeFile(path.join(folder, 'proposal.md'), proposal)
+
+    const run = await createRun(
+      workspace,
+      [{ id: 'task-1', title: 'Land once', prompt: 'append implementation', verify: [] }],
+      'codebuddy',
+      'HEAD',
+      cache,
+      changeId,
+    )
+    const baseSource = await readFile(path.join(workspace, 'change.txt'), 'utf8')
+    await writeFile(path.join(run.worktree_path, 'change.txt'), `${baseSource}implementation landed\n`)
+    const runFolder = path.join(run.worktree_path, '.specops', 'changes', changeId)
+    await mkdir(runFolder, { recursive: true })
+    await writeFile(path.join(runFolder, 'proposal.md'), proposal.replace('Canonical main document.', 'Older run document.'))
+    await writeFile(path.join(runFolder, 'tasks.md'), '# Tasks\n\n- [x] Land once\n')
+    await transitionRun(run, 'awaiting_verify')
+    await transitionRun(run, 'awaiting_review')
+    await collectRunPatch(run)
+
+    // The implementation reaches main through another commit path, while the
+    // canonical documents become newer/richer than the stale Run copies.
+    await writeFile(path.join(workspace, 'change.txt'), `${baseSource}implementation landed\n`)
+    await writeFile(path.join(folder, 'proposal.md'), proposal.replace('Canonical main document.', 'Canonical main document.\n\nNewer detail.'))
+    await writeFile(path.join(folder, 'tasks.md'), '# Tasks\n\n- [x] Land once\n- [x] Preserve evidence\n')
+    await git(workspace, ['add', '-A'])
+    await git(workspace, ['commit', '-q', '-m', 'land through another path'])
+    const headBefore = await git(workspace, ['rev-parse', 'HEAD'])
+
+    const result = await applyWithVerify(run)
+    expect(result).toMatchObject({ applied: false, allOk: true, reason: 'already_landed' })
+    expect((await readRun(workspace, run.run_id)).state).toBe('completed')
+    expect(await git(workspace, ['rev-parse', 'HEAD'])).toBe(headBefore)
+    expect(await readFile(path.join(folder, 'tasks.md'), 'utf8')).toContain('Preserve evidence')
+    expect(parseDocument(await readFile(path.join(folder, 'proposal.md'), 'utf8'), 'proposal.md').frontmatter.status).toBe('completed')
+    await cleanupRun(run)
+  })
+
   test('workspace dirty (non-specops) blocks apply', async () => {
     const { workspace, cache } = await fixture()
     const run = await createRun(workspace, [{ id: 'task-1', title: 'Add file', prompt: 'add x.txt', verify: [] }], 'codebuddy', 'HEAD', cache)

@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -514,6 +514,65 @@ export async function isRunPatchEmpty(run: RunRecord): Promise<boolean> {
   const patchPath = pathInside(run.workspace_root, '.specops', 'runs', run.run_id, 'output.patch')
   if (!await exists(patchPath)) return true
   return (await readFile(patchPath, 'utf8')).trim().length === 0
+}
+
+/**
+ * Detect a stale Run whose implementation is already present in the current
+ * HEAD through another commit path. This is intentionally conservative:
+ *
+ * - at least one non-SpecOps implementation file must have changed;
+ * - every implementation delta must reverse-apply cleanly to the HEAD index;
+ * - changed change-doc files must already exist under the same canonical
+ *   change id in HEAD.
+ *
+ * The check uses a temporary index, so it neither reads nor mutates the user's
+ * working tree. It prevents an old branch from overwriting newer canonical
+ * documents merely because its code change has already landed.
+ */
+export async function isRunAlreadyLanded(run: RunRecord): Promise<boolean> {
+  if (!run.branch || run.change_id === null) return false
+  const changed = (await git(run.workspace_root, ['diff', '--name-only', run.base_commit, run.branch, '--']))
+    .split(/\r?\n/)
+    .map((file) => file.trim())
+    .filter(Boolean)
+  if (changed.length === 0) return false
+
+  const documentPrefix = `.specops/changes/${run.change_id}/`
+  const implementationFiles = changed.filter((file) => !file.startsWith(documentPrefix))
+  if (implementationFiles.length === 0) return false
+
+  const proposalPath = `${documentPrefix}proposal.md`
+  try {
+    const proposal = parseDocument(await git(run.workspace_root, ['show', `HEAD:${proposalPath}`]), proposalPath)
+    if (proposal.frontmatter.id !== run.change_id) return false
+    for (const file of changed.filter((item) => item.startsWith(documentPrefix))) {
+      await execFile('git', ['-C', run.workspace_root, 'cat-file', '-e', `HEAD:${file}`])
+    }
+  } catch {
+    return false
+  }
+
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'specops-landed-check-'))
+  const indexFile = path.join(scratch, 'index')
+  const env = { ...process.env, GIT_INDEX_FILE: indexFile }
+  try {
+    await execFile('git', ['-C', run.workspace_root, 'read-tree', 'HEAD'], { env })
+    for (let index = 0; index < implementationFiles.length; index += 1) {
+      const file = implementationFiles[index]!
+      const patch = await git(run.workspace_root, ['diff', '--binary', run.base_commit, run.branch, '--', file])
+      if (patch.trim() === '') continue
+      const patchFile = path.join(scratch, `${index}.patch`)
+      await writeFile(patchFile, patch.endsWith('\n') ? patch : `${patch}\n`, 'utf8')
+      try {
+        await execFile('git', ['-C', run.workspace_root, 'apply', '--cached', '--reverse', '--check', patchFile], { env })
+      } catch {
+        return false
+      }
+    }
+    return true
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
 }
 
 export interface ApplyResult {

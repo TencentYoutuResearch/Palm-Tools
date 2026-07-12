@@ -3,7 +3,7 @@ schema_version: 1
 id: specops-composer-ime-enter-guard
 kind: bug
 title: SpecOps 输入框在 IME 组合期回车误发送消息
-status: proposed
+status: completed
 verifies:
   - specops
 paths:

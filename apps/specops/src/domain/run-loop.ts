@@ -8,6 +8,7 @@ import {
   collectRunPatch,
   createRun,
   isRunPatchEmpty,
+  isRunAlreadyLanded,
   transitionRun,
   writeRun,
   type ApplyResult,
@@ -310,6 +311,10 @@ export async function decideRun(
 
 export async function applyCompletedRun(run: RunRecord): Promise<{ applied: boolean; reason?: string; commit?: string | undefined }> {
   if (run.state !== 'completed') throw new SpecOpsError('run_not_completed', `Run ${run.run_id} is ${run.state}`)
+  if (await isRunAlreadyLanded(run)) {
+    if (run.change_id !== null) await markChangeCompleted(run.workspace_root, run.change_id)
+    return { applied: false, reason: 'already_landed' }
+  }
   if (await isRunPatchEmpty(run)) {
     // Outputs already live in the base commit (intake committed them) or the
     // agent produced nothing. Treat as a successful no-op rather than failing.
@@ -328,6 +333,13 @@ export async function applyCompletedRun(run: RunRecord): Promise<{ applied: bool
 
 export async function applyWithVerify(run: RunRecord): Promise<{ run: RunRecord; verifyResults: VerifyResult[]; allOk: boolean; applied: boolean; reason?: string; commit?: string | undefined }> {
   if (run.state !== 'awaiting_review' && run.state !== 'completed') throw new SpecOpsError('run_not_reviewable', `Run ${run.run_id} is ${run.state}`)
+  if (await isRunAlreadyLanded(run)) {
+    if (run.state === 'awaiting_review') await transitionRun(run, 'applying')
+    await transitionRun(run, 'applied')
+    await transitionRun(run, 'completed')
+    if (run.change_id !== null) await markChangeCompleted(run.workspace_root, run.change_id)
+    return { run, verifyResults: [], allOk: true, applied: false, reason: 'already_landed' }
+  }
   if (await isRunPatchEmpty(run)) {
     // Nothing to apply — mark completed as a no-op (outputs already in base).
     await transitionRun(run, 'applying')
