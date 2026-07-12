@@ -51,6 +51,16 @@ export interface KodeEvent {
   payload: unknown
 }
 
+export class KodeRequestError extends SpecOpsError {
+  readonly status: number
+
+  constructor(status: number, method: string, path: string, detail: string) {
+    super('kode_request_failed', `${method} ${path}: ${status} ${detail}`)
+    this.name = 'KodeRequestError'
+    this.status = status
+  }
+}
+
 /**
  * One entry returned by GET /sessions/:id/transcript. `kind` discriminates:
  * - `text`: ordinary user/agent message (carries `text`)
@@ -98,7 +108,7 @@ export class KodeClient {
     })
     if (!response.ok) {
       const detail = await response.text()
-      throw new SpecOpsError('kode_request_failed', `${init.method ?? 'GET'} ${path}: ${response.status} ${detail}`)
+      throw new KodeRequestError(response.status, init.method ?? 'GET', path, detail)
     }
     if (response.status === 204) return undefined as T
     return response.json() as Promise<T>
@@ -193,6 +203,13 @@ export class KodeClient {
       method: 'POST',
       body: JSON.stringify({ question_id: questionId, choice_index: choiceIndex, ...(freeText !== undefined ? { free_text: freeText } : {}) }),
     })
+    // The bridge selects the CLI's numbered "Other" option. Most interactive
+    // backends then open a text field, so submit the actual free-form answer as
+    // the next PTY interaction instead of silently dropping it.
+    if (freeText !== undefined && freeText.trim() !== '') {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      await this.sendPrompt(id, freeText.trim())
+    }
   }
 
   async killSession(id: number): Promise<void> {

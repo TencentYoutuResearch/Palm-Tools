@@ -21,6 +21,16 @@ export type SpecOpsPhase =
 
 export type SpecOpsSessionState = 'created' | 'active' | 'awaiting_user' | 'closed' | 'completed' | 'failed' | 'cancelled'
 
+export type SessionExecutionState = 'live' | 'resumable' | 'restartable' | 'detached' | 'unverified' | 'unavailable' | 'history'
+export type SessionResumeMode = 'exact' | 'fresh_context' | 'none'
+
+export interface SessionExecution {
+  state: SessionExecutionState
+  resume_mode: SessionResumeMode
+  last_reconciled_at: string | null
+  last_error: string | null
+}
+
 export type RequiredAction =
   | { kind: 'answer'; prompt: string; question_id?: string; header?: string; options?: Array<{ label: string; description?: string }>; multi_select?: boolean }
   | { kind: 'promote_intake'; prompt: string }
@@ -30,6 +40,26 @@ export type RequiredAction =
   | { kind: 'verify' }
   | { kind: 'review'; patch_files: string[]; review_note?: string }
   | { kind: 'apply_patch' }
+
+export type SessionDecisionKind = 'answer' | 'plan_review'
+export type SessionDecisionOutcome = 'answered' | 'approved' | 'revision_requested'
+
+/**
+ * Durable user decisions made at workflow gates. Transcript text remains useful
+ * for conversation replay, but it is not a reliable source of approved scope or
+ * plan state; consumers should use this ledger instead.
+ */
+export interface SessionDecision {
+  id: string
+  kind: SessionDecisionKind
+  outcome: SessionDecisionOutcome
+  prompt: string | null
+  selections: string[]
+  note: string | null
+  source: 'user'
+  kode_session_id: number | null
+  at: string
+}
 
 export interface TranscriptEntry {
   role: 'agent' | 'user' | 'system'
@@ -109,9 +139,11 @@ export interface SpecOpsSessionRecord {
   document_path: string | null
   phase: SpecOpsPhase
   state: SpecOpsSessionState
+  execution: SessionExecution
   required_action: RequiredAction | null
   /** question_id / plan_id values already answered, so the monitor won't re-surface them. */
   answered_action_ids: string[]
+  decisions: SessionDecision[]
   workflow: WorkflowState
   agents: SessionAgent[]
   transcript_cursor: number
@@ -134,6 +166,7 @@ export interface CreateSpecOpsSessionInput {
   workflow?: WorkflowState
   agents?: SessionAgent[]
   transcript?: TranscriptEntry[]
+  decisions?: SessionDecision[]
 }
 
 export type SpecOpsSessionSummary = Pick<SpecOpsSessionRecord,
@@ -145,7 +178,9 @@ export type SpecOpsSessionSummary = Pick<SpecOpsSessionRecord,
   | 'document_path'
   | 'phase'
   | 'state'
+  | 'execution'
   | 'required_action'
+  | 'decisions'
   | 'workflow'
   | 'agents'
   | 'created_at'
@@ -260,6 +295,7 @@ function syncWorkflow(record: SpecOpsSessionRecord): void {
 function normalizeRecord(record: SpecOpsSessionRecord): SpecOpsSessionRecord {
   record.agents ??= []
   record.answered_action_ids ??= []
+  record.decisions ??= []
   // Backfill per-agent cursor for files written before segmentation existed.
   for (const agent of record.agents) {
     if (typeof agent.transcript_cursor !== 'number') agent.transcript_cursor = 0
@@ -274,6 +310,12 @@ function normalizeRecord(record: SpecOpsSessionRecord): SpecOpsSessionRecord {
     }
   }
   record.workflow ??= createWorkflow(record.phase, record.state)
+  const derivedExecution = deriveSessionExecution(record)
+  record.execution = {
+    ...derivedExecution,
+    last_reconciled_at: record.execution?.last_reconciled_at ?? null,
+    last_error: record.execution?.last_error ?? null,
+  }
   syncWorkflow(record)
   return record
 }
@@ -289,7 +331,9 @@ function summarize(record: SpecOpsSessionRecord): SpecOpsSessionSummary {
     document_path: record.document_path,
     phase: record.phase,
     state: record.state,
+    execution: record.execution,
     required_action: record.required_action,
+    decisions: record.decisions,
     workflow: record.workflow,
     agents: record.agents,
     created_at: record.created_at,
@@ -319,8 +363,15 @@ export async function createSpecOpsSession(workspaceInput: string, input: Create
     document_path: input.document_path ?? null,
     phase: input.phase,
     state: input.state ?? 'active',
+    execution: {
+      state: (input.kode_session_id ?? null) === null ? 'restartable' : 'live',
+      resume_mode: (input.kode_session_id ?? null) === null ? 'fresh_context' : 'none',
+      last_reconciled_at: null,
+      last_error: null,
+    },
     required_action: input.required_action ?? null,
     answered_action_ids: [],
+    decisions: input.decisions ?? [],
     workflow: input.workflow ?? createWorkflow(input.phase, input.state ?? 'active'),
     agents: input.agents ?? [],
     transcript_cursor: 0,
@@ -476,6 +527,66 @@ const PHASE_PURPOSE: Record<SpecOpsPhase, AgentPurpose | undefined> = {
   completed: undefined,
   failed: undefined,
   cancelled: undefined,
+}
+
+export const RESUMABLE_SESSION_PHASES = new Set<SpecOpsPhase>([
+  'run_in_worktree',
+  'analyze_request',
+  'clarify',
+  'plan_discussion',
+  'solution_options',
+  'plan_approved',
+])
+
+export function isTerminalSessionState(state: SpecOpsSessionState): boolean {
+  return state === 'closed' || state === 'completed' || state === 'failed' || state === 'cancelled'
+}
+
+/** Derive the durable recovery posture without assuming a numeric kode id is still alive. */
+export function deriveSessionExecution(record: SpecOpsSessionRecord): SessionExecution {
+  if (isTerminalSessionState(record.state)) {
+    return { state: 'history', resume_mode: 'none', last_reconciled_at: null, last_error: null }
+  }
+  if (record.kode_session_id !== null) {
+    return { state: 'live', resume_mode: 'none', last_reconciled_at: null, last_error: null }
+  }
+  if (!RESUMABLE_SESSION_PHASES.has(record.phase)) {
+    return { state: 'detached', resume_mode: 'none', last_reconciled_at: null, last_error: null }
+  }
+  if (resumeUuidForPhase(record) !== null) {
+    return { state: 'resumable', resume_mode: 'exact', last_reconciled_at: null, last_error: null }
+  }
+  return { state: 'restartable', resume_mode: 'fresh_context', last_reconciled_at: null, last_error: null }
+}
+
+/** Compact durable context for a replacement agent; deliberately excludes raw chat/tool history. */
+export function buildSessionResumeContext(record: SpecOpsSessionRecord): string {
+  const decisions = record.decisions.length === 0
+    ? '- None recorded.'
+    : record.decisions.map((decision) => {
+      const answer = [...decision.selections, decision.note].filter((item): item is string => Boolean(item)).join('; ')
+      return `- ${decision.kind}/${decision.outcome}: ${decision.prompt ?? 'No prompt'}${answer ? ` => ${answer}` : ''}`
+    }).join('\n')
+  const requiredAction = record.required_action === null ? 'None' : JSON.stringify(record.required_action)
+  const completedSteps = record.workflow.steps.filter((step) => step.state === 'done').map((step) => step.id).join(', ') || 'None'
+  return [
+    'Continue this existing SpecOps workflow in a new CLI session.',
+    'Treat the durable workflow state below as authoritative; do not repeat resolved questions.',
+    '',
+    `Session: ${record.title} (${record.id})`,
+    `Workspace: ${record.workspace_root}`,
+    `Phase: ${record.phase}`,
+    `Document: ${record.document_path ?? 'None'}`,
+    `Run: ${record.run_id ?? 'None'}`,
+    `Completed workflow steps: ${completedSteps}`,
+    `Workflow failure count: ${record.workflow.failure_count}`,
+    `Required action: ${requiredAction}`,
+    '',
+    'Confirmed decisions:',
+    decisions,
+    '',
+    'Inspect the repository and durable SpecOps documents before continuing.',
+  ].join('\n')
 }
 
 /**

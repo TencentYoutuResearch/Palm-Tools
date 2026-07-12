@@ -35,6 +35,63 @@ describe('Run worktree isolation', () => {
     expect(result.patch).toContain('run output')
     await expect(readFile(path.join(workspace, 'isolated.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await readRun(workspace, run.run_id)).worktree_path).toBe(run.worktree_path)
+    expect(run.manifest).toMatchObject({
+      schema_version: 1,
+      workflow: { kind: 'feature' },
+      backend: { key: 'codebuddy', plugin: 'builtin.kode' },
+      scope: { base_commit: run.base_commit, task_ids: ['task-1'] },
+      limits: { max_iterations: 8 },
+    })
+    await cleanupRun(run)
+  })
+
+  test('snapshots project, workflow, backend, and verification profiles in the Run manifest', async () => {
+    const { workspace, cache } = await fixture()
+    await mkdir(path.join(workspace, '.specops', 'plugins'), { recursive: true })
+    await writeFile(path.join(workspace, '.specops', 'plugins', 'company-codebuddy.json'), `${JSON.stringify({
+      schema_version: 1,
+      id: 'company.codebuddy',
+      version: '1.0.0',
+      kind: 'backend',
+      capabilities: ['session.create', 'conversation.ask'],
+    })}\n`)
+    await writeFile(path.join(workspace, 'specops.toml'), [
+      'schema_version = 1',
+      '',
+      '[project]',
+      'name = "manifest-fixture"',
+      'profiles = ["desktop", "rust"]',
+      '',
+      '[agent_backends.codebuddy]',
+      'plugin = "company.codebuddy"',
+      'capabilities = ["session.create", "conversation.ask"]',
+      '',
+      '[workflow.feature]',
+      'stages = ["clarify", "plan", "build", "verify", "review", "apply"]',
+      '',
+      '[verify.fast]',
+      'command = ["true"]',
+      '',
+    ].join('\n'))
+    const run = await createRun(workspace, [{ id: 'task-profiled', title: 'Profiled', prompt: 'noop', verify: ['fast'] }], 'codebuddy', 'HEAD', cache)
+    expect(run.manifest).toMatchObject({
+      project_profiles: ['desktop', 'rust'],
+      workflow: { kind: 'feature', stages: ['clarify', 'plan', 'build', 'verify', 'review', 'apply'] },
+      backend: {
+        key: 'codebuddy',
+        plugin: 'company.codebuddy',
+        capabilities: ['session.create', 'conversation.ask'],
+      },
+      verification: { required: ['fast'] },
+    })
+
+    await writeFile(path.join(workspace, 'specops.toml'), [
+      'schema_version = 1',
+      '[project]',
+      'name = "changed-after-launch"',
+      'profiles = ["web"]',
+    ].join('\n'))
+    expect((await readRun(workspace, run.run_id)).manifest.project_profiles).toEqual(['desktop', 'rust'])
     await cleanupRun(run)
   })
 
@@ -648,4 +705,3 @@ describe('transitionRun session phase sync', () => {
     await cleanupRun(run)
   })
 })
-

@@ -24,10 +24,14 @@ export function buildClarifyPrompt(request: string, clarifyId: string): string {
     'and resolve ambiguities BEFORE any documents are created.',
     '',
     'Use the EnterPlanMode tool to explore the codebase in read-only plan mode.',
-    'In plan mode, inspect the repository, identify gaps, and ask clarifying questions.',
-    'Write a draft spec/plan in the plan file — the user will review it.',
+    'Inspect the repository and classify uncertainty as blocking, defaultable, or discovered.',
+    'Use AskUserQuestion for blocking uncertainty before writing the final plan.',
+    'Ask at most 3 focused questions per round. Include a recommended option and its impact.',
+    'Use single-select questions so every answer maps to one durable decision.',
+    'Do not hide unanswered questions inside the plan.',
+    'Write the draft spec/plan only after blocking uncertainty is resolved or the user explicitly accepts a default.',
     '',
-    'When you are ready for user review, call ExitPlanMode to submit the plan.',
+    'Call ExitPlanMode only when scope, non-goals, acceptance criteria, and material risks are explicit.',
     'After the user approves the plan, you may be asked to refine further',
     'or the session will be promoted into intake.',
     '',
@@ -41,5 +45,7 @@ export function buildClarifyPrompt(request: string, clarifyId: string): string {
 }
 
 export function detectClarifyCompletion(agentText: string): boolean {
+  // Legacy compatibility for older backends. New workflows use structured
+  // plan_proposed / ask_user_question events as the source of truth.
   return /(^|\n)\s*CLARIFY_COMPLETE\s*(\n|$)/.test(agentText)
 }

@@ -7,14 +7,6 @@
   import { onWindowDragMouseDown } from '../../lib/windowDrag.ts';
 
   const shortId = (id?: string): string => id ? id.slice(0, 8) : '—';
-  const resumablePhases = new Set([
-    'run_in_worktree',
-    'analyze_request',
-    'clarify',
-    'plan_discussion',
-    'solution_options',
-    'plan_approved',
-  ]);
   const stateTone = (state?: string | null): 'active' | 'busy' | 'error' | 'completed' | 'archived' =>
     state === 'awaiting_user'
       ? 'busy'
@@ -33,8 +25,12 @@
     const session = $activeSession;
     if (!session?.phase) return false;
     if (session.state === 'completed' || session.state === 'closed' || session.state === 'failed' || session.state === 'cancelled') return false;
-    return resumablePhases.has(session.phase);
+    return session.execution?.resume_mode === 'exact' || session.execution?.resume_mode === 'fresh_context';
   });
+
+  let resumeLabel = $derived(
+    $activeSession?.execution?.resume_mode === 'fresh_context' ? t('Restart with context') : t('Resume'),
+  );
 
   async function resumeSession(): Promise<void> {
     const id = $activeSessionId;
@@ -70,10 +66,10 @@
           disabled={resumeBusy}
           onclick={resumeSession}
           aria-label={t('Resume session')}
-          title={t('Resume session')}
+          title={resumeLabel}
         >
           <Icon name="rotate-cw" size={13} />
-          <span>{resumeBusy ? t('Resuming') : t('Resume')}</span>
+          <span>{resumeBusy ? t('Resuming') : resumeLabel}</span>
         </button>
       {/if}
       <StatusBadge label={$activeSession.state ?? 'created'} tone={stateTone($activeSession.state)} />

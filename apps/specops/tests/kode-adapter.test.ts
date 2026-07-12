@@ -86,5 +86,15 @@ describe('KodeClient', () => {
 
     await client.focusSession(7)
     expect(requests[6]).toMatchObject({ url: '/api/v1/sessions/7/focus', body: null })
+
+    await client.answer(7, 'question-1', 2, 'Use the existing desktop behavior')
+    expect(requests[7]).toMatchObject({
+      url: '/api/v1/sessions/7/answer',
+      body: { question_id: 'question-1', choice_index: 2, free_text: 'Use the existing desktop behavior' },
+    })
+    const freeTextBody = requests[8]?.body as { bytes_b64: string }
+    expect(Buffer.from(freeTextBody.bytes_b64, 'base64').toString('utf8')).toBe('\x1b[200~Use the existing desktop behavior\x1b[201~')
+    const freeTextSubmit = requests[9]?.body as { bytes_b64: string }
+    expect(Buffer.from(freeTextSubmit.bytes_b64, 'base64').toString('utf8')).toBe('\r')
   })
 })

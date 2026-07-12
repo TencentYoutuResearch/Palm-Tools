@@ -13,6 +13,8 @@ import { readRun, rollbackRunPatch, transitionRun, type RunRecord, type Task } f
 import { initRunMonitor, watchRun } from '../domain/run-monitor.js'
 import { buildIntakePrompt, parseIntakeReceipt, checkProposal, buildIntakePlanPrompt, LANGUAGE_DIRECTIVE } from '../domain/intake.js'
 import { buildClarifyPrompt, type ClarifyState } from '../domain/clarify.js'
+import { loadConfig } from '../domain/config.js'
+import { KNOWN_CAPABILITIES, loadPluginManifests } from '../domain/harness.js'
 import {
   appendTranscript,
   attachSessionAgent,
@@ -24,13 +26,14 @@ import {
   listSpecOpsSessionRecords,
   listSpecOpsSessions,
   readSpecOpsSession,
+  buildSessionResumeContext,
+  RESUMABLE_SESSION_PHASES,
   resumeUuidForPhase,
   updateSpecOpsSession,
-  type SpecOpsPhase,
 } from '../domain/session.js'
 import { specOpsSessionEvents } from '../domain/session-events.js'
 import { watchSpecOpsSessionTranscript } from '../domain/session-monitor.js'
-import { KodeClient } from '../adapters/kode.js'
+import { KodeClient, KodeRequestError } from '../adapters/kode.js'
 import appScript from './public/app.js' with { type: 'text' }
 import indexHtml from './public/index.html' with { type: 'text' }
 import styles from './public/styles.css' with { type: 'text' }
@@ -366,9 +369,59 @@ async function reconcileRunBackedSessions(workspace: string): Promise<void> {
   }
 }
 
-async function reconcileSessions(workspace: string): Promise<void> {
+async function detachKodeSessionAttachment(workspace: string, recordId: string, kodeSessionId: number): Promise<void> {
+  await updateSpecOpsSession(workspace, recordId, (current) => {
+    if (current.kode_session_id !== kodeSessionId) return
+    current.kode_session_id = null
+    const agent = current.agents.find((item) => item.kode_session_id === kodeSessionId)
+    if (agent !== undefined) {
+      agent.status = 'exited'
+      agent.ended_at ??= new Date().toISOString()
+    }
+    current.execution.last_reconciled_at = new Date().toISOString()
+    current.execution.last_error = null
+  })
+  specOpsSessionEvents.publish('session.updated', recordId, { kode_session_id: null })
+}
+
+async function reconcileKodeSessionAttachments(kode: KodeClient, workspace: string): Promise<void> {
+  const records = await listSpecOpsSessionRecords(workspace)
+  await Promise.all(records.map(async (record) => {
+    if (record.kode_session_id === null || isTerminalSessionState(record.state)) return
+    const kodeSessionId = record.kode_session_id
+    try {
+      const session = await kode.getSession(kodeSessionId)
+      if (session.status !== 'exited') return
+    } catch (error) {
+      // Network/auth failures are not proof that a session was destroyed.
+      // Detach only when the bridge definitively says this numeric id is gone.
+      if (!(error instanceof KodeRequestError) || error.status !== 404) return
+    }
+    await detachKodeSessionAttachment(workspace, record.id, kodeSessionId)
+  }))
+}
+
+async function reconcileSessions(workspace: string, kode?: KodeClient): Promise<void> {
   await reconcileCompletedIntakeSessions(workspace)
   await reconcileRunBackedSessions(workspace)
+  if (kode !== undefined) await reconcileKodeSessionAttachments(kode, workspace)
+}
+
+function withUnverifiedExecution<T extends {
+  kode_session_id: number | null
+  state: string
+  execution: { state: string; resume_mode: string; last_error: string | null }
+}>(session: T, kode: KodeClient | undefined): T {
+  if (kode !== undefined || session.kode_session_id === null || isTerminalSessionState(session.state)) return session
+  return {
+    ...session,
+    execution: {
+      ...session.execution,
+      state: 'unverified',
+      resume_mode: 'none',
+      last_error: 'Kode bridge unavailable; execution liveness was not checked.',
+    },
+  } as T
 }
 
 async function reattachLiveSessionMonitors(kode: KodeClient, workspace: string): Promise<void> {
@@ -377,7 +430,10 @@ async function reattachLiveSessionMonitors(kode: KodeClient, workspace: string):
     if (record.kode_session_id === null || isTerminalSessionState(record.state)) continue
     try {
       const session = await kode.getSession(record.kode_session_id)
-      if (session.status === 'exited') continue
+      if (session.status === 'exited') {
+        await detachKodeSessionAttachment(workspace, record.id, record.kode_session_id)
+        continue
+      }
       if (record.run_id !== null) {
         try {
           const run = await readRun(workspace, record.run_id)
@@ -387,9 +443,12 @@ async function reattachLiveSessionMonitors(kode: KodeClient, workspace: string):
         }
       }
       watchSpecOpsSessionTranscript(kode, workspace, record.id, record.kode_session_id)
-    } catch {
+    } catch (error) {
       // Stale numeric kode_session_id after a GUI restart. The explicit Resume
       // action can rebuild the session from the stored backend UUID.
+      if (error instanceof KodeRequestError && error.status === 404) {
+        await detachKodeSessionAttachment(workspace, record.id, record.kode_session_id)
+      }
     }
   }
 }
@@ -473,6 +532,16 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const [scan, drift, analyze] = await Promise.all([scanWorkspace(workspace), driftWorkspace(workspace), analyzeWorkspace(workspace)])
           return json(response, 200, { workspace, scan, drift, analyze })
         }
+        if (request.method === 'GET' && url.pathname === '/api/harness') {
+          const [config, plugins] = await Promise.all([loadConfig(workspace), loadPluginManifests(workspace)])
+          return json(response, 200, {
+            project: config.project,
+            workflows: config.workflows,
+            agent_backends: config.agent_backends,
+            plugins,
+            known_capabilities: KNOWN_CAPABILITIES,
+          })
+        }
         if (request.method === 'POST' && url.pathname === '/api/analyze') {
           return json(response, 200, await analyzeWorkspace(workspace))
         }
@@ -494,16 +563,17 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           return
         }
         if (request.method === 'GET' && url.pathname === '/api/sessions') {
-          await reconcileSessions(workspace)
-          return json(response, 200, { sessions: await listSpecOpsSessions(workspace) })
+          await reconcileSessions(workspace, kode)
+          const sessions = (await listSpecOpsSessions(workspace)).map((session) => withUnverifiedExecution(session, kode))
+          return json(response, 200, { sessions })
         }
         const sessionMatch = /^\/api\/sessions\/([0-9a-f-]{36})(?:\/(input|action|interrupt|answer|plan_response))?$/.exec(url.pathname)
         if (sessionMatch !== null) {
           const sessionId = sessionMatch[1] as string
           const action = sessionMatch[2]
           if (request.method === 'GET' && action === undefined) {
-            await reconcileSessions(workspace)
-            return json(response, 200, { session: await readSpecOpsSession(workspace, sessionId) })
+            await reconcileSessions(workspace, kode)
+            return json(response, 200, { session: withUnverifiedExecution(await readSpecOpsSession(workspace, sessionId), kode) })
           }
           if (request.method === 'POST' && action === 'interrupt') {
             if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
@@ -533,11 +603,26 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             const choiceIndex = typeof raw.choice_index === 'number' ? raw.choice_index : -1
             if (questionId === '' || choiceIndex < 0) return json(response, 400, { error: 'question_id and choice_index are required' })
             const freeText = typeof raw.free_text === 'string' ? raw.free_text : undefined
+            const pendingAction = session.required_action?.kind === 'answer'
+              && session.required_action.question_id === questionId
+              ? session.required_action
+              : null
             await kode.answer(session.kode_session_id, questionId, choiceIndex, freeText)
             const label = typeof raw.label === 'string' ? raw.label : `option ${choiceIndex + 1}`
             await appendTranscript(workspace, sessionId, 'user', `(answered: ${label})`, session.kode_session_id)
             const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
               if (!record.answered_action_ids.includes(questionId)) record.answered_action_ids.push(questionId)
+              record.decisions.push({
+                id: questionId,
+                kind: 'answer',
+                outcome: 'answered',
+                prompt: pendingAction?.prompt ?? null,
+                selections: [label],
+                note: freeText?.trim() || null,
+                source: 'user',
+                kode_session_id: session.kode_session_id,
+                at: new Date().toISOString(),
+              })
               record.required_action = null
             })
             specOpsSessionEvents.publish('session.updated', sessionId, { required_action: null })
@@ -552,6 +637,10 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             const accept = typeof raw.accept === 'boolean' ? raw.accept : false
             if (planId === '') return json(response, 400, { error: 'plan_id is required' })
             const note = typeof raw.note === 'string' ? raw.note : undefined
+            const pendingAction = session.required_action?.kind === 'plan_review'
+              && session.required_action.plan_id === planId
+              ? session.required_action
+              : null
             await kode.planResponse(session.kode_session_id, planId, accept)
             await kode.waitForReady(session.kode_session_id)
             if (accept) {
@@ -566,6 +655,17 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                   record.state = 'active'
                   record.required_action = null
                   if (!record.answered_action_ids.includes(planId)) record.answered_action_ids.push(planId)
+                  record.decisions.push({
+                    id: planId,
+                    kind: 'plan_review',
+                    outcome: 'approved',
+                    prompt: pendingAction?.markdown ?? null,
+                    selections: ['Approve plan'],
+                    note: note?.trim() || null,
+                    source: 'user',
+                    kode_session_id: session.kode_session_id,
+                    at: new Date().toISOString(),
+                  })
                 })
                 specOpsSessionEvents.publish('session.updated', sessionId, { plan_approved: true })
                 try { await kode.setMode(session.kode_session_id, 'acceptEdits') } catch { /* ignore */ }
@@ -578,6 +678,17 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                 record.required_action = null
                 record.state = 'active'
                 if (!record.answered_action_ids.includes(planId)) record.answered_action_ids.push(planId)
+                record.decisions.push({
+                  id: planId,
+                  kind: 'plan_review',
+                  outcome: 'approved',
+                  prompt: pendingAction?.markdown ?? null,
+                  selections: ['Approve plan'],
+                  note: note?.trim() || null,
+                  source: 'user',
+                  kode_session_id: session.kode_session_id,
+                  at: new Date().toISOString(),
+                })
               })
               specOpsSessionEvents.publish('session.updated', sessionId, { required_action: null })
               return json(response, 200, { session: updated })
@@ -589,6 +700,17 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
               record.state = 'active'
               record.required_action = null
               if (!record.answered_action_ids.includes(planId)) record.answered_action_ids.push(planId)
+              record.decisions.push({
+                id: planId,
+                kind: 'plan_review',
+                outcome: 'revision_requested',
+                prompt: pendingAction?.markdown ?? null,
+                selections: ['Revise plan'],
+                note: feedback,
+                source: 'user',
+                kode_session_id: session.kode_session_id,
+                at: new Date().toISOString(),
+              })
             })
             // If this is an intake session, switch back to plan_discussion
             const rejectIntake = intakes.get(session.kode_session_id)
@@ -622,15 +744,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
               // dead → rebuild with the codebuddy UUID stored on the matching
               // agent (NOT the numeric kode_session_id, which is a bridge
               // internal primary key and drifts across restarts).
-              const RESUMABLE_PHASES = new Set<SpecOpsPhase>([
-                'run_in_worktree',
-                'analyze_request',
-                'clarify',
-                'plan_discussion',
-                'solution_options',
-                'plan_approved',
-              ])
-              if (RESUMABLE_PHASES.has(session.phase)) {
+              if (RESUMABLE_SESSION_PHASES.has(session.phase)) {
                 // 1. If the kode session is still alive, re-attach monitors.
                 if (session.kode_session_id !== null) {
                   try {
@@ -651,15 +765,28 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                 //    a numeric id that would silently fail to restore history.
                 const resumeUuid = resumeUuidForPhase(session)
                 let cwd: string
+                let runContext = ''
                 if ((session.phase === 'run_in_worktree' || session.phase === 'analyze_request') && session.run_id !== null) {
-                  cwd = (await readRun(workspace, session.run_id)).worktree_path
+                  const run = await readRun(workspace, session.run_id)
+                  cwd = run.worktree_path
+                  const task = run.tasks[run.current_task]
+                  runContext = [
+                    '',
+                    'Current run state:',
+                    `- State: ${run.state}`,
+                    `- Iteration: ${run.iteration}/${run.max_iterations}`,
+                    `- Current task: ${task?.title ?? 'None'}`,
+                    `- Task prompt: ${task?.prompt ?? 'None'}`,
+                    `- Required verification: ${task?.verify.join(', ') || 'None'}`,
+                    `- Latest verification evidence: ${JSON.stringify(run.verify_results).slice(-4000) || 'None'}`,
+                  ].join('\n')
                 } else {
                   cwd = workspace
                 }
                 const ks = await kode.createSession(
                   session.backend_key,
                   cwd,
-                  undefined,
+                  resumeUuid === null ? `${buildSessionResumeContext(session)}${runContext}` : undefined,
                   resumeUuid ?? undefined,
                 )
                 await updateSpecOpsSession(workspace, sessionId, (r) => {
@@ -891,12 +1018,29 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
           const planId = typeof raw.plan_id === 'string' ? raw.plan_id : ''
           const accept = raw.accept === true
+          const note = typeof raw.note === 'string' ? raw.note.trim() : ''
+          const currentSession = await readSpecOpsSession(workspace, intake.specopsSessionId)
+          const planMarkdown = currentSession.required_action?.kind === 'plan_review'
+            && currentSession.required_action.plan_id === planId
+            ? currentSession.required_action.markdown ?? null
+            : null
           if (accept) {
             intake.planApproved = true
             await updateSpecOpsSession(workspace, intake.specopsSessionId, (record) => {
               record.phase = 'plan_approved'
               record.state = 'active'
               record.required_action = null
+              record.decisions.push({
+                id: planId,
+                kind: 'plan_review',
+                outcome: 'approved',
+                prompt: planMarkdown,
+                selections: ['Approve plan'],
+                note: note || null,
+                source: 'user',
+                kode_session_id: id,
+                at: new Date().toISOString(),
+              })
             })
             specOpsSessionEvents.publish('session.updated', intake.specopsSessionId, { plan_approved: true })
             // Accept the plan and send a prompt to create the docs
@@ -908,15 +1052,26 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           } else {
             // Reject — send feedback
             try { await kode.planResponse(id, planId, false) } catch { /* ignore */ }
-            const note = typeof raw.note === 'string' ? raw.note : 'Revise the plan and resubmit.'
-            await appendTranscript(workspace, intake.specopsSessionId, 'user', note, id)
+            const feedback = note || 'Revise the plan and resubmit.'
+            await appendTranscript(workspace, intake.specopsSessionId, 'user', feedback, id)
             await updateSpecOpsSession(workspace, intake.specopsSessionId, (record) => {
               record.phase = 'plan_discussion'
               record.state = 'active'
               record.required_action = null
+              record.decisions.push({
+                id: planId,
+                kind: 'plan_review',
+                outcome: 'revision_requested',
+                prompt: planMarkdown,
+                selections: ['Revise plan'],
+                note: feedback,
+                source: 'user',
+                kode_session_id: id,
+                at: new Date().toISOString(),
+              })
             })
             specOpsSessionEvents.publish('session.updated', intake.specopsSessionId, { plan_approved: false })
-            await kode.sendPrompt(id, `Plan rejected: ${note}\n\nRevise the plan in plan mode and call ExitPlanMode again.`)
+            await kode.sendPrompt(id, `Plan rejected: ${feedback}\n\nRevise the plan in plan mode and call ExitPlanMode again.`)
           }
           return json(response, 200, { ok: true, plan_approved: intake.planApproved })
         }
@@ -929,22 +1084,9 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const session = await kode.getSession(intakeId)
           // Plan-phase intake: wait for plan approval, then poll for receipt
           if (intake.planPhase && !intake.planApproved) {
-            if (session.status === 'idle' || session.status === 'exited') {
-              await updateSpecOpsSession(workspace, intake.specopsSessionId, (record) => {
-                record.phase = 'plan_discussion'
-                record.state = 'awaiting_user'
-                record.required_action = {
-                  kind: 'plan_review',
-                  plan_id: String(intakeId),
-                  markdown: record.transcript
-                    .filter((item) => item.role === 'agent')
-                    .slice(-3)
-                    .map((item) => item.text)
-                    .join('\n\n'),
-                }
-              })
-              specOpsSessionEvents.publish('session.action_required', intake.specopsSessionId, { kind: 'plan_review', intake_id: intakeId })
-            }
+            // session-monitor publishes the exact plan_proposed payload. Do not
+            // synthesize a plan from recent transcript messages: tool summaries
+            // and partial assistant text are not an approval-grade artifact.
             return json(response, 200, {
               intake_id: intakeId,
               session,
@@ -1062,7 +1204,24 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             if (existing !== null) {
               const existingClarify = [...clarifies.values()].find((c) => c.specopsSessionId === existing.id)
               if (existingClarify !== undefined) {
-                return json(response, 200, { clarify_id: existingClarify.sessionId, session: await kode.getSession(existingClarify.sessionId), specops_session: existing, reused: true })
+                if (existing.required_action !== null || existing.state === 'awaiting_user') {
+                  return json(response, 409, {
+                    error: 'document_session_awaiting_action',
+                    specops_session: existing,
+                  })
+                }
+                await kode.sendPrompt(existingClarify.sessionId, requestText)
+                existingClarify.status = 'asking'
+                existingClarify.transcript.push({ role: 'user', text: requestText, at: new Date().toISOString() })
+                const updated = await appendTranscript(workspace, existing.id, 'user', requestText, existingClarify.sessionId)
+                const entry = updated.transcript[updated.transcript.length - 1]
+                specOpsSessionEvents.publish('session.transcript_appended', existing.id, entry === undefined ? { role: 'user' } : { entries: [entry] })
+                return json(response, 200, {
+                  clarify_id: existingClarify.sessionId,
+                  session: await kode.getSession(existingClarify.sessionId),
+                  specops_session: updated,
+                  reused: true,
+                })
               }
             }
           }
@@ -1106,12 +1265,21 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const clarify = clarifies.get(id)
           if (clarify === undefined) return json(response, 404, { error: 'clarify_not_found' })
           const session = await kode.getSession(id)
+          const specopsSession = await readSpecOpsSession(workspace, clarify.specopsSessionId)
+          const pendingAction = specopsSession.required_action
           // The clarify session's transcript is populated by session-monitor via
           // the bridge /transcript endpoint (the old `event.type === 'assistant'`
           // history scan here never matched — semantic.rs emits type "message",
           // not "assistant"). We only need to advance the clarify lifecycle: once
           // the kode session goes idle/exited the clarification round is done.
-          if (clarify.status === 'asking' && (session.status === 'idle' || session.status === 'exited')) {
+          if (pendingAction?.kind === 'plan_review') {
+            clarify.status = 'plan_proposed'
+            clarify.planId = pendingAction.plan_id
+            clarify.planMd = pendingAction.markdown ?? null
+          } else if (pendingAction?.kind === 'answer') {
+            clarify.status = 'asking'
+          } else if ((clarify.status === 'asking' || clarify.status === 'plan_proposed')
+            && (session.status === 'idle' || session.status === 'exited')) {
             clarify.status = 'ready'
           }
           if (clarify.status === 'ready') {

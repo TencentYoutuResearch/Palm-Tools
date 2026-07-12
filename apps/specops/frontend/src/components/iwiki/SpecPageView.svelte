@@ -62,8 +62,6 @@
   let actionError = $state<string | null>(null);
   let tasksSource = $state<string | null>(null);
   let tasksLoading = $state(false);
-  let pendingPatch = $state<{ blockId: string; preview: string } | null>(null);
-  let appliedBlockId = $state<string | null>(null);
   let overrides = $state<Record<string, string>>({});
   let activity = $state<ActivityItem[]>([]);
 
@@ -79,6 +77,7 @@
   let planBlocks = $derived(blocks.filter((block) => block.kind === 'plan' || block.kind === 'flow').slice(0, 3));
   let taskBlocks = $derived(blocks.filter((block) => block.kind === 'task_list').slice(0, 4));
   let testBlocks = $derived(blocks.filter((block) => block.kind === 'test_matrix').slice(0, 4));
+  let decisions = $derived(session?.decisions ?? []);
   let requiredAction = $derived(session?.required_action ?? null);
   let nextStep = $derived(describeNextStep(session));
   let launchTasks = $derived(buildLaunchTasks(tasksSource ?? source, title, path));
@@ -240,54 +239,66 @@
     composerText = mode === 'change' ? '把这段改得更可执行，并补充验收状态。' : '';
   }
 
-  function submitComposer(): void {
+  async function submitComposer(): Promise<void> {
     if (selection === null || composerMode === null) return;
     const target = blocks.find((block) => block.id === selection?.blockId);
     if (target === undefined) return;
     const request = composerText.trim();
-    const titleText = composerMode === 'ask'
-      ? 'Agent question'
-      : composerMode === 'change'
-        ? 'Generated change'
-        : 'Note';
-    activity = [
-      {
+    if (composerMode === 'note') {
+      activity = [{
         id: `${Date.now()}`,
-        kind: composerMode === 'change' ? 'patch' : composerMode,
-        title: titleText,
+        kind: 'note',
+        title: 'Local note',
         body: request.length > 0 ? request : selection.quote,
         blockId: target.id,
-      },
-      ...activity,
-    ];
-    if (composerMode === 'change') {
-      pendingPatch = {
-        blockId: target.id,
-        preview: `${target.body.trim()}\n\n> SpecOps draft update: ${request || 'Applied selected context into this section.'}`,
-      };
+      }, ...activity];
+      composerMode = null;
+      composerText = '';
+      return;
     }
-    composerMode = null;
-    composerText = '';
-  }
-
-  function applyPatch(): void {
-    if (pendingPatch === null) return;
-    overrides = { ...overrides, [pendingPatch.blockId]: pendingPatch.preview };
-    appliedBlockId = pendingPatch.blockId;
-    activity = [
-      {
-        id: `${Date.now()}-applied`,
-        kind: 'patch',
-        title: 'Applied to live HTML',
-        body: 'The selected block was regenerated in place. Persistence comes in the next server-backed pass.',
-        blockId: pendingPatch.blockId,
-      },
-      ...activity,
-    ];
-    pendingPatch = null;
-    window.setTimeout(() => {
-      appliedBlockId = null;
-    }, 900);
+    const titleText = composerMode === 'ask'
+      ? 'Document question'
+      : 'Document change request';
+    const intent = composerMode === 'change'
+      ? 'Propose a precise patch for this document section. Explain affected acceptance criteria and do not write files before plan approval.'
+      : 'Answer this question using the selected document section and repository evidence.';
+    const prompt = [
+      intent,
+      '',
+      `Document: ${path}:${selection.lineStart ?? target.lineStart}-${selection.lineEnd ?? target.lineEnd}`,
+      `Section: ${target.title}`,
+      '',
+      'Selected text:',
+      selection.quote,
+      '',
+      'User request:',
+      request || selection.quote,
+    ].join('\n');
+    actionBusy = true;
+    actionError = null;
+    try {
+      const res = await api.post<{ specops_session: { id: string }; reused?: boolean }>('/api/clarifies', {
+        request: prompt,
+        document_path: path,
+        backend_key: session?.backend_key ?? 'codebuddy',
+      });
+      activity = [{
+        id: `${Date.now()}`,
+        kind: composerMode === 'change' ? 'patch' : 'ask',
+        title: `${res.reused ? 'Continued' : 'Started'} ${titleText.toLowerCase()}`,
+        body: request || selection.quote,
+        blockId: target.id,
+      }, ...activity];
+      composerMode = null;
+      composerText = '';
+      await loadSessions();
+      await selectSession(res.specops_session.id);
+      activeModule.set('chat');
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : String(error);
+    } finally {
+      actionBusy = false;
+    }
   }
 
   function cancelComposer(): void {
@@ -454,6 +465,11 @@
       <span class="tracker-label">Tests</span>
       <strong>{testBlocks.length}</strong>
       <span>status table{testBlocks.length === 1 ? '' : 's'}</span>
+    </div>
+    <div class="tracker">
+      <span class="tracker-label">Decisions</span>
+      <strong>{decisions.length}</strong>
+      <span>confirmed gate{decisions.length === 1 ? '' : 's'}</span>
     </div>
   </section>
 
@@ -629,23 +645,11 @@
     </section>
   {/if}
 
-  {#if pendingPatch !== null}
-    <aside class="patch-bar">
-      <div>
-        <span class="patch-title">Generated update</span>
-        <p>Ready to apply to the selected HTML block.</p>
-      </div>
-      <button type="button" class="ghost" onclick={() => (pendingPatch = null)}>Discard</button>
-      <button type="button" class="apply" onclick={applyPatch}>Apply</button>
-    </aside>
-  {/if}
-
   <div class="body-grid">
     <article class="blocks">
       {#each blocks as block (block.id)}
         <section
           class="spec-block"
-          class:applied={appliedBlockId === block.id}
           data-kind={block.kind}
           data-status={block.status}
           data-spec-block-id={block.id}
@@ -662,8 +666,19 @@
     <aside class="activity">
       <header>
         <span>Discussion</span>
-        <small>{activity.length}</small>
+        <small>{activity.length + decisions.length}</small>
       </header>
+      {#if decisions.length > 0}
+        <ol class="decision-list" aria-label="Confirmed decisions">
+          {#each decisions.slice().reverse() as decision (decision.id + decision.at)}
+            <li class="decision-item" data-outcome={decision.outcome}>
+              <span>{decision.kind === 'answer' ? 'Confirmed answer' : decision.outcome === 'approved' ? 'Plan approved' : 'Plan revision'}</span>
+              <p>{decision.selections.join(', ')}</p>
+              {#if decision.note}<small>{decision.note}</small>{/if}
+            </li>
+          {/each}
+        </ol>
+      {/if}
       {#if selection !== null}
         <div class="selection-card">
           <span>{selection.blockKind.replace('_', ' ')}</span>
@@ -676,7 +691,7 @@
           <textarea bind:value={composerText} placeholder="Write the prompt or note"></textarea>
           <div class="composer-actions">
             <button type="button" class="ghost" onclick={cancelComposer}>Cancel</button>
-            <button type="button" class="apply" onclick={submitComposer}>Send</button>
+            <button type="button" class="apply" disabled={actionBusy} onclick={submitComposer}>{actionBusy ? 'Starting…' : 'Send'}</button>
           </div>
         </div>
       {/if}
@@ -737,8 +752,7 @@
   .selection-card span,
   .composer span,
   .activity header span,
-  .activity li span,
-  .patch-title {
+  .activity li span {
     font-size: var(--fs-xs);
     font-weight: var(--fw-semi);
     letter-spacing: 0.04em;
@@ -780,7 +794,7 @@
   }
   .trackers {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: var(--sp-2);
     margin-bottom: var(--sp-3);
   }
@@ -1028,28 +1042,6 @@
     color: var(--fg-tertiary);
     font-size: var(--fs-xs);
   }
-  .patch-bar {
-    position: sticky;
-    top: var(--sp-2);
-    z-index: 4;
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    margin-bottom: var(--sp-3);
-    padding: var(--sp-2);
-    border: 1px solid color-mix(in srgb, var(--acc) 44%, var(--bd-default));
-    border-radius: var(--rad-md);
-    background: color-mix(in srgb, var(--bg-elevated) 88%, var(--acc-soft));
-    box-shadow: var(--sh-md);
-  }
-  .patch-bar div {
-    flex: 1;
-  }
-  .patch-bar p {
-    margin: 2px 0 0;
-    color: var(--fg-secondary);
-    font-size: var(--fs-sm);
-  }
   .body-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 280px;
@@ -1085,20 +1077,6 @@
   }
   .spec-block[data-kind='test_matrix'] {
     border-left: 3px solid var(--st-ok);
-  }
-  .spec-block.applied {
-    animation: apply-flash 900ms cubic-bezier(0.2, 0, 0, 1);
-  }
-  @keyframes apply-flash {
-    0% {
-      transform: translateY(-2px);
-      background: color-mix(in srgb, var(--acc-soft) 42%, var(--bg-elevated));
-      border-color: var(--acc);
-    }
-    100% {
-      transform: translateY(0);
-      background: var(--bg-elevated);
-    }
   }
   .block-meta {
     display: flex;
@@ -1201,6 +1179,20 @@
     line-clamp: 4;
     -webkit-line-clamp: 4;
     -webkit-box-orient: vertical;
+  }
+  .decision-item[data-outcome='approved'],
+  .decision-item[data-outcome='answered'] {
+    border-left: 3px solid var(--st-ok);
+  }
+  .decision-item[data-outcome='revision_requested'] {
+    border-left: 3px solid var(--st-busy);
+  }
+  .decision-item small {
+    display: block;
+    margin-top: var(--sp-1);
+    color: var(--fg-tertiary);
+    font-size: var(--fs-xs);
+    line-height: 1.4;
   }
   .composer textarea {
     width: 100%;

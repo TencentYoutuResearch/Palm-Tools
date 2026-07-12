@@ -48,6 +48,22 @@ describe('SpecOps server', () => {
     expect((await fetch(`${server.origin}/api/state`, auth(server))).status).toBe(200)
   })
 
+  test('exposes declarative Harness profiles and plugin capabilities', async () => {
+    const { server } = await fixture()
+    const response = await fetch(`${server.origin}/api/harness`, auth(server))
+    expect(response.status).toBe(200)
+    const body = await response.json() as {
+      project: { name: string; profiles: string[] }
+      workflows: { feature: { stages: string[] } }
+      known_capabilities: string[]
+      plugins: unknown[]
+    }
+    expect(body.project.profiles).toEqual([])
+    expect(body.workflows.feature.stages).toContain('verify')
+    expect(body.known_capabilities).toContain('conversation.ask')
+    expect(body.plugins).toEqual([])
+  })
+
   test('rejects a wrong origin', async () => {
     const { server } = await fixture()
     const response = await fetch(`${server.origin}/api/state`, auth(server, { headers: { origin: 'https://attacker.invalid' } }))
@@ -88,6 +104,81 @@ describe('SpecOps server', () => {
     const { server } = await fixture()
     const response = await fetch(`${server.origin}/api/document?path=${encodeURIComponent('../outside.md')}`, auth(server))
     expect(response.status).toBe(400)
+  })
+
+  test('persists structured answers and plan reviews in the session decision ledger', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const calls = { answers: 0, plans: 0 }
+    const socket = { on: () => socket, close: () => undefined }
+    const kode = {
+      answer: async () => { calls.answers += 1 },
+      planResponse: async () => { calls.plans += 1 },
+      waitForReady: async () => ({ id: 73, backend_key: 'codebuddy', status: 'idle' }),
+      subscribe: () => socket,
+      history: async () => ({ events: [], next_from: 0 }),
+    } as unknown as KodeClient
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Decision ledger',
+      backend_key: 'codebuddy',
+      kode_session_id: 73,
+      phase: 'clarify',
+      state: 'awaiting_user',
+      required_action: {
+        kind: 'answer',
+        question_id: 'question-1',
+        prompt: 'Which compatibility target should win?',
+        options: [{ label: 'macOS and Linux' }, { label: 'All platforms' }],
+      },
+    })
+    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
+    servers.push(server)
+
+    const answered = await fetch(`${server.origin}/api/sessions/${session.id}/answer`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ question_id: 'question-1', choice_index: 0, label: 'macOS and Linux' }),
+    }))
+    expect(answered.status).toBe(200)
+
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      record.state = 'awaiting_user'
+      record.required_action = { kind: 'plan_review', plan_id: 'plan-1', markdown: '# Approved plan' }
+    })
+    const approved = await fetch(`${server.origin}/api/sessions/${session.id}/plan_response`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ plan_id: 'plan-1', accept: true, note: 'Keep the scope narrow.' }),
+    }))
+    expect(approved.status).toBe(200)
+
+    const detail = await (await fetch(`${server.origin}/api/sessions/${session.id}`, auth(server))).json() as {
+      session: { decisions: Array<{ id: string; outcome: string; prompt: string; selections: string[]; note: string | null }> }
+    }
+    expect(calls).toEqual({ answers: 1, plans: 1 })
+    expect(detail.session.decisions).toEqual([
+      {
+        id: 'question-1',
+        outcome: 'answered',
+        prompt: 'Which compatibility target should win?',
+        selections: ['macOS and Linux'],
+        note: null,
+        kind: 'answer',
+        source: 'user',
+        kode_session_id: 73,
+        at: expect.any(String),
+      },
+      {
+        id: 'plan-1',
+        outcome: 'approved',
+        prompt: '# Approved plan',
+        selections: ['Approve plan'],
+        note: 'Keep the scope narrow.',
+        kind: 'plan_review',
+        source: 'user',
+        kode_session_id: 73,
+        at: expect.any(String),
+      },
+    ])
   })
 
   test('creates every document kind in its canonical directory without overwriting', async () => {
@@ -399,12 +490,12 @@ describe('SpecOps server', () => {
   function buildKodeMock(overrides: {
     getSession?: (id: number) => KodeSession | Promise<KodeSession>
     createSession?: (backendKey: string, cwd: string, initialPrompt?: string, resumeSessionUuid?: string, model?: string) => KodeSession | Promise<KodeSession>
-  } = {}): { kode: KodeClient; calls: { createSession: Array<{ backendKey: string; cwd: string; resumeSessionUuid: string | undefined }> } } {
-    const calls = { createSession: [] as Array<{ backendKey: string; cwd: string; resumeSessionUuid: string | undefined }> }
+  } = {}): { kode: KodeClient; calls: { createSession: Array<{ backendKey: string; cwd: string; initialPrompt: string | undefined; resumeSessionUuid: string | undefined }> } } {
+    const calls = { createSession: [] as Array<{ backendKey: string; cwd: string; initialPrompt: string | undefined; resumeSessionUuid: string | undefined }> }
     const socket = { on: () => socket, close: () => undefined }
     const defaultGetSession = async (id: number) => ({ id, backend_key: 'codebuddy', status: 'idle' })
-    const defaultCreateSession = async (backendKey: string, cwd: string, _initialPrompt?: string, resumeSessionUuid?: string) => {
-      calls.createSession.push({ backendKey, cwd, resumeSessionUuid })
+    const defaultCreateSession = async (backendKey: string, cwd: string, initialPrompt?: string, resumeSessionUuid?: string) => {
+      calls.createSession.push({ backendKey, cwd, initialPrompt, resumeSessionUuid })
       return { id: 9001, backend_key: backendKey, status: 'idle', session_uuid: 'new-uuid-9001' }
     }
     const kode = {
@@ -529,6 +620,48 @@ describe('SpecOps server', () => {
     expect(res.status).toBe(200)
     expect(calls.createSession).toHaveLength(1)
     expect(calls.createSession[0]?.resumeSessionUuid).toBeUndefined()
+    expect(calls.createSession[0]?.initialPrompt).toContain('Continue this existing SpecOps workflow')
+    expect(calls.createSession[0]?.initialPrompt).toContain('Phase: analyze_request')
+  })
+
+  test('session listing detaches an exited kode session and exposes exact recovery', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const specopsSession = await createSpecOpsSession(workspace, {
+      title: 'Destroyed kode session',
+      backend_key: 'codebuddy',
+      kode_session_id: 66,
+      phase: 'clarify',
+      state: 'awaiting_user',
+    })
+    await attachSessionAgent(workspace, specopsSession.id, {
+      kode_session_id: 66,
+      session_uuid: 'recoverable-uuid-66',
+      backend_key: 'codebuddy',
+      model: null,
+      purpose: 'clarify',
+      status: 'idle',
+    })
+    const { kode } = buildKodeMock({
+      getSession: async (id) => ({ id, backend_key: 'codebuddy', status: 'exited' }),
+    })
+    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
+    servers.push(server)
+
+    const listed = await (await fetch(`${server.origin}/api/sessions`, auth(server))).json() as {
+      sessions: Array<{
+        id: string
+        kode_session_id: number | null
+        execution: { state: string; resume_mode: string }
+        agents: Array<{ kode_session_id: number; status: string; ended_at: string | null }>
+      }>
+    }
+    const recovered = listed.sessions.find((session) => session.id === specopsSession.id)
+    expect(recovered?.kode_session_id).toBeNull()
+    expect(recovered?.execution).toMatchObject({ state: 'resumable', resume_mode: 'exact' })
+    expect(recovered?.agents[0]).toMatchObject({ kode_session_id: 66, status: 'exited' })
+    expect(recovered?.agents[0]?.ended_at).not.toBeNull()
   })
 
   test('resume on run_in_worktree rebuilds inside the run worktree with the implement agent UUID', async () => {

@@ -2,6 +2,14 @@ import { parse as parseToml } from 'smol-toml'
 
 import { SpecOpsError } from '../core/errors.js'
 import { exists, pathInside, readText } from '../store/workspace.js'
+import {
+  builtinBackendProfile,
+  DEFAULT_WORKFLOWS,
+  parseWorkflowStages,
+  type AgentBackendProfile,
+  type WorkflowKind,
+  type WorkflowProfile,
+} from './harness.js'
 
 export interface VerifyConfig {
   command: string[]
@@ -24,11 +32,15 @@ export interface ReviewConfig {
 
 export interface SpecOpsConfig {
   schema_version: 1
-  project: { name: string }
+  project: { name: string; profiles: string[] }
   gate: { strict_wild_specs: boolean; suppress: GateSuppressConfig }
   verify: Record<string, VerifyConfig>
   review: ReviewConfig
+  workflows: Record<WorkflowKind, WorkflowProfile>
+  agent_backends: Record<string, AgentBackendProfile>
 }
+
+const WORKFLOW_KINDS: WorkflowKind[] = ['feature', 'bug', 'refactor', 'investigation', 'docs']
 
 function integer(value: unknown, fallback: number, field: string): number {
   if (value === undefined) return fallback
@@ -55,6 +67,7 @@ export async function loadConfig(workspace: string): Promise<SpecOpsConfig> {
     throw new SpecOpsError('invalid_config', 'project.name must be a non-empty string')
   }
   const gate = raw.gate as Record<string, unknown> | undefined
+  const profiles = project.profiles === undefined ? [] : stringArray(project.profiles, 'project.profiles')
   const verifyRaw = (raw.verify ?? {}) as Record<string, unknown>
   const verify: Record<string, VerifyConfig> = {}
   for (const [name, value] of Object.entries(verifyRaw)) {
@@ -89,9 +102,38 @@ export async function loadConfig(workspace: string): Promise<SpecOpsConfig> {
     enabled: reviewRaw.enabled === undefined ? true : reviewRaw.enabled === true,
     ...(typeof reviewRaw.model === 'string' && reviewRaw.model.trim() !== '' ? { model: reviewRaw.model.trim() } : {}),
   }
+  const workflows = structuredClone(DEFAULT_WORKFLOWS)
+  const workflowRaw = (raw.workflow ?? {}) as Record<string, unknown>
+  for (const kind of WORKFLOW_KINDS) {
+    const value = workflowRaw[kind]
+    if (value === undefined) continue
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new SpecOpsError('invalid_config', `workflow.${kind} must be a table`)
+    }
+    const stages = (value as Record<string, unknown>).stages
+    workflows[kind] = { stages: parseWorkflowStages(stages, `workflow.${kind}.stages`) }
+  }
+  const backendRaw = (raw.agent_backends ?? {}) as Record<string, unknown>
+  const agentBackends: Record<string, AgentBackendProfile> = {}
+  for (const [key, value] of Object.entries(backendRaw)) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new SpecOpsError('invalid_config', `agent_backends.${key} must be a table`)
+    }
+    const entry = value as Record<string, unknown>
+    const fallback = builtinBackendProfile(key)
+    if (entry.plugin !== undefined && (typeof entry.plugin !== 'string' || entry.plugin.trim() === '')) {
+      throw new SpecOpsError('invalid_config', `agent_backends.${key}.plugin must be a non-empty string`)
+    }
+    agentBackends[key] = {
+      plugin: typeof entry.plugin === 'string' ? entry.plugin.trim() : fallback.plugin,
+      capabilities: entry.capabilities === undefined
+        ? fallback.capabilities
+        : stringArray(entry.capabilities, `agent_backends.${key}.capabilities`),
+    }
+  }
   return {
     schema_version: 1,
-    project: { name: project.name.trim() },
+    project: { name: project.name.trim(), profiles },
     gate: {
       strict_wild_specs: gate?.strict_wild_specs === true,
       suppress: {
@@ -101,5 +143,14 @@ export async function loadConfig(workspace: string): Promise<SpecOpsConfig> {
     },
     verify,
     review,
+    workflows,
+    agent_backends: agentBackends,
   }
+}
+
+function stringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim() === '')) {
+    throw new SpecOpsError('invalid_config', `${field} must be an array of non-empty strings`)
+  }
+  return value.map((item) => (item as string).trim())
 }

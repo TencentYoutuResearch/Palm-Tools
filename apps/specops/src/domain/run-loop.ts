@@ -68,10 +68,18 @@ export async function launchRun(
 export function promptForTask(run: RunRecord): string {
   const task = run.tasks[run.current_task]
   if (task === undefined) throw new SpecOpsError('task_missing', `Run ${run.run_id} has no current task`)
+  const manifest = run.manifest
   return [
     `SpecOps task ${task.id}: ${task.title}`,
     '',
     task.prompt,
+    '',
+    'Run manifest:',
+    `- Workflow: ${manifest.workflow.kind} (${manifest.workflow.stages.join(' -> ')})`,
+    `- Project profiles: ${manifest.project_profiles.join(', ') || 'none'}`,
+    `- Allowed task ids: ${manifest.scope.task_ids.join(', ')}`,
+    `- Required verification: ${manifest.verification.required.join(', ') || 'none'}`,
+    `- Max iterations: ${manifest.limits.max_iterations}`,
     '',
     `Work only in this Run worktree: ${run.worktree_path}`,
     'Do not apply changes to another worktree. Report when the task is ready for verification.',

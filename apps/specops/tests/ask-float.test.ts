@@ -15,8 +15,8 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((item) => rm(item, { recursive: true, force: true })))
 })
 
-function buildKodePlanMock(): { kode: KodeClient; calls: { createPlanSession: number } } {
-  const calls = { createPlanSession: 0 }
+function buildKodePlanMock(): { kode: KodeClient; calls: { createPlanSession: number; sendPrompt: number } } {
+  const calls = { createPlanSession: 0, sendPrompt: 0 }
   const socket = { on: () => socket, close: () => undefined }
   const session: KodeSession = { id: 9001, backend_key: 'codebuddy', status: 'idle', session_uuid: 'new-uuid-9001' }
   const kode = {
@@ -26,6 +26,7 @@ function buildKodePlanMock(): { kode: KodeClient; calls: { createPlanSession: nu
       return session
     },
     createAnalysisSession: async () => session,
+    sendPrompt: async () => { calls.sendPrompt += 1 },
     subscribe: () => socket,
     history: async () => ({ events: [], next_from: 0 }),
     killSession: async () => undefined,
@@ -52,10 +53,10 @@ async function fixture() {
   await run('git', ['-C', workspace, 'commit', '-q', '-m', 'init'])
   cleanup.push(workspace)
   await initWorkspace(workspace)
-  const { kode } = buildKodePlanMock()
+  const { kode, calls } = buildKodePlanMock()
   const server = await startServer({ workspace, token: 'ask-token', kodeClient: kode })
   servers.push(server)
-  return { workspace, server }
+  return { workspace, server, calls }
 }
 
 function auth(server: ServeHandle, init: RequestInit = {}): RequestInit {
@@ -72,7 +73,7 @@ function auth(server: ServeHandle, init: RequestInit = {}): RequestInit {
 
 describe('AskFloat clarify reuse', () => {
   test('second clarify on the same document_path reuses the existing active session', async () => {
-    const { server } = await fixture()
+    const { server, calls } = await fixture()
     const docPath = '.specops/specs/auth.md'
 
     const first = await fetch(`${server.origin}/api/clarifies`, auth(server, {
@@ -92,6 +93,7 @@ describe('AskFloat clarify reuse', () => {
     const secondBody = await second.json() as { specops_session: { id: string }; reused?: boolean }
     expect(secondBody.reused).toBe(true)
     expect(secondBody.specops_session.id).toBe(firstSessionId)
+    expect(calls).toEqual({ createPlanSession: 1, sendPrompt: 1 })
   })
 
   test('clarify without document_path always creates a new session', async () => {

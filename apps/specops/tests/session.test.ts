@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { initWorkspace } from '../src/domain/commands.js'
 import {
   appendTranscript,
+  buildSessionResumeContext,
   closeSpecOpsSession,
   createSpecOpsSession,
   listSpecOpsSessions,
@@ -41,6 +42,7 @@ describe('SpecOps sessions', () => {
     const loaded = await readSpecOpsSession(workspace, created.id)
     expect(loaded.transcript).toMatchObject([{ role: 'agent', text: 'Analyzing request' }])
     expect(loaded.required_action).toEqual({ kind: 'answer', prompt: 'Which behavior should win?' })
+    expect(loaded.decisions).toEqual([])
 
     const listed = await listSpecOpsSessions(workspace)
     expect(listed).toMatchObject([{ id: created.id, title: 'Track session state', phase: 'clarify', state: 'awaiting_user' }])
@@ -106,5 +108,35 @@ describe('resumeUuidForPhase', () => {
       ]
     })
     expect(resumeUuidForPhase(await readSpecOpsSession(workspace, created.id))).toBeNull()
+  })
+})
+
+describe('buildSessionResumeContext', () => {
+  test('carries durable decisions without replaying raw transcript', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const created = await createSpecOpsSession(workspace, {
+      title: 'Durable recovery',
+      backend_key: 'codebuddy',
+      phase: 'clarify',
+      decisions: [{
+        id: 'decision-1',
+        kind: 'answer',
+        outcome: 'answered',
+        prompt: 'Which target?',
+        selections: ['Desktop'],
+        note: null,
+        source: 'user',
+        kode_session_id: 12,
+        at: '2026-01-01T00:00:00Z',
+      }],
+      transcript: [{ role: 'agent', text: 'large raw chat that must not be replayed', at: '2026-01-01T00:00:00Z' }],
+    })
+
+    const context = buildSessionResumeContext(created)
+    expect(context).toContain('Which target? => Desktop')
+    expect(context).toContain('Phase: clarify')
+    expect(context).not.toContain('large raw chat that must not be replayed')
   })
 })

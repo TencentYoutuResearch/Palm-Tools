@@ -7,6 +7,11 @@ import { promisify } from 'node:util'
 
 import { SpecOpsError } from '../core/errors.js'
 import { loadConfig, type VerifyConfig } from './config.js'
+import {
+  resolveAgentBackendProfile,
+  workflowKindForDocumentKind,
+  type RunManifest,
+} from './harness.js'
 import { parseDocument, type DocumentKind } from './spec.js'
 import { atomicWrite, exists, pathInside, resolveGitWorkspace } from '../store/workspace.js'
 import {
@@ -62,6 +67,7 @@ export interface RunRecord {
   verify_results: unknown[]
   review_results: unknown[]
   decisions: RunDecision[]
+  manifest: RunManifest
   started_at: string
   updated_at: string
 }
@@ -192,6 +198,10 @@ export async function readRun(workspaceInput: string, runId: string): Promise<Ru
   // run.json files have no change_id — they behave as quick-runs: apply paths
   // skip proposal-status updates for them).
   if (run.change_id === undefined) run.change_id = null
+  if (run.manifest === undefined) {
+    const config = await loadConfig(workspace)
+    run.manifest = await buildRunManifest(run, config)
+  }
   return run
 }
 
@@ -243,6 +253,23 @@ export async function createRun(
     }
     verifySnapshot[name] = entry
   }
+  const backend = await resolveAgentBackendProfile(workspace, backendKey, config.agent_backends[backendKey])
+  const workflowKind = await workflowKindForChange(workspace, changeId)
+  const manifest: RunManifest = {
+    schema_version: 1,
+    run_id: runId,
+    created_at: now,
+    workflow: { kind: workflowKind, stages: [...config.workflows[workflowKind].stages] },
+    project_profiles: [...config.project.profiles],
+    backend: { key: backendKey, plugin: backend.plugin, capabilities: [...backend.capabilities] },
+    scope: {
+      base_commit: baseCommit,
+      change_id: changeId,
+      task_ids: tasks.map((task) => task.id),
+    },
+    verification: { required: [...verifyNames].sort() },
+    limits: { max_iterations: 8 },
+  }
   const run: RunRecord = {
     schema_version: 1,
     run_id: runId,
@@ -263,6 +290,7 @@ export async function createRun(
     verify_results: [],
     review_results: [],
     decisions: [],
+    manifest,
     started_at: now,
     updated_at: now,
   }
@@ -278,6 +306,37 @@ export async function createRun(
     run.state = 'failed'
     await writeRun(run)
     throw error
+  }
+}
+
+async function workflowKindForChange(workspace: string, changeId: string | null) {
+  if (changeId === null) return 'feature' as const
+  try {
+    const proposal = pathInside(workspace, '.specops', 'changes', changeId, 'proposal.md')
+    const document = parseDocument(await readFile(proposal, 'utf8'), proposal)
+    return workflowKindForDocumentKind(document.frontmatter.kind)
+  } catch {
+    return 'feature' as const
+  }
+}
+
+async function buildRunManifest(run: RunRecord, config: Awaited<ReturnType<typeof loadConfig>>): Promise<RunManifest> {
+  const backend = await resolveAgentBackendProfile(run.workspace_root, run.backend_key, config.agent_backends[run.backend_key])
+  const workflowKind = await workflowKindForChange(run.workspace_root, run.change_id)
+  return {
+    schema_version: 1,
+    run_id: run.run_id,
+    created_at: run.started_at,
+    workflow: { kind: workflowKind, stages: [...config.workflows[workflowKind].stages] },
+    project_profiles: [...config.project.profiles],
+    backend: { key: run.backend_key, plugin: backend.plugin, capabilities: [...backend.capabilities] },
+    scope: {
+      base_commit: run.base_commit,
+      change_id: run.change_id,
+      task_ids: run.tasks.map((task) => task.id),
+    },
+    verification: { required: Object.keys(run.verify_snapshot).sort() },
+    limits: { max_iterations: run.max_iterations },
   }
 }
 

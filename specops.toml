@@ -2,6 +2,15 @@ schema_version = 1
 
 [project]
 name = "kode"
+profiles = ["desktop", "tauri", "svelte", "rust"]
+
+[agent_backends.codebuddy]
+plugin = "builtin.kode"
+capabilities = ["session.create", "session.resume", "session.interrupt", "conversation.ask", "conversation.plan", "events.tools", "sandbox.policy", "model.select"]
+
+[agent_backends.codex]
+plugin = "builtin.kode"
+capabilities = ["session.create", "session.interrupt", "sandbox.policy", "model.select"]
 
 [gate]
 strict_wild_specs = false

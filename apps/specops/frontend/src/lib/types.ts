@@ -136,14 +136,33 @@ export interface RequiredAction {
   [key: string]: unknown;
 }
 
+export interface SessionDecision {
+  id: string;
+  kind: 'answer' | 'plan_review';
+  outcome: 'answered' | 'approved' | 'revision_requested';
+  prompt: string | null;
+  selections: string[];
+  note: string | null;
+  source: 'user';
+  kode_session_id: number | null;
+  at: string;
+}
+
 export interface SpecOpsSession {
   id: string;
   title?: string;
   backend_key?: string;
   phase?: string;
   state?: string;
+  execution?: {
+    state: 'live' | 'resumable' | 'restartable' | 'detached' | 'unverified' | 'unavailable' | 'history';
+    resume_mode: 'exact' | 'fresh_context' | 'none';
+    last_reconciled_at?: string | null;
+    last_error?: string | null;
+  };
   document_path?: string;
   required_action?: RequiredAction | null;
+  decisions?: SessionDecision[];
   workflow?: { current_phase?: string; failure_count?: number; steps?: WorkflowStep[] };
   agents?: SessionAgent[];
   transcript?: TranscriptEntry[];
