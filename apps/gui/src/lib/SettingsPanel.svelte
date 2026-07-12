@@ -22,6 +22,16 @@
   import type { UnlistenFn } from '@tauri-apps/api/event'
   import BackendIcon from './BackendIcon.svelte'
   import { currentLocale, systemLanguageLabel, t } from './i18n'
+  import {
+    TERMINAL_FONT_PRESETS,
+    TERMINAL_FONT_SIZE_MAX,
+    TERMINAL_FONT_SIZE_MIN,
+    loadTerminalAppearance,
+    saveTerminalAppearance,
+    type TerminalAppearance,
+    type TerminalTarget,
+    type TerminalThemeMode,
+  } from './terminal_settings'
   import { outsidePressClose } from './outside_close'
 
   type Props = {
@@ -32,7 +42,7 @@
   }
   let { onClose, onOpenMemorySync, locale, onLocaleChange }: Props = $props()
 
-  type Tab = 'backends' | 'memory' | 'language'
+  type Tab = 'backends' | 'memory' | 'terminal' | 'language'
   let tab: Tab = $state('backends')
 
   let backends: BackendListItem[] = $state([])
@@ -50,6 +60,8 @@
   let isNew = $state(false)
 
   let memoryPromptEnabled = $state(true)
+  let ptyAppearance = $state<TerminalAppearance>(loadTerminalAppearance('pty'))
+  let shellAppearance = $state<TerminalAppearance>(loadTerminalAppearance('shell'))
 
   function showToast(msg: string) {
     toast = msg
@@ -218,6 +230,40 @@
     showToast(t('settings.language.saved', { language: label }))
   }
 
+  function appearanceFor(target: TerminalTarget): TerminalAppearance {
+    return target === 'pty' ? ptyAppearance : shellAppearance
+  }
+
+  function setAppearance(target: TerminalTarget, next: TerminalAppearance) {
+    const saved = saveTerminalAppearance(target, next)
+    if (target === 'pty') ptyAppearance = saved
+    else shellAppearance = saved
+  }
+
+  function setTerminalFontFamily(target: TerminalTarget, value: string) {
+    setAppearance(target, { ...appearanceFor(target), fontFamily: value })
+  }
+
+  function setTerminalFontSize(target: TerminalTarget, value: number) {
+    setAppearance(target, { ...appearanceFor(target), fontSize: value })
+  }
+
+  function setTerminalThemeMode(target: TerminalTarget, value: TerminalThemeMode) {
+    setAppearance(target, { ...appearanceFor(target), themeMode: value })
+  }
+
+  function resetTerminalAppearance(target: TerminalTarget) {
+    const current = appearanceFor(target)
+    const defaultFamily = target === 'pty'
+      ? '"JetBrains Mono", "SF Mono", Menlo, monospace'
+      : 'SF Mono'
+    setAppearance(target, { ...current, fontFamily: defaultFamily, fontSize: 13, themeMode: 'system' })
+  }
+
+  function terminalTargetLabel(target: TerminalTarget): string {
+    return target === 'pty' ? tr('settings.terminal.mainPty') : tr('settings.terminal.shell')
+  }
+
   function onKeyCapture(e: KeyboardEvent) {
     if (e.key !== 'Escape') return
     e.preventDefault()
@@ -278,6 +324,13 @@
           <path d="M12 3v18M5 7a3 3 0 0 1 3-3h.5a3 3 0 0 1 3 3M5 7a3 3 0 0 0-3 3v4a3 3 0 0 0 3 3M19 7a3 3 0 0 0-3-3h-.5a3 3 0 0 0-3 3M19 7a3 3 0 0 1 3 3v4a3 3 0 0 1-3 3" />
         </svg>
         <span>{tr('settings.memory.title')}</span>
+      </button>
+      <button class="nav-item" class:active={tab === 'terminal'} onclick={() => (tab = 'terminal')}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4 17 10 11 4 5" />
+          <line x1="12" y1="19" x2="20" y2="19" />
+        </svg>
+        <span>{tr('settings.terminal.title')}</span>
       </button>
       <button class="nav-item" class:active={tab === 'language'} onclick={() => (tab = 'language')}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -494,6 +547,105 @@
             </div>
           </li>
         </ul>
+      {:else if tab === 'terminal'}
+        <div class="content-head">
+          <h2>{tr('settings.terminal.title')}</h2>
+          <p class="sub">{tr('settings.terminal.description')}</p>
+        </div>
+
+        <div class="form terminal-form">
+          <section class="terminal-card">
+            <div class="terminal-card-head">
+              <div>
+                <h3>{terminalTargetLabel('pty')}</h3>
+                <p>{tr('settings.terminal.mainPtyDescription')}</p>
+              </div>
+              <button class="btn ghost sm" onclick={() => resetTerminalAppearance('pty')}>{tr('settings.terminal.reset')}</button>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="pty-font-family">{tr('settings.terminal.fontFamily')}</label>
+                <input
+                  id="pty-font-family"
+                  type="text"
+                  list="terminal-font-presets"
+                  value={ptyAppearance.fontFamily}
+                  oninput={(e) => setTerminalFontFamily('pty', (e.target as HTMLInputElement).value)}
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="field size-field">
+                <label for="pty-font-size">{tr('settings.terminal.fontSize')}</label>
+                <input
+                  id="pty-font-size"
+                  type="number"
+                  min={TERMINAL_FONT_SIZE_MIN}
+                  max={TERMINAL_FONT_SIZE_MAX}
+                  value={ptyAppearance.fontSize}
+                  oninput={(e) => setTerminalFontSize('pty', Number((e.target as HTMLInputElement).value))}
+                />
+              </div>
+            </div>
+            <div class="field">
+              <label for="pty-theme">{tr('settings.terminal.themeMode')}</label>
+              <select id="pty-theme" value={ptyAppearance.themeMode} onchange={(e) => setTerminalThemeMode('pty', (e.target as HTMLSelectElement).value as TerminalThemeMode)}>
+                <option value="system">{tr('settings.terminal.followApp')}</option>
+                <option value="dark">{tr('settings.terminal.dark')}</option>
+                <option value="light">{tr('settings.terminal.light')}</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="terminal-card">
+            <div class="terminal-card-head">
+              <div>
+                <h3>{terminalTargetLabel('shell')}</h3>
+                <p>{tr('settings.terminal.shellDescription')}</p>
+              </div>
+              <button class="btn ghost sm" onclick={() => resetTerminalAppearance('shell')}>{tr('settings.terminal.reset')}</button>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="shell-font-family">{tr('settings.terminal.fontFamily')}</label>
+                <input
+                  id="shell-font-family"
+                  type="text"
+                  list="terminal-font-presets"
+                  value={shellAppearance.fontFamily}
+                  oninput={(e) => setTerminalFontFamily('shell', (e.target as HTMLInputElement).value)}
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="field size-field">
+                <label for="shell-font-size">{tr('settings.terminal.fontSize')}</label>
+                <input
+                  id="shell-font-size"
+                  type="number"
+                  min={TERMINAL_FONT_SIZE_MIN}
+                  max={TERMINAL_FONT_SIZE_MAX}
+                  value={shellAppearance.fontSize}
+                  oninput={(e) => setTerminalFontSize('shell', Number((e.target as HTMLInputElement).value))}
+                />
+              </div>
+            </div>
+            <div class="field">
+              <label for="shell-theme">{tr('settings.terminal.themeMode')}</label>
+              <select id="shell-theme" value={shellAppearance.themeMode} onchange={(e) => setTerminalThemeMode('shell', (e.target as HTMLSelectElement).value as TerminalThemeMode)}>
+                <option value="system">{tr('settings.terminal.followApp')}</option>
+                <option value="dark">{tr('settings.terminal.dark')}</option>
+                <option value="light">{tr('settings.terminal.light')}</option>
+              </select>
+            </div>
+          </section>
+
+          <datalist id="terminal-font-presets">
+            {#each TERMINAL_FONT_PRESETS as font}
+              <option value={font}></option>
+            {/each}
+          </datalist>
+        </div>
       {:else if tab === 'language'}
         <div class="content-head">
           <h2>{tr('settings.language.title')}</h2>
@@ -878,6 +1030,33 @@
     padding: 0 4px;
     border-radius: var(--rad-sm);
   }
+  .terminal-form { gap: var(--sp-3); }
+  .terminal-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    padding: var(--sp-3);
+    border: 1px solid var(--bd-muted);
+    border-radius: var(--rad-lg);
+    background: color-mix(in srgb, var(--bg-sidebar) 46%, transparent);
+  }
+  .terminal-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--sp-3);
+  }
+  .terminal-card h3 {
+    margin: 0;
+    font-size: var(--fs-lg);
+  }
+  .terminal-card p {
+    margin: 3px 0 0;
+    color: var(--fg-tertiary);
+    font-size: var(--fs-xs);
+    line-height: 1.35;
+  }
+  .size-field { max-width: 140px; }
   .form-actions {
     display: flex;
     justify-content: flex-end;

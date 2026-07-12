@@ -19,6 +19,16 @@
   import { get } from 'svelte/store'
   import { ipc, type SessionId, type EndpointId } from './ipc'
   import { tabs } from './sessions'
+  import {
+    TERMINAL_FONT_SIZE_DEFAULT,
+    TERMINAL_FONT_SIZE_MIN,
+    TERMINAL_FONT_SIZE_MAX,
+    buildXtermTheme,
+    loadTerminalAppearance,
+    onTerminalSettingsChanged,
+    updateTerminalFontSize,
+    type TerminalAppearance,
+  } from './terminal_settings'
 
   /**
    * 健康尺寸下限。低于此值的 cols/rows 一律视为容器还没准备好,
@@ -27,10 +37,6 @@
    */
   const MIN_COLS = 20
   const MIN_ROWS = 5
-  const FONT_SIZE_DEFAULT = 13
-  const FONT_SIZE_MIN = 8
-  const FONT_SIZE_MAX = 32
-  const FONT_SIZE_KEY = 'kode.terminal.fontSize'
 
   type Props = {
     sessionId: SessionId
@@ -49,17 +55,11 @@
   let fitAddon: any = null
   let destroyed = false
 
-  // 字体大小:从 localStorage 恢复;所有 Terminal 实例共享同一值(全局字号)。
-  let fontSize = $state((() => {
-    try {
-      const v = localStorage.getItem(FONT_SIZE_KEY)
-      if (v) {
-        const n = parseInt(v, 10)
-        if (n >= FONT_SIZE_MIN && n <= FONT_SIZE_MAX) return n
-      }
-    } catch {}
-    return FONT_SIZE_DEFAULT
-  })())
+  // 字体设置:从 localStorage 恢复;所有 Terminal 实例共享同一组设置。
+  const initialAppearance = loadTerminalAppearance('pty')
+  let appearance = $state<TerminalAppearance>(initialAppearance)
+  let fontSize = $state(initialAppearance.fontSize)
+  let fontFamily = $state(initialAppearance.fontFamily)
 
   let resizeObserver: ResizeObserver | null = null
   let resizeTimer: number | null = null
@@ -67,6 +67,7 @@
   let pendingViewportStick = false
   let dprMql: MediaQueryList | null = null
   let bytesUnsubscribe: (() => Promise<void>) | null = null
+  let terminalSettingsUnsubscribe: (() => void) | null = null
   // Cmd 键状态监听器(组件级,以便 onDestroy 时清理)
   let _onCmdDown: ((e: KeyboardEvent) => void) | null = null
   let _onCmdUp: ((e: KeyboardEvent) => void) | null = null
@@ -132,7 +133,7 @@
   async function initTerminal() {
     // 1) 先等字体加载完(避免首次绘制后字体替换重排)
     try {
-      await (document as any).fonts?.load?.('14px JetBrains Mono')
+      await (document as any).fonts?.load?.(`${fontSize}px ${fontFamily}`)
     } catch {}
     if (destroyed) return
 
@@ -146,91 +147,15 @@
     await import('@xterm/xterm/css/xterm.css')
     if (destroyed) return
 
-    // ----------------------------------------------------------------
-    // 主题构建函数 —— 全部硬编码,不读 CSS 变量。
-    //
-    // 历史踩坑:之前用 readVar('--bg-base', fallback) 读 CSS 变量,但
-    // initTerminal 是 onMount 里 async 跑的,可能在 App 的 $effect
-    // (写 <html data-theme=...>)之前就执行 buildXtermTheme,此时 CSS
-    // 仍是 :root 默认值(dark),readVar 直接返回 #0B0B0D。结果:
-    //   - light 模式 → 走 light 分支,但读到 dark 的 #0B0B0D 当 background
-    //   - dark  模式 → 走 dark  分支,但读到 light 的 #F6F6F7 当 background
-    // 颜色就完全反了。fallback 永远派不上用场,因为 CSS 变量"存在但是错的"。
-    //
-    // 修法:全部用硬编码值,语义由 isDark prop 100% 决定,与 DOM 时序无关。
-    // 数值与 index.html 的 token 一致(可对照 :root / :root[data-theme="light"])。
-    //
-    // 关键:必须显式提供 ANSI 16 色调色板。xterm.js 默认的 ANSI 表是为 light 背景
-    // 设计的,落在 dark #0B0B0D 背景上几乎全黑,子进程高亮不可见。
-    // ----------------------------------------------------------------
-
-    // ANSI 16 色 —— Dark 模式(Codex workbench)
-    const ansiDark = {
-      black:         '#1A1D1B',
-      red:           '#FF6B6B',
-      green:         '#71D47D',
-      yellow:        '#E6B450',
-      blue:          '#8FD3FF',
-      magenta:       '#D8B4FE',
-      cyan:          '#7DD3C7',
-      white:         '#C9CEC8',
-      brightBlack:   '#70776F',
-      brightRed:     '#FF8585',
-      brightGreen:   '#9FE870',
-      brightYellow:  '#F0C96A',
-      brightBlue:    '#A9DEFF',
-      brightMagenta: '#E4C7FF',
-      brightCyan:    '#99E5DB',
-      brightWhite:   '#EDEFEB',
-    }
-
-    // ANSI 16 色 —— Light 模式(Codex workbench)
-    const ansiLight = {
-      black:         '#171A18',
-      red:           '#C24141',
-      green:         '#216E45',
-      yellow:        '#9A6700',
-      blue:          '#146C94',
-      magenta:       '#7E4CB8',
-      cyan:          '#087A6D',
-      white:         '#5F675F',
-      brightBlack:   '#7A827B',
-      brightRed:     '#D95656',
-      brightGreen:   '#2F8F58',
-      brightYellow:  '#B7791F',
-      brightBlue:    '#1D84B5',
-      brightMagenta: '#935FD0',
-      brightCyan:    '#0F9486',
-      brightWhite:   '#171A18',
-    }
-
-    function buildXtermTheme(dark: boolean) {
-      return dark
-        ? {
-            background: '#0D0F0E',
-            foreground: '#EDEFEB',
-            cursor: '#9FE870',
-            cursorAccent: '#0D0F0E',
-            selectionBackground: 'rgba(159, 232, 112, 0.48)',
-            ...ansiDark,
-          }
-        : {
-            background: '#F7F7F3',
-            foreground: '#171A18',
-            cursor: '#216E45',
-            cursorAccent: '#F7F7F3',
-            selectionBackground: 'rgba(33, 110, 69, 0.42)',
-            ...ansiLight,
-          }
-    }
-
+    // Theme values come from terminal_settings.ts and stay hardcoded there.
+    // Do not read CSS variables here; App theme effects can race terminal init.
     term = new Terminal({
-      fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
+      fontFamily,
       fontSize: fontSize,
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 5000,
-      theme: buildXtermTheme(isDark),
+      theme: buildXtermTheme(isDark, appearance.themeMode),
       // 让 xterm 直接吃 UTF-8 二进制(避免 string 路径的 UTF-16 重编码)
       convertEol: false,
       // 强制最小对比度 —— 子进程常用 24-bit RGB 转义序列(\x1b[38;2;...)输出
@@ -1148,67 +1073,48 @@
   function adjustFontSize(delta: number) {
     if (!term) return
     const next = delta === 0
-      ? FONT_SIZE_DEFAULT
-      : Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, fontSize + delta))
+      ? TERMINAL_FONT_SIZE_DEFAULT
+      : Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, fontSize + delta))
     if (next === fontSize && delta !== 0) return
-    fontSize = next
-    try {
-      localStorage.setItem(FONT_SIZE_KEY, String(next))
-    } catch {}
-    term.options.fontSize = next
+    appearance = updateTerminalFontSize('pty', next)
+    fontSize = appearance.fontSize
+    term.options.fontSize = fontSize
     // setTimeout(0) 让 xterm 先消化 fontSize 变更再 fit,避免用旧字号算列数
     window.setTimeout(() => scheduleResize(), 0)
   }
 
   onMount(() => {
+    terminalSettingsUnsubscribe = onTerminalSettingsChanged(({ target, settings }) => {
+      if (target !== 'pty') return
+      appearance = settings
+      fontSize = settings.fontSize
+      fontFamily = settings.fontFamily
+      applyAppearance(settings)
+    })
     initTerminal().catch((e) => {
       console.error('[term] init failed', e)
     })
   })
 
-  // isDark 变化时(theme 切换)热更新 xterm 颜色主题。
-  // initTerminal 是异步的,term 可能还未就绪;已有 xterm 实例则直接更新 options.theme。
-  //
-  // 关键:不走 readVar 读 CSS 变量 —— Svelte $effect 执行顺序不保证 App 的
-  // $effect(写 data-theme attribute)先于本 effect 跑,读到的可能还是旧主题值导致颜色反转。
-  // 全部用硬编码值,与 index.html token 完全一致。
-  $effect(() => {
-    const dark = isDark
+  function applyAppearance(next = appearance) {
     if (!term) return
-    const ansiDark = {
-      black:'#1A1D1B',red:'#FF6B6B',green:'#71D47D',yellow:'#E6B450',
-      blue:'#8FD3FF',magenta:'#D8B4FE',cyan:'#7DD3C7',white:'#C9CEC8',
-      brightBlack:'#70776F',brightRed:'#FF8585',brightGreen:'#9FE870',
-      brightYellow:'#F0C96A',brightBlue:'#A9DEFF',brightMagenta:'#E4C7FF',
-      brightCyan:'#99E5DB',brightWhite:'#EDEFEB',
-    }
-    const ansiLight = {
-      black:'#171A18',red:'#C24141',green:'#216E45',yellow:'#9A6700',
-      blue:'#146C94',magenta:'#7E4CB8',cyan:'#087A6D',white:'#5F675F',
-      brightBlack:'#7A827B',brightRed:'#D95656',brightGreen:'#2F8F58',
-      brightYellow:'#B7791F',brightBlue:'#1D84B5',brightMagenta:'#935FD0',
-      brightCyan:'#0F9486',brightWhite:'#171A18',
-    }
-    // 直接用硬编码值,不走 readVar —— 避免 App 的 $effect(写 data-theme)还没跑
-    // 时 CSS 变量仍是旧主题值导致颜色反转。fallback 值与 index.html token 完全一致。
-    const nextTheme = dark
-      ? { background: '#0D0F0E', foreground: '#EDEFEB',
-          cursor: '#9FE870', cursorAccent: '#0D0F0E',
-          selectionBackground: 'rgba(159,232,112,0.48)', ...ansiDark }
-      : { background: '#F7F7F3', foreground: '#171A18',
-          cursor: '#216E45', cursorAccent: '#F7F7F3',
-          selectionBackground: 'rgba(33,110,69,0.42)', ...ansiLight }
     try {
-      term.options.theme = nextTheme
-      // WebGL renderer 会把字符按"颜色 + 字形"缓存到 texture atlas。
-      // 仅改 options.theme + refresh 时,已渲染的 cell 拿的还是旧 atlas 的颜色,
-      // 切到 light 时整屏字形仍是 dark 的浅色 → 落在 light 背景上几乎透明。
-      // clearTextureAtlas 强制让 WebGL/canvas renderer 抛掉缓存,下次 refresh 用新主题色重建。
+      term.options.fontFamily = next.fontFamily
+      term.options.fontSize = next.fontSize
+      term.options.theme = buildXtermTheme(isDark, next.themeMode)
       try { term.clearTextureAtlas?.() } catch {}
       term.refresh(0, term.rows - 1)
+      window.setTimeout(() => scheduleResize(), 0)
     } catch (e) {
-      console.warn('[term] theme update failed', e)
+      console.warn('[term] appearance update failed', e)
     }
+  }
+
+  // isDark 或 terminal appearance 变化时热更新 xterm。
+  $effect(() => {
+    void isDark
+    void appearance
+    applyAppearance()
   })
 
   // ============ 搜索(Ctrl/Cmd+F)============
@@ -1543,6 +1449,7 @@
     pendingViewportStick = false
     if (_onCmdDown) window.removeEventListener('keydown', _onCmdDown)
     if (_onCmdUp) window.removeEventListener('keyup', _onCmdUp)
+    terminalSettingsUnsubscribe?.()
     if (_onWheelFallback) containerEl?.removeEventListener('wheel', _onWheelFallback, { capture: true })
     bytesUnsubscribe?.().catch((e) => console.warn('[term] unsubscribe bytes failed', e))
     try {

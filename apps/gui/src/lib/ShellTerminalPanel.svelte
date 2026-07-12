@@ -21,6 +21,16 @@
   import { ENDPOINT_LOCAL, shellIpc, type EndpointId, type ShellId } from './ipc'
   import type { TabInfo } from './sessions'
   import Icon from './Icon.svelte'
+  import {
+    TERMINAL_FONT_SIZE_DEFAULT,
+    TERMINAL_FONT_SIZE_MIN,
+    TERMINAL_FONT_SIZE_MAX,
+    buildXtermTheme,
+    loadTerminalAppearance,
+    onTerminalSettingsChanged,
+    updateTerminalFontSize,
+    type TerminalAppearance,
+  } from './terminal_settings'
 
   type Props = {
     tab: TabInfo | null
@@ -94,39 +104,15 @@
   }
 
   // ── 字体(全局共享,持久化到 localStorage)──────────────────
-  const FONT_SIZE_KEY = 'kode.shellTerminal.fontSize'
-  const FONT_FAMILY_KEY = 'kode.shellTerminal.fontFamily'
-  const FONT_SIZE_DEFAULT = 13
-  const FONT_SIZE_MIN = 8
-  const FONT_SIZE_MAX = 32
-  let fontSize = $state<number>(loadFontSize())
-  let fontFamily = $state<string>(loadFontFamily())
-
-  function loadFontSize(): number {
-    try {
-      const v = localStorage.getItem(FONT_SIZE_KEY)
-      if (v) {
-        const n = parseInt(v, 10)
-        if (n >= FONT_SIZE_MIN && n <= FONT_SIZE_MAX) return n
-      }
-    } catch {}
-    return FONT_SIZE_DEFAULT
-  }
-  function loadFontFamily(): string {
-    try {
-      const v = localStorage.getItem(FONT_FAMILY_KEY)
-      if (v) return v
-    } catch {}
-    return 'SF Mono'
-  }
-  function saveFontSize() {
-    try { localStorage.setItem(FONT_SIZE_KEY, String(fontSize)) } catch {}
-  }
+  const initialAppearance = loadTerminalAppearance('shell')
+  let appearance = $state<TerminalAppearance>(initialAppearance)
+  let fontSize = $state(initialAppearance.fontSize)
+  let fontFamily = $state(initialAppearance.fontFamily)
   function adjustFontSize(delta: number) {
-    const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, fontSize + delta))
+    const next = Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, fontSize + delta))
     if (next === fontSize) return
-    fontSize = next
-    saveFontSize()
+    appearance = updateTerminalFontSize('shell', next)
+    fontSize = appearance.fontSize
     for (const { term, fitAddon, container } of termInstances.values()) {
       try {
         term.options.fontSize = fontSize
@@ -137,8 +123,8 @@
     }
   }
   function resetFontSize() {
-    fontSize = FONT_SIZE_DEFAULT
-    saveFontSize()
+    appearance = updateTerminalFontSize('shell', TERMINAL_FONT_SIZE_DEFAULT)
+    fontSize = appearance.fontSize
     for (const { term, fitAddon, container } of termInstances.values()) {
       try {
         term.options.fontSize = fontSize
@@ -150,29 +136,6 @@
   }
 
   let destroyed = false
-
-  // ── xterm theme(从 Terminal.svelte 复制,硬编码不读 CSS 变量)──────────
-  const ansiDark = {
-    black: '#1A1D1B', red: '#FF6B6B', green: '#71D47D', yellow: '#E6B450',
-    blue: '#8FD3FF', magenta: '#D8B4FE', cyan: '#7DD3C7', white: '#C9CEC8',
-    brightBlack: '#70776F', brightRed: '#FF8585', brightGreen: '#9FE870',
-    brightYellow: '#F0C96A', brightBlue: '#A9DEFF', brightMagenta: '#E4C7FF',
-    brightCyan: '#99E5DB', brightWhite: '#EDEFEB',
-  }
-  const ansiLight = {
-    black: '#171A18', red: '#C24141', green: '#216E45', yellow: '#9A6700',
-    blue: '#146C94', magenta: '#7E4CB8', cyan: '#087A6D', white: '#5F675F',
-    brightBlack: '#7A827B', brightRed: '#D95656', brightGreen: '#2F8F58',
-    brightYellow: '#B7791F', brightBlue: '#1D84B5', brightMagenta: '#935FD0',
-    brightCyan: '#0F9486', brightWhite: '#171A18',
-  }
-  function buildXtermTheme(dark: boolean) {
-    return dark
-      ? { background: '#0D0F0E', foreground: '#EDEFEB', cursor: '#9FE870',
-          cursorAccent: '#0D0F0E', selectionBackground: 'rgba(159, 232, 112, 0.48)', ...ansiDark }
-      : { background: '#F7F7F3', foreground: '#171A18', cursor: '#216E45',
-          cursorAccent: '#F7F7F3', selectionBackground: 'rgba(33, 110, 69, 0.42)', ...ansiLight }
-  }
 
   function waitForLayout(el: HTMLElement): Promise<void> {
     return new Promise((resolve) => {
@@ -232,7 +195,7 @@
         cursorBlink: true,
         allowProposedApi: true,
         scrollback: 5000,
-        theme: buildXtermTheme(isDark),
+        theme: buildXtermTheme(isDark, appearance.themeMode),
         convertEol: false,
         minimumContrastRatio: 4.5,
       })
@@ -403,6 +366,7 @@
 
   let creatingTerminal = false
   let terminalError = $state<string | null>(null)
+  let terminalSettingsUnsubscribe: (() => void) | null = null
 
   function formatTerminalError(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error)
@@ -412,9 +376,30 @@
     return message
   }
 
+  function applyAppearance(next = appearance) {
+    for (const { term, fitAddon, container } of termInstances.values()) {
+      try {
+        term.options.fontFamily = `"${next.fontFamily}", "SF Mono", Menlo, monospace`
+        term.options.fontSize = next.fontSize
+        term.options.theme = buildXtermTheme(isDark, next.themeMode)
+        try { term.clearTextureAtlas?.() } catch {}
+        term.refresh(0, term.rows - 1)
+        if (container?.offsetWidth && container?.offsetHeight) {
+          window.setTimeout(() => { try { fitAddon?.fit() } catch {} }, 0)
+        }
+      } catch {}
+    }
+  }
+
   // 点击右上角终端图标直接开 shell:面板挂载时若当前 tab 没有终端,自动 spawn 一个。
-  // 仅在挂载时触发一次;用户手动关掉全部 shell 后仍保留 empty-state 按钮作为再开入口。
   onMount(() => {
+    terminalSettingsUnsubscribe = onTerminalSettingsChanged(({ target, settings }) => {
+      if (target !== 'shell') return
+      appearance = settings
+      fontSize = settings.fontSize
+      fontFamily = settings.fontFamily
+      applyAppearance(settings)
+    })
     if (terminals.length === 0 && tab?.cwd) {
       newTerminal().catch((e) => console.error('[shell-term] auto-spawn failed:', e))
     }
@@ -518,20 +503,11 @@
     prevWorkspaceKey = currentWorkspaceKey
   })
 
-  // isDark 变化时更新主题
+  // isDark / appearance 变化时同步到所有 xterm 实例。
   $effect(() => {
     void isDark
-    for (const { term } of termInstances.values()) {
-      try { term.options.theme = buildXtermTheme(isDark) } catch {}
-    }
-  })
-
-  // fontSize 变化时同步到所有 xterm 实例
-  $effect(() => {
-    void fontSize
-    for (const { term } of termInstances.values()) {
-      try { term.options.fontSize = fontSize } catch {}
-    }
+    void appearance
+    applyAppearance()
   })
 
   onDestroy(() => {
@@ -541,6 +517,7 @@
       unsub?.().catch(() => {})
       try { term.dispose() } catch {}
     }
+    terminalSettingsUnsubscribe?.()
     termInstances.clear()
   })
 </script>

@@ -51,6 +51,58 @@
     "message": "Persistent facts shared across tabs.",
     "description": "Memory settings description"
   },
+  "settings.terminal.title": {
+    "message": "Terminal",
+    "description": "Settings tab for terminal appearance"
+  },
+  "settings.terminal.description": {
+    "message": "Configure fonts and colors for the main PTY and workspace shell terminals.",
+    "description": "Terminal settings description"
+  },
+  "settings.terminal.mainPty": {
+    "message": "Main PTY",
+    "description": "Main AI session terminal label"
+  },
+  "settings.terminal.mainPtyDescription": {
+    "message": "The primary terminal used by codebuddy, claude, codex, and other AI CLIs.",
+    "description": "Main PTY terminal settings description"
+  },
+  "settings.terminal.shell": {
+    "message": "Shell",
+    "description": "Workspace shell terminal label"
+  },
+  "settings.terminal.shellDescription": {
+    "message": "The lightweight shell panel inside the workspace inspector.",
+    "description": "Shell terminal settings description"
+  },
+  "settings.terminal.fontFamily": {
+    "message": "Font family",
+    "description": "Terminal font family setting"
+  },
+  "settings.terminal.fontSize": {
+    "message": "Font size",
+    "description": "Terminal font size setting"
+  },
+  "settings.terminal.themeMode": {
+    "message": "Color theme",
+    "description": "Terminal theme mode setting"
+  },
+  "settings.terminal.followApp": {
+    "message": "Follow app theme",
+    "description": "Terminal follows global app theme"
+  },
+  "settings.terminal.dark": {
+    "message": "Dark",
+    "description": "Dark terminal theme"
+  },
+  "settings.terminal.light": {
+    "message": "Light",
+    "description": "Light terminal theme"
+  },
+  "settings.terminal.reset": {
+    "message": "Reset",
+    "description": "Reset terminal appearance settings"
+  },
   "settings.memory.promptInjection": {
     "message": "Prompt injection",
     "description": "Memory prompt injection setting title"
