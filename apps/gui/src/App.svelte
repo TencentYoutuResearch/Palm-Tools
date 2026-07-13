@@ -195,6 +195,8 @@
   let renameInputEl: HTMLInputElement | null = $state(null)
   /** dnd 进行中 —— 禁用 ⋯ 按钮 hover 显形,避免拖拽途中误触 */
   let dragging = $state(false)
+  /** workspace header 同时是折叠按钮和拖拽 handle;拖拽完成后的 click 必须吞掉。 */
+  let suppressNextCollapseClick = $state(false)
   /**
    * 工作区分栏:按 cwd 把 tabs 分组,每组一个可折叠 section header。
    * 单 workspace 时退化为平铺列表(不渲染 header),避免常见单项目场景出现多余 UI。
@@ -215,7 +217,6 @@
     pathHint: string
     showPathHint: boolean
     endpointKind: 'local' | 'remote'
-    endpointLabel: string
     tabs: TabInfo[]
   }
 
@@ -249,7 +250,6 @@
         pathHint: cwd === '(no cwd)' ? '' : wsPathHint(cwd, homeDir),
         showPathHint: false,
         endpointKind: endpoint.kind,
-        endpointLabel: endpoint.label,
         tabs,
       }
     })
@@ -312,6 +312,15 @@
     if (next.has(groupId)) next.delete(groupId)
     else next.add(groupId)
     collapsedCwds = next
+  }
+  function onWorkspaceHeaderClick(e: MouseEvent, groupId: string) {
+    if (suppressNextCollapseClick) {
+      e.preventDefault()
+      e.stopPropagation()
+      suppressNextCollapseClick = false
+      return
+    }
+    toggleCollapse(groupId)
   }
 
   /**
@@ -558,8 +567,14 @@
   }
 
   /** workspace 分组级别的拖拽回调:把整个分组上下重排。 */
+  function clearWorkspaceDragClickSuppression() {
+    window.setTimeout(() => {
+      suppressNextCollapseClick = false
+    }, 0)
+  }
   function onWsDndConsider(e: CustomEvent<DndEvent>) {
     dragging = true
+    suppressNextCollapseClick = true
     menuOpenId = null
     wsShadows = [...(e.detail.items as WsGroup[])]
   }
@@ -578,6 +593,7 @@
     ) {
       dragging = false
       wsShadows = [...wsGroups]
+      clearWorkspaceDragClickSuppression()
       return
     }
     wsShadows = [...finalGroups]
@@ -588,6 +604,7 @@
     }
     reorderTabs(nextOrder)
     dragging = false
+    clearWorkspaceDragClickSuppression()
   }
 
   /// 任何模态弹层打开时为 true —— 全局 Cmd/Ctrl 快捷键 handler 据此放行,
@@ -1562,7 +1579,7 @@
                   class:local={group.endpointKind === 'local'}
                   title={group.fullPath}
                   aria-expanded={!collapsedCwds.has(group.id)}
-                  onclick={() => toggleCollapse(group.id)}
+                  onclick={(e) => onWorkspaceHeaderClick(e, group.id)}
                   use:dragHandle
                 >
                   <span class="ws-grip" aria-hidden="true"><Icon name="grip-vertical" size={14} /></span>
@@ -1573,12 +1590,7 @@
                     <Icon name={group.endpointKind === 'remote' ? 'folder-open' : 'folder'} size={13} />
                   </span>
                   <span class="ws-title">
-                    <span class="ws-title-row">
-                      <span class="ws-name">{group.name}</span>
-                      <span class="ws-scope" class:remote={group.endpointKind === 'remote'} class:local={group.endpointKind === 'local'}>
-                        {group.endpointKind === 'remote' ? group.endpointLabel : 'local'}
-                      </span>
-                    </span>
+                    <span class="ws-name">{group.name}</span>
                     {#if group.showPathHint}
                       <span class="ws-path">{group.pathHint}</span>
                     {/if}
@@ -2461,12 +2473,6 @@
     min-width: 0;
     gap: 1px;
   }
-  .ws-group-header .ws-title-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
   .ws-group-header .ws-name {
     min-width: 0;
     overflow: hidden;
@@ -2475,25 +2481,6 @@
     font-family: var(--font-ui);
     text-transform: none;
     letter-spacing: 0;
-  }
-  .ws-group-header .ws-scope {
-    flex-shrink: 0;
-    max-width: 72px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding: 0 5px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--fg-primary) 8%, transparent);
-    color: var(--fg-tertiary);
-    font-size: 9px;
-    font-weight: 600;
-    line-height: 14px;
-    text-transform: uppercase;
-  }
-  .ws-group-header .ws-scope.remote {
-    background: color-mix(in srgb, var(--st-info, #8fd3ff) 16%, transparent);
-    color: color-mix(in srgb, var(--st-info, #8fd3ff) 84%, var(--fg-secondary));
   }
   .ws-group-header .ws-path {
     min-width: 0;
@@ -3216,11 +3203,13 @@
   /* ===== 长按闸门态(longpress_gate action 加的 class) =====
      .longpress-arming:按下未到 600ms,轻微缩起提示「正在识别长按」
      .longpress-armed :长按到时,dndzone 已接管,变 grab + 抬起 */
-  .tab.longpress-arming {
+  .tab.longpress-arming,
+  .ws-group-header.longpress-arming {
     transform: scale(0.98);
     box-shadow: 0 0 0 1px var(--acc) inset;
   }
-  .tab.longpress-armed {
+  .tab.longpress-armed,
+  .ws-group-header.longpress-armed {
     cursor: grabbing !important;
     transform: scale(1.02);
     box-shadow: var(--shadow-md, 0 4px 12px rgba(0,0,0,0.25));

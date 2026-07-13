@@ -3,18 +3,18 @@
  *
  * 为什么需要这个 action:
  *   svelte-dnd-action@0.9.70 鼠标按下即进入 drag-ready 状态,只要 pointer 移动
- *   超过 3px(MIN_MOVEMENT_BEFORE_DRAG_START_PX)就触发拖拽。点击 tab 想选中时
- *   手稍微一抖就变成拖拽,体验差。它自带的 `delayTouchStart` 只对触屏生效,
+ *   超过 3px(MIN_MOVEMENT_BEFORE_DRAG_START_PX)就触发拖拽。点击 tab 或 workspace
+ *   header 时手稍微一抖就变成拖拽,体验差。它自带的 `delayTouchStart` 只对触屏生效,
  *   鼠标/触控板没有内置长按选项。
  *
  * 原理:
  *   在 capture 阶段拦截 `mousedown`(触屏交给 dndzone 自带的 delayTouchStart,
  *   不处理),阻止事件传到 dndzone。启动一个长按计时器:
  *     - 到时 → 用合成 MouseEvent 重新派发一次 mousedown,此时 dndzone 才接管;
- *       tab 切到 .longpress-armed 态(cursor: grabbing + 轻微抬起动画)
+ *       被拖元素切到 .longpress-armed 态(cursor: grabbing + 轻微抬起动画)
  *     - 期间 pointer 移动 > MAX_MOVE_BEFORE_GATE_RELEASE_PX → 视为点击/滚动,
  *       取消闸门;当前 mousedown 已被吞,但 click 是独立事件,会正常派发,
- *       tab 选中不受影响
+ *       tab 选中 / workspace 折叠切换不受影响
  *     - 期间 mouseup → 取消(点击放行)
  *   拖拽开始后,继续监听 mouseup —— 用户松手时清掉 .longpress-armed。
  *
@@ -43,16 +43,16 @@ export function longpressGate(node: HTMLElement) {
   let arming = false
   /** 长按已到时,dndzone 已接管,等 mouseup 收尾 */
   let armed = false
-  let armedTab: HTMLElement | null = null
+  let armedEl: HTMLElement | null = null
   let startX = 0
   let startY = 0
   /** 正在 re-dispatch 合成 mousedown —— 此时 capture handler 要放行,避免递归拦截 */
   let redispatching = false
 
-  function clearArmedTabClasses() {
-    if (armedTab) {
-      armedTab.classList.remove('longpress-arming')
-      armedTab.classList.remove('longpress-armed')
+  function clearArmedElClasses() {
+    if (armedEl) {
+      armedEl.classList.remove('longpress-arming')
+      armedEl.classList.remove('longpress-armed')
     }
   }
 
@@ -63,8 +63,8 @@ export function longpressGate(node: HTMLElement) {
       timer = undefined
     }
     arming = false
-    clearArmedTabClasses()
-    armedTab = null
+    clearArmedElClasses()
+    armedEl = null
     window.removeEventListener('mousemove', onWaitingMouseMove, true)
     window.removeEventListener('mouseup', onArmingMouseUp, true)
   }
@@ -72,8 +72,8 @@ export function longpressGate(node: HTMLElement) {
   /** 拖拽已开始(dndzone 接管)后,松手时清掉 .longpress-armed */
   function onArmedMouseUp() {
     armed = false
-    clearArmedTabClasses()
-    armedTab = null
+    clearArmedElClasses()
+    armedEl = null
     window.removeEventListener('mouseup', onArmedMouseUp, true)
   }
 
@@ -104,23 +104,24 @@ export function longpressGate(node: HTMLElement) {
     // dndzone 拖拽,onDndConsider 把 menuOpenId 清掉 —— 菜单永远开不起来。
     if (t && t.closest('.more-btn, .tab-menu, .close-btn, .tab-title-input')) return
 
-    // 找到被按的 .tab(dndzone 的 draggableEl) —— 合成事件必须 dispatch 到它,
-    // 不能 dispatch 到子元素,否则 dndzone 的 handleMouseDown 里
-    // e.target !== e.currentTarget 分支会走错。
-    const tabEl = (t && t.closest<HTMLElement>('.tab')) || null
-    if (!tabEl) return
+    // 找到被按的拖拽元素。
+    // - tab 拖拽:dispatch 到 .tab 本身,匹配 dndzone 的 draggableEl。
+    // - workspace 拖拽:dispatch 到 .ws-group-header,匹配 dragHandle。
+    // 不能 dispatch 到任意子元素,否则 dndzone 的 target 判断会走错。
+    const dragEl = (t && (t.closest<HTMLElement>('.tab') ?? t.closest<HTMLElement>('.ws-group-header'))) || null
+    if (!dragEl) return
 
     // 阻断 dndzone 的 mousedown 监听(它在 bubble 阶段绑在 draggableEl 上)。
     // 只 stopImmediatePropagation,不 preventDefault —— preventDefault 会阻止
     // 浏览器派发后续 click,导致 tab 选中失效。
     e.stopImmediatePropagation()
 
-    armedTab = tabEl
+    armedEl = dragEl
     arming = true
     startX = e.clientX
     startY = e.clientY
-    // 立即给视觉反馈:tab 进入「长按中」态(轻微缩起)
-    armedTab.classList.add('longpress-arming')
+    // 立即给视觉反馈:拖拽元素进入「长按中」态(轻微缩起)
+    armedEl.classList.add('longpress-arming')
 
     timer = window.setTimeout(() => {
       // 长按到时 → 重新派发一个合成 mousedown,让 dndzone 接管当前这次按压
@@ -128,8 +129,8 @@ export function longpressGate(node: HTMLElement) {
       window.removeEventListener('mousemove', onWaitingMouseMove, true)
       window.removeEventListener('mouseup', onArmingMouseUp, true)
       // 切到「可拖拽」态:cursor 变 grabbing,轻微抬起
-      armedTab?.classList.remove('longpress-arming')
-      armedTab?.classList.add('longpress-armed')
+      armedEl?.classList.remove('longpress-arming')
+      armedEl?.classList.add('longpress-armed')
       armed = true
 
       const Ctor = globalThis.MouseEvent as unknown as {
@@ -143,11 +144,10 @@ export function longpressGate(node: HTMLElement) {
         clientX: startX,
         clientY: startY,
       })
-      // dispatch 到 .tab 本身 —— dndzone 的 handleMouseDown 在此元素上监听,
-      // e.target === e.currentTarget,跳过 input/嵌套元素分支
+      // dispatch 到拖拽元素本身 —— dndzone / dragHandle 的 mousedown 在此元素上监听。
       redispatching = true
       try {
-        armedTab?.dispatchEvent(synth)
+        armedEl?.dispatchEvent(synth)
       } finally {
         redispatching = false
       }
