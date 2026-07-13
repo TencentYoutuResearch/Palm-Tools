@@ -18,7 +18,7 @@
    *           viewport repair(主终端专用,shell 终端不需要)
    */
   import { onDestroy, onMount } from 'svelte'
-  import { ENDPOINT_LOCAL, shellIpc, type EndpointId, type ShellId } from './ipc'
+  import { ENDPOINT_LOCAL, ipc, shellIpc, type EndpointId, type ShellId } from './ipc'
   import type { TabInfo } from './sessions'
   import Icon from './Icon.svelte'
   import {
@@ -104,6 +104,12 @@
   }
 
   // ── 字体(全局共享,持久化到 localStorage)──────────────────
+  /// 字体 fallback 链:用户选的字体 → SF Mono → Menlo → Monaco →
+  /// Symbols Nerd Font Mono(powerline/nerd-font 图标兜底,装了才生效,没装跳过)→
+  /// Apple Symbols(系统符号)→ monospace。
+  /// 保证 box-drawing / powerline / 常见图标至少有一个字体能兜出来,不至于全方框。
+  /// init 和 applyAppearance 都用这个,避免切字体后丢 fallback。
+  const FONT_FALLBACK = `"SF Mono", Menlo, Monaco, "Symbols Nerd Font Mono", "Noto Sans Mono", "Apple Symbols", monospace`
   const initialAppearance = loadTerminalAppearance('shell')
   let appearance = $state<TerminalAppearance>(initialAppearance)
   let fontSize = $state(initialAppearance.fontSize)
@@ -190,7 +196,7 @@
       if (containerEls.get(shellId) !== container) return
 
       const term = new Terminal({
-        fontFamily: `"${fontFamily}", "SF Mono", Menlo, monospace`,
+        fontFamily: `"${fontFamily}", ${FONT_FALLBACK}`,
         fontSize: fontSize,
         cursorBlink: true,
         allowProposedApi: true,
@@ -276,19 +282,39 @@
         console.warn('[shell-term] modifier-scroll patch failed:', e)
       }
 
-      // 字体缩放快捷键拦截(Cmd+= / Cmd+- / Cmd+0)
+      // 字体缩放快捷键拦截(Cmd+= / Cmd+- / Cmd+0)+ 剪贴板复制/粘贴
+      // (参考 Terminal.svelte:Cmd+C 复制选区;Cmd+V 通过 Rust 读剪贴板粘贴到 PTY,
+      //  绕过 WKWebView 每次都弹权限窗的问题)
       function onKeydown(e: KeyboardEvent) {
-        if (e.metaKey) {
-          if (e.key === '=' || e.key === '+') {
-            e.preventDefault()
-            adjustFontSize(1)
-          } else if (e.key === '-') {
-            e.preventDefault()
-            adjustFontSize(-1)
-          } else if (e.key === '0') {
-            e.preventDefault()
-            resetFontSize()
+        if (!e.metaKey) return
+        if (e.key === '=' || e.key === '+') {
+          e.preventDefault(); e.stopPropagation()
+          adjustFontSize(1)
+        } else if (e.key === '-') {
+          e.preventDefault(); e.stopPropagation()
+          adjustFontSize(-1)
+        } else if (e.key === '0') {
+          e.preventDefault(); e.stopPropagation()
+          resetFontSize()
+        } else if (!e.ctrlKey && !e.altKey && e.key === 'c') {
+          // Cmd+C:有选区 → 复制;无选区 → 仍 preventDefault(避免 WKWebView undo-focus)
+          e.preventDefault(); e.stopPropagation()
+          const sel = term.getSelection()
+          if (sel) {
+            navigator.clipboard.writeText(sel).catch((err) => {
+              console.warn('[shell-term] clipboard write failed:', err)
+            })
           }
+        } else if (!e.ctrlKey && !e.altKey && e.key === 'v') {
+          // Cmd+V:通过 Rust 侧读剪贴板,绕过 WKWebView 权限弹窗
+          e.preventDefault(); e.stopPropagation()
+          ipc.readClipboard().then((text) => {
+            if (!text) return
+            const bytes = new TextEncoder().encode(text)
+            shellIpc.write(shellId, bytes, shellTab.endpointId).catch(console.error)
+          }).catch((err) => {
+            console.warn('[shell-term] clipboard read failed:', err)
+          })
         }
       }
       container.addEventListener('keydown', onKeydown)
@@ -379,7 +405,7 @@
   function applyAppearance(next = appearance) {
     for (const { term, fitAddon, container } of termInstances.values()) {
       try {
-        term.options.fontFamily = `"${next.fontFamily}", "SF Mono", Menlo, monospace`
+        term.options.fontFamily = `"${next.fontFamily}", ${FONT_FALLBACK}`
         term.options.fontSize = next.fontSize
         term.options.theme = buildXtermTheme(isDark, next.themeMode)
         try { term.clearTextureAtlas?.() } catch {}
@@ -589,8 +615,7 @@
   }
 
   /* ── 顶部 tab 栏 ── */
-  /* overflow: visible —— 不能 hidden,否则字体下拉(font-dropdown,absolute 向下展开)
-     会被 30px 高的 tab-bar 裁掉。水平裁剪由 .tabs-scroll 自己的 overflow-x:auto 负责。 */
+  /* overflow: visible —— 水平裁剪由 .tabs-scroll 自己的 overflow-x:auto 负责。 */
   .tab-bar {
     flex: 0 0 auto;
     display: flex;

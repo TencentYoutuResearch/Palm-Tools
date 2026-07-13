@@ -1122,7 +1122,16 @@
     //    仍允许浏览器默认(Cmd+Z 撤销 cwd 输入框内容等场景正常工作)。
     //    弹层打开时也不阻断(anyModalOpen) —— 否则 Cmd+V 粘贴、Cmd+A 全选
     //    在 DeployPanel/EndpointDialog 等弹层里失效。
-    if ($activeId != null && !anyModalOpen) {
+    //
+    //    可编辑元素(<input>/<textarea>/contenteditable)里也不阻断 —— 否则
+    //    非弹层的输入框(如 shell 终端的字体输入框)里 Cmd+C / Cmd+V / Cmd+A
+    //    等编辑快捷键的浏览器默认行为会被杀掉,无法复制粘贴。
+    //    与 anyModalOpen 同理:让浏览器原生处理这些编辑动作。
+    const target = e.target as HTMLElement | null
+    const isEditable = !!target && (
+      target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+    )
+    if ($activeId != null && !anyModalOpen && !isEditable) {
       e.preventDefault()
     }
   }

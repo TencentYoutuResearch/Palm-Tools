@@ -50,6 +50,7 @@ export function sanitizeModelName(raw: string): string {
     '\tnote:',
     ' the model was saved to user settings',
     '-the-model-was-saved-to-user-settings',
+    ' (this session only)',
   ]) {
     const idx = lower.indexOf(marker)
     if (idx >= 0) {

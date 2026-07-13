@@ -62,6 +62,10 @@ pub fn short_model_name(raw: &str) -> String {
 /// - `Claude-Opus-4.8-1M Note: The model was saved ...`
 /// - `opus-4.8-1m-note:-the-model-was-saved-to-user-settings,...`
 /// - `glm-5.2-ioa\nNote: The model was saved to user settings, ...`(note 用换行分隔)
+/// - `glm-5.2-ioa (this session only)`(codebuddy `/model` session-only 切换的 stdout 注释)
+///
+/// 注意:不能无脑截掉所有 ` (...)` 括号 —— 友好名里的 `(1M context)` 是 size tag,
+/// `short_model_name` 要靠它拼 `-1m` 后缀,必须保留。所以这里只截已知的具体文案。
 pub fn sanitize_model_name(raw: &str) -> String {
     let s = raw.trim();
     if s.is_empty() {
@@ -78,6 +82,7 @@ pub fn sanitize_model_name(raw: &str) -> String {
         "\tnote:",
         " the model was saved to user settings",
         "-the-model-was-saved-to-user-settings",
+        " (this session only)",
     ] {
         if let Some(idx) = lower.find(marker) {
             cut = cut.min(idx);
@@ -381,6 +386,33 @@ mod tests {
         assert_eq!(
             sanitize_model_name("Claude-Opus-4.8-1M Note: The model was saved"),
             "Claude-Opus-4.8-1M"
+        );
+    }
+
+    // 回归:codebuddy `/model <name>` 设为 session-only 时,stdout 形如
+    // `Switch model to glm-5.2-ioa (this session only)`,jsonl_tail 的
+    // extract_model_switch 会把 `glm-5.2-ioa (this session only)` 整段当 model 名。
+    // 这个脏值若不清理,会被原样塞进 `--model` argv 并持久化到 state.json,
+    // 导致 resume / 启动恢复时 codebuddy 报 `400 model service info not found`。
+    #[test]
+    fn strips_this_session_only_suffix() {
+        assert_eq!(
+            sanitize_model_name("glm-5.2-ioa (this session only)"),
+            "glm-5.2-ioa"
+        );
+        assert_eq!(
+            sanitize_model_name("claude-opus-4.8-1m (this session only)"),
+            "claude-opus-4.8-1m"
+        );
+        // 大小写不敏感
+        assert_eq!(
+            sanitize_model_name("GPT-5.5 (This Session Only)"),
+            "GPT-5.5"
+        );
+        // 友好名的 (1M context) size tag 必须保留 —— 不能误伤
+        assert_eq!(
+            sanitize_model_name("Claude-4.7-Opus (1M context)"),
+            "Claude-4.7-Opus (1M context)"
         );
     }
 
