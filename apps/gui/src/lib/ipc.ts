@@ -296,6 +296,12 @@ export const ipc = {
     invoke<FilePreview>('workspace_preview_file', { path }),
   workspaceGitDiff: (cwd: string, path: string, bucket: string) =>
     invoke<GitDiffPreview>('workspace_git_diff', { cwd, path, bucket }),
+  workspaceGitCommitDiff: (cwd: string, commit: string) =>
+    invoke<GitDiffPreview>('workspace_git_commit_diff', { cwd, commit }),
+  workspaceGitCommitDetail: (cwd: string, commit: string) =>
+    invoke<GitCommitDetail>('workspace_git_commit_detail', { cwd, commit }),
+  workspaceGitCommitFileDiff: (cwd: string, commit: string, path: string) =>
+    invoke<GitDiffPreview>('workspace_git_commit_file_diff', { cwd, commit, path }),
 
   // Theme(全局 UI 主题持久化)
   getTheme: () => invoke<string>('get_theme'),
@@ -341,6 +347,34 @@ export interface WorkspaceGitChange {
   bucket: 'staged' | 'modified' | 'untracked' | 'conflict' | string
 }
 
+export interface GitBranchInfo {
+  name: string
+  display_name: string
+  current: boolean
+  remote: boolean
+}
+
+export interface GitCommitInfo {
+  hash: string
+  short_hash: string
+  author: string
+  timestamp_secs: number
+  subject: string
+  parents?: string[]
+  decorations?: string[]
+}
+
+export interface GitCommitFileChange {
+  path: string
+  status: string
+}
+
+export interface GitCommitDetail {
+  commit: string
+  message: string
+  files: GitCommitFileChange[]
+}
+
 export interface WorkspaceGitSummary {
   is_repo: boolean
   root: string | null
@@ -353,6 +387,8 @@ export interface WorkspaceGitSummary {
   ahead: number
   behind: number
   changes: WorkspaceGitChange[]
+  branches?: GitBranchInfo[]
+  commits?: GitCommitInfo[]
 }
 
 export interface WorkspaceSnapshot {
@@ -543,6 +579,15 @@ export const endpointIpc = {
   /** 远端 tab:git diff(对齐 ipc.workspaceGitDiff) */
   workspaceGitDiff: (id: string, cwd: string, path: string, bucket: string) =>
     invoke<GitDiffPreview>('endpoint_workspace_git_diff', { id, cwd, path, bucket }),
+  /** 远端 tab:commit diff(对齐 ipc.workspaceGitCommitDiff) */
+  workspaceGitCommitDiff: (id: string, cwd: string, commit: string) =>
+    invoke<GitDiffPreview>('endpoint_workspace_git_commit_diff', { id, cwd, commit }),
+  /** 远端 tab:commit detail(对齐 ipc.workspaceGitCommitDetail) */
+  workspaceGitCommitDetail: (id: string, cwd: string, commit: string) =>
+    invoke<GitCommitDetail>('endpoint_workspace_git_commit_detail', { id, cwd, commit }),
+  /** 远端 tab:commit file diff(对齐 ipc.workspaceGitCommitFileDiff) */
+  workspaceGitCommitFileDiff: (id: string, cwd: string, commit: string, path: string) =>
+    invoke<GitDiffPreview>('endpoint_workspace_git_commit_file_diff', { id, cwd, commit, path }),
 }
 
 // ── 远端 Bridge 部署 ──────────────────────────────────────────────────────

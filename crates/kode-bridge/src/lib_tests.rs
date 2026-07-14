@@ -13,6 +13,46 @@ fn create_session_sanitizes_requested_model() {
     assert_eq!(sanitize_requested_model(None), None);
 }
 
+#[test]
+fn git_history_helpers_parse_summary_additions() {
+    let branches = parse_git_branches(
+        "refs/heads/main\x1fmain\x1f*\nrefs/remotes/origin/HEAD\x1forigin/HEAD\x1f \nrefs/remotes/origin/dev\x1forigin/dev\x1f ",
+    );
+    assert_eq!(branches.len(), 2);
+    assert!(branches[0].current);
+    assert!(!branches[0].remote);
+    assert_eq!(branches[1].name, "origin/dev");
+    assert!(branches[1].remote);
+
+    let commits = parse_git_commits(
+        "0123456789abcdef\x1f0123456\x1fAlice\x1f1720000000\x1fadd git history\x1fabcdef0 1111111\x1fHEAD -> main, origin/main, tag: v1\n",
+    );
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].short_hash, "0123456");
+    assert_eq!(commits[0].subject, "add git history");
+    assert_eq!(commits[0].parents, vec!["abcdef0", "1111111"]);
+    assert_eq!(
+        commits[0].decorations,
+        vec!["HEAD", "main", "origin/main", "tag: v1"]
+    );
+
+    let labels = parse_commit_decorations(
+        "HEAD -> refs/heads/main, refs/remotes/origin/main, tag: refs/tags/v1",
+    );
+    assert_eq!(labels, vec!["HEAD", "main", "origin/main", "tag: v1"]);
+
+    let detail = parse_commit_detail(
+        "0123456",
+        "full message\n\nbody\x1e\nM\tapps/gui/src/lib/WorkspacePanel.svelte\nA\tnew-file.txt\n",
+    );
+    assert_eq!(detail.message, "full message\n\nbody");
+    assert_eq!(detail.files.len(), 2);
+    assert_eq!(detail.files[0].status, "M");
+
+    assert!(is_valid_commit_hash("0123456"));
+    assert!(!is_valid_commit_hash("main"));
+}
+
 /// 新增的 `/api/v1/memory/recent` 路由(GUI Browse 面板远端历史入口)契约:
 /// 已 approve 的 fact 应能通过 memory_recent handler 拉出,形态与 /search 一致
 /// (hits 数组,带 id/body/snippet/scope 等)。

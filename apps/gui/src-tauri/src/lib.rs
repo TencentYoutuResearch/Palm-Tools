@@ -146,6 +146,9 @@ pub fn run() {
             workspace::workspace_list_dir,
             workspace::workspace_preview_file,
             workspace::workspace_git_diff,
+            workspace::workspace_git_commit_diff,
+            workspace::workspace_git_commit_detail,
+            workspace::workspace_git_commit_file_diff,
             commands::get_theme,
             commands::set_theme,
             commands::get_locale,
@@ -210,6 +213,9 @@ pub fn run() {
             endpoints::endpoint_workspace_list_dir,
             endpoints::endpoint_workspace_preview_file,
             endpoints::endpoint_workspace_git_diff,
+            endpoints::endpoint_workspace_git_commit_diff,
+            endpoints::endpoint_workspace_git_commit_detail,
+            endpoints::endpoint_workspace_git_commit_file_diff,
             // 远端 Bridge 部署安装(SSH 推 tarball + 停旧 + 起新 + 取 token)
             deploy::deploy_remote_bridge,
             // Shell PTY(工作区终端面板)

@@ -618,6 +618,9 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/api/v1/fs/preview", get(fs_preview))
         .route("/api/v1/git/status", get(git_status))
         .route("/api/v1/git/diff", get(git_diff))
+        .route("/api/v1/git/commit-diff", get(git_commit_diff))
+        .route("/api/v1/git/commit-detail", get(git_commit_detail))
+        .route("/api/v1/git/commit-file-diff", get(git_commit_file_diff))
         .route("/api/v1/memory/pending", get(memory_list_pending))
         .route("/api/v1/memory/pending/:id/review", post(memory_review))
         .route("/api/v1/memory/search", get(memory_search))
@@ -2061,6 +2064,25 @@ struct WsGitChange {
     bucket: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WsGitBranchInfo {
+    name: String,
+    display_name: String,
+    current: bool,
+    remote: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WsGitCommitInfo {
+    hash: String,
+    short_hash: String,
+    author: String,
+    timestamp_secs: u64,
+    subject: String,
+    parents: Vec<String>,
+    decorations: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 struct WsGitSummary {
     is_repo: bool,
@@ -2074,6 +2096,8 @@ struct WsGitSummary {
     ahead: u32,
     behind: u32,
     changes: Vec<WsGitChange>,
+    branches: Vec<WsGitBranchInfo>,
+    commits: Vec<WsGitCommitInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2092,6 +2116,19 @@ struct WsGitDiffPreview {
     bucket: String,
     content: String,
     truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WsGitCommitFileChange {
+    path: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WsGitCommitDetail {
+    commit: String,
+    message: String,
+    files: Vec<WsGitCommitFileChange>,
 }
 
 #[derive(Deserialize)]
@@ -2210,6 +2247,127 @@ async fn git_diff(Query(q): Query<GitDiffQuery>) -> Result<Json<WsGitDiffPreview
     }))
 }
 
+/// `GET /api/v1/git/commit-diff?cwd=<abs>&commit=<sha>`
+#[derive(Deserialize)]
+struct GitCommitDiffQuery {
+    cwd: String,
+    commit: String,
+}
+
+async fn git_commit_diff(
+    Query(q): Query<GitCommitDiffQuery>,
+) -> Result<Json<WsGitDiffPreview>, ApiError> {
+    const MAX_CHARS: usize = 180_000;
+    let cwd = std::path::Path::new(q.cwd.trim());
+    if !cwd.is_absolute() {
+        return Err(ApiError::BadRequest("cwd must be absolute".into()));
+    }
+    let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| ApiError::BadRequest("not a Git repository".into()))?;
+    let commit = q.commit.trim();
+    if !is_valid_commit_hash(commit) {
+        return Err(ApiError::BadRequest(
+            "commit must be a 7-40 character hex SHA".into(),
+        ));
+    }
+    let output = run_git_raw(
+        std::path::Path::new(&root),
+        &[
+            "--no-pager",
+            "show",
+            "--format=fuller",
+            "--stat",
+            "--patch",
+            "--no-ext-diff",
+            "--find-renames",
+            commit,
+        ],
+    )?;
+    let (content, truncated) = truncate_chars(output, MAX_CHARS);
+    Ok(Json(WsGitDiffPreview {
+        path: commit.to_string(),
+        bucket: "commit".into(),
+        content,
+        truncated,
+    }))
+}
+
+async fn git_commit_detail(
+    Query(q): Query<GitCommitDiffQuery>,
+) -> Result<Json<WsGitCommitDetail>, ApiError> {
+    let cwd = std::path::Path::new(q.cwd.trim());
+    if !cwd.is_absolute() {
+        return Err(ApiError::BadRequest("cwd must be absolute".into()));
+    }
+    let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| ApiError::BadRequest("not a Git repository".into()))?;
+    let commit = q.commit.trim();
+    if !is_valid_commit_hash(commit) {
+        return Err(ApiError::BadRequest(
+            "commit must be a 7-40 character hex SHA".into(),
+        ));
+    }
+    let output = run_git_raw(
+        std::path::Path::new(&root),
+        &[
+            "--no-pager",
+            "show",
+            "--format=%B%x1e",
+            "--name-status",
+            "--no-renames",
+            commit,
+        ],
+    )?;
+    Ok(Json(parse_commit_detail(commit, &output)))
+}
+
+#[derive(Deserialize)]
+struct GitCommitFileDiffQuery {
+    cwd: String,
+    commit: String,
+    path: String,
+}
+
+async fn git_commit_file_diff(
+    Query(q): Query<GitCommitFileDiffQuery>,
+) -> Result<Json<WsGitDiffPreview>, ApiError> {
+    const MAX_CHARS: usize = 180_000;
+    let cwd = std::path::Path::new(q.cwd.trim());
+    if !cwd.is_absolute() {
+        return Err(ApiError::BadRequest("cwd must be absolute".into()));
+    }
+    let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| ApiError::BadRequest("not a Git repository".into()))?;
+    let commit = q.commit.trim();
+    if !is_valid_commit_hash(commit) {
+        return Err(ApiError::BadRequest(
+            "commit must be a 7-40 character hex SHA".into(),
+        ));
+    }
+    let rel = validate_git_rel_path(&q.path)?;
+    let output = run_git_raw(
+        std::path::Path::new(&root),
+        &[
+            "--no-pager",
+            "show",
+            "--format=",
+            "--patch",
+            "--no-ext-diff",
+            "--find-renames",
+            commit,
+            "--",
+            rel,
+        ],
+    )?;
+    let (content, truncated) = truncate_chars(output, MAX_CHARS);
+    Ok(Json(WsGitDiffPreview {
+        path: rel.to_string(),
+        bucket: "commit-file".into(),
+        content,
+        truncated,
+    }))
+}
+
 // ===== bridge 端 git 辅助(对齐 workspace.rs:211-404,best-effort 降级)=====
 
 fn read_git_summary_best_effort(path: &std::path::Path) -> WsGitSummary {
@@ -2227,6 +2385,8 @@ fn read_git_summary_best_effort(path: &std::path::Path) -> WsGitSummary {
         root: Some(root),
         branch,
         short_head,
+        branches: read_git_branches(path),
+        commits: read_git_commits(path),
         ..Default::default()
     };
     if let Some(status) = run_git(path, &["status", "--porcelain=v1", "--branch"]) {
@@ -2236,6 +2396,174 @@ fn read_git_summary_best_effort(path: &std::path::Path) -> WsGitSummary {
     // 逐个进 submodule 跑 status,前缀聚合进来 —— 对齐 workspace.rs 的 collect_submodule_changes。
     collect_submodule_changes(path, &mut summary);
     summary
+}
+
+fn read_git_branches(path: &std::path::Path) -> Vec<WsGitBranchInfo> {
+    let Some(output) = run_git(
+        path,
+        &[
+            "branch",
+            "--all",
+            "--format=%(refname)%x1f%(refname:short)%x1f%(HEAD)",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    parse_git_branches(&output)
+}
+
+fn parse_git_branches(output: &str) -> Vec<WsGitBranchInfo> {
+    let mut branches = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in output.lines() {
+        let mut parts = line.split('\x1f');
+        let Some(refname) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let Some(short) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if refname.starts_with("refs/remotes/") && refname.ends_with("/HEAD") {
+            continue;
+        }
+        if !seen.insert(short.to_string()) {
+            continue;
+        }
+        branches.push(WsGitBranchInfo {
+            name: short.to_string(),
+            display_name: short.to_string(),
+            current: parts.next().map(str::trim) == Some("*"),
+            remote: refname.starts_with("refs/remotes/"),
+        });
+    }
+    branches
+}
+
+fn read_git_commits(path: &std::path::Path) -> Vec<WsGitCommitInfo> {
+    let Some(output) = run_git(
+        path,
+        &[
+            "log",
+            "--all",
+            "-n",
+            "80",
+            "--date=unix",
+            "--decorate=full",
+            "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s%x1f%P%x1f%D",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    parse_git_commits(&output)
+}
+
+fn parse_git_commits(output: &str) -> Vec<WsGitCommitInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(7, '\x1f');
+            let hash = parts.next()?.trim();
+            let short_hash = parts.next()?.trim();
+            let author = parts.next()?.trim();
+            let timestamp_secs = parts.next()?.trim().parse().ok()?;
+            let subject = parts.next().unwrap_or_default().trim();
+            let parents = parse_commit_parents(parts.next().unwrap_or_default());
+            let decorations = parse_commit_decorations(parts.next().unwrap_or_default());
+            Some(WsGitCommitInfo {
+                hash: hash.to_string(),
+                short_hash: short_hash.to_string(),
+                author: author.to_string(),
+                timestamp_secs,
+                subject: subject.to_string(),
+                parents,
+                decorations,
+            })
+        })
+        .collect()
+}
+
+fn parse_commit_parents(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_commit_decorations(raw: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    for part in raw.split(',') {
+        let label = part
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        if label.is_empty() {
+            continue;
+        }
+        if let Some(branch) = label.strip_prefix("HEAD -> ") {
+            labels.push("HEAD".to_string());
+            if let Some(cleaned) = clean_decoration_label(branch) {
+                labels.push(cleaned);
+            }
+        } else if let Some(cleaned) = clean_decoration_label(label) {
+            labels.push(cleaned);
+        }
+    }
+    labels
+}
+
+fn clean_decoration_label(label: &str) -> Option<String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let cleaned = label
+        .strip_prefix("refs/heads/")
+        .or_else(|| label.strip_prefix("refs/remotes/"))
+        .map(str::to_string)
+        .or_else(|| {
+            label
+                .strip_prefix("tag: refs/tags/")
+                .map(|tag| format!("tag: {tag}"))
+        })
+        .or_else(|| {
+            label
+                .strip_prefix("refs/tags/")
+                .map(|tag| format!("tag: {tag}"))
+        })
+        .unwrap_or_else(|| label.to_string());
+    Some(cleaned)
+}
+
+fn parse_commit_detail(commit: &str, output: &str) -> WsGitCommitDetail {
+    let (message, files_raw) = output.split_once('\x1e').unwrap_or((output, ""));
+    WsGitCommitDetail {
+        commit: commit.to_string(),
+        message: message.trim().to_string(),
+        files: parse_commit_file_changes(files_raw),
+    }
+}
+
+fn parse_commit_file_changes(raw: &str) -> Vec<WsGitCommitFileChange> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut parts = trimmed.split('\t');
+            let status = parts.next()?.trim();
+            let path = parts.next_back().or_else(|| parts.next())?.trim();
+            if status.is_empty() || path.is_empty() {
+                return None;
+            }
+            Some(WsGitCommitFileChange {
+                path: path.to_string(),
+                status: status.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// 枚举已 checkout 的 submodule,在每个子模块内部跑 `git status --porcelain`,
@@ -2447,6 +2775,20 @@ fn truncate_chars(mut content: String, max_chars: usize) -> (String, bool) {
     content.truncate(end);
     content.push_str("\n\n... truncated ...\n");
     (content, true)
+}
+
+fn validate_git_rel_path(path: &str) -> Result<&str, ApiError> {
+    let rel = path.trim();
+    if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
+        return Err(ApiError::BadRequest(
+            "git path must be a repository-relative path".into(),
+        ));
+    }
+    Ok(rel)
+}
+
+fn is_valid_commit_hash(value: &str) -> bool {
+    (7..=40).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 async fn ws_upgrade(Extension(ctx): Extension<Arc<Ctx>>, ws: WebSocketUpgrade) -> Response {

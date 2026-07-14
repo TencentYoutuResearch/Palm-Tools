@@ -741,7 +741,8 @@ pub async fn endpoint_list_sessions_for_cwd(
 // 返回类型复用 `workspace.rs` 的 pub struct,前端 TS 类型也已对齐。
 
 use crate::workspace::{
-    FilePreview, GitDiffPreview, WorkspaceEntry, WorkspaceGitSummary, WorkspaceSnapshot,
+    FilePreview, GitCommitDetail, GitDiffPreview, WorkspaceEntry, WorkspaceGitSummary,
+    WorkspaceSnapshot,
 };
 
 /// 从 `state.remote_transports` 拿具类型 `Arc<RemoteTransport>`。
@@ -773,29 +774,31 @@ pub async fn endpoint_workspace_snapshot(
     let hidden = show_hidden.unwrap_or(false);
     let hidden_flag = if hidden { "true" } else { "false" };
     let query: &[(&str, &str)] = if hidden {
-        &[("path", cwd.as_str()), ("files", "true"), ("show_hidden", hidden_flag)]
+        &[
+            ("path", cwd.as_str()),
+            ("files", "true"),
+            ("show_hidden", hidden_flag),
+        ]
     } else {
         &[("path", cwd.as_str()), ("files", "true")]
     };
-    let (entries, exists): (Vec<WorkspaceEntry>, bool) = match transport
-        .rest_get("/api/v1/fs/list", query)
-        .await
-    {
-        Ok(fs_resp) => {
-            let list: Vec<WorkspaceEntry> = fs_resp
-                .get("entries")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|item| serde_json::from_value(item).ok())
-                .collect();
-            // 走 Ok = 路径存在(即便空目录,entries 为空但 exists=true)
-            (list, true)
-        }
-        Err(e) if e.status == Some(404) => (Vec::new(), false),
-        Err(e) => return Err(e.to_string()),
-    };
+    let (entries, exists): (Vec<WorkspaceEntry>, bool) =
+        match transport.rest_get("/api/v1/fs/list", query).await {
+            Ok(fs_resp) => {
+                let list: Vec<WorkspaceEntry> = fs_resp
+                    .get("entries")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect();
+                // 走 Ok = 路径存在(即便空目录,entries 为空但 exists=true)
+                (list, true)
+            }
+            Err(e) if e.status == Some(404) => (Vec::new(), false),
+            Err(e) => return Err(e.to_string()),
+        };
     if !exists {
         return Ok(WorkspaceSnapshot {
             path: cwd,
@@ -834,7 +837,11 @@ pub async fn endpoint_workspace_list_dir(
     let hidden = show_hidden.unwrap_or(false);
     let hidden_flag = if hidden { "true" } else { "false" };
     let query: &[(&str, &str)] = if hidden {
-        &[("path", path.as_str()), ("files", "true"), ("show_hidden", hidden_flag)]
+        &[
+            ("path", path.as_str()),
+            ("files", "true"),
+            ("show_hidden", hidden_flag),
+        ]
     } else {
         &[("path", path.as_str()), ("files", "true")]
     };
@@ -890,6 +897,68 @@ pub async fn endpoint_workspace_git_diff(
         .await
         .map_err(|e| e.to_string())?;
     serde_json::from_value(resp).map_err(|e| format!("git diff decode: {e}"))
+}
+
+/// 远端 tab:commit diff(对齐本地 `workspace_git_commit_diff`)。
+#[tauri::command]
+pub async fn endpoint_workspace_git_commit_diff(
+    id: String,
+    cwd: String,
+    commit: String,
+    state: State<'_, AppState>,
+) -> Result<GitDiffPreview, String> {
+    let transport = lookup_remote_transport(&state, &id)?;
+    let resp = transport
+        .rest_get(
+            "/api/v1/git/commit-diff",
+            &[("cwd", cwd.as_str()), ("commit", commit.as_str())],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::from_value(resp).map_err(|e| format!("git commit diff decode: {e}"))
+}
+
+/// 远端 tab:commit detail(对齐本地 `workspace_git_commit_detail`)。
+#[tauri::command]
+pub async fn endpoint_workspace_git_commit_detail(
+    id: String,
+    cwd: String,
+    commit: String,
+    state: State<'_, AppState>,
+) -> Result<GitCommitDetail, String> {
+    let transport = lookup_remote_transport(&state, &id)?;
+    let resp = transport
+        .rest_get(
+            "/api/v1/git/commit-detail",
+            &[("cwd", cwd.as_str()), ("commit", commit.as_str())],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::from_value(resp).map_err(|e| format!("git commit detail decode: {e}"))
+}
+
+/// 远端 tab:commit file diff(对齐本地 `workspace_git_commit_file_diff`)。
+#[tauri::command]
+pub async fn endpoint_workspace_git_commit_file_diff(
+    id: String,
+    cwd: String,
+    commit: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<GitDiffPreview, String> {
+    let transport = lookup_remote_transport(&state, &id)?;
+    let resp = transport
+        .rest_get(
+            "/api/v1/git/commit-file-diff",
+            &[
+                ("cwd", cwd.as_str()),
+                ("commit", commit.as_str()),
+                ("path", path.as_str()),
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::from_value(resp).map_err(|e| format!("git commit file diff decode: {e}"))
 }
 
 fn session_history_unsupported(status: reqwest::StatusCode, detail: &str) -> bool {

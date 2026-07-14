@@ -6,6 +6,9 @@
     ipc,
     endpointIpc,
     type FilePreview,
+    type GitCommitDetail,
+    type GitCommitFileChange,
+    type GitCommitInfo,
     type GitDiffPreview,
     type WorkspaceEntry,
     type WorkspaceGitChange,
@@ -68,6 +71,10 @@
   let childrenByPath = $state<Record<string, WorkspaceEntry[]>>({})
   let selectedPath = $state('')
   let selectedGitKey = $state('')
+  let expandedGraphKey: string | null = $state(null)
+  let commitDetails = $state<Record<string, GitCommitDetail>>({})
+  let loadingCommitDetails = $state<Set<string>>(new Set())
+  let commitDetailErrors = $state<Record<string, string>>({})
   let contextMenu: ContextMenuState | null = $state(null)
   let preview = $state<PreviewState>({
     kind: 'empty',
@@ -163,6 +170,10 @@
       childrenByPath = {}
       selectedPath = ''
       selectedGitKey = ''
+      expandedGraphKey = null
+      commitDetails = {}
+      loadingCommitDetails = new Set()
+      commitDetailErrors = {}
       preview = emptyPreview()
       prevWorkspaceKey = currentWorkspaceKey
       return
@@ -178,6 +189,10 @@
         expandedPaths = new Set(saved.expandedPaths)
         selectedPath = saved.selectedPath
         selectedGitKey = saved.selectedGitKey
+        expandedGraphKey = null
+        commitDetails = {}
+        loadingCommitDetails = new Set()
+        commitDetailErrors = {}
         preview = emptyPreview()
         void refresh().then(async () => {
           // refresh 拉了 snapshot;再补 expanded 目录的子项 + 重新预览 selectedPath
@@ -194,6 +209,10 @@
         childrenByPath = {}
         selectedPath = ''
         selectedGitKey = ''
+        expandedGraphKey = null
+        commitDetails = {}
+        loadingCommitDetails = new Set()
+        commitDetailErrors = {}
         preview = emptyPreview()
         void refresh()
       }
@@ -462,6 +481,103 @@
     }
   }
 
+  async function previewCommit(commit: GitCommitInfo) {
+    if (!cwd) return
+    activePanel = 'git'
+    selectedGitKey = `commit:${commit.hash}`
+    preview = {
+      kind: 'loading',
+      title: commit.subject || commit.short_hash,
+      subtitle: `${commit.short_hash} · ${commit.author}`,
+      content: '',
+    }
+    try {
+      const rid = remoteId()
+      const data: GitDiffPreview = rid
+        ? await endpointIpc.workspaceGitCommitDiff(rid, cwd, commit.hash)
+        : await ipc.workspaceGitCommitDiff(cwd, commit.hash)
+      preview = {
+        kind: 'diff',
+        title: commit.subject || commit.short_hash,
+        subtitle: `${commit.short_hash} · ${commit.author} · ${formatCommitTime(commit.timestamp_secs)}`,
+        content: data.content || '(no textual diff)',
+        truncated: data.truncated,
+      }
+    } catch (e) {
+      preview = {
+        kind: 'error',
+        title: commit.subject || commit.short_hash,
+        subtitle: commit.hash,
+        content: String(e),
+      }
+    }
+  }
+
+  async function previewCommitFile(commit: GitCommitInfo, file: GitCommitFileChange) {
+    if (!cwd) return
+    activePanel = 'git'
+    selectedGitKey = `commit-file:${commit.hash}:${file.path}`
+    preview = {
+      kind: 'loading',
+      title: basename(file.path),
+      subtitle: `${commit.short_hash} · ${file.status}`,
+      content: '',
+    }
+    try {
+      const rid = remoteId()
+      const data: GitDiffPreview = rid
+        ? await endpointIpc.workspaceGitCommitFileDiff(rid, cwd, commit.hash, file.path)
+        : await ipc.workspaceGitCommitFileDiff(cwd, commit.hash, file.path)
+      preview = {
+        kind: 'diff',
+        title: data.path,
+        subtitle: `${commit.short_hash} · file diff`,
+        content: data.content || '(no textual diff)',
+        truncated: data.truncated,
+      }
+    } catch (e) {
+      preview = {
+        kind: 'error',
+        title: basename(file.path),
+        subtitle: `${commit.short_hash} · ${file.path}`,
+        content: String(e),
+      }
+    }
+  }
+
+  function toggleWorkingTree() {
+    selectedGitKey = 'working'
+    expandedGraphKey = expandedGraphKey === 'working' ? null : 'working'
+  }
+
+  function toggleCommit(commit: GitCommitInfo) {
+    const key = `commit:${commit.hash}`
+    selectedGitKey = key
+    expandedGraphKey = expandedGraphKey === key ? null : key
+    if (expandedGraphKey === key) void loadCommitDetail(commit)
+  }
+
+  async function loadCommitDetail(commit: GitCommitInfo) {
+    if (!cwd || commitDetails[commit.hash] || loadingCommitDetails.has(commit.hash)) return
+    const loadingNext = new Set(loadingCommitDetails)
+    loadingNext.add(commit.hash)
+    loadingCommitDetails = loadingNext
+    commitDetailErrors = { ...commitDetailErrors, [commit.hash]: '' }
+    try {
+      const rid = remoteId()
+      const detail = rid
+        ? await endpointIpc.workspaceGitCommitDetail(rid, cwd, commit.hash)
+        : await ipc.workspaceGitCommitDetail(cwd, commit.hash)
+      commitDetails = { ...commitDetails, [commit.hash]: detail }
+    } catch (e) {
+      commitDetailErrors = { ...commitDetailErrors, [commit.hash]: String(e) }
+    } finally {
+      const done = new Set(loadingCommitDetails)
+      done.delete(commit.hash)
+      loadingCommitDetails = done
+    }
+  }
+
   function dirtyCount(s: WorkspaceSnapshot | null): number {
     if (!s) return 0
     return s.git.staged + s.git.modified + s.git.untracked + s.git.conflicts
@@ -472,6 +588,34 @@
     const q = filterQuery.trim().toLowerCase()
     if (!q) return all
     return all.filter((c) => c.path.toLowerCase().includes(q))
+  }
+
+  function commitsForFilter(): GitCommitInfo[] {
+    const all = snapshot?.git.commits ?? []
+    const q = filterQuery.trim().toLowerCase()
+    if (!q) return all
+    return all.filter((c) =>
+      c.short_hash.toLowerCase().includes(q)
+      || c.hash.toLowerCase().includes(q)
+      || c.author.toLowerCase().includes(q)
+      || c.subject.toLowerCase().includes(q)
+      || (c.decorations ?? []).some((d) => d.toLowerCase().includes(q)),
+    )
+  }
+
+  function visibleDirtyChanges(): WorkspaceGitChange[] {
+    return ['conflict', 'staged', 'modified', 'untracked'].flatMap((bucket) => changesFor(bucket))
+  }
+
+  function gitFilterPlaceholder(): string {
+    return 'Filter graph…'
+  }
+
+  function decorationClass(label: string): string {
+    if (label === 'HEAD') return 'head'
+    if (label.startsWith('tag:')) return 'tag'
+    if (label.includes('/')) return 'remote'
+    return 'branch'
   }
 
   // 文件过滤:按名字(大小写不敏感)过滤顶层 entries。有 query 时不递归子目录,
@@ -491,6 +635,16 @@
     const parts = s.split('/').filter(Boolean)
     const tail = parts.slice(-2).join('/')
     return `${s.startsWith('/') ? '/' : ''}.../${tail}`
+  }
+
+  function formatCommitTime(timestampSecs: number): string {
+    if (!Number.isFinite(timestampSecs) || timestampSecs <= 0) return ''
+    return new Date(timestampSecs * 1000).toLocaleString(undefined, {
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
   }
 
   function formatSize(entry: WorkspaceEntry): string {
@@ -706,7 +860,7 @@
           <input
             class="filter-input"
             type="text"
-            placeholder={activePanel === 'files' ? 'Filter files…' : 'Filter changes…'}
+            placeholder={activePanel === 'files' ? 'Filter files…' : gitFilterPlaceholder()}
             bind:value={filterQuery}
             spellcheck="false"
             autocomplete="off"
@@ -752,10 +906,109 @@
                   {#if snapshot.git.ahead === 0 && snapshot.git.behind === 0 && gitDirtyCount === 0}<span>clean</span>{/if}
                 </div>
               </div>
-              {@render changeGroup('Staged', 'staged', changesFor('staged'))}
-              {@render changeGroup('Modified', 'modified', changesFor('modified'))}
-              {@render changeGroup('Untracked', 'untracked', changesFor('untracked'))}
-              {@render changeGroup('Conflicts', 'conflict', changesFor('conflict'))}
+              {@const dirtyChanges = visibleDirtyChanges()}
+              {@const commits = commitsForFilter()}
+              <div class="git-graph" aria-label="Git graph">
+                {#if gitDirtyCount > 0 && dirtyChanges.length > 0}
+                  <div class="graph-block">
+                    <button
+                      class="graph-row working-tree-row"
+                      class:selected={selectedGitKey === 'working'}
+                      aria-expanded={expandedGraphKey === 'working'}
+                      title="Toggle working tree changes"
+                      onclick={toggleWorkingTree}
+                    >
+                      <span class="graph-rail"><span class="graph-node working"></span></span>
+                      <span class="graph-content working-tree-card">
+                        <span class="graph-main">
+                          <strong>Working tree</strong>
+                          <span>{gitDirtyCount} change{gitDirtyCount === 1 ? '' : 's'}</span>
+                        </span>
+                        <span class="graph-meta">{snapshot.git.branch ?? 'detached'} · uncommitted changes</span>
+                      </span>
+                    </button>
+                    {#if expandedGraphKey === 'working'}
+                      <div class="graph-expanded working-expanded">
+                        {@render graphChangeGroup('Conflicts', 'conflict', changesFor('conflict'))}
+                        {@render graphChangeGroup('Staged', 'staged', changesFor('staged'))}
+                        {@render graphChangeGroup('Modified', 'modified', changesFor('modified'))}
+                        {@render graphChangeGroup('Untracked', 'untracked', changesFor('untracked'))}
+                      </div>
+                    {/if}
+                  </div>
+                {:else if gitDirtyCount > 0 && filterQuery}
+                  <p class="muted pad">No working tree matches</p>
+                {/if}
+
+                {#if commits.length === 0}
+                  <p class="muted pad">No commits</p>
+                {:else}
+                  {#each commits as commit (commit.hash)}
+                    <div class="graph-block">
+                      <button
+                        class="graph-row commit-graph-row"
+                        class:selected={selectedGitKey === `commit:${commit.hash}`}
+                        aria-expanded={expandedGraphKey === `commit:${commit.hash}`}
+                        title={`${commit.hash} ${commit.subject}`}
+                        onclick={() => toggleCommit(commit)}
+                      >
+                        <span class="graph-rail">
+                          <span class="graph-node" class:merge={(commit.parents ?? []).length > 1}></span>
+                        </span>
+                        <span class="graph-content">
+                          <span class="graph-main">
+                            <span class="graph-hash">{commit.short_hash}</span>
+                            <strong>{commit.subject || '(no subject)'}</strong>
+                          </span>
+                          <span class="graph-meta">
+                            {commit.author} · {formatCommitTime(commit.timestamp_secs)}
+                            {#if (commit.parents ?? []).length > 1} · merge{/if}
+                          </span>
+                          {#if (commit.decorations ?? []).length > 0}
+                            <span class="ref-chips">
+                              {#each commit.decorations ?? [] as label (label)}
+                                <span class="ref-chip {decorationClass(label)}">{label}</span>
+                              {/each}
+                            </span>
+                          {/if}
+                        </span>
+                      </button>
+                      {#if expandedGraphKey === `commit:${commit.hash}`}
+                        {@const detail = commitDetails[commit.hash]}
+                        <div class="graph-expanded commit-detail">
+                          {#if loadingCommitDetails.has(commit.hash)}
+                            <p class="muted">Loading commit details...</p>
+                          {:else if commitDetailErrors[commit.hash]}
+                            <p class="strip-msg error">{commitDetailErrors[commit.hash]}</p>
+                          {:else if detail}
+                            {#if detail.message}
+                              <pre class="commit-message">{detail.message}</pre>
+                            {/if}
+                            {#if detail.files.length > 0}
+                              <div class="commit-files">
+                                {#each detail.files as file (`${commit.hash}:${file.path}`)}
+                                  <button
+                                    class="commit-file-row"
+                                    class:selected={selectedGitKey === `commit-file:${commit.hash}:${file.path}`}
+                                    title={file.path}
+                                    onclick={() => previewCommitFile(commit, file)}
+                                  >
+                                    <span class="status-tag commit-file">{file.status.slice(0, 1)}</span>
+                                    <span>{basename(file.path)}</span>
+                                    <em>{file.path}</em>
+                                  </button>
+                                {/each}
+                              </div>
+                            {:else}
+                              <p class="muted">No changed files</p>
+                            {/if}
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                {/if}
+              </div>
             {:else if snapshot}
               <p class="muted pad">Not a Git repository</p>
             {/if}
@@ -842,6 +1095,26 @@
           <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>
           <span class="change-name">{basename(change.path)}</span>
           <span class="change-path">{change.path}</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet graphChangeGroup(label: string, bucket: string, changes: WorkspaceGitChange[])}
+  {#if changes.length > 0}
+    <div class="graph-change-group">
+      <div class="graph-change-heading">{label}</div>
+      {#each changes as change (`${bucket}:${change.path}`)}
+        <button
+          class="graph-change-row"
+          class:selected={selectedGitKey === `${change.bucket}:${change.path}`}
+          title={change.path}
+          onclick={() => previewGit(change)}
+        >
+          <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>
+          <span>{basename(change.path)}</span>
+          <em>{change.path}</em>
         </button>
       {/each}
     </div>
@@ -1174,6 +1447,251 @@
     font-family: var(--font-mono);
   }
 
+  .git-graph {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 2px 0 8px;
+  }
+  .graph-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 7px;
+    border: 0;
+    background: transparent;
+    color: var(--fg-secondary);
+    text-align: left;
+  }
+  .commit-graph-row {
+    width: 100%;
+    min-height: 52px;
+    padding: 0 7px 0 0;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .graph-block { min-width: 0; }
+  .commit-graph-row:hover,
+  .commit-graph-row.selected,
+  .working-tree-row:hover,
+  .working-tree-row.selected {
+    background: var(--bg-tab-hover);
+    color: var(--fg-primary);
+  }
+  .graph-rail {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    min-height: 100%;
+  }
+  .graph-rail::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: color-mix(in srgb, var(--fg-primary) 13%, transparent);
+  }
+  .graph-node {
+    position: relative;
+    z-index: 1;
+    width: 10px;
+    height: 10px;
+    margin-top: 18px;
+    border: 2px solid var(--acc);
+    border-radius: 999px;
+    background: var(--bg-sidebar);
+    box-shadow: 0 0 0 2px var(--bg-sidebar);
+  }
+  .graph-node.merge { border-color: var(--st-warn); }
+  .graph-node.working {
+    width: 12px;
+    height: 12px;
+    margin-top: 13px;
+    background: var(--acc);
+  }
+  .graph-content {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 8px 0;
+  }
+  .graph-main {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .graph-main strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg-primary);
+    font-size: 12px;
+  }
+  .graph-main > span:not(.graph-hash) {
+    color: var(--fg-tertiary);
+    font-size: 11px;
+  }
+  .graph-hash {
+    flex: 0 0 auto;
+    color: var(--acc);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+  }
+  .graph-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+  .working-tree-row {
+    width: 100%;
+    min-height: 48px;
+    padding: 0 7px 0 0;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .working-tree-card {
+    margin: 4px 7px 4px 0;
+    padding: 7px 8px;
+    border: 1px solid color-mix(in srgb, var(--acc) 20%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--acc) 7%, transparent);
+  }
+  .graph-expanded {
+    margin: 0 7px 8px 35px;
+    padding: 8px 9px;
+    border: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg-primary) 4%, transparent);
+  }
+  .commit-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .commit-message {
+    max-height: 92px;
+    margin: 0;
+    padding: 7px 8px;
+    overflow: auto;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg-pre) 70%, transparent);
+    color: var(--fg-secondary);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
+  .commit-files {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .commit-file-row {
+    width: 100%;
+    min-height: 28px;
+    display: grid;
+    grid-template-columns: 18px minmax(0, auto) minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--fg-secondary);
+    padding: 3px 5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .commit-file-row:hover,
+  .commit-file-row.selected {
+    background: color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    color: var(--fg-primary);
+  }
+  .commit-file-row span:not(.status-tag),
+  .commit-file-row em {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .commit-file-row em {
+    color: var(--fg-tertiary);
+    font-style: normal;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+  .ref-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+  }
+  .ref-chip {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 1px 6px;
+    border-radius: 999px;
+    color: var(--fg-secondary);
+    background: color-mix(in srgb, var(--fg-primary) 9%, transparent);
+    font-size: 10px;
+    font-family: var(--font-mono);
+  }
+  .ref-chip.head { color: var(--acc); background: var(--acc-soft); }
+  .ref-chip.branch { color: var(--st-ok); background: color-mix(in srgb, var(--st-ok) 13%, transparent); }
+  .ref-chip.remote { color: var(--st-info); background: color-mix(in srgb, var(--st-info) 13%, transparent); }
+  .ref-chip.tag { color: var(--st-warn); background: color-mix(in srgb, var(--st-warn) 13%, transparent); }
+  .graph-change-group { margin-top: 8px; }
+  .graph-change-heading {
+    margin: 7px 0 4px;
+    color: var(--fg-tertiary);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .graph-change-row {
+    width: 100%;
+    min-height: 28px;
+    display: grid;
+    grid-template-columns: 18px minmax(0, auto) minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--fg-secondary);
+    padding: 3px 5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .graph-change-row:hover,
+  .graph-change-row.selected {
+    background: color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    color: var(--fg-primary);
+  }
+  .graph-change-row span:not(.status-tag),
+  .graph-change-row em {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .graph-change-row .status-tag { grid-row: auto; }
+  .graph-change-row em {
+    color: var(--fg-tertiary);
+    font-style: normal;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
   .change-group { margin: 8px 0 10px; }
   .change-heading {
     display: flex;
@@ -1225,6 +1743,18 @@
   .status-tag.modified { background: var(--st-info); }
   .status-tag.untracked { background: var(--st-warn); }
   .status-tag.conflict { background: var(--st-err); }
+  .status-tag.commit {
+    width: auto;
+    min-width: 48px;
+    padding: 0 4px;
+    color: var(--bg-base);
+    background: var(--acc);
+  }
+  .status-tag.branch { background: var(--st-ok); }
+  .status-tag.remote { background: var(--st-info); }
+  .status-tag.commit-file { background: var(--acc); grid-row: auto; }
+  .commit-row { grid-template-columns: 58px minmax(0, 1fr); }
+  .branch-row { cursor: default; }
   .change-name { color: var(--fg-primary); font-size: 12px; }
   .change-path {
     color: var(--fg-tertiary);

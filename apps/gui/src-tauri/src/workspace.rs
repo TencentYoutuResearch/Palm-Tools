@@ -20,6 +20,27 @@ pub struct GitChange {
     pub bucket: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchInfo {
+    pub name: String,
+    pub display_name: String,
+    pub current: bool,
+    pub remote: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitInfo {
+    pub hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub timestamp_secs: u64,
+    pub subject: String,
+    #[serde(default)]
+    pub parents: Vec<String>,
+    #[serde(default)]
+    pub decorations: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceGitSummary {
     pub is_repo: bool,
@@ -33,6 +54,10 @@ pub struct WorkspaceGitSummary {
     pub ahead: u32,
     pub behind: u32,
     pub changes: Vec<GitChange>,
+    #[serde(default)]
+    pub branches: Vec<GitBranchInfo>,
+    #[serde(default)]
+    pub commits: Vec<GitCommitInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +86,19 @@ pub struct GitDiffPreview {
     pub bucket: String,
     pub content: String,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitFileChange {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitDetail {
+    pub commit: String,
+    pub message: String,
+    pub files: Vec<GitCommitFileChange>,
 }
 
 #[tauri::command]
@@ -107,6 +145,37 @@ pub async fn workspace_git_diff(
     tauri::async_runtime::spawn_blocking(move || git_diff_sync(&cwd, &path, &bucket))
         .await
         .map_err(|e| format!("workspace git diff task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn workspace_git_commit_diff(
+    cwd: String,
+    commit: String,
+) -> Result<GitDiffPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || git_commit_diff_sync(&cwd, &commit))
+        .await
+        .map_err(|e| format!("workspace git commit diff task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn workspace_git_commit_detail(
+    cwd: String,
+    commit: String,
+) -> Result<GitCommitDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || git_commit_detail_sync(&cwd, &commit))
+        .await
+        .map_err(|e| format!("workspace git commit detail task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn workspace_git_commit_file_diff(
+    cwd: String,
+    commit: String,
+    path: String,
+) -> Result<GitDiffPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || git_commit_file_diff_sync(&cwd, &commit, &path))
+        .await
+        .map_err(|e| format!("workspace git commit file diff task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -224,8 +293,7 @@ fn preview_file_sync(raw: &str) -> Result<FilePreview, String> {
                 mime,
             });
         }
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         return Ok(FilePreview {
@@ -292,6 +360,8 @@ fn read_git_summary(path: &Path) -> WorkspaceGitSummary {
         root: Some(root),
         branch,
         short_head,
+        branches: read_git_branches(path),
+        commits: read_git_commits(path),
         ..Default::default()
     };
 
@@ -302,6 +372,144 @@ fn read_git_summary(path: &Path) -> WorkspaceGitSummary {
     // 逐个进 submodule 跑 status,前缀聚合进来 —— 这样 Git 面板能看到子模块内部改动。
     collect_submodule_changes(path, &mut summary);
     summary
+}
+
+fn read_git_branches(path: &Path) -> Vec<GitBranchInfo> {
+    let Some(output) = run_git(
+        path,
+        &[
+            "branch",
+            "--all",
+            "--format=%(refname)%x1f%(refname:short)%x1f%(HEAD)",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    parse_git_branches(&output)
+}
+
+fn parse_git_branches(output: &str) -> Vec<GitBranchInfo> {
+    let mut branches = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in output.lines() {
+        let mut parts = line.split('\x1f');
+        let Some(refname) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let Some(short) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if refname.starts_with("refs/remotes/") && refname.ends_with("/HEAD") {
+            continue;
+        }
+        if !seen.insert(short.to_string()) {
+            continue;
+        }
+        branches.push(GitBranchInfo {
+            name: short.to_string(),
+            display_name: short.to_string(),
+            current: parts.next().map(str::trim) == Some("*"),
+            remote: refname.starts_with("refs/remotes/"),
+        });
+    }
+    branches
+}
+
+fn read_git_commits(path: &Path) -> Vec<GitCommitInfo> {
+    let Some(output) = run_git(
+        path,
+        &[
+            "log",
+            "--all",
+            "-n",
+            "80",
+            "--date=unix",
+            "--decorate=full",
+            "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s%x1f%P%x1f%D",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    parse_git_commits(&output)
+}
+
+fn parse_git_commits(output: &str) -> Vec<GitCommitInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(7, '\x1f');
+            let hash = parts.next()?.trim();
+            let short_hash = parts.next()?.trim();
+            let author = parts.next()?.trim();
+            let timestamp_secs = parts.next()?.trim().parse().ok()?;
+            let subject = parts.next().unwrap_or_default().trim();
+            let parents = parse_commit_parents(parts.next().unwrap_or_default());
+            let decorations = parse_commit_decorations(parts.next().unwrap_or_default());
+            Some(GitCommitInfo {
+                hash: hash.to_string(),
+                short_hash: short_hash.to_string(),
+                author: author.to_string(),
+                timestamp_secs,
+                subject: subject.to_string(),
+                parents,
+                decorations,
+            })
+        })
+        .collect()
+}
+
+fn parse_commit_parents(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_commit_decorations(raw: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    for part in raw.split(',') {
+        let label = part
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        if label.is_empty() {
+            continue;
+        }
+        if let Some(branch) = label.strip_prefix("HEAD -> ") {
+            labels.push("HEAD".to_string());
+            if let Some(cleaned) = clean_decoration_label(branch) {
+                labels.push(cleaned);
+            }
+        } else if let Some(cleaned) = clean_decoration_label(label) {
+            labels.push(cleaned);
+        }
+    }
+    labels
+}
+
+fn clean_decoration_label(label: &str) -> Option<String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let cleaned = label
+        .strip_prefix("refs/heads/")
+        .or_else(|| label.strip_prefix("refs/remotes/"))
+        .map(str::to_string)
+        .or_else(|| {
+            label
+                .strip_prefix("tag: refs/tags/")
+                .map(|tag| format!("tag: {tag}"))
+        })
+        .or_else(|| {
+            label
+                .strip_prefix("refs/tags/")
+                .map(|tag| format!("tag: {tag}"))
+        })
+        .unwrap_or_else(|| label.to_string());
+    Some(cleaned)
 }
 
 /// 枚举已 checkout 的 submodule,在每个子模块内部跑 `git status --porcelain`,
@@ -469,6 +677,138 @@ fn git_diff_sync(cwd: &str, path: &str, bucket: &str) -> Result<GitDiffPreview, 
     })
 }
 
+fn git_commit_diff_sync(cwd: &str, commit: &str) -> Result<GitDiffPreview, String> {
+    const MAX_CHARS: usize = 180_000;
+    let cwd = absolute_path(cwd)?;
+    let root = run_git(&cwd, &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| "not a Git repository".to_string())?;
+    let commit = commit.trim();
+    if !is_valid_commit_hash(commit) {
+        return Err("commit must be a 7-40 character hex SHA".into());
+    }
+    let output = run_git_raw(
+        Path::new(&root),
+        &[
+            "--no-pager",
+            "show",
+            "--format=fuller",
+            "--stat",
+            "--patch",
+            "--no-ext-diff",
+            "--find-renames",
+            commit,
+        ],
+    )?;
+    let (content, truncated) = truncate_chars(output, MAX_CHARS);
+    Ok(GitDiffPreview {
+        path: commit.to_string(),
+        bucket: "commit".into(),
+        content,
+        truncated,
+    })
+}
+
+fn git_commit_detail_sync(cwd: &str, commit: &str) -> Result<GitCommitDetail, String> {
+    let cwd = absolute_path(cwd)?;
+    let root = run_git(&cwd, &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| "not a Git repository".to_string())?;
+    let commit = commit.trim();
+    if !is_valid_commit_hash(commit) {
+        return Err("commit must be a 7-40 character hex SHA".into());
+    }
+    let output = run_git_raw(
+        Path::new(&root),
+        &[
+            "--no-pager",
+            "show",
+            "--format=%B%x1e",
+            "--name-status",
+            "--no-renames",
+            commit,
+        ],
+    )?;
+    Ok(parse_commit_detail(commit, &output))
+}
+
+fn git_commit_file_diff_sync(
+    cwd: &str,
+    commit: &str,
+    path: &str,
+) -> Result<GitDiffPreview, String> {
+    const MAX_CHARS: usize = 180_000;
+    let cwd = absolute_path(cwd)?;
+    let root = run_git(&cwd, &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| "not a Git repository".to_string())?;
+    let commit = commit.trim();
+    if !is_valid_commit_hash(commit) {
+        return Err("commit must be a 7-40 character hex SHA".into());
+    }
+    let rel = validate_git_rel_path(path)?;
+    let output = run_git_raw(
+        Path::new(&root),
+        &[
+            "--no-pager",
+            "show",
+            "--format=",
+            "--patch",
+            "--no-ext-diff",
+            "--find-renames",
+            commit,
+            "--",
+            rel,
+        ],
+    )?;
+    let (content, truncated) = truncate_chars(output, MAX_CHARS);
+    Ok(GitDiffPreview {
+        path: rel.to_string(),
+        bucket: "commit-file".into(),
+        content,
+        truncated,
+    })
+}
+
+fn parse_commit_detail(commit: &str, output: &str) -> GitCommitDetail {
+    let (message, files_raw) = output.split_once('\x1e').unwrap_or((output, ""));
+    GitCommitDetail {
+        commit: commit.to_string(),
+        message: message.trim().to_string(),
+        files: parse_commit_file_changes(files_raw),
+    }
+}
+
+fn parse_commit_file_changes(raw: &str) -> Vec<GitCommitFileChange> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut parts = trimmed.split('\t');
+            let status = parts.next()?.trim();
+            let path = parts.next_back().or_else(|| parts.next())?.trim();
+            if status.is_empty() || path.is_empty() {
+                return None;
+            }
+            Some(GitCommitFileChange {
+                path: path.to_string(),
+                status: status.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn validate_git_rel_path(path: &str) -> Result<&str, String> {
+    let rel = path.trim();
+    if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
+        return Err("git path must be a repository-relative path".into());
+    }
+    Ok(rel)
+}
+
+fn is_valid_commit_hash(value: &str) -> bool {
+    (7..=40).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// 判断 `rel` 是否落在某个 submodule 内。若是,返回 `(submodule_root, 子模块内相对路径)`;
 /// 否则返回 `(root, rel)` 不变。做法:从文件父目录向上找第一个存在的目录,跑
 /// `git rev-parse --show-toplevel` —— 子模块内的文件解析出的 toplevel 会不同于
@@ -595,6 +935,75 @@ fn open_path_sync(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_git_branches_and_skips_remote_head_alias() {
+        let branches = parse_git_branches(
+            "refs/heads/main\x1fmain\x1f*\nrefs/remotes/origin/HEAD\x1forigin/HEAD\x1f \nrefs/remotes/origin/feature\x1forigin/feature\x1f ",
+        );
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].name, "main");
+        assert!(branches[0].current);
+        assert!(!branches[0].remote);
+        assert_eq!(branches[1].name, "origin/feature");
+        assert!(!branches[1].current);
+        assert!(branches[1].remote);
+    }
+
+    #[test]
+    fn parses_git_commits_with_graph_metadata() {
+        let commits = parse_git_commits(
+            "0123456789abcdef\x1f0123456\x1fAlice\x1f1720000000\x1fadd history view\x1fabcdef0 1111111\x1fHEAD -> main, origin/main, tag: v1\nfedcba9876543210\x1ffedcba9\x1fBob\x1f1720000100\x1froot commit\x1f\x1f",
+        );
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].hash, "0123456789abcdef");
+        assert_eq!(commits[0].short_hash, "0123456");
+        assert_eq!(commits[0].author, "Alice");
+        assert_eq!(commits[0].timestamp_secs, 1720000000);
+        assert_eq!(commits[0].subject, "add history view");
+        assert_eq!(commits[0].parents, vec!["abcdef0", "1111111"]);
+        assert_eq!(
+            commits[0].decorations,
+            vec!["HEAD", "main", "origin/main", "tag: v1"]
+        );
+        assert!(commits[1].parents.is_empty());
+        assert!(commits[1].decorations.is_empty());
+    }
+
+    #[test]
+    fn parses_full_ref_decorations() {
+        let labels = parse_commit_decorations(
+            "HEAD -> refs/heads/main, refs/remotes/origin/main, tag: refs/tags/v1",
+        );
+        assert_eq!(labels, vec!["HEAD", "main", "origin/main", "tag: v1"]);
+    }
+
+    #[test]
+    fn parses_commit_detail_file_changes() {
+        let detail = parse_commit_detail(
+            "0123456",
+            "full message\n\nbody\x1e\nM\tapps/gui/src/lib/WorkspacePanel.svelte\nA\tnew-file.txt\n",
+        );
+        assert_eq!(detail.commit, "0123456");
+        assert_eq!(detail.message, "full message\n\nbody");
+        assert_eq!(detail.files.len(), 2);
+        assert_eq!(detail.files[0].status, "M");
+        assert_eq!(
+            detail.files[0].path,
+            "apps/gui/src/lib/WorkspacePanel.svelte"
+        );
+    }
+
+    #[test]
+    fn validates_commit_hashes() {
+        assert!(is_valid_commit_hash("0123456"));
+        assert!(is_valid_commit_hash(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!is_valid_commit_hash("012345"));
+        assert!(!is_valid_commit_hash("main"));
+        assert!(!is_valid_commit_hash("0123456..abcdef0"));
+    }
 
     #[test]
     fn image_preview_returns_base64_for_png() {
