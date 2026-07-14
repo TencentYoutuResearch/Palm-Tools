@@ -1054,6 +1054,10 @@ pub async fn memory_list_pending_remote(endpoint_id: String) -> Result<Vec<Pendi
 }
 
 /// 远端审核。
+fn remote_review_body(verdict: &VerdictDto) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(serde_json::json!({ "verdict": verdict }))
+}
+
 #[tauri::command]
 pub async fn memory_review_remote(
     endpoint_id: String,
@@ -1068,7 +1072,9 @@ pub async fn memory_review_remote(
         .find(|e| e.id == endpoint_id)
         .map(|e| e.token)
         .unwrap_or_default();
-    let body = serde_json::to_value(&verdict).map_err(|e| e.to_string())?;
+    // Bridge 的 review 契约是 { "verdict": { "kind": ... } }。本地 Tauri
+    // command 直接接收 verdict 参数,两层入口的 JSON 形状并不相同。
+    let body = remote_review_body(&verdict).map_err(|e| e.to_string())?;
     let resp = http
         .post(format!("{base}/api/v1/memory/pending/{id}/review"))
         .bearer_auth(&token)
@@ -1183,4 +1189,30 @@ pub async fn memory_list_recent_remote(
         .cloned()
         .unwrap_or_default();
     Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{remote_review_body, VerdictDto};
+    use serde_json::json;
+
+    #[test]
+    fn remote_review_wraps_verdict_for_bridge_contract() {
+        let approve = remote_review_body(&VerdictDto::Approve).expect("serialize approve");
+        assert_eq!(approve, json!({ "verdict": { "kind": "approve" } }));
+
+        let reject = remote_review_body(&VerdictDto::Reject {
+            reason: "not useful".into(),
+        })
+        .expect("serialize reject");
+        assert_eq!(
+            reject,
+            json!({
+                "verdict": {
+                    "kind": "reject",
+                    "reason": "not useful"
+                }
+            })
+        );
+    }
 }

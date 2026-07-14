@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  remote-memory-bridge:
+    name: Build remote memory bridge
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build musl remote memory bridge
+        run: bash deploy/build-remote-memory-bridge.sh --musl
+
+      - name: Collect remote bridge assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets/remote-bridge
+          cp target/remote-memory-bridge/kode-remote-memory-bridge-x86_64-unknown-linux-musl.tar.gz \
+            release-assets/remote-bridge/kode-remote-memory-bridge-x86_64-unknown-linux-musl.tar.gz
+          cp target/remote-memory-bridge/kode-remote-memory-bridge-x86_64-unknown-linux-musl.tar.gz \
+            release-assets/remote-bridge/kode-remote-memory-bridge-linux-musl.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-memory-bridge
+          path: release-assets/remote-bridge/*.tar.gz
+          if-no-files-found: error
+
+  macos-app:
+    name: Build macOS app
+    runs-on: macos-latest
+    needs: remote-memory-bridge
+    env:
+      APPLE_SIGNING_AVAILABLE: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 != '' && secrets.APPLE_DEVELOPER_ID_P12_PASSWORD != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.2.2"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13"
+          cache: pnpm
+          cache-dependency-path: |
+            apps/gui/pnpm-lock.yaml
+            apps/specops/pnpm-lock.yaml
+            apps/specops/frontend/pnpm-lock.yaml
+
+      - name: Install GUI dependencies
+        run: pnpm --dir apps/gui install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: remote-memory-bridge
+          path: release-assets/remote-bridge
+
+      - name: Install remote bridge resource
+        run: |
+          set -euo pipefail
+          mkdir -p apps/gui/src-tauri/resources
+          cp release-assets/remote-bridge/kode-remote-memory-bridge-linux-musl.tar.gz \
+            apps/gui/src-tauri/resources/kode-remote-memory-bridge-linux-musl.tar.gz
+
+      - name: Import Apple signing certificate
+        if: env.APPLE_SIGNING_AVAILABLE == 'true'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          p12-password: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+
+      - name: Build macOS app
+        run: ./run.sh app
+
+      - name: Collect macOS assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets/macos
+          shopt -s nullglob
+          dmg_files=(target/release/bundle/dmg/*.dmg)
+          if (( ${#dmg_files[@]} > 0 )); then
+            cp "${dmg_files[@]}" release-assets/macos/
+          else
+            ditto -c -k --sequesterRsrc --keepParent \
+              target/release/bundle/macos/kode.app \
+              "release-assets/macos/kode-${GITHUB_REF_NAME:-dev}-macos-${RUNNER_ARCH}.app.zip"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: release-assets/macos/*
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/macos/*
+            release-assets/remote-bridge/kode-remote-memory-bridge-x86_64-unknown-linux-musl.tar.gz
+          fail_on_unmatched_files: true

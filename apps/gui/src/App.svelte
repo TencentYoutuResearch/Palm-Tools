@@ -195,8 +195,8 @@
   let renameInputEl: HTMLInputElement | null = $state(null)
   /** dnd 进行中 —— 禁用 ⋯ 按钮 hover 显形,避免拖拽途中误触 */
   let dragging = $state(false)
-  /** workspace header 同时是折叠按钮和拖拽 handle;拖拽完成后的 click 必须吞掉。 */
-  let suppressNextCollapseClick = $state(false)
+  /** workspace header 同时是折叠按钮和拖拽 handle;拖拽后的 click 不能再触发折叠。 */
+  let suppressNextWorkspaceHeaderClick = $state(false)
   /**
    * 工作区分栏:按 cwd 把 tabs 分组,每组一个可折叠 section header。
    * 单 workspace 时退化为平铺列表(不渲染 header),避免常见单项目场景出现多余 UI。
@@ -264,6 +264,11 @@
 
   /** 是否渲染分组 header —— 单组时不渲染,保持原平铺体验。 */
   const wsGrouped = $derived(wsGroups.length > 1)
+  function isWsGroupCollapsed(group: WsGroup): boolean {
+    if (collapsedCwds.has(group.id)) return true
+    const first = group.tabs[0]
+    return !!(group as any).isDndShadowItem && !!first && collapsedCwds.has(wsGroupKey(first))
+  }
 
   /** 全局序号(按 $tabs 顺序),用于 tab 角标 / tooltip / Cmd+1..9。 */
   const wsGlobalIdx = $derived.by(() => {
@@ -314,10 +319,9 @@
     collapsedCwds = next
   }
   function onWorkspaceHeaderClick(e: MouseEvent, groupId: string) {
-    if (suppressNextCollapseClick) {
+    if (suppressNextWorkspaceHeaderClick) {
       e.preventDefault()
-      e.stopPropagation()
-      suppressNextCollapseClick = false
+      suppressNextWorkspaceHeaderClick = false
       return
     }
     toggleCollapse(groupId)
@@ -537,6 +541,7 @@
     el?.focus()
   }
   function onDndConsider(e: CustomEvent<DndEvent>) {
+    e.stopPropagation()
     // svelte-dnd-action 不走原生 dragstart;第一次 consider 才表示拖拽真正开始。
     dragging = true
     menuOpenId = null
@@ -546,6 +551,7 @@
     groupShadows = { ...groupShadows, [groupId]: [...(e.detail.items as TabInfo[])] }
   }
   function onDndFinalize(e: CustomEvent<DndEvent>) {
+    e.stopPropagation()
     const groupId = (e.currentTarget as HTMLElement).dataset.groupId ?? ''
     const finalItems = e.detail.items as TabInfo[]
     const original = wsGroups.find((g) => g.id === groupId)?.tabs ?? []
@@ -567,18 +573,20 @@
   }
 
   /** workspace 分组级别的拖拽回调:把整个分组上下重排。 */
-  function clearWorkspaceDragClickSuppression() {
+  function clearWorkspaceHeaderClickSuppression() {
     window.setTimeout(() => {
-      suppressNextCollapseClick = false
+      suppressNextWorkspaceHeaderClick = false
     }, 0)
   }
   function onWsDndConsider(e: CustomEvent<DndEvent>) {
+    if (e.target !== e.currentTarget) return
     dragging = true
-    suppressNextCollapseClick = true
+    suppressNextWorkspaceHeaderClick = true
     menuOpenId = null
     wsShadows = [...(e.detail.items as WsGroup[])]
   }
   function onWsDndFinalize(e: CustomEvent<DndEvent>) {
+    if (e.target !== e.currentTarget) return
     // 过滤 shadow item(svelte-dnd-action 的占位),只保留真实 workspace。
     // isDndShadowItem 是运行时注入的标记,不在 WsGroup 类型里,用 as any 读取。
     const finalGroups = (e.detail.items as WsGroup[]).filter(
@@ -593,7 +601,7 @@
     ) {
       dragging = false
       wsShadows = [...wsGroups]
-      clearWorkspaceDragClickSuppression()
+      clearWorkspaceHeaderClickSuppression()
       return
     }
     wsShadows = [...finalGroups]
@@ -604,7 +612,7 @@
     }
     reorderTabs(nextOrder)
     dragging = false
-    clearWorkspaceDragClickSuppression()
+    clearWorkspaceHeaderClickSuppression()
   }
 
   /// 任何模态弹层打开时为 true —— 全局 Cmd/Ctrl 快捷键 handler 据此放行,
@@ -1564,7 +1572,6 @@
         <div
           class="ws-list"
           use:dragHandleZone={{ items: wsShadows, type: 'workspace-group', delayTouchStart: TAB_DRAG_LONG_PRESS_MS }}
-          use:longpressGate
           onconsider={onWsDndConsider}
           onfinalize={onWsDndFinalize}
         >
@@ -1574,17 +1581,17 @@
                 <button
                   type="button"
                   class="ws-group-header"
-                  class:collapsed={collapsedCwds.has(group.id)}
+                  class:collapsed={isWsGroupCollapsed(group)}
                   class:remote={group.endpointKind === 'remote'}
                   class:local={group.endpointKind === 'local'}
                   title={group.fullPath}
-                  aria-expanded={!collapsedCwds.has(group.id)}
+                  aria-expanded={!isWsGroupCollapsed(group)}
                   onclick={(e) => onWorkspaceHeaderClick(e, group.id)}
                   use:dragHandle
                 >
                   <span class="ws-grip" aria-hidden="true"><Icon name="grip-vertical" size={14} /></span>
                   <span class="ws-chevron">
-                    <Icon name={collapsedCwds.has(group.id) ? 'chevron-right' : 'chevron-down'} size={12} />
+                    <Icon name={isWsGroupCollapsed(group) ? 'chevron-right' : 'chevron-down'} size={12} />
                   </span>
                   <span class="ws-icon" class:remote={group.endpointKind === 'remote'} class:local={group.endpointKind === 'local'}>
                     <Icon name={group.endpointKind === 'remote' ? 'folder-open' : 'folder'} size={13} />
@@ -1601,7 +1608,7 @@
                 <!-- compact 多 workspace:组间细分隔线 -->
                 <div class="ws-group-separator" aria-hidden="true"></div>
               {/if}
-              {#if !useGroupedLayout || !collapsedCwds.has(group.id)}
+              {#if !useGroupedLayout || !isWsGroupCollapsed(group)}
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   class="ws-group-tabs"
@@ -3203,13 +3210,11 @@
   /* ===== 长按闸门态(longpress_gate action 加的 class) =====
      .longpress-arming:按下未到 600ms,轻微缩起提示「正在识别长按」
      .longpress-armed :长按到时,dndzone 已接管,变 grab + 抬起 */
-  .tab.longpress-arming,
-  .ws-group-header.longpress-arming {
+  .tab.longpress-arming {
     transform: scale(0.98);
     box-shadow: 0 0 0 1px var(--acc) inset;
   }
-  .tab.longpress-armed,
-  .ws-group-header.longpress-armed {
+  .tab.longpress-armed {
     cursor: grabbing !important;
     transform: scale(1.02);
     box-shadow: var(--shadow-md, 0 4px 12px rgba(0,0,0,0.25));

@@ -1,16 +1,29 @@
 <p align="center">
-  <img src="docs/images/screenshot-main.png" alt="kode — a multi-backend terminal workspace for AI coding agents" width="880" />
+  <img src="apps/gui/src-tauri/icons/icon.png" alt="kode app icon" width="112" />
 </p>
 
-# kode
+<h1 align="center">kode</h1>
 
-A multi-backend terminal workspace for AI coding agents — run every agent in one app, share memory across sessions, and drive remote sessions over SSH.
+<p align="center">
+  <em>Named after <strong>Kill la Code</strong> — a nod to <strong>Kill la Kill</strong>.</em>
+</p>
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
-[![Platform: macOS · Linux](https://img.shields.io/badge/Platform-macOS%20%C2%B7%20Linux-lightgrey.svg)](#install)
-[![Built with Tauri 2](https://img.shields.io/badge/Built%20with-Tauri%202-red.svg)](https://v2.tauri.app)
+<p align="center">
+  A multi-backend terminal workspace for AI coding agents.<br />
+  Run CodeBuddy, Claude, Codex, Gemini, and more in one native app; share memory across sessions; keep local and remote agents in sync over SSH.
+</p>
 
-> **Status:** early access. Expect rough edges.
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
+  <a href="#install"><img src="https://img.shields.io/badge/Platform-macOS%20%C2%B7%20Linux-lightgrey.svg" alt="Platform: macOS · Linux" /></a>
+  <a href="https://v2.tauri.app"><img src="https://img.shields.io/badge/Built%20with-Tauri%202-red.svg" alt="Built with Tauri 2" /></a>
+</p>
+
+<p align="center"><strong>Status:</strong> early access. Expect rough edges.</p>
+
+<p align="center">
+  <img src="docs/images/screenshot-main.png" alt="kode — a multi-backend terminal workspace for AI coding agents" width="880" />
+</p>
 
 ---
 
@@ -163,5 +176,3 @@ Default at `~/.config/kode/config.toml`. Backend definitions are data-driven —
 ## License
 
 [Apache-2.0](./LICENSE). Third-party notices in [`NOTICE.md`](./NOTICE.md).
-
-`kode` is named after *Kill la Code* — a nod to *Kill la Kill*.

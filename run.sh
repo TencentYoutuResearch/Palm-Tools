@@ -171,9 +171,9 @@ case "$CMD" in
   app|release)
     ensure_node_modules
     APP_PATH="$ROOT_DIR/target/release/bundle/macos/kode.app"
-    DMG_PATH="$ROOT_DIR/target/release/bundle/dmg/kode_0.2.0-dev_aarch64.dmg"
+    DMG_DIR="$ROOT_DIR/target/release/bundle/dmg"
     # 避免打包中途失败后误装上一次遗留的 DMG。
-    rm -f "$DMG_PATH"
+    rm -f "$DMG_DIR"/kode_*.dmg
 
     set_tauri_resource_args
     set_signing_args
@@ -186,11 +186,16 @@ case "$CMD" in
       ${BUNDLE_TARGETS[@]+"${BUNDLE_TARGETS[@]}"} \
       "$@"
     cd "$ROOT_DIR"
+    shopt -s nullglob
+    DMG_FILES=("$DMG_DIR"/kode_*.dmg)
+    shopt -u nullglob
     # ad-hoc 模式只产 .app(跳过了 DMG);有证书时要求 .app + .dmg 都在。
-    if [ -d "$APP_PATH" ] && { [ "$SIGN_ADHOC" -eq 1 ] || [ -f "$DMG_PATH" ]; }; then
+    if [ -d "$APP_PATH" ] && { [ "$SIGN_ADHOC" -eq 1 ] || [ ${#DMG_FILES[@]} -gt 0 ]; }; then
       info "产物 → $APP_PATH"
-      if [ -f "$DMG_PATH" ]; then
-        info "安装包 → $DMG_PATH"
+      if [ ${#DMG_FILES[@]} -gt 0 ]; then
+        for dmg in "${DMG_FILES[@]}"; do
+          info "安装包 → $dmg"
+        done
         hint "挂载 DMG 后把 kode.app 拖到 Applications,或 ./run.sh open 直接运行 bundle"
       else
         hint "ad-hoc 签名,未打 DMG。./run.sh open 直接运行,或手动拷到 /Applications"
