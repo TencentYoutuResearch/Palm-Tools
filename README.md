@@ -40,7 +40,27 @@ No accounts, no telemetry, no cloud sync. Your code, tokens, and conversations s
 </p>
 <p align="center"><sub>Pick a backend, choose a working directory, and a live session spins up in a new tab.</sub></p>
 
-Every backend gets an icon in the chooser and sidebar. Drop in any PNG and name your own preset:
+Every backend gets an icon in the chooser and sidebar. Drop in any PNG in `Settings → Backends` to create a custom backend avatar, or build a small animated avatar gallery from your own generated image sequence:
+
+```text
+# macOS
+~/Library/Application Support/kode/avatars/gallery/<avatar-id>/frame-01.png ... frame-04.png
+
+# Linux
+~/.config/kode/avatars/gallery/<avatar-id>/frame-01.png ... frame-04.png
+```
+
+For state-aware avatars, split the frames by session state. Each state can contain one 4-frame set directly, or multiple variants (`01`, `02`, ...) that kode will cycle through:
+
+```text
+avatars/gallery/<avatar-id>/idle/frame-01.png ... frame-04.png
+avatars/gallery/<avatar-id>/running/01/frame-01.png ... frame-04.png
+avatars/gallery/<avatar-id>/running/02/frame-01.png ... frame-04.png
+avatars/gallery/<avatar-id>/awaiting/frame-01.png ... frame-04.png
+avatars/gallery/<avatar-id>/error/frame-01.png ... frame-04.png
+```
+
+Set `KODE_AVATAR_DIR=/path/to/avatars` while developing to load a different avatar root without touching your app config directory.
 
 <p align="center">
   <img src="docs/videos/custom-avatar-demo.gif" alt="Custom avatar demo — drop a PNG and name your preset" width="720" />
