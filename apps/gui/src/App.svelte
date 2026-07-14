@@ -1790,6 +1790,7 @@
             onClose={() => { workspacePanelOpen = false }}
             terminalOpen={terminalPanelOpen}
             onToggleTerminal={toggleTerminalPanel}
+            {onTitlebarMouseDown}
           />
         </div>
         {#if terminalPanelOpen}

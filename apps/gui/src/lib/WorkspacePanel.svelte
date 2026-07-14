@@ -22,6 +22,7 @@
     onClose: () => void
     terminalOpen?: boolean
     onToggleTerminal?: () => void
+    onTitlebarMouseDown?: (e: MouseEvent) => void
   }
 
   type PanelTab = 'files' | 'git'
@@ -58,7 +59,7 @@
   }
   const panelStateCache = new Map<string, SavedPanelState>()
 
-  let { tab, homeDir, onClose, terminalOpen = false, onToggleTerminal }: Props = $props()
+  let { tab, homeDir, onClose, terminalOpen = false, onToggleTerminal, onTitlebarMouseDown }: Props = $props()
 
   let activePanel = $state<PanelTab>('files')
   let filterQuery = $state('')
@@ -757,7 +758,8 @@
   aria-label="Workspace inspector"
 >
   <!-- 顶部一排(拉通整个右边栏):Files/Git 靠左,刷新 + inspector 关闭 靠右 -->
-  <div class="nav-top">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="nav-top" data-tauri-drag-region onmousedown={onTitlebarMouseDown}>
     <div class="tabs" role="tablist" aria-label="Workspace views">
       <button class:active={activePanel === 'files'} role="tab" aria-selected={activePanel === 'files'} onclick={() => (activePanel = 'files')}>
         <Icon name="folder" size={14} /> Files
@@ -1155,6 +1157,7 @@
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    -webkit-app-region: no-drag;
     transition: background var(--t-fast), color var(--t-fast);
   }
   .tool-btn:hover:not(:disabled) { color: var(--fg-primary); background: color-mix(in srgb, var(--fg-primary) 8%, transparent); }
@@ -1173,6 +1176,9 @@
     height: 44px;
     padding: 0 8px 0 10px;
     border-bottom: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
+    -webkit-app-region: drag;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .nav-top-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .tabs {
@@ -1193,6 +1199,7 @@
     gap: 6px;
     font-size: 12px;
     cursor: pointer;
+    -webkit-app-region: no-drag;
   }
   .tabs button:hover { background: var(--bg-tab-hover); color: var(--fg-primary); }
   .tabs button.active {
