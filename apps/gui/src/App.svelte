@@ -1594,7 +1594,7 @@
                     <Icon name={isWsGroupCollapsed(group) ? 'chevron-right' : 'chevron-down'} size={12} />
                   </span>
                   <span class="ws-icon" class:remote={group.endpointKind === 'remote'} class:local={group.endpointKind === 'local'}>
-                    <Icon name={group.endpointKind === 'remote' ? 'folder-open' : 'folder'} size={13} />
+                    <Icon name={group.endpointKind === 'remote' ? 'server' : 'folder'} size={13} />
                   </span>
                   <span class="ws-title">
                     <span class="ws-name">{group.name}</span>

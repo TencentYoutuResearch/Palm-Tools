@@ -32,6 +32,7 @@
     | 'search'
     | 'folder'
     | 'folder-open'
+    | 'server'
     | 'file-text'
     | 'eye'
     | 'eye-off'
@@ -125,6 +126,12 @@
     // lucide:folder-open
     'folder-open':
       '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6A2 2 0 0 1 18.46 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2A2 2 0 0 0 12.1 6H20a2 2 0 0 1 2 2v2"/>',
+    // lucide:server
+    server:
+      '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/>' +
+      '<rect width="20" height="8" x="2" y="14" rx="2" ry="2"/>' +
+      '<line x1="6" x2="6.01" y1="6" y2="6"/>' +
+      '<line x1="6" x2="6.01" y1="18" y2="18"/>',
     // lucide:file-text
     'file-text':
       '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>' +
