@@ -40,7 +40,7 @@ pub struct SessionState {
     pub title_pinned: bool,
     /// 切走后是否有新输出
     pub unread: bool,
-    /// 当前上下文/最近一次请求 token,不跨轮次累加。
+    /// 当前 session 累计 token(input + output)。
     pub tokens: Option<u64>,
     /// 细分 token 统计(来自 jsonl providerData.usage)
     pub tokens_input: Option<u64>,

@@ -19,7 +19,7 @@ pub enum CoreEvent {
         /// 子进程真实 session uuid。codebuddy `/clear` 会切到新 jsonl/session,
         /// 这里把新 uuid 带回 UI,避免持久化仍指向旧会话。
         session_uuid: Option<String>,
-        /// 是否清空已有 token/context/cost 展示。/clear 和 /model 会触发。
+        /// 是否清空已有 token/context/cost 展示。切换到新 session(/clear)时触发。
         tokens_reset: bool,
         /// reset 后累计总 tokens(input + output)。
         tokens: Option<u64>,

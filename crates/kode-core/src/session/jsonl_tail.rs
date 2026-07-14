@@ -288,6 +288,11 @@ struct LineUpdate {
     new_input: Option<u64>,
     new_output: Option<u64>,
     new_cached: Option<u64>,
+    /// token 字段是否已经是 session 累计值。Codex 的 total_token_usage 是累计值;
+    /// codebuddy / claude usage 是单次请求增量。
+    tokens_are_cumulative: bool,
+    /// 最新一次请求占用的上下文 token,只用于 context_pct,不参与 session 累计。
+    latest_context_tokens: Option<u64>,
     /// codebuddy in-TUI `/resume <target>` 在**源文件**里写一行
     /// `<local-command-stdout>change session <uuid></local-command-stdout>`,
     /// 之后真实对话全写进 target 文件。这个字段携带 target uuid,run() 据此
@@ -595,17 +600,32 @@ async fn run(
             || upd.new_output.is_some()
             || upd.new_cached.is_some();
 
-        if let Some(t) = upd.new_total {
-            state.total_tokens = t;
-        }
-        if let Some(t) = upd.new_input {
-            state.input_tokens = t;
-        }
-        if let Some(t) = upd.new_output {
-            state.output_tokens = t;
-        }
-        if let Some(t) = upd.new_cached {
-            state.cached_tokens = t;
+        if upd.tokens_are_cumulative {
+            if let Some(t) = upd.new_total {
+                state.total_tokens = t;
+            }
+            if let Some(t) = upd.new_input {
+                state.input_tokens = t;
+            }
+            if let Some(t) = upd.new_output {
+                state.output_tokens = t;
+            }
+            if let Some(t) = upd.new_cached {
+                state.cached_tokens = t;
+            }
+        } else {
+            state.total_tokens = state
+                .total_tokens
+                .saturating_add(upd.new_total.unwrap_or(0));
+            state.input_tokens = state
+                .input_tokens
+                .saturating_add(upd.new_input.unwrap_or(0));
+            state.output_tokens = state
+                .output_tokens
+                .saturating_add(upd.new_output.unwrap_or(0));
+            state.cached_tokens = state
+                .cached_tokens
+                .saturating_add(upd.new_cached.unwrap_or(0));
         }
 
         if let Some(m) = upd.new_model.as_ref() {
@@ -616,7 +636,7 @@ async fn run(
         }
 
         // context_pct 使用最新一次请求的输入 token,不是历史最大值或累计值。
-        let latest_ctx_used = upd.new_input.or(upd.new_total).unwrap_or(0);
+        let latest_ctx_used = upd.latest_context_tokens.unwrap_or(0);
         let context_pct = match state.last_model.as_deref() {
             Some(m) if latest_ctx_used > 0 => crate::context::context_pct(m, latest_ctx_used),
             _ => None,
@@ -819,7 +839,6 @@ fn parse_codebuddy_line(line: &str, state: &mut TailState) -> LineUpdate {
             return upd;
         }
         state.user_pinned_model = Some(model.clone());
-        upd.tokens_reset = true;
         if state.last_emitted_model.as_deref() != Some(&model) {
             upd.new_model = Some(model.clone());
             state.last_emitted_model = Some(model);
@@ -862,10 +881,12 @@ fn parse_codebuddy_line(line: &str, state: &mut TailState) -> LineUpdate {
         }
         if let Some(u) = &pd.usage {
             // codebuddy 的 usage 字段是单次模型请求用量,不是 session 累计值。
-            // UI 展示当前上下文/最近一次请求规模,所以 run() 用最新 usage 覆盖。
-            let raw_total = u.total_tokens.unwrap_or(0);
+            // run() 把每次请求的 usage 累加成 session 总量。
             let raw_input = u.input_tokens.unwrap_or(0);
             let raw_output = u.output_tokens.unwrap_or(0);
+            let raw_total = u
+                .total_tokens
+                .unwrap_or_else(|| raw_input.saturating_add(raw_output));
             let raw_cached = u
                 .input_tokens_details
                 .as_ref()
@@ -885,6 +906,7 @@ fn parse_codebuddy_line(line: &str, state: &mut TailState) -> LineUpdate {
             if raw_cached > 0 {
                 upd.new_cached = Some(raw_cached);
             }
+            upd.latest_context_tokens = (raw_input > 0).then_some(raw_input);
         }
     }
     upd
@@ -1003,8 +1025,7 @@ struct ClMessage {
 struct ClUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
-    /// claude code 只有 cache_read_input_tokens(实际用过的 cache 命中);
-    /// cache_creation_input_tokens 是首次缓存构建,不算"已使用"
+    cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
 }
 
@@ -1031,10 +1052,11 @@ fn parse_claude_line(line: &str, state: &mut TailState) -> LineUpdate {
             // 我们语义对齐 codebuddy:
             //   - input_tokens(JsonlMeta):current request 全部 input(含 cached)
             //   - cached_tokens:cache_read 部分(已折扣 90%)
+            let cache_creation = u.cache_creation_input_tokens.unwrap_or(0);
             let cached = u.cache_read_input_tokens.unwrap_or(0);
             let raw_input = u.input_tokens.unwrap_or(0);
-            // codebuddy 的 inputTokens 包含 cached;为对齐,把 cached 加进 input 当 total
-            let input_total = raw_input + cached;
+            // Anthropic 把普通 input、cache write、cache read 分开报告;三者都属于 input。
+            let input_total = raw_input + cache_creation + cached;
             let output = u.output_tokens.unwrap_or(0);
             let total = input_total + output;
             if input_total > 0 {
@@ -1049,6 +1071,7 @@ fn parse_claude_line(line: &str, state: &mut TailState) -> LineUpdate {
             if total > 0 {
                 upd.new_total = Some(total);
             }
+            upd.latest_context_tokens = (input_total > 0).then_some(input_total);
         }
     }
 
@@ -1156,11 +1179,17 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
     if entry.r#type.as_deref() == Some("event_msg") && payload_type == Some("token_count") {
         if let Some(info_value) = entry.payload.get("info") {
             if let Ok(info) = serde_json::from_value::<CodexTokenInfo>(info_value.clone()) {
-                if let Some(u) = info.last_token_usage.or(info.total_token_usage) {
+                let latest_context_tokens = info
+                    .last_token_usage
+                    .as_ref()
+                    .and_then(|u| u.input_tokens.or(u.total_tokens));
+                if let Some(u) = info.total_token_usage.or(info.last_token_usage) {
                     upd.new_total = u.total_tokens;
                     upd.new_input = u.input_tokens;
                     upd.new_output = u.output_tokens;
                     upd.new_cached = u.cached_input_tokens;
+                    upd.tokens_are_cumulative = true;
+                    upd.latest_context_tokens = latest_context_tokens;
                 }
             }
         }
@@ -1622,9 +1651,9 @@ mod tests {
         state.last_model = Some("claude-sonnet-4.6".to_string());
         let upd = parse_codebuddy_line(line, &mut state);
         assert_eq!(upd.new_model.as_deref(), Some("claude-opus-4.6"));
-        // 不应产生 tokens 更新,但要清空旧 token 展示
+        // 模型切换不应产生 tokens 更新,也不应清空同一 session 的累计量。
         assert!(upd.new_total.is_none());
-        assert!(upd.tokens_reset);
+        assert!(!upd.tokens_reset);
     }
 
     #[test]
@@ -1634,7 +1663,7 @@ mod tests {
         let mut state = TailState::new();
         let upd = parse_codebuddy_line(line, &mut state);
         assert_eq!(upd.new_model.as_deref(), Some("kimi-k2.6-ioa"));
-        assert!(upd.tokens_reset);
+        assert!(!upd.tokens_reset);
     }
 
     #[test]
@@ -1644,10 +1673,10 @@ mod tests {
         state.last_emitted_model = Some("claude-opus-4.6".to_string());
         // 即使 last_emitted_model 已是同名,user 显式 switch 仍 pin 它(防止后续 assistant 行覆盖)
         let upd = parse_codebuddy_line(line, &mut state);
-        // 模型没变,不应触发 model emit,但仍要触发 token reset
+        // 模型没变,不触发 emit;同一 session 的累计 token 保持不变。
         assert!(upd.new_model.is_none());
-        assert!(upd.changed());
-        assert!(upd.tokens_reset);
+        assert!(!upd.changed());
+        assert!(!upd.tokens_reset);
         // 但 pin 必须被设置
         assert_eq!(state.user_pinned_model.as_deref(), Some("claude-opus-4.6"));
     }
@@ -2413,12 +2442,12 @@ mod tests {
         let mut state = TailState::new();
         let upd = parse_claude_line(line, &mut state);
         assert_eq!(upd.new_model.as_deref(), Some("claude-4.7-opus"));
-        // claude 的 input_tokens(33087) + cached(1000) = 34087
-        assert_eq!(upd.new_input, Some(33087 + 1000));
+        // 普通 input + cache creation + cache read 都属于 input token。
+        assert_eq!(upd.new_input, Some(33087 + 33081 + 1000));
         assert_eq!(upd.new_output, Some(4666));
         assert_eq!(upd.new_cached, Some(1000));
         // total = input_total + output
-        assert_eq!(upd.new_total, Some(33087 + 1000 + 4666));
+        assert_eq!(upd.new_total, Some(33087 + 33081 + 1000 + 4666));
     }
 
     #[test]
@@ -2430,10 +2459,11 @@ mod tests {
 
         let token_line = r#"{"timestamp":"2026-06-14T08:16:40Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9999999,"cached_input_tokens":8888888,"output_tokens":7777,"reasoning_output_tokens":255,"total_tokens":10007776},"last_token_usage":{"input_tokens":20767,"cached_input_tokens":11136,"output_tokens":463,"reasoning_output_tokens":255,"total_tokens":21230},"model_context_window":258400}}}"#;
         let upd = parse_codex_line(token_line, &mut state);
-        assert_eq!(upd.new_total, Some(21230));
-        assert_eq!(upd.new_input, Some(20767));
-        assert_eq!(upd.new_output, Some(463));
-        assert_eq!(upd.new_cached, Some(11136));
+        assert_eq!(upd.new_total, Some(10007776));
+        assert_eq!(upd.new_input, Some(9999999));
+        assert_eq!(upd.new_output, Some(7777));
+        assert_eq!(upd.new_cached, Some(8888888));
+        assert_eq!(upd.latest_context_tokens, Some(20767));
     }
 
     #[test]
@@ -2661,7 +2691,7 @@ mod tests {
         )
         .unwrap();
         // codebuddy 的 totalTokens / inputTokens / outputTokens 是单次请求用量。
-        // UI 展示当前上下文/最近一次请求规模,不跨轮次累加。
+        // UI 展示 session 累计用量。
         writeln!(
             f,
             r#"{{"type":"message","role":"assistant","providerData":{{"requestModelName":"Claude-Opus-4.7-1M","usage":{{"totalTokens":2500,"inputTokens":2000,"outputTokens":500}}}}}}"#
@@ -2679,7 +2709,7 @@ mod tests {
         let mut got_tokens = None;
 
         let _ = tokio::time::timeout(Duration::from_secs(3), async {
-            while got_title.is_none() || got_model.is_none() || got_tokens != Some(3100) {
+            while got_title.is_none() || got_model.is_none() || got_tokens != Some(5600) {
                 match rx.recv().await {
                     Some(CoreEvent::JsonlMeta {
                         model,
@@ -2708,7 +2738,7 @@ mod tests {
 
         assert_eq!(got_title.as_deref(), Some("My Title"));
         assert_eq!(got_model.as_deref(), Some("Claude-Opus-4.7-1M"));
-        assert_eq!(got_tokens, Some(3100));
+        assert_eq!(got_tokens, Some(5600));
     }
 
     /// 端到端:claude 路径
