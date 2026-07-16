@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: fix-gate-signals-diagnostics
 kind: bug
+document_class: work_item
+work_type: bugfix
 title: Fix misleading "Gate signals" diagnostics panel — stale verifies, panel mislabeling, broken suppress, and noise
-status: proposed
+status: cancelled
 verifies:
   - specops
 paths:

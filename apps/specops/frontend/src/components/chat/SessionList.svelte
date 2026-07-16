@@ -10,6 +10,7 @@
   } from '../../lib/stores/sessions.ts';
   import { t } from '../../lib/i18n.ts';
   import type { SpecOpsSession } from '../../lib/types.ts';
+  import { onWindowDragMouseDown } from '../../lib/windowDrag.ts';
 
   const fmtTime = (iso?: string): string => {
     if (!iso) return '';
@@ -49,17 +50,17 @@
 </script>
 
 <div class="session-list">
-  <header class="list-head">
-    <div>
+  <header class="list-head" role="presentation" data-tauri-drag-region onmousedown={onWindowDragMouseDown}>
+    <div data-tauri-drag-region>
       <span class="eyebrow">{t('Sessions')}</span>
       <strong>{$sessions.length}</strong>
     </div>
-    <button class="refresh" onclick={() => loadSessions()} aria-label="refresh">
+    <button class="refresh" onclick={() => loadSessions({ showLoading: false })} aria-label="refresh">
       <Icon name="refresh" size={14} />
     </button>
   </header>
 
-  {#if $sessionsLoading}
+  {#if $sessionsLoading && $sessions.length === 0}
     <p class="empty">Loading…</p>
   {:else if $sessionsError}
     <p class="err">{$sessionsError}</p>
@@ -128,6 +129,8 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .list-head {
     display: flex;
@@ -137,6 +140,10 @@
     border-bottom: 1px solid var(--bd-muted);
     background: color-mix(in srgb, var(--bg-sidebar) 88%, var(--bg-base));
     flex-shrink: 0;
+    min-height: 44px;
+    -webkit-app-region: drag;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .list-head > div {
     display: flex;
@@ -165,6 +172,7 @@
     border: 1px solid transparent;
     background: transparent;
     color: var(--fg-tertiary);
+    -webkit-app-region: no-drag;
   }
   .refresh:hover {
     background: var(--bg-tab-hover);
@@ -252,13 +260,13 @@
   .status-dot[data-state='active'],
   .status-dot[data-state='live'] {
     background: var(--st-idle);
-    animation: pulse 1.4s ease-in-out infinite;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--st-idle) 18%, transparent);
   }
   .status-dot[data-state='awaiting_user'],
   .status-dot[data-state='resumable'],
   .status-dot[data-state='restartable'] {
     background: var(--st-warn);
-    animation: pulse 1.1s ease-in-out infinite;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--st-warn) 18%, transparent);
   }
   .status-dot[data-state='failed'],
   .status-dot[data-state='cancelled'] {
@@ -355,14 +363,5 @@
   }
   .dot {
     opacity: 0.5;
-  }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.5;
-    }
   }
 </style>

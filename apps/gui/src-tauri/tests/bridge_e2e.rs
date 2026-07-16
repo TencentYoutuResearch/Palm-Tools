@@ -454,7 +454,7 @@ async fn history_endpoint_returns_session_events() {
 }
 
 #[tokio::test]
-async fn answer_endpoint_writes_digit_to_pty() {
+async fn answer_endpoint_writes_choice_and_submit_to_pty() {
     let addr = start_server().await;
     let client = reqwest::Client::new();
     let session: Value = client
@@ -476,7 +476,7 @@ async fn answer_endpoint_writes_digit_to_pty() {
         .send()
         .await
         .unwrap();
-    // 已实装:write_input("1") to PTY → 204
+    // 已实装:首项直接 Enter;其它项用 DownArrow 移动后 Enter。
     assert_eq!(resp.status(), 204);
 
     // 越界 choice_index 应 400

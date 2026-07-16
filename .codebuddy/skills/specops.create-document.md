@@ -15,13 +15,15 @@ Content-Type: application/json
 ```json
 {
   "path": ".specops/{specs|changes}/{id}.md",
-  "content": "---\nschema_version: 1\nid: \"{id}\"\nkind: {kind}\ntitle: \"{title}\"\nstatus: {status}\n---\n\n{body}"
+  "content": "---\nschema_version: 2\nid: \"{id}\"\nkind: {kind}\ndocument_class: {normative|work_item}\nspec_type: {capability|action|contract|verification|architecture|policy|invariant}\nwork_type: {feature|bugfix|refactor|investigation|docs|chore}\ntitle: \"{title}\"\nstatus: {status}\n---\n\n{body}"
 }
 ```
 
 ## Parameters
 
-- **kind** (required): `spec` | `change`
+- **kind** (required): `spec` for normative documents; a concrete work kind for work items
+- **document_class** (required in schema v2): `normative` | `work_item`
+- `spec_type` is only valid for normative specs; `work_type`, `targets`, and `workflow_profile` are only valid for work items.
 - **id** (required): unique identifier matching `[A-Za-z0-9][A-Za-z0-9._/-]{0,127}`
   - Format: `{YYYY-MM-DD}-{slug}`
   - Example: `2026-06-21-fix-session-char-loss`

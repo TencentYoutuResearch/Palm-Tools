@@ -49,7 +49,9 @@ class _PairScreenState extends ConsumerState<PairScreen> {
     });
 
     final port = int.tryParse(_portCtrl.text.trim()) ?? -1;
-    if (_hostCtrl.text.trim().isEmpty || port <= 0 || _tokenCtrl.text.trim().isEmpty) {
+    if (_hostCtrl.text.trim().isEmpty ||
+        port <= 0 ||
+        _tokenCtrl.text.trim().isEmpty) {
       setState(() {
         _error = 'fill host / port / token';
         _testing = false;
@@ -116,17 +118,27 @@ class _PairScreenState extends ConsumerState<PairScreen> {
             children: [
               if (_scanning) _buildScanner() else _buildScanCta(),
               const SizedBox(height: 16),
-              const Text('OR ENTER MANUALLY',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.2,
-                      color: KillLaColors.accent)),
+              const Text(
+                'OR ENTER MANUALLY',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.2,
+                  color: KillLaColors.accent,
+                ),
+              ),
               const SizedBox(height: 8),
               _input('Host', _hostCtrl, 'e.g. 100.x.x.x or mac.tail-scale.ts'),
-              _input('Port', _portCtrl, '47870',
-                  keyboardType: TextInputType.number),
-              _input('Bearer token', _tokenCtrl,
-                  'paste token from desktop "Show Pairing QR…" dialog'),
+              _input(
+                'Port',
+                _portCtrl,
+                '47870',
+                keyboardType: TextInputType.number,
+              ),
+              _input(
+                'Bearer token',
+                _tokenCtrl,
+                'paste token from desktop "Show Pairing QR…" dialog',
+              ),
               const SizedBox(height: 12),
               if (_error != null)
                 Container(
@@ -134,13 +146,16 @@ class _PairScreenState extends ConsumerState<PairScreen> {
                   decoration: BoxDecoration(
                     color: KillLaColors.danger.withValues(alpha: 0.12),
                     border: Border(
-                        left: BorderSide(
-                            color: KillLaColors.danger, width: 4)),
+                      left: BorderSide(color: KillLaColors.danger, width: 4),
+                    ),
                   ),
-                  child: Text(_error!,
-                      style: const TextStyle(
-                          color: KillLaColors.danger,
-                          fontWeight: FontWeight.w700)),
+                  child: Text(
+                    _error!,
+                    style: const TextStyle(
+                      color: KillLaColors.danger,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
                 ),
               const SizedBox(height: 12),
               FilledButton.icon(
@@ -149,7 +164,10 @@ class _PairScreenState extends ConsumerState<PairScreen> {
                         width: 14,
                         height: 14,
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
                     : const Icon(Icons.check_circle_outline, size: 18),
                 onPressed: _testing ? null : _testAndSave,
                 label: const Text('TEST CONNECTION & SAVE'),
@@ -171,12 +189,15 @@ class _PairScreenState extends ConsumerState<PairScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('SCAN PAIRING QR',
-              style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1.2,
-                  color: KillLaColors.accent)),
+          const Text(
+            'SCAN PAIRING QR',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 1.2,
+              color: KillLaColors.accent,
+            ),
+          ),
           const SizedBox(height: 6),
           const Text(
             'On desktop GUI, open Command Palette (⌘P) → "Show Pairing QR…", then scan.',
@@ -225,8 +246,12 @@ class _PairScreenState extends ConsumerState<PairScreen> {
     );
   }
 
-  Widget _input(String label, TextEditingController ctrl, String hint,
-      {TextInputType? keyboardType}) {
+  Widget _input(
+    String label,
+    TextEditingController ctrl,
+    String hint, {
+    TextInputType? keyboardType,
+  }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: TextField(

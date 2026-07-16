@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "intake_id": "f4978936-cbd3-4c03-9253-5ad050e7654f",
+  "status": "completed",
+  "primary": ".specops/changes/fix-specops-text-selection",
+  "documents": [
+    ".specops/changes/fix-specops-text-selection",
+    ".specops/changes/fix-specops-text-selection/proposal.md",
+    ".specops/changes/fix-specops-text-selection/tasks.md",
+    ".specops/changes/fix-specops-text-selection/design.md"
+  ]
+}

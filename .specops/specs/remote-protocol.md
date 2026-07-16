@@ -152,11 +152,14 @@ paths:
 {
   "question_id": "ask-uuid-123",
   "choice_index": 0,
-  "free_text": null
+  "free_text": null,
+  "submit": false
 }
 ```
 
 - `choice_index`:选中的 option 下标(从 0 开始)。如果用户选 "Other" 或问题允许自由输入,改用 `free_text`,`choice_index` 设为 `-1`。
+- 同一次 AskUserQuestion 含多题时,客户端应先本地收集并允许修改全部答案,再按问题顺序发送;仅最后一题传 `submit=true`,让交互式 backend 确认汇总页。
+- 每题可同时携带 `free_text` 作为所选 option 的补充说明。无法在原生 AskPanel 内表达补充信息的 PTY backend,应在选项组提交后把整组补充说明作为同 session 的一条后续消息发送。
 - 后端把对应回答转写成对应 PTY 字符序列(模拟用户在桌面端按下选项)。**具体 PTY 编码由 server 根据 backend 类型决定**,客户端不需要知道。
 
 **响应** 204。

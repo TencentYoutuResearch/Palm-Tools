@@ -6,6 +6,7 @@
   import { trackIntake } from '../../lib/stores/workflows.ts';
   import { api } from '../../lib/api.ts';
   import { t } from '../../lib/i18n.ts';
+  import { shouldSubmitOnEnter } from '../../lib/ime.ts';
 
   type Mode = 'intake' | 'plan' | 'clarify' | 'doc';
 
@@ -15,6 +16,8 @@
   let sending = $state(false);
   let error = $state<string | null>(null);
   let lastAnswer = $state<string | null>(null);
+  let imeComposing = $state(false);
+  let compositionEndedAt = $state(0);
 
   const modeLabel: Record<Mode, string> = {
     intake: 'Intake',
@@ -68,7 +71,6 @@
       if (mode === 'intake' || mode === 'plan') {
         const res = await api.post<{ intake_id: number; specops_session?: { id: string } }>('/api/intakes', {
           request,
-          backend_key: 'codebuddy',
           pre_plan: mode === 'plan',
         });
         trackIntake(res.intake_id);
@@ -77,7 +79,6 @@
         const res = await api.post<{ clarify_id: number; specops_session: { id: string }; reused?: boolean }>('/api/clarifies', {
           request,
           ...(mode === 'doc' && $selectedTextContext !== null ? { document_path: $selectedTextContext.path } : {}),
-          backend_key: 'codebuddy',
         });
         lastAnswer = `${res.reused ? 'Reused' : 'Created'} Clarify ${res.specops_session.id.slice(0, 8)}`;
       }
@@ -143,8 +144,10 @@
         <textarea
           bind:value={text}
           placeholder={mode === 'doc' ? t('Ask about the selected file/lines…') : t('Describe the new conversation…')}
+          oncompositionstart={() => (imeComposing = true)}
+          oncompositionend={() => { imeComposing = false; compositionEndedAt = Date.now(); }}
           onkeydown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+            if (shouldSubmitOnEnter(e, imeComposing, compositionEndedAt)) {
               e.preventDefault();
               submit();
             }

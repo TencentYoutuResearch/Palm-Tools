@@ -1,15 +1,18 @@
-import { execFile as execFileCallback } from 'node:child_process'
+import { execFile as execFileCallback, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { finished } from 'node:stream/promises'
 import { promisify } from 'node:util'
 
 import { SpecOpsError } from '../core/errors.js'
-import { loadConfig, type VerifyConfig } from './config.js'
+import { loadConfig, resolveAgentSelection, type VerifyConfig } from './config.js'
 import {
   resolveAgentBackendProfile,
   workflowKindForDocumentKind,
+  workflowKindForWorkType,
   type RunManifest,
 } from './harness.js'
 import { parseDocument, type DocumentKind } from './spec.js'
@@ -21,6 +24,8 @@ import {
   type SpecOpsPhase,
   type SpecOpsSessionState,
 } from './session.js'
+import { appendHarnessEvent, initializeHarnessRun, readHarnessState, transitionHarnessLoop, transitionHarnessTask } from './harness-core.js'
+import { captureEnvironment } from './environment.js'
 
 const execFile = promisify(execFileCallback)
 
@@ -31,6 +36,8 @@ export interface Task {
   title: string
   prompt: string
   verify: string[]
+  /** Dependency ids form a DAG; tasks are topologically ordered before launch. */
+  depends_on?: string[]
 }
 
 export interface RunDecision {
@@ -58,6 +65,13 @@ export interface RunRecord {
    */
   change_id: string | null
   backend_key: string
+  /** Immutable model selection for implementation/repair. Null uses backend default. */
+  model: string | null
+  /** Immutable role selections. Existing runs do not drift when specops.toml changes. */
+  agent_profiles: {
+    implementation: { backend: string; model: string | null }
+    review: { backend: string; model: string | null }
+  }
   kode_session_id: number | null
   tasks: Task[]
   current_task: number
@@ -113,6 +127,43 @@ async function gitOk(workspace: string, args: string[]): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+/**
+ * Write potentially large git output directly to disk. `execFile` buffers all
+ * stdout and aborts once maxBuffer is reached, which made valid Runs with a
+ * large binary/generated diff impossible to review or apply.
+ */
+async function gitToFile(workspace: string, args: string[], destination: string): Promise<void> {
+  const temp = `${destination}.${process.pid}.${randomUUID()}.tmp`
+  const child = spawn('git', ['-C', workspace, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const output = createWriteStream(temp, { encoding: 'utf8', mode: 0o600 })
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk: string) => {
+    if (stderr.length < 64 * 1024) stderr += chunk.slice(0, 64 * 1024 - stderr.length)
+  })
+  child.stdout.pipe(output)
+
+  try {
+    const exit = new Promise<void>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', (code, signal) => {
+        if (code === 0) resolve()
+        else reject(new SpecOpsError(
+          'git_failed',
+          `git ${args[0] ?? ''} failed${signal === null ? ` with exit code ${code}` : ` from signal ${signal}`}: ${stderr.trim()}`,
+        ))
+      })
+    })
+    await Promise.all([exit, finished(output)])
+    await rename(temp, destination)
+  } catch (error) {
+    child.kill()
+    output.destroy()
+    await rm(temp, { force: true }).catch(() => undefined)
+    throw error
   }
 }
 
@@ -194,6 +245,15 @@ export async function readRun(workspaceInput: string, runId: string): Promise<Ru
   // Backfill review_results for runs created before auto-review existed, so
   // callers can always `.push()` without an undefined guard.
   if (!Array.isArray(run.review_results)) run.review_results = []
+  if (run.model === undefined) run.model = null
+  if (run.agent_profiles === undefined) {
+    const config = await loadConfig(workspace)
+    const review = resolveAgentSelection(config, 'review')
+    run.agent_profiles = {
+      implementation: { backend: run.backend_key, model: run.model },
+      review: { backend: review.backend, model: review.model ?? null },
+    }
+  }
   // Backfill change_id for runs created before this field existed (legacy
   // run.json files have no change_id — they behave as quick-runs: apply paths
   // skip proposal-status updates for them).
@@ -202,6 +262,7 @@ export async function readRun(workspaceInput: string, runId: string): Promise<Ru
     const config = await loadConfig(workspace)
     run.manifest = await buildRunManifest(run, config)
   }
+  await initializeHarnessRun(workspace, run.run_id, run.tasks, run.max_iterations)
   return run
 }
 
@@ -217,10 +278,27 @@ export async function createRun(
   base = 'HEAD',
   runCacheRoot = cacheRoot(),
   changeId: string | null = null,
+  model?: string,
 ): Promise<RunRecord> {
   if (tasks.length === 0) throw new SpecOpsError('invalid_tasks', 'a Run requires at least one task')
+  tasks = orderTaskDag(tasks)
   const workspace = await resolveGitWorkspace(workspaceInput)
   const config = await loadConfig(workspace)
+  // The proposal is the authoritative verification contract. UI-created tasks
+  // may omit their per-task verify arrays (the document-to-task conversion used
+  // to do exactly that), but that must not silently turn a verified work item
+  // into a Run whose manifest says "Required verification: none". Run-level
+  // verification happens after the final task, so inherit proposal verifies
+  // there while preserving any explicitly requested task checks.
+  if (changeId !== null) {
+    const proposal = pathInside(workspace, '.specops', 'changes', changeId, 'proposal.md')
+    const document = parseDocument(await readFile(proposal, 'utf8'), proposal)
+    const required = document.frontmatter.verifies ?? []
+    if (required.length > 0) {
+      const last = tasks.at(-1)!
+      last.verify = [...new Set([...last.verify, ...required])]
+    }
+  }
   let baseCommit: string
   try {
     baseCommit = await git(workspace, ['rev-parse', '--verify', `${base}^{commit}`])
@@ -254,6 +332,7 @@ export async function createRun(
     verifySnapshot[name] = entry
   }
   const backend = await resolveAgentBackendProfile(workspace, backendKey, config.agent_backends[backendKey])
+  const reviewAgent = resolveAgentSelection(config, 'review')
   const workflowKind = await workflowKindForChange(workspace, changeId)
   const manifest: RunManifest = {
     schema_version: 1,
@@ -269,6 +348,7 @@ export async function createRun(
     },
     verification: { required: [...verifyNames].sort() },
     limits: { max_iterations: 8 },
+    environment: await captureEnvironment(workspace, baseCommit),
   }
   const run: RunRecord = {
     schema_version: 1,
@@ -281,6 +361,11 @@ export async function createRun(
     pre_apply_commit: null,
     change_id: changeId,
     backend_key: backendKey,
+    model: model ?? null,
+    agent_profiles: {
+      implementation: { backend: backendKey, model: model ?? null },
+      review: { backend: reviewAgent.backend, model: reviewAgent.model ?? null },
+    },
     kode_session_id: null,
     tasks,
     current_task: 0,
@@ -295,6 +380,7 @@ export async function createRun(
     updated_at: now,
   }
   await writeRun(run)
+  await initializeHarnessRun(workspace, runId, tasks, run.max_iterations)
   await transitionRun(run, 'preparing')
   try {
     // Branch-based worktree: one Run = one branch. apply later merges this
@@ -309,13 +395,37 @@ export async function createRun(
   }
 }
 
+export function orderTaskDag(tasks: Task[]): Task[] {
+  const byId = new Map<string, Task>()
+  for (const task of tasks) {
+    if (byId.has(task.id)) throw new SpecOpsError('invalid_tasks', `duplicate task id: ${task.id}`)
+    byId.set(task.id, task)
+  }
+  for (const task of tasks) for (const dependency of task.depends_on ?? []) {
+    if (!byId.has(dependency)) throw new SpecOpsError('invalid_tasks', `task ${task.id} depends on unknown task: ${dependency}`)
+  }
+  const ordered: Task[] = []
+  const visiting = new Set<string>(); const visited = new Set<string>()
+  const visit = (task: Task): void => {
+    if (visited.has(task.id)) return
+    if (visiting.has(task.id)) throw new SpecOpsError('invalid_tasks', `task dependency cycle includes: ${task.id}`)
+    visiting.add(task.id)
+    for (const dependency of task.depends_on ?? []) visit(byId.get(dependency)!)
+    visiting.delete(task.id); visited.add(task.id); ordered.push(task)
+  }
+  for (const task of tasks) visit(task)
+  return ordered
+}
+
 async function workflowKindForChange(workspace: string, changeId: string | null) {
   if (changeId === null) return 'feature' as const
   try {
     const proposal = pathInside(workspace, '.specops', 'changes', changeId, 'proposal.md')
     const document = parseDocument(await readFile(proposal, 'utf8'), proposal)
-    return workflowKindForDocumentKind(document.frontmatter.kind)
-  } catch {
+    if (document.frontmatter.document_class === 'normative') return workflowKindForDocumentKind('spec')
+    return workflowKindForWorkType(document.frontmatter.workflow_profile ?? document.frontmatter.work_type ?? document.frontmatter.kind)
+  } catch (error) {
+    if (error instanceof SpecOpsError && error.code === 'workflow_not_applicable') throw error
     return 'feature' as const
   }
 }
@@ -337,21 +447,59 @@ async function buildRunManifest(run: RunRecord, config: Awaited<ReturnType<typeo
     },
     verification: { required: Object.keys(run.verify_snapshot).sort() },
     limits: { max_iterations: run.max_iterations },
+    environment: await captureEnvironment(run.workspace_root, run.base_commit),
   }
 }
 
-export async function transitionRun(run: RunRecord, next: RunState): Promise<void> {
+export async function transitionRun(run: RunRecord, next: RunState, options: { syncSession?: boolean } = {}): Promise<void> {
   if (!TRANSITIONS[run.state].includes(next)) {
     throw new SpecOpsError('invalid_run_transition', `cannot transition Run ${run.run_id} from ${run.state} to ${next}`)
   }
   run.state = next
   await writeRun(run)
+  await appendHarnessEvent(run.workspace_root, run.run_id, 'run.transitioned', 'run-state-machine', {
+    state: next,
+    task_id: run.tasks[run.current_task]?.id ?? null,
+    iteration: run.iteration,
+  })
+  const task = run.tasks[run.current_task]
+  if (task !== undefined) {
+    if (next === 'running') {
+      await transitionHarnessTask(run.workspace_root, run.run_id, task.id, 'running', { agent: run.backend_key, worktree: run.worktree_path, iteration: run.iteration })
+      await transitionHarnessLoop(run.workspace_root, run.run_id, 'build', 'running', task.id)
+    } else if (next === 'awaiting_verify') {
+      await transitionHarnessTask(run.workspace_root, run.run_id, task.id, 'verifying', { iteration: run.iteration })
+      await transitionHarnessLoop(run.workspace_root, run.run_id, 'build', 'completed', task.id)
+      await transitionHarnessLoop(run.workspace_root, run.run_id, 'verify_repair', 'running', task.id)
+    } else if (next === 'awaiting_review') {
+      // Apply failures legally return a Run from `applying` to
+      // `awaiting_review`. The scheduler task may already be completed after
+      // the user accepted it; never regress that terminal task state merely
+      // to restore the Run-level review/apply controls.
+      const harness = await readHarnessState(run.workspace_root, run.run_id)
+      const scheduledTask = harness?.tasks.find((item) => item.id === task.id)
+      if (scheduledTask?.state !== 'completed') {
+        await transitionHarnessTask(run.workspace_root, run.run_id, task.id, 'reviewing', { iteration: run.iteration })
+      }
+      await transitionHarnessLoop(run.workspace_root, run.run_id, 'verify_repair', 'waiting', task.id)
+    } else if (next === 'completed') {
+      await transitionHarnessTask(run.workspace_root, run.run_id, task.id, 'completed', { iteration: run.iteration })
+      await transitionHarnessLoop(run.workspace_root, run.run_id, 'verify_repair', 'completed', task.id)
+    } else if (next === 'failed' || next === 'applied_failed') {
+      await transitionHarnessTask(run.workspace_root, run.run_id, task.id, 'failed', { iteration: run.iteration })
+      await transitionHarnessLoop(run.workspace_root, run.run_id, 'verify_repair', 'failed', task.id)
+    } else if (next === 'cancelled') {
+      await transitionHarnessTask(run.workspace_root, run.run_id, task.id, 'cancelled', { iteration: run.iteration })
+    }
+  }
   // Best-effort: keep the linked SpecOps session's phase/state in sync with
   // the Run. Session metadata must never block the Run state machine — any
   // failure (no linked session, disk error, terminal session) is swallowed.
-  await syncSessionPhaseForRun(run).catch((error) => {
-    console.warn(`[specops] session phase sync failed for run ${run.run_id}: ${error instanceof Error ? error.message : String(error)}`)
-  })
+  if (options.syncSession !== false) {
+    await syncSessionPhaseForRun(run).catch((error) => {
+      console.warn(`[specops] session phase sync failed for run ${run.run_id}: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
 }
 
 /**
@@ -437,7 +585,7 @@ async function sessionUpdateForRunState(run: RunRecord): Promise<{
  *
  * Side-effect-free: never modifies the index or working tree.
  */
-async function changedFilesForRun(run: RunRecord): Promise<string[]> {
+export async function changedFilesForRun(run: RunRecord): Promise<string[]> {
   const files = new Set<string>()
   try {
     const { stdout } = await execFile('git', ['-C', run.worktree_path, 'diff', '--name-only', run.base_commit, '--'])
@@ -476,11 +624,11 @@ async function changedFilesForRun(run: RunRecord): Promise<string[]> {
 export async function collectRunPatch(run: RunRecord): Promise<{ patch: string; files: string[] }> {
   if (!await exists(run.worktree_path)) throw new SpecOpsError('worktree_missing', `Run worktree is missing: ${run.worktree_path}`)
   await execFile('git', ['-C', run.worktree_path, 'add', '-N', '.'])
-  const patch = await git(run.worktree_path, ['diff', '--full-index', '--binary', run.base_commit, '--'])
+  const patchPath = pathInside(run.workspace_root, '.specops', 'runs', run.run_id, 'output.patch')
+  await gitToFile(run.worktree_path, ['diff', '--full-index', '--binary', run.base_commit, '--'], patchPath)
+  const patch = await readFile(patchPath, 'utf8')
   const status = await git(run.worktree_path, ['status', '--porcelain=v1', '-z'])
   const files = status.split('\0').filter(Boolean).map((entry) => entry.slice(2).trimStart()).sort()
-  const patchPath = pathInside(run.workspace_root, '.specops', 'runs', run.run_id, 'output.patch')
-  await atomicWrite(patchPath, patch.endsWith('\n') ? patch : `${patch}\n`)
   // Commit the agent's work onto the Run branch so `git merge <branch>` (the
   // apply path) actually carries these changes. Without this, the branch tip
   // still points at base_commit and the merge would be a no-op. We use --allow-empty
@@ -597,6 +745,32 @@ async function dirtyNonSpecopsPaths(workspace: string): Promise<string[]> {
   return paths
 }
 
+async function stashWorkspacePaths(workspace: string, runId: string, paths: string[]): Promise<string | null> {
+  if (paths.length === 0) return null
+  await execFile('git', [
+    '-C', workspace, 'stash', 'push', '--include-untracked',
+    '-m', `specops:auto-stash:${runId}`, '--', ...paths,
+  ], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+  try {
+    return await git(workspace, ['rev-parse', '--verify', 'refs/stash'])
+  } catch {
+    return null
+  }
+}
+
+async function restoreWorkspaceStash(workspace: string, stashCommit: string | null): Promise<string[]> {
+  if (stashCommit === null) return []
+  const restored = await gitOk(workspace, ['stash', 'apply', '--index', stashCommit])
+  if (restored) {
+    // Drop only when refs/stash still points to the entry we created. Keeping a
+    // mismatched/newer stash is safer than deleting someone else's work.
+    const current = await git(workspace, ['rev-parse', '--verify', 'refs/stash']).catch(() => '')
+    if (current === stashCommit) await gitOk(workspace, ['stash', 'drop', 'stash@{0}'])
+    return []
+  }
+  return dirtyNonSpecopsPaths(workspace)
+}
+
 /**
  * Upfront conflict detection using `git merge-tree --write-tree --name-only`.
  * Returns the list of paths that would conflict if we merged <branch> into HEAD.
@@ -665,19 +839,15 @@ export async function applyRunPatch(run: RunRecord): Promise<ApplyResult> {
 
   const workspace = run.workspace_root
 
-  // 1. Workspace clean check — refuse to merge when the user has uncommitted
-  //    non-specops changes (we don't want to entangle them in the merge).
+  // 1. Protect local edits transactionally. They are restored after the Run
+  //    merge, so an unrelated dirty workspace no longer blocks apply.
   const dirty = await dirtyNonSpecopsPaths(workspace)
-  if (dirty.length > 0) {
-    throw new SpecOpsError(
-      'workspace_dirty',
-      `Cannot apply Run ${run.run_id}: the main workspace has uncommitted changes outside .specops/:\n  ${dirty.slice(0, 10).join('\n  ')}${dirty.length > 10 ? `\n  ...and ${dirty.length - 10} more` : ''}\nCommit or stash these before applying.`,
-    )
-  }
+  const autoStash = await stashWorkspacePaths(workspace, run.run_id, dirty)
 
   // 2. Upfront conflict detection — tell the user *before* touching the tree.
   const conflicts = await mergeTreeConflicts(workspace, run.branch)
   if (conflicts.length > 0) {
+    await restoreWorkspaceStash(workspace, autoStash)
     throw new SpecOpsError(
       'merge_will_conflict',
       `Merge of branch '${run.branch}' into HEAD would conflict in:\n  ${conflicts.slice(0, 10).join('\n  ')}${conflicts.length > 10 ? `\n  ...and ${conflicts.length - 10} more` : ''}\nRe-run this Run from the current HEAD, or manually resolve after merging.`,
@@ -693,6 +863,7 @@ export async function applyRunPatch(run: RunRecord): Promise<ApplyResult> {
     // Conflict surfaced despite upfront detection (race, or merge-tree missed
     // something). Abort and leave the tree as we found it.
     await gitOk(workspace, ['merge', '--abort'])
+    await restoreWorkspaceStash(workspace, autoStash)
     throw new SpecOpsError(
       'merge_conflict',
       `Merge of branch '${run.branch}' failed with conflicts. The workspace has been rolled back to its pre-merge state.\nResolve manually with \`git merge ${run.branch}\`, or run \`git merge --abort\` and re-apply from the new HEAD.`,
@@ -702,6 +873,14 @@ export async function applyRunPatch(run: RunRecord): Promise<ApplyResult> {
   // 5. Persist pre_apply_commit so rollback can `git reset --hard` back here.
   run.pre_apply_commit = preApply
   await writeRun(run)
+
+  const restoreConflicts = await restoreWorkspaceStash(workspace, autoStash)
+  if (restoreConflicts.length > 0) {
+    throw new SpecOpsError(
+      'workspace_restore_conflict',
+      `Run ${run.run_id} was merged, but restoring the main workspace edits conflicted in:\n  ${restoreConflicts.slice(0, 10).join('\n  ')}${restoreConflicts.length > 10 ? `\n  ...and ${restoreConflicts.length - 10} more` : ''}\nThe original edits remain backed up in git stash ${autoStash}. Resolve the working-tree conflicts, then continue.`,
+    )
+  }
 
   const newHead = await git(workspace, ['rev-parse', 'HEAD'])
   return { commit: newHead.slice(0, 12) }

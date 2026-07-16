@@ -57,8 +57,10 @@ final _routerProvider = Provider<GoRouter>((ref) {
 class _RouterRefresh extends ChangeNotifier {
   _RouterRefresh(this.ref) {
     _epSub = ref.listen(endpointProvider, (_, _) => notifyListeners());
-    _bootSub =
-        ref.listen(endpointBootstrapProvider, (_, _) => notifyListeners());
+    _bootSub = ref.listen(
+      endpointBootstrapProvider,
+      (_, _) => notifyListeners(),
+    );
   }
   final Ref ref;
   late final ProviderSubscription _epSub;
@@ -84,10 +86,10 @@ class _LoadingScreen extends StatelessWidget {
           children: [
             CircularProgressIndicator(),
             SizedBox(height: 16),
-            Text('CONNECTING…',
-                style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.5)),
+            Text(
+              'CONNECTING…',
+              style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1.5),
+            ),
           ],
         ),
       ),
@@ -105,8 +107,7 @@ class KodeApp extends ConsumerWidget {
 
     return MaterialApp.router(
       title: 'kode',
-      // Kill la Code 主题:漆黑底 + 血红主调 + 警示黄。
-      // 默认 dark(更贴 KLK 视觉),系统 light → 落到 light 副皮(降饱和)。
+      // Same green-neutral token family as the Kode desktop GUI.
       themeMode: ThemeMode.system,
       theme: KillLaTheme.light(),
       darkTheme: KillLaTheme.dark(),

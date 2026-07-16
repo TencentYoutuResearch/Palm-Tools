@@ -271,6 +271,7 @@ export const ipc = {
   openSpecOpsWindow: (session: SpecOpsSession, theme: ThemeMode, locale: LocaleMode) =>
     invoke<void>('open_specops_window', { session, theme, locale }),
   specopsOpen: (workspace: string) => invoke<SpecOpsSession>('specops_open', { workspace }),
+  specopsInitGitWorkspace: (workspace: string) => invoke<void>('specops_init_git_workspace', { workspace }),
   specopsClose: (workspace: string) => invoke<void>('specops_close', { workspace }),
 
   // Phase 9.1.2-final 配对(Flutter App 扫 QR 拿到 host+port+token)

@@ -1,7 +1,7 @@
 <script lang="ts">
   interface Props {
     label: string;
-    tone?: 'draft' | 'active' | 'proposed' | 'completed' | 'archived' | 'idle' | 'busy' | 'error' | 'info';
+    tone?: 'draft' | 'active' | 'deprecated' | 'superseded' | 'proposed' | 'approved' | 'in_progress' | 'blocked' | 'completed' | 'cancelled' | 'archived' | 'idle' | 'busy' | 'error' | 'info';
   }
   let { label, tone = 'draft' }: Props = $props();
 </script>
@@ -25,12 +25,14 @@
     background: var(--bg-chip);
   }
   .tone-active,
+  .tone-approved,
   .tone-idle {
     color: var(--st-idle);
     background: color-mix(in srgb, var(--st-idle) 14%, transparent);
     border-color: color-mix(in srgb, var(--st-idle) 28%, transparent);
   }
   .tone-proposed,
+  .tone-in_progress,
   .tone-busy {
     color: var(--st-busy);
     background: color-mix(in srgb, var(--st-busy) 14%, transparent);
@@ -42,12 +44,16 @@
     background: color-mix(in srgb, var(--st-info) 14%, transparent);
     border-color: color-mix(in srgb, var(--st-info) 28%, transparent);
   }
-  .tone-archived {
+  .tone-archived,
+  .tone-deprecated,
+  .tone-superseded,
+  .tone-cancelled {
     color: var(--fg-tertiary);
     background: var(--bg-chip);
     opacity: 0.7;
   }
-  .tone-error {
+  .tone-error,
+  .tone-blocked {
     color: var(--st-err);
     background: color-mix(in srgb, var(--st-err) 14%, transparent);
     border-color: color-mix(in srgb, var(--st-err) 28%, transparent);

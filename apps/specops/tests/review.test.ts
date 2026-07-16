@@ -1,11 +1,11 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
 import { afterEach, describe, expect, test } from 'vitest'
 
-import { loadConfig } from '../src/domain/config.js'
-import { extractReviewResult, formatReviewNote, type ReviewResult } from '../src/domain/run-loop.js'
+import { loadConfig, resolveAgentSelection, saveAgentConfig } from '../src/domain/config.js'
+import { extractReviewResult, formatReviewNote, humanReviewSatisfiesRiskApproval, type ReviewResult } from '../src/domain/run-loop.js'
 
 const cleanup: string[] = []
 afterEach(async () => {
@@ -99,6 +99,26 @@ describe('formatReviewNote', () => {
   })
 })
 
+describe('risk approval flow', () => {
+  test('an accepted patch satisfies a medium human-review gate', () => {
+    expect(humanReviewSatisfiesRiskApproval(
+      [{ verdict: 'accept' }],
+      [{ required_approval: 'human_review' }],
+    )).toBe(true)
+  })
+
+  test('does not silently approve stronger design or plan-only gates', () => {
+    expect(humanReviewSatisfiesRiskApproval(
+      [{ verdict: 'accept' }],
+      [{ required_approval: 'design_and_human_review' }],
+    )).toBe(false)
+    expect(humanReviewSatisfiesRiskApproval(
+      [{ verdict: 'accept' }],
+      [{ required_approval: 'plan_only' }],
+    )).toBe(false)
+  })
+})
+
 describe('review config parsing', () => {
   test('defaults review.enabled to true when [review] is absent', async () => {
     const workspace = await workspaceWithConfig(BASE)
@@ -122,5 +142,50 @@ describe('review config parsing', () => {
   test('rejects a non-boolean review.enabled', async () => {
     const workspace = await workspaceWithConfig(`${BASE}\n[review]\nenabled = "yes"\n`)
     await expect(loadConfig(workspace)).rejects.toThrow(/review.enabled/)
+  })
+})
+
+describe('agent profile resolution', () => {
+  test('inherits role backend and model from workspace defaults', async () => {
+    const workspace = await workspaceWithConfig(`${BASE}\n[agents.default]\nbackend = "codex"\nmodel = "default-model"\n\n[agents.review]\nbackend = "claude"\n`)
+    const config = await loadConfig(workspace)
+    expect(resolveAgentSelection(config, 'analysis')).toEqual({
+      role: 'analysis', backend: 'codex', model: 'default-model',
+    })
+    expect(resolveAgentSelection(config, 'review')).toEqual({
+      role: 'review', backend: 'claude', model: 'default-model',
+    })
+  })
+
+  test('request overrides role, and legacy review.model remains compatible', async () => {
+    const workspace = await workspaceWithConfig(`${BASE}\n[agents.default]\nbackend = "codebuddy"\n\n[agents.implementation]\nbackend = "codex"\nmodel = "builder"\n\n[review]\nmodel = "legacy-review"\n`)
+    const config = await loadConfig(workspace)
+    expect(resolveAgentSelection(config, 'implementation', { backend: 'claude', model: 'one-shot' })).toEqual({
+      role: 'implementation', backend: 'claude', model: 'one-shot',
+    })
+    expect(resolveAgentSelection(config, 'review')).toEqual({
+      role: 'review', backend: 'codebuddy', model: 'legacy-review',
+    })
+  })
+
+  test('rejects empty profile values', async () => {
+    const workspace = await workspaceWithConfig(`${BASE}\n[agents.analysis]\nbackend = ""\n`)
+    await expect(loadConfig(workspace)).rejects.toThrow(/agents\.analysis\.backend/)
+  })
+
+  test('visual settings update only agent tables and preserve other config', async () => {
+    const workspace = await workspaceWithConfig(`${BASE}\n# keep this comment\n[gate]\nstrict_wild_specs = true\n\n[agents.default]\nbackend = "codebuddy"\n`)
+    const config = await saveAgentConfig(workspace, {
+      default: { backend: 'codex' },
+      analysis: {},
+      implementation: { backend: 'claude', model: 'sonnet' },
+      review: {},
+    })
+    expect(config.agents.default.backend).toBe('codex')
+    expect(config.agents.implementation).toEqual({ backend: 'claude', model: 'sonnet' })
+    const source = await readFile(path.join(workspace, 'specops.toml'), 'utf8')
+    expect(source).toContain('# keep this comment')
+    expect(source).toContain('[gate]\nstrict_wild_specs = true')
+    expect(source.match(/\[agents\.default\]/g)).toHaveLength(1)
   })
 })

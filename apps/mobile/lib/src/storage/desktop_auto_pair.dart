@@ -57,8 +57,9 @@ class DesktopAutoPair {
 
     // 候选端口列表:env 优先,然后默认列表
     final ports = <int>[];
-    final envPort =
-        int.tryParse(Platform.environment['KODE_BRIDGE_PORT'] ?? '');
+    final envPort = int.tryParse(
+      Platform.environment['KODE_BRIDGE_PORT'] ?? '',
+    );
     if (envPort != null) ports.add(envPort);
     for (final p in _candidatePorts) {
       if (!ports.contains(p)) ports.add(p);

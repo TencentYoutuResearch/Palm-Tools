@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: fix-gui-status-bar-vertical-center
 kind: bug
+document_class: work_item
+work_type: bugfix
 title: 修复 GUI 底部状态栏元素垂直居中
-status: proposed
+status: cancelled
 verifies: []
 paths:
   - apps/gui/src/App.svelte

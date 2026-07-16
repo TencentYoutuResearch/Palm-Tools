@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: investigate-gate-signals-28
 kind: investigation
+document_class: work_item
+work_type: investigation
 title: Investigate why 28 Gate signals persist and have not been resolved
-status: proposed
+status: cancelled
 verifies:
   - specops
 paths:

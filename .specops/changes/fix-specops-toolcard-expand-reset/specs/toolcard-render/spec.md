@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: toolcard-render
 kind: spec
+document_class: normative
+spec_type: capability
 title: SpecOps tool card 渲染层不变性
-status: proposed
+status: deprecated
 verifies: []
 paths:
   - apps/specops/src/server/public/app.js

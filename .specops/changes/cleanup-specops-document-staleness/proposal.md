@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: cleanup-specops-document-staleness
 kind: refactor
+document_class: work_item
+work_type: refactor
 title: Clean up SpecOps document staleness from clarify guardrail proliferation
-status: proposed
+status: cancelled
 verifies:
   - specops
 paths:

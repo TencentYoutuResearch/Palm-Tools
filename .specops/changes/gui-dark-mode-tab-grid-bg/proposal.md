@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: gui-dark-mode-tab-grid-bg
 kind: bug
+document_class: work_item
+work_type: bugfix
 title: GUI 终端 tab 在 dark 模式下背景透出网格
-status: proposed
+status: cancelled
 verifies:
   - rust
 paths:

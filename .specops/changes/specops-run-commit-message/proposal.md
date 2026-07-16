@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: specops-run-commit-message
 kind: refactor
+document_class: work_item
+work_type: refactor
 title: "SpecOps worktree commit 信息带上规范提交，而不是 specops(run): uuid 无效信息"
-status: proposed
+status: cancelled
 verifies:
   - specops
 paths:

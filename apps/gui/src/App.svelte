@@ -636,6 +636,19 @@
   let specopsSession: SpecOpsSession | null = $state(null)
   let specopsOpening = $state(false)
   let specopsError: string | null = $state(null)
+  let specopsInitConfirm: { path: string; resolve: (accepted: boolean) => void } | null = $state(null)
+
+  function confirmSpecOpsGitInitialization(path: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      specopsInitConfirm = { path, resolve }
+    })
+  }
+
+  function resolveSpecOpsGitInitialization(accepted: boolean) {
+    const pending = specopsInitConfirm
+    specopsInitConfirm = null
+    pending?.resolve(accepted)
+  }
   /** memory hover 卡片显示态;徽章 hover 300ms 后显示。 */
   let memoryHoverVisible = $state(false)
   let memoryHoverTimer: number | null = null
@@ -713,7 +726,17 @@
     try {
       const picked = await open({ directory: true, multiple: false, title: 'Open a Git workspace in SpecOps' })
       if (typeof picked !== 'string') return
-      specopsSession = await ipc.specopsOpen(picked)
+      try {
+        specopsSession = await ipc.specopsOpen(picked)
+      } catch (error) {
+        const message = String(error)
+        const notGit = message.includes('not_git_workspace') || message.includes('not a Git workspace')
+        if (!notGit) throw error
+        const accepted = await confirmSpecOpsGitInitialization(picked)
+        if (!accepted) return
+        await ipc.specopsInitGitWorkspace(picked)
+        specopsSession = await ipc.specopsOpen(picked)
+      }
       // 打开独立窗口
       try {
         await ipc.openSpecOpsWindow(specopsSession, theme, locale)
@@ -2003,6 +2026,17 @@
   />
 {/if}
 
+{#if specopsInitConfirm}
+  <ConfirmDialog
+    title="Initialize SpecOps workspace"
+    message={`The selected folder is not a Git repository:\n\n${specopsInitConfirm.path}\n\nInitialize Git and create the SpecOps workspace files here?`}
+    confirmLabel="Initialize"
+    cancelLabel="Cancel"
+    onConfirm={() => resolveSpecOpsGitInitialization(true)}
+    onClose={() => resolveSpecOpsGitInitialization(false)}
+  />
+{/if}
+
 {#if memoryPanelOpen}
   <MemoryPanel onClose={() => (memoryPanelOpen = false)} />
 {/if}
@@ -2341,6 +2375,8 @@
     overflow: hidden;
     min-height: 0;
     transition: border-right-color 180ms ease;
+    user-select: none;
+    -webkit-user-select: none;
   }
   /* Kill la Code 文字:放在红绿灯右边、占中间弹性空间,把 + 推到最右 */
   .brand-text {
@@ -3203,6 +3239,8 @@
     font: inherit;
     border-bottom: 1px solid var(--acc);
     padding: 0 2px;
+    user-select: text;
+    -webkit-user-select: text;
   }
 
   /* ===== dnd 拖拽态 ===== */
@@ -3537,6 +3575,8 @@
      * .status-left/.status-right 内部处理。
      */
     overflow: visible;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .status-left, .status-right {
     display: flex;

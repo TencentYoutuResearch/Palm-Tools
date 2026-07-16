@@ -15,7 +15,7 @@ Read `.specops/constitution.md` first. If any proposed document would violate a
 declared invariant, surface the conflict in `proposal.md` under a
 `## Constitution conflicts` heading rather than silently complying.
 
-- `spec`: durable invariant, contract, convention, or standard
+- `spec`: durable normative capability, action, contract, verification, architecture, policy, or invariant. It has no implementation workflow.
 - `bug`: broken behavior that needs a fix
 - `refactor`: structural change without intended behavior change
 - `feature`: new user-facing or developer-facing capability
@@ -53,9 +53,13 @@ Must have YAML frontmatter. Default status by kind: `active` for specs, `propose
 
 ```markdown
 ---
-schema_version: 1
+schema_version: 2
 id: add-dark-mode
-kind: change
+kind: feature
+document_class: work_item
+work_type: feature
+targets:
+  - theme/system
 title: Add dark mode support
 status: proposed
 verifies:
@@ -71,6 +75,11 @@ paths:
 
 ...
 ```
+
+`kind` and `work_type` are intentionally not identical for bugs: use
+`kind: bug` together with `work_type: bugfix`. Valid `work_type` values are
+only `feature`, `bugfix`, `refactor`, `investigation`, `docs`, and `chore`;
+never write `work_type: bug`.
 
 > **`verifies` must only list verify names defined in `specops.toml` under
 > `[verify.*]` sections.** Read `specops.toml` first. If a needed check is not
@@ -140,8 +149,8 @@ frontmatter `title` value in Chinese. If the request is in English, write them
 in English. For mixed-language requests, use the dominant language of the
 request body.
 
-Keep YAML frontmatter **keys** (`schema_version`, `id`, `kind`, `status`,
-`verifies`, `paths`) in English — they are parsed by the SpecOps server, gate,
+Keep YAML frontmatter **keys** (`schema_version`, `id`, `kind`, `document_class`,
+`spec_type`, `work_type`, `targets`, `workflow_profile`, `status`, `verifies`, `paths`) in English — they are parsed by the SpecOps server, gate,
 and drift analyzers. Only the `title` **value** and the markdown body follow
 the request language.
 

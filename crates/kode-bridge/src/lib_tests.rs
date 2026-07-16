@@ -3,6 +3,12 @@ use std::path::PathBuf;
 use super::*;
 
 #[test]
+fn answer_input_selects_and_confirms_the_choice() {
+    assert_eq!(answer_input(0), b"\r");
+    assert_eq!(answer_input(3), b"\x1b[B\x1b[B\x1b[B\r");
+}
+
+#[test]
 fn create_session_sanitizes_requested_model() {
     assert_eq!(
         sanitize_requested_model(Some("Claude-Opus-4.8-1M Note: The model was saved")).as_deref(),

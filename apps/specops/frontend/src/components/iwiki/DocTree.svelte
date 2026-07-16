@@ -1,8 +1,9 @@
 <script lang="ts">
   import DocTreeNode from './DocTreeNode.svelte';
   import Icon from '../shared/Icon.svelte';
-  import { workspaceState, refreshState } from '../../lib/stores/documents.ts';
+  import { workspaceState, refreshState, selectedDoc, selectedDocContent } from '../../lib/stores/documents.ts';
   import type { RegistryEntry, DocumentKind, DocumentStatus } from '../../lib/types.ts';
+  import { onWindowDragMouseDown } from '../../lib/windowDrag.ts';
 
   let collapsedGroups = $state<Set<string>>(new Set(['Archive']));
   let refreshing = $state(false);
@@ -35,9 +36,15 @@
 
   const statusPriority: Record<DocumentStatus, number> = {
     active: 0,
+    approved: 0,
+    in_progress: 0,
     proposed: 1,
     completed: 2,
     draft: 3,
+    blocked: 3,
+    deprecated: 4,
+    superseded: 4,
+    cancelled: 4,
     archived: 4,
   };
 
@@ -65,7 +72,10 @@
 </script>
 
 <div class="tree">
-  <div class="tree-header">
+  <div class="tree-header" role="presentation" data-tauri-drag-region onmousedown={onWindowDragMouseDown}>
+    <button type="button" class="control-btn" onclick={() => { selectedDoc.set(null); selectedDocContent.set(null); }}>
+      <Icon name="activity" size={13} /> Assurance
+    </button>
     <button
       type="button"
       class="refresh-btn"
@@ -99,6 +109,10 @@
 </div>
 
 <style>
+  .tree {
+    user-select: none;
+    -webkit-user-select: none;
+  }
   .tree {
     padding: var(--sp-2);
     display: flex;
@@ -151,9 +165,15 @@
   }
   .tree-header {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
     margin-bottom: var(--sp-1);
+    min-height: 44px;
+    align-items: center;
+    -webkit-app-region: drag;
+    user-select: none;
+    -webkit-user-select: none;
   }
+  .control-btn { display: inline-flex; align-items: center; gap: var(--sp-1); border: 0; background: transparent; color: var(--fg-secondary); font-size: var(--fs-xs); -webkit-app-region: no-drag; }
   .refresh-btn {
     display: inline-flex;
     align-items: center;
@@ -166,6 +186,7 @@
     color: var(--fg-tertiary);
     cursor: pointer;
     transition: background var(--t-fast), color var(--t-fast);
+    -webkit-app-region: no-drag;
   }
   .refresh-btn:hover:not(:disabled) {
     background: var(--bg-tab-hover);

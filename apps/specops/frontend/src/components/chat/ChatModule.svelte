@@ -17,7 +17,7 @@
 <section
   class="module chat-layout"
   class:right-open={$chatRightOpen}
-  style="--col-left: {$chatLeftWidth}px; --col-right: {$chatRightOpen ? $chatRightWidth : 0}px;"
+  style="--col-left: {$chatLeftWidth}px; --col-right: {$chatRightOpen ? $chatRightWidth : 0}px; --header-height: 44px;"
 >
   <aside class="panel panel-left">
     <SessionList />

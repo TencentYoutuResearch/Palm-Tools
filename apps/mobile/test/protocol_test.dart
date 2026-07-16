@@ -3,10 +3,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kode_mobile/src/protocol/protocol.dart';
 
 void main() {
+  group('AskUserQuestion grouping', () {
+    test('groups expanded questions from one tool call', () {
+      expect(askQuestionGroupId('tooluse-abc-0'), 'tooluse-abc');
+      expect(askQuestionGroupId('tooluse-abc-1'), 'tooluse-abc');
+      expect(askQuestionGroupId('standalone'), 'standalone');
+    });
+  });
+
   group('Endpoint.tryParseUri', () {
     test('parses kode://pair correctly', () {
       final ep = Endpoint.tryParseUri(
-          'kode://pair?host=100.64.0.1&port=9870&token=abc123');
+        'kode://pair?host=100.64.0.1&port=9870&token=abc123',
+      );
       expect(ep, isNotNull);
       expect(ep!.host, '100.64.0.1');
       expect(ep.port, 9870);
@@ -24,7 +33,8 @@ void main() {
 
     test('handles encoded host', () {
       final ep = Endpoint.tryParseUri(
-          'kode://pair?host=mac.tail-net.ts&port=9870&token=t');
+        'kode://pair?host=mac.tail-net.ts&port=9870&token=t',
+      );
       expect(ep, isNotNull);
       expect(ep!.host, 'mac.tail-net.ts');
     });
@@ -73,12 +83,7 @@ void main() {
         'status': 'busy',
         'cwd': '/Users/foo/proj',
         'session_uuid': 'abc-123',
-        'tokens': {
-          'input': 1000,
-          'output': 200,
-          'cached': 50,
-          'total': 1200,
-        },
+        'tokens': {'input': 1000, 'output': 200, 'cached': 50, 'total': 1200},
         'context_pct': 12.5,
         'cost_usd': 0.0123,
       });

@@ -29,7 +29,8 @@ class ApiClient {
   final Dio _dio;
 
   ApiClient(this.endpoint)
-      : _dio = Dio(BaseOptions(
+    : _dio = Dio(
+        BaseOptions(
           baseUrl: endpoint.baseUrl,
           headers: {
             'Authorization': 'Bearer ${endpoint.token}',
@@ -39,7 +40,8 @@ class ApiClient {
           receiveTimeout: const Duration(seconds: 15),
           // 让我们自己处理状态码,而不是 dio 默认的"非 2xx 就 throw"
           validateStatus: (_) => true,
-        ));
+        ),
+      );
 
   Future<bool> healthz() async {
     final resp = await _dio.getUri<String>(
@@ -98,8 +100,10 @@ class ApiClient {
     final qp = <String, dynamic>{};
     if (fromMs != null) qp['from'] = fromMs;
     if (limit != null) qp['limit'] = limit;
-    final resp = await _dio.get('/api/v1/sessions/$id/history',
-        queryParameters: qp.isEmpty ? null : qp);
+    final resp = await _dio.get(
+      '/api/v1/sessions/$id/history',
+      queryParameters: qp.isEmpty ? null : qp,
+    );
     _check(resp);
     final list = (resp.data['events'] as List?) ?? const [];
     return list
@@ -111,14 +115,20 @@ class ApiClient {
   /// **当前 Rust bridge 占位 500**。
   /// 真实 PTY 编码尚未确定 → 这个方法会因 server 返 500 而抛 ApiException。
   /// Flutter 显示给用户即可,等 server 端实装后自动 work。
-  Future<void> postAnswer(int id, String questionId, int choiceIndex,
-      {String? freeText}) async {
+  Future<void> postAnswer(
+    int id,
+    String questionId,
+    int choiceIndex, {
+    String? freeText,
+    bool submit = false,
+  }) async {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/answer',
       data: {
         'question_id': questionId,
         'choice_index': choiceIndex,
         if (freeText != null) 'free_text': freeText,
+        if (submit) 'submit': true,
       },
     );
     _check(resp);
@@ -190,7 +200,9 @@ class ApiClient {
       }
       final err = ApiException(code, name, detail);
       // ignore: avoid_print
-      print('[api] ${resp.requestOptions.method} ${resp.requestOptions.path} -> $err');
+      print(
+        '[api] ${resp.requestOptions.method} ${resp.requestOptions.path} -> $err',
+      );
       throw err;
     }
   }
@@ -240,7 +252,9 @@ class WSClient {
           } catch (e) {
             // 不抛,只 log
             // ignore: avoid_print
-            print('[ws] bad frame: $e -- ${raw.substring(0, raw.length.clamp(0, 200))}');
+            print(
+              '[ws] bad frame: $e -- ${raw.substring(0, raw.length.clamp(0, 200))}',
+            );
           }
         }
       },
@@ -275,8 +289,9 @@ class WSClient {
     _sub = null;
     _reconnectTimer?.cancel();
     final delay = _backoff;
-    _backoff =
-        Duration(milliseconds: (_backoff.inMilliseconds * 2).clamp(1000, 30000));
+    _backoff = Duration(
+      milliseconds: (_backoff.inMilliseconds * 2).clamp(1000, 30000),
+    );
     _reconnectTimer = Timer(delay, connect);
   }
 

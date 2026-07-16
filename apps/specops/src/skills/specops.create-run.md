@@ -30,7 +30,8 @@ Content-Type: application/json
 
 ## Parameters
 
-- **backend_key** (required): agent backend to use. Check available backends in `~/.config/kode/config.toml` `[backends]`. Common: `codebuddy`, `claude-internal`, `claude`
+- **backend_key** (optional): one-run override. When omitted, SpecOps resolves `[agents.implementation]`, then `[agents.default]` from `specops.toml`, then the builtin `codebuddy` fallback. Backend definitions remain in `~/.config/kode/config.toml`.
+- **model** (optional): one-run model override. When omitted, the same profile inheritance applies; an omitted profile model uses the Kode backend default.
 - **base** (optional): git ref to base the worktree on. Default: `HEAD`
 - **change_id** (optional): the `id` of the SpecOps change proposal this Run implements (from `.specops/changes/<id>/proposal.md` frontmatter). When set, a successful apply will automatically flip the proposal's `status` from `proposed` to `completed`. Omit for quick-runs (no linked proposal → no auto status update).
 - **tasks** (required): array of 1-5 tasks, each with:

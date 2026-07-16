@@ -10,6 +10,7 @@
   } from '../../lib/stores/history.ts';
   import { selectedDoc } from '../../lib/stores/documents.ts';
   import { t } from '../../lib/i18n.ts';
+  import { onWindowDragMouseDown } from '../../lib/windowDrag.ts';
 
   let loadedPath = $state<string | null>(null);
 
@@ -24,8 +25,8 @@
 </script>
 
 <div class="history-panel">
-  <header class="history-head">
-    <span>{t('History')}</span>
+  <header class="history-head" role="presentation" data-tauri-drag-region onmousedown={onWindowDragMouseDown}>
+    <span data-tauri-drag-region>{t('History')}</span>
     {#if $commitsLoading}
       <Icon name="refresh" size={12} />
     {/if}
@@ -57,6 +58,8 @@
     height: 100%;
     min-height: 0;
     overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .history-head {
     display: flex;
@@ -76,6 +79,9 @@
     text-transform: uppercase;
     background: color-mix(in srgb, var(--bg-sidebar) 88%, var(--bg-base));
     flex-shrink: 0;
+    -webkit-app-region: drag;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .empty,
   .warning {

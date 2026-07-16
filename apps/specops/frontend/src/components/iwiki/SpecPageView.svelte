@@ -1,18 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { renderMarkdown } from '../../lib/markdown.ts';
-  import { selectedTextContext } from '../../lib/stores/documents.ts';
+  import { refreshState, selectedTextContext, workspaceState } from '../../lib/stores/documents.ts';
   import { loadSessions, selectSession } from '../../lib/stores/sessions.ts';
   import { activeModule } from '../../lib/stores/layout.ts';
   import { api } from '../../lib/api.ts';
   import type { RegistryFile, SpecOpsSession } from '../../lib/types.ts';
   import Icon from '../shared/Icon.svelte';
+  import { shouldSubmitOnEnter } from '../../lib/ime.ts';
 
   interface Props {
     source: string;
     path: string;
     title: string;
     status: string;
+    documentClass?: 'normative' | 'work_item';
+    specType?: string;
+    workType?: string;
     session?: SpecOpsSession | null;
     files?: RegistryFile[];
   }
@@ -41,6 +45,17 @@
     title: string;
     body: string;
     blockId: string;
+    status?: string;
+    stale?: boolean;
+    created_by?: string | null;
+    quote?: string;
+    lineStart?: number | null;
+    lineEnd?: number | null;
+  }
+
+  interface DocumentNote {
+    id: string; block_id: string; body: string; status: string; stale: boolean;
+    created_by: string | null; quote: string; line_start: number | null; line_end: number | null;
   }
 
   interface LaunchTask {
@@ -57,7 +72,7 @@
     state: WorkflowStripState;
   }
 
-  let { source, path, title, status, session = null, files = [] }: Props = $props();
+  let { source, path, title, status, documentClass = 'normative', specType, workType, session = null, files = [] }: Props = $props();
 
   let hostEl: HTMLElement | null = $state(null);
   let contextMenu = $state<{ x: number; y: number } | null>(null);
@@ -67,12 +82,20 @@
   let actionText = $state('');
   let actionBusy = $state(false);
   let actionError = $state<string | null>(null);
+  let answerSelections = $state<Record<string, number>>({});
+  let answerInputs = $state<Record<string, string>>({});
+  let answerActionKey = $state('');
   let tasksSource = $state<string | null>(null);
   let tasksLoading = $state(false);
   let overrides = $state<Record<string, string>>({});
   let activity = $state<ActivityItem[]>([]);
+  let imeComposing = $state(false);
+  let compositionEndedAt = $state(0);
+  let statusOverride = $state<string | null>(null);
+  let currentStatus = $derived(statusOverride ?? status);
+  let deprecating = $state(false);
 
-  let workflow = $derived(buildWorkflowStrip(session, status));
+  let workflow = $derived(buildWorkflowStrip(session, currentStatus));
   let workflowIndex = $derived.by(() => {
     const current = workflow.findIndex((step) => step.state === 'active' || step.state === 'failed');
     return current === -1 ? workflow.length : current;
@@ -86,7 +109,15 @@
   let nextStep = $derived(describeNextStep(session));
   let launchTasks = $derived(buildLaunchTasks(tasksSource ?? source, title, path));
   let canLaunchRun = $derived(session !== null && requiredAction?.kind === 'run_in_worktree');
-  let canLaunchStandalone = $derived(session === null && status === 'proposed' && path.replace(/\/+$/, '').startsWith('.specops/changes/'));
+  let canLaunchStandalone = $derived(session === null && currentStatus === 'proposed' && path.replace(/\/+$/, '').startsWith('.specops/changes/'));
+  let assurance = $derived($workspaceState?.assurance);
+  let assuranceNode = $derived(assurance?.spec_graph.nodes.find((item) => item.path === path));
+  let assuranceId = $derived(assuranceNode?.id ?? '');
+  let assuranceMapping = $derived(assurance?.mappings.find((item) => item.spec_id === assuranceId) ?? null);
+  let assuranceContract = $derived(assurance?.completion_contracts.find((item) => item.subject === assuranceId) ?? null);
+  let assuranceEvidence = $derived(assurance?.evidence.filter((item) => item.subject === assuranceId) ?? []);
+  let assuranceImpact = $derived(assurance?.impact.find((item) => item.subject === assuranceId) ?? null);
+  let assuranceRisk = $derived(assurance?.risk.find((item) => item.subject === assuranceId) ?? null);
 
   function buildWorkflowStrip(current: SpecOpsSession | null, documentStatus: string): WorkflowStripStep[] {
     const groups = [
@@ -127,6 +158,28 @@
     }
     void loadTasks(taskPath);
   });
+
+  $effect(() => { path; void loadNotes(); });
+
+  async function loadNotes(): Promise<void> {
+    try {
+      const result = await api.get<{ notes: DocumentNote[] }>(`/api/notes?path=${encodeURIComponent(path)}`);
+      const persisted = result.notes.filter((note) => note.status !== 'deprecated').map((note) => ({
+        id: note.id, kind: 'note' as const,
+        title: note.stale ? `Stale · ${note.created_by ?? 'Unknown'}` : note.status === 'resolved' ? `Resolved · ${note.created_by ?? 'Unknown'}` : note.created_by ?? 'Unknown',
+        body: note.body, blockId: note.block_id, status: note.status, stale: note.stale,
+        created_by: note.created_by, quote: note.quote, lineStart: note.line_start, lineEnd: note.line_end,
+      }));
+      activity = [...persisted, ...activity.filter((item) => item.kind !== 'note')];
+    } catch { /* notes are auxiliary; document rendering must remain available */ }
+  }
+
+  async function resolveNote(id: string): Promise<void> {
+    try {
+      await api.post(`/api/notes/${id}/resolve`);
+      await loadNotes();
+    } catch (error) { actionError = error instanceof Error ? error.message : String(error); }
+  }
 
   function blockKind(titleText: string, body: string): SpecBlock['kind'] {
     const text = `${titleText}\n${body}`.toLowerCase();
@@ -239,11 +292,9 @@
     const raw = window.getSelection();
     const quote = raw?.toString().trim() ?? '';
     const anchor = raw?.anchorNode;
-    if (!quote || !anchor || !hostEl?.contains(anchor)) {
-      selection = null;
-      selectedTextContext.set(null);
-      return;
-    }
+    // Clicking the context menu or composer collapses the native selection.
+    // Keep the last valid document selection as the immutable action context.
+    if (!quote || !anchor || !hostEl?.contains(anchor)) return;
     const blockEl = anchor.parentElement?.closest<HTMLElement>('[data-spec-block-id]');
     const blockId = blockEl?.dataset.specBlockId ?? '';
     const block = blocks.find((item) => item.id === blockId);
@@ -281,15 +332,33 @@
     if (target === undefined) return;
     const request = composerText.trim();
     if (composerMode === 'note') {
+      actionBusy = true;
+      actionError = null;
+      try {
+        const result = await api.post<{ note: DocumentNote }>('/api/notes', {
+          document_path: path, block_id: target.id, block_kind: target.kind,
+          line_start: selection.lineStart, line_end: selection.lineEnd,
+          quote: selection.quote, body: request.length > 0 ? request : selection.quote,
+          source: 'ui',
+        });
       activity = [{
-        id: `${Date.now()}`,
+        id: result.note.id,
         kind: 'note',
-        title: 'Local note',
-        body: request.length > 0 ? request : selection.quote,
+        title: result.note.created_by ?? 'Unknown',
+        body: result.note.body,
         blockId: target.id,
+        created_by: result.note.created_by,
+        quote: result.note.quote,
+        lineStart: result.note.line_start,
+        lineEnd: result.note.line_end,
       }, ...activity];
       composerMode = null;
       composerText = '';
+      } catch (error) {
+        actionError = error instanceof Error ? error.message : String(error);
+      } finally {
+        actionBusy = false;
+      }
       return;
     }
     const titleText = composerMode === 'ask'
@@ -316,7 +385,6 @@
       const res = await api.post<{ specops_session: { id: string }; reused?: boolean }>('/api/clarifies', {
         request: prompt,
         document_path: path,
-        backend_key: session?.backend_key ?? 'codebuddy',
       });
       activity = [{
         id: `${Date.now()}`,
@@ -342,22 +410,59 @@
     composerText = '';
   }
 
+  async function deprecateDocument(): Promise<void> {
+    const verb = documentClass === 'normative' ? 'deprecate' : 'cancel';
+    if (!window.confirm(`This will ${verb} the document and close its active SpecOps/agent sessions. Continue?`)) return;
+    deprecating = true;
+    actionError = null;
+    try {
+      const result = await api.post<{ status: string }>('/api/document/deprecate', { path });
+      statusOverride = result.status;
+      await Promise.all([refreshState(), loadSessions()]);
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : String(error);
+    } finally {
+      deprecating = false;
+    }
+  }
+
   function closeMenus(): void {
     contextMenu = null;
   }
 
-  async function answerRequiredAction(optionIndex: number, label: string, freeText?: string): Promise<void> {
+  function selectRequiredAnswer(questionId: string, optionIndex: number): void {
+    answerSelections = { ...answerSelections, [questionId]: optionIndex };
+  }
+
+  function setRequiredAnswerInput(questionId: string, value: string): void {
+    answerInputs = { ...answerInputs, [questionId]: value };
+  }
+
+  async function answerRequiredAction(): Promise<void> {
     if (session === null || requiredAction?.kind !== 'answer') return;
+    const questions = requiredAction.questions ?? [{
+      question_id: requiredAction.question_id ?? '', prompt: requiredAction.prompt ?? '',
+      options: requiredAction.options ?? [],
+    }];
+    if (questions.some((question) => answerSelections[question.question_id] === undefined)) return;
     actionBusy = true;
     actionError = null;
     try {
       await api.post(`/api/sessions/${session.id}/answer`, {
-        question_id: requiredAction.question_id ?? '',
-        choice_index: optionIndex,
-        label,
-        ...(freeText ? { free_text: freeText } : {}),
+        answers: questions.map((question) => {
+          const choiceIndex = answerSelections[question.question_id] ?? 0;
+          const freeText = answerInputs[question.question_id]?.trim() ?? '';
+          return {
+            question_id: question.question_id,
+            choice_index: choiceIndex,
+            label: question.options[choiceIndex]?.label ?? '',
+            ...(freeText ? { free_text: freeText } : {}),
+          };
+        }),
       });
       actionText = '';
+      answerSelections = {};
+      answerInputs = {};
       await loadSessions();
     } catch (error) {
       actionError = error instanceof Error ? error.message : String(error);
@@ -365,6 +470,17 @@
       actionBusy = false;
     }
   }
+
+  $effect(() => {
+    const key = requiredAction?.kind === 'answer'
+      ? (requiredAction.questions?.map((question) => question.question_id).join('|') ?? requiredAction.question_id ?? '')
+      : '';
+    if (key !== answerActionKey) {
+      answerActionKey = key;
+      answerSelections = {};
+      answerInputs = {};
+    }
+  });
 
   async function respondPlan(accept: boolean): Promise<void> {
     if (session === null || requiredAction?.kind !== 'plan_review') return;
@@ -393,7 +509,6 @@
         await api.post(`/api/sessions/${session.id}/action`, {
           kind: 'run_in_worktree',
           tasks: launchTasks,
-          backend_key: session.backend_key ?? 'codebuddy',
           document_path: path,
         });
         await loadSessions();
@@ -401,7 +516,6 @@
       } else {
         const res = await api.post<{ specops_session?: { id: string } }>('/api/runs', {
           tasks: launchTasks,
-          backend_key: 'codebuddy',
           document_path: path,
         });
         await loadSessions();
@@ -474,18 +588,30 @@
       <p class="eyebrow">{path}</p>
       <h1>{title}</h1>
     </div>
-    <span class="status">{status}</span>
+    <div class="page-actions">
+      <span class="status">{currentStatus}</span>
+      {#if !['deprecated', 'cancelled', 'archived'].includes(currentStatus)}
+        <button type="button" class="danger deprecate" disabled={deprecating} onclick={deprecateDocument}>
+          {deprecating ? 'Closing…' : documentClass === 'normative' ? 'Deprecate spec' : 'Cancel work item'}
+        </button>
+      {/if}
+    </div>
   </header>
 
-  <section class="state-strip" aria-label="workflow state">
-    {#each workflow as step}
-      <span class="step" data-state={step.state}>
-        <span class="dot"></span>
-        {step.label}
-      </span>
-    {/each}
-  </section>
+  {#if documentClass === 'work_item'}
+    <section class="state-strip" aria-label="workflow state">
+      {#each workflow as step}
+        <span class="step" data-state={step.state}><span class="dot"></span>{step.label}</span>
+      {/each}
+    </section>
+  {:else}
+    <section class="normative-strip" aria-label="normative specification status">
+      <span>Normative {specType ?? 'capability'} spec</span>
+      <span class="normative-note">No implementation workflow · implemented through linked work items</span>
+    </section>
+  {/if}
 
+  {#if documentClass === 'work_item'}
   <section class="trackers">
     <div class="tracker">
       <span class="tracker-label">Plan</span>
@@ -508,7 +634,22 @@
       <span>confirmed gate{decisions.length === 1 ? '' : 's'}</span>
     </div>
   </section>
+  {:else}
+    <section class="assurance-grid">
+      <div><span>Mapping</span><strong>{assuranceMapping?.coverage ?? 'missing'}</strong><small>{assuranceMapping?.paths.length ?? 0} path(s)</small></div>
+      <div><span>Evidence</span><strong>{assuranceEvidence.filter((item) => item.result === 'passed' && !item.stale).length}</strong><small>{assuranceEvidence.filter((item) => item.stale).length} stale</small></div>
+      <div><span>Contract</span><strong>{assuranceContract?.pass_condition.gate_status ?? 'pending'}</strong><small>{assuranceContract?.required_evidence.length ?? 0} claim(s)</small></div>
+      <div><span>Risk</span><strong>{assuranceRisk?.level ?? 'low'}</strong><small>{assuranceRisk?.required_approval ?? 'automatic'}</small></div>
+    </section>
+    {#if assuranceImpact !== null}
+      <section class="assurance-summary">
+        <span>Impact</span>
+        <p>{assuranceImpact.direct.length} direct path(s), {assuranceImpact.affected_specs.length} linked work item(s), {assuranceImpact.required_tests.length} required verification(s).</p>
+      </section>
+    {/if}
+  {/if}
 
+  {#if documentClass === 'work_item' || session !== null}
   <section class="workflow-card" data-state={session?.state ?? 'none'}>
     <div class="workflow-copy">
       <span class="workflow-label">{requiredAction === null ? 'Next step' : 'Action required'}</span>
@@ -518,43 +659,34 @@
       <button type="button" class="ghost" onclick={openSession}>Open session</button>
     {/if}
   </section>
+  {/if}
 
   {#if requiredAction !== null}
     <section class="required-action" data-kind={requiredAction.kind}>
       {#if requiredAction.kind === 'answer'}
-        <div class="action-head">
-          <span>{requiredAction.header ?? 'Question'}</span>
-          <strong>Choose one response</strong>
-        </div>
-        <p class="action-prompt">{requiredAction.prompt}</p>
-        {#if requiredAction.options?.length}
+        {@const questions = requiredAction.questions ?? [{ question_id: requiredAction.question_id ?? '', prompt: requiredAction.prompt ?? '', header: requiredAction.header, options: requiredAction.options ?? [] }]}
+        <div class="action-head"><span>Questions</span><strong>Review all answers before submitting</strong></div>
+        {#each questions as question, questionIndex (question.question_id)}
+          <p class="action-prompt">{questionIndex + 1}. {question.prompt}</p>
           <div class="action-options">
-            {#each requiredAction.options as option, index (option.label)}
-              <button
-                type="button"
-                class="choice"
-                disabled={actionBusy}
-                onclick={() => answerRequiredAction(index, option.label)}
-              >
+            {#each question.options as option, index (option.label)}
+              <button type="button" class="choice" class:selected={answerSelections[question.question_id] === index} disabled={actionBusy} onclick={() => selectRequiredAnswer(question.question_id, index)}>
                 <span>{option.label}</span>
-                {#if option.description}
-                  <small>{option.description}</small>
-                {/if}
+                {#if option.description}<small>{option.description}</small>{/if}
               </button>
             {/each}
           </div>
-        {/if}
-        <div class="reply-row">
-          <textarea bind:value={actionText} placeholder="Reply with additional context"></textarea>
-          <button
-            type="button"
-            class="apply"
-            disabled={actionBusy || actionText.trim().length === 0}
-            onclick={() => answerRequiredAction(requiredAction.options?.length ?? 0, actionText.trim(), actionText.trim())}
-          >
-            Reply
-          </button>
-        </div>
+          <textarea
+            class="answer-input"
+            rows="2"
+            value={answerInputs[question.question_id] ?? ''}
+            oninput={(event) => setRequiredAnswerInput(question.question_id, event.currentTarget.value)}
+            placeholder="Optional details or your own answer"
+          ></textarea>
+        {/each}
+        <button type="button" class="apply" disabled={actionBusy || questions.some((question) => answerSelections[question.question_id] === undefined)} onclick={answerRequiredAction}>
+          {actionBusy ? 'Submitting…' : 'Submit answers'}
+        </button>
       {:else if requiredAction.kind === 'plan_review'}
         <div class="action-head">
           <span>Plan review</span>
@@ -724,7 +856,18 @@
       {#if composerMode !== null}
         <div class="composer">
           <span>{composerMode === 'ask' ? 'Ask agent' : composerMode === 'change' ? 'Request change' : 'Add note'}</span>
-          <textarea bind:value={composerText} placeholder="Write the prompt or note"></textarea>
+          <textarea
+            bind:value={composerText}
+            placeholder="Write the prompt or note"
+            oncompositionstart={() => (imeComposing = true)}
+            oncompositionend={() => { imeComposing = false; compositionEndedAt = Date.now(); }}
+            onkeydown={(event) => {
+              if (shouldSubmitOnEnter(event, imeComposing, compositionEndedAt)) {
+                event.preventDefault();
+                void submitComposer();
+              }
+            }}
+          ></textarea>
           <div class="composer-actions">
             <button type="button" class="ghost" onclick={cancelComposer}>Cancel</button>
             <button type="button" class="apply" disabled={actionBusy} onclick={submitComposer}>{actionBusy ? 'Starting…' : 'Send'}</button>
@@ -736,9 +879,15 @@
       {:else}
         <ol>
           {#each activity as item (item.id)}
-            <li>
+            <li data-stale={item.stale ?? false}>
               <span>{item.title}</span>
+              {#if item.kind === 'note' && item.quote}
+                <blockquote title={item.lineStart !== null && item.lineEnd !== null ? `lines ${item.lineStart}-${item.lineEnd}` : undefined}>{item.quote}</blockquote>
+              {/if}
               <p>{item.body}</p>
+              {#if item.kind === 'note' && item.status === 'open'}
+                <button type="button" class="inline-action" onclick={() => resolveNote(item.id)}>Resolve</button>
+              {/if}
             </li>
           {/each}
         </ol>
@@ -769,6 +918,8 @@
     padding-bottom: var(--sp-3);
     border-bottom: 1px solid var(--bd-muted);
   }
+  .page-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; justify-content: flex-end; }
+  .deprecate { white-space: nowrap; }
   .eyebrow {
     margin: 0 0 var(--sp-1);
     color: var(--fg-tertiary);
@@ -943,6 +1094,10 @@
     background: var(--bg-selected);
     transform: translateY(-1px);
   }
+  .choice.selected {
+    border-color: var(--acc);
+    background: var(--acc-soft);
+  }
   .choice span {
     color: var(--fg-primary);
     font-weight: var(--fw-med);
@@ -963,12 +1118,6 @@
     color: var(--fg-primary);
     font-family: inherit;
     font-size: var(--fs-sm);
-  }
-  .reply-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: end;
-    gap: var(--sp-2);
   }
   .plan-markdown {
     max-height: 360px;
@@ -1216,6 +1365,32 @@
     font-size: var(--fs-sm);
     line-height: 1.45;
   }
+  .activity li blockquote {
+    margin: var(--sp-2) 0 0;
+    padding: var(--sp-2) var(--sp-3);
+    border-left: 2px solid var(--acc);
+    border-radius: 0 var(--rad-sm) var(--rad-sm) 0;
+    background: var(--bg-selected);
+    color: var(--fg-secondary);
+    font-size: var(--fs-sm);
+    line-height: 1.45;
+  }
+  .inline-action {
+    margin-top: var(--sp-2);
+    padding: 4px var(--sp-2);
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-sm);
+    background: var(--bg-base);
+    color: var(--fg-secondary);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .inline-action:hover {
+    border-color: var(--acc);
+    background: var(--bg-selected);
+    color: var(--fg-primary);
+  }
   .selection-card p {
     display: -webkit-box;
     overflow: hidden;
@@ -1237,6 +1412,40 @@
     font-size: var(--fs-xs);
     line-height: 1.4;
   }
+  .normative-strip,
+  .assurance-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    margin: 0 var(--sp-4) var(--sp-3);
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-md);
+    background: var(--bg-subtle);
+    color: var(--fg-secondary);
+    font-size: var(--fs-sm);
+  }
+  .normative-note { color: var(--fg-tertiary); }
+  .assurance-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--sp-2);
+    margin: 0 var(--sp-4) var(--sp-3);
+  }
+  .assurance-grid > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--sp-3);
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-md);
+    background: var(--bg-subtle);
+  }
+  .assurance-grid span, .assurance-grid small { color: var(--fg-tertiary); font-size: var(--fs-xs); }
+  .assurance-grid strong { color: var(--fg-primary); text-transform: capitalize; }
+  .assurance-summary span { font-weight: var(--fw-semi); }
+  .assurance-summary p { margin: 0; color: var(--fg-tertiary); }
   .composer textarea {
     width: 100%;
     min-height: 76px;
@@ -1310,6 +1519,7 @@
     .trackers {
       grid-template-columns: 1fr;
     }
+    .assurance-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .activity {
       position: static;
       max-height: none;

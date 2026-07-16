@@ -1270,5 +1270,31 @@
   "attention.banner.planHint": {
     "message": "— accept or reject below.",
     "description": "Hint shown after the plan banner title"
-  }
+  },
+  "specops.loading": { "message": "Loading…" },
+  "specops.action.refresh": { "message": "Refresh" },
+  "specops.settings.eyebrow": { "message": "Workspace settings" },
+  "specops.settings.agents": { "message": "Agent Profiles" },
+  "specops.settings.intro": { "message": "Choose the Kode backend and model used by each SpecOps responsibility." },
+  "specops.settings.newRuns": { "message": "Changes apply to new Runs only." },
+  "specops.settings.profile.default": { "message": "Default" },
+  "specops.settings.profile.analysis": { "message": "Analysis" },
+  "specops.settings.profile.implementation": { "message": "Implementation" },
+  "specops.settings.profile.review": { "message": "Review" },
+  "specops.settings.profile.defaultDesc": { "message": "Fallback for every SpecOps agent role." },
+  "specops.settings.profile.analysisDesc": { "message": "Clarify, intake, and planning agents." },
+  "specops.settings.profile.implementationDesc": { "message": "Implementation, repair, and resumed Run agents." },
+  "specops.settings.profile.reviewDesc": { "message": "Automated verification and code-review agent." },
+  "specops.settings.backend": { "message": "Backend" },
+  "specops.settings.model": { "message": "Model override" },
+  "specops.settings.inheritDefault": { "message": "Inherit Default" },
+  "specops.settings.builtinDefault": { "message": "Built-in fallback (codebuddy)" },
+  "specops.settings.backendDefault": { "message": "Backend default" },
+  "specops.settings.effective": { "message": "Effective:" },
+  "specops.settings.reset": { "message": "Reset to inherited" },
+  "specops.settings.save": { "message": "Save profiles" },
+  "specops.settings.saving": { "message": "Saving…" },
+  "specops.settings.saved": { "message": "Agent profiles saved to specops.toml." },
+  "specops.settings.unsaved": { "message": "Unsaved workspace changes" },
+  "specops.settings.synced": { "message": "Synced with specops.toml" }
 }

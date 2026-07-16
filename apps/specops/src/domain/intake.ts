@@ -17,7 +17,8 @@ export const LANGUAGE_DIRECTIVE = [
   'Match the document language to the user request\'s language.',
   'If the request is in Chinese, write proposal.md / tasks.md / design.md bodies and the frontmatter title in Chinese.',
   'If the request is in English, write them in English.',
-  'Keep YAML frontmatter keys (schema_version, id, kind, status, verifies, paths) in English — only the title value and body follow the request language.',
+  'Keep YAML frontmatter keys (schema_version, id, kind, document_class, spec_type, work_type, targets, workflow_profile, status, verifies, paths) in English — only the title value and body follow the request language.',
+  'For bug documents use `kind: bug` with `work_type: bugfix`; `work_type: bug` is invalid.',
   'Do not translate the user request; quote it verbatim when referenced.',
 ].join('\n')
 

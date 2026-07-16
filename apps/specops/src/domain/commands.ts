@@ -121,6 +121,24 @@ export async function initWorkspace(input: string): Promise<CommandResult<{ work
       '# Optional composable project profiles used to build immutable Run manifests.',
       '# profiles = ["web", "react", "node"]',
       '',
+      '# Workspace-level agent selection. Role settings inherit from default;',
+      '# omit model to use the selected Kode backend\'s own default model.',
+      '[agents.default]',
+      'backend = "codebuddy"',
+      '# model = ""',
+      '',
+      '# [agents.analysis]       # clarify, intake, plan',
+      '# backend = "claude"',
+      '# model = "claude-sonnet"',
+      '',
+      '# [agents.implementation] # implement, repair, resume',
+      '# backend = "codex"',
+      '# model = "gpt-5-codex"',
+      '',
+      '# [agents.review]',
+      '# backend = "claude"',
+      '# model = "claude-opus"',
+      '',
       '# Backend capability declarations are snapshots, not executable plugins.',
       '# Missing backends use the conservative builtin.kode capability profile.',
       '# [agent_backends.codebuddy]',
@@ -149,7 +167,7 @@ export async function initWorkspace(input: string): Promise<CommandResult<{ work
       '# and re-runs (up to max_iterations). Set enabled = false to skip it.',
       '# [review]',
       '# enabled = true',
-      '# model = ""  # optional model override; empty uses the run backend default',
+      '# model = ""  # deprecated: use [agents.review] model instead',
       '',
     ].join('\n')
     await atomicWrite(configPath, seedConfig)
@@ -226,14 +244,19 @@ export async function initWorkspace(input: string): Promise<CommandResult<{ work
   return { ok: true, command: 'init', data: { workspace, created }, diagnostics: [] }
 }
 
-interface RegistryEntry {
+export interface RegistryEntry {
   id: string
   kind: string
+  document_class?: import('./spec.js').DocumentClass
+  spec_type?: import('./spec.js').NormativeSpecType
+  work_type?: import('./spec.js').WorkType
   title: string
   status: string
   path: string
   verifies: string[]
   paths: string[]
+  targets?: string[]
+  workflow_profile?: import('./spec.js').WorkType
   files?: Array<{ name: string; path: string }>
 }
 
@@ -411,11 +434,16 @@ export async function scanWorkspace(input: string): Promise<CommandResult<Regist
     documents: documents.map((document) => ({
       id: document.frontmatter.id,
       kind: document.frontmatter.kind,
+      ...(document.frontmatter.document_class === undefined ? {} : { document_class: document.frontmatter.document_class }),
+      ...(document.frontmatter.spec_type === undefined ? {} : { spec_type: document.frontmatter.spec_type }),
+      ...(document.frontmatter.work_type === undefined ? {} : { work_type: document.frontmatter.work_type }),
       title: document.frontmatter.title,
       status: document.frontmatter.status,
       path: document.relativePath,
       verifies: document.frontmatter.verifies ?? [],
       paths: document.frontmatter.paths ?? [],
+      targets: document.frontmatter.targets ?? [],
+      ...(document.frontmatter.workflow_profile === undefined ? {} : { workflow_profile: document.frontmatter.workflow_profile }),
       ...(changeFiles.has(document.relativePath) ? { files: changeFiles.get(document.relativePath)! } : {}),
     })),
     ...(constitution !== undefined ? { constitution } : {}),

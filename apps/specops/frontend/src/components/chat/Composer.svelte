@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../shared/Icon.svelte';
+  import { shouldSubmitOnEnter } from '../../lib/ime.ts';
   import Markdown from '../shared/Markdown.svelte';
   import { activeSessionId, activeSession } from '../../lib/stores/sessions.ts';
   import { pendingDocSelection } from '../../lib/stores/documents.ts';
@@ -12,6 +13,11 @@
   let actionError: string | null = $state(null);
   let sendError: string | null = $state(null);
   let textareaEl: HTMLTextAreaElement | null = $state(null);
+  let imeComposing = $state(false);
+  let compositionEndedAt = $state(0);
+  let answerSelections = $state<Record<string, number>>({});
+  let answerInputs = $state<Record<string, string>>({});
+  let answerActionKey = $state('');
 
   function canSend(): boolean {
     const session = $activeSession;
@@ -51,19 +57,58 @@
     }
   }
 
-  async function answerAction(questionId: string, optionIndex: number, label: string): Promise<void> {
+  function selectAnswer(questionId: string, optionIndex: number): void {
+    answerSelections = { ...answerSelections, [questionId]: optionIndex };
+  }
+
+  function setAnswerInput(questionId: string, value: string): void {
+    answerInputs = { ...answerInputs, [questionId]: value };
+  }
+
+  async function submitAnswers(): Promise<void> {
     const id = $activeSessionId;
-    if (!id) return;
+    const action = $activeSession?.required_action;
+    if (!id || action?.kind !== 'answer' || actionBusy) return;
+    const questions = action.questions ?? [{
+      question_id: action.question_id ?? '', prompt: action.prompt ?? '',
+      options: action.options ?? [],
+    }];
+    if (questions.some((question) => answerSelections[question.question_id] === undefined)) return;
+    actionBusy = true;
+    actionError = null;
     try {
       await api.post(`/api/sessions/${id}/answer`, {
-        question_id: questionId,
-        choice_index: optionIndex,
-        label,
+        answers: questions.map((question) => {
+          const choiceIndex = answerSelections[question.question_id] ?? 0;
+          const freeText = answerInputs[question.question_id]?.trim() ?? '';
+          return {
+            question_id: question.question_id,
+            choice_index: choiceIndex,
+            label: question.options[choiceIndex]?.label ?? '',
+            ...(freeText ? { free_text: freeText } : {}),
+          };
+        }),
       });
-    } catch {
-      // ignore
+      answerSelections = {};
+      answerInputs = {};
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      actionBusy = false;
     }
   }
+
+  $effect(() => {
+    const action = $activeSession?.required_action;
+    const key = action?.kind === 'answer'
+      ? (action.questions?.map((question) => question.question_id).join('|') ?? action.question_id ?? '')
+      : '';
+    if (key !== answerActionKey) {
+      answerActionKey = key;
+      answerSelections = {};
+      answerInputs = {};
+    }
+  });
 
   async function respondPlanReview(planId: string, accept: boolean, note?: string): Promise<void> {
     const id = $activeSessionId;
@@ -113,17 +158,32 @@
     {@const action = $activeSession.required_action}
     <div class="action-banner">
       {#if action.kind === 'answer' && action.options}
-        <p class="action-prompt">{action.prompt}</p>
-        <div class="action-options">
-          {#each action.options as opt, i (opt.label)}
-            <button type="button" class="action-option" onclick={() => answerAction(action.question_id ?? '', i, opt.label)}>
-              <span class="opt-label">{opt.label}</span>
-              {#if opt.description}
-                <span class="opt-desc">{opt.description}</span>
-              {/if}
-            </button>
+        {@const questions = action.questions ?? [{ question_id: action.question_id ?? '', prompt: action.prompt ?? '', header: action.header, options: action.options }]}
+        <div class="answer-questions">
+          {#each questions as question, questionIndex (question.question_id)}
+            <div class="answer-question">
+              <p class="action-prompt">{questionIndex + 1}. {question.prompt}</p>
+              <div class="action-options">
+                {#each question.options as opt, i (opt.label)}
+                  <button type="button" class="action-option" class:selected={answerSelections[question.question_id] === i} onclick={() => selectAnswer(question.question_id, i)}>
+                    <span class="opt-label">{opt.label}</span>
+                    {#if opt.description}<span class="opt-desc">{opt.description}</span>{/if}
+                  </button>
+                {/each}
+              </div>
+              <textarea
+                class="answer-input"
+                rows="2"
+                value={answerInputs[question.question_id] ?? ''}
+                oninput={(event) => setAnswerInput(question.question_id, event.currentTarget.value)}
+                placeholder="Optional details or your own answer"
+              ></textarea>
+            </div>
           {/each}
         </div>
+        <button type="button" class="plan-action primary" disabled={actionBusy || questions.some((question) => answerSelections[question.question_id] === undefined)} onclick={submitAnswers}>
+          <span>{actionBusy ? 'Submitting…' : 'Submit answers'}</span>
+        </button>
       {:else if action.kind === 'plan_review'}
         {#if action.markdown}
           <div class="plan-review-card">
@@ -229,8 +289,10 @@
         bind:value={text}
         rows="1"
         placeholder={t('Send a message…  (Enter to send · Shift+Enter for newline)')}
+        oncompositionstart={() => (imeComposing = true)}
+        oncompositionend={() => { imeComposing = false; compositionEndedAt = Date.now(); }}
         onkeydown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+          if (shouldSubmitOnEnter(e, imeComposing, compositionEndedAt)) {
             e.preventDefault();
             send();
           }
@@ -280,6 +342,20 @@
     flex-direction: column;
     gap: var(--sp-1);
   }
+  .answer-questions {
+    max-height: min(48vh, 520px);
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    padding-right: var(--sp-1);
+    margin-right: calc(-1 * var(--sp-1));
+  }
+  .answer-question + .answer-question {
+    margin-top: var(--sp-3);
+    padding-top: var(--sp-3);
+    border-top: 1px solid var(--bd-default);
+  }
   .action-option {
     display: flex;
     flex-direction: column;
@@ -295,6 +371,11 @@
     background: var(--bg-selected);
     border-color: var(--acc);
   }
+
+  .action-option.selected {
+    border-color: var(--acc);
+    background: var(--acc-soft);
+  }
   .opt-label {
     font-weight: var(--fw-med);
   }
@@ -302,6 +383,17 @@
     font-size: var(--fs-xs);
     color: var(--fg-secondary);
     margin-top: 2px;
+  }
+  .answer-input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 54px;
+    margin-top: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    resize: vertical;
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-md);
+    background: var(--bg-input);
   }
 
   /* plan_review */

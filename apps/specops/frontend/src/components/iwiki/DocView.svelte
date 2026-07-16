@@ -1,5 +1,6 @@
 <script lang="ts">
   import SpecPageView from './SpecPageView.svelte';
+  import AssuranceDashboard from './AssuranceDashboard.svelte';
   import {
     selectedDoc,
     selectedDocContent,
@@ -32,9 +33,7 @@
 
 <section class="doc-view">
   {#if $selectedDoc === null}
-    <div class="empty">
-      <p>Select a document from the tree.</p>
-    </div>
+    <AssuranceDashboard />
   {:else if $docLoading}
     <div class="empty"><p>Loading…</p></div>
   {:else if $selectedDocContent === null}
@@ -47,6 +46,9 @@
       path={$selectedDoc.path}
       title={doc?.frontmatter.title ?? $selectedDoc.title}
       status={doc?.frontmatter.status ?? $selectedDoc.status}
+      documentClass={doc?.frontmatter.document_class ?? $selectedDoc.document_class ?? ($selectedDoc.kind === 'spec' ? 'normative' : 'work_item')}
+      specType={doc?.frontmatter.spec_type ?? $selectedDoc.spec_type}
+      workType={doc?.frontmatter.work_type ?? $selectedDoc.work_type}
       session={documentSession}
       files={$selectedDoc.files ?? []}
     />

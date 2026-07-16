@@ -6,8 +6,9 @@ import '../protocol/protocol.dart';
 import '../storage/desktop_auto_pair.dart';
 import '../storage/endpoint_storage.dart';
 
-final endpointStorageProvider =
-    Provider<EndpointStorage>((ref) => EndpointStorage());
+final endpointStorageProvider = Provider<EndpointStorage>(
+  (ref) => EndpointStorage(),
+);
 
 /// 当前激活的 endpoint。null = 未配对,App 路由到 /pair。
 final endpointProvider = StateProvider<Endpoint?>((ref) => null);
@@ -131,12 +132,14 @@ class SessionAttentionNotifier extends Notifier<Map<int, String>> {
 
 final sessionAttentionProvider =
     NotifierProvider<SessionAttentionNotifier, Map<int, String>>(
-        SessionAttentionNotifier.new);
+      SessionAttentionNotifier.new,
+    );
 
 /// session 列表 — 启动时拉一次 /sessions,WS 事件来了增量更新。
 final sessionsProvider =
     AsyncNotifierProvider<SessionsNotifier, List<SessionDto>>(
-        SessionsNotifier.new);
+      SessionsNotifier.new,
+    );
 
 class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
   @override
@@ -145,64 +148,77 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
     if (api == null) return const [];
 
     // WS 事件来了时增量更新本地缓存
-    final wsSub = ref.listen<AsyncValue<Envelope>>(eventStreamProvider, (_, ev) {
+    final wsSub = ref.listen<AsyncValue<Envelope>>(eventStreamProvider, (
+      _,
+      ev,
+    ) {
       ev.whenData((env) async {
         switch (env.type) {
           case 'session.created':
             try {
               final s = SessionDto.fromJson(env.payload);
-              state = AsyncData([
-                ...(state.value ?? const []),
-                s,
-              ]);
+              state = AsyncData([...(state.value ?? const []), s]);
             } catch (_) {}
             break;
           case 'session.exited':
             final sid = env.sessionId;
-            state = AsyncData((state.value ?? const [])
-                .map((s) => s.id == sid
-                    ? SessionDto(
-                        id: s.id,
-                        backendKey: s.backendKey,
-                        title: s.title,
-                        model: s.model,
-                        status: 'exited',
-                        cwd: s.cwd,
-                        sessionUuid: s.sessionUuid,
-                        tokens: s.tokens,
-                        contextPct: s.contextPct,
-                        costUsd: s.costUsd,
-                      )
-                    : s)
-                .toList(growable: false));
+            state = AsyncData(
+              (state.value ?? const [])
+                  .map(
+                    (s) => s.id == sid
+                        ? SessionDto(
+                            id: s.id,
+                            backendKey: s.backendKey,
+                            title: s.title,
+                            model: s.model,
+                            status: 'exited',
+                            cwd: s.cwd,
+                            sessionUuid: s.sessionUuid,
+                            tokens: s.tokens,
+                            contextPct: s.contextPct,
+                            costUsd: s.costUsd,
+                          )
+                        : s,
+                  )
+                  .toList(growable: false),
+            );
             break;
           case 'meta':
             // 简化:meta 会更新 model/title/tokens,只 patch 不重建
             final sid = env.sessionId;
-            state = AsyncData((state.value ?? const []).map((s) {
-              if (s.id != sid) return s;
-              final p = env.payload;
-              return SessionDto(
-                id: s.id,
-                backendKey: s.backendKey,
-                title: (p['title'] as String?) ?? s.title,
-                model: (p['model'] as String?) ?? s.model,
-                status: s.status,
-                cwd: s.cwd,
-                sessionUuid: s.sessionUuid,
-                tokens: TokensDto(
-                  input: (p['input_tokens'] as num?)?.toInt() ?? s.tokens.input,
-                  output:
-                      (p['output_tokens'] as num?)?.toInt() ?? s.tokens.output,
-                  cached:
-                      (p['cached_tokens'] as num?)?.toInt() ?? s.tokens.cached,
-                  total: (p['tokens'] as num?)?.toInt() ?? s.tokens.total,
-                ),
-                contextPct:
-                    (p['context_pct'] as num?)?.toDouble() ?? s.contextPct,
-                costUsd: (p['cost_usd'] as num?)?.toDouble() ?? s.costUsd,
-              );
-            }).toList(growable: false));
+            state = AsyncData(
+              (state.value ?? const [])
+                  .map((s) {
+                    if (s.id != sid) return s;
+                    final p = env.payload;
+                    return SessionDto(
+                      id: s.id,
+                      backendKey: s.backendKey,
+                      title: (p['title'] as String?) ?? s.title,
+                      model: (p['model'] as String?) ?? s.model,
+                      status: s.status,
+                      cwd: s.cwd,
+                      sessionUuid: s.sessionUuid,
+                      tokens: TokensDto(
+                        input:
+                            (p['input_tokens'] as num?)?.toInt() ??
+                            s.tokens.input,
+                        output:
+                            (p['output_tokens'] as num?)?.toInt() ??
+                            s.tokens.output,
+                        cached:
+                            (p['cached_tokens'] as num?)?.toInt() ??
+                            s.tokens.cached,
+                        total: (p['tokens'] as num?)?.toInt() ?? s.tokens.total,
+                      ),
+                      contextPct:
+                          (p['context_pct'] as num?)?.toDouble() ??
+                          s.contextPct,
+                      costUsd: (p['cost_usd'] as num?)?.toDouble() ?? s.costUsd,
+                    );
+                  })
+                  .toList(growable: false),
+            );
             break;
         }
       });

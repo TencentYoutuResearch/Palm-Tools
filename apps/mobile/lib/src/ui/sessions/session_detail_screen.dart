@@ -93,8 +93,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
     final api = ref.read(apiClientProvider);
     if (api == null) return;
     try {
-      final events =
-          await api.getHistory(widget.sessionId, fromMs: 0, limit: 1000);
+      final events = await api.getHistory(
+        widget.sessionId,
+        fromMs: 0,
+        limit: 1000,
+      );
       for (final env in events) {
         _ingest(env);
       }
@@ -114,9 +117,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       if (!_scrollCtrl.hasClients) return;
       final target = _scrollCtrl.position.maxScrollExtent;
       if (animate) {
-        _scrollCtrl.animateTo(target,
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOut);
+        _scrollCtrl.animateTo(
+          target,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
       } else {
         _scrollCtrl.jumpTo(target);
       }
@@ -124,7 +129,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   }
 
   void _subscribeLive() {
-    _wsSub = ref.listenManual<AsyncValue<Envelope>>(eventStreamProvider, (_, ev) {
+    _wsSub = ref.listenManual<AsyncValue<Envelope>>(eventStreamProvider, (
+      _,
+      ev,
+    ) {
       ev.whenData((env) {
         if (env.sessionId != widget.sessionId) return;
         // 注意:不在这里 clear attention。`session.attention_cleared` 事件由
@@ -152,12 +160,14 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         _meta = {..._meta, ...env.payload};
         break;
       case 'message':
-        _upsert(_Item(
-          key: 'm-${env.payload['id'] ?? env.ts}',
-          type: 'message',
-          ts: env.ts,
-          payload: env.payload,
-        ));
+        _upsert(
+          _Item(
+            key: 'm-${env.payload['id'] ?? env.ts}',
+            type: 'message',
+            ts: env.ts,
+            payload: env.payload,
+          ),
+        );
         break;
       case 'tool_use':
         // 同一 id 的事件 (running → ok/error) 合并
@@ -172,42 +182,49 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
             if (v != null) merged[k] = v;
           });
           _items[existing] = _Item(
-            key: old.key, type: old.type, ts: old.ts, payload: merged);
+            key: old.key,
+            type: old.type,
+            ts: old.ts,
+            payload: merged,
+          );
         } else {
-          _upsert(_Item(
-            key: key,
-            type: 'tool_use',
-            ts: env.ts,
-            payload: env.payload,
-          ));
+          _upsert(
+            _Item(key: key, type: 'tool_use', ts: env.ts, payload: env.payload),
+          );
         }
         break;
       case 'ask_user_question':
         // payload.question_id 唯一(bridge 形如 "tooluse_xxx-0",含 question 序号),
         // **不能**用 ts:bridge 一行 jsonl 多事件同毫秒 emit,ts 会冲突
-        _upsert(_Item(
-          key: 'ask-${env.payload['question_id'] ?? env.ts}',
-          type: 'ask_user_question',
-          ts: env.ts,
-          payload: env.payload,
-        ));
+        _upsert(
+          _Item(
+            key: 'ask-${env.payload['question_id'] ?? env.ts}',
+            type: 'ask_user_question',
+            ts: env.ts,
+            payload: env.payload,
+          ),
+        );
         break;
       case 'plan_proposed':
-        _upsert(_Item(
-          key: 'plan-${env.payload['plan_id'] ?? env.ts}',
-          type: 'plan_proposed',
-          ts: env.ts,
-          payload: env.payload,
-        ));
+        _upsert(
+          _Item(
+            key: 'plan-${env.payload['plan_id'] ?? env.ts}',
+            type: 'plan_proposed',
+            ts: env.ts,
+            payload: env.payload,
+          ),
+        );
         break;
       case 'task_create':
         // 用 payload.id;同 ts 多个 task 不会冲突
-        _upsert(_Item(
-          key: 'task-${env.payload['id'] ?? env.ts}',
-          type: 'task_create',
-          ts: env.ts,
-          payload: env.payload,
-        ));
+        _upsert(
+          _Item(
+            key: 'task-${env.payload['id'] ?? env.ts}',
+            type: 'task_create',
+            ts: env.ts,
+            payload: env.payload,
+          ),
+        );
         break;
       case 'task_update':
         // task_update 不新建 _Item,而是 patch 已有 task_create 卡的 status。
@@ -224,23 +241,33 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
             merged['status'] = env.payload['status'];
           }
           _items[at] = _Item(
-              key: old.key, type: old.type, ts: old.ts, payload: merged);
+            key: old.key,
+            type: old.type,
+            ts: old.ts,
+            payload: merged,
+          );
         } else {
-          _upsert(_Item(
-            key: 'task-update-${tid ?? env.ts}',
-            type: 'task_update',
-            ts: env.ts,
-            payload: env.payload,
-          ));
+          _upsert(
+            _Item(
+              key: 'task-update-${tid ?? env.ts}',
+              type: 'task_update',
+              ts: env.ts,
+              payload: env.payload,
+            ),
+          );
         }
         break;
       case 'session.exited':
-        _upsert(_Item(
-          key: 'exit-${env.ts}',
-          type: 'system',
-          ts: env.ts,
-          payload: {'text': 'session exited (code=${env.payload['exit_code']})'},
-        ));
+        _upsert(
+          _Item(
+            key: 'exit-${env.ts}',
+            type: 'system',
+            ts: env.ts,
+            payload: {
+              'text': 'session exited (code=${env.payload['exit_code']})',
+            },
+          ),
+        );
         break;
       case 'session.mode_changed':
         // 不进消息流,只更新 AppBar 上的 mode chip
@@ -287,8 +314,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       _inputCtrl.clear();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('send failed: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('send failed: $e')));
       }
     } finally {
       if (mounted) setState(() => _sending = false);
@@ -306,8 +334,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       if (mounted) setState(() => _mode = reached);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('mode switch failed: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('mode switch failed: $e')));
       }
     } finally {
       if (mounted) setState(() => _modeBusy = false);
@@ -322,7 +351,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
     final title = _meta['title'] as String? ?? '';
     // 当前 session 是否仍需用户操作(prompt 还没解除)
     final attentionKind = ref.watch(
-        sessionAttentionProvider.select((m) => m[widget.sessionId]));
+      sessionAttentionProvider.select((m) => m[widget.sessionId]),
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -330,53 +360,60 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-                title.isNotEmpty ? title : 'Session ${widget.sessionId}',
-                style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.0),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis),
+              title.isNotEmpty ? title : 'Session ${widget.sessionId}',
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.0,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (model.isNotEmpty)
-                  Text(model,
-                      style: const TextStyle(
-                          fontSize: 11,
-                          color: KillLaColors.textMuted,
-                          fontFamily: 'Menlo')),
+                  Text(
+                    model,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: KillLaColors.textMuted,
+                      fontFamily: 'Menlo',
+                    ),
+                  ),
                 if (tokens != null) ...[
                   const SizedBox(width: 8),
-                  Text('$tokens tok',
-                      style: const TextStyle(
-                          fontSize: 11,
-                          color: KillLaColors.textMuted,
-                          fontFamily: 'Menlo')),
+                  Text(
+                    '$tokens tok',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: KillLaColors.textMuted,
+                      fontFamily: 'Menlo',
+                    ),
+                  ),
                 ],
                 if (ctxPct != null) ...[
                   const SizedBox(width: 8),
-                  Text('ctx ${ctxPct.toStringAsFixed(1)}%',
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontFamily: 'Menlo',
-                          fontWeight: FontWeight.w700,
-                          color: ctxPct >= 80
-                              ? KillLaColors.accent
-                              : (ctxPct >= 50
-                                  ? KillLaColors.busy
-                                  : KillLaColors.textMuted))),
+                  Text(
+                    'ctx ${ctxPct.toStringAsFixed(1)}%',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'Menlo',
+                      fontWeight: FontWeight.w700,
+                      color: ctxPct >= 80
+                          ? KillLaColors.accent
+                          : (ctxPct >= 50
+                                ? KillLaColors.busy
+                                : KillLaColors.textMuted),
+                    ),
+                  ),
                 ],
               ],
             ),
           ],
         ),
         actions: [
-          _ModeChip(
-            mode: _mode,
-            busy: _modeBusy,
-            onPick: _switchMode,
-          ),
+          _ModeChip(mode: _mode, busy: _modeBusy, onPick: _switchMode),
           const SizedBox(width: 8),
         ],
       ),
@@ -388,17 +425,18 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
               child: !_historyLoaded
                   ? const Center(child: CircularProgressIndicator())
                   : _items.isEmpty
-                      ? const Center(
-                          child: Text(
-                              'No messages yet — type below to send to the session.',
-                              style: TextStyle(
-                                  color: KillLaColors.textMuted)))
-                      : ListView.builder(
-                          controller: _scrollCtrl,
-                          padding: const EdgeInsets.all(12),
-                          itemCount: _items.length,
-                          itemBuilder: (_, i) => _buildItem(_items[i]),
-                        ),
+                  ? const Center(
+                      child: Text(
+                        'No messages yet — type below to send to the session.',
+                        style: TextStyle(color: KillLaColors.textMuted),
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scrollCtrl,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: _items.length,
+                      itemBuilder: (_, i) => _buildItem(_items[i]),
+                    ),
             ),
             const Divider(height: 1),
             _buildInput(),
@@ -417,8 +455,14 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       case 'tool_use':
         return _ToolUseCard(payload: item.payload);
       case 'ask_user_question':
-        return _AskQuestionCard(
-            sessionId: widget.sessionId, payload: item.payload);
+        final group = _askGroupFor(item);
+        // Only the first event renders the grouped card; later members remain
+        // in the event list for history/dedup but do not duplicate the UI.
+        if (group.first.key != item.key) return const SizedBox.shrink();
+        return _AskQuestionsCard(
+          sessionId: widget.sessionId,
+          payloads: group.map((entry) => entry.payload).toList(),
+        );
       case 'plan_proposed':
         return _PlanCard(sessionId: widget.sessionId, payload: item.payload);
       case 'task_create':
@@ -428,14 +472,28 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         return Container(
           margin: const EdgeInsets.symmetric(vertical: 8),
           alignment: Alignment.center,
-          child: Text(item.payload['text'] as String? ?? '',
-              style: const TextStyle(
-                  color: KillLaColors.textMuted,
-                  fontSize: 12,
-                  fontFamily: 'Menlo')),
+          child: Text(
+            item.payload['text'] as String? ?? '',
+            style: const TextStyle(
+              color: KillLaColors.textMuted,
+              fontSize: 12,
+              fontFamily: 'Menlo',
+            ),
+          ),
         );
     }
     return const SizedBox.shrink();
+  }
+
+  List<_Item> _askGroupFor(_Item item) {
+    final id = item.payload['question_id'] as String? ?? item.key;
+    final base = askQuestionGroupId(id);
+    return _items.where((candidate) {
+      if (candidate.type != 'ask_user_question') return false;
+      final candidateId =
+          candidate.payload['question_id'] as String? ?? candidate.key;
+      return askQuestionGroupId(candidateId) == base;
+    }).toList();
   }
 
   Widget _buildInput() {
@@ -452,8 +510,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                 hintText: 'Message session…',
                 border: OutlineInputBorder(),
                 isDense: true,
-                contentPadding:
-                    EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
               ),
               onSubmitted: (_) => _send(),
             ),
@@ -465,7 +525,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                     width: 14,
                     height: 14,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white))
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
                 : const Icon(Icons.send),
             onPressed: _sending ? null : _send,
           ),
@@ -498,7 +561,7 @@ class _MessageBubble extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: bg,
-          // 几乎不要圆角,KLK 偏硬朗;只一侧加粗描边强化"刀片切口"
+          borderRadius: BorderRadius.circular(10),
           border: Border(
             left: BorderSide(color: accentColor, width: isUser ? 0 : 4),
             right: BorderSide(color: accentColor, width: isUser ? 4 : 0),
@@ -509,12 +572,15 @@ class _MessageBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(role.toUpperCase(),
-                style: TextStyle(
-                    fontSize: 10,
-                    color: accentColor,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.2)),
+            Text(
+              role.toUpperCase(),
+              style: TextStyle(
+                fontSize: 10,
+                color: accentColor,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.2,
+              ),
+            ),
             const SizedBox(height: 4),
             // MarkdownBody(不是 Markdown):后者自带滚动容器,在 ListView 里会冲突。
             // selectable=true 替代原 SelectableText,长按选中复制。
@@ -523,18 +589,21 @@ class _MessageBubble extends StatelessWidget {
               selectable: true,
               styleSheet: MarkdownStyleSheet(
                 p: const TextStyle(
-                    fontSize: 14, color: KillLaColors.textPrimary),
+                  fontSize: 14,
+                  color: KillLaColors.textPrimary,
+                ),
                 code: const TextStyle(
-                    fontFamily: 'Menlo',
-                    fontSize: 12,
-                    color: KillLaColors.warning,
-                    backgroundColor: Color(0x33000000)),
+                  fontFamily: 'Menlo',
+                  fontSize: 12,
+                  color: KillLaColors.warning,
+                  backgroundColor: Color(0x33000000),
+                ),
                 codeblockDecoration: BoxDecoration(
                   color: KillLaColors.bgPrimary,
                   border: Border.all(color: KillLaColors.border),
                 ),
-                blockquoteDecoration: const BoxDecoration(
-                  color: Color(0x14FF2B2B),
+                blockquoteDecoration: BoxDecoration(
+                  color: KillLaColors.accent.withValues(alpha: .06),
                   border: Border(
                     left: BorderSide(color: KillLaColors.accent, width: 3),
                   ),
@@ -571,6 +640,7 @@ class _ToolUseCardState extends State<_ToolUseCard> {
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
         color: KillLaColors.bgSecondary,
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(color: KillLaColors.border),
       ),
       child: Column(
@@ -578,8 +648,7 @@ class _ToolUseCardState extends State<_ToolUseCard> {
           InkWell(
             onTap: () => setState(() => _open = !_open),
             child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               child: Row(
                 children: [
                   Container(
@@ -592,15 +661,19 @@ class _ToolUseCardState extends State<_ToolUseCard> {
                     child: Text(
                       summary ?? (tool != null ? '$tool · $status' : status),
                       style: const TextStyle(
-                          fontFamily: 'Menlo',
-                          fontSize: 12,
-                          color: KillLaColors.textPrimary),
+                        fontFamily: 'Menlo',
+                        fontSize: 12,
+                        color: KillLaColors.textPrimary,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  Icon(_open ? Icons.expand_less : Icons.expand_more,
-                      size: 18, color: KillLaColors.textSecondary),
+                  Icon(
+                    _open ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: KillLaColors.textSecondary,
+                  ),
                 ],
               ),
             ),
@@ -615,11 +688,14 @@ class _ToolUseCardState extends State<_ToolUseCard> {
                   color: KillLaColors.bgPrimary,
                   border: Border.all(color: KillLaColors.border),
                 ),
-                child: SelectableText(preview,
-                    style: const TextStyle(
-                        fontFamily: 'Menlo',
-                        fontSize: 11,
-                        color: KillLaColors.textSecondary)),
+                child: SelectableText(
+                  preview,
+                  style: const TextStyle(
+                    fontFamily: 'Menlo',
+                    fontSize: 11,
+                    color: KillLaColors.textSecondary,
+                  ),
+                ),
               ),
             ),
         ],
@@ -628,97 +704,197 @@ class _ToolUseCardState extends State<_ToolUseCard> {
   }
 }
 
-class _AskQuestionCard extends ConsumerStatefulWidget {
+class _AskQuestionsCard extends ConsumerStatefulWidget {
   final int sessionId;
-  final Map<String, dynamic> payload;
-  const _AskQuestionCard({required this.sessionId, required this.payload});
+  final List<Map<String, dynamic>> payloads;
+  const _AskQuestionsCard({required this.sessionId, required this.payloads});
   @override
-  ConsumerState<_AskQuestionCard> createState() => _AskQuestionCardState();
+  ConsumerState<_AskQuestionsCard> createState() => _AskQuestionsCardState();
 }
 
-class _AskQuestionCardState extends ConsumerState<_AskQuestionCard> {
-  int? _selected;
+class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
+  final Map<String, int> _selections = {};
+  final Map<String, TextEditingController> _details = {};
   bool _submitted = false;
+  bool _submitting = false;
   String? _error;
+
+  TextEditingController _controller(String id) =>
+      _details.putIfAbsent(id, TextEditingController.new);
+
+  @override
+  void dispose() {
+    for (final controller in _details.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final p = widget.payload;
-    final question = p['question'] as String? ?? '';
-    final header = p['header'] as String?;
-    final options = (p['options'] as List?) ?? const [];
+    final header = widget.payloads.isEmpty
+        ? null
+        : widget.payloads.first['header'] as String?;
+    final complete = widget.payloads.every((payload) {
+      final id = payload['question_id'] as String? ?? '';
+      return _selections.containsKey(id);
+    });
 
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: KillLaColors.accent.withValues(alpha: 0.10),
-        border: const Border(
-          left: BorderSide(color: KillLaColors.accent, width: 4),
-          top: BorderSide(color: KillLaColors.accent),
-          right: BorderSide(color: KillLaColors.accent),
-          bottom: BorderSide(color: KillLaColors.accent),
-        ),
+        color: KillLaColors.bgSecondary,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: KillLaColors.borderStrong),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.help_outline,
-                  color: KillLaColors.accent, size: 18),
+              const Icon(
+                Icons.help_outline,
+                color: KillLaColors.accent,
+                size: 18,
+              ),
               const SizedBox(width: 6),
               Text(
-                (header ?? 'AskUserQuestion').toUpperCase(),
+                header ?? 'Questions',
                 style: const TextStyle(
-                    color: KillLaColors.accent,
-                    fontWeight: FontWeight.w900,
-                    fontSize: 12,
-                    letterSpacing: 1.2),
+                  color: KillLaColors.accent,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                  letterSpacing: .3,
+                ),
               ),
             ],
           ),
           const SizedBox(height: 8),
-          Text(question,
-              style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: KillLaColors.textPrimary)),
           const SizedBox(height: 10),
-          ...List.generate(options.length, (i) {
-            final opt = options[i] as Map<String, dynamic>;
-            final label = opt['label'] as String? ?? '?';
-            final desc = opt['description'] as String?;
-            return RadioListTile<int>(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: i,
-              groupValue: _selected,
-              activeColor: KillLaColors.accent,
-              onChanged: _submitted
-                  ? null
-                  : (v) => setState(() => _selected = v),
-              title: Text(label,
-                  style: const TextStyle(color: KillLaColors.textPrimary)),
-              subtitle: desc == null
-                  ? null
-                  : Text(desc,
-                      style:
-                          const TextStyle(color: KillLaColors.textSecondary)),
+          ...widget.payloads.indexed.map((entry) {
+            final (questionIndex, payload) = entry;
+            final id = payload['question_id'] as String? ?? 'q_$questionIndex';
+            final question = payload['question'] as String? ?? '';
+            final options = (payload['options'] as List?) ?? const [];
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${questionIndex + 1}. $question',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...List.generate(options.length, (i) {
+                    final opt = options[i] as Map<String, dynamic>;
+                    final label = opt['label'] as String? ?? '?';
+                    final desc = opt['description'] as String?;
+                    final selected = _selections[id] == i;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(9),
+                        onTap: _submitted
+                            ? null
+                            : () => setState(() => _selections[id] = i),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 120),
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 9,
+                          ),
+                          decoration: BoxDecoration(
+                            color: selected
+                                ? KillLaColors.accent.withValues(alpha: .10)
+                                : KillLaColors.bgTertiary,
+                            borderRadius: BorderRadius.circular(9),
+                            border: Border.all(
+                              color: selected
+                                  ? KillLaColors.accent
+                                  : KillLaColors.border,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                selected
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                size: 18,
+                                color: selected
+                                    ? KillLaColors.accent
+                                    : KillLaColors.textMuted,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      label,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    if (desc != null)
+                                      Text(
+                                        desc,
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: KillLaColors.textSecondary,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                  TextField(
+                    controller: _controller(id),
+                    enabled: !_submitted,
+                    minLines: 1,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      hintText: 'Optional details or your own answer',
+                      isDense: true,
+                    ),
+                  ),
+                ],
+              ),
             );
           }),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text(_error!,
-                  style: const TextStyle(color: KillLaColors.danger)),
+              child: Text(
+                _error!,
+                style: const TextStyle(color: KillLaColors.danger),
+              ),
             ),
           const SizedBox(height: 6),
           Row(
             children: [
               FilledButton(
-                onPressed: (_selected == null || _submitted) ? null : _submit,
-                child: Text(_submitted ? '✓ SUBMITTED' : 'SUBMIT'),
+                onPressed: (!complete || _submitted || _submitting)
+                    ? null
+                    : _submit,
+                child: Text(
+                  _submitted
+                      ? 'Submitted'
+                      : _submitting
+                      ? 'Submitting…'
+                      : 'Submit all answers',
+                ),
               ),
             ],
           ),
@@ -728,21 +904,55 @@ class _AskQuestionCardState extends ConsumerState<_AskQuestionCard> {
   }
 
   Future<void> _submit() async {
-    if (_selected == null) return;
+    if (_submitting || _submitted) return;
     final api = ref.read(apiClientProvider);
     if (api == null) return;
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
     try {
-      // POST /sessions/:id/answer { question_id, choice_index }
-      // 协议 §4.6;Rust bridge 当前 500 占位 — 这里失败也展示给用户看
-      final qid = widget.payload['question_id'] as String? ?? '?';
-      await api.postAnswer(widget.sessionId, qid, _selected!);
+      final supplemental = <String>[];
+      for (final entry in widget.payloads.indexed) {
+        final (index, payload) = entry;
+        final qid = payload['question_id'] as String? ?? 'q_$index';
+        final selected = _selections[qid];
+        if (selected == null) return;
+        final options = (payload['options'] as List?) ?? const [];
+        final label = selected < options.length
+            ? (options[selected] as Map<String, dynamic>)['label'] as String? ??
+                  'option ${selected + 1}'
+            : 'option ${selected + 1}';
+        final details = _controller(qid).text.trim();
+        await api.postAnswer(
+          widget.sessionId,
+          qid,
+          selected,
+          submit: index == widget.payloads.length - 1,
+        );
+        if (details.isNotEmpty) {
+          supplemental.add(
+            '- ${payload['question'] ?? qid}\n  Selected: $label\n  User details: $details',
+          );
+        }
+      }
+      if (supplemental.isNotEmpty) {
+        await api.sendInputText(
+          widget.sessionId,
+          'Additional context for my AskUserQuestion answers:\n\n${supplemental.join('\n\n')}\n',
+        );
+      }
       // 乐观清 attention — server 的 scan_loop 在 ~200-400ms 后才会推 attention_cleared,
       // 这一段时间避免 list 上仍闪烁让用户困惑。如果 server 没真清掉(子进程又弹了
       // 新 prompt),下一次扫描会自动重新点亮。
-      ref.read(sessionAttentionProvider.notifier).clearOptimistic(widget.sessionId);
+      ref
+          .read(sessionAttentionProvider.notifier)
+          .clearOptimistic(widget.sessionId);
       setState(() => _submitted = true);
     } catch (e) {
       setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _submitting = false);
     }
   }
 }
@@ -781,12 +991,15 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
             children: [
               Icon(Icons.list_alt, color: KillLaColors.warning, size: 18),
               SizedBox(width: 6),
-              Text('PLAN PROPOSED',
-                  style: TextStyle(
-                      color: KillLaColors.warning,
-                      fontWeight: FontWeight.w900,
-                      fontSize: 12,
-                      letterSpacing: 1.2)),
+              Text(
+                'PLAN PROPOSED',
+                style: TextStyle(
+                  color: KillLaColors.warning,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12,
+                  letterSpacing: 1.2,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -801,42 +1014,49 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
               selectable: true,
               styleSheet: MarkdownStyleSheet(
                 p: const TextStyle(
-                    fontSize: 13, color: KillLaColors.textPrimary),
+                  fontSize: 13,
+                  color: KillLaColors.textPrimary,
+                ),
                 code: const TextStyle(
-                    fontFamily: 'Menlo',
-                    fontSize: 12,
-                    color: KillLaColors.warning,
-                    backgroundColor: Color(0x33000000)),
+                  fontFamily: 'Menlo',
+                  fontSize: 12,
+                  color: KillLaColors.warning,
+                  backgroundColor: Color(0x33000000),
+                ),
                 codeblockDecoration: BoxDecoration(
                   color: KillLaColors.bgSecondary,
                   border: Border.all(color: KillLaColors.border),
                 ),
                 listBullet: const TextStyle(
-                    fontSize: 13, color: KillLaColors.textPrimary),
+                  fontSize: 13,
+                  color: KillLaColors.textPrimary,
+                ),
                 checkbox: const TextStyle(
-                    fontSize: 13, color: KillLaColors.textPrimary),
+                  fontSize: 13,
+                  color: KillLaColors.textPrimary,
+                ),
               ),
             ),
           ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text(_error!,
-                  style: const TextStyle(color: KillLaColors.danger)),
+              child: Text(
+                _error!,
+                style: const TextStyle(color: KillLaColors.danger),
+              ),
             ),
           const SizedBox(height: 8),
           Row(
             children: [
               FilledButton(
                 onPressed: _accepted != null ? null : () => _respond(true),
-                child:
-                    Text(_accepted == true ? '✓ ACCEPTED' : 'ACCEPT'),
+                child: Text(_accepted == true ? '✓ ACCEPTED' : 'ACCEPT'),
               ),
               const SizedBox(width: 8),
               OutlinedButton(
                 onPressed: _accepted != null ? null : () => _respond(false),
-                child:
-                    Text(_accepted == false ? '✗ REJECTED' : 'REJECT'),
+                child: Text(_accepted == false ? '✗ REJECTED' : 'REJECT'),
               ),
             ],
           ),
@@ -852,7 +1072,9 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
       final pid = widget.payload['plan_id'] as String? ?? '?';
       await api.postPlanResponse(widget.sessionId, pid, accept);
       // 乐观清 attention(server scan_loop 也会推 attention_cleared 兜底)
-      ref.read(sessionAttentionProvider.notifier).clearOptimistic(widget.sessionId);
+      ref
+          .read(sessionAttentionProvider.notifier)
+          .clearOptimistic(widget.sessionId);
       setState(() => _accepted = accept);
     } catch (e) {
       setState(() => _error = '$e');
@@ -893,20 +1115,24 @@ class _TaskCard extends StatelessWidget {
             children: [
               Icon(icon, size: 14, color: color),
               const SizedBox(width: 6),
-              Text(label.toUpperCase(),
-                  style: TextStyle(
-                      color: color,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.8)),
+              Text(
+                label.toUpperCase(),
+                style: TextStyle(
+                  color: color,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                ),
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   subject.isEmpty ? '(no subject)' : subject,
                   style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: KillLaColors.textPrimary),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: KillLaColors.textPrimary,
+                  ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -917,9 +1143,13 @@ class _TaskCard extends StatelessWidget {
             const SizedBox(height: 4),
             Padding(
               padding: const EdgeInsets.only(left: 20),
-              child: Text(description,
-                  style: const TextStyle(
-                      fontSize: 11, color: KillLaColors.textMuted)),
+              child: Text(
+                description,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: KillLaColors.textMuted,
+                ),
+              ),
             ),
           ],
         ],
@@ -936,7 +1166,11 @@ class _ModeChip extends StatelessWidget {
   final String? mode;
   final bool busy;
   final ValueChanged<String> onPick;
-  const _ModeChip({required this.mode, required this.busy, required this.onPick});
+  const _ModeChip({
+    required this.mode,
+    required this.busy,
+    required this.onPick,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -946,10 +1180,25 @@ class _ModeChip extends StatelessWidget {
       enabled: !busy,
       onSelected: onPick,
       itemBuilder: (_) => const [
-        PopupMenuItem(value: 'default', child: _ModeMenuItem(label: 'Default', sub: '每个工具调用都要批准')),
-        PopupMenuItem(value: 'acceptEdits', child: _ModeMenuItem(label: 'Auto-accept edits', sub: '自动批准 file/edit')),
-        PopupMenuItem(value: 'plan', child: _ModeMenuItem(label: 'Plan', sub: '只规划不执行')),
-        PopupMenuItem(value: 'bypassPermissions', child: _ModeMenuItem(label: 'Bypass permissions', sub: '⚠️ 全部跳过批准')),
+        PopupMenuItem(
+          value: 'default',
+          child: _ModeMenuItem(label: 'Default', sub: '每个工具调用都要批准'),
+        ),
+        PopupMenuItem(
+          value: 'acceptEdits',
+          child: _ModeMenuItem(
+            label: 'Auto-accept edits',
+            sub: '自动批准 file/edit',
+          ),
+        ),
+        PopupMenuItem(
+          value: 'plan',
+          child: _ModeMenuItem(label: 'Plan', sub: '只规划不执行'),
+        ),
+        PopupMenuItem(
+          value: 'bypassPermissions',
+          child: _ModeMenuItem(label: 'Bypass permissions', sub: '⚠️ 全部跳过批准'),
+        ),
       ],
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -965,7 +1214,10 @@ class _ModeChip extends StatelessWidget {
               SizedBox(
                 width: 10,
                 height: 10,
-                child: CircularProgressIndicator(strokeWidth: 1.5, color: color),
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: color,
+                ),
               )
             else
               Container(
@@ -974,12 +1226,15 @@ class _ModeChip extends StatelessWidget {
                 decoration: BoxDecoration(color: color),
               ),
             const SizedBox(width: 6),
-            Text(label.toUpperCase(),
-                style: TextStyle(
-                    fontSize: 11,
-                    color: color,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 0.8)),
+            Text(
+              label.toUpperCase(),
+              style: TextStyle(
+                fontSize: 11,
+                color: color,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.8,
+              ),
+            ),
             Icon(Icons.arrow_drop_down, size: 16, color: color),
           ],
         ),
@@ -997,7 +1252,7 @@ class _ModeChip extends StatelessWidget {
         'plan' => 'plan',
         'bypassPermissions' => 'bypass',
         _ => '—',
-      }
+      },
     );
   }
 }
@@ -1012,13 +1267,17 @@ class _ModeMenuItem extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label,
-            style: const TextStyle(
-                fontWeight: FontWeight.w700,
-                color: KillLaColors.textPrimary)),
-        Text(sub,
-            style: const TextStyle(
-                fontSize: 11, color: KillLaColors.textMuted)),
+        Text(
+          label,
+          style: const TextStyle(
+            fontWeight: FontWeight.w700,
+            color: KillLaColors.textPrimary,
+          ),
+        ),
+        Text(
+          sub,
+          style: const TextStyle(fontSize: 11, color: KillLaColors.textMuted),
+        ),
       ],
     );
   }
@@ -1061,16 +1320,19 @@ class _AttentionBannerState extends State<_AttentionBanner>
       width: 24,
       height: 24,
       alignment: Alignment.center,
-      // KLK 风:方刀片标签,黑色描边
       decoration: BoxDecoration(
         color: color,
-        border: Border.all(color: Colors.black, width: 1.5),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: KillLaColors.borderStrong),
       ),
-      child: Text(isPlan ? '!' : '?',
-          style: const TextStyle(
-              color: Colors.white,
-              fontSize: 14,
-              fontWeight: FontWeight.w900)),
+      child: Text(
+        isPlan ? '!' : '?',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 14,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
     );
     return Container(
       width: double.infinity,
@@ -1088,9 +1350,10 @@ class _AttentionBannerState extends State<_AttentionBanner>
             badge
           else
             ScaleTransition(
-              scale: Tween(begin: 1.0, end: 1.20)
-                  .chain(CurveTween(curve: Curves.easeInOut))
-                  .animate(_ctrl),
+              scale: Tween(
+                begin: 1.0,
+                end: 1.20,
+              ).chain(CurveTween(curve: Curves.easeInOut)).animate(_ctrl),
               child: badge,
             ),
           const SizedBox(width: 12),
@@ -1103,17 +1366,20 @@ class _AttentionBannerState extends State<_AttentionBanner>
                       ? 'PLAN AWAITING DECISION'
                       : 'WAITING FOR YOUR RESPONSE',
                   style: TextStyle(
-                      color: color,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1.2),
+                    color: color,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.2,
+                  ),
                 ),
                 Text(
                   isPlan
                       ? 'Scroll down and Accept or Reject the plan to continue.'
                       : 'Scroll down and answer the prompt to continue.',
                   style: TextStyle(
-                      color: color.withValues(alpha: 0.85), fontSize: 11),
+                    color: color.withValues(alpha: 0.85),
+                    fontSize: 11,
+                  ),
                 ),
               ],
             ),

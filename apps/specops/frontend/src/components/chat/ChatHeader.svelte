@@ -19,6 +19,8 @@
             : 'active';
 
   let resumeBusy = $state(false);
+  let reopenBusy = $state(false);
+  let closeBusy = $state(false);
   let resumeError: string | null = $state(null);
 
   let canResume = $derived.by(() => {
@@ -47,6 +49,37 @@
       resumeBusy = false;
     }
   }
+
+  async function closeSession(): Promise<void> {
+    const id = $activeSessionId;
+    if (!id || closeBusy || !window.confirm('Close this SpecOps session and stop its active agent?')) return;
+    closeBusy = true;
+    resumeError = null;
+    try {
+      await api.post(`/api/sessions/${id}/action`, { kind: 'close' });
+      await loadSessions({ showLoading: false });
+    } catch (err) {
+      resumeError = err instanceof Error ? err.message : String(err);
+    } finally {
+      closeBusy = false;
+    }
+  }
+
+  async function reopenSession(): Promise<void> {
+    const id = $activeSessionId;
+    if (!id || reopenBusy) return;
+    reopenBusy = true;
+    resumeError = null;
+    try {
+      await api.post(`/api/sessions/${id}/action`, { kind: 'reopen' });
+      await selectSession(id);
+      await loadSessions({ showLoading: false });
+    } catch (err) {
+      resumeError = err instanceof Error ? err.message : String(err);
+    } finally {
+      reopenBusy = false;
+    }
+  }
 </script>
 
 <header class="chat-head" role="presentation" data-tauri-drag-region onmousedown={onWindowDragMouseDown}>
@@ -55,7 +88,7 @@
       <h2>{$activeSession.title}</h2>
       <span class="meta">#{shortId($activeSession.id)} · {$activeSession.phase}</span>
     </div>
-    <div class="head-right" data-tauri-drag-region>
+    <div class="head-right">
       {#if resumeError !== null}
         <span class="resume-error">{resumeError}</span>
       {/if}
@@ -70,6 +103,17 @@
         >
           <Icon name="rotate-cw" size={13} />
           <span>{resumeBusy ? t('Resuming') : resumeLabel}</span>
+        </button>
+      {/if}
+      {#if $activeSession.state === 'completed' && $activeSession.workflow_applicable !== false && $activeSession.document_path}
+        <button type="button" class="reopen-btn" disabled={reopenBusy} onclick={reopenSession} title={t('Reopen session')}>
+          <Icon name="rotate-cw" size={13} />
+          <span>{reopenBusy ? t('Reopening') : t('Reopen')}</span>
+        </button>
+      {/if}
+      {#if !['completed', 'closed', 'failed', 'cancelled'].includes($activeSession.state ?? '')}
+        <button type="button" class="close-btn" disabled={closeBusy} onclick={closeSession} title="Close session">
+          <Icon name="x" size={13} /><span>{closeBusy ? 'Closing…' : 'Close'}</span>
         </button>
       {/if}
       <StatusBadge label={$activeSession.state ?? 'created'} tone={stateTone($activeSession.state)} />
@@ -131,7 +175,9 @@
     gap: var(--sp-2);
     -webkit-app-region: no-drag;
   }
-  .resume-btn {
+  .resume-btn,
+  .reopen-btn,
+  .close-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -146,11 +192,15 @@
     cursor: pointer;
     transition: background var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
   }
+  .close-btn { border-color: color-mix(in srgb, var(--st-err) 30%, var(--bd-default)); background: transparent; color: var(--st-err); }
+  .close-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--st-err) 12%, transparent); }
   .resume-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--st-info) 18%, transparent);
     border-color: color-mix(in srgb, var(--st-info) 50%, var(--bd-default));
   }
-  .resume-btn:disabled {
+  .resume-btn:disabled,
+  .reopen-btn:disabled,
+  .close-btn:disabled {
     opacity: 0.55;
     cursor: wait;
   }

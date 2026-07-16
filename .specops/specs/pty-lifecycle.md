@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: pty/lifecycle
 kind: spec
+document_class: normative
+spec_type: capability
 title: PTY child lifecycle remains deadlock-free
-status: active
+status: deprecated
 verifies:
   - rust
 paths:

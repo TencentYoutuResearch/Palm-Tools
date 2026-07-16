@@ -4,6 +4,7 @@
   import StatusBar from './components/StatusBar.svelte';
   import IwikiModule from './components/iwiki/IwikiModule.svelte';
   import ChatModule from './components/chat/ChatModule.svelte';
+  import SettingsModule from './components/settings/SettingsModule.svelte';
   import { activeModule } from './lib/stores/layout.ts';
   import { loadState, pendingDocSelection } from './lib/stores/documents.ts';
   import { loadSessions, subscribeEvents, unsubscribeEvents } from './lib/stores/sessions.ts';
@@ -32,8 +33,10 @@
   <main class="module-container">
     {#if $activeModule === 'iwiki'}
       <IwikiModule />
-    {:else}
+    {:else if $activeModule === 'chat'}
       <ChatModule />
+    {:else}
+      <SettingsModule />
     {/if}
   </main>
   <StatusBar />

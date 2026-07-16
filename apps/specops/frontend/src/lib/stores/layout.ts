@@ -1,6 +1,6 @@
 import { writable, type Writable } from 'svelte/store';
 
-export type ModuleId = 'iwiki' | 'chat';
+export type ModuleId = 'iwiki' | 'chat' | 'settings';
 
 function persisted<T>(key: string, initial: T, parse: (raw: string) => T): Writable<T> {
   let start = initial;
@@ -24,7 +24,7 @@ function persisted<T>(key: string, initial: T, parse: (raw: string) => T): Writa
 export const activeModule = persisted<ModuleId>(
   'specops.layout.module',
   'iwiki',
-  (raw) => (raw === 'chat' ? 'chat' : 'iwiki'),
+  (raw) => (raw === 'chat' || raw === 'settings' ? raw : 'iwiki'),
 );
 
 const clampWidth = (n: number, min = 200, max = 420) => Math.min(max, Math.max(min, n));

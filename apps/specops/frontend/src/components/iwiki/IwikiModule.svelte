@@ -48,7 +48,7 @@
 <section
   class="module"
   class:right-open={$iwikiRightOpen}
-  style="--col-left: {$iwikiLeftWidth}px; --col-right: {$iwikiRightOpen ? $iwikiRightWidth : 0}px;"
+  style="--col-left: {$iwikiLeftWidth}px; --col-right: {$iwikiRightOpen ? $iwikiRightWidth : 0}px; --header-height: 44px;"
 >
   <aside class="panel panel-left">
     <DocTree />

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "intake_id": "def4712b-bf90-4a61-b3c8-6f4aff2ff733",
+  "status": "completed",
+  "primary": ".specops/changes/specops-note-author-context",
+  "documents": [
+    ".specops/changes/specops-note-author-context",
+    ".specops/changes/specops-note-author-context/proposal.md",
+    ".specops/changes/specops-note-author-context/tasks.md",
+    ".specops/changes/specops-note-author-context/design.md"
+  ]
+}

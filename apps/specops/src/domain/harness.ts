@@ -3,6 +3,7 @@ import path from 'node:path'
 
 import { SpecOpsError } from '../core/errors.js'
 import { pathInside } from '../store/workspace.js'
+import type { ReproducibleEnvironment } from './environment.js'
 
 export const KNOWN_CAPABILITIES = [
   'session.create',
@@ -59,6 +60,7 @@ export interface RunManifest {
   scope: { base_commit: string; change_id: string | null; task_ids: string[] }
   verification: { required: string[] }
   limits: { max_iterations: number }
+  environment: ReproducibleEnvironment
 }
 
 const PLUGIN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/
@@ -185,7 +187,13 @@ export function workflowKindForDocumentKind(kind: string | undefined): WorkflowK
   if (kind === 'bug') return 'bug'
   if (kind === 'refactor') return 'refactor'
   if (kind === 'investigation') return 'investigation'
-  if (kind === 'spec') return 'docs'
+  if (kind === 'spec') throw new SpecOpsError('workflow_not_applicable', 'normative specs do not have an implementation workflow')
+  return 'feature'
+}
+
+export function workflowKindForWorkType(workType: string | undefined): WorkflowKind {
+  if (workType === 'bugfix') return 'bug'
+  if (workType === 'refactor' || workType === 'investigation' || workType === 'docs' || workType === 'feature') return workType
   return 'feature'
 }
 

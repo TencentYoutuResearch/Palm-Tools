@@ -37,6 +37,8 @@
     font-variant-numeric: tabular-nums;
     color: var(--fg-secondary);
     z-index: 2;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .cwd {
     font-family: var(--font-mono);

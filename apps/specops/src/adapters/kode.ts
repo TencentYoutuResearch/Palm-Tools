@@ -45,6 +45,13 @@ export interface KodeSession {
   session_uuid?: string
 }
 
+export interface KodeBackendInfo {
+  key: string
+  display_name: string
+  model_flag?: string | null
+  enabled: boolean
+}
+
 export interface KodeEvent {
   type: string
   session_id: number
@@ -131,6 +138,11 @@ export class KodeClient {
     })
   }
 
+  async listBackends(): Promise<KodeBackendInfo[]> {
+    const result = await this.request<{ backends?: KodeBackendInfo[] }>('/api/v1/backends')
+    return result.backends ?? []
+  }
+
   createPlanSession(backendKey: string, cwd: string, initialPrompt: string, model?: string): Promise<KodeSession> {
     return this.request('/api/v1/sessions', {
       method: 'POST',
@@ -197,19 +209,12 @@ export class KodeClient {
     await this.request(`/api/v1/sessions/${id}/input`, { method: 'POST', body: JSON.stringify({ bytes_b64: bytes }) })
   }
 
-  /** Answer an AskUserQuestion: writes the 0-based choice digit to the session PTY. */
-  async answer(id: number, questionId: string, choiceIndex: number, freeText?: string): Promise<void> {
+  /** Answer one AskUserQuestion option in the session PTY. */
+  async answer(id: number, questionId: string, choiceIndex: number, _freeText?: string, submit = false): Promise<void> {
     await this.request(`/api/v1/sessions/${id}/answer`, {
       method: 'POST',
-      body: JSON.stringify({ question_id: questionId, choice_index: choiceIndex, ...(freeText !== undefined ? { free_text: freeText } : {}) }),
+      body: JSON.stringify({ question_id: questionId, choice_index: choiceIndex, ...(submit ? { submit: true } : {}) }),
     })
-    // The bridge selects the CLI's numbered "Other" option. Most interactive
-    // backends then open a text field, so submit the actual free-form answer as
-    // the next PTY interaction instead of silently dropping it.
-    if (freeText !== undefined && freeText.trim() !== '') {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      await this.sendPrompt(id, freeText.trim())
-    }
   }
 
   async killSession(id: number): Promise<void> {
@@ -221,7 +226,10 @@ export class KodeClient {
   }
 
   history(id: number, from = 0): Promise<{ events: KodeEvent[]; next_from: number }> {
-    return this.request(`/api/v1/sessions/${id}/history?from=${from}`)
+    // The bridge retains up to 1000 non-PTY events, while its endpoint defaults
+    // to the oldest 200. A question emitted after enough status/meta events can
+    // therefore be omitted unless SpecOps explicitly requests the full window.
+    return this.request(`/api/v1/sessions/${id}/history?from=${from}&limit=1000`)
   }
 
   /**

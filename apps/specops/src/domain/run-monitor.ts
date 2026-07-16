@@ -12,8 +12,8 @@ import type { KodeClient, KodeEvent } from '../adapters/kode.js'
 import { SpecOpsError } from '../core/errors.js'
 import { exists } from '../store/workspace.js'
 import { loadConfig } from './config.js'
-import { readRun, transitionRun } from './run.js'
-import { decideRun, formatReviewNote, runReview, verifyRun } from './run-loop.js'
+import { changedFilesForRun, readRun, transitionRun } from './run.js'
+import { advanceToNextTask, decideRun, formatReviewNote, runReview, verifyRun } from './run-loop.js'
 import { findSpecOpsSessionByRunId, updateSpecOpsSession } from './session.js'
 import { specOpsSessionEvents } from './session-events.js'
 import type WebSocket from 'ws'
@@ -120,18 +120,30 @@ async function advanceRun(entry: MonitorEntry): Promise<void> {
       return
     }
 
-    // Only auto-advance if the worktree has actual changes
-    const { execFile } = await import('node:child_process')
-    const { promisify } = await import('node:util')
-    const exec = promisify(execFile)
-    const { stdout } = await exec('git', ['-C', run.worktree_path, 'diff', '--stat', run.base_commit, '--'])
-    if (stdout.trim().length === 0) {
+    // Only auto-advance if the worktree has actual changes. Use the same
+    // side-effect-free view as the review UI so newly-created (untracked)
+    // files count as implementation output too; `git diff` alone misses them.
+    const changedFiles = await changedFilesForRun(run)
+    if (changedFiles.length === 0) {
       // No changes yet — re-watch so we check again later
       entry.advancing = false
       watchRun(entry.runId, entry.workspace, entry.sessionId)
       return
     }
-    const result = await verifyRun(run)
+    // Intermediate task boundaries are internal scheduler progress. Continue
+    // building in the same session and expose Verify/Review only after all
+    // implementation tasks have finished.
+    if (run.current_task + 1 < run.tasks.length) {
+      if (kodeRef === null) throw new SpecOpsError('kode_unavailable', 'starting the next scheduled task requires a connected kode session')
+      await advanceToNextTask(run, kodeRef)
+      entry.advancing = false
+      watchRun(entry.runId, entry.workspace, entry.sessionId)
+      return
+    }
+
+    // Automated review owns the gate until it finishes, so do not expose a
+    // clickable human Review action that could race its eventual write-back.
+    const result = await verifyRun(run, { deferReviewAction: true })
 
     // Automated review (if enabled): run a fresh review agent against the diff
     // BEFORE surfacing the human review action. On a blocking review, feed the
@@ -142,6 +154,8 @@ async function advanceRun(entry: MonitorEntry): Promise<void> {
     if (config.review.enabled && kodeRef !== null) {
       const review = await runReview(run, kodeRef, config, result.patch)
       reviewSummary = review.summary
+      const latest = await readRun(entry.workspace, entry.runId)
+      if (latest.state !== 'awaiting_review' || latest.current_task !== run.current_task) return
       if (review.blocker) {
         try {
           await decideRun(run, 'feedback', formatReviewNote(review), kodeRef)
@@ -161,10 +175,37 @@ async function advanceRun(entry: MonitorEntry): Promise<void> {
     }
 
     await publishReviewAction(entry, run.run_id, result.files, reviewSummary)
-  } catch {
-    // verify may fail — that's acceptable,
-    // the user can still manually trigger verify from the UI
+  } catch (error) {
+    // Do not permanently detach the monitor on a transient git/verify/review
+    // failure. If the Run is still active, re-arm it so a later idle poll can
+    // retry; also leave a useful diagnostic instead of swallowing the error.
+    console.error(`[specops] failed to auto-advance run ${entry.runId}`, error)
+    try {
+      const run = await readRun(entry.workspace, entry.runId)
+      if (run.state === 'running') {
+        entry.advancing = false
+        watchRun(entry.runId, entry.workspace, entry.sessionId)
+      } else if (run.state === 'awaiting_verify') {
+        // Verification failed after its session action was intentionally
+        // deferred. Surface the manual recovery gate instead of leaving the
+        // session looking active forever.
+        await publishVerifyAction(entry, run.run_id)
+      }
+    } catch (readError) {
+      console.error(`[specops] failed to recover run monitor ${entry.runId}`, readError)
+    }
   }
+}
+
+async function publishVerifyAction(entry: MonitorEntry, runId: string): Promise<void> {
+  const specopsSession = await findSpecOpsSessionByRunId(entry.workspace, runId)
+  if (specopsSession === null) return
+  const updated = await updateSpecOpsSession(entry.workspace, specopsSession.id, (record) => {
+    record.phase = 'verify'
+    record.state = 'awaiting_user'
+    record.required_action = { kind: 'verify' }
+  })
+  specOpsSessionEvents.publish('session.action_required', specopsSession.id, updated.required_action)
 }
 
 /** Surface the human review action for a run, attaching an optional review summary note. */

@@ -1232,6 +1232,8 @@ struct AnswerReq {
     choice_index: u32,
     #[serde(default)]
     free_text: Option<String>,
+    #[serde(default)]
+    submit: bool,
 }
 
 async fn post_answer(
@@ -1247,19 +1249,43 @@ async fn post_answer(
             req.choice_index
         )));
     }
-    let digit = char::from_digit(req.choice_index + 1, 10).expect("0..=8 is valid") as u8;
-    let g = ctx.sessions.lock();
-    let s = g
-        .get(&id)
-        .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
-    s.write_input(&[digit]);
-    drop(g);
+    let input = answer_input(req.choice_index);
+    {
+        let g = ctx.sessions.lock();
+        let s = g
+            .get(&id)
+            .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
+        // CodeBuddy's AskPanel only handles up/down (or j/k) plus Enter; number
+        // keys are ignored. Each question starts at option zero, so move down
+        // to the requested option and confirm it.
+        s.write_input(&input);
+    }
+    if req.submit {
+        // After the final question AskPanel opens a separate summary/submit
+        // phase. Give Ink a render tick, then confirm that page as well; without
+        // this second Enter doneAsk() is never called and the agent stays stuck.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let g = ctx.sessions.lock();
+        let s = g
+            .get(&id)
+            .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
+        s.write_input(b"\r");
+    }
     ctx.bus.emit(EventEnvelope::new(
         id,
         "session.attention_cleared",
         json!({ "reason": "user_answered_via_api" }),
     ));
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn answer_input(choice_index: u32) -> Vec<u8> {
+    let mut input = Vec::with_capacity(choice_index as usize * 3 + 1);
+    for _ in 0..choice_index {
+        input.extend_from_slice(b"\x1b[B");
+    }
+    input.push(b'\r');
+    input
 }
 
 #[derive(Deserialize)]

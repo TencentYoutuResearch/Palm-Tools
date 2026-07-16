@@ -51,6 +51,7 @@ describe('Harness plugin and workflow contracts', () => {
     expect(builtinBackendProfile('codex').capabilities).not.toContain('conversation.ask')
     expect(workflowKindForDocumentKind('bug')).toBe('bug')
     expect(workflowKindForDocumentKind('change')).toBe('feature')
+    expect(() => workflowKindForDocumentKind('spec')).toThrow('do not have an implementation workflow')
   })
 
   test('loads user plugin declarations and validates backend capability claims', async () => {

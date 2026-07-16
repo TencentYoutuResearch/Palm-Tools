@@ -11,6 +11,8 @@ paths:
   - .specops
 ---
 
+> **Harness 完成口径**:Task DAG 排序和隔离 Run 只是基础,不等于 Harness 调度器完成。完整口径见 `specops-harness-core.md`:必须具备持久化事件、逐 task 调度、类型化 Artifact、可执行 Gate、精确 Evidence 和 Drift 恢复闭环。
+
 # SpecOps — kode 内置的 spec 驱动执行控制台(立项草稿)
 
 > **状态**:立项设计草稿 / 本 feature 的 ROADMAP,2026-06-20(第四轮工程化评审:补齐 Run 隔离、安全启动契约、gate 语义与执行计划)。
@@ -719,4 +721,7 @@ CI 硬禁 `src/**/spec.md`,但开发就是想在代码旁写需求;强堵会让�
 ### v2 — 验证价值后再做
 
 - [ ] Phase 9 `session.status_changed`、verify trigger、可选结构化 diff、`plan_response`。
-- [ ] 自动完成触发、多 agent/squad、跨宿主 adapter、完整 Spec Graph、更多语言 plugin。
+- [x] 文档类型拆分为 normative spec 与 work item；只有 work item 绑定 workflow。
+- [x] SpecGraph/ProductGraph、mapping/diff、Completion Contract、Evidence Ledger 基础控制面。
+- [x] Impact/Risk/Policy、可复现 RunManifest、Task DAG 与 Assurance Console。
+- [ ] 自动完成触发、多 agent/squad、跨宿主 adapter、AST/runtime 专用语言 adapter、更多语言 plugin。

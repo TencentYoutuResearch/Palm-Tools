@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: plan-review-ui-and-doc-navigation
 kind: feature
+document_class: work_item
+work_type: feature
 title: SpecOps plan_review 渲染与跨模块文档导航
-status: proposed
+status: cancelled
 verifies:
   - specops
 paths:

@@ -80,17 +80,18 @@ class _ConnBanner extends StatelessWidget {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(8),
-      decoration: const BoxDecoration(
-        color: Color(0x33FB5607), // busy/橙 alpha 20%
-        border: Border(
-          bottom: BorderSide(color: KillLaColors.busy, width: 2),
+      decoration: BoxDecoration(
+        color: KillLaColors.busy.withValues(alpha: .12),
+        border: Border(bottom: BorderSide(color: KillLaColors.busy, width: 2)),
+      ),
+      child: Text(
+        'WS: $err',
+        style: const TextStyle(
+          fontSize: 12,
+          color: KillLaColors.busy,
+          fontWeight: FontWeight.w700,
         ),
       ),
-      child: Text('WS: $err',
-          style: const TextStyle(
-              fontSize: 12,
-              color: KillLaColors.busy,
-              fontWeight: FontWeight.w700)),
     );
   }
 }
@@ -109,11 +110,15 @@ class _SessionTile extends ConsumerWidget {
       title: Row(
         children: [
           Expanded(
-            child: Text(s.title.isEmpty ? '(untitled)' : s.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    fontWeight: FontWeight.w700, letterSpacing: 0.2)),
+            child: Text(
+              s.title.isEmpty ? '(untitled)' : s.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.2,
+              ),
+            ),
           ),
           if (kind != null) ...[
             const SizedBox(width: 6),
@@ -134,19 +139,25 @@ class _SessionTile extends ConsumerWidget {
             ),
             const SizedBox(width: 6),
             if (s.tokens.total > 0)
-              Text('${s.tokens.total} tok',
-                  style: const TextStyle(
-                      fontSize: 11,
-                      color: KillLaColors.textMuted,
-                      fontFamily: 'Menlo')),
+              Text(
+                '${s.tokens.total} tok',
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: KillLaColors.textMuted,
+                  fontFamily: 'Menlo',
+                ),
+              ),
           ],
         ),
       ),
-      trailing: Text('#${s.id}',
-          style: const TextStyle(
-              fontSize: 12,
-              color: KillLaColors.textMuted,
-              fontFamily: 'Menlo')),
+      trailing: Text(
+        '#${s.id}',
+        style: const TextStyle(
+          fontSize: 12,
+          color: KillLaColors.textMuted,
+          fontFamily: 'Menlo',
+        ),
+      ),
       onTap: () => GoRouter.of(context).push('/sessions/${s.id}'),
     );
 
@@ -195,9 +206,7 @@ class _AttentionWrapState extends State<_AttentionWrap>
       return Container(
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.10),
-          border: Border(
-            left: BorderSide(color: color, width: 4),
-          ),
+          border: Border(left: BorderSide(color: color, width: 4)),
         ),
         child: widget.child,
       );
@@ -205,7 +214,7 @@ class _AttentionWrapState extends State<_AttentionWrap>
     return AnimatedBuilder(
       animation: _ctrl,
       builder: (_, child) {
-        // _ctrl 0..1 → curved 0..1 → 0.10..0.24 alpha(KLK 风更强烈)
+        // Keep attention visible without overpowering the session metadata.
         final t = Curves.easeInOut.transform(_ctrl.value);
         final bgAlpha = 0.10 + 0.14 * t;
         final borderAlpha = 0.55 + 0.45 * t;
@@ -261,22 +270,26 @@ class _AttentionBadgeState extends State<_AttentionBadge>
       width: 20,
       height: 20,
       alignment: Alignment.center,
-      // KLK 风:不要圆,用切角方块(刀片感)
       decoration: BoxDecoration(
         color: color,
-        border: Border.all(color: Colors.black, width: 1.5),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: KillLaColors.borderStrong),
       ),
-      child: Text(label,
-          style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w900)),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
     );
     if (reduce) return dot;
     return ScaleTransition(
-      scale: Tween(begin: 1.0, end: 1.22)
-          .chain(CurveTween(curve: Curves.easeInOut))
-          .animate(_ctrl),
+      scale: Tween(
+        begin: 1.0,
+        end: 1.22,
+      ).chain(CurveTween(curve: Curves.easeInOut)).animate(_ctrl),
       child: dot,
     );
   }
@@ -288,13 +301,13 @@ class _StatusDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = KillLaColors.statusDot(status);
-    // KLK 风:正方块刀片,带黑色描边
     return Container(
       width: 12,
       height: 12,
       decoration: BoxDecoration(
         color: c,
-        border: Border.all(color: Colors.black, width: 1),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: KillLaColors.borderStrong),
       ),
     );
   }
@@ -338,7 +351,7 @@ class _EmptyView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // KLK: 大号红色叉刀
+            // Destructive action keeps the semantic danger color.
             Container(
               width: 80,
               height: 80,
@@ -346,23 +359,30 @@ class _EmptyView extends StatelessWidget {
               decoration: BoxDecoration(
                 border: Border.all(color: KillLaColors.accent, width: 3),
               ),
-              child: const Text('×',
-                  style: TextStyle(
-                      fontSize: 56,
-                      height: 1,
-                      fontWeight: FontWeight.w900,
-                      color: KillLaColors.accent)),
+              child: const Text(
+                '×',
+                style: TextStyle(
+                  fontSize: 56,
+                  height: 1,
+                  fontWeight: FontWeight.w900,
+                  color: KillLaColors.accent,
+                ),
+              ),
             ),
             const SizedBox(height: 16),
-            const Text('NO ACTIVE SESSIONS',
-                style: TextStyle(
-                    color: KillLaColors.textPrimary,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.2)),
+            const Text(
+              'NO ACTIVE SESSIONS',
+              style: TextStyle(
+                color: KillLaColors.textPrimary,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.2,
+              ),
+            ),
             const SizedBox(height: 4),
-            const Text('Start one from the desktop GUI; it will show up here.',
-                style: TextStyle(
-                    fontSize: 12, color: KillLaColors.textMuted)),
+            const Text(
+              'Start one from the desktop GUI; it will show up here.',
+              style: TextStyle(fontSize: 12, color: KillLaColors.textMuted),
+            ),
           ],
         ),
       ),
@@ -382,12 +402,17 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.error_outline,
-                size: 48, color: KillLaColors.danger),
+            const Icon(
+              Icons.error_outline,
+              size: 48,
+              color: KillLaColors.danger,
+            ),
             const SizedBox(height: 8),
-            Text(message,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: KillLaColors.textSecondary)),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: KillLaColors.textSecondary),
+            ),
             const SizedBox(height: 12),
             FilledButton(onPressed: onRetry, child: const Text('RETRY')),
           ],

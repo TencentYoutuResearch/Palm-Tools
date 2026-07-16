@@ -55,6 +55,12 @@ function transcriptEntryKey(entry: TranscriptEntry): string {
   return [entry.kode_session_id ?? '', entry.role, kind, entry.text].join('\u0000');
 }
 
+/** Server history is authoritative; retain only local optimistic entries absent from it. */
+function mergeTranscript(local: TranscriptEntry[] = [], remote: TranscriptEntry[] = []): TranscriptEntry[] {
+  const remoteKeys = new Set(remote.map(transcriptEntryKey));
+  return [...remote, ...local.filter((entry) => !remoteKeys.has(transcriptEntryKey(entry)))];
+}
+
 function appendTranscriptEntries(sessionId: string, entries: TranscriptEntry[], updatedAt?: string): void {
   if (entries.length === 0) return;
   let changed = false;
@@ -72,7 +78,7 @@ function appendTranscriptEntries(sessionId: string, entries: TranscriptEntry[], 
     }
     if (!changed) return session;
     activeTranscript.set(transcript);
-    return session;
+    return { ...session, transcript };
   });
   // When activeSession is already set (same session), activeTranscript is updated above.
   // When it's not set (no session selected yet), just skip — no active view cares.
@@ -125,13 +131,17 @@ export async function selectSession(id: string): Promise<void> {
   }
 }
 
-async function refreshSession(id: string): Promise<void> {
+export async function refreshSession(id: string): Promise<void> {
   try {
     const res = await api.get<{ session: SpecOpsSession }>(`/api/sessions/${id}`);
     activeSession.update((session) => {
       if (session?.id !== id) return session;
-      // Only update metadata — keep existing transcript so ChatThread isn't disturbed.
-      return { ...session, ...res.session, transcript: session.transcript ?? res.session?.transcript };
+      // Reconcile the full persisted transcript as a safety net for SSE events
+      // missed before subscription or during a reconnect. Do not clear local
+      // optimistic messages that the server has not persisted yet.
+      const transcript = mergeTranscript(session.transcript, res.session?.transcript);
+      activeTranscript.set(transcript);
+      return { ...session, ...res.session, transcript };
     });
     updateSessionSummary(res.session);
   } catch {

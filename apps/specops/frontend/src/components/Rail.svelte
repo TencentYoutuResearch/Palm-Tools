@@ -34,6 +34,15 @@
   <div class="rail-foot">
     <button
       class="rail-tool"
+      class:active={$activeModule === 'settings'}
+      onclick={() => activeModule.set('settings')}
+      aria-label={t('specops.settings.agents')}
+      title={t('specops.settings.agents')}
+    >
+      <Icon name="settings" size={16} />
+    </button>
+    <button
+      class="rail-tool"
       onclick={() => theme.set(cycleTheme($theme))}
       aria-label={t('specops.rail.theme')}
       title={t('specops.rail.theme')}
@@ -55,6 +64,8 @@
     flex-shrink: 0;
     height: 100%;
     min-height: 0;
+    user-select: none;
+    -webkit-user-select: none;
   }
   /* Reserved top strip that aligns with the macOS traffic-light height. */
   .rail-top {
@@ -119,6 +130,7 @@
     padding: var(--sp-1);
     display: flex;
     justify-content: center;
+    gap: 2px;
   }
   .rail-tool {
     width: 28px;
@@ -135,5 +147,10 @@
   .rail-tool:hover {
     background: var(--bg-tab-hover);
     color: var(--fg-primary);
+  }
+  .rail-tool.active {
+    background: var(--acc-soft);
+    color: var(--acc);
+    border-color: color-mix(in srgb, var(--acc) 30%, transparent);
   }
 </style>

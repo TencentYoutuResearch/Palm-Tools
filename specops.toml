@@ -4,6 +4,23 @@ schema_version = 1
 name = "kode"
 profiles = ["desktop", "tauri", "svelte", "rust"]
 
+# SpecOps chooses agents per responsibility. Omit `model` to use the selected
+# Kode backend's configured default model.
+[agents.default]
+backend = "codebuddy"
+
+# clarify / intake / plan
+[agents.analysis]
+backend = "codebuddy"
+
+# implement / repair / resume
+[agents.implementation]
+backend = "codebuddy"
+
+# automated review
+[agents.review]
+backend = "codebuddy"
+
 [agent_backends.codebuddy]
 plugin = "builtin.kode"
 capabilities = ["session.create", "session.resume", "session.interrupt", "conversation.ask", "conversation.plan", "events.tools", "sandbox.policy", "model.select"]

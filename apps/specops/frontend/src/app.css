@@ -180,6 +180,24 @@ body,
   margin: 0;
 }
 
+/* The console shell behaves like a native workbench: dragging across tabs,
+   chat cards, navigation, and controls must not create accidental text
+   selections. Document content is the deliberate copy/select surface. Form
+   controls remain selectable so editing and copy/paste keep working. */
+#app {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app [role='document'],
+#app [role='document'] *,
+#app input,
+#app textarea,
+#app [contenteditable='true'] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 body {
   font-family: var(--font-ui);
   font-size: var(--fs-md);
@@ -264,6 +282,9 @@ button {
   position: sticky;
   top: 0;
   z-index: 1;
+  -webkit-app-region: drag;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* FAB — used by AskFloat (phase F) */

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "intake_id": "cc0efb31-f218-470f-906a-0636f4038314",
+  "status": "completed",
+  "primary": ".specops/changes/fix-specops-title-drag",
+  "documents": [
+    ".specops/changes/fix-specops-title-drag",
+    ".specops/changes/fix-specops-title-drag/proposal.md",
+    ".specops/changes/fix-specops-title-drag/tasks.md",
+    ".specops/changes/fix-specops-title-drag/design.md"
+  ]
+}

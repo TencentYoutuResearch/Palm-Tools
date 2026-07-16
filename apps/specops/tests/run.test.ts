@@ -4,10 +4,11 @@ import path from 'node:path'
 
 import { afterEach, describe, expect, test } from 'vitest'
 
+import type { KodeClient } from '../src/adapters/kode.js'
 import { initWorkspace } from '../src/domain/commands.js'
 import { parseDocument, serializeDocument, type SpecDocument } from '../src/domain/spec.js'
-import { applyCompletedRun, applyWithVerify } from '../src/domain/run-loop.js'
-import { applyRunPatch, cleanupRun, collectRunPatch, createRun, readRun, rollbackRunPatch, transitionRun, writeRun, type RunRecord } from '../src/domain/run.js'
+import { advanceToNextTask, applyCompletedRun, applyWithVerify } from '../src/domain/run-loop.js'
+import { applyRunPatch, changedFilesForRun, cleanupRun, collectRunPatch, createRun, readRun, rollbackRunPatch, transitionRun, writeRun, type RunRecord } from '../src/domain/run.js'
 import { createSpecOpsSession, readSpecOpsSession } from '../src/domain/session.js'
 import { git, gitCommit, gitWorkspace } from './helpers.js'
 
@@ -26,6 +27,40 @@ async function fixture() {
 }
 
 describe('Run worktree isolation', () => {
+  test('advances implementation tasks without entering verify between them', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [
+      { id: 'task-1', title: 'First', prompt: 'first', verify: [] },
+      { id: 'task-2', title: 'Second', prompt: 'second', verify: [] },
+    ], 'codebuddy', 'HEAD', cache)
+    run.kode_session_id = 42
+    await writeRun(run)
+    const prompts: string[] = []
+    const kode = {
+      waitForReady: async () => ({ id: 42, backend_key: 'codebuddy', status: 'idle' }),
+      sendPrompt: async (_id: number, prompt: string) => { prompts.push(prompt) },
+    } as unknown as KodeClient
+
+    await advanceToNextTask(run, kode)
+
+    const updated = await readRun(workspace, run.run_id)
+    expect(updated.state).toBe('running')
+    expect(updated.current_task).toBe(1)
+    expect(updated.verify_results).toEqual([])
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('SpecOps task task-2: Second')
+    await cleanupRun(run)
+  })
+
+  test('detects untracked implementation output before auto-verify', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [{ id: 'task-1', title: 'Add file', prompt: 'Add new-file.txt', verify: [] }], 'codebuddy', 'HEAD', cache)
+    await writeFile(path.join(run.worktree_path, 'new-file.txt'), 'implementation output\n')
+
+    await expect(changedFilesForRun(run)).resolves.toContain('new-file.txt')
+    await cleanupRun(run)
+  })
+
   test('captures changes without modifying the primary worktree', async () => {
     const { workspace, cache } = await fixture()
     const run = await createRun(workspace, [{ id: 'task-1', title: 'Add file', prompt: 'Add isolated.txt', verify: [] }], 'codebuddy', 'HEAD', cache)
@@ -42,6 +77,19 @@ describe('Run worktree isolation', () => {
       scope: { base_commit: run.base_commit, task_ids: ['task-1'] },
       limits: { max_iterations: 8 },
     })
+    await cleanupRun(run)
+  })
+
+  test('streams patches larger than the former execFile stdout buffer', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [{ id: 'task-1', title: 'Large output', prompt: 'Add large.txt', verify: [] }], 'codebuddy', 'HEAD', cache)
+    const largeContent = `${'x'.repeat(17 * 1024 * 1024)}\n`
+    await writeFile(path.join(run.worktree_path, 'large.txt'), largeContent)
+
+    const result = await collectRunPatch(run)
+
+    expect(Buffer.byteLength(result.patch)).toBeGreaterThan(16 * 1024 * 1024)
+    expect(result.files).toContain('large.txt')
     await cleanupRun(run)
   })
 
@@ -95,6 +143,36 @@ describe('Run worktree isolation', () => {
     await cleanupRun(run)
   })
 
+  test('inherits proposal verifies when UI tasks omit them', async () => {
+    const { workspace, cache } = await fixture()
+    await writeFile(path.join(workspace, 'specops.toml'), [
+      'schema_version = 1', '', '[project]', 'name = "verified-ui-change"', '',
+      '[verify.test]', 'command = ["true"]', '',
+    ].join('\n'))
+    const changeId = 'verified-ui-change'
+    const changeDir = path.join(workspace, '.specops', 'changes', changeId)
+    await mkdir(changeDir, { recursive: true })
+    await writeFile(path.join(changeDir, 'proposal.md'), [
+      '---', 'schema_version: 2', `id: ${changeId}`, 'kind: bug',
+      'document_class: work_item', 'work_type: bugfix', 'title: Verified UI change',
+      'status: proposed', 'verifies:', '  - test', '---', '',
+      '# Verified UI change', '', '## Motivation', 'Verify it.', '',
+      '## Scope', 'UI.', '', '## Acceptance criteria', '- [ ] Works', '',
+      '## Out of scope', 'Other changes.', '',
+    ].join('\n'))
+
+    const run = await createRun(workspace, [
+      { id: 'task-1', title: 'Implement', prompt: 'implement', verify: [] },
+      { id: 'task-2', title: 'Finish', prompt: 'finish', verify: [] },
+    ], 'codebuddy', 'HEAD', cache, changeId)
+
+    expect(run.tasks[0]?.verify).toEqual([])
+    expect(run.tasks[1]?.verify).toEqual(['test'])
+    expect(run.manifest.verification.required).toEqual(['test'])
+    expect(run.verify_snapshot.test).toBeDefined()
+    await cleanupRun(run)
+  })
+
   test('applies only an explicitly reviewed patch', async () => {
     const { workspace, cache } = await fixture()
     const run = await createRun(workspace, [{ id: 'task-1', title: 'Add file', prompt: 'Add approved.txt', verify: [] }], 'codebuddy', 'HEAD', cache)
@@ -104,6 +182,22 @@ describe('Run worktree isolation', () => {
     await collectRunPatch(run)
     await applyRunPatch(run)
     expect(await readFile(path.join(workspace, 'approved.txt'), 'utf8')).toBe('approved\n')
+    await cleanupRun(run)
+  })
+
+  test('restores review controls after apply failure without regressing a completed task', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [{ id: 'task-1', title: 'Apply recovery', prompt: 'noop', verify: [] }], 'codebuddy', 'HEAD', cache)
+    await writeFile(path.join(run.worktree_path, 'recovery.txt'), 'recovery\n')
+    await transitionRun(run, 'awaiting_verify')
+    await transitionRun(run, 'awaiting_review')
+    await transitionRun(run, 'completed')
+    await transitionRun(run, 'applying')
+
+    await expect(transitionRun(run, 'awaiting_review')).resolves.toBeUndefined()
+    const harness = JSON.parse(await readFile(path.join(workspace, '.specops', 'runs', run.run_id, 'harness-state.json'), 'utf8')) as { tasks: Array<{ id: string; state: string }> }
+    expect(harness.tasks.find((task) => task.id === 'task-1')?.state).toBe('completed')
+    expect((await readRun(workspace, run.run_id)).state).toBe('awaiting_review')
     await cleanupRun(run)
   })
 
@@ -225,7 +319,7 @@ describe('branch-based apply', () => {
     await cleanupRun(run)
   })
 
-  test('workspace dirty (non-specops) blocks apply', async () => {
+  test('workspace dirty (non-specops) is stashed, restored, and does not block apply', async () => {
     const { workspace, cache } = await fixture()
     const run = await createRun(workspace, [{ id: 'task-1', title: 'Add file', prompt: 'add x.txt', verify: [] }], 'codebuddy', 'HEAD', cache)
     await writeFile(path.join(run.worktree_path, 'x.txt'), 'x\n')
@@ -234,7 +328,10 @@ describe('branch-based apply', () => {
     await collectRunPatch(run)
     // Dirty the main workspace with a non-specops file
     await writeFile(path.join(workspace, 'uncommitted.txt'), 'dirty\n')
-    await expect(applyRunPatch(run)).rejects.toMatchObject({ code: 'workspace_dirty' })
+    await applyRunPatch(run)
+    expect(await readFile(path.join(workspace, 'x.txt'), 'utf8')).toBe('x\n')
+    expect(await readFile(path.join(workspace, 'uncommitted.txt'), 'utf8')).toBe('dirty\n')
+    expect(await git(workspace, ['status', '--porcelain=v1'])).toContain('?? uncommitted.txt')
     await cleanupRun(run)
   })
 
@@ -585,20 +682,15 @@ describe('collectRunPatch commit message', () => {
     await cleanupRun(run)
   })
 
-  test('spec kind (unknown to mapping) falls back to chore type', async () => {
+  test('normative spec cannot launch an implementation workflow', async () => {
     const { workspace, cache } = await fixture()
     const changeId = 'spec-something'
     await writeProposalKind(workspace, changeId, 'spec', 'Spec out the foo')
-    const run = await createRun(
+    await expect(createRun(
       workspace,
       [{ id: 'task-1', title: 'Write spec', prompt: 'write', verify: [] }],
       'codebuddy', 'HEAD', cache, changeId,
-    )
-    await writeFile(path.join(run.worktree_path, 's.txt'), 's\n')
-    await collectRunPatch(run)
-    const msg = await lastCommitMessage(run.worktree_path)
-    expect(msg.split('\n')[0]).toMatch(/^chore: Spec out the foo$/)
-    await cleanupRun(run)
+    )).rejects.toThrow('normative specs do not have an implementation workflow')
   })
 
   test('subject longer than 72 chars is truncated with ellipsis', async () => {

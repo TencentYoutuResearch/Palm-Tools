@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: backend/default-args
 kind: spec
+document_class: normative
+spec_type: capability
 title: Backend default arguments are non-positional
-status: active
+status: deprecated
 verifies:
   - rust
 paths:

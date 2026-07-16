@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: investigate-proposed-document-backlog
 kind: investigation
+document_class: work_item
+work_type: investigation
 title: 调查 changes 文档大量处于 proposed 状态的原因并清理
-status: proposed
+status: cancelled
 verifies:
   - specops
 paths:

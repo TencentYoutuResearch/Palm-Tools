@@ -1,7 +1,7 @@
 import { parse as parseToml } from 'smol-toml'
 
 import { SpecOpsError } from '../core/errors.js'
-import { exists, pathInside, readText } from '../store/workspace.js'
+import { atomicWrite, exists, pathInside, readText } from '../store/workspace.js'
 import {
   builtinBackendProfile,
   DEFAULT_WORKFLOWS,
@@ -30,14 +30,106 @@ export interface ReviewConfig {
   model?: string
 }
 
+export type AgentRole = 'analysis' | 'implementation' | 'review'
+
+export interface AgentSelection {
+  backend?: string
+  model?: string
+}
+
+export interface AgentConfig {
+  default: AgentSelection
+  analysis: AgentSelection
+  implementation: AgentSelection
+  review: AgentSelection
+}
+
+export interface ResolvedAgentSelection {
+  role: AgentRole
+  backend: string
+  model?: string
+}
+
 export interface SpecOpsConfig {
   schema_version: 1
   project: { name: string; profiles: string[] }
   gate: { strict_wild_specs: boolean; suppress: GateSuppressConfig }
   verify: Record<string, VerifyConfig>
   review: ReviewConfig
+  agents: AgentConfig
   workflows: Record<WorkflowKind, WorkflowProfile>
   agent_backends: Record<string, AgentBackendProfile>
+}
+
+const DEFAULT_AGENT_BACKEND = 'codebuddy'
+
+function agentSelection(value: unknown, field: string): AgentSelection {
+  if (value === undefined) return {}
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SpecOpsError('invalid_config', `${field} must be a table`)
+  }
+  const raw = value as Record<string, unknown>
+  for (const key of ['backend', 'model'] as const) {
+    if (raw[key] !== undefined && (typeof raw[key] !== 'string' || raw[key].trim() === '')) {
+      throw new SpecOpsError('invalid_config', `${field}.${key} must be a non-empty string`)
+    }
+  }
+  return {
+    ...(typeof raw.backend === 'string' ? { backend: raw.backend.trim() } : {}),
+    ...(typeof raw.model === 'string' ? { model: raw.model.trim() } : {}),
+  }
+}
+
+/** Resolve once at agent creation; callers persist this result for resume/recovery. */
+export function resolveAgentSelection(
+  config: SpecOpsConfig,
+  role: AgentRole,
+  override: AgentSelection = {},
+): ResolvedAgentSelection {
+  const defaults = config.agents.default
+  const selected = config.agents[role]
+  return {
+    role,
+    backend: override.backend ?? selected.backend ?? defaults.backend ?? DEFAULT_AGENT_BACKEND,
+    ...(override.model ?? selected.model ?? defaults.model
+      ? { model: override.model ?? selected.model ?? defaults.model }
+      : {}),
+  }
+}
+
+const AGENT_PROFILE_NAMES = ['default', 'analysis', 'implementation', 'review'] as const
+
+/** Update only managed [agents.*] tables while preserving the rest of specops.toml. */
+export async function saveAgentConfig(workspace: string, agents: AgentConfig): Promise<SpecOpsConfig> {
+  const configPath = pathInside(workspace, 'specops.toml')
+  const source = await readText(configPath)
+  const lines = source.split(/\r?\n/)
+  const kept: string[] = []
+  let skip = false
+  for (const line of lines) {
+    if (line.trim() === '# Agent profiles managed by the SpecOps Settings UI.') continue
+    const header = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line)
+    if (header !== null) {
+      skip = AGENT_PROFILE_NAMES.some((name) => header[1] === `agents.${name}`)
+    }
+    if (!skip) kept.push(line)
+  }
+  while (kept.length > 0 && kept.at(-1)?.trim() === '') kept.pop()
+  const managed = [
+    '# Agent profiles managed by the SpecOps Settings UI.',
+    ...AGENT_PROFILE_NAMES.flatMap((name) => {
+      const profile = agents[name]
+      if (profile.backend === undefined && profile.model === undefined) return []
+      return [
+        '',
+        `[agents.${name}]`,
+        ...(profile.backend === undefined ? [] : [`backend = ${JSON.stringify(profile.backend)}`]),
+        ...(profile.model === undefined ? [] : [`model = ${JSON.stringify(profile.model)}`]),
+      ]
+    }),
+  ]
+  await atomicWrite(configPath, `${[...kept, '', ...managed, ''].join('\n')}`)
+  return loadConfig(workspace)
 }
 
 const WORKFLOW_KINDS: WorkflowKind[] = ['feature', 'bug', 'refactor', 'investigation', 'docs']
@@ -102,6 +194,19 @@ export async function loadConfig(workspace: string): Promise<SpecOpsConfig> {
     enabled: reviewRaw.enabled === undefined ? true : reviewRaw.enabled === true,
     ...(typeof reviewRaw.model === 'string' && reviewRaw.model.trim() !== '' ? { model: reviewRaw.model.trim() } : {}),
   }
+  const agentsRaw = (raw.agents ?? {}) as Record<string, unknown>
+  if (raw.agents !== undefined && (raw.agents === null || typeof raw.agents !== 'object' || Array.isArray(raw.agents))) {
+    throw new SpecOpsError('invalid_config', 'agents must be a table')
+  }
+  const agents: AgentConfig = {
+    default: agentSelection(agentsRaw.default, 'agents.default'),
+    analysis: agentSelection(agentsRaw.analysis, 'agents.analysis'),
+    implementation: agentSelection(agentsRaw.implementation, 'agents.implementation'),
+    review: agentSelection(agentsRaw.review, 'agents.review'),
+  }
+  // Backward compatibility: [review].model is treated as the review profile's
+  // model only when the new setting is absent.
+  if (agents.review.model === undefined && review.model !== undefined) agents.review.model = review.model
   const workflows = structuredClone(DEFAULT_WORKFLOWS)
   const workflowRaw = (raw.workflow ?? {}) as Record<string, unknown>
   for (const kind of WORKFLOW_KINDS) {
@@ -143,6 +248,7 @@ export async function loadConfig(workspace: string): Promise<SpecOpsConfig> {
     },
     verify,
     review,
+    agents,
     workflows,
     agent_backends: agentBackends,
   }

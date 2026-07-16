@@ -15,13 +15,13 @@ Promote the clarified session into intake when ready.
 2. Read `.specops/workspace/journal.md` for recent context (if it exists)
 3. Classify the user's request into one of:
 
-   | Classification | Document Kind | Directory | Examples |
+   | Classification | Document class / work type | Directory | Examples |
    |---|---|---|---|
-   | `spec` | `spec` | `specs/` | Coding standards, API contracts, naming conventions, invariants |
-   | `bug` | `change` | `changes/` | Fixing broken behavior in existing features |
-   | `refactor` | `change` | `changes/` | Restructuring code without changing behavior |
-   | `feature` | `change` | `changes/` | New endpoint, new component, new capability |
-   | `investigation` | `change` | `changes/` | Feasibility analysis, tech evaluation, research |
+   | `spec` | `normative` / no workflow | `specs/` | Coding standards, API contracts, naming conventions, invariants |
+   | `bug` | `work_item` / `bugfix` | `changes/` | Fixing broken behavior in existing features |
+   | `refactor` | `work_item` / `refactor` | `changes/` | Restructuring code without changing behavior |
+   | `feature` | `work_item` / `feature` | `changes/` | New endpoint, new component, new capability |
+   | `investigation` | `work_item` / `investigation` | `changes/` | Feasibility analysis, tech evaluation, research |
 
 3. Generate a short `slug` from the description (e.g. `fix-session-char-loss`)
 4. Break down into 1-5 tasks, each with:
@@ -34,6 +34,7 @@ Promote the clarified session into intake when ready.
 
 ### For `spec` classification:
 Use the `specops.create-document` skill to create a single file under `.specops/specs/{id}.md`.
+Do not create tasks or launch a Run. A later work item may reference it through `targets`.
 
 ### For `bug`, `refactor`, `feature`, `investigation`:
 Create a change folder under `.specops/changes/{slug}/`:

@@ -2,6 +2,7 @@
   import StatusBadge from '../shared/StatusBadge.svelte';
   import { activeSession } from '../../lib/stores/sessions.ts';
   import { t } from '../../lib/i18n.ts';
+  import { onWindowDragMouseDown } from '../../lib/windowDrag.ts';
 
   const STEP_LABELS: Record<string, string> = {
     analyze_request: 'Intake',
@@ -17,12 +18,17 @@
     failed: 'Failed',
     cancelled: 'Cancelled',
   };
+
+  let currentAgents = $derived(($activeSession?.agents ?? []).filter((agent) => agent.ended_at == null));
 </script>
 
 <div class="progress-panel">
-  <div class="col-title">{t('Progress')}</div>
+  <div class="col-title" role="presentation" data-tauri-drag-region onmousedown={onWindowDragMouseDown}>{t('Progress')}</div>
 
   {#if $activeSession}
+    {#if $activeSession.workflow_applicable === false}
+      <section class="workflow"><header class="workflow-head"><span class="current-phase">Document review</span></header></section>
+    {:else}
     {@const wf = $activeSession.workflow}
     <section class="workflow">
       <header class="workflow-head">
@@ -40,11 +46,12 @@
         {/each}
       </ol>
     </section>
+    {/if}
 
     <section class="agents">
       <header class="agents-head">Agents</header>
       <ul class="agent-list">
-        {#each $activeSession.agents ?? [] as agent (agent.kode_session_id)}
+        {#each currentAgents as agent (agent.kode_session_id)}
           <li class="agent">
             <span class="status-dot" data-status={agent.status}></span>
             <div class="agent-body">
@@ -60,6 +67,9 @@
             <StatusBadge label={agent.status} tone={agent.status === 'exited' ? 'archived' : 'active'} />
           </li>
         {/each}
+        {#if currentAgents.length === 0}
+          <li class="agent-empty">No active agent</li>
+        {/if}
       </ul>
     </section>
   {:else}
@@ -73,6 +83,8 @@
     flex-direction: column;
     height: 100%;
     overflow-y: auto;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .workflow {
     padding: var(--sp-2) var(--sp-3);
@@ -121,17 +133,6 @@
     min-height: 28px;
     font-size: var(--fs-sm);
     color: var(--fg-secondary);
-    animation: step-in var(--t-base) cubic-bezier(0.2, 0, 0, 1) both;
-  }
-  @keyframes step-in {
-    from {
-      opacity: 0;
-      transform: translateX(-4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateX(0);
-    }
   }
   .step-dot {
     position: relative;
@@ -155,12 +156,12 @@
   .step-active .step-dot {
     background: var(--st-busy);
     border-color: var(--st-busy);
-    animation: pulse 1.4s ease-in-out infinite;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--st-busy) 18%, transparent);
   }
   .step-awaiting_user .step-dot {
     background: var(--st-warn);
     border-color: var(--st-warn);
-    animation: pulse 1.1s ease-in-out infinite;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--st-warn) 18%, transparent);
   }
   .step-done .step-dot {
     background: var(--st-idle);
@@ -202,6 +203,11 @@
     flex-direction: column;
     gap: var(--sp-2);
   }
+  .agent-empty {
+    color: var(--fg-tertiary);
+    font-size: var(--fs-xs);
+    padding: var(--sp-2) 0;
+  }
   .agent {
     display: flex;
     align-items: center;
@@ -221,11 +227,11 @@
   .status-dot[data-status='active'],
   .status-dot[data-status='running'] {
     background: var(--st-idle);
-    animation: pulse 1.4s ease-in-out infinite;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--st-idle) 18%, transparent);
   }
   .status-dot[data-status='awaiting_user'] {
     background: var(--st-warn);
-    animation: pulse 1.1s ease-in-out infinite;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--st-warn) 18%, transparent);
   }
   .status-dot[data-status='exited'],
   .status-dot[data-status='failed'] {
@@ -265,14 +271,5 @@
     color: var(--fg-tertiary);
     font-size: var(--fs-sm);
     margin: 0;
-  }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.5;
-    }
   }
 </style>

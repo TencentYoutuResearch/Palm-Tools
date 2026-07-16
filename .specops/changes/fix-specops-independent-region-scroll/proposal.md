@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: fix-specops-independent-region-scroll
 kind: bug
+document_class: work_item
+work_type: bugfix
 title: SpecOps 每个区域独立上下滚动，消除全局上下滚动
-status: proposed
+status: cancelled
 verifies: []
 paths:
   - apps/specops/src/server/public/styles.css

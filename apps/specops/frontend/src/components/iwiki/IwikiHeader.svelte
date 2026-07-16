@@ -14,7 +14,7 @@
       <span class="meta">Choose a document from the tree</span>
     {/if}
   </div>
-  <div class="head-right" data-tauri-drag-region>
+  <div class="head-right">
     {#if $selectedDoc}
       <StatusBadge label={$selectedDoc.status} tone={$selectedDoc.status} />
     {/if}
@@ -68,7 +68,6 @@
     display: flex;
     align-items: center;
     gap: var(--sp-2);
-    pointer-events: none;
-    -webkit-app-region: drag;
+    -webkit-app-region: no-drag;
   }
 </style>

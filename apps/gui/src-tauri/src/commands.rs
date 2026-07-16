@@ -39,6 +39,35 @@ pub async fn specops_open(
     .map_err(|e| format!("SpecOps task failed: {e}"))?
 }
 
+#[tauri::command]
+pub async fn specops_init_git_workspace(workspace: String) -> Result<(), String> {
+    let path = PathBuf::from(workspace);
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|e| format!("invalid SpecOps workspace: {e}"))?;
+    if !canonical.is_dir() {
+        return Err("the selected SpecOps workspace is not a directory".into());
+    }
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("--")
+            .arg(&canonical)
+            .output()
+    })
+    .await
+    .map_err(|e| format!("Git initialization task failed: {e}"))?
+    .map_err(|e| format!("failed to launch git init: {e}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("git init failed with {}", output.status)
+        } else {
+            format!("git init failed: {detail}")
+        });
+    }
+    Ok(())
+}
+
 async fn wait_for_bridge_addr(
     listen_addr: Arc<parking_lot::Mutex<Option<SocketAddr>>>,
 ) -> Result<SocketAddr, String> {

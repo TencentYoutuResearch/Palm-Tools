@@ -32,7 +32,7 @@ export interface SessionExecution {
 }
 
 export type RequiredAction =
-  | { kind: 'answer'; prompt: string; question_id?: string; header?: string; options?: Array<{ label: string; description?: string }>; multi_select?: boolean }
+  | { kind: 'answer'; prompt: string; question_id?: string; header?: string; options?: Array<{ label: string; description?: string }>; multi_select?: boolean; questions?: AnswerQuestion[] }
   | { kind: 'promote_intake'; prompt: string }
   | { kind: 'plan_review'; plan_id: string; markdown?: string }
   | { kind: 'cli_error_decision'; title: string; message: string; options: Array<{ id: string; label: string }> }
@@ -40,6 +40,14 @@ export type RequiredAction =
   | { kind: 'verify' }
   | { kind: 'review'; patch_files: string[]; review_note?: string }
   | { kind: 'apply_patch' }
+
+export interface AnswerQuestion {
+  question_id: string
+  prompt: string
+  header?: string
+  options: Array<{ label: string; description?: string }>
+  multi_select?: boolean
+}
 
 export type SessionDecisionKind = 'answer' | 'plan_review'
 export type SessionDecisionOutcome = 'answered' | 'approved' | 'revision_requested'
@@ -144,6 +152,8 @@ export interface SpecOpsSessionRecord {
   /** question_id / plan_id values already answered, so the monitor won't re-surface them. */
   answered_action_ids: string[]
   decisions: SessionDecision[]
+  /** False for normative-document review sessions; they have activity history but no implementation workflow. */
+  workflow_applicable: boolean
   workflow: WorkflowState
   agents: SessionAgent[]
   transcript_cursor: number
@@ -167,6 +177,7 @@ export interface CreateSpecOpsSessionInput {
   agents?: SessionAgent[]
   transcript?: TranscriptEntry[]
   decisions?: SessionDecision[]
+  workflow_applicable?: boolean
 }
 
 export type SpecOpsSessionSummary = Pick<SpecOpsSessionRecord,
@@ -181,6 +192,7 @@ export type SpecOpsSessionSummary = Pick<SpecOpsSessionRecord,
   | 'execution'
   | 'required_action'
   | 'decisions'
+  | 'workflow_applicable'
   | 'workflow'
   | 'agents'
   | 'created_at'
@@ -296,6 +308,7 @@ function normalizeRecord(record: SpecOpsSessionRecord): SpecOpsSessionRecord {
   record.agents ??= []
   record.answered_action_ids ??= []
   record.decisions ??= []
+  record.workflow_applicable ??= true
   // Backfill per-agent cursor for files written before segmentation existed.
   for (const agent of record.agents) {
     if (typeof agent.transcript_cursor !== 'number') agent.transcript_cursor = 0
@@ -334,6 +347,7 @@ function summarize(record: SpecOpsSessionRecord): SpecOpsSessionSummary {
     execution: record.execution,
     required_action: record.required_action,
     decisions: record.decisions,
+    workflow_applicable: record.workflow_applicable,
     workflow: record.workflow,
     agents: record.agents,
     created_at: record.created_at,
@@ -372,6 +386,7 @@ export async function createSpecOpsSession(workspaceInput: string, input: Create
     required_action: input.required_action ?? null,
     answered_action_ids: [],
     decisions: input.decisions ?? [],
+    workflow_applicable: input.workflow_applicable ?? true,
     workflow: input.workflow ?? createWorkflow(input.phase, input.state ?? 'active'),
     agents: input.agents ?? [],
     transcript_cursor: 0,

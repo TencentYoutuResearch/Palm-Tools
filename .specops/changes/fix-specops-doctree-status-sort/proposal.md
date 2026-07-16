@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: fix-specops-doctree-status-sort
 kind: bug
+document_class: work_item
+work_type: bugfix
 title: SpecOps 文档列表组内按状态排序优化
-status: proposed
+status: cancelled
 verifies:
   - specops
 paths:

@@ -136,6 +136,7 @@ pub fn run() {
             commands::focus_main_window,
             commands::open_specops_window,
             commands::specops_open,
+            commands::specops_init_git_workspace,
             commands::specops_close,
             commands::get_pairing_payload,
             commands::get_paths_config,

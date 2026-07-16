@@ -1,10 +1,9 @@
-/// Kill la Code — Flutter 主题配置
+/// Kode Flutter theme — aligned with apps/gui/index.html design tokens.
 ///
 /// 设计语言:
-///   - 受 *Kill la Kill* 视觉影响:漆黑底色 + 血红主调 + 警示黄
-///   - 棱角分明、刀切感(几乎零圆角)
-///   - 高对比、强阴影、爆发式色块,而不是柔和渐变
-///   - 字号 / 字重偏粗(KLK 标题字喜欢黑体粗描边的视觉冲击)
+///   - green-tinted neutral surfaces + soft green accent
+///   - low-contrast borders and compact information density
+///   - status colors are semantic; they do not replace the primary accent
 ///
 /// 使用:
 ///   - `KillLaColors.*` 常量:用于状态色 / 装饰色
@@ -27,81 +26,80 @@ class KillLaColors {
   KillLaColors._();
 
   // ---- Dark (主皮)----
-  static const bgPrimary = Color(0xFF0B0B0D); // 漆黑底
-  static const bgSecondary = Color(0xFF141417); // 卡片 / appbar
-  static const bgTertiary = Color(0xFF1C1C20); // hover / elevated
+  static const bgPrimary = Color(0xFF0D0F0E);
+  static const bgSecondary = Color(0xFF111413);
+  static const bgTertiary = Color(0xFF181B19);
 
-  /// 血红主调 —— SCISSOR_BLADE_RED,KLK 标志色
-  static const accent = Color(0xFFFF2B2B);
-  static const accentHover = Color(0xFFFF4D4D);
+  /// Kode desktop accent.
+  static const accent = Color(0xFF9FE870);
+  static const accentHover = Color(0xFFB3F28B);
 
   /// 深红 —— 错误 / 危险
-  static const danger = Color(0xFFC1121F);
-  static const dangerStrong = Color(0xFF9D0208);
+  static const danger = Color(0xFFE06C75);
+  static const dangerStrong = Color(0xFFC95B65);
 
   /// 警示黄 —— Senketsu fiber 色,idle / 注意提示
-  static const warning = Color(0xFFFFB703);
+  static const warning = Color(0xFFE8B86D);
 
   /// 火焰橙 —— busy / running
-  static const busy = Color(0xFFFB5607);
+  static const busy = Color(0xFF7FB4E8);
 
-  static const textPrimary = Color(0xFFF5F5F5);
-  static const textSecondary = Color(0xFFB0B0B5);
-  static const textMuted = Color(0xFF6B6B70);
+  static const textPrimary = Color(0xFFEDEFEB);
+  static const textSecondary = Color(0xFFA8AEA7);
+  static const textMuted = Color(0xFF70776F);
 
-  static const border = Color(0xFF2A2A2E);
-  static const borderStrong = Color(0xFF3D3D44);
+  static const border = Color(0xFF262B28);
+  static const borderStrong = Color(0xFF3A413C);
 
   // ---- Light (副皮,降低纯度,用户切系统主题时用)----
-  static const lightBg = Color(0xFFF6F6F7);
-  static const lightSurface = Color(0xFFEDEDF0);
+  static const lightBg = Color(0xFFF7F7F3);
+  static const lightSurface = Color(0xFFECEDE8);
   static const lightElevated = Color(0xFFFFFFFF);
-  static const lightAccent = Color(0xFFE01E37);
-  static const lightAccentHover = Color(0xFFFF2B2B);
-  static const lightDanger = Color(0xFF9D0208);
-  static const lightWarning = Color(0xFFF4A261);
-  static const lightBusy = Color(0xFFF77F00);
-  static const lightTextPrimary = Color(0xFF111113);
-  static const lightTextSecondary = Color(0xFF44444A);
-  static const lightTextMuted = Color(0xFF7A7A80);
-  static const lightBorder = Color(0xFFD0D0D5);
+  static const lightAccent = Color(0xFF216E45);
+  static const lightAccentHover = Color(0xFF2B8054);
+  static const lightDanger = Color(0xFFB54750);
+  static const lightWarning = Color(0xFF9A6B20);
+  static const lightBusy = Color(0xFF3977A8);
+  static const lightTextPrimary = Color(0xFF171A18);
+  static const lightTextSecondary = Color(0xFF4F5750);
+  static const lightTextMuted = Color(0xFF7A827B);
+  static const lightBorder = Color(0xFFD9DDD5);
 
   /// session 状态点配色(starting/idle/busy/exited)
   static Color statusDot(String status) => switch (status) {
-        'busy' => busy,
-        'idle' => warning,           // KLK 风:idle 也用警示黄,别用绿
-        'starting' => textMuted,
-        'exited' => textMuted,
-        _ => textMuted,
-      };
+    'busy' => busy,
+    'idle' => warning,
+    'starting' => textMuted,
+    'exited' => textMuted,
+    _ => textMuted,
+  };
 
   /// permission mode chip 配色
   static Color modeColor(String? m) => switch (m) {
-        'default' => textSecondary,
-        'acceptEdits' => accent,         // 主红 — 自动接受是 KLK 主操作
-        'plan' => warning,                // 黄 — 计划态
-        'bypassPermissions' => dangerStrong, // 深红警告
-        _ => textMuted,
-      };
+    'default' => textSecondary,
+    'acceptEdits' => accent,
+    'plan' => warning, // 黄 — 计划态
+    'bypassPermissions' => dangerStrong, // 深红警告
+    _ => textMuted,
+  };
 
   /// task 状态配色(completed / in_progress / deleted / pending)
   static (Color, IconData, String) taskStyle(String status) => switch (status) {
-        'completed' => (warning, Icons.check_circle, 'completed'),
-        'in_progress' => (accent, Icons.play_circle_fill, 'in progress'),
-        'deleted' => (textMuted, Icons.cancel, 'deleted'),
-        _ => (busy, Icons.radio_button_unchecked, 'pending'),
-      };
+    'completed' => (warning, Icons.check_circle, 'completed'),
+    'in_progress' => (accent, Icons.play_circle_fill, 'in progress'),
+    'deleted' => (textMuted, Icons.cancel, 'deleted'),
+    _ => (busy, Icons.radio_button_unchecked, 'pending'),
+  };
 
   /// tool_use 状态点
   static Color toolStatus(String s) => switch (s) {
-        'ok' => warning,
-        'error' => danger,
-        _ => busy,
-      };
+    'ok' => warning,
+    'error' => danger,
+    _ => busy,
+  };
 
   /// attention 配色(ask=主红,plan=警示黄)
-  static Color attention(String kind) =>
-      kind == 'plan' ? warning : accent;
+  static Color attention(String kind) => kind == 'plan' ? warning : accent;
 }
 
 /// 整体 ThemeData
@@ -109,7 +107,7 @@ class KillLaTheme {
   KillLaTheme._();
 
   static ThemeData dark() {
-    const onAccent = Colors.white;
+    const onAccent = Color(0xFF07100B);
 
     final scheme = ColorScheme(
       brightness: Brightness.dark,
@@ -183,7 +181,7 @@ class KillLaTheme {
     required Color border,
     required Color accent,
   }) {
-    // KLK 偏粗黑体;系统字体 fallback 链同 GUI
+    // System font stack mirrors the desktop GUI.
     const headingFamily = '.SF Pro Display';
     const bodyFamily = '.SF Pro Text';
 
@@ -192,12 +190,12 @@ class KillLaTheme {
       displayLarge: TextStyle(
         color: textPrimary,
         fontFamily: headingFamily,
-        fontWeight: FontWeight.w900,
+        fontWeight: FontWeight.w700,
         letterSpacing: -0.5,
       ),
       titleLarge: TextStyle(
         color: textPrimary,
-        fontWeight: FontWeight.w800,
+        fontWeight: FontWeight.w700,
         fontFamily: headingFamily,
         letterSpacing: 0.2,
       ),
@@ -219,16 +217,12 @@ class KillLaTheme {
         fontFamily: bodyFamily,
         fontWeight: FontWeight.w700,
       ),
-      labelSmall: TextStyle(
-        color: textMuted,
-        fontFamily: bodyFamily,
-      ),
+      labelSmall: TextStyle(color: textMuted, fontFamily: bodyFamily),
     );
 
-    // KLK 风:几乎零圆角;只在必要的 chip / dialog 上用 4
-    const radSm = 2.0;
-    const radMd = 4.0;
-    const radLg = 6.0;
+    const radSm = 8.0;
+    const radMd = 10.0;
+    const radLg = 14.0;
 
     return ThemeData(
       useMaterial3: true,
@@ -246,10 +240,10 @@ class KillLaTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
-        shape: Border(bottom: BorderSide(color: accent, width: 2)),
+        shape: Border(bottom: BorderSide(color: border, width: 1)),
         titleTextStyle: TextStyle(
           color: textPrimary,
-          fontWeight: FontWeight.w800,
+          fontWeight: FontWeight.w700,
           fontSize: 16,
           letterSpacing: 0.4,
           fontFamily: headingFamily,
@@ -271,7 +265,7 @@ class KillLaTheme {
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           backgroundColor: accent,
-          foregroundColor: Colors.white,
+          foregroundColor: scheme.onPrimary,
           disabledBackgroundColor: surfaceHi,
           disabledForegroundColor: textMuted,
           shape: RoundedRectangleBorder(
@@ -309,8 +303,10 @@ class KillLaTheme {
         fillColor: surfaceLow,
         hintStyle: TextStyle(color: textMuted),
         labelStyle: TextStyle(color: textSecondary),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 12,
+        ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(radSm),
           borderSide: BorderSide(color: border),
@@ -329,11 +325,7 @@ class KillLaTheme {
         ),
       ),
 
-      dividerTheme: DividerThemeData(
-        color: border,
-        thickness: 1,
-        space: 1,
-      ),
+      dividerTheme: DividerThemeData(color: border, thickness: 1, space: 1),
 
       listTileTheme: ListTileThemeData(
         iconColor: textSecondary,

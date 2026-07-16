@@ -12,12 +12,22 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method, headers: authHeaders() };
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 15_000);
+  const init: RequestInit = { method, headers: authHeaders(), signal: controller.signal };
   if (body !== undefined) {
     init.headers = authHeaders({ 'content-type': 'application/json' });
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(path, init);
+  let res: Response;
+  try {
+    res = await fetch(path, init);
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`${method} ${path} timed out`);
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
   const text = await res.text();
   let parsed: unknown = undefined;
   if (text) {

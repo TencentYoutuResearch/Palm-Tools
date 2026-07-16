@@ -46,7 +46,7 @@
 <style>
   .resizer {
     position: absolute;
-    top: 0;
+    top: var(--header-height, 44px);
     bottom: 0;
     width: 6px;
     cursor: col-resize;

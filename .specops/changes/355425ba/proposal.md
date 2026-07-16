@@ -1,9 +1,11 @@
 ---
-schema_version: 1
+schema_version: 2
 id: 355425ba-d70b-484e-a254-d290fa4433ca
 kind: investigation
+document_class: work_item
+work_type: investigation
 title: PTY 显示乱码根因分析与防御
-status: proposed
+status: cancelled
 verifies:
   - rust
 paths:

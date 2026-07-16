@@ -1,5 +1,5 @@
 import type { KodeClient } from '../adapters/kode.js'
-import { updateSessionAgentStatus, updateSpecOpsSession, type TranscriptEntry } from './session.js'
+import { readSpecOpsSession, updateSessionAgentStatus, updateSpecOpsSession, type TranscriptEntry } from './session.js'
 import { specOpsSessionEvents } from './session-events.js'
 
 interface SessionMonitorEntry {
@@ -136,6 +136,59 @@ async function poll(entry: SessionMonitorEntry): Promise<void> {
 /** required_action kinds owned by the run lifecycle (run-monitor.ts) — never overwrite these. */
 const RUN_OWNED_ACTIONS = new Set(['review', 'verify', 'apply_patch', 'run_in_worktree'])
 
+type PendingPrompt = { kind: 'answer' | 'plan_review'; id: string; payload: Record<string, unknown> }
+
+function answerQuestion(candidate: PendingPrompt): {
+  question_id: string
+  prompt: string
+  header?: string
+  options: Array<{ label: string; description?: string }>
+  multi_select: boolean
+} {
+  const options = Array.isArray(candidate.payload.options)
+    ? (candidate.payload.options as Array<Record<string, unknown>>).map((option) => ({
+      label: typeof option.label === 'string' ? option.label : String(option.label ?? ''),
+      ...(typeof option.description === 'string' ? { description: option.description } : {}),
+    }))
+    : []
+  return {
+    question_id: candidate.id,
+    prompt: typeof candidate.payload.question === 'string' ? candidate.payload.question : '',
+    ...(typeof candidate.payload.header === 'string' ? { header: candidate.payload.header } : {}),
+    options,
+    multi_select: candidate.payload.multi_select === true,
+  }
+}
+
+export function formatQuestionsForTranscript(questions: ReturnType<typeof answerQuestion>[]): string {
+  return questions.map((question, index) => {
+    const options = question.options.map((option, optionIndex) =>
+      `  ${optionIndex + 1}. ${option.label}${option.description === undefined ? '' : ` — ${option.description}`}`,
+    )
+    return [`Question ${index + 1}: ${question.prompt}`, ...options].join('\n')
+  }).join('\n\n')
+}
+
+/** Convert retained bridge events into the next CLI prompt SpecOps must show. */
+export function nextPendingPrompt(
+  events: Array<{ type: string; payload: unknown }>,
+  answeredActionIds: Iterable<string>,
+): PendingPrompt | null {
+  const answered = new Set(answeredActionIds)
+  for (const ev of events) {
+    const payload = (ev.payload ?? {}) as Record<string, unknown>
+    if (ev.type === 'ask_user_question' && typeof payload.question_id === 'string'
+      && !answered.has(payload.question_id)) {
+      return { kind: 'answer', id: payload.question_id, payload }
+    }
+    if (ev.type === 'plan_proposed' && typeof payload.plan_id === 'string'
+      && !answered.has(payload.plan_id)) {
+      return { kind: 'plan_review', id: payload.plan_id, payload }
+    }
+  }
+  return null
+}
+
 /**
  * Read the bridge event history for this kode session and, if the latest
  * pending AskUserQuestion / ExitPlanMode hasn't been answered yet, set it as the
@@ -149,25 +202,32 @@ async function syncPendingPrompt(entry: SessionMonitorEntry): Promise<void> {
   } catch {
     return
   }
-  // Walk newest-first; the latest question/plan wins.
-  let pending: { kind: 'answer' | 'plan_review'; id: string; payload: Record<string, unknown> } | null = null
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i]
-    if (ev === undefined) continue
-    const p = (ev.payload ?? {}) as Record<string, unknown>
-    if (ev.type === 'ask_user_question' && typeof p.question_id === 'string') {
-      pending = { kind: 'answer', id: p.question_id, payload: p }
-      break
-    }
-    if (ev.type === 'plan_proposed' && typeof p.plan_id === 'string') {
-      pending = { kind: 'plan_review', id: p.plan_id, payload: p }
-      break
-    }
-  }
+  // AskUserQuestion may contain several questions. The semantic bridge expands
+  // those into consecutive events, while the CLI presents them one at a time.
+  // Keep event order and surface the first unanswered item; choosing the newest
+  // event skips straight to the last question and strands the earlier ones.
+  const snapshot = await readSpecOpsSession(entry.workspace, entry.specopsSessionId)
+  const pending = nextPendingPrompt(events, snapshot.answered_action_ids)
   if (pending === null) return
-  // Already published this exact prompt — don't re-fire every 2.5s.
-  if (entry.lastPendingId === pending.id) return
+  const unansweredQuestions: PendingPrompt[] = events
+    .flatMap((event): PendingPrompt[] => {
+      const payload = (event.payload ?? {}) as Record<string, unknown>
+      return event.type === 'ask_user_question' && typeof payload.question_id === 'string'
+        ? [{ kind: 'answer', id: payload.question_id, payload }]
+        : []
+    })
+    .filter((candidate) => !snapshot.answered_action_ids.includes(candidate.id))
+  // Already published this exact prompt — don't re-fire every 2.5s. Reading
+  // the durable action as well as the in-memory id is important: after q1 is
+  // answered, q2 must surface even though the history snapshot is unchanged.
+  const currentId = snapshot.required_action?.kind === 'answer'
+    ? snapshot.required_action.question_id
+    : snapshot.required_action?.kind === 'plan_review'
+      ? snapshot.required_action.plan_id
+      : null
+  if (entry.lastPendingId === pending.id && currentId === pending.id) return
 
+  let appendedQuestion: TranscriptEntry | null = null
   await updateSpecOpsSession(entry.workspace, entry.specopsSessionId, (record) => {
     if (record.answered_action_ids.includes(pending.id)) return
     const current = record.required_action
@@ -175,19 +235,26 @@ async function syncPendingPrompt(entry: SessionMonitorEntry): Promise<void> {
     // stale answer/plan_review with a newer one.
     if (current !== null && RUN_OWNED_ACTIONS.has(current.kind)) return
     if (pending.kind === 'answer') {
-      const options = Array.isArray(pending.payload.options)
-        ? (pending.payload.options as Array<Record<string, unknown>>).map((o) => ({
-          label: typeof o.label === 'string' ? o.label : String(o.label ?? ''),
-          ...(typeof o.description === 'string' ? { description: o.description } : {}),
-        }))
-        : []
+      const questions = unansweredQuestions.map(answerQuestion)
+      const first = questions[0] ?? answerQuestion(pending)
+      const questionText = formatQuestionsForTranscript(questions.length === 0 ? [first] : questions)
+      const alreadyRecorded = record.transcript.some((item) =>
+        item.kode_session_id === entry.kodeSessionId && item.role === 'agent' && item.text === questionText)
+      if (!alreadyRecorded) {
+        appendedQuestion = {
+          role: 'agent', text: questionText, at: new Date().toISOString(),
+          kode_session_id: entry.kodeSessionId, kind: 'text',
+        }
+        record.transcript.push(appendedQuestion)
+      }
       record.required_action = {
         kind: 'answer',
-        prompt: typeof pending.payload.question === 'string' ? pending.payload.question : '',
-        question_id: pending.id,
-        ...(typeof pending.payload.header === 'string' ? { header: pending.payload.header } : {}),
-        options,
-        multi_select: pending.payload.multi_select === true,
+        prompt: first.prompt,
+        question_id: first.question_id,
+        ...(first.header !== undefined ? { header: first.header } : {}),
+        options: first.options,
+        multi_select: first.multi_select,
+        questions,
       }
     } else {
       record.required_action = {
@@ -198,6 +265,9 @@ async function syncPendingPrompt(entry: SessionMonitorEntry): Promise<void> {
     }
     record.state = 'awaiting_user'
   }).then((updated) => {
+    if (appendedQuestion !== null) {
+      specOpsSessionEvents.publish('session.transcript_appended', entry.specopsSessionId, { entries: [appendedQuestion] })
+    }
     const ra = updated.required_action
     if (ra !== null && (ra.kind === 'answer' || ra.kind === 'plan_review')) {
       const raId = ra.kind === 'answer' ? ra.question_id : ra.plan_id
