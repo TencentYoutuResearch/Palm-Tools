@@ -139,6 +139,43 @@ export interface SessionStatusEvent {
   status: SessionStatus
 }
 
+export type ModelUsagePeriod = 'today' | 'month' | 'all'
+
+export interface ModelUsageTotals {
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  total_tokens: number
+  cost_usd: number
+}
+
+export interface ModelUsageRow extends ModelUsageTotals {
+  backend: 'codex' | 'claude' | 'codebuddy' | string
+  model: string
+  requests: number
+}
+
+export interface ModelUsageSnapshot {
+  period: ModelUsagePeriod
+  scanned_files: number
+  rows: ModelUsageRow[]
+  totals: ModelUsageTotals
+  daily: { date: string; total_tokens: number }[]
+}
+
+export const modelUsageIpc = {
+  snapshot: (period: ModelUsagePeriod) =>
+    invoke<ModelUsageSnapshot>('model_usage_snapshot', { period }),
+}
+
+export const modelMonitorIpc = {
+  setExpanded: (expanded: boolean) =>
+    invoke<void>('model_monitor_set_expanded', { expanded }),
+  reposition: () => invoke<void>('model_monitor_reposition'),
+  onThemeChanged: (cb: (theme: ThemeMode) => void) =>
+    listen<string>('theme-changed', (event) => cb(event.payload as ThemeMode)),
+}
+
 /// SpecOps "Open in kode" 触发。payload 携带完整 session DTO,
 /// 主窗口 tab 缺失时据此补建(字段与 SessionCreatedEvent 一致)。
 /// DTO 字段标记为可选以兼容只带 id 的旧/降级路径。

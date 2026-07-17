@@ -163,6 +163,54 @@
     "message": "Remote: {name}",
     "description": "Remote memory source label"
   },
+  "memory.metrics.title": {
+    "message": "Memory metrics",
+    "description": "Status bar memory metrics button aria label"
+  },
+  "memory.metrics.summaryAria": {
+    "message": "Memory metrics summary",
+    "description": "Metrics hover card aria label"
+  },
+  "memory.metrics.badgeTitle": {
+    "message": "Memory metrics — hover for stats, ⌘⇧M to review, ⌘⇧B to browse",
+    "description": "Status bar memory metrics tooltip"
+  },
+  "memory.metrics.reviewQueueTitle": {
+    "message": "Memory review queue ({count} pending) — ⌘⇧M",
+    "description": "Status bar memory pending review tooltip"
+  },
+  "memory.metrics.openReview": {
+    "message": "Open memory review",
+    "description": "Status bar memory pending review button aria label"
+  },
+  "memory.metrics.error": {
+    "message": "Metrics: {error}",
+    "description": "Metrics hover card load error"
+  },
+  "memory.metrics.loading": {
+    "message": "Loading metrics...",
+    "description": "Metrics hover card loading state"
+  },
+  "memory.metrics.todayProposes": {
+    "message": "Proposals today",
+    "description": "Metrics hover card daily propose count label"
+  },
+  "memory.metrics.acceptRate7d": {
+    "message": "7-day accept rate",
+    "description": "Metrics hover card 7-day accept rate label"
+  },
+  "memory.metrics.reviews": {
+    "message": "{count} reviews",
+    "description": "Metrics hover card review count"
+  },
+  "memory.metrics.energy": {
+    "message": "Energy",
+    "description": "Metrics hover card energy section label"
+  },
+  "memory.metrics.byAuthor7d": {
+    "message": "By author (7d)",
+    "description": "Metrics hover card by-author section label"
+  },
   "memory.sync.title": {
     "message": "Memory Git Sync",
     "description": "Memory sync panel title"

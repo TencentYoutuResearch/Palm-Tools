@@ -985,6 +985,11 @@ pub fn set_theme(
     s.theme = Some(theme.clone());
     state.persist.request_save(s);
 
+    // 让系统级 model monitor 等同源 Tauri 伴随窗口即时跟随主窗口切换。
+    // 主窗口本身已经乐观更新本地状态，收到这个广播也无需额外处理。
+    use tauri::Emitter;
+    let _ = app.emit("theme-changed", theme.clone());
+
     // 广播主题切换到所有 SpecOps 独立窗口。SpecOps 窗口加载的是外部 URL
     // (http://127.0.0.1:port),没有 Tauri IPC,用 webview.eval() 直接操作
     // DOM attribute,CSS 的 [data-theme] 选择器自然响应。首屏主题已由

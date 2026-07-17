@@ -28,6 +28,14 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan QR code to pair with your desktop Kode server</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Kode needs to reach your desktop bridge on the local network to pair and stream sessions.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- kode bridge 是 http://LAN-IP:47870,非 https。允许 cleartext 才能配对。 -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

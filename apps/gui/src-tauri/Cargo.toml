@@ -25,6 +25,7 @@ tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = "0.4"
 # 2026-06:GUI 管理 backend 时改写 ~/.config/kode/config.toml,要求保留用户注释/顺序。
 # 普通 toml crate 是「parse-then-stringify」会丢注释,toml_edit 维持 DOM 增量修改。
 toml_edit = { version = "0.22", features = ["serde"] }
@@ -65,6 +66,7 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 # 注意此 [target...] 块必须放最后,否则后续顶层依赖会被吸进 macOS-only。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
 
 [features]
 # 默认关闭所有 Tauri allowlist,只显式开启用得到的

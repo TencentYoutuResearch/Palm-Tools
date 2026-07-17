@@ -1,4 +1,7 @@
 /// 配对屏:扫码或手输 host/port/token,验证连通后保存。
+import 'dart:io';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -49,9 +52,9 @@ class _PairScreenState extends ConsumerState<PairScreen> {
     });
 
     final port = int.tryParse(_portCtrl.text.trim()) ?? -1;
-    if (_hostCtrl.text.trim().isEmpty ||
-        port <= 0 ||
-        _tokenCtrl.text.trim().isEmpty) {
+    final userHost = _hostCtrl.text.trim();
+    final token = _tokenCtrl.text.trim();
+    if (userHost.isEmpty || port <= 0 || token.isEmpty) {
       setState(() {
         _error = 'fill host / port / token';
         _testing = false;
@@ -59,52 +62,106 @@ class _PairScreenState extends ConsumerState<PairScreen> {
       return;
     }
 
-    final ep = Endpoint(
-      host: _hostCtrl.text.trim(),
-      port: port,
-      token: _tokenCtrl.text.trim(),
-    );
+    // 候选 host:用户输入优先。真机若不在 Mac 同子网 → No route to host,
+    // 自动 fallback 试 127.0.0.1 —— 覆盖 Android 真机 + `adb reverse tcp:47870 tcp:47870` USB 调试。
+    // iOS 真机 127.0.0.1 是手机自己,会快速 refused,不浪费时间。
+    final candidates = <String>[userHost];
+    if (userHost != '127.0.0.1' && userHost != 'localhost') {
+      candidates.add('127.0.0.1');
+    }
 
-    final client = ApiClient(ep);
-    try {
-      final ok = await client.healthz();
-      if (!ok) {
-        setState(() {
-          _error = 'healthz did not return "ok"';
-          _testing = false;
-        });
-        return;
+    Endpoint? working;
+    String? lastError;
+    for (final h in candidates) {
+      final ep = Endpoint(host: h, port: port, token: token);
+      try {
+        final client = ApiClient(ep);
+        final ok = await client.healthz();
+        if (ok) {
+          await client.listSessions();
+          working = ep;
+          break;
+        }
+        if (h == userHost) lastError = 'healthz did not return "ok"';
+      } on ApiException catch (e) {
+        debugPrint('[pair] API error on $h: $e');
+        if (h == userHost) lastError = '${e.error}: ${e.detail}';
+      } catch (e, st) {
+        debugPrint('[pair] connect error on $h: $e\n$st');
+        if (h == userHost) lastError = _friendlyConnectError(e, ep);
       }
-      // 也验一下 bearer 能用
-      await client.listSessions();
-    } on ApiException catch (e) {
-      debugPrint('[pair] API error: $e');
+    }
+
+    if (working == null) {
       setState(() {
-        _error = '${e.error}: ${e.detail}';
+        _error = lastError ?? 'connect failed';
         _testing = false;
       });
       return;
-    } catch (e, st) {
-      debugPrint('[pair] connect error: $e\n$st');
-      setState(() {
-        _error = 'connect: $e';
-        _testing = false;
-      });
-      return;
+    }
+
+    if (working.host != userHost) {
+      debugPrint(
+        '[pair] fell back to ${working.host} (original $userHost unreachable)',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Connected via ${working.host} (USB debug: original $userHost unreachable)',
+            ),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
     }
 
     // 保存 + 进 home。save 失败(keychain 弹窗 / 权限)只 log,继续设 endpoint。
     try {
       await ref
           .read(endpointStorageProvider)
-          .save(ep)
+          .save(working)
           .timeout(const Duration(milliseconds: 1500));
     } catch (e) {
       debugPrint('[pair] save failed (will skip persistence): $e');
     }
-    ref.read(endpointProvider.notifier).state = ep;
+    ref.read(endpointProvider.notifier).state = working;
     if (!mounted) return;
     context.go('/sessions');
+  }
+
+  /// 把底层 DioException / SocketException 翻译成可操作提示。
+  /// "No route to host" 这类 OS 错误对用户没意义,得告诉用户下一步该查什么。
+  String _friendlyConnectError(Object e, Endpoint ep) {
+    var raw = e.toString();
+    if (e is DioException) {
+      final inner = e.error;
+      if (inner is SocketException) {
+        raw = inner.osError?.message ?? inner.message;
+      } else if (inner != null) {
+        raw = inner.toString();
+      }
+    }
+    final lower = raw.toLowerCase();
+
+    final String kind;
+    if (lower.contains('no route to host') ||
+        lower.contains('network is unreachable')) {
+      kind = 'phone and Mac are not on the same WiFi subnet';
+    } else if (lower.contains('connection refused')) {
+      kind = 'connection refused (desktop bridge not running?)';
+    } else if (lower.contains('timed out') || lower.contains('timeout')) {
+      kind = 'timed out (firewall may be dropping packets)';
+    } else {
+      kind = 'cannot reach host';
+    }
+
+    return 'Cannot connect to ${ep.host}:${ep.port}\n'
+        '$kind.\n'
+        'Fix:\n'
+        '  · join same WiFi as Mac\n'
+        '  · Android USB: `adb reverse tcp:${ep.port} tcp:${ep.port}` then retry\n'
+        '  · or install Tailscale on both devices';
   }
 
   @override

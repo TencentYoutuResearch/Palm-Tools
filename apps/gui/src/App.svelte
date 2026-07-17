@@ -1888,8 +1888,8 @@
         >
           <button
             class="mem-badge"
-            title="Memory review queue ({totalMemoryPendingCount} pending) — ⌘⇧M"
-            aria-label="Open memory review"
+            title={tr('memory.metrics.reviewQueueTitle', { count: totalMemoryPendingCount })}
+            aria-label={tr('memory.metrics.openReview')}
             onclick={() => (memoryPanelOpen = true)}
           >
             <Icon name="brain" /> {totalMemoryPendingCount}
@@ -1915,8 +1915,8 @@
         >
           <button
             class="mem-badge dim"
-            title="Memory metrics — hover for stats, ⌘⇧M to review, ⌘⇧B to browse"
-            aria-label="Memory metrics"
+            title={tr('memory.metrics.badgeTitle')}
+            aria-label={tr('memory.metrics.title')}
             onclick={() => (memoryBrowseOpen = true)}
           >
             <Icon name="brain" />
@@ -2296,14 +2296,12 @@
     user-select: none;
     -webkit-user-select: none;
     cursor: default;
-    /* chip 化:背景 + 圆角 + padding,Linear/Vercel 标题样式 */
     display: inline-flex;
     align-items: center;
     padding: 3px 8px;
     border-radius: var(--rad-md);
     background: var(--bg-chip);
     border: 1px solid var(--bd-muted);
-    /* 轻微 text-shadow 增强在渐变背景上的可读性 */
     text-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
   }
   .main-title-center span {
@@ -3582,20 +3580,18 @@
     display: flex;
     align-items: center;
     gap: var(--sp-2);
-    /* line-height: 1 让不同字号的文字 flex 项行盒高度=字号本身,
-     * 配合 align-items: center 使所有元素的视觉中心落在同一条水平线上,
-     * 避免大 line-height 文字把行盒撑高、视觉中心偏移。 */
-    line-height: 1;
+    /* 给字体 descender 留出足够行盒空间。line-height:1 在部分字体/缩放下
+     * 会裁掉 g/j/p/y 等下半部分；状态栏本身 28px 高，1.35 仍可稳定居中。 */
+    line-height: 1.35;
     /* 不要在这里 overflow:hidden — 会把 .dot-attention 的 box-shadow 脉冲裁掉。
      * 父级 .status 已有 overflow: hidden 做兜底防溢出。 */
   }
-  /* 状态栏左右两侧的所有直接子项:统一 line-height 让行盒高度=字号,
-   * 配合父级 align-items: center,使不同字号的文字视觉中心落在同一水平线。
+  /* 状态栏左右两侧的所有直接子项:统一 line-height,不改变 display。
    * 注意:不能给会做 text-overflow:ellipsis 的元素(.cwd-path)设 inline-flex,
-   * 否则截断失效 —— 所以这里只统一 line-height,不动 display。 */
+   * 否则截断失效。 */
   .status-left > *,
   .status-right > * {
-    line-height: 1;
+    line-height: 1.35;
   }
   .status-text { color: var(--fg-secondary); }
   .status-text.muted { color: var(--fg-tertiary); }

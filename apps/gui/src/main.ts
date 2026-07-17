@@ -1,5 +1,6 @@
 import { mount } from 'svelte'
 import App from './App.svelte'
+import ModelUsageIsland from './lib/ModelUsageIsland.svelte'
 
 // 全局兜底:任何未捕获错误都直接渲染到屏幕,避免一片空白看不到原因
 function showFatal(msg: string) {
@@ -22,7 +23,8 @@ window.addEventListener('unhandledrejection', (e) => {
 
 let app: any = null
 try {
-  app = mount(App, {
+  const isModelMonitor = new URLSearchParams(window.location.search).has('model_monitor')
+  app = mount(isModelMonitor ? ModelUsageIsland : App, {
     target: document.getElementById('app')!,
   })
 } catch (e: any) {

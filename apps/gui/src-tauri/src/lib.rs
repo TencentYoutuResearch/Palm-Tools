@@ -18,6 +18,8 @@ mod deploy;
 mod endpoints;
 mod memory;
 mod memory_mcp;
+mod model_monitor;
+mod model_usage;
 mod persistence;
 mod shell_pty;
 mod specops;
@@ -116,6 +118,9 @@ pub fn run() {
                     tracing::warn!(error = %e, "resolve_pending_enabled failed");
                 }
             }
+            if let Err(error) = crate::model_monitor::create_model_monitor(&handle) {
+                tracing::warn!(%error, "model monitor window unavailable");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -161,6 +166,9 @@ pub fn run() {
             workspace::open_path,
             commands::read_clipboard,
             commands::list_sessions_for_cwd,
+            model_usage::model_usage_snapshot,
+            model_monitor::model_monitor_set_expanded,
+            model_monitor::model_monitor_reposition,
             // M4 memory review queue
             memory::memory_list_pending,
             memory::memory_stats,

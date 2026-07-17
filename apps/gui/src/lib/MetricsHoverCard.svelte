@@ -17,6 +17,7 @@
   import { onMount } from 'svelte'
   import { memoryIpc, type MemoryMetricsSummary } from './ipc'
   import Icon from './Icon.svelte'
+  import { currentLocale, t } from './i18n'
 
   type Props = {
     visible: boolean
@@ -25,6 +26,10 @@
 
   let data: MemoryMetricsSummary | null = $state(null)
   let loadError: string | null = $state(null)
+  let tr = $derived.by(() => {
+    void $currentLocale
+    return (key: string, params?: Parameters<typeof t>[1]) => t(key, params)
+  })
 
   $effect(() => {
     if (!visible) return
@@ -56,22 +61,22 @@
 </script>
 
 {#if visible}
-  <div class="card" role="tooltip" aria-label="Memory metrics summary">
+  <div class="card" role="tooltip" aria-label={tr('memory.metrics.summaryAria')}>
     {#if loadError}
-      <div class="line err">metrics: {loadError}</div>
+      <div class="line err">{tr('memory.metrics.error', { error: loadError })}</div>
     {:else if !data}
-      <div class="line muted">loading metrics…</div>
+      <div class="line muted">{tr('memory.metrics.loading')}</div>
     {:else}
       <div class="line">
-        <span class="lbl">今日 propose</span>
+        <span class="lbl">{tr('memory.metrics.todayProposes')}</span>
         <span class="val">{data.today_proposes}</span>
       </div>
       <div class="line">
-        <span class="lbl">7天接受率</span>
+        <span class="lbl">{tr('memory.metrics.acceptRate7d')}</span>
         <span class="val">
           {#if data.accept_rate_7d != null}
             {(data.accept_rate_7d * 100).toFixed(0)}%
-            <span class="muted small">({data.total_reviews_7d} reviews)</span>
+            <span class="muted small">({tr('memory.metrics.reviews', { count: data.total_reviews_7d })})</span>
           {:else}
             <span class="muted">--</span>
           {/if}
@@ -80,7 +85,7 @@
       {#if data.energy_by_author.length > 0}
         <div class="sep"></div>
         <div class="line lbl-row">
-          <span class="lbl"><Icon name="zap" /> energy</span>
+          <span class="lbl"><Icon name="zap" /> {tr('memory.metrics.energy')}</span>
         </div>
         {#each data.energy_by_author as e (e.author)}
           <div class="line energy">
@@ -93,7 +98,7 @@
       {#if data.by_author.length > 0}
         <div class="sep"></div>
         <div class="line lbl-row">
-          <span class="lbl"><Icon name="check" /> by author (7d)</span>
+          <span class="lbl"><Icon name="check" /> {tr('memory.metrics.byAuthor7d')}</span>
         </div>
         {#each data.by_author as a (a.author)}
           <div class="line by-author">
@@ -114,13 +119,15 @@
     position: absolute;
     bottom: calc(100% + 6px);
     right: 0;
-    background: var(--bg-tooltip, #1f1f1f);
-    color: var(--fg, #ddd);
-    border: 1px solid var(--border, #444);
-    border-radius: 4px;
+    background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
+    color: var(--fg-primary);
+    border: 1px solid var(--bd-default);
+    border-radius: 8px;
     padding: 8px 12px;
     min-width: 220px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--sh-md);
+    backdrop-filter: var(--blur-modal);
+    -webkit-backdrop-filter: var(--blur-modal);
     z-index: 1200;
     font-size: 12px;
     pointer-events: none; /* 不抢 hover —— 父按钮 onmouseleave 才会消失 */
@@ -187,7 +194,7 @@
     text-align: right;
   }
   .lbl {
-    color: var(--text-muted, #888);
+    color: var(--fg-tertiary);
     display: inline-flex;
     gap: 4px;
     align-items: center;
@@ -196,26 +203,26 @@
     font-weight: 600;
   }
   .author {
-    color: var(--text-author, #aaa);
+    color: var(--fg-secondary);
   }
   .bar {
-    color: var(--accent, #6cf);
+    color: var(--st-info);
     letter-spacing: -1px;
   }
   .num {
-    color: var(--text-muted, #aaa);
+    color: var(--fg-tertiary);
   }
   .small {
     font-size: 10px;
   }
   .muted {
-    color: var(--text-muted, #888);
+    color: var(--fg-tertiary);
   }
   .err {
-    color: var(--text-err, #f66);
+    color: var(--st-err);
   }
   .sep {
-    border-top: 1px solid var(--border-muted, #333);
+    border-top: 1px solid var(--bd-muted);
     margin: 4px -2px;
   }
 </style>
