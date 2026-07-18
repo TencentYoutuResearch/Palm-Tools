@@ -271,8 +271,7 @@ fn scan_request_file(
 fn parse_codebuddy_request(value: &Value) -> Option<(String, UsageBucket)> {
     let provider = value.get("providerData")?;
     let raw_model = provider
-        .get("requestModelName")
-        .or_else(|| provider.get("requestModelId"))
+        .get("requestModelId")
         .or_else(|| provider.get("model"))?
         .as_str()?;
     let model = clean_model(raw_model);
@@ -582,7 +581,7 @@ mod tests {
         let value = serde_json::json!({
             "type": "message",
             "providerData": {
-                "requestModelName": "Claude-Opus-4.7",
+                "requestModelId": "claude-opus-4.7",
                 "usage": {
                     "totalTokens": 120,
                     "inputTokens": 100,
@@ -592,7 +591,7 @@ mod tests {
             }
         });
         let (model, usage) = parse_codebuddy_request(&value).unwrap();
-        assert_eq!(model, "Claude-Opus-4.7");
+        assert_eq!(model, "claude-opus-4.7");
         assert_eq!(
             (usage.input, usage.output, usage.cached, usage.total),
             (100, 20, 40, 120)

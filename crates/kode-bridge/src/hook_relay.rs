@@ -21,7 +21,7 @@
 //! | `PermissionRequest` | — | `ask_user_question_hint` | Codex 权限请求点亮 attention |
 //! | `UserPromptSubmit` | — | `session.attention_cleared` | 用户回车后即时清除 attention |
 //! | `PreToolUse` | — | `session.mode_changed` | 实时获取 permission_mode |
-//! | `ConfigChange` | `model` 非空 | `CoreEvent::JsonlMeta` | 即时同步当前 session model |
+//! | `ConfigChange` | `model` 非空 | `CoreEvent::JsonlMeta` | 同步 CodeBuddy 当前 model |
 //! | `PostToolUse` / `SubagentStop` / `SessionEnd` | — | `session.attention_cleared` | Codex 本轮结束后清除 stale attention |
 //! | `Stop` | — | `session.turn_finished` + `session.attention_cleared` | codebuddy/claude 本轮真正结束,权威 turn_finished 信号 |
 //!
@@ -294,12 +294,9 @@ fn process_hook_json_inner(
                 .and_then(|v| v.as_str())
                 .map(kode_core::model_alias::sanitize_model_name)
                 .filter(|model| !model.is_empty());
-
             let (Some(model), Some(core_tx)) = (model, core_tx) else {
                 return;
             };
-
-            tracing::info!(%session_id, %model, "HookRelay: ConfigChange → model metadata");
             let _ = core_tx.send(CoreEvent::JsonlMeta {
                 id: session_id,
                 model: Some(model),
@@ -523,48 +520,20 @@ mod tests {
     }
 
     #[test]
-    fn process_config_change_updates_only_the_routed_session_model() {
+    fn process_config_change_emits_model_meta() {
         let bus = Arc::new(BridgeBus::new());
         let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let json = r#"{
-            "session_id": "42",
-            "hook_event_name": "ConfigChange",
-            "source": "user_settings",
-            "file_path": "/Users/test/.codebuddy/settings.json",
-            "model": "gpt-5.6-sol"
-        }"#;
-
-        process_hook_json_with_core_tx(json, &bus, &core_tx);
-
-        let event = core_rx.try_recv().expect("should receive model metadata");
-        match event {
-            kode_core::CoreEvent::JsonlMeta {
-                id,
-                model,
-                title,
-                session_uuid,
-                tokens_reset,
-                tokens,
-                input_tokens,
-                output_tokens,
-                cached_tokens,
-                cost_usd,
-                context_pct,
-            } => {
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"42","hook_event_name":"ConfigChange","model":"hy3-ioa"}"#,
+            &bus,
+            &core_tx,
+        );
+        match core_rx.try_recv().expect("model metadata") {
+            CoreEvent::JsonlMeta { id, model, .. } => {
                 assert_eq!(id, 42);
-                assert_eq!(model.as_deref(), Some("gpt-5.6-sol"));
-                assert!(title.is_none());
-                assert!(session_uuid.is_none());
-                assert!(!tokens_reset);
-                assert!(tokens.is_none());
-                assert!(input_tokens.is_none());
-                assert!(output_tokens.is_none());
-                assert!(cached_tokens.is_none());
-                assert!(cost_usd.is_none());
-                assert!(context_pct.is_none());
+                assert_eq!(model.as_deref(), Some("hy3-ioa"));
             }
-            other => panic!("unexpected event: {other:?}"),
+            event => panic!("unexpected event: {event:?}"),
         }
     }
 

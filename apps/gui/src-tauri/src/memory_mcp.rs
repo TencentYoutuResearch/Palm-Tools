@@ -511,8 +511,6 @@ pub fn spawn_startup_probe(app: AppHandle) {
                 {
                     tracing::warn!("session_start hook inject failed for {label}: {e}");
                 }
-                // ConfigChange 是 CodeBuddy 2.97+ 的事件。Claude 不支持，不能把
-                // 未知 hook key 写进 ~/.claude/settings.json。
                 if label == "codebuddy" {
                     if let Err(e) =
                         kode_memory::hook_setup::inject_config_change_hook(&path, &relay_cmd)

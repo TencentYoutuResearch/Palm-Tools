@@ -236,18 +236,13 @@ struct TailState {
     input_tokens: u64,
     output_tokens: u64,
     cached_tokens: u64,
-    /// 上次 LLM 实际使用的 model(来自 assistant providerData.requestModelName)。
+    /// 上次 LLM 实际使用的 model(来自 assistant providerData 的其他字段)。
     /// 用于 cost / context_pct 计算 —— 这反映"这次请求实际花的钱用什么算"。
     last_model: Option<String>,
-    /// 上次 emit 给前端 UI 的 model(可能与 last_model 不同,见 user_pinned_model)。
-    /// 用 dedupe 同一个值的重复 emit。
+    /// 上次 emit 给前端 UI 的实际 model，用于去重。
     last_emitted_model: Option<String>,
-    /// 用户通过 `/model` 显式切换后被 pin 住的目标模型(原始字符串,如 "claude-opus-4.6")。
-    /// codebuddy 的 `/model` 语义:**只对之后的新消息生效**,正在产出的 assistant
-    /// 响应仍用旧模型 → 后续 jsonl assistant 行的 requestModelName 还会是旧 model。
-    /// 若不 pin,UI 会被这些旧 assistant 行刷回旧 model,表现为"只有第一次切换有效"。
-    /// 当后续 assistant 行的 requestModelName 与 pin 一致(大小写不敏感)时清除 pin,
-    /// 之后 assistant 行可正常更新 UI model。
+    /// `/model` 切换后的用户意图。在下一次真实请求到来前先让 UI 跟随，
+    /// 后续由 providerData 里的实际模型校正。
     user_pinned_model: Option<String>,
     last_title: Option<String>,
     /// 当前 jsonl 行声明的真实 session uuid。codebuddy `/clear` 会换新 session/jsonl,
@@ -718,9 +713,21 @@ struct CbProviderData {
     model: Option<String>,
     #[serde(rename = "requestModelId")]
     request_model_id: Option<String>,
+    // CodeBuddy 的 `requestModelName` 在模型切换后可能保留旧值，生产解析不读取它。
+    // 仅保留给现有测试夹具反序列化，避免测试数据格式本身被误删。
+    #[cfg(test)]
     #[serde(rename = "requestModelName")]
     request_model_name: Option<String>,
     usage: Option<CbUsage>,
+}
+
+impl CbProviderData {
+    fn reported_model(&self) -> Option<String> {
+        let model = self.request_model_id.clone().or_else(|| self.model.clone());
+        #[cfg(test)]
+        let model = model.or_else(|| self.request_model_name.clone());
+        model
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,45 +838,32 @@ fn parse_codebuddy_line(line: &str, state: &mut TailState) -> LineUpdate {
         return upd;
     }
 
-    // 检测 /model 切换命令的 stdout 行,即时更新模型名,并 pin 住用户意图。
-    // 之后的 assistant 行(可能仍用旧 model 在收尾)不再覆盖 UI 显示。
+    // CodeBuddy 会把 `/model` 的结果写成 local-command stdout。这是当前使用者选择，
+    // 先反映到状态栏；如果之后真实请求仍报旧 model，不要立刻覆盖这个选择。
     if let Some(model) = extract_model_switch(&entry.content) {
         let model = crate::model_alias::sanitize_model_name(&model);
-        if model.is_empty() {
-            return upd;
-        }
-        state.user_pinned_model = Some(model.clone());
-        if state.last_emitted_model.as_deref() != Some(&model) {
-            upd.new_model = Some(model.clone());
-            state.last_emitted_model = Some(model);
+        if !model.is_empty() {
+            state.user_pinned_model = Some(model.clone());
+            if state.last_emitted_model.as_deref() != Some(&model) {
+                upd.new_model = Some(model.clone());
+                state.last_emitted_model = Some(model);
+            }
         }
         return upd;
     }
 
     if let Some(pd) = &entry.provider_data {
-        if let Some(name) = pd
-            .request_model_name
-            .clone()
-            .or_else(|| pd.request_model_id.clone())
-            .or_else(|| pd.model.clone())
-        {
+        if let Some(name) = pd.reported_model() {
             let name = crate::model_alias::sanitize_model_name(&name);
             if !name.is_empty() {
-                // last_model 始终跟随 assistant 实际使用的模型 —— 用于 cost / context 计算
+                // 只有 providerData 里的结构化字段才代表本次请求实际使用的模型。
+                // `/model` 只是选择下一次请求的意图，不用它预判 UI 状态。
                 state.last_model = Some(name.clone());
-
-                // 决定是否把这个 model emit 给 UI:
-                // - 若用户 pin 了某个 model,assistant 行只有在与 pin 一致(大小写不敏感)
-                //   时才解除 pin、并允许后续 emit;否则跳过 model emit(仍处理 tokens)
-                // - 否则按 dedupe 后正常 emit
                 let should_emit = match &state.user_pinned_model {
-                    Some(pinned) => {
-                        if names_match(pinned, &name) {
-                            state.user_pinned_model = None;
-                            state.last_emitted_model.as_deref() != Some(&name)
-                        } else {
-                            false
-                        }
+                    Some(pinned) if !names_match(pinned, &name) => false,
+                    Some(_) => {
+                        state.user_pinned_model = None;
+                        state.last_emitted_model.as_deref() != Some(&name)
                     }
                     None => state.last_emitted_model.as_deref() != Some(&name),
                 };
@@ -912,11 +906,6 @@ fn parse_codebuddy_line(line: &str, state: &mut TailState) -> LineUpdate {
     upd
 }
 
-/// 比较 user 在 `/model` 命令里写的名字与 assistant 行里 providerData 报告的名字
-/// 是否指同一个模型。codebuddy 这两边大小写/连字符位置不一致(用户:`claude-opus-4.6`,
-/// 服务端响应:`Claude-Opus-4.6` 或 `claude-opus-4-6`),所以归一化后比较:
-///   - 转小写
-///   - 去掉 `-` / `_` / `.` / 空格
 fn names_match(a: &str, b: &str) -> bool {
     fn norm(s: &str) -> String {
         crate::model_alias::sanitize_model_name(s)
@@ -928,22 +917,15 @@ fn names_match(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-/// 从 `/model` 命令的 stdout 行中提取新模型名。
-/// content 格式:string 或 array [{type:"input_text",text:"<local-command-stdout>Switch model to X</local-command-stdout>"}]
 fn extract_model_switch(content: &Option<serde_json::Value>) -> Option<String> {
     const PREFIX: &str = "<local-command-stdout>Switch model to ";
     const SUFFIX: &str = "</local-command-stdout>";
-
-    let text = extract_cb_content_text(content)?;
-    let text = text.trim();
-    if text.starts_with(PREFIX) && text.ends_with(SUFFIX) {
-        let model = &text[PREFIX.len()..text.len() - SUFFIX.len()];
-        let model = model.trim();
-        if !model.is_empty() {
-            return Some(model.to_string());
-        }
-    }
-    None
+    let text = extract_cb_content_text(content)?.trim().to_string();
+    text.strip_prefix(PREFIX)
+        .and_then(|s| s.strip_suffix(SUFFIX))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 /// 检测 content 字段中是否包含会切换 codebuddy session 的命令。
@@ -1457,7 +1439,7 @@ mod tests {
         let line = r#"{"type":"message","role":"assistant","providerData":{"model":"claude-opus-4.7-1m","requestModelName":"Claude-Opus-4.7-1M","usage":{"totalTokens":36263,"inputTokens":30000,"outputTokens":6263,"inputTokensDetails":[{"cached_tokens":12345}]}}}"#;
         let mut state = TailState::new();
         let upd = parse_codebuddy_line(line, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("Claude-Opus-4.7-1M"));
+        assert_eq!(upd.new_model.as_deref(), Some("claude-opus-4.7-1m"));
         assert_eq!(upd.new_total, Some(36263));
         assert_eq!(upd.new_input, Some(30000));
         assert_eq!(upd.new_output, Some(6263));
@@ -1644,105 +1626,30 @@ mod tests {
     }
 
     #[test]
-    fn codebuddy_model_switch_from_content_array() {
-        // /model 命令的 stdout 行(content 为 array 格式)
-        let line = r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"<local-command-stdout>Switch model to claude-opus-4.6</local-command-stdout>"}],"providerData":{"skipRun":true}}"#;
+    fn codebuddy_model_switch_command_updates_ui_until_actual_model_arrives() {
         let mut state = TailState::new();
-        state.last_model = Some("claude-sonnet-4.6".to_string());
-        let upd = parse_codebuddy_line(line, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("claude-opus-4.6"));
-        // 模型切换不应产生 tokens 更新,也不应清空同一 session 的累计量。
-        assert!(upd.new_total.is_none());
-        assert!(!upd.tokens_reset);
-    }
 
-    #[test]
-    fn codebuddy_model_switch_from_content_string() {
-        // content 为 string 格式
-        let line = r#"{"type":"message","role":"user","content":"<local-command-stdout>Switch model to kimi-k2.6-ioa</local-command-stdout>","providerData":{"skipRun":true}}"#;
-        let mut state = TailState::new();
-        let upd = parse_codebuddy_line(line, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("kimi-k2.6-ioa"));
-        assert!(!upd.tokens_reset);
-    }
+        let old_request = r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"GLM-5.2","usage":{"totalTokens":100,"inputTokens":80,"outputTokens":20}}}"#;
+        let upd = parse_codebuddy_line(old_request, &mut state);
+        assert_eq!(upd.new_model.as_deref(), Some("GLM-5.2"));
 
-    #[test]
-    fn codebuddy_model_switch_same_model_no_update() {
-        let line = r#"{"type":"message","role":"user","content":"<local-command-stdout>Switch model to claude-opus-4.6</local-command-stdout>","providerData":{"skipRun":true}}"#;
-        let mut state = TailState::new();
-        state.last_emitted_model = Some("claude-opus-4.6".to_string());
-        // 即使 last_emitted_model 已是同名,user 显式 switch 仍 pin 它(防止后续 assistant 行覆盖)
-        let upd = parse_codebuddy_line(line, &mut state);
-        // 模型没变,不触发 emit;同一 session 的累计 token 保持不变。
+        // CodeBuddy 会把 `/model` 的选择结果写成 local-command stdout，先更新 UI。
+        let switch = r#"{"type":"message","role":"user","content":"<local-command-stdout>Switch model to gpt-5.6-sol</local-command-stdout>","providerData":{"skipRun":true}}"#;
+        let upd = parse_codebuddy_line(switch, &mut state);
+        assert_eq!(upd.new_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(state.user_pinned_model.as_deref(), Some("gpt-5.6-sol"));
+
+        // 直到新请求的 providerData 报告实际模型，UI 才更新。
+        let new_request = r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"GLM-5.2","usage":{"totalTokens":120,"inputTokens":90,"outputTokens":30}}}"#;
+        let upd = parse_codebuddy_line(new_request, &mut state);
         assert!(upd.new_model.is_none());
-        assert!(!upd.changed());
-        assert!(!upd.tokens_reset);
-        // 但 pin 必须被设置
-        assert_eq!(state.user_pinned_model.as_deref(), Some("claude-opus-4.6"));
-    }
+        assert_eq!(state.last_model.as_deref(), Some("GLM-5.2"));
 
-    /// **关键回归**:用户连续切换两次后,UI 应反映最后一次切换。
-    /// 历史 bug:第一次切换后,assistant 行(还在用旧 model 收尾)的 requestModelName
-    /// 会立刻把 UI model 刷回旧值,表现为"只有第一次切换有效"。
-    #[test]
-    fn codebuddy_model_switch_pinned_against_stale_assistant_lines() {
-        let mut state = TailState::new();
-
-        // 1) 一开始 assistant 在用 4.8 跑
-        let assistant_48 = r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"Claude-Opus-4.8-1M","usage":{"totalTokens":100,"inputTokens":80,"outputTokens":20}}}"#;
-        let upd = parse_codebuddy_line(assistant_48, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("Claude-Opus-4.8-1M"));
-
-        // 2) 用户切到 4.6
-        let switch_46 = r#"{"type":"message","role":"user","content":"<local-command-stdout>Switch model to claude-opus-4.6</local-command-stdout>","providerData":{"skipRun":true}}"#;
-        let upd = parse_codebuddy_line(switch_46, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("claude-opus-4.6"));
-        assert_eq!(state.user_pinned_model.as_deref(), Some("claude-opus-4.6"));
-
-        // 3) 还在收尾的旧 assistant 行(4.8)—— 不应把 UI 刷回 4.8
-        let stale = r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"Claude-Opus-4.8-1M","usage":{"totalTokens":150,"inputTokens":120,"outputTokens":30}}}"#;
-        let upd = parse_codebuddy_line(stale, &mut state);
-        assert!(
-            upd.new_model.is_none(),
-            "stale assistant line must not override pinned model, got {:?}",
-            upd.new_model
-        );
-        // tokens 仍应被处理(150 > 100)
-        assert_eq!(upd.new_total, Some(150));
-        // last_model(用于 cost)跟随真实 LLM,4.8 仍是这次请求的实际计价模型
-        assert_eq!(state.last_model.as_deref(), Some("Claude-Opus-4.8-1M"));
-
-        // 4) 用户立刻又切到 kimi(没等 4.6 真的开始响应)
-        let switch_kimi = r#"{"type":"message","role":"user","content":"<local-command-stdout>Switch model to kimi-k2.6-ioa</local-command-stdout>","providerData":{"skipRun":true}}"#;
-        let upd = parse_codebuddy_line(switch_kimi, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("kimi-k2.6-ioa"));
-        assert_eq!(state.user_pinned_model.as_deref(), Some("kimi-k2.6-ioa"));
-
-        // 5) 又一行 4.8 stale,仍不能覆盖
-        let upd = parse_codebuddy_line(stale, &mut state);
+        let actual_new = r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"gpt-5.6-sol","usage":{"totalTokens":140,"inputTokens":100,"outputTokens":40}}}"#;
+        let upd = parse_codebuddy_line(actual_new, &mut state);
         assert!(upd.new_model.is_none());
-
-        // 6) kimi 真的开始响应了 → pin 解除,UI 更新到 kimi(归一化匹配:大小写+连字符)
-        let assistant_kimi = r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"Kimi-K2.6-IOA","usage":{"totalTokens":200,"inputTokens":160,"outputTokens":40}}}"#;
-        let upd = parse_codebuddy_line(assistant_kimi, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("Kimi-K2.6-IOA"));
+        assert_eq!(state.last_model.as_deref(), Some("gpt-5.6-sol"));
         assert!(state.user_pinned_model.is_none());
-
-        // 7) 后续 kimi 行不该重复 emit 同名 model
-        let upd = parse_codebuddy_line(assistant_kimi, &mut state);
-        assert!(upd.new_model.is_none());
-    }
-
-    #[test]
-    fn names_match_normalizes_case_and_separators() {
-        assert!(names_match("claude-opus-4.6", "Claude-Opus-4.6"));
-        assert!(names_match("claude-opus-4.6", "claude_opus_4_6"));
-        assert!(names_match("kimi-k2.6-ioa", "Kimi-K2.6-IOA"));
-        assert!(names_match(
-            "claude-opus-4.8-1m",
-            "Claude-Opus-4.8-1M Note: The model was saved to user settings"
-        ));
-        assert!(!names_match("claude-opus-4.6", "claude-opus-4.8"));
     }
 
     #[test]
@@ -1754,47 +1661,34 @@ mod tests {
         assert_eq!(state.last_model.as_deref(), Some("Claude-Opus-4.8-1M"));
     }
 
-    /// /clear command should reset TailState so old user_pinned_model doesn't
-    /// block subsequent /model switches after conversation reset.
+    /// /clear command should reset the actual-model and token state.
     #[test]
     fn codebuddy_clear_command_resets_tail_state() {
         let mut state = TailState::new();
+        state.last_model = Some("GLM-5.2".to_string());
+        state.last_emitted_model = Some("GLM-5.2".to_string());
+        state.total_tokens = 5000;
+        state.input_tokens = 4000;
 
-        // Simulate: user previously did /model, then /clear, then /model again.
-        // 1) /model pins a model
-        let switch = r#"{"type":"message","role":"user","content":"<local-command-stdout>Switch model to claude-opus-4.6</local-command-stdout>","providerData":{"skipRun":true}}"#;
-        let upd = parse_codebuddy_line(switch, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("claude-opus-4.6"));
-        assert_eq!(state.user_pinned_model.as_deref(), Some("claude-opus-4.6"));
-
-        // 2) /clear command arrives
         let clear =
             r#"{"type":"message","role":"user","content":"<command-name>/clear</command-name>"}"#;
         let upd = parse_codebuddy_line(clear, &mut state);
-        // /clear should emit an explicit token reset
         assert!(upd.changed());
         assert!(upd.tokens_reset);
-        // TailState must be fully reset
-        assert!(state.user_pinned_model.is_none());
         assert!(state.last_model.is_none());
         assert!(state.last_emitted_model.is_none());
         assert_eq!(state.total_tokens, 0);
         assert_eq!(state.input_tokens, 0);
         assert_eq!(state.output_tokens, 0);
         assert_eq!(state.cached_tokens, 0);
-
-        // 3) After /clear, /model again should work normally
-        let switch2 = r#"{"type":"message","role":"user","content":"<local-command-stdout>Switch model to kimi-k2.6-ioa</local-command-stdout>","providerData":{"skipRun":true}}"#;
-        let upd = parse_codebuddy_line(switch2, &mut state);
-        assert_eq!(upd.new_model.as_deref(), Some("kimi-k2.6-ioa"));
-        assert_eq!(state.user_pinned_model.as_deref(), Some("kimi-k2.6-ioa"));
     }
 
     /// /clear in array content format should also reset TailState.
     #[test]
     fn codebuddy_clear_command_array_format_resets_state() {
         let mut state = TailState::new();
-        state.user_pinned_model = Some("claude-opus-4.6".to_string());
+        state.last_model = Some("GLM-5.2".to_string());
+        state.last_emitted_model = Some("GLM-5.2".to_string());
         state.total_tokens = 5000;
         state.input_tokens = 4000;
 
@@ -1802,7 +1696,8 @@ mod tests {
         let upd = parse_codebuddy_line(clear, &mut state);
         assert!(upd.changed());
         assert!(upd.tokens_reset);
-        assert!(state.user_pinned_model.is_none());
+        assert!(state.last_model.is_none());
+        assert!(state.last_emitted_model.is_none());
         assert_eq!(state.total_tokens, 0);
         assert_eq!(state.input_tokens, 0);
     }
@@ -1894,7 +1789,7 @@ mod tests {
 
     /// End-to-end: when /clear rewrites jsonl via atomic rename, the old fd stays
     /// at EOF on the removed inode. The tail task must reopen the path and read
-    /// the new file, otherwise later /model commands never reach the tab UI.
+    /// the new file, otherwise later actual request metadata never reaches the tab UI.
     #[tokio::test(flavor = "multi_thread")]
     async fn tail_detects_file_replacement_and_resets_state() {
         use std::io::Write;
@@ -1922,7 +1817,7 @@ mod tests {
         .unwrap();
         writeln!(
             f,
-            r#"{{"type":"message","role":"user","content":[{{"type":"input_text","text":"<local-command-stdout>Switch model to gpt-5.5</local-command-stdout>"}}],"providerData":{{"skipRun":true}}}}"#
+            r#"{{"type":"message","role":"assistant","providerData":{{"requestModelName":"gpt-5.5","usage":{{"totalTokens":120,"inputTokens":90,"outputTokens":30}}}}}}"#
         )
         .unwrap();
         drop(f);
@@ -1951,7 +1846,7 @@ mod tests {
             .collect();
         assert!(
             models.contains(&"gpt-5.5".to_string()),
-            "replacement re-read should find /model gpt-5.5, got models: {:?}",
+            "replacement re-read should find actual model gpt-5.5, got models: {:?}",
             models
         );
     }

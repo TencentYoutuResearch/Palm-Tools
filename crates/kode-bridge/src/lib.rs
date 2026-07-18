@@ -1854,14 +1854,11 @@ fn extract_session_meta(path: &FsPath) -> (Option<String>, Option<String>, Optio
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
             if let Some(pd) = v.get("providerData") {
                 if let Some(m) = pd
-                    .get("requestModelName")
-                    .or_else(|| pd.get("requestModelId"))
+                    .get("requestModelId")
                     .or_else(|| pd.get("model"))
                     .and_then(|v| v.as_str())
                 {
-                    // 复用 kode-core 的 sanitize:codebuddy 偶发把 note/警告后缀
-                    // (含换行符的脏值)夹进 requestModelName,不清理会被原样塞进
-                    // `--model` argv 导致子进程异常。
+                    // 复用 kode-core 的 sanitize，避免脏值被原样塞进 `--model` argv。
                     model = Some(kode_core::model_alias::sanitize_model_name(m));
                 }
                 if let Some(t) = pd

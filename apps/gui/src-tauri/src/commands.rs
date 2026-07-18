@@ -1318,7 +1318,7 @@ pub struct SessionSummary {
     pub session_id: String,
     /// 从 jsonl aiTitle 行提取的标题(可能为空)
     pub title: Option<String>,
-    /// 最后使用的 model(从 providerData.requestModelName 提取)
+    /// 最后使用的 model(从 providerData.requestModelId/model 提取)
     pub model: Option<String>,
     /// 当前 total tokens(取最新 usage,不跨轮次累加)
     pub total_tokens: Option<u64>,
@@ -1506,8 +1506,7 @@ pub(crate) fn extract_session_meta(
                 if let Some(pd) = v.get("providerData") {
                     if model.is_none() {
                         model = pd
-                            .get("requestModelName")
-                            .or_else(|| pd.get("requestModelId"))
+                            .get("requestModelId")
                             .or_else(|| pd.get("model"))
                             .and_then(|v| v.as_str())
                             .map(|m| kode_core::model_alias::sanitize_model_name(&m));
@@ -1677,9 +1676,9 @@ mod specops_bridge_tests {
             concat!(
                 r#"{"type":"ai-title","aiTitle":"Token test"}"#,
                 "\n",
-                r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"Claude-Opus-4.8","usage":{"totalTokens":100,"inputTokens":80,"outputTokens":20}}}"#,
+                r#"{"type":"message","role":"assistant","providerData":{"requestModelId":"Claude-Opus-4.8","usage":{"totalTokens":100,"inputTokens":80,"outputTokens":20}}}"#,
                 "\n",
-                r#"{"type":"message","role":"assistant","providerData":{"requestModelName":"Claude-Opus-4.8","usage":{"totalTokens":250,"inputTokens":200,"outputTokens":50}}}"#,
+                r#"{"type":"message","role":"assistant","providerData":{"requestModelId":"Claude-Opus-4.8","usage":{"totalTokens":250,"inputTokens":200,"outputTokens":50}}}"#,
                 "\n",
             ),
         )
