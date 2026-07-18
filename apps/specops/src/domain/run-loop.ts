@@ -20,8 +20,10 @@ import { trustWorktreeRoot } from './trust.js'
 import { buildAssuranceState, evaluatePatchPolicy, recordVerificationEvidence } from './assurance.js'
 import { appendHarnessEvent, readHarnessState, recordGateDecision, recordHarnessArtifact, transitionHarnessTask } from './harness-core.js'
 import { compileAgentContext } from './agent-runtime.js'
+import { BUILTIN_AGENT_PROMPTS, composeRolePrompt } from './agent-prompts.js'
 import { parseDocument } from './spec.js'
 import { pathInside, readText } from '../store/workspace.js'
+import { attachSessionAgent, findSpecOpsSessionByRunId, updateSessionAgentStatus } from './session.js'
 
 /**
  * Process-wide apply serialization. Keyed by workspace root so that applies
@@ -81,7 +83,7 @@ export function promptForTask(run: RunRecord, compiledContext?: string): string 
   const task = run.tasks[run.current_task]
   if (task === undefined) throw new SpecOpsError('task_missing', `Run ${run.run_id} has no current task`)
   const manifest = run.manifest
-  return [
+  const assignment = [
     `SpecOps task ${task.id}: ${task.title}`,
     '',
     compiledContext ?? task.prompt,
@@ -96,6 +98,7 @@ export function promptForTask(run: RunRecord, compiledContext?: string): string 
     `Work only in this Run worktree: ${run.worktree_path}`,
     'Do not apply changes to another worktree. Report when the task is ready for verification.',
   ].join('\n')
+  return composeRolePrompt(run.agent_profiles.implementation.prompt ?? BUILTIN_AGENT_PROMPTS.implementation, assignment)
 }
 
 export async function verifyRun(
@@ -243,8 +246,7 @@ export function formatReviewNote(review: ReviewResult): string {
 }
 
 function buildReviewPrompt(run: RunRecord, task: Task, patch: string): string {
-  return [
-    'You are an automated SpecOps code reviewer. Review the implementation of one task in an isolated git worktree.',
+  const assignment = [
     `Worktree (read it directly): ${run.worktree_path}`,
     '',
     `Task ${task.id}: ${task.title}`,
@@ -264,6 +266,7 @@ function buildReviewPrompt(run: RunRecord, task: Task, patch: string): string {
     '{ "summary": "<one line>", "findings": [ { "category": "spec|quality", "severity": "critical|major|minor", "note": "<what and where>" } ] }',
     REVIEW_END,
   ].join('\n')
+  return composeRolePrompt(run.agent_profiles.review.prompt ?? BUILTIN_AGENT_PROMPTS.review, assignment)
 }
 
 /**
@@ -296,12 +299,27 @@ export async function runReview(
     // loop (up to max_iterations) from flashing a stream of kode tabs.
     const session = await kode.createAnalysisSession(selection.backend, run.worktree_path, prompt, model, true)
     sessionId = session.id
+    const owner = await findSpecOpsSessionByRunId(run.workspace_root, run.run_id)
+    if (owner !== null) {
+      await attachSessionAgent(run.workspace_root, owner.id, {
+        kode_session_id: session.id,
+        session_uuid: session.session_uuid ?? null,
+        backend_key: session.backend_key,
+        model: model ?? null,
+        purpose: 'review',
+        status: session.status,
+      })
+    }
     const text = await waitForReviewOutput(kode, sessionId)
     result = extractReviewResult(text, agentModel)
   } catch {
     result = { at: new Date().toISOString(), agent_model: agentModel, blocker: false, summary: 'review inconclusive: agent session error', findings: [], inconclusive: true }
   } finally {
-    if (sessionId !== null) await kode.killSession(sessionId).catch(() => undefined)
+    if (sessionId !== null) {
+      await kode.killSession(sessionId).catch(() => undefined)
+      const owner = await findSpecOpsSessionByRunId(run.workspace_root, run.run_id)
+      if (owner !== null) await updateSessionAgentStatus(run.workspace_root, owner.id, sessionId, 'exited')
+    }
   }
   // Review can take minutes. Re-read before persisting so an old reviewer
   // cannot overwrite a newer accept/cancel/task transition with stale state.

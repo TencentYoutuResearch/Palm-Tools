@@ -10,7 +10,7 @@ export default defineConfig({
       if (/\/src\/server\/public\/(?:app\.js|index\.html|styles\.css)$/.test(id)) {
         return `export default ${JSON.stringify(readFileSync(id, 'utf8'))}`
       }
-      if (/\/src\/skills\/.+\.md$/.test(id)) {
+      if (/\/src\/(?:skills|prompts)\/.+\.md$/.test(id)) {
         return `export default ${JSON.stringify(readFileSync(id, 'utf8'))}`
       }
       return null

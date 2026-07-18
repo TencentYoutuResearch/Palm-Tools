@@ -12,14 +12,17 @@ backend = "codebuddy"
 # clarify / intake / plan
 [agents.analysis]
 backend = "codebuddy"
+prompt_file = ".specops/agents/clarify.md"
 
 # implement / repair / resume
 [agents.implementation]
 backend = "codebuddy"
+prompt_file = ".specops/agents/implementation.md"
 
 # automated review
 [agents.review]
 backend = "codebuddy"
+prompt_file = ".specops/agents/review.md"
 
 [agent_backends.codebuddy]
 plugin = "builtin.kode"

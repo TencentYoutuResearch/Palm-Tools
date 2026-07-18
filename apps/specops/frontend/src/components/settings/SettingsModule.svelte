@@ -1,22 +1,25 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Icon from '../shared/Icon.svelte';
+  import AvatarSprite from '../shared/AvatarSprite.svelte';
+  import Markdown from '../shared/Markdown.svelte';
+  import AvatarPicker from './AvatarPicker.svelte';
   import { api } from '../../lib/api.ts';
   import { t } from '../../lib/i18n.ts';
   import { onWindowDragMouseDown } from '../../lib/windowDrag.ts';
 
   type ProfileName = 'default' | 'analysis' | 'implementation' | 'review';
-  type Profile = { backend?: string; model?: string };
+  type Profile = { backend?: string; model?: string; avatar?: string; prompt_file?: string };
   type Backend = { key: string; display_name: string; model_flag?: string | null; enabled: boolean };
-  type Resolved = { backend: string; model?: string };
+  type Resolved = { backend: string; model?: string; avatar?: string };
   type SettingsResponse = {
     profiles: Record<ProfileName, Profile>;
     resolved: Record<ProfileName, Resolved>;
     backends: Backend[];
+    prompts: Record<'analysis' | 'implementation' | 'review', { content: string; source: string; builtin: boolean }>;
   };
 
   const names: ProfileName[] = ['default', 'analysis', 'implementation', 'review'];
-
   let data = $state<SettingsResponse | null>(null);
   let draft = $state<Record<ProfileName, Profile>>({ default: {}, analysis: {}, implementation: {}, review: {} });
   let loading = $state(true);
@@ -24,6 +27,8 @@
   let dirty = $state(false);
   let error = $state<string | null>(null);
   let saved = $state(false);
+  let editingAvatar = $state<ProfileName | null>(null);
+  let previewingPrompt = $state<ProfileName | null>(null);
 
   function cloneProfiles(profiles: Record<ProfileName, Profile>): Record<ProfileName, Profile> {
     return Object.fromEntries(names.map((name) => [name, { ...profiles[name] }])) as Record<ProfileName, Profile>;
@@ -63,6 +68,12 @@
     const key = resolvedBackend(name);
     const backend = data?.backends.find((item) => item.key === key);
     return backend === undefined || Boolean(backend.model_flag);
+  }
+
+  function resolvedAvatar(name: ProfileName): string | null {
+    if (draft[name].avatar) return draft[name].avatar;
+    if (name !== 'default' && draft.default.avatar) return draft.default.avatar;
+    return data?.resolved[name]?.avatar ?? null;
   }
 
   async function save(): Promise<void> {
@@ -113,7 +124,7 @@
                 <h2>{t(`specops.settings.profile.${name}`)}</h2>
                 <p>{t(`specops.settings.profile.${name}Desc`)}</p>
               </div>
-              {#if name !== 'default' && (draft[name].backend || draft[name].model)}
+              {#if name !== 'default' && (draft[name].backend || draft[name].model || draft[name].avatar || draft[name].prompt_file)}
                 <button class="inherit" type="button" onclick={() => reset(name)}>{t('specops.settings.reset')}</button>
               {/if}
             </div>
@@ -138,6 +149,44 @@
                 />
               </label>
             </div>
+
+            <label class="avatar-field">
+              <span>{t('specops.settings.avatar')}</span>
+              <button class="avatar-editor" type="button" onclick={() => editingAvatar = name}>
+                <span class="avatar-preview"><AvatarSprite avatarId={resolvedAvatar(name)} backendKey={resolvedBackend(name)} status="idle" size={30} /></span>
+                <span><strong>{resolvedAvatar(name)?.replace(/^gallery\//, '') ?? t('specops.settings.followBackend')}</strong><small>{t('specops.settings.editAvatar')}</small></span>
+                <Icon name="chevron-right" size={14} />
+              </button>
+            </label>
+
+            {#if editingAvatar === name}
+              <AvatarPicker
+                backendKey={resolvedBackend(name)}
+                currentAvatarId={resolvedAvatar(name)}
+                onPick={(avatarId) => { update(name, 'avatar', avatarId ?? ''); editingAvatar = null; }}
+                onClose={() => editingAvatar = null}
+              />
+            {/if}
+
+            {#if name !== 'default'}
+              <div class="prompt-section">
+                <label class="prompt-file">
+                  <span>{t('specops.settings.promptFile')}</span>
+                  <input
+                    value={draft[name].prompt_file ?? ''}
+                    oninput={(event) => update(name, 'prompt_file', event.currentTarget.value)}
+                    placeholder={name === 'analysis' ? '.specops/agents/clarify.md' : `.specops/agents/${name}.md`}
+                  />
+                  <small>{draft[name].prompt_file || data.prompts[name].source}</small>
+                </label>
+                <button class="preview-toggle" type="button" onclick={() => previewingPrompt = previewingPrompt === name ? null : name}>
+                  {previewingPrompt === name ? t('specops.settings.hidePreview') : t('specops.settings.previewMarkdown')}
+                </button>
+                {#if previewingPrompt === name}
+                  <div class="prompt-preview"><Markdown source={data.prompts[name].content} /></div>
+                {/if}
+              </div>
+            {/if}
 
             <div class="resolved">
               <span>{t('specops.settings.effective')}</span>
@@ -178,6 +227,18 @@
   .profile-title p { margin: 0; color: var(--fg-tertiary); font-size: var(--fs-sm); }
   .inherit { border: 0; background: transparent; color: var(--acc); font-size: var(--fs-xs); padding: 3px 0; white-space: nowrap; }
   .fields { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .avatar-field { margin-top: 12px; }
+  .avatar-preview { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--bd-default); border-radius: var(--rad-md); background: var(--bg-input); }
+  .avatar-editor { width: 100%; display: grid; grid-template-columns: 34px minmax(0, 1fr) 16px; align-items: center; gap: 9px; padding: 6px 8px; border: 1px solid var(--bd-default); border-radius: var(--rad-md); background: var(--bg-input); color: var(--fg-secondary); text-align: left; }
+  .avatar-editor:hover { border-color: var(--bd-focus); }
+  .avatar-editor > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
+  .avatar-editor strong { overflow: hidden; color: var(--fg-primary); font-family: var(--font-mono); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .avatar-editor small { color: var(--fg-tertiary); font-size: 9px; }
+  .prompt-file { margin-top: 12px; }
+  .prompt-file small { overflow: hidden; color: var(--fg-tertiary); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .prompt-section { position: relative; }
+  .preview-toggle { margin-top: 7px; padding: 0; border: 0; background: transparent; color: var(--acc); font-size: var(--fs-xs); }
+  .prompt-preview { max-height: 300px; margin-top: 9px; padding: 12px; overflow: auto; border: 1px solid var(--bd-muted); border-radius: var(--rad-md); background: var(--bg-base); }
   label { display: grid; gap: 6px; color: var(--fg-secondary); font-size: var(--fs-xs); }
   select, input { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--bd-default); border-radius: var(--rad-md); background: var(--bg-input); color: var(--fg-primary); outline: none; }
   select:focus, input:focus { border-color: var(--bd-focus); }

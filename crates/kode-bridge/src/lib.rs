@@ -276,7 +276,8 @@ pub async fn run() -> anyhow::Result<()> {
     // spawn HookRelay 主循环(需要 ctx.bus)。
     if let Some(relay) = hook_relay {
         let bus = Arc::clone(&ctx.bus);
-        tokio::spawn(async move { relay.run(bus).await });
+        let core_tx = ctx.core_tx.clone();
+        tokio::spawn(async move { relay.run(bus, core_tx).await });
     }
 
     // 注入 settings.json hook(幂等)。仅当 HookRelay 启用时才有意义 ——
@@ -315,6 +316,11 @@ fn inject_hooks_into_settings() {
         }
         if let Err(e) = kode_memory::hook_setup::inject_session_start_hook(&path, &relay_cmd) {
             tracing::warn!(label, error = %e, "session_start hook inject failed");
+        }
+        if label == "codebuddy" {
+            if let Err(e) = kode_memory::hook_setup::inject_config_change_hook(&path, &relay_cmd) {
+                tracing::warn!(label, error = %e, "config_change hook inject failed");
+            }
         }
     }
     if let Some(path) = kode_memory::hook_setup::codex_hooks_path() {

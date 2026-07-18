@@ -35,6 +35,10 @@ export type AgentRole = 'analysis' | 'implementation' | 'review'
 export interface AgentSelection {
   backend?: string
   model?: string
+  /** Kode gallery avatar id (for example `gallery/fox`); omitted uses the backend icon. */
+  avatar?: string
+  /** Workspace-relative Markdown file. Its body replaces the built-in role prompt. */
+  prompt_file?: string
 }
 
 export interface AgentConfig {
@@ -48,6 +52,7 @@ export interface ResolvedAgentSelection {
   role: AgentRole
   backend: string
   model?: string
+  avatar?: string
 }
 
 export interface SpecOpsConfig {
@@ -69,7 +74,7 @@ function agentSelection(value: unknown, field: string): AgentSelection {
     throw new SpecOpsError('invalid_config', `${field} must be a table`)
   }
   const raw = value as Record<string, unknown>
-  for (const key of ['backend', 'model'] as const) {
+  for (const key of ['backend', 'model', 'avatar', 'prompt_file'] as const) {
     if (raw[key] !== undefined && (typeof raw[key] !== 'string' || raw[key].trim() === '')) {
       throw new SpecOpsError('invalid_config', `${field}.${key} must be a non-empty string`)
     }
@@ -77,6 +82,8 @@ function agentSelection(value: unknown, field: string): AgentSelection {
   return {
     ...(typeof raw.backend === 'string' ? { backend: raw.backend.trim() } : {}),
     ...(typeof raw.model === 'string' ? { model: raw.model.trim() } : {}),
+    ...(typeof raw.avatar === 'string' ? { avatar: raw.avatar.trim() } : {}),
+    ...(typeof raw.prompt_file === 'string' ? { prompt_file: raw.prompt_file.trim() } : {}),
   }
 }
 
@@ -93,6 +100,9 @@ export function resolveAgentSelection(
     backend: override.backend ?? selected.backend ?? defaults.backend ?? DEFAULT_AGENT_BACKEND,
     ...(override.model ?? selected.model ?? defaults.model
       ? { model: override.model ?? selected.model ?? defaults.model }
+      : {}),
+    ...(override.avatar ?? selected.avatar ?? defaults.avatar
+      ? { avatar: override.avatar ?? selected.avatar ?? defaults.avatar }
       : {}),
   }
 }
@@ -119,12 +129,14 @@ export async function saveAgentConfig(workspace: string, agents: AgentConfig): P
     '# Agent profiles managed by the SpecOps Settings UI.',
     ...AGENT_PROFILE_NAMES.flatMap((name) => {
       const profile = agents[name]
-      if (profile.backend === undefined && profile.model === undefined) return []
+      if (profile.backend === undefined && profile.model === undefined && profile.avatar === undefined && profile.prompt_file === undefined) return []
       return [
         '',
         `[agents.${name}]`,
         ...(profile.backend === undefined ? [] : [`backend = ${JSON.stringify(profile.backend)}`]),
         ...(profile.model === undefined ? [] : [`model = ${JSON.stringify(profile.model)}`]),
+        ...(profile.avatar === undefined ? [] : [`avatar = ${JSON.stringify(profile.avatar)}`]),
+        ...(profile.prompt_file === undefined ? [] : [`prompt_file = ${JSON.stringify(profile.prompt_file)}`]),
       ]
     }),
   ]

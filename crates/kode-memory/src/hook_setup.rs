@@ -11,6 +11,7 @@
 //! | `Notification` (permission_prompt) | 即时通知 kode GUI 有权限请求 |
 //! | `UserPromptSubmit` | 用户回车提交后即时清除 attention |
 //! | `PreToolUse` (*) | 实时获取 permission_mode |
+//! | `ConfigChange` | CodeBuddy 配置变化后同步当前 session 的 model |
 //!
 //! ## 设计要点
 //!
@@ -289,6 +290,33 @@ pub fn inject_pretooluse_hook(path: &Path, relay_command: &str) -> Result<(), St
 /// 检查 PreToolUse hook 是否已配置。
 pub fn is_pretooluse_hook_configured(path: &Path) -> bool {
     find_kode_hook_entry(path, "PreToolUse").is_some()
+}
+
+// ============================================================================
+// ConfigChange hook (CodeBuddy model tracking)
+// ============================================================================
+
+/// 注入 ConfigChange hook，用于在 CodeBuddy `/model` 切换后即时同步模型。
+///
+/// CodeBuddy 2.124 不再把模型切换命令写进 session jsonl，但 ConfigChange hook
+/// 会携带当前模型。hook command 从发起切换的 CodeBuddy 进程继承
+/// `KODE_SESSION_ID`，因此事件能精确路由到当前 tab，不需要监听全局 settings 文件。
+pub fn inject_config_change_hook(path: &Path, relay_command: &str) -> Result<(), String> {
+    let kode_entry = serde_json::json!({
+        "_kode_managed": true,
+        "hooks": [{
+            "type": "command",
+            "timeout": 5,
+            "command": relay_command
+        }]
+    });
+
+    inject_hook_entry(path, "ConfigChange", &kode_entry)
+}
+
+/// 检查 ConfigChange hook 是否已配置。
+pub fn is_config_change_hook_configured(path: &Path) -> bool {
+    find_kode_hook_entry(path, "ConfigChange").is_some()
 }
 
 // ============================================================================
@@ -901,6 +929,20 @@ mod tests {
         assert!(arr[0]["_kode_managed"].as_bool().unwrap());
     }
 
+    // --- ConfigChange hook tests ---
+
+    #[test]
+    fn inject_config_change_hook_creates_entry() {
+        let tmp = write_tmp("{}");
+        inject_config_change_hook(tmp.path(), "echo config").unwrap();
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let arr = doc["hooks"]["ConfigChange"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["hooks"][0]["command"], "echo config");
+        assert!(arr[0]["_kode_managed"].as_bool().unwrap());
+    }
+
     // --- Multiple hook types coexist ---
 
     #[test]
@@ -910,6 +952,7 @@ mod tests {
         inject_notification_hook(tmp.path(), "echo relay").unwrap();
         inject_user_prompt_submit_hook(tmp.path(), "echo submit").unwrap();
         inject_pretooluse_hook(tmp.path(), "echo ptool").unwrap();
+        inject_config_change_hook(tmp.path(), "echo config").unwrap();
 
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -918,6 +961,7 @@ mod tests {
         assert!(hooks.contains_key("Notification"));
         assert!(hooks.contains_key("UserPromptSubmit"));
         assert!(hooks.contains_key("PreToolUse"));
+        assert!(hooks.contains_key("ConfigChange"));
     }
 
     #[test]

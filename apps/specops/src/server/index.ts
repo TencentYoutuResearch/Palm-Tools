@@ -41,6 +41,8 @@ import {
 import { specOpsSessionEvents } from '../domain/session-events.js'
 import { unwatchSpecOpsSessionTranscript, watchSpecOpsSessionTranscript } from '../domain/session-monitor.js'
 import { KodeClient, KodeRequestError } from '../adapters/kode.js'
+import { composeRolePrompt, resolveAgentPrompt } from '../domain/agent-prompts.js'
+import { loadAvatarLibrary } from '../domain/avatar-library.js'
 import appScript from './public/app.js' with { type: 'text' }
 import indexHtml from './public/index.html' with { type: 'text' }
 import styles from './public/styles.css' with { type: 'text' }
@@ -189,7 +191,7 @@ function parseAgentProfiles(value: unknown): AgentConfig {
     }
     const profile = entry as Record<string, unknown>
     const parsed: AgentSelection = {}
-    for (const key of ['backend', 'model'] as const) {
+    for (const key of ['backend', 'model', 'avatar', 'prompt_file'] as const) {
       if (profile[key] === undefined || profile[key] === null || profile[key] === '') continue
       if (typeof profile[key] !== 'string' || profile[key].trim() === '') {
         throw new SpecOpsError('invalid_agent_profiles', `profiles.${name}.${key} must be a string`)
@@ -203,7 +205,12 @@ function parseAgentProfiles(value: unknown): AgentConfig {
 
 async function agentSettingsPayload(workspace: string, kode?: KodeClient) {
   const config = await loadConfig(workspace)
-  const backends = kode === undefined || typeof kode.listBackends !== 'function' ? [] : await kode.listBackends().catch(() => [])
+  const [backends, analysisPrompt, implementationPrompt, reviewPrompt] = await Promise.all([
+    kode === undefined || typeof kode.listBackends !== 'function' ? [] : kode.listBackends().catch(() => []),
+    resolveAgentPrompt(workspace, config, 'analysis'),
+    resolveAgentPrompt(workspace, config, 'implementation'),
+    resolveAgentPrompt(workspace, config, 'review'),
+  ])
   return {
     profiles: config.agents,
     resolved: {
@@ -212,8 +219,15 @@ async function agentSettingsPayload(workspace: string, kode?: KodeClient) {
       implementation: resolveAgentSelection(config, 'implementation'),
       review: resolveAgentSelection(config, 'review'),
     },
+    prompts: { analysis: analysisPrompt, implementation: implementationPrompt, review: reviewPrompt },
     backends,
   }
+}
+
+async function withAgentPrompt(workspace: string, role: AgentRole, assignment: string): Promise<string> {
+  const config = await loadConfig(workspace)
+  const prompt = await resolveAgentPrompt(workspace, config, role)
+  return composeRolePrompt(prompt.content, assignment)
 }
 
 async function recordAgent(
@@ -773,6 +787,9 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
         if (request.method === 'GET' && url.pathname === '/api/settings/agents') {
           return json(response, 200, await agentSettingsPayload(workspace, kode))
         }
+        if (request.method === 'GET' && url.pathname === '/api/settings/avatars') {
+          return json(response, 200, await loadAvatarLibrary())
+        }
         if (request.method === 'PUT' && url.pathname === '/api/settings/agents') {
           const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
           const profiles = parseAgentProfiles(raw.profiles)
@@ -1294,7 +1311,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             const session = await kode.createPlanSession(
               backendKey,
               workspace,
-              buildIntakePlanPrompt(requestText, receiptId),
+              await withAgentPrompt(workspace, 'analysis', buildIntakePlanPrompt(requestText, receiptId)),
               intakeModel,
             )
             const specopsSession = await createSpecOpsSession(workspace, {
@@ -1325,7 +1342,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const session = await kode.createAnalysisSession(
             backendKey,
             workspace,
-            buildIntakePrompt(requestText, receiptId),
+            await withAgentPrompt(workspace, 'analysis', buildIntakePrompt(requestText, receiptId)),
             intakeModel,
           )
           const specopsSession = await createSpecOpsSession(workspace, {
@@ -1528,7 +1545,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const session = await kode.createPlanSession(
             backendKey,
             workspace,
-            buildClarifyPrompt(requestText, clarifyId),
+            await withAgentPrompt(workspace, 'analysis', buildClarifyPrompt(requestText, clarifyId)),
             clarifyModel,
           )
           const specopsSession = await createSpecOpsSession(workspace, {
@@ -1641,7 +1658,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             ? `## Approved plan\n\n${clarify.planMd}`
             : clarify.transcript.map((t) => `### ${t.role}\n${t.text}`).join('\n\n')
           const clarifiedContext = `${clarify.request}\n\n${planContext}`
-          const combinedPrompt = buildIntakePrompt(clarifiedContext, receiptId)
+          const combinedPrompt = await withAgentPrompt(workspace, 'analysis', buildIntakePrompt(clarifiedContext, receiptId))
           const session = await kode.createAnalysisSession(clarify.backendKey, workspace, combinedPrompt, clarify.model)
           const specopsSession = await updateSpecOpsSession(workspace, clarify.specopsSessionId, (record) => {
             record.phase = 'analyze_request'

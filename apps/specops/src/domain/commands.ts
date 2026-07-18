@@ -4,6 +4,7 @@ import path from 'node:path'
 import type { CommandResult, Diagnostic } from '../core/result.js'
 import { parseDocument, serializeDocument, type ChangeFile, type SpecDocument } from './spec.js'
 import { trustWorktreeRoot } from './trust.js'
+import { BUILTIN_AGENT_PROMPTS, DEFAULT_AGENT_PROMPT_FILES } from './agent-prompts.js'
 import {
   atomicWrite,
   exists,
@@ -46,7 +47,7 @@ const BUILTIN_SKILLS: Record<string, string> = {
   'specops.analyze.md': analyzeSkill,
 }
 
-const SPECOPS_DIRS = ['specs', 'changes', 'state', 'runs'] as const
+const SPECOPS_DIRS = ['specs', 'changes', 'state', 'runs', 'agents'] as const
 
 const CONSTITUTION_SEED = `# Project Constitution
 
@@ -127,15 +128,18 @@ export async function initWorkspace(input: string): Promise<CommandResult<{ work
       'backend = "codebuddy"',
       '# model = ""',
       '',
-      '# [agents.analysis]       # clarify, intake, plan',
+      '[agents.analysis]       # Clarify / Plan primary agent',
+      'prompt_file = ".specops/agents/clarify.md"',
       '# backend = "claude"',
       '# model = "claude-sonnet"',
       '',
-      '# [agents.implementation] # implement, repair, resume',
+      '[agents.implementation] # implement, repair, resume',
+      'prompt_file = ".specops/agents/implementation.md"',
       '# backend = "codex"',
       '# model = "gpt-5-codex"',
       '',
-      '# [agents.review]',
+      '[agents.review]',
+      'prompt_file = ".specops/agents/review.md"',
       '# backend = "claude"',
       '# model = "claude-opus"',
       '',
@@ -172,6 +176,12 @@ export async function initWorkspace(input: string): Promise<CommandResult<{ work
     ].join('\n')
     await atomicWrite(configPath, seedConfig)
     created.push('specops.toml')
+  }
+  for (const role of ['analysis', 'implementation', 'review'] as const) {
+    const promptPath = pathInside(workspace, DEFAULT_AGENT_PROMPT_FILES[role])
+    if (await exists(promptPath)) continue
+    await atomicWrite(promptPath, `${BUILTIN_AGENT_PROMPTS[role]}\n`)
+    created.push(DEFAULT_AGENT_PROMPT_FILES[role])
   }
   const ignorePath = path.join(root, '.gitignore')
   if (!await exists(ignorePath)) {

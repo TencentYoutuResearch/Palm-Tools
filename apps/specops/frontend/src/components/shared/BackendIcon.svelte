@@ -16,8 +16,9 @@
 
   interface Props {
     backendKey?: string | null;
+    size?: number;
   }
-  let { backendKey }: Props = $props();
+  let { backendKey, size = 26 }: Props = $props();
 
   interface IconDef {
     src: string;
@@ -69,7 +70,7 @@
   const fallback = $derived(fallbackLabel(backendKey ?? '?'));
 </script>
 
-<span class="backend-icon">
+<span class="backend-icon" style={`--backend-icon-size: ${size}px`}>
   {#if profile}
     <img src={profile.src} alt="" loading="lazy" decoding="async" />
   {:else}
@@ -79,8 +80,8 @@
 
 <style>
   .backend-icon {
-    width: 26px;
-    height: 26px;
+    width: var(--backend-icon-size);
+    height: var(--backend-icon-size);
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -88,14 +89,14 @@
     overflow: visible;
   }
   img {
-    width: 26px;
-    height: 26px;
+    width: var(--backend-icon-size);
+    height: var(--backend-icon-size);
     display: block;
     object-fit: contain;
   }
   .fallback {
-    width: 26px;
-    height: 26px;
+    width: var(--backend-icon-size);
+    height: var(--backend-icon-size);
     border-radius: var(--rad-sm);
     display: inline-flex;
     align-items: center;

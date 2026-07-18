@@ -81,17 +81,20 @@ describe('SpecOps server', () => {
     const loaded = await fetch(`${server.origin}/api/settings/agents`, auth(server))
     expect(loaded.status).toBe(200)
     expect((await loaded.json() as { backends: Array<{ key: string }> }).backends.map((item) => item.key)).toEqual(['codebuddy', 'codex'])
+    const avatars = await fetch(`${server.origin}/api/settings/avatars`, auth(server))
+    expect(avatars.status).toBe(200)
+    expect((await avatars.json() as { gallery: unknown[] }).gallery).toBeInstanceOf(Array)
 
     const saved = await fetch(`${server.origin}/api/settings/agents`, auth(server, {
       method: 'PUT',
       body: JSON.stringify({ profiles: {
         default: { backend: 'codebuddy' }, analysis: {},
-        implementation: { backend: 'codex', model: 'gpt-5-codex' }, review: {},
+        implementation: { backend: 'codex', model: 'gpt-5-codex', avatar: 'gallery/robot' }, review: {},
       } }),
     }))
     expect(saved.status).toBe(200)
     const config = await readFile(path.join(workspace, 'specops.toml'), 'utf8')
-    expect(config).toContain('[agents.implementation]\nbackend = "codex"\nmodel = "gpt-5-codex"')
+    expect(config).toContain('[agents.implementation]\nbackend = "codex"\nmodel = "gpt-5-codex"\navatar = "gallery/robot"')
 
     const invalid = await fetch(`${server.origin}/api/settings/agents`, auth(server, {
       method: 'PUT',

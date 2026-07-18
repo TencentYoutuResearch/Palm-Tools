@@ -85,8 +85,9 @@ pub fn run() {
             // HookRelay 需要 BridgeBus(AppState 内部创建的),所以 AppState 创建后再 spawn relay task。
             if let Some(relay) = hook_relay {
                 let bus = Arc::clone(&app_state.ctx.bus);
+                let core_tx = app_state.ctx.core_tx.clone();
                 tauri::async_runtime::spawn(async move {
-                    relay.run(bus).await;
+                    relay.run(bus, core_tx).await;
                 });
             }
             let ctx_for_bridge = std::sync::Arc::clone(&app_state.protocol_ctx);

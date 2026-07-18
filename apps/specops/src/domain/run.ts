@@ -26,6 +26,7 @@ import {
 } from './session.js'
 import { appendHarnessEvent, initializeHarnessRun, readHarnessState, transitionHarnessLoop, transitionHarnessTask } from './harness-core.js'
 import { captureEnvironment } from './environment.js'
+import { resolveAgentPrompt } from './agent-prompts.js'
 
 const execFile = promisify(execFileCallback)
 
@@ -69,8 +70,8 @@ export interface RunRecord {
   model: string | null
   /** Immutable role selections. Existing runs do not drift when specops.toml changes. */
   agent_profiles: {
-    implementation: { backend: string; model: string | null }
-    review: { backend: string; model: string | null }
+    implementation: { backend: string; model: string | null; prompt?: string; prompt_source?: string }
+    review: { backend: string; model: string | null; prompt?: string; prompt_source?: string }
   }
   kode_session_id: number | null
   tasks: Task[]
@@ -249,9 +250,22 @@ export async function readRun(workspaceInput: string, runId: string): Promise<Ru
   if (run.agent_profiles === undefined) {
     const config = await loadConfig(workspace)
     const review = resolveAgentSelection(config, 'review')
+    const [implementationPrompt, reviewPrompt] = await Promise.all([
+      resolveAgentPrompt(workspace, config, 'implementation'),
+      resolveAgentPrompt(workspace, config, 'review'),
+    ])
     run.agent_profiles = {
-      implementation: { backend: run.backend_key, model: run.model },
-      review: { backend: review.backend, model: review.model ?? null },
+      implementation: { backend: run.backend_key, model: run.model, prompt: implementationPrompt.content, prompt_source: implementationPrompt.source },
+      review: { backend: review.backend, model: review.model ?? null, prompt: reviewPrompt.content, prompt_source: reviewPrompt.source },
+    }
+  }
+  for (const role of ['implementation', 'review'] as const) {
+    const profile = run.agent_profiles[role]
+    if (profile.prompt === undefined || profile.prompt_source === undefined) {
+      const config = await loadConfig(workspace)
+      const prompt = await resolveAgentPrompt(workspace, config, role)
+      profile.prompt = prompt.content
+      profile.prompt_source = prompt.source
     }
   }
   // Backfill change_id for runs created before this field existed (legacy
@@ -292,11 +306,13 @@ export async function createRun(
   // there while preserving any explicitly requested task checks.
   if (changeId !== null) {
     const proposal = pathInside(workspace, '.specops', 'changes', changeId, 'proposal.md')
-    const document = parseDocument(await readFile(proposal, 'utf8'), proposal)
-    const required = document.frontmatter.verifies ?? []
-    if (required.length > 0) {
-      const last = tasks.at(-1)!
-      last.verify = [...new Set([...last.verify, ...required])]
+    if (await exists(proposal)) {
+      const document = parseDocument(await readFile(proposal, 'utf8'), proposal)
+      const required = document.frontmatter.verifies ?? []
+      if (required.length > 0) {
+        const last = tasks.at(-1)!
+        last.verify = [...new Set([...last.verify, ...required])]
+      }
     }
   }
   let baseCommit: string
@@ -333,6 +349,10 @@ export async function createRun(
   }
   const backend = await resolveAgentBackendProfile(workspace, backendKey, config.agent_backends[backendKey])
   const reviewAgent = resolveAgentSelection(config, 'review')
+  const [implementationPrompt, reviewPrompt] = await Promise.all([
+    resolveAgentPrompt(workspace, config, 'implementation'),
+    resolveAgentPrompt(workspace, config, 'review'),
+  ])
   const workflowKind = await workflowKindForChange(workspace, changeId)
   const manifest: RunManifest = {
     schema_version: 1,
@@ -363,8 +383,8 @@ export async function createRun(
     backend_key: backendKey,
     model: model ?? null,
     agent_profiles: {
-      implementation: { backend: backendKey, model: model ?? null },
-      review: { backend: reviewAgent.backend, model: reviewAgent.model ?? null },
+      implementation: { backend: backendKey, model: model ?? null, prompt: implementationPrompt.content, prompt_source: implementationPrompt.source },
+      review: { backend: reviewAgent.backend, model: reviewAgent.model ?? null, prompt: reviewPrompt.content, prompt_source: reviewPrompt.source },
     },
     kode_session_id: null,
     tasks,

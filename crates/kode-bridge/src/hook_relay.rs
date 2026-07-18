@@ -21,6 +21,7 @@
 //! | `PermissionRequest` | — | `ask_user_question_hint` | Codex 权限请求点亮 attention |
 //! | `UserPromptSubmit` | — | `session.attention_cleared` | 用户回车后即时清除 attention |
 //! | `PreToolUse` | — | `session.mode_changed` | 实时获取 permission_mode |
+//! | `ConfigChange` | `model` 非空 | `CoreEvent::JsonlMeta` | 即时同步当前 session model |
 //! | `PostToolUse` / `SubagentStop` / `SessionEnd` | — | `session.attention_cleared` | Codex 本轮结束后清除 stale attention |
 //! | `Stop` | — | `session.turn_finished` + `session.attention_cleared` | codebuddy/claude 本轮真正结束,权威 turn_finished 信号 |
 //!
@@ -34,8 +35,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{BridgeBus, EventEnvelope};
+use kode_core::CoreEvent;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
 
 /// Hook Relay 服务,持有 Unix Domain Socket 监听器。
 pub struct HookRelay {
@@ -98,7 +101,7 @@ impl HookRelay {
     /// 运行 relay 主循环:接受连接,逐行解析 JSON,emit 到 BridgeBus。
     ///
     /// 这是阻塞的 async 函数,应在 spawn 中运行。
-    pub async fn run(self, bus: Arc<BridgeBus>) {
+    pub async fn run(self, bus: Arc<BridgeBus>, core_tx: mpsc::UnboundedSender<CoreEvent>) {
         loop {
             match self.listener.accept().await {
                 Ok((stream, addr)) => {
@@ -106,8 +109,9 @@ impl HookRelay {
                         tracing::debug!(?addr, ?peer_creds, "HookRelay accepted connection");
                     }
                     let bus = Arc::clone(&bus);
+                    let core_tx = core_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus).await {
+                        if let Err(e) = handle_connection(stream, bus, core_tx).await {
                             tracing::warn!(?addr, error = %e, "HookRelay connection error");
                         }
                     });
@@ -131,7 +135,11 @@ impl Drop for HookRelay {
 }
 
 /// 处理单个 UDS 连接:逐行读 JSON,解析并 emit。
-async fn handle_connection(stream: UnixStream, bus: Arc<BridgeBus>) -> Result<(), String> {
+async fn handle_connection(
+    stream: UnixStream,
+    bus: Arc<BridgeBus>,
+    core_tx: mpsc::UnboundedSender<CoreEvent>,
+) -> Result<(), String> {
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();
 
@@ -140,14 +148,31 @@ async fn handle_connection(stream: UnixStream, bus: Arc<BridgeBus>) -> Result<()
         if trimmed.is_empty() {
             continue;
         }
-        process_hook_json(trimmed, &bus);
+        process_hook_json_with_core_tx(trimmed, &bus, &core_tx);
     }
 
     Ok(())
 }
 
 /// 解析一行 hook JSON 并 emit 对应的 BridgeBus 事件。
+#[cfg(test)]
 fn process_hook_json(json_str: &str, bus: &BridgeBus) {
+    process_hook_json_inner(json_str, bus, None);
+}
+
+fn process_hook_json_with_core_tx(
+    json_str: &str,
+    bus: &BridgeBus,
+    core_tx: &mpsc::UnboundedSender<CoreEvent>,
+) {
+    process_hook_json_inner(json_str, bus, Some(core_tx));
+}
+
+fn process_hook_json_inner(
+    json_str: &str,
+    bus: &BridgeBus,
+    core_tx: Option<&mpsc::UnboundedSender<CoreEvent>>,
+) {
     let doc: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(e) => {
@@ -262,6 +287,32 @@ fn process_hook_json(json_str: &str, bus: &BridgeBus) {
                 "session.mode_changed",
                 serde_json::json!({ "mode": permission_mode }),
             ));
+        }
+        "ConfigChange" => {
+            let model = doc
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(kode_core::model_alias::sanitize_model_name)
+                .filter(|model| !model.is_empty());
+
+            let (Some(model), Some(core_tx)) = (model, core_tx) else {
+                return;
+            };
+
+            tracing::info!(%session_id, %model, "HookRelay: ConfigChange → model metadata");
+            let _ = core_tx.send(CoreEvent::JsonlMeta {
+                id: session_id,
+                model: Some(model),
+                title: None,
+                session_uuid: None,
+                tokens_reset: false,
+                tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                cost_usd: None,
+                context_pct: None,
+            });
         }
         "SessionStart" => {
             // codebuddy/claude/codex 在会话创建或恢复时发 SessionStart。
@@ -469,6 +520,52 @@ mod tests {
         let env = rx.try_recv().expect("should receive event");
         assert_eq!(env.r#type, "session.mode_changed");
         assert_eq!(env.payload["mode"], "plan");
+    }
+
+    #[test]
+    fn process_config_change_updates_only_the_routed_session_model() {
+        let bus = Arc::new(BridgeBus::new());
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let json = r#"{
+            "session_id": "42",
+            "hook_event_name": "ConfigChange",
+            "source": "user_settings",
+            "file_path": "/Users/test/.codebuddy/settings.json",
+            "model": "gpt-5.6-sol"
+        }"#;
+
+        process_hook_json_with_core_tx(json, &bus, &core_tx);
+
+        let event = core_rx.try_recv().expect("should receive model metadata");
+        match event {
+            kode_core::CoreEvent::JsonlMeta {
+                id,
+                model,
+                title,
+                session_uuid,
+                tokens_reset,
+                tokens,
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                cost_usd,
+                context_pct,
+            } => {
+                assert_eq!(id, 42);
+                assert_eq!(model.as_deref(), Some("gpt-5.6-sol"));
+                assert!(title.is_none());
+                assert!(session_uuid.is_none());
+                assert!(!tokens_reset);
+                assert!(tokens.is_none());
+                assert!(input_tokens.is_none());
+                assert!(output_tokens.is_none());
+                assert!(cached_tokens.is_none());
+                assert!(cost_usd.is_none());
+                assert!(context_pct.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

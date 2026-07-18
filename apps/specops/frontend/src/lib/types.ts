@@ -163,7 +163,7 @@ export interface SessionAgent {
 
 export interface WorkflowStep {
   id: string;
-  state: 'pending' | 'active' | 'done' | 'failed';
+  state: 'pending' | 'active' | 'awaiting_user' | 'done' | 'failed' | 'skipped';
   started_at?: string;
   completed_at?: string;
 }

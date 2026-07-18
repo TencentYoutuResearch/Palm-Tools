@@ -147,13 +147,13 @@ describe('review config parsing', () => {
 
 describe('agent profile resolution', () => {
   test('inherits role backend and model from workspace defaults', async () => {
-    const workspace = await workspaceWithConfig(`${BASE}\n[agents.default]\nbackend = "codex"\nmodel = "default-model"\n\n[agents.review]\nbackend = "claude"\n`)
+    const workspace = await workspaceWithConfig(`${BASE}\n[agents.default]\nbackend = "codex"\nmodel = "default-model"\navatar = "gallery/fox"\n\n[agents.review]\nbackend = "claude"\navatar = "gallery/owl"\n`)
     const config = await loadConfig(workspace)
     expect(resolveAgentSelection(config, 'analysis')).toEqual({
-      role: 'analysis', backend: 'codex', model: 'default-model',
+      role: 'analysis', backend: 'codex', model: 'default-model', avatar: 'gallery/fox',
     })
     expect(resolveAgentSelection(config, 'review')).toEqual({
-      role: 'review', backend: 'claude', model: 'default-model',
+      role: 'review', backend: 'claude', model: 'default-model', avatar: 'gallery/owl',
     })
   })
 
@@ -178,11 +178,11 @@ describe('agent profile resolution', () => {
     const config = await saveAgentConfig(workspace, {
       default: { backend: 'codex' },
       analysis: {},
-      implementation: { backend: 'claude', model: 'sonnet' },
+      implementation: { backend: 'claude', model: 'sonnet', avatar: 'gallery/robot' },
       review: {},
     })
     expect(config.agents.default.backend).toBe('codex')
-    expect(config.agents.implementation).toEqual({ backend: 'claude', model: 'sonnet' })
+    expect(config.agents.implementation).toEqual({ backend: 'claude', model: 'sonnet', avatar: 'gallery/robot' })
     const source = await readFile(path.join(workspace, 'specops.toml'), 'utf8')
     expect(source).toContain('# keep this comment')
     expect(source).toContain('[gate]\nstrict_wild_specs = true')
