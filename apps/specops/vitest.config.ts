@@ -18,6 +18,10 @@ export default defineConfig({
   }],
   test: {
     environment: 'node',
+    // TypeScript tests are canonical. Legacy compiled .js fixtures remain in the
+    // repository for compatibility, but running both copies executes stale
+    // assertions against the current source twice.
+    include: ['tests/**/*.test.ts'],
     // SpecOps tests do heavy git + filesystem I/O (worktrees, commits, rm -rf
     // cleanup in afterEach). Running test files in parallel turns the filesystem
     // into a bottleneck and produces intermittent ENOTEMPTY races during tmpdir

@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from 'vitest'
-import { mkdir, writeFile, rm, mkdtemp, readdir } from 'node:fs/promises'
+import { mkdir, writeFile, rm, mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
 import { initWorkspace } from '../src/domain/commands.js'
-import { startServer, type ServeHandle } from '../src/server/index.js'
-import { createSpecOpsSession, attachSessionAgent, listSpecOpsSessions } from '../src/domain/session.js'
+import { updateSpecOpsSession } from '../src/domain/session.js'
+import { startServer, type ServeHandle, type SpecOpsExecutionRuntime } from '../src/server/index.js'
 import type { KodeClient, KodeSession } from '../src/adapters/kode.js'
+import type { ExecutionRequestOutcome, ExecutionTurnResult } from '../src/execution/types.js'
 
 const cleanup: string[] = []
 const servers: ServeHandle[] = []
@@ -34,6 +35,46 @@ function buildKodePlanMock(): { kode: KodeClient; calls: { createPlanSession: nu
   return { kode, calls }
 }
 
+function buildExecutionRuntimeMock(): {
+  runtime: SpecOpsExecutionRuntime
+  calls: { start: number; prompt: number }
+} {
+  const calls = { start: 0, prompt: 0 }
+  const pending: Array<(outcome: ExecutionRequestOutcome<ExecutionTurnResult>) => void> = []
+  const identity = {
+    execution_id: 'clarify-execution',
+    transport: 'codebuddy_acp' as const,
+    backend_key: 'codebuddy',
+    native_session_id: 'clarify-native-session',
+    process_generation: 1,
+  }
+  const attach = async (input: { workspace: string; sessionId: string }) => {
+    await updateSpecOpsSession(input.workspace, input.sessionId, (record) => {
+      record.current_execution = identity
+      record.state = 'active'
+    })
+    return identity
+  }
+  const runtime = {
+    start: async (input: { workspace: string; sessionId: string }) => { calls.start += 1; return attach(input) },
+    load: async (input: { workspace: string; sessionId: string }) => attach(input),
+    prompt: () => {
+      calls.prompt += 1
+      return new Promise<ExecutionRequestOutcome<ExecutionTurnResult>>((resolve) => pending.push(resolve))
+    },
+    respond: async () => ({ outcome: 'completed' as const, value: undefined }),
+    cancel: async () => ({ outcome: 'completed' as const, value: undefined }),
+    close: async () => undefined,
+    get: () => identity,
+    shutdown: async () => {
+      for (const resolve of pending.splice(0)) {
+        resolve({ outcome: 'completed', value: { turnId: 'shutdown' } })
+      }
+    },
+  } satisfies SpecOpsExecutionRuntime
+  return { runtime, calls }
+}
+
 async function fixture() {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'specops-ask-'))
   const { execFile } = await import('node:child_process')
@@ -53,10 +94,11 @@ async function fixture() {
   await run('git', ['-C', workspace, 'commit', '-q', '-m', 'init'])
   cleanup.push(workspace)
   await initWorkspace(workspace)
-  const { kode, calls } = buildKodePlanMock()
-  const server = await startServer({ workspace, token: 'ask-token', kodeClient: kode })
+  const { kode, calls: legacyCalls } = buildKodePlanMock()
+  const { runtime, calls: runtimeCalls } = buildExecutionRuntimeMock()
+  const server = await startServer({ workspace, token: 'ask-token', kodeClient: kode, executionRuntime: runtime })
   servers.push(server)
-  return { workspace, server, calls }
+  return { workspace, server, legacyCalls, runtimeCalls }
 }
 
 function auth(server: ServeHandle, init: RequestInit = {}): RequestInit {
@@ -73,7 +115,7 @@ function auth(server: ServeHandle, init: RequestInit = {}): RequestInit {
 
 describe('AskFloat clarify reuse', () => {
   test('second clarify on the same document_path reuses the existing active session', async () => {
-    const { server, calls } = await fixture()
+    const { server, legacyCalls, runtimeCalls } = await fixture()
     const docPath = '.specops/specs/auth.md'
 
     const first = await fetch(`${server.origin}/api/clarifies`, auth(server, {
@@ -93,7 +135,8 @@ describe('AskFloat clarify reuse', () => {
     const secondBody = await second.json() as { specops_session: { id: string }; reused?: boolean }
     expect(secondBody.reused).toBe(true)
     expect(secondBody.specops_session.id).toBe(firstSessionId)
-    expect(calls).toEqual({ createPlanSession: 1, sendPrompt: 1 })
+    expect(runtimeCalls).toEqual({ start: 1, prompt: 2 })
+    expect(legacyCalls).toEqual({ createPlanSession: 0, sendPrompt: 0 })
   })
 
   test('clarify without document_path always creates a new session', async () => {
@@ -112,5 +155,28 @@ describe('AskFloat clarify reuse', () => {
     expect(second.status).toBe(201)
     const secondBody = await second.json() as { specops_session: { id: string }; reused?: boolean }
     expect(secondBody.reused).toBeUndefined()
+  })
+
+  test('gates clarify and pre-plan by effective structured capabilities', async () => {
+    const { server, runtimeCalls } = await fixture()
+    const clarify = await fetch(`${server.origin}/api/clarifies`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ request: 'clarify with codex', backend_key: 'codex' }),
+    }))
+    expect(clarify.status).toBe(201)
+
+    const prePlan = await fetch(`${server.origin}/api/intakes`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ request: 'pre-plan with codex', backend_key: 'codex', pre_plan: true }),
+    }))
+    expect(prePlan.status).toBe(201)
+    expect(runtimeCalls).toEqual({ start: 2, prompt: 2 })
+
+    const claude = await fetch(`${server.origin}/api/clarifies`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ request: 'clarify with claude', backend_key: 'claude' }),
+    }))
+    expect(claude.status).toBe(201)
+    expect(runtimeCalls).toEqual({ start: 3, prompt: 3 })
   })
 })

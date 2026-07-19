@@ -1,5 +1,6 @@
 <script lang="ts">
   import MessageBubble from './MessageBubble.svelte';
+  import AgentWorkingBubble from './AgentWorkingBubble.svelte';
   import ToolCard from './ToolCard.svelte';
   import StatusBadge from '../shared/StatusBadge.svelte';
   import { createTranscriptDisplayItems } from '../../lib/transcriptDisplay.ts';
@@ -8,28 +9,47 @@
   interface Props {
     agent: SessionAgent | null;
     entries: TranscriptEntry[];
+    groupKey: string | null;
+    working?: boolean;
   }
-  let { agent, entries }: Props = $props();
+  let { agent, entries, groupKey, working = false }: Props = $props();
   const displayItems = $derived(createTranscriptDisplayItems(entries));
+  const identityLabel = $derived.by(() => {
+    if (agent?.transport === 'legacy_kode_pty' && typeof agent.kode_session_id === 'number') {
+      return `#${agent.kode_session_id}`;
+    }
+    if (agent?.native_session_id) return agent.native_session_id;
+    if (agent?.execution_id) return agent.execution_id;
+    if (typeof agent?.kode_session_id === 'number') return `#${agent.kode_session_id}`;
+    return groupKey?.replace(/^(execution:|legacy-kode:)/, '') ?? '';
+  });
 </script>
 
 <section class="agent-group">
-  {#if agent !== null}
+  {#if agent !== null || groupKey !== null}
     <header class="group-head">
-      <span class="purpose">{agent.purpose}</span>
+      <span class="purpose">{agent?.purpose ?? 'execution'}</span>
       <span class="dot">·</span>
-      <span class="id">#{agent.kode_session_id}</span>
-      <StatusBadge label={agent.status} tone={agent.status === 'exited' ? 'archived' : 'active'} />
+      <span class="id" title={agent?.execution_id ?? groupKey ?? undefined}>{identityLabel}</span>
+      {#if agent !== null}
+        <StatusBadge
+          label={working ? 'running' : agent.status}
+          tone={working ? 'busy' : agent.status === 'failed' ? 'error' : agent.status === 'exited' || agent.status === 'closed' ? 'archived' : 'active'}
+        />
+      {/if}
     </header>
   {/if}
   <div class="messages">
     {#each displayItems as item (item.key)}
       {#if item.kind === 'tool'}
-        <ToolCard entry={item.resultEntry ?? item.entry} />
+        <ToolCard entry={item.resultEntry === undefined ? item.entry : { ...item.entry, ...item.resultEntry }} />
       {:else}
         <MessageBubble entry={item.entry} backendKey={agent?.backend_key ?? null} />
       {/if}
     {/each}
+    {#if working}
+      <AgentWorkingBubble backendKey={agent?.backend_key ?? null} />
+    {/if}
   </div>
 </section>
 

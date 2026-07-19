@@ -19,13 +19,16 @@ import { parseDocument, type DocumentKind } from './spec.js'
 import { atomicWrite, exists, pathInside, resolveGitWorkspace } from '../store/workspace.js'
 import {
   findSpecOpsSessionByRunId,
+  legacyExecutionIdentity,
   updateSpecOpsSession,
+  type ExecutionIdentity,
   type RequiredAction,
   type SpecOpsPhase,
   type SpecOpsSessionState,
 } from './session.js'
 import { appendHarnessEvent, initializeHarnessRun, readHarnessState, transitionHarnessLoop, transitionHarnessTask } from './harness-core.js'
 import { captureEnvironment } from './environment.js'
+import { cancelActionableInteractions, enqueueInteraction } from './interactions.js'
 import { resolveAgentPrompt } from './agent-prompts.js'
 
 const execFile = promisify(execFileCallback)
@@ -73,6 +76,8 @@ export interface RunRecord {
     implementation: { backend: string; model: string | null; prompt?: string; prompt_source?: string }
     review: { backend: string; model: string | null; prompt?: string; prompt_source?: string }
   }
+  /** Current implementation attachment; kode_session_id remains a legacy mirror. */
+  execution: ExecutionIdentity | null
   kode_session_id: number | null
   tasks: Task[]
   current_task: number
@@ -239,10 +244,20 @@ async function runCommitMessage(run: RunRecord): Promise<string> {
   return `${header}\n\nRun-Id: ${run.run_id}\nChange-Id: ${changeId}\nTask: ${taskLine}`
 }
 
+function normalizeRunExecution(run: RunRecord): void {
+  if (typeof run.kode_session_id !== 'number') run.kode_session_id = null
+  if (run.execution == null || run.execution.transport === 'legacy_kode_pty') {
+    run.execution = run.kode_session_id === null
+      ? null
+      : legacyExecutionIdentity(run.kode_session_id, run.backend_key)
+  }
+}
+
 export async function readRun(workspaceInput: string, runId: string): Promise<RunRecord> {
   const workspace = await resolveGitWorkspace(workspaceInput)
   if (!/^[0-9a-f-]{36}$/.test(runId)) throw new SpecOpsError('invalid_run_id', `invalid run id: ${runId}`)
   const run = JSON.parse(await readFile(runFile(workspace, runId), 'utf8')) as RunRecord
+  normalizeRunExecution(run)
   // Backfill review_results for runs created before auto-review existed, so
   // callers can always `.push()` without an undefined guard.
   if (!Array.isArray(run.review_results)) run.review_results = []
@@ -281,6 +296,7 @@ export async function readRun(workspaceInput: string, runId: string): Promise<Ru
 }
 
 export async function writeRun(run: RunRecord): Promise<void> {
+  normalizeRunExecution(run)
   run.updated_at = new Date().toISOString()
   await atomicWrite(runFile(run.workspace_root, run.run_id), `${JSON.stringify(run, null, 2)}\n`)
 }
@@ -386,6 +402,7 @@ export async function createRun(
       implementation: { backend: backendKey, model: model ?? null, prompt: implementationPrompt.content, prompt_source: implementationPrompt.source },
       review: { backend: reviewAgent.backend, model: reviewAgent.model ?? null, prompt: reviewPrompt.content, prompt_source: reviewPrompt.source },
     },
+    execution: null,
     kode_session_id: null,
     tasks,
     current_task: 0,
@@ -546,6 +563,45 @@ async function syncSessionPhaseForRun(run: RunRecord): Promise<void> {
   await updateSpecOpsSession(run.workspace_root, session.id, (record) => {
     record.phase = update.phase
     record.state = update.state
+    if (run.state === 'running') {
+      cancelActionableInteractions(record, ['run_verify', 'human_review', 'resume'], { reason: 'run_resumed' })
+      return
+    }
+    if (run.state === 'awaiting_verify') {
+      cancelActionableInteractions(record, ['human_review', 'apply', 'resume'], { reason: 'verification_required' })
+      const task = run.tasks[run.current_task]
+      enqueueInteraction(record, {
+        kind: 'run_verify',
+        source: 'system',
+        idempotency_key: `run_verify:${run.run_id}:${task?.id ?? 'unknown'}:${run.iteration}`,
+        payload: { run_id: run.run_id },
+      })
+      return
+    }
+    if (run.state === 'awaiting_review') {
+      cancelActionableInteractions(record, ['run_verify', 'apply', 'resume'], { reason: 'verification_completed' })
+      enqueueInteraction(record, {
+        kind: 'human_review',
+        source: 'system',
+        idempotency_key: `human_review:${run.run_id}:${run.current_task}:${run.review_results.length}`,
+        payload: {
+          run_id: run.run_id,
+          patch_files: update.required_action?.kind === 'review' ? update.required_action.patch_files : [],
+          review_note: update.required_action?.kind === 'review' ? update.required_action.review_note ?? null : null,
+        },
+      })
+      return
+    }
+    if (run.state === 'completed' || run.state === 'applied_failed') {
+      cancelActionableInteractions(record, ['run_verify', 'human_review', 'resume'], { reason: 'review_completed' })
+      enqueueInteraction(record, {
+        kind: 'apply',
+        source: 'system',
+        idempotency_key: `apply:${run.run_id}:${run.state}`,
+        payload: { run_id: run.run_id },
+      })
+      return
+    }
     record.required_action = update.required_action
   })
 }
@@ -639,6 +695,32 @@ export async function changedFilesForRun(run: RunRecord): Promise<string[]> {
   } catch {
     return []
   }
+}
+
+export interface RunChangeEvidence {
+  files: string[]
+  digest: string
+}
+
+/**
+ * Side-effect-free snapshot used to prove that one stage-bound turn changed the
+ * Run worktree. Hashing the current contents (or a deletion marker) catches
+ * edits to a file that was already dirty before a later task/repair turn.
+ */
+export async function runChangeEvidence(run: RunRecord): Promise<RunChangeEvidence> {
+  const files = await changedFilesForRun(run)
+  const hash = createHash('sha256')
+  for (const file of files) {
+    hash.update(file)
+    hash.update('\0')
+    try {
+      hash.update(await readFile(path.join(run.worktree_path, file)))
+    } catch {
+      hash.update('<deleted>')
+    }
+    hash.update('\0')
+  }
+  return { files, digest: hash.digest('hex') }
 }
 
 export async function collectRunPatch(run: RunRecord): Promise<{ patch: string; files: string[] }> {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
-import { createTranscriptDisplayItems } from '../frontend/src/lib/transcriptDisplay.ts'
-import type { TranscriptEntry } from '../frontend/src/lib/types.ts'
+import { createTranscriptDisplayItems } from '../frontend/src/lib/transcriptDisplay.js'
+import { executionGroupKey, type TranscriptEntry } from '../frontend/src/lib/types.js'
 
 function message(text = 'hello'): TranscriptEntry {
   return { role: 'agent', text, kind: 'text' }
@@ -13,7 +13,7 @@ function toolUse(id?: string): TranscriptEntry {
     text: '',
     kind: 'tool_use',
     tool: 'Read',
-    tool_call_id: id,
+    ...(id === undefined ? {} : { tool_call_id: id }),
     summary: 'Read file',
     status: 'running',
   }
@@ -25,11 +25,22 @@ function toolResult(id?: string, preview = '{"ok":true}'): TranscriptEntry {
     text: '',
     kind: 'tool_result',
     tool: 'Read',
-    tool_call_id: id,
+    ...(id === undefined ? {} : { tool_call_id: id }),
     preview,
     status: 'ok',
   }
 }
+
+describe('executionGroupKey', () => {
+  test('prefers transport-neutral execution identity over legacy numeric ids', () => {
+    expect(executionGroupKey('codebuddy_acp:session-a:1', 42)).toBe('execution:codebuddy_acp:session-a:1')
+  })
+
+  test('groups unnormalized legacy records by numeric Kode session id', () => {
+    expect(executionGroupKey(null, 42)).toBe('legacy-kode:42')
+    expect(executionGroupKey(undefined, null)).toBeNull()
+  })
+})
 
 describe('createTranscriptDisplayItems', () => {
   test('pairs tool_use and tool_result by tool_call_id at the use position', () => {

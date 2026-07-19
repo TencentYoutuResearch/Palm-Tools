@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { parseToolPreview } from '../frontend/src/lib/toolPreview.ts'
+import { parseToolPreview } from '../frontend/src/lib/toolPreview.js'
 
 describe('parseToolPreview (lib/toolPreview.ts pure parser)', () => {
   test('parses a JSON object into kind:json', () => {

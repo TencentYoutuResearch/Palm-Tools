@@ -41,7 +41,7 @@ describe('document history API', () => {
     const { join } = await import('node:path')
     await mkdir(join(workspace, '.specops', 'specs'), { recursive: true })
     await writeFile(join(workspace, rel), '# Auth\nv1\n')
-    const h1 = await gitCommit(workspace, 'v1: init', rel)
+    await gitCommit(workspace, 'v1: init', rel)
     await writeFile(join(workspace, rel), '# Auth\nv1\nv2\n')
     await gitCommit(workspace, 'v2: update', rel)
     await writeFile(join(workspace, rel), '# Auth\nv1\nv2\nv3\n')
@@ -54,12 +54,13 @@ describe('document history API', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as { commits: Array<{ hash: string; short: string; author: string; date: string; message: string }> }
     expect(body.commits.length).toBe(3)
-    expect(body.commits[0].message).toBe('v3: more')
-    expect(body.commits[2].message).toBe('v1: init')
-    expect(body.commits[0].hash.length).toBeGreaterThanOrEqual(7)
-    expect(body.commits[0].short.length).toBe(8)
-    expect(body.commits[0].author).toBe('SpecOps Test')
-    expect(body.commits[0].date).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    const latest = body.commits[0]!
+    expect(latest.message).toBe('v3: more')
+    expect(body.commits[2]!.message).toBe('v1: init')
+    expect(latest.hash.length).toBeGreaterThanOrEqual(7)
+    expect(latest.short.length).toBe(8)
+    expect(latest.author).toBe('SpecOps Test')
+    expect(latest.date).toMatch(/^\d{4}-\d{2}-\d{2}T/)
   })
 
   test('returns empty commits for an untracked file without erroring', async () => {

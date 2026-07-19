@@ -1,5 +1,8 @@
-import type { KodeClient } from '../adapters/kode.js'
+import { randomUUID } from 'node:crypto'
+
 import { SpecOpsError } from '../core/errors.js'
+import type { ExecutionRuntime } from '../execution/runtime.js'
+import type { ExecutionRequestOutcome, ExecutionTurnResult } from '../execution/types.js'
 import { markChangeCompleted, scanWorkspace } from './commands.js'
 import type { SpecOpsConfig } from './config.js'
 import { runVerify, type VerifyResult } from './gate.js'
@@ -10,6 +13,7 @@ import {
   isRunPatchEmpty,
   isRunAlreadyLanded,
   readRun,
+  runChangeEvidence,
   transitionRun,
   writeRun,
   type ApplyResult,
@@ -23,7 +27,7 @@ import { compileAgentContext } from './agent-runtime.js'
 import { BUILTIN_AGENT_PROMPTS, composeRolePrompt } from './agent-prompts.js'
 import { parseDocument } from './spec.js'
 import { pathInside, readText } from '../store/workspace.js'
-import { attachSessionAgent, findSpecOpsSessionByRunId, updateSessionAgentStatus } from './session.js'
+import { buildSessionResumeContext, findSpecOpsSessionByRunId, readSpecOpsSession, updateSpecOpsSession } from './session.js'
 
 /**
  * Process-wide apply serialization. Keyed by workspace root so that applies
@@ -44,39 +48,121 @@ function withApplyLock<T>(workspace: string, work: () => Promise<T>): Promise<T>
   return next
 }
 
+export type RunExecutionRuntime = Pick<ExecutionRuntime, 'start' | 'load' | 'prompt' | 'close' | 'get'>
+
+export type StageBoundPurpose = 'implement' | 'repair'
+
+export interface RunTurnBinding {
+  run_id: string
+  task_id: string
+  purpose: StageBoundPurpose
+  request_id: string
+  execution_id: string
+  process_generation: number
+  baseline_digest: string
+}
+
+export interface RunTurn {
+  run: RunRecord
+  binding: RunTurnBinding
+  completion: Promise<ExecutionRequestOutcome<ExecutionTurnResult>>
+}
+
+async function promptStageBoundTurn(
+  run: RunRecord,
+  runtime: RunExecutionRuntime,
+  identity: NonNullable<RunRecord['execution']>,
+  purpose: StageBoundPurpose,
+  taskId: string,
+  text: string,
+  freshContext = false,
+): Promise<RunTurn> {
+  const baseline = await runChangeEvidence(run)
+  const requestId = randomUUID()
+  const binding: RunTurnBinding = {
+    run_id: run.run_id,
+    task_id: taskId,
+    purpose,
+    request_id: requestId,
+    execution_id: identity.execution_id,
+    process_generation: identity.process_generation,
+    baseline_digest: baseline.digest,
+  }
+  return {
+    run,
+    binding,
+    completion: runtime.prompt(identity.execution_id, {
+      requestId,
+      text,
+      metadata: {
+        run_id: run.run_id,
+        task_id: taskId,
+        purpose,
+        may_advance_stage: true,
+        process_generation: identity.process_generation,
+        fresh_context: freshContext,
+      },
+    }),
+  }
+}
+
 export async function launchRun(
   workspace: string,
   tasks: Task[],
   backendKey: string,
   base: string,
-  kode?: KodeClient,
   runCacheRoot?: string,
   model?: string,
   changeId: string | null = null,
 ): Promise<RunRecord> {
-  const run = await createRun(workspace, tasks, backendKey, base, runCacheRoot, changeId, model)
-  if (kode !== undefined) {
-    // Pre-trust the worktree cache root so codebuddy won't block on
-    // "trust this directory?" when starting in the git worktree.
-    await trustWorktreeRoot(runCacheRoot)
-    // Pass the prompt before spawn so codebuddy submits it as part of startup.
-    try {
-      const context = await compileAgentContext(run, 'builder')
-      await recordHarnessArtifact(run.workspace_root, run.run_id, {
-        kind: 'context', subject: context.task_id, producer: 'context-compiler', uri: null,
-        content_hash: context.hash, source_commit: run.base_commit, inputs: [], metadata: { role: context.role, included_paths: context.included_paths, excluded: context.excluded },
-      })
-      const session = await kode.createSession(run.backend_key, run.worktree_path, promptForTask(run, context.content), undefined, run.model ?? undefined)
-      run.kode_session_id = session.id
-      await writeRun(run)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      run.state = 'failed'
-      await writeRun(run)
-      throw new SpecOpsError('session_create_failed', `Failed to create kode session: ${message}`)
-    }
+  return createRun(workspace, tasks, backendKey, base, runCacheRoot, changeId, model)
+}
+
+/** Bind a prepared Run to an existing SpecOps session before starting its first structured turn. */
+export async function startRunExecution(
+  run: RunRecord,
+  runtime: RunExecutionRuntime,
+  specopsSessionId: string,
+  runCacheRoot?: string,
+): Promise<RunTurn> {
+  await trustWorktreeRoot(runCacheRoot)
+  try {
+    const context = await compileAgentContext(run, 'builder')
+    await recordContextArtifact(run, context)
+    const identity = await runtime.start({
+      workspace: run.workspace_root,
+      sessionId: specopsSessionId,
+      runId: run.run_id,
+      purpose: 'implement',
+      backendKey: run.backend_key,
+      cwd: run.worktree_path,
+      ...(run.model === null ? {} : { model: run.model }),
+    })
+    run.execution = identity
+    run.kode_session_id = null
+    await writeRun(run)
+    return promptStageBoundTurn(
+      run,
+      runtime,
+      identity,
+      'implement',
+      context.task_id,
+      promptForTask(run, context.content),
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    run.state = 'failed'
+    await writeRun(run)
+    throw new SpecOpsError('execution_start_failed', `Failed to start structured execution: ${message}`)
   }
-  return run
+}
+
+async function recordContextArtifact(run: RunRecord, context: Awaited<ReturnType<typeof compileAgentContext>>): Promise<void> {
+  await recordHarnessArtifact(run.workspace_root, run.run_id, {
+    kind: 'context', subject: context.task_id, producer: 'context-compiler', uri: null,
+    content_hash: context.hash, source_commit: await worktreeHead(run.worktree_path), inputs: [],
+    metadata: { role: context.role, included_paths: context.included_paths, excluded: context.excluded },
+  })
 }
 
 export function promptForTask(run: RunRecord, compiledContext?: string): string {
@@ -105,8 +191,10 @@ export async function verifyRun(
   run: RunRecord,
   options: { deferReviewAction?: boolean } = {},
 ): Promise<{ run: RunRecord; patch: string; files: string[]; results: VerifyResult[] }> {
-  if (run.state === 'running') await transitionRun(run, 'awaiting_verify', { syncSession: !options.deferReviewAction })
   if (run.state !== 'awaiting_verify') throw new SpecOpsError('run_not_verifiable', `Run ${run.run_id} is ${run.state}`)
+  if (run.current_task + 1 !== run.tasks.length) {
+    throw new SpecOpsError('run_not_verifiable', `Run ${run.run_id} has unfinished scheduled tasks`)
+  }
   const task = run.tasks[run.current_task]
   if (task === undefined) throw new SpecOpsError('task_missing', `Run ${run.run_id} has no current task`)
   const results: VerifyResult[] = []
@@ -188,10 +276,6 @@ export interface ReviewResult {
 const REVIEW_BEGIN = 'REVIEW_RESULT_BEGIN'
 const REVIEW_END = 'REVIEW_RESULT_END'
 
-/** Poll cadence + idle settle + hard deadline for the review agent session. */
-const REVIEW_POLL_MS = 5_000
-const REVIEW_SETTLE_MS = 8_000
-const REVIEW_DEADLINE_MS = 180_000
 
 /**
  * Pure parser: extract the sentinel JSON block from a review agent's message and
@@ -273,13 +357,14 @@ function buildReviewPrompt(run: RunRecord, task: Task, patch: string): string {
  * Run an automated review agent against the current task's diff. Spawns a fresh
  * analysis session in the run's worktree, polls until idle (or deadline), parses
  * the sentinel result, and appends it to `run.review_results`. Never throws on a
- * misbehaving reviewer — returns an inconclusive (non-blocking) result instead.
+ * misbehaving reviewer — returns an explicit inconclusive result that callers
+ * must route to a human/retry gate rather than treating as approval.
  * `patch` is reused from verifyRun's output to avoid re-running collectRunPatch
  * (which has a git add/commit side effect).
  */
 export async function runReview(
   run: RunRecord,
-  kode: KodeClient,
+  runtime: RunExecutionRuntime,
   config: SpecOpsConfig,
   patch: string,
 ): Promise<ReviewResult> {
@@ -290,36 +375,40 @@ export async function runReview(
   const model = selection.model ?? undefined
   const agentModel = model ?? selection.backend
   const prompt = buildReviewPrompt(run, task, patch)
+  const owner = await findSpecOpsSessionByRunId(run.workspace_root, run.run_id)
+  if (owner === null) throw new SpecOpsError('session_missing', `Run ${run.run_id} has no SpecOps session`)
 
-  let sessionId: number | null = null
+  let executionId: string | null = null
   let result: ReviewResult
   try {
-    // Headless: the review agent is a background reviewer the user never
-    // interacts with directly. Suppressing the GUI tab keeps the auto-review
-    // loop (up to max_iterations) from flashing a stream of kode tabs.
-    const session = await kode.createAnalysisSession(selection.backend, run.worktree_path, prompt, model, true)
-    sessionId = session.id
-    const owner = await findSpecOpsSessionByRunId(run.workspace_root, run.run_id)
-    if (owner !== null) {
-      await attachSessionAgent(run.workspace_root, owner.id, {
-        kode_session_id: session.id,
-        session_uuid: session.session_uuid ?? null,
-        backend_key: session.backend_key,
-        model: model ?? null,
-        purpose: 'review',
-        status: session.status,
-      })
+    const identity = await runtime.start({
+      workspace: run.workspace_root,
+      sessionId: owner.id,
+      purpose: 'review',
+      backendKey: selection.backend,
+      cwd: run.worktree_path,
+      ...(model === undefined ? {} : { model }),
+    })
+    executionId = identity.execution_id
+    const outcome = await runtime.prompt(identity.execution_id, {
+      requestId: randomUUID(),
+      text: prompt,
+      metadata: { run_id: run.run_id, task_id: task.id, purpose: 'review' },
+    })
+    if (outcome.outcome === 'outcome_unknown') {
+      result = { at: new Date().toISOString(), agent_model: agentModel, blocker: false, summary: `review inconclusive: outcome unknown (${outcome.error.message})`, findings: [], inconclusive: true }
+    } else {
+      const session = await readSpecOpsSession(run.workspace_root, owner.id)
+      const text = session.transcript
+        .filter((entry) => entry.execution_id === identity.execution_id && entry.role === 'agent' && (entry.kind ?? 'text') === 'text')
+        .map((entry) => entry.text)
+        .join('\n')
+      result = extractReviewResult(text, agentModel)
     }
-    const text = await waitForReviewOutput(kode, sessionId)
-    result = extractReviewResult(text, agentModel)
   } catch {
-    result = { at: new Date().toISOString(), agent_model: agentModel, blocker: false, summary: 'review inconclusive: agent session error', findings: [], inconclusive: true }
+    result = { at: new Date().toISOString(), agent_model: agentModel, blocker: false, summary: 'review inconclusive: agent execution error', findings: [], inconclusive: true }
   } finally {
-    if (sessionId !== null) {
-      await kode.killSession(sessionId).catch(() => undefined)
-      const owner = await findSpecOpsSessionByRunId(run.workspace_root, run.run_id)
-      if (owner !== null) await updateSessionAgentStatus(run.workspace_root, owner.id, sessionId, 'exited')
-    }
+    if (executionId !== null) await runtime.close(executionId).catch(() => undefined)
   }
   // Review can take minutes. Re-read before persisting so an old reviewer
   // cannot overwrite a newer accept/cancel/task transition with stale state.
@@ -333,69 +422,35 @@ export async function runReview(
   return result
 }
 
-/** Poll the review session until it settles idle, then return its last agent message. Times out at REVIEW_DEADLINE_MS. */
-async function waitForReviewOutput(kode: KodeClient, sessionId: number): Promise<string> {
-  const deadline = Date.now() + REVIEW_DEADLINE_MS
-  let idleSince: number | null = null
-  while (Date.now() < deadline) {
-    let status = 'unknown'
-    try {
-      status = (await kode.getSession(sessionId)).status
-    } catch { /* transient — retry */ }
-    if (status === 'exited') break
-    if (status === 'idle') {
-      if (idleSince === null) idleSince = Date.now()
-      else if (Date.now() - idleSince >= REVIEW_SETTLE_MS) break
-    } else {
-      idleSince = null
-    }
-    await new Promise((r) => setTimeout(r, REVIEW_POLL_MS))
-  }
-  const { messages } = await kode.transcript(sessionId)
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    if (m?.role === 'agent' && (m.kind ?? 'text') === 'text') return m.text ?? ''
-  }
-  return ''
+export interface RunDecisionResult {
+  run: RunRecord
+  turn?: RunTurn
 }
 
 export async function decideRun(
   run: RunRecord,
   verdict: 'accept' | 'reject' | 'feedback',
   note: string,
-  kode?: KodeClient,
-): Promise<RunRecord> {
+  runtime?: RunExecutionRuntime,
+): Promise<RunDecisionResult> {
   if (run.state !== 'awaiting_review') throw new SpecOpsError('run_not_reviewable', `Run ${run.run_id} is ${run.state}`)
   run.decisions.push({ at: new Date().toISOString(), verdict, note })
   if (verdict === 'accept') {
     if (run.current_task + 1 < run.tasks.length) {
-      if (kode === undefined || run.kode_session_id === null) {
-        throw new SpecOpsError('kode_unavailable', 'starting the next scheduled task requires a connected kode session')
-      }
-      const completedTask = run.tasks[run.current_task]!
-      await transitionHarnessTask(run.workspace_root, run.run_id, completedTask.id, 'completed', { iteration: run.iteration })
-      run.current_task += 1
-      run.iteration = 0
+      if (runtime === undefined) throw new SpecOpsError('execution_unavailable', 'starting the next scheduled task requires a structured execution runtime')
       await transitionRun(run, 'running')
-      await kode.waitForReady(run.kode_session_id)
-      const context = await compileAgentContext(run, 'builder')
-      await recordHarnessArtifact(run.workspace_root, run.run_id, {
-        kind: 'context', subject: context.task_id, producer: 'context-compiler', uri: null,
-        content_hash: context.hash, source_commit: await worktreeHead(run.worktree_path), inputs: [], metadata: { role: context.role, included_paths: context.included_paths, excluded: context.excluded },
-      })
-      await kode.sendPrompt(run.kode_session_id, promptForTask(run, context.content))
-      return run
+      const turn = await advanceToNextTask(run, runtime)
+      return { run: turn.run, turn }
     }
     await transitionRun(run, 'completed')
-    return run
+    return { run }
   }
   if (verdict === 'reject') {
     await transitionRun(run, 'cancelled')
-    return run
+    return { run }
   }
   run.iteration += 1
   if (run.iteration >= run.max_iterations) {
-    run.state = 'failed'
     await writeRun(run)
     await appendHarnessEvent(run.workspace_root, run.run_id, 'budget.exhausted', 'loop-orchestrator', {
       task_id: run.tasks[run.current_task]?.id ?? null,
@@ -404,23 +459,32 @@ export async function decideRun(
     })
     throw new SpecOpsError('max_iterations', `Run ${run.run_id} reached max_iterations`)
   }
-  if (kode === undefined || run.kode_session_id === null) {
-    throw new SpecOpsError('kode_unavailable', 'feedback requires a connected kode session')
-  }
+  if (runtime === undefined) throw new SpecOpsError('execution_unavailable', 'feedback requires a structured execution runtime')
   await transitionRun(run, 'running')
-  await kode.waitForReady(run.kode_session_id)
-  await kode.sendPrompt(run.kode_session_id, `SpecOps review feedback:\n\n${note}\n\nRevise the same task and report when ready for verification.`)
-  return run
+  const owner = await requireRunSession(run)
+  const resumed = await ensureRunExecution(run, runtime, owner.id, 'repair')
+  const feedback = `SpecOps review feedback:\n\n${note}\n\nRevise the same task and report when ready for verification.`
+  const taskId = run.tasks[run.current_task]?.id
+  if (taskId === undefined) throw new SpecOpsError('task_missing', `Run ${run.run_id} has no current task`)
+  const completion = await promptStageBoundTurn(
+    run,
+    runtime,
+    resumed.identity,
+    'repair',
+    taskId,
+    resumed.freshContext === undefined ? feedback : `${resumed.freshContext}\n\n${feedback}`,
+    resumed.freshContext !== undefined,
+  )
+  return { run: completion.run, turn: completion }
 }
 
 /**
  * Complete one scheduled implementation task and send the next task to the
- * same builder session. Task boundaries are scheduler progress; Run-level
+ * same structured execution. Task boundaries are scheduler progress; Run-level
  * verification and review happen only after the final task.
  */
-export async function advanceToNextTask(run: RunRecord, kode: KodeClient): Promise<RunRecord> {
+export async function advanceToNextTask(run: RunRecord, runtime: RunExecutionRuntime): Promise<RunTurn> {
   if (run.state !== 'running') throw new SpecOpsError('run_not_running', `Run ${run.run_id} is ${run.state}`)
-  if (run.kode_session_id === null) throw new SpecOpsError('kode_unavailable', 'starting the next scheduled task requires a connected kode session')
   if (run.current_task + 1 >= run.tasks.length) throw new SpecOpsError('task_missing', `Run ${run.run_id} has no next scheduled task`)
 
   const completedTask = run.tasks[run.current_task]!
@@ -435,14 +499,117 @@ export async function advanceToNextTask(run: RunRecord, kode: KodeClient): Promi
     worktree: run.worktree_path,
     iteration: run.iteration,
   })
-  await kode.waitForReady(run.kode_session_id)
   const context = await compileAgentContext(run, 'builder')
-  await recordHarnessArtifact(run.workspace_root, run.run_id, {
-    kind: 'context', subject: context.task_id, producer: 'context-compiler', uri: null,
-    content_hash: context.hash, source_commit: await worktreeHead(run.worktree_path), inputs: [], metadata: { role: context.role, included_paths: context.included_paths, excluded: context.excluded },
+  await recordContextArtifact(run, context)
+  const owner = await requireRunSession(run)
+  const resumed = await ensureRunExecution(run, runtime, owner.id, 'implement')
+  const prompt = promptForTask(run, context.content)
+  return promptStageBoundTurn(
+    run,
+    runtime,
+    resumed.identity,
+    'implement',
+    nextTask.id,
+    resumed.freshContext === undefined ? prompt : `${resumed.freshContext}\n\n${prompt}`,
+    resumed.freshContext !== undefined,
+  )
+}
+
+export async function resumeRunExecution(
+  run: RunRecord,
+  runtime: RunExecutionRuntime,
+  specopsSessionId: string,
+): Promise<RunTurn> {
+  if (run.state !== 'running') throw new SpecOpsError('run_not_running', `Run ${run.run_id} is ${run.state}`)
+  const task = run.tasks[run.current_task]
+  if (task === undefined) throw new SpecOpsError('task_missing', `Run ${run.run_id} has no current task`)
+  const purpose: StageBoundPurpose = run.iteration > 0 ? 'repair' : 'implement'
+  const context = await compileAgentContext(run, 'builder')
+  await recordContextArtifact(run, context)
+  const resumed = await ensureRunExecution(run, runtime, specopsSessionId, purpose)
+  const latestFeedback = [...run.decisions].reverse().find((decision) => decision.verdict === 'feedback')?.note
+  const assignment = [
+    'Resume the interrupted SpecOps stage-bound turn.',
+    promptForTask(run, context.content),
+    ...(purpose === 'repair' && latestFeedback !== undefined
+      ? ['', 'Latest blocking review feedback:', latestFeedback]
+      : []),
+  ].join('\n')
+  return promptStageBoundTurn(
+    run,
+    runtime,
+    resumed.identity,
+    purpose,
+    task.id,
+    resumed.freshContext === undefined ? assignment : `${resumed.freshContext}\n\n${assignment}`,
+    resumed.freshContext !== undefined,
+  )
+}
+
+async function requireRunSession(run: RunRecord) {
+  const owner = await findSpecOpsSessionByRunId(run.workspace_root, run.run_id)
+  if (owner === null) throw new SpecOpsError('session_missing', `Run ${run.run_id} has no SpecOps session`)
+  return owner
+}
+
+async function ensureRunExecution(
+  run: RunRecord,
+  runtime: RunExecutionRuntime,
+  sessionId: string,
+  purpose: 'implement' | 'repair',
+): Promise<{ identity: NonNullable<RunRecord['execution']>; freshContext?: string }> {
+  const existing = run.execution
+  if (existing !== null && runtime.get(existing.execution_id) !== undefined) return { identity: existing }
+
+  // CodeBuddy advertises ACP session/load but fails it in real sidecar
+  // restarts. Its durable Run context is sufficient to continue safely, so
+  // start a fresh ACP session instead of exposing that unreliable load path.
+  if (existing !== null && existing.transport !== 'legacy_kode_pty'
+    && existing.transport !== 'codebuddy_acp' && existing.native_session_id !== null) {
+    try {
+      const identity = await runtime.load({
+        workspace: run.workspace_root,
+        sessionId,
+        runId: run.run_id,
+        purpose,
+        backendKey: run.backend_key,
+        cwd: run.worktree_path,
+        executionId: existing.execution_id,
+        nativeSessionId: existing.native_session_id,
+        ...(run.model === null ? {} : { model: run.model }),
+      })
+      run.execution = identity
+      run.kode_session_id = null
+      await writeRun(run)
+      return { identity }
+    } catch {
+      // Native resume is best-effort. A new structured process receives the
+      // durable session/run context below; PTY fallback is intentionally forbidden.
+    }
+  }
+
+  if (!new Set(['codebuddy', 'codex', 'claude', 'claude-internal']).has(run.backend_key)) {
+    throw new SpecOpsError('unsupported_execution_backend', `Backend ${run.backend_key} has no structured execution transport`)
+  }
+  const session = await readSpecOpsSession(run.workspace_root, sessionId)
+  const identity = await runtime.start({
+    workspace: run.workspace_root,
+    sessionId,
+    runId: run.run_id,
+    purpose,
+    backendKey: run.backend_key,
+    cwd: run.worktree_path,
+    ...(run.model === null ? {} : { model: run.model }),
+    metadata: { resumed_with_fresh_context: true },
   })
-  await kode.sendPrompt(run.kode_session_id, promptForTask(run, context.content))
-  return run
+  run.execution = identity
+  run.kode_session_id = null
+  await writeRun(run)
+  await updateSpecOpsSession(run.workspace_root, sessionId, (record) => {
+    record.execution.last_reconciled_at = new Date().toISOString()
+    record.execution.last_error = 'Native session resume was unavailable; execution continued with fresh durable context.'
+  })
+  return { identity, freshContext: buildSessionResumeContext(session) }
 }
 
 async function worktreeHead(worktree: string): Promise<string> {

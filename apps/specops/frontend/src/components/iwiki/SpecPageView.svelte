@@ -82,9 +82,10 @@
   let actionText = $state('');
   let actionBusy = $state(false);
   let actionError = $state<string | null>(null);
-  let answerSelections = $state<Record<string, number>>({});
+  let answerSelections = $state<Record<string, number[]>>({});
   let answerInputs = $state<Record<string, string>>({});
   let answerActionKey = $state('');
+  let requiredActionKey = $state('');
   let tasksSource = $state<string | null>(null);
   let tasksLoading = $state(false);
   let overrides = $state<Record<string, string>>({});
@@ -430,8 +431,12 @@
     contextMenu = null;
   }
 
-  function selectRequiredAnswer(questionId: string, optionIndex: number): void {
-    answerSelections = { ...answerSelections, [questionId]: optionIndex };
+  function selectRequiredAnswer(questionId: string, optionIndex: number, multiSelect: boolean): void {
+    const current = answerSelections[questionId] ?? [];
+    const next = multiSelect
+      ? (current.includes(optionIndex) ? current.filter((index) => index !== optionIndex) : [...current, optionIndex])
+      : [optionIndex];
+    answerSelections = { ...answerSelections, [questionId]: next };
   }
 
   function setRequiredAnswerInput(questionId: string, value: string): void {
@@ -444,18 +449,17 @@
       question_id: requiredAction.question_id ?? '', prompt: requiredAction.prompt ?? '',
       options: requiredAction.options ?? [],
     }];
-    if (questions.some((question) => answerSelections[question.question_id] === undefined)) return;
+    if (questions.some((question) => (answerSelections[question.question_id]?.length ?? 0) === 0)) return;
     actionBusy = true;
     actionError = null;
     try {
       await api.post(`/api/sessions/${session.id}/answer`, {
         answers: questions.map((question) => {
-          const choiceIndex = answerSelections[question.question_id] ?? 0;
+          const choiceIndices = answerSelections[question.question_id] ?? [];
           const freeText = answerInputs[question.question_id]?.trim() ?? '';
           return {
             question_id: question.question_id,
-            choice_index: choiceIndex,
-            label: question.options[choiceIndex]?.label ?? '',
+            choice_indices: choiceIndices,
             ...(freeText ? { free_text: freeText } : {}),
           };
         }),
@@ -479,6 +483,17 @@
       answerActionKey = key;
       answerSelections = {};
       answerInputs = {};
+    }
+  });
+
+  $effect(() => {
+    const key = requiredAction === null
+      ? ''
+      : `${requiredAction.kind}:${String(requiredAction.interaction_id ?? requiredAction.plan_id ?? requiredAction.question_id ?? '')}`;
+    if (key !== requiredActionKey) {
+      requiredActionKey = key;
+      actionText = '';
+      actionError = null;
     }
   });
 
@@ -664,13 +679,13 @@
   {#if requiredAction !== null}
     <section class="required-action" data-kind={requiredAction.kind}>
       {#if requiredAction.kind === 'answer'}
-        {@const questions = requiredAction.questions ?? [{ question_id: requiredAction.question_id ?? '', prompt: requiredAction.prompt ?? '', header: requiredAction.header, options: requiredAction.options ?? [] }]}
+        {@const questions = requiredAction.questions ?? [{ question_id: requiredAction.question_id ?? '', prompt: requiredAction.prompt ?? '', header: requiredAction.header, options: requiredAction.options ?? [], multi_select: requiredAction.multi_select }]}
         <div class="action-head"><span>Questions</span><strong>Review all answers before submitting</strong></div>
         {#each questions as question, questionIndex (question.question_id)}
           <p class="action-prompt">{questionIndex + 1}. {question.prompt}</p>
           <div class="action-options">
             {#each question.options as option, index (option.label)}
-              <button type="button" class="choice" class:selected={answerSelections[question.question_id] === index} disabled={actionBusy} onclick={() => selectRequiredAnswer(question.question_id, index)}>
+              <button type="button" class="choice" class:selected={answerSelections[question.question_id]?.includes(index) === true} disabled={actionBusy} onclick={() => selectRequiredAnswer(question.question_id, index, question.multi_select === true)}>
                 <span>{option.label}</span>
                 {#if option.description}<small>{option.description}</small>{/if}
               </button>
@@ -684,7 +699,7 @@
             placeholder="Optional details or your own answer"
           ></textarea>
         {/each}
-        <button type="button" class="apply" disabled={actionBusy || questions.some((question) => answerSelections[question.question_id] === undefined)} onclick={answerRequiredAction}>
+        <button type="button" class="apply" disabled={actionBusy || questions.some((question) => (answerSelections[question.question_id]?.length ?? 0) === 0)} onclick={answerRequiredAction}>
           {actionBusy ? 'Submitting…' : 'Submit answers'}
         </button>
       {:else if requiredAction.kind === 'plan_review'}
@@ -701,6 +716,16 @@
         <div class="plan-actions">
           <button type="button" class="apply" disabled={actionBusy} onclick={() => respondPlan(true)}>Approve plan</button>
           <button type="button" class="danger" disabled={actionBusy} onclick={() => respondPlan(false)}>Revise</button>
+        </div>
+      {:else if requiredAction.kind === 'permission'}
+        <div class="action-head">
+          <span>{requiredAction.title}</span>
+          <strong>Permission required</strong>
+        </div>
+        <p class="action-prompt">{requiredAction.message}</p>
+        <div class="plan-actions">
+          <button type="button" class="apply" disabled={actionBusy} onclick={() => runSessionAction('permission_allow')}>Allow</button>
+          <button type="button" class="danger" disabled={actionBusy} onclick={() => runSessionAction('permission_deny')}>Deny</button>
         </div>
       {:else if requiredAction.kind === 'run_in_worktree'}
         <div class="action-head">
@@ -725,6 +750,26 @@
         </ol>
         <div class="plan-actions">
           <button type="button" class="apply" disabled={actionBusy || !canLaunchRun} onclick={launchRun}>Launch Run</button>
+          <button type="button" class="ghost" onclick={openSession}>Open session</button>
+        </div>
+      {:else if requiredAction.kind === 'promote_intake'}
+        <div class="action-head">
+          <span>Clarification complete</span>
+          <strong>Ready for intake</strong>
+        </div>
+        <p class="action-prompt">{requiredAction.prompt ?? 'Start intake with the approved plan and confirmed decisions.'}</p>
+        <div class="plan-actions">
+          <button type="button" class="apply" disabled={actionBusy} onclick={() => runSessionAction('promote_intake')}>Start intake</button>
+          <button type="button" class="ghost" onclick={openSession}>Open session</button>
+        </div>
+      {:else if requiredAction.kind === 'resume'}
+        <div class="action-head">
+          <span>Execution needs to resume</span>
+          <strong>Durable recovery available</strong>
+        </div>
+        <p class="action-prompt">{requiredAction.reason ?? 'The previous execution is no longer attached. Resume from the durable workflow state.'}</p>
+        <div class="plan-actions">
+          <button type="button" class="apply" disabled={actionBusy} onclick={() => runSessionAction('resume')}>Resume execution</button>
           <button type="button" class="ghost" onclick={openSession}>Open session</button>
         </div>
       {:else if requiredAction.kind === 'verify'}

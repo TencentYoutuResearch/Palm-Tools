@@ -124,6 +124,12 @@ export function builtinBackendProfile(backendKey: string): AgentBackendProfile {
       capabilities: [...base, 'session.resume', 'conversation.ask', 'conversation.plan', 'events.tools'],
     }
   }
+  if (backendKey === 'codex') {
+    return {
+      plugin: 'builtin.kode',
+      capabilities: [...base, 'session.resume', 'conversation.ask', 'events.tools'],
+    }
+  }
   return { plugin: 'builtin.kode', capabilities: base }
 }
 

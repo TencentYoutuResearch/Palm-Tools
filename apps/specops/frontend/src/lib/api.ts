@@ -59,9 +59,13 @@ export const api = {
  * Open the SpecOps SSE event stream. Token travels as a query param because
  * EventSource cannot set Authorization headers.
  */
-export function openEventStream(onEvent: (type: string, data: unknown) => void): EventSource {
+export function openEventStream(
+  onEvent: (type: string, data: unknown) => void,
+  onOpen?: () => void,
+): EventSource {
   const url = token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
   const es = new EventSource(url);
+  if (onOpen !== undefined) es.onopen = onOpen;
   const parse = (raw: string): unknown => {
     try {
       return JSON.parse(raw);
@@ -75,7 +79,10 @@ export function openEventStream(onEvent: (type: string, data: unknown) => void):
     'session.updated',
     'session.closed',
     'session.action_required',
+    'session.status_changed',
     'session.transcript_appended',
+    'session.transcript_delta',
+    'session.transcript_upsert',
   ]) {
     es.addEventListener(name, (ev) => onEvent(name, parse((ev as MessageEvent).data)));
   }

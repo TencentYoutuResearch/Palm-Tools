@@ -9,21 +9,30 @@ import { scanWorkspace, archiveChange } from '../domain/commands.js'
 import { SpecOpsError } from '../core/errors.js'
 import { driftWorkspace, analyzeWorkspace } from '../domain/gate.js'
 import { parseDocument, serializeDocument, defaultStatusForKind, isNormative } from '../domain/spec.js'
-import { applyCompletedRun, applyWithVerify, decideRun, launchRun, verifyRun } from '../domain/run-loop.js'
-import { readRun, rollbackRunPatch, transitionRun, type RunRecord, type Task } from '../domain/run.js'
-import { initRunMonitor, unwatchRun, watchRun } from '../domain/run-monitor.js'
-import { buildIntakePrompt, parseIntakeReceipt, checkProposal, buildIntakePlanPrompt, LANGUAGE_DIRECTIVE } from '../domain/intake.js'
-import { buildClarifyPrompt, type ClarifyState } from '../domain/clarify.js'
+import {
+  applyCompletedRun,
+  applyWithVerify,
+  decideRun,
+  formatReviewNote,
+  launchRun,
+  resumeRunExecution,
+  runReview,
+  startRunExecution,
+  verifyRun,
+} from '../domain/run-loop.js'
+import { changedFilesForRun, readRun, rollbackRunPatch, transitionRun, type RunRecord, type Task } from '../domain/run.js'
+import { hasRunMonitor, initRunMonitor, shutdownMonitor, unwatchRun, watchRun } from '../domain/run-monitor.js'
+import { buildIntakePrompt, parseIntakeReceipt, checkProposal, buildIntakePlanPrompt } from '../domain/intake.js'
+import { buildClarifyPrompt } from '../domain/clarify.js'
 import { createDocumentNote, listDocumentNotes, setDocumentNoteStatus, type DocumentNoteSource } from '../domain/notes.js'
 import { loadConfig, resolveAgentSelection, saveAgentConfig, type AgentConfig, type AgentRole, type AgentSelection, type ResolvedAgentSelection } from '../domain/config.js'
-import { KNOWN_CAPABILITIES, loadPluginManifests } from '../domain/harness.js'
+import { KNOWN_CAPABILITIES, loadPluginManifests, resolveAgentBackendProfile } from '../domain/harness.js'
 import { buildAssuranceState, recordRuntimeEvidence, type RuntimeEvidenceKind } from '../domain/assurance.js'
 import { listHarnessStates, readHarnessEvents, readHarnessState, recordGateDecision, recordHarnessArtifact } from '../domain/harness-core.js'
 import { readLatestDriftReport, runDriftLoop } from '../domain/drift-loop.js'
 import { buildHarnessHealth, loadHarnessRules, runBenchmarks, saveHarnessRules, type HarnessRules } from '../domain/harness-evolution.js'
 import {
   appendTranscript,
-  attachSessionAgent,
   canonicalDocumentKey,
   closeSpecOpsSession,
   createSpecOpsSession,
@@ -34,15 +43,30 @@ import {
   readSpecOpsSession,
   buildSessionResumeContext,
   RESUMABLE_SESSION_PHASES,
-  resumeUuidForPhase,
   updateSpecOpsSession,
   type SpecOpsSessionRecord,
 } from '../domain/session.js'
 import { specOpsSessionEvents } from '../domain/session-events.js'
 import { unwatchSpecOpsSessionTranscript, watchSpecOpsSessionTranscript } from '../domain/session-monitor.js'
 import { KodeClient, KodeRequestError } from '../adapters/kode.js'
+import { ExecutionManager } from '../execution/manager.js'
+import { ExecutionRuntime } from '../execution/runtime.js'
+import { createExecutionTransportFactory, executionTransportCapabilities, hasStructuredExecutionTransport } from '../execution/transports.js'
+import { missingWorkflowCapabilities, type StructuredWorkflow } from '../execution/capabilities.js'
+import type { ExecutionRequestOutcome, ExecutionTurnResult } from '../execution/types.js'
 import { composeRolePrompt, resolveAgentPrompt } from '../domain/agent-prompts.js'
 import { loadAvatarLibrary } from '../domain/avatar-library.js'
+import { recordClarifyProtocolMiss, reconcileMissingStructuredExecution, setClarificationSubstate } from '../domain/workflow-state.js'
+import { enqueueInteraction, resolveActionableInteraction, resolveInteraction, type InteractionResponse } from '../domain/interactions.js'
+import {
+  blockingInteraction,
+  claimInteractionResponse,
+  interactionForAction,
+  markClaimDeliveryUnknown,
+  resolvePermissionCommand,
+  resolvePlanCommand,
+  resolveQuestionsCommand,
+} from './workflow-commands.js'
 import appScript from './public/app.js' with { type: 'text' }
 import indexHtml from './public/index.html' with { type: 'text' }
 import styles from './public/styles.css' with { type: 'text' }
@@ -68,12 +92,17 @@ async function noteCreator(workspace: string, raw: Record<string, unknown>): Pro
 const MAX_BODY_BYTES = 1_048_576
 export const SPECOPS_PROTOCOL_VERSION = 1
 
+export type SpecOpsExecutionRuntime = Pick<ExecutionRuntime, 'start' | 'load' | 'prompt' | 'respond' | 'cancel' | 'close' | 'get' | 'shutdown'>
+
 export interface ServeOptions {
   workspace: string
   host?: string
   port?: number
   token?: string
+  /** Legacy bridge access is limited to backend discovery, history, focus, and closing old numeric attachments. */
   kodeClient?: KodeClient
+  /** Test seam; production creates ExecutionManager + ExecutionRuntime below. */
+  executionRuntime?: SpecOpsExecutionRuntime
   runCacheRoot?: string
 }
 
@@ -230,33 +259,9 @@ async function withAgentPrompt(workspace: string, role: AgentRole, assignment: s
   return composeRolePrompt(prompt.content, assignment)
 }
 
-async function recordAgent(
-  workspace: string,
-  specopsSessionId: string,
-  session: { id: number; backend_key: string; status: string; session_uuid?: string },
-  purpose: 'clarify' | 'plan' | 'intake' | 'implement' | 'repair' | 'review',
-  model?: string,
-): Promise<void> {
-  await updateSpecOpsSession(workspace, specopsSessionId, (record) => {
-    const now = new Date().toISOString()
-    for (const previous of record.agents) {
-      if (previous.kode_session_id === session.id || previous.ended_at !== null) continue
-      previous.status = 'exited'
-      previous.ended_at = now
-    }
-  })
-  await attachSessionAgent(workspace, specopsSessionId, {
-    kode_session_id: session.id,
-    session_uuid: session.session_uuid ?? null,
-    backend_key: session.backend_key,
-    model: model ?? null,
-    purpose,
-    status: session.status,
-  })
-}
-
 /** Close every backend session owned by one completed SpecOps workflow. */
 async function terminateSpecOpsExecution(
+  runtime: SpecOpsExecutionRuntime,
   kode: KodeClient | undefined,
   workspace: string,
   specopsSessionId: string,
@@ -265,18 +270,17 @@ async function terminateSpecOpsExecution(
   unwatchSpecOpsSessionTranscript(specopsSessionId)
   if (runId !== null) unwatchRun(runId)
   const session = await readSpecOpsSession(workspace, specopsSessionId)
-  const ids = new Set(session.agents.map((agent) => agent.kode_session_id))
-  if (session.kode_session_id !== null) ids.add(session.kode_session_id)
-  if (kode !== undefined) {
-    // Await shutdown: fire-and-forget allowed the HTTP request to report a
-    // completed workflow while its CodeBuddy tab/process was still alive.
-    await Promise.all([...ids].map((id) => kode.killSession(id).catch(() => undefined)))
+  if (session.current_execution !== null && session.current_execution.transport !== 'legacy_kode_pty') {
+    await runtime.close(session.current_execution.execution_id).catch(() => undefined)
   }
+  const ids = new Set(session.agents.flatMap((agent) => agent.kode_session_id === null ? [] : [agent.kode_session_id]))
+  if (session.kode_session_id !== null) ids.add(session.kode_session_id)
+  if (kode !== undefined) await Promise.all([...ids].map((id) => kode.killSession(id).catch(() => undefined)))
   await updateSpecOpsSession(workspace, specopsSessionId, (record) => {
     const now = new Date().toISOString()
     record.kode_session_id = null
     for (const agent of record.agents) {
-      if (!ids.has(agent.kode_session_id)) continue
+      if (agent.kode_session_id === null || !ids.has(agent.kode_session_id)) continue
       agent.status = 'exited'
       agent.ended_at ??= now
     }
@@ -443,26 +447,6 @@ function isTerminalSessionState(state: string): boolean {
   return state === 'closed' || state === 'completed' || state === 'failed' || state === 'cancelled'
 }
 
-async function changedFilesForRun(run: RunRecord): Promise<string[]> {
-  try {
-    const { stdout } = await execFile('git', ['-C', run.worktree_path, 'diff', '--name-only', run.base_commit, '--'])
-    const files = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-    if (files.length > 0) return [...new Set(files)].sort()
-  } catch {
-    // Fall back to the collected patch below.
-  }
-
-  try {
-    const patch = await readText(pathInside(run.workspace_root, '.specops', 'runs', run.run_id, 'output.patch'))
-    const files = [...patch.matchAll(/^diff --git a\/.+ b\/(.+)$/gm)]
-      .map((match) => match[1]?.trim())
-      .filter((file): file is string => Boolean(file))
-    return [...new Set(files)].sort()
-  } catch {
-    return []
-  }
-}
-
 function latestReviewSummary(run: RunRecord): string | undefined {
   for (let i = run.review_results.length - 1; i >= 0; i -= 1) {
     const item = run.review_results[i] as { summary?: unknown } | undefined
@@ -471,7 +455,79 @@ function latestReviewSummary(run: RunRecord): string | undefined {
   return undefined
 }
 
-async function reconcileRunBackedSessions(workspace: string): Promise<void> {
+async function resolveRunInteraction(
+  workspace: string,
+  sessionId: string,
+  kinds: Array<'run_verify' | 'human_review' | 'apply' | 'launch_run' | 'resume'>,
+  response: InteractionResponse,
+): Promise<SpecOpsSessionRecord> {
+  return updateSpecOpsSession(workspace, sessionId, (record) => {
+    resolveActionableInteraction(record, kinds, response)
+  })
+}
+
+async function publishHumanReview(
+  workspace: string,
+  sessionId: string,
+  run: RunRecord,
+  files: string[],
+  reviewNote: string | null,
+): Promise<SpecOpsSessionRecord> {
+  return updateSpecOpsSession(workspace, sessionId, (record) => {
+    record.phase = 'review'
+    record.state = 'awaiting_user'
+    enqueueInteraction(record, {
+      kind: 'human_review',
+      source: 'system',
+      idempotency_key: `human_review:${run.run_id}:${run.current_task}:${run.review_results.length}`,
+      payload: { run_id: run.run_id, patch_files: files, review_note: reviewNote },
+    })
+  })
+}
+
+async function verifyAndRouteReview(
+  runtime: SpecOpsExecutionRuntime,
+  workspace: string,
+  run: RunRecord,
+  sessionId: string | null,
+) {
+  const verified = await verifyRun(run, { deferReviewAction: true })
+  const config = await loadConfig(workspace)
+  let review: Awaited<ReturnType<typeof runReview>> | undefined
+  if (config.review.enabled) review = await runReview(run, runtime, config, verified.patch)
+
+  if (sessionId === null) return { ...verified, review, repairing: false }
+  await resolveRunInteraction(workspace, sessionId, ['run_verify'], { verified: true })
+
+  if (review !== undefined && review.blocker && review.inconclusive !== true) {
+    const latest = await readRun(workspace, run.run_id)
+    try {
+      const decision = await decideRun(latest, 'feedback', formatReviewNote(review), runtime)
+      if (decision.turn === undefined) throw new SpecOpsError('execution_turn_missing', 'Blocking review did not start a repair turn')
+      watchRun(run.run_id, workspace, decision.turn)
+      const updated = await readSpecOpsSession(workspace, sessionId)
+      specOpsSessionEvents.publish('session.updated', sessionId, { phase: updated.phase, state: updated.state })
+      return { ...verified, review, repairing: true }
+    } catch (error) {
+      if (!(error instanceof SpecOpsError && error.code === 'max_iterations')) throw error
+      const latestAtLimit = await readRun(workspace, run.run_id)
+      const note = `Repair limit reached; human review or an explicit retry is required. ${review.summary}`
+      const updated = await publishHumanReview(workspace, sessionId, latestAtLimit, verified.files, note)
+      specOpsSessionEvents.publish('session.action_required', sessionId, updated.required_action)
+      return { ...verified, review, repairing: false }
+    }
+  }
+
+  const latest = await readRun(workspace, run.run_id)
+  const reviewNote = review?.inconclusive === true
+    ? `Automated review was inconclusive; do not treat it as approval. ${review.summary}`
+    : review?.summary ?? null
+  const updated = await publishHumanReview(workspace, sessionId, latest, verified.files, reviewNote)
+  specOpsSessionEvents.publish('session.action_required', sessionId, updated.required_action)
+  return { ...verified, review, repairing: false }
+}
+
+async function reconcileRunBackedSessions(workspace: string, runtime: SpecOpsExecutionRuntime): Promise<void> {
   const records = await listSpecOpsSessionRecords(workspace)
   for (const record of records) {
     if (record.run_id === null) continue
@@ -484,6 +540,38 @@ async function reconcileRunBackedSessions(workspace: string): Promise<void> {
       continue
     }
 
+    if (run.state === 'running') {
+      const execution = record.current_execution
+      const liveExecution = execution !== null
+        && execution.transport !== 'legacy_kode_pty'
+        && runtime.get(execution.execution_id) !== undefined
+      // A monitor can be attached a few ticks after a live execution is
+      // registered (especially while a Resume request is being processed).
+      // Never close a live agent merely because that bookkeeping has not
+      // caught up: doing so races its prompt and produces "client is closed".
+      // Only a genuinely absent runtime execution requires durable recovery.
+      if (liveExecution) continue
+      const task = run.tasks[run.current_task]
+      await updateSpecOpsSession(workspace, record.id, (current) => {
+        if (isTerminalSessionState(current.state)) return
+        current.phase = 'run_in_worktree'
+        current.state = 'awaiting_user'
+        current.current_execution = null
+        current.execution.last_error = 'Running Run has no live stage monitor/execution; explicit resume is required.'
+        current.execution.last_reconciled_at = new Date().toISOString()
+        enqueueInteraction(current, {
+          kind: 'resume',
+          source: 'reconciliation',
+          idempotency_key: `resume:${run.run_id}:${task?.id ?? 'unknown'}:${run.iteration}:monitor_missing`,
+          payload: {
+            reason: 'run_monitor_missing',
+            prompt: `Resume the current Run task ${task?.id ?? 'unknown'} from durable task and repair context.`,
+          },
+        })
+      })
+      continue
+    }
+
     if (run.state === 'awaiting_review') {
       const files = await changedFilesForRun(run)
       const reviewNote = latestReviewSummary(run)
@@ -491,11 +579,16 @@ async function reconcileRunBackedSessions(workspace: string): Promise<void> {
         if (isTerminalSessionState(current.state)) return
         current.phase = 'review'
         current.state = 'awaiting_user'
-        current.required_action = {
-          kind: 'review',
-          patch_files: files,
-          ...(reviewNote !== undefined ? { review_note: reviewNote } : {}),
-        }
+        enqueueInteraction(current, {
+          kind: 'human_review',
+          source: 'reconciliation',
+          idempotency_key: `human_review:${run.run_id}:${run.current_task}:${run.review_results.length}:reconcile:${run.updated_at}`,
+          payload: {
+            run_id: run.run_id,
+            patch_files: files,
+            review_note: reviewNote ?? null,
+          },
+        })
       })
       continue
     }
@@ -505,7 +598,12 @@ async function reconcileRunBackedSessions(workspace: string): Promise<void> {
         if (isTerminalSessionState(current.state)) return
         current.phase = 'verify'
         current.state = 'awaiting_user'
-        current.required_action = { kind: 'verify' }
+        enqueueInteraction(current, {
+          kind: 'run_verify',
+          source: 'reconciliation',
+          idempotency_key: `run_verify:${run.run_id}:${run.tasks[run.current_task]?.id ?? 'unknown'}:${run.iteration}`,
+          payload: { run_id: run.run_id },
+        })
       })
       continue
     }
@@ -601,10 +699,23 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
   }
 }
 
-async function reconcileSessions(workspace: string, kode?: KodeClient): Promise<void> {
+async function reconcileSessions(
+  workspace: string,
+  runtime: SpecOpsExecutionRuntime,
+  kode?: KodeClient,
+): Promise<void> {
   await reconcileCompletedIntakeSessions(workspace)
-  await reconcileRunBackedSessions(workspace)
+  await reconcileRunBackedSessions(workspace, runtime)
   if (kode !== undefined) await reconcileKodeSessionAttachments(kode, workspace)
+  const records = await listSpecOpsSessionRecords(workspace)
+  for (const record of records) {
+    const execution = record.current_execution
+    if (execution === null || execution.transport === 'legacy_kode_pty' || isTerminalSessionState(record.state)) continue
+    if (runtime.get(execution.execution_id) !== undefined) continue
+    await updateSpecOpsSession(workspace, record.id, (current) => {
+      reconcileMissingStructuredExecution(current, execution)
+    })
+  }
 }
 
 function withUnverifiedExecution<T extends {
@@ -634,14 +745,8 @@ async function reattachLiveSessionMonitors(kode: KodeClient, workspace: string):
         await detachKodeSessionAttachment(workspace, record.id, record.kode_session_id)
         continue
       }
-      if (record.run_id !== null) {
-        try {
-          const run = await readRun(workspace, record.run_id)
-          if (run.state === 'running') watchRun(record.run_id, workspace, record.kode_session_id)
-        } catch {
-          // Missing or stale run metadata should not block transcript recovery.
-        }
-      }
+      // Legacy Kode attachments are history-only during the structured-runtime
+      // migration. Keep transcript recovery, but never drive a new Run turn.
       watchSpecOpsSessionTranscript(kode, workspace, record.id, record.kode_session_id)
     } catch (error) {
       // Stale numeric kode_session_id after a GUI restart. The explicit Resume
@@ -653,54 +758,337 @@ async function reattachLiveSessionMonitors(kode: KodeClient, workspace: string):
   }
 }
 
+function purposeForPhase(phase: SpecOpsSessionRecord['phase']): 'clarify' | 'plan' | 'intake' | 'implement' | 'repair' {
+  if (phase === 'clarify') return 'clarify'
+  if (phase === 'plan_discussion' || phase === 'solution_options' || phase === 'plan_approved') return 'plan'
+  if (phase === 'analyze_request') return 'intake'
+  if (phase === 'run_in_worktree') return 'implement'
+  return 'repair'
+}
+
+function structuredBackendSupported(backendKey: string): boolean {
+  return hasStructuredExecutionTransport(backendKey)
+}
+
+async function workflowCapabilityGap(
+  workspace: string,
+  backendKey: string,
+  workflow: StructuredWorkflow,
+): Promise<string[]> {
+  const config = await loadConfig(workspace)
+  const profile = await resolveAgentBackendProfile(workspace, backendKey, config.agent_backends[backendKey])
+  return missingWorkflowCapabilities(workflow, profile.capabilities, executionTransportCapabilities(backendKey))
+}
+
+async function markStructuredOutcomeUnknown(
+  runtime: SpecOpsExecutionRuntime,
+  workspace: string,
+  sessionId: string,
+  message: string,
+): Promise<void> {
+  const session = await readSpecOpsSession(workspace, sessionId)
+  if (session.current_execution !== null && session.current_execution.transport !== 'legacy_kode_pty') {
+    await runtime.close(session.current_execution.execution_id).catch(() => undefined)
+  }
+  const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
+    const execution = record.current_execution
+    record.current_execution = null
+    record.state = 'awaiting_user'
+    record.execution.last_error = `Structured execution outcome is unknown: ${message}`
+    record.execution.last_reconciled_at = new Date().toISOString()
+    enqueueInteraction(record, {
+      kind: 'resume',
+      source: 'reconciliation',
+      idempotency_key: `resume:${record.id}:outcome_unknown:${execution?.execution_id ?? 'detached'}:${execution?.process_generation ?? 0}`,
+      payload: {
+        reason: 'outcome_unknown',
+        prompt: 'Resume from durable workflow state; do not assume the uncertain turn completed.',
+      },
+    })
+  })
+  specOpsSessionEvents.publish('session.action_required', sessionId, {
+    state: updated.state,
+    error: updated.execution.last_error,
+    outcome_unknown: true,
+    required_action: updated.required_action,
+  })
+}
+
+async function observeSessionTurn(
+  runtime: SpecOpsExecutionRuntime,
+  workspace: string,
+  session: SpecOpsSessionRecord,
+  completion: Promise<ExecutionRequestOutcome<ExecutionTurnResult>>,
+): Promise<void> {
+  try {
+    const outcome = await completion
+    if (outcome.outcome === 'outcome_unknown') await markStructuredOutcomeUnknown(runtime, workspace, session.id, outcome.error.message)
+  } catch (error) {
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      record.state = 'failed'
+      record.execution.last_error = error instanceof Error ? error.message : String(error)
+      record.execution.last_reconciled_at = new Date().toISOString()
+    }).catch(() => undefined)
+  }
+}
+
+function promptStructuredExecution(
+  runtime: SpecOpsExecutionRuntime,
+  workspace: string,
+  session: SpecOpsSessionRecord,
+  text: string,
+  options: { userText?: string; purpose?: string; freshContext?: boolean } = {},
+): Promise<ExecutionRequestOutcome<ExecutionTurnResult>> {
+  const execution = session.current_execution
+  if (execution === null || execution.transport === 'legacy_kode_pty') {
+    throw new SpecOpsError('structured_execution_missing', 'Session has no structured execution attachment')
+  }
+  const completion = runtime.prompt(execution.execution_id, {
+    requestId: randomUUID(),
+    text,
+    metadata: {
+      specops_session_id: session.id,
+      ...(session.run_id === null ? {} : { run_id: session.run_id }),
+      purpose: options.purpose ?? 'user_chat',
+      may_advance_stage: false,
+      ...(options.freshContext === undefined ? {} : { fresh_context: options.freshContext }),
+    },
+  })
+  if (options.userText !== undefined) {
+    // Persisting the user message must not hold the request open for a model
+    // turn. The client only needs delivery acknowledgement; transcript and
+    // model events arrive through the normal realtime stream.
+    void appendTranscript(workspace, session.id, 'user', options.userText, null, execution.execution_id)
+      .then((updated) => {
+        const entry = updated.transcript.at(-1)
+        specOpsSessionEvents.publish('session.transcript_appended', session.id, entry === undefined ? { role: 'user' } : { entries: [entry] })
+      })
+      .catch(() => undefined)
+  }
+  // The ACP prompt resolves only after the agent finishes a complete turn.
+  // Observe that outcome in the background so /input can acknowledge delivery
+  // immediately instead of hitting the browser's request timeout.
+  void observeSessionTurn(runtime, workspace, session, completion)
+  return completion
+}
+
+function questionAnswersPrompt(
+  questions: readonly { id: string; prompt: string }[],
+  answers: readonly { questionId: string; labels: readonly string[]; freeText?: string | undefined }[],
+): string {
+  const byId = new Map(answers.map((answer) => [answer.questionId, answer]))
+  return [
+    'The user answered the pending structured questions. Treat these answers as authoritative decisions:',
+    ...questions.map((question, index) => {
+      const answer = byId.get(question.id)
+      const selected = answer?.labels.join(', ') || '(no selection)'
+      const details = answer?.freeText?.trim()
+      return `${index + 1}. ${question.prompt}\n   Answer: ${selected}${details ? `\n   Details: ${details}` : ''}`
+    }),
+    '',
+    'Continue clarification from these decisions. Do not reuse a plan that was produced before these answers.',
+  ].join('\n')
+}
+
+function planRevisionPrompt(note: string | undefined): string {
+  return [
+    'The user rejected the proposed plan.',
+    `Feedback: ${note?.trim() || 'Revise the plan and address the unresolved scope.'}`,
+    'Continue clarification and submit a new complete plan for review.',
+  ].join('\n')
+}
+
 async function rebuildSpecOpsExecution(
-  kode: KodeClient,
+  runtime: SpecOpsExecutionRuntime,
   workspace: string,
   session: SpecOpsSessionRecord,
   continuationPrompt?: string,
 ): Promise<{ session: SpecOpsSessionRecord; promptDelivered: boolean }> {
   if (!RESUMABLE_SESSION_PHASES.has(session.phase)) {
-    throw new SpecOpsError('session_not_recoverable', `Session phase ${session.phase} does not own a CLI execution session`)
+    throw new SpecOpsError('session_not_recoverable', `Session phase ${session.phase} does not own a structured execution`)
   }
-  const resumeUuid = resumeUuidForPhase(session)
+  if (!structuredBackendSupported(session.backend_key)) {
+    throw new SpecOpsError('unsupported_execution_backend', `Backend ${session.backend_key} has no structured execution transport`)
+  }
+  if (session.current_execution !== null && session.current_execution.transport !== 'legacy_kode_pty'
+    && runtime.get(session.current_execution.execution_id) !== undefined) {
+    if (continuationPrompt !== undefined) {
+      void promptStructuredExecution(runtime, workspace, session, continuationPrompt, { purpose: 'resume' })
+    }
+    return { session: await readSpecOpsSession(workspace, session.id), promptDelivered: continuationPrompt !== undefined }
+  }
+
   let cwd = workspace
+  let backendKey = session.backend_key
+  let model = [...session.agents].reverse().find((agent) => agent.ended_at === null)?.model ?? undefined
   let runContext = ''
   if (session.run_id !== null) {
     const run = await readRun(workspace, session.run_id)
     cwd = run.worktree_path
+    backendKey = run.backend_key
+    model = run.model ?? undefined
     const task = run.tasks[run.current_task]
     runContext = [
-      '',
-      'Current run state:',
-      `- State: ${run.state}`,
-      `- Iteration: ${run.iteration}/${run.max_iterations}`,
-      `- Current task: ${task?.title ?? 'None'}`,
-      `- Task prompt: ${task?.prompt ?? 'None'}`,
+      '', 'Current run state:', `- State: ${run.state}`, `- Iteration: ${run.iteration}/${run.max_iterations}`,
+      `- Current task: ${task?.title ?? 'None'}`, `- Task prompt: ${task?.prompt ?? 'None'}`,
       `- Required verification: ${task?.verify.join(', ') || 'None'}`,
       `- Latest verification evidence: ${JSON.stringify(run.verify_results).slice(-4000) || 'None'}`,
     ].join('\n')
   }
-  const freshContext = resumeUuid === null
-    ? `${buildSessionResumeContext(session)}${runContext}${continuationPrompt === undefined ? '' : `\n\nNew user message:\n${continuationPrompt}`}`
-    : undefined
-  let backendKey = session.backend_key
-  let model = [...session.agents].reverse().find((agent) => agent.ended_at === null)?.model ?? undefined
-  if (session.run_id !== null) {
-    const run = await readRun(workspace, session.run_id)
-    backendKey = run.backend_key
-    model = run.model ?? undefined
+
+  const previous = session.current_execution?.transport === 'legacy_kode_pty'
+    ? [...session.agents].reverse().find((agent) => agent.transport !== 'legacy_kode_pty' && agent.native_session_id)?.execution_id
+      ? [...session.agents].reverse().find((agent) => agent.transport !== 'legacy_kode_pty' && agent.native_session_id)
+      : undefined
+    : session.current_execution ?? undefined
+  let exact = false
+  // CodeBuddy ACP's advertised session/load is not reliable across a new
+  // sidecar process. Resume it from the durable session context in a new ACP
+  // session; other structured transports keep their exact native resume.
+  if (previous?.execution_id !== undefined && previous.transport !== 'codebuddy_acp'
+    && previous.native_session_id != null) {
+    try {
+      await runtime.load({
+        workspace,
+        sessionId: session.id,
+        ...(session.run_id === null ? {} : { runId: session.run_id }),
+        purpose: purposeForPhase(session.phase),
+        backendKey,
+        cwd,
+        executionId: previous.execution_id,
+        nativeSessionId: previous.native_session_id,
+        ...(model === undefined ? {} : { model }),
+      })
+      exact = true
+    } catch {
+      // Start below with durable context; never fall back to a PTY transport.
+    }
   }
-  const ks = await kode.createSession(backendKey, cwd, freshContext, resumeUuid ?? undefined, model)
-  await updateSpecOpsSession(workspace, session.id, (record) => {
-    record.kode_session_id = ks.id
+  if (!exact) {
+    await runtime.start({
+      workspace,
+      sessionId: session.id,
+      ...(session.run_id === null ? {} : { runId: session.run_id }),
+      purpose: purposeForPhase(session.phase),
+      backendKey,
+      cwd,
+      ...(model === undefined ? {} : { model }),
+      metadata: { resumed_with_fresh_context: true },
+    })
+  }
+  let updated = await readSpecOpsSession(workspace, session.id)
+  const freshContext = exact ? undefined : `${buildSessionResumeContext(session)}${runContext}`
+  const prompt = freshContext === undefined
+    ? continuationPrompt
+    : `${freshContext}${continuationPrompt === undefined ? '' : `\n\nNew user message:\n${continuationPrompt}`}`
+  if (!exact) {
+    updated = await updateSpecOpsSession(workspace, session.id, (record) => {
+      record.execution.last_reconciled_at = new Date().toISOString()
+      record.execution.last_error = 'Native session resume was unavailable; execution continued with fresh durable context.'
+    })
+  }
+  if (prompt !== undefined) {
+    void promptStructuredExecution(runtime, workspace, updated, prompt, {
+      purpose: 'resume',
+      freshContext: freshContext !== undefined,
+    })
+  }
+  updated = await readSpecOpsSession(workspace, session.id)
+  specOpsSessionEvents.publish('session.updated', session.id, {
+    phase: updated.phase,
+    state: updated.state,
+    current_execution: updated.current_execution,
+    resume_mode: exact ? 'exact' : 'fresh_context',
+  })
+  return { session: updated, promptDelivered: continuationPrompt !== undefined }
+}
+
+interface DurablePromotionResult {
+  session: SpecOpsSessionRecord
+  execution: NonNullable<SpecOpsSessionRecord['current_execution']>
+  completion?: Promise<ExecutionRequestOutcome<ExecutionTurnResult>>
+  receiptId: string
+}
+
+async function promoteDurableClarify(
+  runtime: SpecOpsExecutionRuntime,
+  workspace: string,
+  sessionId: string,
+  cas: Record<string, unknown> = {},
+): Promise<DurablePromotionResult | null> {
+  const before = await readSpecOpsSession(workspace, sessionId)
+  const approvedPlan = before.clarification!.approved_plan
+  const startInteraction = before.interactions?.find((interaction) => interaction.kind === 'start_intake')
+  if (approvedPlan === null || startInteraction === undefined) return null
+  if (before.phase === 'analyze_request') {
+    const execution = before.current_execution
+    if (execution === null || execution.transport === 'legacy_kode_pty') return null
+    return { session: before, execution, receiptId: startInteraction.payload.receipt_id }
+  }
+  const claimed = await claimInteractionResponse(workspace, sessionId, 'start_intake', cas)
+  if (claimed === null || claimed.interaction.kind !== 'start_intake') return null
+  const startInteractionClaim = claimed.interaction
+  await updateSpecOpsSession(workspace, sessionId, (record) => {
+    setClarificationSubstate(record, 'promoting')
     record.state = 'active'
   })
-  await recordAgent(workspace, session.id, ks, 'repair', model)
-  if (session.run_id !== null) watchRun(session.run_id, workspace, ks.id)
-  watchSpecOpsSessionTranscript(kode, workspace, session.id, ks.id)
-  const updated = await readSpecOpsSession(workspace, session.id)
-  specOpsSessionEvents.publish('session.updated', session.id, { phase: updated.phase, state: updated.state, kode_session_id: ks.id })
-  return { session: updated, promptDelivered: freshContext !== undefined && continuationPrompt !== undefined }
+  const decisions = before.decisions.length === 0
+    ? '- None.'
+    : before.decisions.map((decision) => {
+      const value = [...decision.selections, decision.note].filter((item): item is string => Boolean(item)).join('; ')
+      return `- ${decision.prompt ?? decision.kind}: ${value || decision.outcome}`
+    }).join('\n')
+  const clarifiedContext = [
+    '## Initial request', before.clarification!.initial_request,
+    '', '## Approved plan', approvedPlan.markdown,
+    '', '## Confirmed decisions', decisions,
+  ].join('\n')
+  const combinedPrompt = await withAgentPrompt(
+    workspace,
+    'analysis',
+    buildIntakePrompt(clarifiedContext, startInteractionClaim.payload.receipt_id),
+  )
+  const model = [...before.agents].reverse().find((agent) => agent.model !== null)?.model ?? undefined
+  let execution: NonNullable<SpecOpsSessionRecord['current_execution']>
+  try {
+    execution = await runtime.start({
+      workspace,
+      sessionId,
+      purpose: 'intake',
+      backendKey: before.backend_key,
+      cwd: workspace,
+      mode: 'acceptEdits',
+      ...(model === undefined ? {} : { model }),
+    })
+  } catch (error) {
+    await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw error
+  }
+  const promoted = await updateSpecOpsSession(workspace, sessionId, (record) => {
+    record.phase = 'analyze_request'
+    record.state = 'active'
+    record.intake_receipt_id = startInteractionClaim.payload.receipt_id
+    record.kode_session_id = null
+    resolveInteraction(record, claimed.interaction.id, {
+      promoted: true,
+      receipt_id: startInteractionClaim.payload.receipt_id,
+      execution_id: execution.execution_id,
+    })
+    setClarificationSubstate(record, 'promoted')
+  })
+  const completion = runtime.prompt(execution.execution_id, {
+    requestId: randomUUID(),
+    text: combinedPrompt,
+    metadata: { specops_session_id: sessionId, purpose: 'intake', receipt_id: startInteractionClaim.payload.receipt_id },
+  })
+  return {
+    session: promoted,
+    execution,
+    completion,
+    receiptId: startInteractionClaim.payload.receipt_id,
+  }
 }
 
 function findLatestReceiptId(text: string): string | null {
@@ -743,22 +1131,66 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
       ? new KodeClient(process.env.KODE_BRIDGE_URL, process.env.KODE_BRIDGE_TOKEN)
       : undefined
   )
-  if (kode !== undefined) {
-    initRunMonitor(kode, workspace)
-    await reattachLiveSessionMonitors(kode, workspace)
+  const runtime = options.executionRuntime ?? new ExecutionRuntime(
+    new ExecutionManager(createExecutionTransportFactory()),
+    { projectorOptions: { onError: (error) => console.error('[specops] execution projection failed', error) } },
+  )
+  initRunMonitor(runtime, workspace)
+  if (kode !== undefined) await reattachLiveSessionMonitors(kode, workspace)
+  const backgroundTasks = new Set<Promise<void>>()
+  const activeActions = new Set<string>()
+  let closing = false
+  const trackBackground = (task: Promise<void>): void => {
+    backgroundTasks.add(task)
+    void task.then(
+      () => backgroundTasks.delete(task),
+      () => backgroundTasks.delete(task),
+    )
   }
-  const intakes = new Map<number, {
-    receiptId: string
-    document: { path: string; version: string } | null
-    documents: string[]
-    error: string | null
-    specopsSessionId: string
-    planPhase?: boolean         // true when this intake is waiting for plan approval
-    planApproved?: boolean      // true after user approved the plan
-    backendKey?: string
-    request?: string
-  }>()
-  const clarifies = new Map<number, ClarifyState & { specopsSessionId: string }>()
+  const trackClarifyTurn = (
+    sessionId: string,
+    completion: Promise<ExecutionRequestOutcome<ExecutionTurnResult>>,
+  ): void => {
+    const task = completion.then(async (outcome) => {
+      if (closing) return
+      if (outcome.outcome === 'outcome_unknown') {
+        await markStructuredOutcomeUnknown(runtime, workspace, sessionId, outcome.error.message)
+        return
+      }
+      const session = await readSpecOpsSession(workspace, sessionId)
+      if (session.phase !== 'clarify' || blockingInteraction(session) !== undefined) return
+      const turnId = outcome.value.turnId ?? `turn:${session.id}:${session.clarification!.protocol_violations.length + 1}`
+      const assistantText = [...session.transcript].reverse().find((entry) => entry.role === 'agent')?.text ?? ''
+      let correctivePrompt: string | null = null
+      const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
+        const result = recordClarifyProtocolMiss(record, {
+          turn_id: turnId,
+          assistant_text: assistantText,
+        })
+        correctivePrompt = result.corrective_prompt
+      })
+      if (correctivePrompt === null) {
+        specOpsSessionEvents.publish('session.action_required', sessionId, updated.required_action)
+        return
+      }
+      const execution = updated.current_execution
+      if (execution === null || execution.transport === 'legacy_kode_pty') return
+      const correction = runtime.prompt(execution.execution_id, {
+        requestId: randomUUID(),
+        text: correctivePrompt,
+        metadata: { specops_session_id: sessionId, purpose: 'clarify_protocol_correction' },
+      })
+      trackClarifyTurn(sessionId, correction)
+    }).catch(async (error) => {
+      if (closing) return
+      await updateSpecOpsSession(workspace, sessionId, (record) => {
+        record.state = 'failed'
+        record.execution.last_error = error instanceof Error ? error.message : String(error)
+        setClarificationSubstate(record, 'failed')
+      }).catch(() => undefined)
+    })
+    trackBackground(task)
+  }
   let expectedOrigin = ''
 
   const server = createServer(async (request, response) => {
@@ -888,7 +1320,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           return
         }
         if (request.method === 'GET' && url.pathname === '/api/sessions') {
-          await reconcileSessions(workspace, kode)
+          await reconcileSessions(workspace, runtime, kode)
           const sessions = (await listSpecOpsSessions(workspace)).map((session) => withUnverifiedExecution(session, kode))
           return json(response, 200, { sessions })
         }
@@ -897,204 +1329,213 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const sessionId = sessionMatch[1] as string
           const action = sessionMatch[2]
           if (request.method === 'GET' && action === undefined) {
-            await reconcileSessions(workspace, kode)
+            await reconcileSessions(workspace, runtime, kode)
             return json(response, 200, { session: withUnverifiedExecution(await readSpecOpsSession(workspace, sessionId), kode) })
           }
           if (request.method === 'POST' && action === 'interrupt') {
-            if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
+            await reconcileSessions(workspace, runtime, kode)
             const session = await readSpecOpsSession(workspace, sessionId)
-            if (session.kode_session_id === null) return json(response, 409, { error: 'kode_session_missing' })
-            await kode.interrupt(session.kode_session_id)
+            if (session.current_execution === null || session.current_execution.transport === 'legacy_kode_pty'
+              || runtime.get(session.current_execution.execution_id) === undefined) {
+              return json(response, 409, {
+                error: 'resume_required',
+                message: 'The previous execution is no longer attached. Resume the durable workflow before interrupting it.',
+                required_action: session.required_action,
+              })
+            }
+            const outcome = await runtime.cancel(session.current_execution.execution_id, { requestId: randomUUID(), reason: 'user_interrupt' })
+            if (outcome.outcome === 'outcome_unknown') {
+              await markStructuredOutcomeUnknown(runtime, workspace, sessionId, outcome.error.message)
+              return json(response, 409, { error: 'outcome_unknown', message: outcome.error.message })
+            }
             return json(response, 200, { ok: true })
           }
           if (request.method === 'POST' && action === 'input') {
-            if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
             const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
             if (typeof raw.text !== 'string' || raw.text.trim() === '') return json(response, 400, { error: 'text is required' })
             const prompt = raw.text.trim()
             let session = await readSpecOpsSession(workspace, sessionId)
-            let promptDelivered = false
-            if (session.kode_session_id === null) {
-              const rebuilt = await rebuildSpecOpsExecution(kode, workspace, session, prompt)
+            if (blockingInteraction(session) !== undefined) {
+              return json(response, 409, { error: 'action_required', required_action: session.required_action })
+            }
+            const sessionBeforeInput = session
+            const targetExecutionId = session.current_execution !== null
+              && session.current_execution.transport !== 'legacy_kode_pty'
+              && runtime.get(session.current_execution.execution_id) !== undefined
+              ? session.current_execution.execution_id
+              : null
+            session = await appendTranscript(workspace, sessionId, 'user', prompt, null, targetExecutionId)
+            const userEntry = session.transcript.at(-1)
+            specOpsSessionEvents.publish(
+              'session.transcript_appended',
+              sessionId,
+              userEntry === undefined ? { role: 'user' } : { entries: [userEntry] },
+            )
+            if (session.current_execution === null || session.current_execution.transport === 'legacy_kode_pty'
+              || runtime.get(session.current_execution.execution_id) === undefined) {
+              const rebuilt = await rebuildSpecOpsExecution(runtime, workspace, sessionBeforeInput, prompt)
               session = rebuilt.session
-              promptDelivered = rebuilt.promptDelivered
+            } else {
+              void promptStructuredExecution(runtime, workspace, session, prompt, { purpose: 'user_chat' })
+              session = await readSpecOpsSession(workspace, sessionId)
             }
-            if (session.kode_session_id === null) return json(response, 409, { error: 'kode_session_missing' })
-            if (!promptDelivered) {
-              try {
-                await kode.sendPrompt(session.kode_session_id, prompt)
-              } catch (error) {
-                if (!(error instanceof KodeRequestError) || error.status !== 404) throw error
-                await detachKodeSessionAttachment(workspace, sessionId, session.kode_session_id)
-                const rebuilt = await rebuildSpecOpsExecution(kode, workspace, await readSpecOpsSession(workspace, sessionId), prompt)
-                session = rebuilt.session
-                if (!rebuilt.promptDelivered && session.kode_session_id !== null) await kode.sendPrompt(session.kode_session_id, prompt)
-              }
-            }
-            const updated = await appendTranscript(workspace, sessionId, 'user', prompt, session.kode_session_id)
-            const entry = updated.transcript[updated.transcript.length - 1]
-            specOpsSessionEvents.publish('session.transcript_appended', sessionId, entry === undefined ? { role: 'user' } : { entries: [entry] })
-            return json(response, 200, { session: updated })
+            return json(response, 200, { accepted: true, session })
           }
           if (request.method === 'POST' && action === 'answer') {
-            if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
             const session = await readSpecOpsSession(workspace, sessionId)
-            if (session.kode_session_id === null) return json(response, 409, { error: 'kode_session_missing' })
+            const pending = interactionForAction(session)
+            if (pending === undefined || pending.kind !== 'questions') {
+              return json(response, 409, { error: 'questions_not_pending' })
+            }
             const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
             const submitted = Array.isArray(raw.answers) ? raw.answers as Array<Record<string, unknown>> : [raw]
             const answers = submitted.map((item) => ({
               questionId: typeof item.question_id === 'string' ? item.question_id : '',
-              choiceIndex: typeof item.choice_index === 'number' ? item.choice_index : -1,
-              label: typeof item.label === 'string' ? item.label : '',
+              choiceIndices: Array.isArray(item.choice_indices)
+                ? item.choice_indices.every((value) => typeof value === 'number' && Number.isInteger(value))
+                  ? item.choice_indices as number[]
+                  : []
+                : typeof item.choice_index === 'number' && Number.isInteger(item.choice_index)
+                  ? [item.choice_index]
+                  : [],
               freeText: typeof item.free_text === 'string' ? item.free_text : undefined,
             }))
-            if (answers.length === 0 || answers.some((item) => item.questionId === '' || item.choiceIndex < 0)) {
-              return json(response, 400, { error: 'answers require question_id and choice_index' })
+            if (answers.length === 0 || answers.some((item) => item.questionId === '' || item.choiceIndices.length === 0)) {
+              return json(response, 400, { error: 'answers require question_id and at least one choice index' })
             }
-            const pendingAction = session.required_action?.kind === 'answer' ? session.required_action : null
-            const expectedIds = pendingAction?.questions?.map((question) => question.question_id)
-              ?? (pendingAction?.question_id === undefined ? [] : [pendingAction.question_id])
-            if (expectedIds.length > 0 && (answers.length !== expectedIds.length
-              || answers.some((item, index) => item.questionId !== expectedIds[index]))) {
+            const expectedIds = pending.payload.questions.map((question) => question.id)
+            if (answers.length !== expectedIds.length || answers.some((item, index) => item.questionId !== expectedIds[index])) {
               return json(response, 409, { error: 'answers_do_not_match_pending_questions' })
             }
-            for (const [index, item] of answers.entries()) {
-              await kode.answer(session.kode_session_id, item.questionId, item.choiceIndex, undefined, index === answers.length - 1)
-              if (index < answers.length - 1) await new Promise((resolve) => setTimeout(resolve, 120))
-            }
-            const supplemental = answers.map((item, index) => {
-              if (!item.freeText?.trim()) return null
-              const question = pendingAction?.questions?.[index]
-              const label = item.label || `option ${item.choiceIndex + 1}`
-              return `- ${question?.prompt ?? item.questionId}\n  Selected: ${label}\n  User details: ${item.freeText!.trim()}`
-            }).filter((item): item is string => item !== null)
-            if (supplemental.length > 0) {
-              await new Promise((resolve) => setTimeout(resolve, 80))
-              await kode.sendPrompt(session.kode_session_id, `Additional context for my AskUserQuestion answers:\n\n${supplemental.join('\n\n')}`)
-            }
-            const labels = answers.map((item) => {
-              const label = item.label || `option ${item.choiceIndex + 1}`
-              return item.freeText?.trim() ? `${label} — ${item.freeText.trim()}` : label
-            })
-            await appendTranscript(workspace, sessionId, 'user', `(answered: ${labels.join('; ')})`, session.kode_session_id)
-            const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
-              for (const [index, item] of answers.entries()) {
-                if (!record.answered_action_ids.includes(item.questionId)) record.answered_action_ids.push(item.questionId)
-                const question = pendingAction?.questions?.[index]
-                record.decisions.push({
-                  id: item.questionId, kind: 'answer', outcome: 'answered',
-                  prompt: question?.prompt ?? pendingAction?.prompt ?? null,
-                  selections: [item.label || `option ${item.choiceIndex + 1}`],
-                  note: item.freeText?.trim() || null, source: 'user',
-                  kode_session_id: session.kode_session_id, at: new Date().toISOString(),
-                })
+            const normalizedAnswers = answers.map((answer, index) => {
+              const question = pending.payload.questions[index]!
+              const uniqueIndices = [...new Set(answer.choiceIndices)]
+              if ((!question.multi_select && uniqueIndices.length !== 1)
+                || uniqueIndices.some((choiceIndex) => choiceIndex < 0 || choiceIndex >= question.options.length)) return null
+              return {
+                questionId: answer.questionId,
+                choiceIndices: uniqueIndices,
+                labels: uniqueIndices.map((choiceIndex) => question.options[choiceIndex]!.label),
+                freeText: answer.freeText,
+                multiSelect: question.multi_select,
               }
-              record.required_action = null
             })
-            specOpsSessionEvents.publish('session.updated', sessionId, { required_action: null })
+            if (normalizedAnswers.some((answer) => answer === null)) {
+              return json(response, 400, { error: 'answer_choices_invalid' })
+            }
+            const validAnswers = normalizedAnswers.filter((answer): answer is NonNullable<typeof answer> => answer !== null)
+            const claimed = await claimInteractionResponse(workspace, sessionId, 'questions', raw)
+            if (claimed === null) return json(response, 409, { error: 'interaction_conflict' })
+            const execution = claimed.session.current_execution
+            if (execution === null || execution.transport === 'legacy_kode_pty' || runtime.get(execution.execution_id) === undefined) {
+              await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: 'structured_execution_missing' })
+              return json(response, 409, { error: 'structured_execution_missing' })
+            }
+            if (pending.payload.response_mode === 'prompt') {
+              void promptStructuredExecution(runtime, workspace, claimed.session, questionAnswersPrompt(
+                pending.payload.questions,
+                validAnswers,
+              ), { purpose: 'question_answers' })
+            } else {
+              try {
+                const outcome = await runtime.respond(execution.execution_id, {
+                  kind: 'questions',
+                  requestId: pending.payload.request_id,
+                  answers: Object.fromEntries(validAnswers.map((item) => [
+                    item.questionId,
+                    item.multiSelect
+                      ? [...item.labels, ...(item.freeText?.trim() ? [`Additional details: ${item.freeText.trim()}`] : [])]
+                      : item.freeText?.trim() ? `${item.labels[0]} — ${item.freeText.trim()}` : item.labels[0]!,
+                  ])),
+                })
+                if (outcome.outcome === 'outcome_unknown') {
+                  await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: outcome.error.message })
+                  return json(response, 409, { error: 'outcome_unknown', message: outcome.error.message })
+                }
+              } catch (error) {
+                await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: error instanceof Error ? error.message : String(error) })
+                return json(response, 409, { error: 'delivery_unknown' })
+              }
+            }
+            const labels = validAnswers.map((item) => {
+              const selections = item.labels.join(', ')
+              return item.freeText?.trim() ? `${selections} — ${item.freeText.trim()}` : selections
+            })
+            await appendTranscript(workspace, sessionId, 'user', `(answered: ${labels.join('; ')})`, null, execution.execution_id)
+            const updated = await resolveQuestionsCommand(workspace, sessionId, claimed.interaction.id, validAnswers, execution)
+            specOpsSessionEvents.publish('session.updated', sessionId, { required_action: updated.required_action })
             return json(response, 200, { session: updated })
           }
           if (request.method === 'POST' && action === 'plan_response') {
-            if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
             const session = await readSpecOpsSession(workspace, sessionId)
-            if (session.kode_session_id === null) return json(response, 409, { error: 'kode_session_missing' })
+            const pending = interactionForAction(session)
             const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
             const planId = typeof raw.plan_id === 'string' ? raw.plan_id : ''
-            const accept = typeof raw.accept === 'boolean' ? raw.accept : false
-            if (planId === '') return json(response, 400, { error: 'plan_id is required' })
+            const accept = raw.accept === true
             const note = typeof raw.note === 'string' ? raw.note : undefined
-            const pendingAction = session.required_action?.kind === 'plan_review'
-              && session.required_action.plan_id === planId
-              ? session.required_action
-              : null
-            await kode.planResponse(session.kode_session_id, planId, accept)
-            await kode.waitForReady(session.kode_session_id)
-            if (accept) {
-              // Check whether this session belongs to an active intake —
-              // intakes need acceptEdits mode + document-generation prompt.
-              const intake = intakes.get(session.kode_session_id)
-              if (intake !== undefined && intake.planPhase) {
-                // Intake-level plan review: approve plan and trigger doc creation
-                intake.planApproved = true
-                await updateSpecOpsSession(workspace, sessionId, (record) => {
-                  record.phase = 'plan_approved'
-                  record.state = 'active'
-                  record.required_action = null
-                  if (!record.answered_action_ids.includes(planId)) record.answered_action_ids.push(planId)
-                  record.decisions.push({
-                    id: planId,
-                    kind: 'plan_review',
-                    outcome: 'approved',
-                    prompt: pendingAction?.markdown ?? null,
-                    selections: ['Approve plan'],
-                    note: note?.trim() || null,
-                    source: 'user',
-                    kode_session_id: session.kode_session_id,
-                    at: new Date().toISOString(),
-                  })
-                })
-                specOpsSessionEvents.publish('session.updated', sessionId, { plan_approved: true })
-                try { await kode.setMode(session.kode_session_id, 'acceptEdits') } catch { /* ignore */ }
-                await kode.sendPrompt(session.kode_session_id, 'Plan approved. Now create the canonical SpecOps documents: write proposal.md (with YAML frontmatter), tasks.md, and optional design.md under `.specops/changes/`. Then write the receipt file as instructed.\n\n' + LANGUAGE_DIRECTIVE)
-                return json(response, 200, { ok: true })
+            if (planId === '') return json(response, 400, { error: 'plan_id is required' })
+            if (pending === undefined || pending.kind !== 'plan_review' || pending.payload.plan_id !== planId) {
+              return json(response, 409, { error: 'plan_not_pending' })
+            }
+            const claimed = await claimInteractionResponse(workspace, sessionId, 'plan_review', raw)
+            if (claimed === null) return json(response, 409, { error: 'interaction_conflict' })
+            const execution = claimed.session.current_execution
+            if (execution === null || execution.transport === 'legacy_kode_pty' || runtime.get(execution.execution_id) === undefined) {
+              await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: 'structured_execution_missing' })
+              return json(response, 409, { error: 'structured_execution_missing' })
+            }
+            if (pending.payload.response_mode === 'prompt') {
+              if (!accept) {
+                void promptStructuredExecution(runtime, workspace, claimed.session, planRevisionPrompt(note), { purpose: 'plan_revision' })
               }
-              // Generic session plan_review: just approve and continue
-              await appendTranscript(workspace, sessionId, 'system', 'Plan approved.', session.kode_session_id)
-              const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
-                record.required_action = null
-                record.state = 'active'
-                if (!record.answered_action_ids.includes(planId)) record.answered_action_ids.push(planId)
-                record.decisions.push({
-                  id: planId,
-                  kind: 'plan_review',
-                  outcome: 'approved',
-                  prompt: pendingAction?.markdown ?? null,
-                  selections: ['Approve plan'],
-                  note: note?.trim() || null,
-                  source: 'user',
-                  kode_session_id: session.kode_session_id,
-                  at: new Date().toISOString(),
+            } else {
+              try {
+                const outcome = await runtime.respond(execution.execution_id, {
+                  kind: 'plan',
+                  requestId: pending.payload.request_id,
+                  decision: accept ? 'approve' : 'reject',
+                  ...(note === undefined ? {} : { feedback: note }),
                 })
-              })
-              specOpsSessionEvents.publish('session.updated', sessionId, { required_action: null })
-              return json(response, 200, { session: updated })
+                if (outcome.outcome === 'outcome_unknown') {
+                  await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: outcome.error.message })
+                  return json(response, 409, { error: 'outcome_unknown', message: outcome.error.message })
+                }
+              } catch (error) {
+                await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: error instanceof Error ? error.message : String(error) })
+                return json(response, 409, { error: 'delivery_unknown' })
+              }
             }
-            // Reject — send feedback to the session
-            const feedback = note ?? 'Plan rejected. Please revise.'
-            await appendTranscript(workspace, sessionId, 'user', feedback, session.kode_session_id)
-            await updateSpecOpsSession(workspace, sessionId, (record) => {
-              record.state = 'active'
-              record.required_action = null
-              if (!record.answered_action_ids.includes(planId)) record.answered_action_ids.push(planId)
-              record.decisions.push({
-                id: planId,
-                kind: 'plan_review',
-                outcome: 'revision_requested',
-                prompt: pendingAction?.markdown ?? null,
-                selections: ['Revise plan'],
-                note: feedback,
-                source: 'user',
-                kode_session_id: session.kode_session_id,
-                at: new Date().toISOString(),
-              })
-            })
-            // If this is an intake session, switch back to plan_discussion
-            const rejectIntake = intakes.get(session.kode_session_id)
-            if (rejectIntake !== undefined && rejectIntake.planPhase) {
-              await updateSpecOpsSession(workspace, sessionId, (record) => {
-                record.phase = 'plan_discussion'
-              })
-            }
-            specOpsSessionEvents.publish('session.updated', sessionId, { required_action: null })
-            return json(response, 200, { ok: true })
+            if (accept) await appendTranscript(workspace, sessionId, 'system', 'Plan approved.', null, execution.execution_id)
+            else await appendTranscript(workspace, sessionId, 'user', note?.trim() || 'Plan rejected. Please revise.', null, execution.execution_id)
+            const updated = await resolvePlanCommand(workspace, sessionId, claimed.interaction.id, accept, note, execution)
+            specOpsSessionEvents.publish('session.action_required', sessionId, updated.required_action)
+            return json(response, 200, { ok: true, session: updated, plan_approved: accept })
           }
           if (request.method === 'POST' && action === 'action') {
             const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
             const kind = typeof raw.kind === 'string' ? raw.kind : ''
+            // Executions are process-local while sessions and Runs are
+            // durable. A sidecar restart (or a replaced stage agent) can leave
+            // an old execution id in the record. Reconcile before dispatching
+            // any user action so we surface a resumable workflow state instead
+            // of passing an unknown id to the runtime manager.
+            await reconcileSessions(workspace, runtime, kode)
             const session = await readSpecOpsSession(workspace, sessionId)
+            const serializedKinds = new Set(['run_in_worktree', 'verify', 'accept', 'feedback', 'apply', 'apply_with_verify', 'rollback', 'resume'])
+            if (serializedKinds.has(kind)) {
+              const key = `${sessionId}:${kind}`
+              if (activeActions.has(key)) return json(response, 409, { error: 'action_in_progress', kind })
+              activeActions.add(key)
+              const release = (): void => { activeActions.delete(key) }
+              response.once('finish', release)
+              response.once('close', release)
+            }
             if (kind === 'close') {
+              if (session.current_execution !== null && session.current_execution.transport !== 'legacy_kode_pty') {
+                await runtime.close(session.current_execution.execution_id).catch(() => undefined)
+              }
               if (kode !== undefined) {
-                const ids = new Set(session.agents.map((agent) => agent.kode_session_id))
+                const ids = new Set(session.agents.flatMap((agent) => agent.kode_session_id === null ? [] : [agent.kode_session_id]))
                 if (session.kode_session_id !== null) ids.add(session.kode_session_id)
                 for (const id of ids) await kode.killSession(id).catch(() => undefined)
               }
@@ -1131,44 +1572,96 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
               return json(response, 200, { session: reopened })
             }
             if (kind === 'focus') {
-              if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-              if (session.kode_session_id === null) return json(response, 409, { error: 'kode_session_missing' })
+              if (session.current_execution !== null && session.current_execution.transport !== 'legacy_kode_pty') {
+                return json(response, 409, { error: 'focus_not_supported', capability: false })
+              }
+              if (kode === undefined || session.kode_session_id === null) return json(response, 409, { error: 'legacy_kode_session_missing' })
               await kode.focusSession(session.kode_session_id)
-              return json(response, 200, { ok: true })
+              return json(response, 200, { ok: true, capability: true })
+            }
+            if (kind === 'permission_allow' || kind === 'permission_deny') {
+              const pending = interactionForAction(session)
+              if (pending === undefined || pending.kind !== 'permission') {
+                return json(response, 409, { error: 'permission_not_pending' })
+              }
+              const claimed = await claimInteractionResponse(workspace, sessionId, 'permission', raw)
+              if (claimed === null) return json(response, 409, { error: 'interaction_conflict' })
+              const execution = claimed.session.current_execution
+              if (execution === null || execution.transport === 'legacy_kode_pty' || runtime.get(execution.execution_id) === undefined) {
+                const recovered = await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: 'structured_execution_missing' })
+                specOpsSessionEvents.publish('session.action_required', sessionId, recovered.required_action)
+                return json(response, 409, { error: 'structured_execution_missing' })
+              }
+              const decision = kind === 'permission_allow' ? 'allow' : 'deny'
+              try {
+                const outcome = await runtime.respond(execution.execution_id, {
+                  kind: 'permission', requestId: pending.payload.request_id, decision, remember: raw.remember === true,
+                })
+                if (outcome.outcome === 'outcome_unknown') {
+                  const recovered = await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: outcome.error.message })
+                  specOpsSessionEvents.publish('session.action_required', sessionId, recovered.required_action)
+                  return json(response, 409, { error: 'outcome_unknown', message: outcome.error.message })
+                }
+              } catch (error) {
+                const recovered = await markClaimDeliveryUnknown(workspace, sessionId, claimed.interaction.id, { error: error instanceof Error ? error.message : String(error) })
+                specOpsSessionEvents.publish('session.action_required', sessionId, recovered.required_action)
+                return json(response, 409, { error: 'delivery_unknown' })
+              }
+              const updated = await resolvePermissionCommand(workspace, sessionId, claimed.interaction.id, decision, raw.remember === true)
+              // The action endpoint does not optimistically update the client
+              // store. Publish the resolved queue head so an answered
+              // permission card is removed immediately, just like answers.
+              specOpsSessionEvents.publish('session.updated', sessionId, {
+                required_action: updated.required_action,
+                state: updated.state,
+              })
+              return json(response, 200, { session: updated })
             }
             if (kind === 'resume') {
-              if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-              // Phases that own a kode session (either still running or exited).
-              // Each of these may be resumed: alive → re-attach monitors;
-              // dead → rebuild with the codebuddy UUID stored on the matching
-              // agent (NOT the numeric kode_session_id, which is a bridge
-              // internal primary key and drifts across restarts).
-              if (RESUMABLE_SESSION_PHASES.has(session.phase)) {
-                // 1. If the kode session is still alive, re-attach monitors.
-                if (session.kode_session_id !== null) {
-                  try {
-                    const ks = await kode.getSession(session.kode_session_id)
-                    if (ks.status !== 'exited') {
-                      if (session.run_id !== null) watchRun(session.run_id, workspace, session.kode_session_id)
-                      watchSpecOpsSessionTranscript(kode, workspace, sessionId, session.kode_session_id)
-                      const updated = await updateSpecOpsSession(workspace, sessionId, (r) => { r.state = 'active' })
-                      specOpsSessionEvents.publish('session.updated', sessionId, { phase: updated.phase, state: updated.state })
-                      return json(response, 200, { session: updated })
-                    }
-                  } catch { /* session not found — fall through to rebuild */ }
-                }
-                const rebuilt = await rebuildSpecOpsExecution(kode, workspace, session)
-                return json(response, 200, { session: rebuilt.session })
+              if (!RESUMABLE_SESSION_PHASES.has(session.phase)) {
+                return json(response, 400, { error: 'unsupported_resume_phase', phase: session.phase })
               }
-              return json(response, 400, { error: 'unsupported_resume_phase', phase: session.phase })
+              if (session.run_id !== null) {
+                const run = await readRun(workspace, session.run_id)
+                if (run.state !== 'running') return json(response, 409, { error: 'run_not_running', state: run.state })
+                const attachedExecution = session.current_execution
+                if (hasRunMonitor(run.run_id) && attachedExecution !== null
+                  && attachedExecution.transport !== 'legacy_kode_pty'
+                  && runtime.get(attachedExecution.execution_id) !== undefined) {
+                  return json(response, 200, { session, run, already_resumed: true })
+                }
+                unwatchRun(run.run_id)
+                const turn = await resumeRunExecution(run, runtime, session.id)
+                await resolveRunInteraction(workspace, session.id, ['resume'], { resumed: true, request_id: turn.binding.request_id })
+                watchRun(run.run_id, workspace, turn)
+                const updated = await readSpecOpsSession(workspace, session.id)
+                return json(response, 200, { session: updated, run: turn.run })
+              }
+              await rebuildSpecOpsExecution(runtime, workspace, session)
+              await resolveRunInteraction(workspace, session.id, ['resume'], { resumed: true })
+              return json(response, 200, { session: await readSpecOpsSession(workspace, session.id) })
             }
             if (kind === 'promote_intake') {
-              const clarifyEntry = [...clarifies.entries()].find(([, item]) => item.specopsSessionId === sessionId)
-              if (clarifyEntry === undefined) return json(response, 404, { error: 'clarify_not_found' })
-              return json(response, 409, { error: 'use_clarify_promote_route', clarify_id: clarifyEntry[0] })
+              const promoted = await promoteDurableClarify(runtime, workspace, sessionId, raw)
+              if (promoted === null) return json(response, 409, { error: 'clarify_not_ready' })
+              if (promoted.completion !== undefined) {
+                trackBackground(observeSessionTurn(runtime, workspace, promoted.session, promoted.completion))
+              }
+              specOpsSessionEvents.publish('session.updated', sessionId, {
+                phase: promoted.session.phase,
+                current_execution: promoted.execution,
+              })
+              return json(response, promoted.completion === undefined ? 200 : 201, {
+                intake_id: sessionId,
+                session: promoted.execution,
+                specops_session: promoted.session,
+              })
             }
             if (kind === 'run_in_worktree') {
-              if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
+              if (session.run_id !== null) {
+                const existingRun = await readRun(workspace, session.run_id)
+                return json(response, 200, { session, run: existingRun, already_launched: true })
+              }
               if (!Array.isArray(raw.tasks)) return json(response, 400, { error: 'tasks are required' })
               const tasks = raw.tasks as Task[]
               if (tasks.some((task) => typeof task.id !== 'string' || typeof task.title !== 'string' || typeof task.prompt !== 'string' || !Array.isArray(task.verify))) {
@@ -1177,6 +1670,9 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
               const selected = await agentSelection(workspace, 'implementation', raw)
               const backendKey = selected.backend
               const model = selected.model
+              if (!structuredBackendSupported(backendKey)) {
+                return json(response, 409, { error: 'unsupported_execution_backend', backend_key: backendKey })
+              }
               // Resolve the change proposal id this Run should be linked to.
               // Priority: explicit `change_id` in the request body > reverse-resolve
               // from the session's document_path (read the proposal.md frontmatter).
@@ -1185,40 +1681,32 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
               if (changeId === null && session.document_path !== null) {
                 changeId = await readChangeIdFromDocumentPath(workspace, session.document_path)
               }
-              const run = await launchRun(workspace, tasks, backendKey, typeof raw.base === 'string' ? raw.base : 'HEAD', kode, options.runCacheRoot, model, changeId)
-              const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
+              const run = await launchRun(workspace, tasks, backendKey, typeof raw.base === 'string' ? raw.base : 'HEAD', options.runCacheRoot, model, changeId)
+              await updateSpecOpsSession(workspace, sessionId, (record) => {
                 record.backend_key = backendKey
-                record.kode_session_id = run.kode_session_id
+                record.kode_session_id = null
                 record.run_id = run.run_id
                 record.phase = 'run_in_worktree'
                 record.state = 'active'
                 record.required_action = null
               })
-              if (run.kode_session_id !== null) {
-                await recordAgent(workspace, sessionId, {
-                  id: run.kode_session_id,
-                  backend_key: backendKey,
-                  status: 'starting',
-                }, 'implement', model)
-              }
-              if (run.kode_session_id !== null) {
-                watchRun(run.run_id, workspace, run.kode_session_id)
-                watchSpecOpsSessionTranscript(kode, workspace, sessionId, run.kode_session_id)
-              }
-              specOpsSessionEvents.publish('session.updated', sessionId, { run_id: run.run_id, kode_session_id: run.kode_session_id })
-              return json(response, 201, { session: updated, run })
+              const started = await startRunExecution(run, runtime, sessionId, options.runCacheRoot)
+              watchRun(run.run_id, workspace, started)
+              const updated = await readSpecOpsSession(workspace, sessionId)
+              specOpsSessionEvents.publish('session.updated', sessionId, { run_id: run.run_id, current_execution: updated.current_execution })
+              return json(response, 201, { session: updated, run: started.run })
             }
             if (session.run_id !== null && (kind === 'verify' || kind === 'accept' || kind === 'reject' || kind === 'feedback' || kind === 'apply' || kind === 'apply_with_verify' || kind === 'rollback')) {
               const run = await readRun(workspace, session.run_id)
               if (kind === 'verify') {
-                const result = await verifyRun(run)
-                const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
-                  record.phase = 'review'
-                  record.state = 'awaiting_user'
-                  record.required_action = { kind: 'review', patch_files: result.files }
-                })
-                specOpsSessionEvents.publish('session.action_required', sessionId, updated.required_action)
-                return json(response, 200, { session: updated, ...result })
+                if (run.state === 'awaiting_review') {
+                  return json(response, 200, { session, run, already_verified: true })
+                }
+                if (run.state !== 'awaiting_verify') {
+                  return json(response, 409, { error: 'run_not_verifiable', state: run.state })
+                }
+                const result = await verifyAndRouteReview(runtime, workspace, run, sessionId)
+                return json(response, 200, { session: await readSpecOpsSession(workspace, sessionId), ...result })
               }
               if (kind === 'apply') {
                 const outcome = await applyCompletedRun(run)
@@ -1227,7 +1715,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                   record.state = 'completed'
                   record.required_action = null
                 })
-                await terminateSpecOpsExecution(kode, workspace, sessionId, run.run_id)
+                await terminateSpecOpsExecution(runtime, kode, workspace, sessionId, run.run_id)
                 specOpsSessionEvents.publish('session.updated', sessionId, { phase: updated.phase, state: updated.state })
                 return json(response, 200, { session: updated, ok: true, applied: outcome.applied, reason: outcome.reason, commit: outcome.commit })
               }
@@ -1251,7 +1739,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                     record.required_action = { kind: 'apply_patch' }
                   }
                 })
-                if (result.allOk) await terminateSpecOpsExecution(kode, workspace, sessionId, run.run_id)
+                if (result.allOk) await terminateSpecOpsExecution(runtime, kode, workspace, sessionId, run.run_id)
                 specOpsSessionEvents.publish('session.updated', sessionId, {
                   phase: updated.phase,
                   state: updated.state,
@@ -1270,24 +1758,29 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                 specOpsSessionEvents.publish('session.updated', sessionId, { phase: updated.phase, state: updated.state })
                 return json(response, 200, { session: updated, ok: true })
               }
+              if (kind === 'accept' && run.state === 'completed') {
+                return json(response, 200, { session, run, already_accepted: true })
+              }
               const verdict = kind === 'accept' ? 'accept' : kind === 'reject' ? 'reject' : 'feedback'
-              const decided = await decideRun(run, verdict, typeof raw.note === 'string' ? raw.note : '', kode)
+              await resolveRunInteraction(workspace, sessionId, ['human_review'], {
+                verdict,
+                note: typeof raw.note === 'string' ? raw.note : '',
+              })
+              const decision = await decideRun(run, verdict, typeof raw.note === 'string' ? raw.note : '', runtime)
+              const decided = decision.run
               const updated = await updateSpecOpsSession(workspace, sessionId, (record) => {
                 if (decided.state === 'running') {
                   record.phase = 'run_in_worktree'
                   record.state = 'active'
-                  record.required_action = null
                 } else if (decided.state === 'completed') {
                   record.phase = 'apply_patch'
                   record.state = 'awaiting_user'
-                  record.required_action = { kind: 'apply_patch' }
                 } else if (decided.state === 'cancelled') {
                   record.phase = 'cancelled'
                   record.state = 'cancelled'
-                  record.required_action = null
                 }
               })
-              if (decided.state === 'running' && decided.kode_session_id !== null) watchRun(decided.run_id, workspace, decided.kode_session_id)
+              if (decided.state === 'running' && decision.turn !== undefined) watchRun(decided.run_id, workspace, decision.turn)
               specOpsSessionEvents.publish(updated.required_action === null ? 'session.updated' : 'session.action_required', sessionId, updated.required_action)
               return json(response, 200, { session: updated, run: decided })
             }
@@ -1295,7 +1788,6 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           }
         }
         if (request.method === 'POST' && url.pathname === '/api/intakes') {
-          if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
           const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
           if (typeof raw.request !== 'string' || raw.request.trim() === '') {
             return json(response, 400, { error: 'request is required' })
@@ -1306,203 +1798,134 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const prePlan = raw.pre_plan === true
           const receiptId = randomUUID()
           if (prePlan) {
-            // Plan-first intake: create plan session, user approves plan before writing docs
+            const missing = await workflowCapabilityGap(workspace, backendKey, 'pre_plan')
+            if (missing.length > 0) {
+              return json(response, 422, { error: 'capability_missing', backend_key: backendKey, required: missing })
+            }
             const requestText = raw.request.trim()
-            const session = await kode.createPlanSession(
-              backendKey,
-              workspace,
-              await withAgentPrompt(workspace, 'analysis', buildIntakePlanPrompt(requestText, receiptId)),
-              intakeModel,
-            )
-            const specopsSession = await createSpecOpsSession(workspace, {
-              title: titleFromRequest(requestText),
-              backend_key: backendKey,
-              kode_session_id: session.id,
-              phase: 'plan_discussion',
-              state: 'active',
+            const created = await createSpecOpsSession(workspace, {
+              title: titleFromRequest(requestText), backend_key: backendKey, phase: 'plan_discussion', state: 'created',
+              intake_receipt_id: receiptId,
+              transcript: [{ role: 'user', text: requestText, at: new Date().toISOString() }],
             })
-            await recordAgent(workspace, specopsSession.id, session, 'plan', intakeModel)
-            specOpsSessionEvents.publish('session.created', specopsSession.id, { kode_session_id: session.id })
-            watchSpecOpsSessionTranscript(kode, workspace, specopsSession.id, session.id)
-            intakes.set(session.id, {
-              receiptId,
-              document: null,
-              documents: [],
-              error: null,
-              specopsSessionId: specopsSession.id,
-              planPhase: true,
-              planApproved: false,
-              backendKey,
-              request: requestText,
+            const execution = await runtime.start({
+              workspace, sessionId: created.id, purpose: 'plan', backendKey, cwd: workspace, mode: 'plan',
+              ...(intakeModel === undefined ? {} : { model: intakeModel }),
             })
-            return json(response, 201, { intake_id: session.id, session, specops_session: specopsSession, plan_phase: true })
+            const specopsSession = await readSpecOpsSession(workspace, created.id)
+            const completion = runtime.prompt(execution.execution_id, {
+              requestId: randomUUID(),
+              text: await withAgentPrompt(workspace, 'analysis', buildIntakePlanPrompt(requestText, receiptId)),
+              metadata: { specops_session_id: created.id, purpose: 'plan', receipt_id: receiptId },
+            })
+            trackBackground(observeSessionTurn(runtime, workspace, specopsSession, completion))
+            specOpsSessionEvents.publish('session.created', specopsSession.id, { current_execution: execution })
+            return json(response, 201, { intake_id: specopsSession.id, session: execution, specops_session: specopsSession, plan_phase: true })
           }
-          // Direct intake (existing flow)
           const requestText = raw.request.trim()
-          const session = await kode.createAnalysisSession(
-            backendKey,
-            workspace,
-            await withAgentPrompt(workspace, 'analysis', buildIntakePrompt(requestText, receiptId)),
-            intakeModel,
-          )
-          const specopsSession = await createSpecOpsSession(workspace, {
-            title: titleFromRequest(requestText),
-            backend_key: backendKey,
-            kode_session_id: session.id,
-            phase: 'analyze_request',
-            state: 'active',
+          const created = await createSpecOpsSession(workspace, {
+            title: titleFromRequest(requestText), backend_key: backendKey, phase: 'analyze_request', state: 'created',
+            intake_receipt_id: receiptId,
+            transcript: [{ role: 'user', text: requestText, at: new Date().toISOString() }],
           })
-          await recordAgent(workspace, specopsSession.id, session, 'intake', intakeModel)
-          specOpsSessionEvents.publish('session.created', specopsSession.id, { kode_session_id: session.id })
-          watchSpecOpsSessionTranscript(kode, workspace, specopsSession.id, session.id)
-          intakes.set(session.id, {
-            receiptId,
-            document: null,
-            documents: [],
-            error: null,
-            specopsSessionId: specopsSession.id,
+          const execution = await runtime.start({
+            workspace, sessionId: created.id, purpose: 'intake', backendKey, cwd: workspace, mode: 'acceptEdits',
+            ...(intakeModel === undefined ? {} : { model: intakeModel }),
           })
-          return json(response, 201, { intake_id: session.id, session, specops_session: specopsSession })
+          const specopsSession = await readSpecOpsSession(workspace, created.id)
+          const completion = runtime.prompt(execution.execution_id, {
+            requestId: randomUUID(),
+            text: await withAgentPrompt(workspace, 'analysis', buildIntakePrompt(requestText, receiptId)),
+            metadata: { specops_session_id: created.id, purpose: 'intake', receipt_id: receiptId },
+          })
+          trackBackground(observeSessionTurn(runtime, workspace, specopsSession, completion))
+          specOpsSessionEvents.publish('session.created', specopsSession.id, { current_execution: execution })
+          return json(response, 201, { intake_id: specopsSession.id, session: execution, specops_session: specopsSession })
         }
-        // Plan response for plan-phase intakes
-        const intakePlanMatch = /^\/api\/intakes\/(\d+)\/plan_response$/.exec(url.pathname)
+        // Compatibility wrapper for the durable session plan command.
+        const intakePlanMatch = /^\/api\/intakes\/([0-9a-f-]{36})\/plan_response$/.exec(url.pathname)
         if (request.method === 'POST' && intakePlanMatch !== null) {
-          if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-          const id = Number(intakePlanMatch[1])
-          const intake = intakes.get(id)
-          if (intake === undefined || !intake.planPhase) return json(response, 404, { error: 'intake_not_found' })
+          const id = intakePlanMatch[1] as string
           const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
+          const current = await readSpecOpsSession(workspace, id)
+          const pending = interactionForAction(current)
           const planId = typeof raw.plan_id === 'string' ? raw.plan_id : ''
+          if (pending === undefined || pending.kind !== 'plan_review' || pending.payload.plan_id !== planId) {
+            return json(response, 409, { error: 'plan_not_pending' })
+          }
+          const claimed = await claimInteractionResponse(workspace, id, 'plan_review', raw)
+          if (claimed === null) return json(response, 409, { error: 'interaction_conflict' })
+          const execution = claimed.session.current_execution
+          if (execution === null || execution.transport === 'legacy_kode_pty' || runtime.get(execution.execution_id) === undefined) {
+            await markClaimDeliveryUnknown(workspace, id, claimed.interaction.id, { error: 'structured_execution_missing' })
+            return json(response, 409, { error: 'structured_execution_missing' })
+          }
           const accept = raw.accept === true
-          const note = typeof raw.note === 'string' ? raw.note.trim() : ''
-          const currentSession = await readSpecOpsSession(workspace, intake.specopsSessionId)
-          const planMarkdown = currentSession.required_action?.kind === 'plan_review'
-            && currentSession.required_action.plan_id === planId
-            ? currentSession.required_action.markdown ?? null
-            : null
-          if (accept) {
-            intake.planApproved = true
-            await updateSpecOpsSession(workspace, intake.specopsSessionId, (record) => {
-              record.phase = 'plan_approved'
-              record.state = 'active'
-              record.required_action = null
-              record.decisions.push({
-                id: planId,
-                kind: 'plan_review',
-                outcome: 'approved',
-                prompt: planMarkdown,
-                selections: ['Approve plan'],
-                note: note || null,
-                source: 'user',
-                kode_session_id: id,
-                at: new Date().toISOString(),
-              })
-            })
-            specOpsSessionEvents.publish('session.updated', intake.specopsSessionId, { plan_approved: true })
-            // Accept the plan and send a prompt to create the docs
-            try { await kode.planResponse(id, planId, true) } catch { /* ignore */ }
-            await kode.waitForReady(id)
-            // Switch to acceptEdits and ask to write documents
-            try { await kode.setMode(id, 'acceptEdits') } catch { /* ignore */ }
-            await kode.sendPrompt(id, 'Plan approved. Now create the canonical SpecOps documents: write proposal.md (with YAML frontmatter), tasks.md, and optional design.md under `.specops/changes/`. Then write the receipt file as instructed.\n\n' + LANGUAGE_DIRECTIVE)
+          const note = typeof raw.note === 'string' ? raw.note : undefined
+          if (pending.payload.response_mode === 'prompt') {
+            if (!accept) void promptStructuredExecution(runtime, workspace, claimed.session, planRevisionPrompt(note), { purpose: 'plan_revision' })
           } else {
-            // Reject — send feedback
-            try { await kode.planResponse(id, planId, false) } catch { /* ignore */ }
-            const feedback = note || 'Revise the plan and resubmit.'
-            await appendTranscript(workspace, intake.specopsSessionId, 'user', feedback, id)
-            await updateSpecOpsSession(workspace, intake.specopsSessionId, (record) => {
-              record.phase = 'plan_discussion'
-              record.state = 'active'
-              record.required_action = null
-              record.decisions.push({
-                id: planId,
-                kind: 'plan_review',
-                outcome: 'revision_requested',
-                prompt: planMarkdown,
-                selections: ['Revise plan'],
-                note: feedback,
-                source: 'user',
-                kode_session_id: id,
-                at: new Date().toISOString(),
-              })
+            const outcome = await runtime.respond(execution.execution_id, {
+              kind: 'plan', requestId: pending.payload.request_id, decision: accept ? 'approve' : 'reject',
+              ...(note === undefined ? {} : { feedback: note }),
             })
-            specOpsSessionEvents.publish('session.updated', intake.specopsSessionId, { plan_approved: false })
-            await kode.sendPrompt(id, `Plan rejected: ${feedback}\n\nRevise the plan in plan mode and call ExitPlanMode again.`)
+            if (outcome.outcome === 'outcome_unknown') {
+              await markClaimDeliveryUnknown(workspace, id, claimed.interaction.id, { error: outcome.error.message })
+              return json(response, 409, { error: 'outcome_unknown', message: outcome.error.message })
+            }
           }
-          return json(response, 200, { ok: true, plan_approved: intake.planApproved })
+          const updated = await resolvePlanCommand(workspace, id, claimed.interaction.id, accept, note, execution)
+          specOpsSessionEvents.publish('session.action_required', id, updated.required_action)
+          return json(response, 200, { ok: true, plan_approved: accept, session: updated })
         }
-        const intakeMatch = /^\/api\/intakes\/(\d+)$/.exec(url.pathname)
+        const intakeMatch = /^\/api\/intakes\/([0-9a-f-]{36})$/.exec(url.pathname)
         if (request.method === 'GET' && intakeMatch !== null) {
-          if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-          const intakeId = Number(intakeMatch[1])
-          const intake = intakes.get(intakeId)
-          if (intake === undefined) return json(response, 404, { error: 'intake_not_found' })
-          const session = await kode.getSession(intakeId)
-          // Plan-phase intake: wait for plan approval, then poll for receipt
-          if (intake.planPhase && !intake.planApproved) {
-            // session-monitor publishes the exact plan_proposed payload. Do not
-            // synthesize a plan from recent transcript messages: tool summaries
-            // and partial assistant text are not an approval-grade artifact.
-            return json(response, 200, {
-              intake_id: intakeId,
-              session,
-              document: null,
-              documents: [],
-              error: intake.error,
-              specops_session_id: intake.specopsSessionId,
-              plan_phase: true,
-              plan_approved: false,
-            })
-          }
-          if (intake.document === null && intake.error === null) {
+          const intakeId = intakeMatch[1] as string
+          let session = await readSpecOpsSession(workspace, intakeId)
+          const receiptId = session.intake_receipt_id
+            ?? session.interactions?.find((interaction) => interaction.kind === 'start_intake')?.payload.receipt_id
+            ?? findLatestReceiptId(session.transcript.map((entry) => entry.text).join('\n'))
+          if (receiptId === null || receiptId === undefined) return json(response, 404, { error: 'intake_not_found' })
+          const planPhase = session.phase === 'plan_discussion' || session.phase === 'solution_options'
+            || session.phase === 'plan_approved'
+          const planApproved = session.clarification!.approved_plan !== null
+          let document: { path: string; version: string } | null = null
+          let documents: string[] = []
+          let error = session.execution.last_error
+          const receiptPath = pathInside(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
+          if (await exists(receiptPath)) {
             try {
-              const receiptPath = pathInside(
-                workspace,
-                '.specops',
-                'state',
-                'intakes',
-                `${intake.receiptId}.json`,
+              const finalized = await finalizeCompletedIntake(workspace, session.id, receiptId, session.title)
+              documents = finalized.documents
+              document = { path: finalized.primary, version: finalized.version }
+              error = finalized.checklistError
+              specOpsSessionEvents.publish(
+                finalized.isDocOnly ? 'session.updated' : 'session.action_required',
+                session.id,
+                finalized.isDocOnly ? { phase: 'completed' } : { phase: 'run_in_worktree', document_path: finalized.primary },
               )
-              if (await exists(receiptPath)) {
-                const finalized = await finalizeCompletedIntake(
-                  workspace,
-                  intake.specopsSessionId,
-                  intake.receiptId,
-                  titleFromRequest(intake.request ?? intake.receiptId),
-                )
-                intake.documents = finalized.documents
-                intake.document = { path: finalized.primary, version: finalized.version }
-                intake.error = finalized.checklistError
-                specOpsSessionEvents.publish(
-                  finalized.isDocOnly ? 'session.updated' : 'session.action_required',
-                  intake.specopsSessionId,
-                  finalized.isDocOnly ? { phase: 'completed' } : { phase: 'run_in_worktree', document_path: finalized.primary },
-                )
-              }
-            } catch (error) {
-              intake.error = error instanceof Error ? error.message : String(error)
-              await updateSpecOpsSession(workspace, intake.specopsSessionId, (record) => {
-                // A completed receipt is authoritative. Keep the workflow
-                // recoverable and record the post-processing failure instead
-                // of mislabelling successful agent work as a failed Intake.
-                record.execution.last_error = intake.error
+              session = await readSpecOpsSession(workspace, session.id)
+            } catch (caught) {
+              error = caught instanceof Error ? caught.message : String(caught)
+              session = await updateSpecOpsSession(workspace, session.id, (record) => {
+                record.execution.last_error = error
                 record.execution.last_reconciled_at = new Date().toISOString()
               })
-              specOpsSessionEvents.publish('session.updated', intake.specopsSessionId, { intake_finalize_error: intake.error })
+              specOpsSessionEvents.publish('session.updated', session.id, { intake_finalize_error: error })
             }
           }
           return json(response, 200, {
             intake_id: intakeId,
             session,
-            document: intake.document,
-            documents: intake.documents,
-            error: intake.error,
-            specops_session_id: intake.specopsSessionId,
+            document,
+            documents,
+            error,
+            specops_session_id: session.id,
+            ...(planPhase ? { plan_phase: true, plan_approved: planApproved } : {}),
           })
         }
         // ── Clarify routes ──
         if (request.method === 'POST' && url.pathname === '/api/clarifies') {
-          if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
           const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
           if (typeof raw.request !== 'string' || raw.request.trim() === '') {
             return json(response, 400, { error: 'request is required' })
@@ -1510,169 +1933,158 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const selected = await agentSelection(workspace, 'analysis', raw)
           const backendKey = selected.backend
           const clarifyModel = selected.model
-          const clarifyId = randomUUID()
+          const missing = await workflowCapabilityGap(workspace, backendKey, 'clarify')
+          if (missing.length > 0) {
+            return json(response, 422, { error: 'capability_missing', backend_key: backendKey, required: missing })
+          }
           const requestText = raw.request.trim()
           const documentPath = typeof raw.document_path === 'string' && raw.document_path.trim() !== '' ? raw.document_path.trim() : null
-          // Reuse an existing active clarify-backed session for the same document
-          // so consecutive asks on the same doc don't spawn duplicates.
           if (documentPath !== null) {
             const existing = await findActiveSpecOpsSessionByDocument(workspace, documentPath)
             if (existing !== null) {
-              const existingClarify = [...clarifies.values()].find((c) => c.specopsSessionId === existing.id)
-              if (existingClarify !== undefined) {
-                if (existing.required_action !== null || existing.state === 'awaiting_user') {
-                  return json(response, 409, {
-                    error: 'document_session_awaiting_action',
-                    specops_session: existing,
-                  })
-                }
-                await kode.sendPrompt(existingClarify.sessionId, requestText)
-                existingClarify.status = 'asking'
-                existingClarify.transcript.push({ role: 'user', text: requestText, at: new Date().toISOString() })
-                const updated = await appendTranscript(workspace, existing.id, 'user', requestText, existingClarify.sessionId)
-                const entry = updated.transcript[updated.transcript.length - 1]
-                specOpsSessionEvents.publish('session.transcript_appended', existing.id, entry === undefined ? { role: 'user' } : { entries: [entry] })
-                return json(response, 200, {
-                  clarify_id: existingClarify.sessionId,
-                  session: await kode.getSession(existingClarify.sessionId),
-                  specops_session: updated,
-                  reused: true,
-                })
+              if (blockingInteraction(existing) !== undefined || existing.state === 'awaiting_user') {
+                return json(response, 409, { error: 'document_session_awaiting_action', specops_session: existing })
               }
+              const execution = existing.current_execution
+              if (execution === null || execution.transport === 'legacy_kode_pty'
+                || runtime.get(execution.execution_id) === undefined) {
+                return json(response, 409, { error: 'resume_required', specops_session: existing })
+              }
+              const completion = runtime.prompt(execution.execution_id, {
+                requestId: randomUUID(), text: requestText,
+                metadata: { specops_session_id: existing.id, purpose: 'clarify' },
+              })
+              const updated = await appendTranscript(workspace, existing.id, 'user', requestText, null, execution.execution_id)
+              const entry = updated.transcript.at(-1)
+              specOpsSessionEvents.publish('session.transcript_appended', existing.id, entry === undefined ? { role: 'user' } : { entries: [entry] })
+              trackClarifyTurn(existing.id, completion)
+              return json(response, 200, {
+                clarify_id: existing.id,
+                session: execution,
+                specops_session: updated,
+                reused: true,
+              })
             }
           }
-          // Create session in bypass mode; user-facing plan/answer gates are managed by SpecOps.
-          const session = await kode.createPlanSession(
-            backendKey,
-            workspace,
-            await withAgentPrompt(workspace, 'analysis', buildClarifyPrompt(requestText, clarifyId)),
-            clarifyModel,
-          )
-          const specopsSession = await createSpecOpsSession(workspace, {
-            title: titleFromRequest(requestText),
-            backend_key: backendKey,
-            kode_session_id: session.id,
-            document_path: documentPath,
-            phase: 'clarify',
-            state: 'active',
+          const created = await createSpecOpsSession(workspace, {
+            title: titleFromRequest(requestText), backend_key: backendKey, document_path: documentPath,
+            phase: 'clarify', state: 'created',
+            transcript: [{ role: 'user', text: requestText, at: new Date().toISOString() }],
           })
-          await recordAgent(workspace, specopsSession.id, session, 'clarify', clarifyModel)
-          specOpsSessionEvents.publish('session.created', specopsSession.id, { kode_session_id: session.id })
-          watchSpecOpsSessionTranscript(kode, workspace, specopsSession.id, session.id)
-          clarifies.set(session.id, {
-            clarifyId,
-            status: 'asking',
-            sessionId: session.id,
-            backendKey,
-            ...(clarifyModel !== undefined ? { model: clarifyModel } : {}),
-            request: requestText,
-            planId: null,
-            planMd: null,
-            transcript: [],
-            error: null,
-            specopsSessionId: specopsSession.id,
+          const execution = await runtime.start({
+            workspace, sessionId: created.id, purpose: 'clarify', backendKey, cwd: workspace, mode: 'plan',
+            ...(clarifyModel === undefined ? {} : { model: clarifyModel }),
           })
-          return json(response, 201, { clarify_id: session.id, session, specops_session: specopsSession })
+          const specopsSession = await readSpecOpsSession(workspace, created.id)
+          const completion = runtime.prompt(execution.execution_id, {
+            requestId: randomUUID(),
+            text: await withAgentPrompt(workspace, 'analysis', buildClarifyPrompt(requestText, created.id)),
+            metadata: { specops_session_id: created.id, purpose: 'clarify', clarify_id: created.id },
+          })
+          trackClarifyTurn(created.id, completion)
+          specOpsSessionEvents.publish('session.created', specopsSession.id, { current_execution: execution })
+          return json(response, 201, { clarify_id: specopsSession.id, session: execution, specops_session: specopsSession })
         }
-        const clarifyPollMatch = /^\/api\/clarifies\/(\d+)$/.exec(url.pathname)
+        const clarifyPollMatch = /^\/api\/clarifies\/([0-9a-f-]{36})$/.exec(url.pathname)
         if (request.method === 'GET' && clarifyPollMatch !== null) {
-          if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-          const id = Number(clarifyPollMatch[1])
-          const clarify = clarifies.get(id)
-          if (clarify === undefined) return json(response, 404, { error: 'clarify_not_found' })
-          const session = await kode.getSession(id)
-          const specopsSession = await readSpecOpsSession(workspace, clarify.specopsSessionId)
+          const id = clarifyPollMatch[1] as string
+          await reconcileSessions(workspace, runtime, kode)
+          const specopsSession = await readSpecOpsSession(workspace, id)
           const pendingAction = specopsSession.required_action
-          // The clarify session's transcript is populated by session-monitor via
-          // the bridge /transcript endpoint (the old `event.type === 'assistant'`
-          // history scan here never matched — semantic.rs emits type "message",
-          // not "assistant"). We only need to advance the clarify lifecycle: once
-          // the kode session goes idle/exited the clarification round is done.
-          if (pendingAction?.kind === 'plan_review') {
-            clarify.status = 'plan_proposed'
-            clarify.planId = pendingAction.plan_id
-            clarify.planMd = pendingAction.markdown ?? null
-          } else if (pendingAction?.kind === 'answer') {
-            clarify.status = 'asking'
-          } else if ((clarify.status === 'asking' || clarify.status === 'plan_proposed')
-            && (session.status === 'idle' || session.status === 'exited')) {
-            clarify.status = 'ready'
-          }
-          if (clarify.status === 'ready') {
-            await updateSpecOpsSession(workspace, clarify.specopsSessionId, (record) => {
-              record.state = 'awaiting_user'
-              record.required_action = { kind: 'promote_intake', prompt: 'Clarification complete. Start intake when ready.' }
-            })
-            specOpsSessionEvents.publish('session.action_required', clarify.specopsSessionId, { kind: 'promote_intake' })
-          }
+          const status = pendingAction?.kind === 'plan_review'
+            ? 'plan_proposed'
+            : pendingAction?.kind === 'promote_intake'
+              ? 'ready'
+              : pendingAction?.kind === 'resume' || specopsSession.state === 'failed'
+                ? 'error'
+                : 'asking'
+          const execution = specopsSession.current_execution
           return json(response, 200, {
             clarify_id: id,
-            session,
-            status: clarify.status,
-            transcript: clarify.transcript,
-            error: clarify.error,
+            session: execution === null ? null : runtime.get(execution.execution_id) ?? execution,
+            status,
+            transcript: specopsSession.transcript.filter((entry) => entry.role === 'agent' || entry.role === 'user'),
+            error: specopsSession.execution.last_error,
+            specops_session: specopsSession,
           })
         }
-        const clarifyAnswerMatch = /^\/api\/clarifies\/(\d+)\/answer$/.exec(url.pathname)
+        const clarifyAnswerMatch = /^\/api\/clarifies\/([0-9a-f-]{36})\/answer$/.exec(url.pathname)
         if (request.method === 'POST' && clarifyAnswerMatch !== null) {
-          if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-          const id = Number(clarifyAnswerMatch[1])
-          const clarify = clarifies.get(id)
-          if (clarify === undefined) return json(response, 404, { error: 'clarify_not_found' })
+          const id = clarifyAnswerMatch[1] as string
           const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
-          if (typeof raw.answer !== 'string' || raw.answer.trim() === '') {
-            return json(response, 400, { error: 'answer is required' })
-          }
-          // If there's an active plan proposed, accept it first, then send feedback
-          if (clarify.status === 'plan_proposed' && clarify.planId !== null) {
-            try { await kode.planResponse(id, clarify.planId, true) } catch { /* ignore */ }
-            await kode.waitForReady(id)
-          }
+          if (typeof raw.answer !== 'string' || raw.answer.trim() === '') return json(response, 400, { error: 'answer is required' })
           const answer = raw.answer.trim()
-          await kode.sendPrompt(id, answer)
-          clarify.transcript.push({ role: 'user', text: answer, at: new Date().toISOString() })
-          const updated = await appendTranscript(workspace, clarify.specopsSessionId, 'user', answer, id)
-          await updateSpecOpsSession(workspace, clarify.specopsSessionId, (record) => {
-            record.state = 'active'
-            record.required_action = null
-          })
-          const entry = updated.transcript[updated.transcript.length - 1]
-          specOpsSessionEvents.publish('session.transcript_appended', clarify.specopsSessionId, entry === undefined ? { role: 'user' } : { entries: [entry] })
-          clarify.status = 'asking'
-          return json(response, 200, { ok: true, status: clarify.status })
-        }
-        const clarifyPromoteMatch = /^\/api\/clarifies\/(\d+)\/promote$/.exec(url.pathname)
-        if (request.method === 'POST' && clarifyPromoteMatch !== null) {
-          if (kode === undefined) return json(response, 503, { error: 'kode_bridge_unavailable' })
-          const id = Number(clarifyPromoteMatch[1])
-          const clarify = clarifies.get(id)
-          if (clarify === undefined) return json(response, 404, { error: 'clarify_not_found' })
-          if (clarify.status !== 'ready') return json(response, 409, { error: 'clarify_not_ready' })
-          // If plan was proposed, accept it before promoting
-          if (clarify.planId !== null) {
-            try { await kode.planResponse(id, clarify.planId, true) } catch { /* ignore */ }
+          const current = await readSpecOpsSession(workspace, id)
+          const pending = interactionForAction(current)
+          const execution = current.current_execution
+          if (execution === null || execution.transport === 'legacy_kode_pty'
+            || runtime.get(execution.execution_id) === undefined) {
+            return json(response, 409, { error: 'structured_execution_missing' })
           }
-          const receiptId = randomUUID()
-          // Build intake prompt with plan context
-          const planContext = clarify.planMd
-            ? `## Approved plan\n\n${clarify.planMd}`
-            : clarify.transcript.map((t) => `### ${t.role}\n${t.text}`).join('\n\n')
-          const clarifiedContext = `${clarify.request}\n\n${planContext}`
-          const combinedPrompt = await withAgentPrompt(workspace, 'analysis', buildIntakePrompt(clarifiedContext, receiptId))
-          const session = await kode.createAnalysisSession(clarify.backendKey, workspace, combinedPrompt, clarify.model)
-          const specopsSession = await updateSpecOpsSession(workspace, clarify.specopsSessionId, (record) => {
-            record.phase = 'analyze_request'
-            record.state = 'active'
-            record.required_action = null
-            record.kode_session_id = session.id
+          if (pending?.kind === 'plan_review') {
+            return json(response, 409, { error: 'plan_review_required', required_action: current.required_action })
+          }
+          if (pending !== undefined && pending.kind !== 'questions') {
+            return json(response, 409, { error: 'action_required', required_action: current.required_action })
+          }
+          if (pending?.kind === 'questions') {
+            if (pending.payload.questions.length !== 1) {
+              return json(response, 409, { error: 'structured_answers_required', required_action: current.required_action })
+            }
+            const claimed = await claimInteractionResponse(workspace, id, 'questions', raw)
+            if (claimed === null) return json(response, 409, { error: 'interaction_conflict' })
+            const question = pending.payload.questions[0]!
+            if (pending.payload.response_mode === 'prompt') {
+              void promptStructuredExecution(runtime, workspace, claimed.session, questionAnswersPrompt(
+                pending.payload.questions,
+                [{ questionId: question.id, labels: [answer] }],
+              ), { purpose: 'question_answers' })
+            } else {
+              try {
+                const outcome = await runtime.respond(execution.execution_id, {
+                  kind: 'questions', requestId: pending.payload.request_id, answers: { [question.id]: answer },
+                })
+                if (outcome.outcome === 'outcome_unknown') {
+                  await markClaimDeliveryUnknown(workspace, id, claimed.interaction.id, { error: outcome.error.message })
+                  return json(response, 409, { error: 'outcome_unknown', message: outcome.error.message })
+                }
+              } catch (error) {
+                await markClaimDeliveryUnknown(workspace, id, claimed.interaction.id, { error: error instanceof Error ? error.message : String(error) })
+                return json(response, 409, { error: 'delivery_unknown' })
+              }
+            }
+            await appendTranscript(workspace, id, 'user', answer, null, execution.execution_id)
+            const updated = await resolveQuestionsCommand(workspace, id, claimed.interaction.id, [{
+              questionId: question.id, labels: [answer],
+            }], execution)
+            return json(response, 200, { ok: true, status: 'asking', specops_session: updated })
+          }
+          const completion = runtime.prompt(execution.execution_id, {
+            requestId: randomUUID(), text: answer,
+            metadata: { specops_session_id: current.id, purpose: 'clarify' },
           })
-          await recordAgent(workspace, clarify.specopsSessionId, session, 'intake', clarify.model)
-          specOpsSessionEvents.publish('session.updated', clarify.specopsSessionId, { phase: 'analyze_request', kode_session_id: session.id })
-          watchSpecOpsSessionTranscript(kode, workspace, clarify.specopsSessionId, session.id)
-          intakes.set(session.id, { receiptId, document: null, documents: [], error: null, specopsSessionId: clarify.specopsSessionId, request: clarifiedContext })
-          clarifies.delete(id)
-          kode.killSession(clarify.sessionId).catch(() => undefined)
-          return json(response, 201, { intake_id: session.id, session, specops_session: specopsSession })
+          const updated = await appendTranscript(workspace, id, 'user', answer, null, execution.execution_id)
+          const entry = updated.transcript.at(-1)
+          specOpsSessionEvents.publish('session.transcript_appended', id, entry === undefined ? { role: 'user' } : { entries: [entry] })
+          trackClarifyTurn(id, completion)
+          return json(response, 200, { ok: true, status: 'asking', specops_session: updated })
+        }
+        const clarifyPromoteMatch = /^\/api\/clarifies\/([0-9a-f-]{36})\/promote$/.exec(url.pathname)
+        if (request.method === 'POST' && clarifyPromoteMatch !== null) {
+          const id = clarifyPromoteMatch[1] as string
+          const rawBody = (await requestBody(request)).toString('utf8')
+          const raw = rawBody.trim() === '' ? {} : JSON.parse(rawBody) as Record<string, unknown>
+          const promoted = await promoteDurableClarify(runtime, workspace, id, raw)
+          if (promoted === null) return json(response, 409, { error: 'clarify_not_ready' })
+          if (promoted.completion !== undefined) {
+            trackBackground(observeSessionTurn(runtime, workspace, promoted.session, promoted.completion))
+          }
+          specOpsSessionEvents.publish('session.updated', id, { phase: promoted.session.phase, current_execution: promoted.execution })
+          return json(response, promoted.completion === undefined ? 200 : 201, {
+            intake_id: id,
+            session: promoted.execution,
+            specops_session: promoted.session,
+          })
         }
         if (request.method === 'GET' && url.pathname === '/api/document') {
           let relativePath = url.searchParams.get('path') ?? ''
@@ -1723,9 +2135,12 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const killedKodeSessions = new Set<number>()
           for (const session of await listSpecOpsSessionRecords(workspace)) {
             if (canonicalDocumentKey(session.document_path) !== documentKey || isTerminalSessionState(session.state)) continue
+            if (session.current_execution !== null && session.current_execution.transport !== 'legacy_kode_pty') {
+              await runtime.close(session.current_execution.execution_id).catch(() => undefined)
+            }
             if (kode !== undefined) {
               for (const agent of session.agents) {
-                if (killedKodeSessions.has(agent.kode_session_id)) continue
+                if (agent.kode_session_id === null || killedKodeSessions.has(agent.kode_session_id)) continue
                 await kode.killSession(agent.kode_session_id).catch(() => undefined)
                 killedKodeSessions.add(agent.kode_session_id)
               }
@@ -1900,11 +2315,14 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           }
           const selected = await agentSelection(workspace, 'implementation', raw)
           const runModel = selected.model
+          if (!structuredBackendSupported(selected.backend)) {
+            return json(response, 409, { error: 'unsupported_execution_backend', backend_key: selected.backend })
+          }
           // Optional: link this Run to a SpecOps change proposal. When non-null,
           // apply paths will flip the matching proposal.md from `proposed` to
           // `completed` once the Run lands. Omit for quick-runs.
           const changeId = typeof raw.change_id === 'string' && raw.change_id.trim() !== '' ? raw.change_id : null
-          const run = await launchRun(workspace, tasks, selected.backend, typeof raw.base === 'string' ? raw.base : 'HEAD', kode, options.runCacheRoot, runModel, changeId)
+          const run = await launchRun(workspace, tasks, selected.backend, typeof raw.base === 'string' ? raw.base : 'HEAD', options.runCacheRoot, runModel, changeId)
           const documentPath = typeof raw.document_path === 'string' ? raw.document_path : null
           // Authoritative dedup: reuse a live SpecOps session already bound to
           // this document (e.g. the clarify→intake session) instead of spawning
@@ -1917,7 +2335,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           if (existing !== null) {
             specopsSession = await updateSpecOpsSession(workspace, existing.id, (record) => {
               record.backend_key = selected.backend
-              record.kode_session_id = run.kode_session_id
+              record.kode_session_id = null
               record.run_id = run.run_id
               record.phase = 'run_in_worktree'
               record.state = 'active'
@@ -1935,18 +2353,12 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
               phase: 'run_in_worktree',
               state: 'active',
             })
-            specOpsSessionEvents.publish('session.created', specopsSession.id, { run_id: run.run_id, kode_session_id: run.kode_session_id })
+            specOpsSessionEvents.publish('session.created', specopsSession.id, { run_id: run.run_id })
           }
-          if (run.kode_session_id !== null) {
-            await recordAgent(workspace, specopsSession.id, {
-              id: run.kode_session_id,
-              backend_key: selected.backend,
-              status: 'starting',
-            }, 'implement', runModel)
-            watchRun(run.run_id, workspace, run.kode_session_id)
-            if (kode !== undefined) watchSpecOpsSessionTranscript(kode, workspace, specopsSession.id, run.kode_session_id)
-          }
-          return json(response, 201, { run, specops_session: specopsSession })
+          const started = await startRunExecution(run, runtime, specopsSession.id, options.runCacheRoot)
+          watchRun(run.run_id, workspace, started)
+          const attached = await readSpecOpsSession(workspace, specopsSession.id)
+          return json(response, 201, { run: started.run, specops_session: attached })
         }
         if (request.method === 'POST' && url.pathname === '/api/quick-run') {
           const raw = JSON.parse((await requestBody(request)).toString('utf8')) as Record<string, unknown>
@@ -1962,6 +2374,10 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const CHANGE_KINDS = new Set(['change', 'bug', 'refactor', 'feature', 'investigation'])
           const kindDir = raw.kind === 'spec' ? 'specs' : CHANGE_KINDS.has(raw.kind as string) ? 'changes' : undefined
           if (kindDir === undefined) return json(response, 400, { error: `kind must be one of: spec, ${[...CHANGE_KINDS].join(', ')}` })
+          const selected = await agentSelection(workspace, 'implementation', raw)
+          if (!structuredBackendSupported(selected.backend)) {
+            return json(response, 409, { error: 'unsupported_execution_backend', backend_key: selected.backend })
+          }
 
           // 1. Create document
           const docPath = `.specops/${kindDir}/${raw.id}.md`
@@ -1978,9 +2394,8 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           if (tasks.some((task) => typeof task.id !== 'string' || typeof task.title !== 'string' || typeof task.prompt !== 'string' || !Array.isArray(task.verify))) {
             return json(response, 400, { error: 'invalid task' })
           }
-          const selected = await agentSelection(workspace, 'implementation', raw)
           const quickRunModel = selected.model
-          const run = await launchRun(workspace, tasks, selected.backend, typeof raw.base === 'string' ? raw.base : 'HEAD', kode, options.runCacheRoot, quickRunModel)
+          const run = await launchRun(workspace, tasks, selected.backend, typeof raw.base === 'string' ? raw.base : 'HEAD', options.runCacheRoot, quickRunModel)
           const specopsSession = await createSpecOpsSession(workspace, {
             title: raw.title,
             backend_key: selected.backend,
@@ -1990,17 +2405,11 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             phase: 'run_in_worktree',
             state: 'active',
           })
-          specOpsSessionEvents.publish('session.created', specopsSession.id, { run_id: run.run_id, kode_session_id: run.kode_session_id })
-          if (run.kode_session_id !== null) {
-            await recordAgent(workspace, specopsSession.id, {
-              id: run.kode_session_id,
-              backend_key: selected.backend,
-              status: 'starting',
-            }, 'implement', quickRunModel)
-            watchRun(run.run_id, workspace, run.kode_session_id)
-            if (kode !== undefined) watchSpecOpsSessionTranscript(kode, workspace, specopsSession.id, run.kode_session_id)
-          }
-          return json(response, 201, { document: { path: docPath, version: version(docContent) }, run, specops_session: specopsSession })
+          specOpsSessionEvents.publish('session.created', specopsSession.id, { run_id: run.run_id })
+          const started = await startRunExecution(run, runtime, specopsSession.id, options.runCacheRoot)
+          watchRun(run.run_id, workspace, started)
+          const attached = await readSpecOpsSession(workspace, specopsSession.id)
+          return json(response, 201, { document: { path: docPath, version: version(docContent) }, run: started.run, specops_session: attached })
         }
         const gateApprovalMatch = /^\/api\/runs\/([0-9a-f-]{36})\/gates\/([a-z0-9._-]+)\/approve$/.exec(url.pathname)
         if (request.method === 'POST' && gateApprovalMatch !== null) {
@@ -2033,6 +2442,14 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
         if (runMatch !== null) {
           const run = await readRun(workspace, runMatch[1] as string)
           const action = runMatch[2]
+          if (request.method === 'POST' && action !== undefined && ['verify', 'decision', 'apply'].includes(action)) {
+            const key = `run:${run.run_id}:${action}`
+            if (activeActions.has(key)) return json(response, 409, { error: 'action_in_progress', action })
+            activeActions.add(key)
+            const release = (): void => { activeActions.delete(key) }
+            response.once('finish', release)
+            response.once('close', release)
+          }
           if (request.method === 'GET' && action === undefined) return json(response, 200, { run })
           if (request.method === 'GET' && action === 'harness') return json(response, 200, { state: await readHarnessState(workspace, run.run_id) })
           if (request.method === 'GET' && action === 'events') return json(response, 200, { events: await readHarnessEvents(workspace, run.run_id) })
@@ -2041,16 +2458,12 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             return result.collectRunPatch(run)
           })())
           if (request.method === 'POST' && action === 'verify') {
-            const result = await verifyRun(run)
             const specopsSession = await findSpecOpsSessionByRunId(workspace, run.run_id)
-            if (specopsSession !== null) {
-              const updated = await updateSpecOpsSession(workspace, specopsSession.id, (record) => {
-                record.phase = 'review'
-                record.state = 'awaiting_user'
-                record.required_action = { kind: 'review', patch_files: result.files }
-              })
-              specOpsSessionEvents.publish('session.action_required', specopsSession.id, updated.required_action)
+            if (run.state === 'awaiting_review') return json(response, 200, { run, already_verified: true })
+            if (run.state !== 'awaiting_verify') {
+              return json(response, 409, { error: 'run_not_verifiable', state: run.state })
             }
+            const result = await verifyAndRouteReview(runtime, workspace, run, specopsSession?.id ?? null)
             return json(response, 200, result)
           }
           if (request.method === 'POST' && action === 'decision') {
@@ -2058,29 +2471,35 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
             if (raw.verdict !== 'accept' && raw.verdict !== 'reject' && raw.verdict !== 'feedback') {
               return json(response, 400, { error: 'invalid verdict' })
             }
-            const decided = await decideRun(run, raw.verdict, typeof raw.note === 'string' ? raw.note : '', kode)
             const specopsSession = await findSpecOpsSessionByRunId(workspace, run.run_id)
+            if (raw.verdict === 'accept' && run.state === 'completed') {
+              return json(response, 200, { run, already_accepted: true })
+            }
+            if (specopsSession !== null) {
+              await resolveRunInteraction(workspace, specopsSession.id, ['human_review'], {
+                verdict: raw.verdict,
+                note: typeof raw.note === 'string' ? raw.note : '',
+              })
+            }
+            const decision = await decideRun(run, raw.verdict, typeof raw.note === 'string' ? raw.note : '', runtime)
+            const decided = decision.run
             if (specopsSession !== null) {
               const updated = await updateSpecOpsSession(workspace, specopsSession.id, (record) => {
                 if (decided.state === 'running') {
                   record.phase = 'run_in_worktree'
                   record.state = 'active'
-                  record.required_action = null
                 } else if (decided.state === 'completed') {
                   record.phase = 'apply_patch'
                   record.state = 'awaiting_user'
-                  record.required_action = { kind: 'apply_patch' }
                 } else if (decided.state === 'cancelled') {
                   record.phase = 'cancelled'
                   record.state = 'cancelled'
-                  record.required_action = null
                 }
               })
               specOpsSessionEvents.publish(updated.required_action === null ? 'session.updated' : 'session.action_required', specopsSession.id, updated.required_action)
             }
-            // Re-watch if the run went back to running (feedback or next task)
-            if (decided.state === 'running' && decided.kode_session_id !== null) {
-              watchRun(decided.run_id, workspace, decided.kode_session_id)
+            if (decided.state === 'running' && decision.turn !== undefined) {
+              watchRun(decided.run_id, workspace, decision.turn)
             }
             return json(response, 200, { run: decided })
           }
@@ -2094,7 +2513,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                 record.required_action = null
               })
               specOpsSessionEvents.publish('session.updated', specopsSession.id, { phase: updated.phase, state: updated.state })
-              await terminateSpecOpsExecution(kode, workspace, specopsSession.id, run.run_id)
+              await terminateSpecOpsExecution(runtime, kode, workspace, specopsSession.id, run.run_id)
             }
             return json(response, 200, { ok: true, applied: outcome.applied, reason: outcome.reason, commit: outcome.commit })
           }
@@ -2144,11 +2563,25 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
   await runDriftLoop(workspace, 'startup').catch((error) => {
     console.warn(`[specops] startup drift loop failed: ${error instanceof Error ? error.message : String(error)}`)
   })
-  return {
-    origin: expectedOrigin,
-    token,
-    close: async () => new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error))),
+  let closePromise: Promise<void> | undefined
+  const close = (): Promise<void> => {
+    if (closePromise !== undefined) return closePromise
+    closing = true
+    closePromise = (async () => {
+      const results = await Promise.allSettled([
+        new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error))),
+        runtime.shutdown(),
+        shutdownMonitor(),
+      ])
+      while (backgroundTasks.size > 0) {
+        await Promise.allSettled([...backgroundTasks])
+      }
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failure !== undefined) throw failure.reason
+    })()
+    return closePromise
   }
+  return { origin: expectedOrigin, token, close }
 }
 
 export async function serve(options: ServeOptions): Promise<never> {

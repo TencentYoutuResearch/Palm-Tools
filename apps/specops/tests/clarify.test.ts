@@ -14,6 +14,8 @@ describe('clarify', () => {
     expect(prompt).toContain('blocking, defaultable, or discovered')
     expect(prompt).toContain('at most 3 focused questions')
     expect(prompt).toContain('Do not hide unanswered questions inside the plan')
+    expect(prompt).toContain('never ask them to reply in ordinary assistant text')
+    expect(prompt).toContain('Do not call ExitPlanMode while any question is unanswered')
     expect(prompt).toContain('clarify-abc')
     expect(prompt).toContain('Add dark mode')
   })

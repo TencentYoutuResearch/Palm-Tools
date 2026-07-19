@@ -43,9 +43,17 @@ struct ManagedChild {
 
 impl ManagedChild {
     fn stop(&mut self) {
-        // Drop stdin first so the sidecar also gets its EOF self-exit signal,
-        // then kill+reap as a hard backstop.
+        // EOF lets the sidecar flush structured agent state and reap its ACP /
+        // app-server children. Give that graceful path a short window before
+        // using kill as a hard backstop.
         self.stdin.take();
+        for _ in 0..20 {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(25)),
+                Err(_) => break,
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

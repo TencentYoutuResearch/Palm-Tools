@@ -2,7 +2,7 @@
   import Icon from '../shared/Icon.svelte';
   import { shouldSubmitOnEnter } from '../../lib/ime.ts';
   import Markdown from '../shared/Markdown.svelte';
-  import { activeSessionId, activeSession } from '../../lib/stores/sessions.ts';
+  import { activeSessionId, activeSession, activeTranscript, refreshSession } from '../../lib/stores/sessions.ts';
   import { pendingDocSelection } from '../../lib/stores/documents.ts';
   import { api } from '../../lib/api.ts';
   import { t } from '../../lib/i18n.ts';
@@ -15,9 +15,10 @@
   let textareaEl: HTMLTextAreaElement | null = $state(null);
   let imeComposing = $state(false);
   let compositionEndedAt = $state(0);
-  let answerSelections = $state<Record<string, number>>({});
+  let answerSelections = $state<Record<string, number[]>>({});
   let answerInputs = $state<Record<string, string>>({});
   let answerActionKey = $state('');
+  let requiredActionKey = $state('');
 
   function canSend(): boolean {
     const session = $activeSession;
@@ -44,21 +45,62 @@
     if (!canSend()) return;
     const id = $activeSessionId;
     if (!id) return;
-    const body = { text };
+    const message = text.trim();
+    const sessionBeforeSend = $activeSession;
+    const executionId = sessionBeforeSend?.current_execution?.execution_id ?? null;
+    const previousAgentStatus = sessionBeforeSend?.agents?.find((agent) => agent.execution_id === executionId)?.status;
+    const optimisticEntry = {
+      role: 'user' as const,
+      text: message,
+      execution_id: executionId,
+      kode_session_id: null,
+    };
+    const body = { text: message };
     text = '';
     if (textareaEl) textareaEl.style.height = 'auto';
     sendError = null;
+    // Enter should have an immediate, visible result even before the HTTP
+    // acknowledgement/SSE echo arrives: add the user's bubble and mark the
+    // attached execution busy. The server snapshot reconciles both shortly.
+    activeSession.update((session) => {
+      if (session?.id !== id) return session;
+      const transcript = [...(session.transcript ?? []), optimisticEntry];
+      const agents = (session.agents ?? []).map((agent) => (
+        agent.execution_id === executionId ? { ...agent, status: 'running' } : agent
+      ));
+      activeTranscript.set(transcript);
+      return { ...session, transcript, agents };
+    });
     try {
       await api.post(`/api/sessions/${id}/input`, body);
+      await refreshSession(id);
     } catch (err) {
       sendError = err instanceof Error ? err.message : String(err);
       text = body.text;
+      const refreshed = await refreshSession(id);
+      activeSession.update((session) => {
+        if (session?.id !== id) return session;
+        const transcript = (session.transcript ?? []).filter((entry) => entry !== optimisticEntry);
+        const agents = refreshed
+          ? (session.agents ?? [])
+          : (session.agents ?? []).map((agent) => (
+              agent.execution_id === executionId && previousAgentStatus !== undefined
+                ? { ...agent, status: previousAgentStatus }
+                : agent
+            ));
+        activeTranscript.set(transcript);
+        return { ...session, transcript, agents };
+      });
       autoGrow();
     }
   }
 
-  function selectAnswer(questionId: string, optionIndex: number): void {
-    answerSelections = { ...answerSelections, [questionId]: optionIndex };
+  function selectAnswer(questionId: string, optionIndex: number, multiSelect: boolean): void {
+    const current = answerSelections[questionId] ?? [];
+    const next = multiSelect
+      ? (current.includes(optionIndex) ? current.filter((index) => index !== optionIndex) : [...current, optionIndex])
+      : [optionIndex];
+    answerSelections = { ...answerSelections, [questionId]: next };
   }
 
   function setAnswerInput(questionId: string, value: string): void {
@@ -73,18 +115,17 @@
       question_id: action.question_id ?? '', prompt: action.prompt ?? '',
       options: action.options ?? [],
     }];
-    if (questions.some((question) => answerSelections[question.question_id] === undefined)) return;
+    if (questions.some((question) => (answerSelections[question.question_id]?.length ?? 0) === 0)) return;
     actionBusy = true;
     actionError = null;
     try {
       await api.post(`/api/sessions/${id}/answer`, {
         answers: questions.map((question) => {
-          const choiceIndex = answerSelections[question.question_id] ?? 0;
+          const choiceIndices = answerSelections[question.question_id] ?? [];
           const freeText = answerInputs[question.question_id]?.trim() ?? '';
           return {
             question_id: question.question_id,
-            choice_index: choiceIndex,
-            label: question.options[choiceIndex]?.label ?? '',
+            choice_indices: choiceIndices,
             ...(freeText ? { free_text: freeText } : {}),
           };
         }),
@@ -110,9 +151,23 @@
     }
   });
 
+  $effect(() => {
+    const action = $activeSession?.required_action;
+    const key = action === undefined || action === null
+      ? ''
+      : `${action.kind}:${String(action.interaction_id ?? action.plan_id ?? action.question_id ?? '')}`;
+    if (key !== requiredActionKey) {
+      requiredActionKey = key;
+      actionText = '';
+      actionError = null;
+    }
+  });
+
   async function respondPlanReview(planId: string, accept: boolean, note?: string): Promise<void> {
     const id = $activeSessionId;
-    if (!id) return;
+    if (!id || actionBusy) return;
+    actionBusy = true;
+    actionError = null;
     try {
       await api.post(`/api/sessions/${id}/plan_response`, {
         plan_id: planId,
@@ -120,8 +175,10 @@
         ...(note ? { note } : {}),
       });
       actionText = '';
-    } catch {
-      // ignore
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      actionBusy = false;
     }
   }
 
@@ -158,14 +215,14 @@
     {@const action = $activeSession.required_action}
     <div class="action-banner">
       {#if action.kind === 'answer' && action.options}
-        {@const questions = action.questions ?? [{ question_id: action.question_id ?? '', prompt: action.prompt ?? '', header: action.header, options: action.options }]}
+        {@const questions = action.questions ?? [{ question_id: action.question_id ?? '', prompt: action.prompt ?? '', header: action.header, options: action.options, multi_select: action.multi_select }]}
         <div class="answer-questions">
           {#each questions as question, questionIndex (question.question_id)}
             <div class="answer-question">
               <p class="action-prompt">{questionIndex + 1}. {question.prompt}</p>
               <div class="action-options">
                 {#each question.options as opt, i (opt.label)}
-                  <button type="button" class="action-option" class:selected={answerSelections[question.question_id] === i} onclick={() => selectAnswer(question.question_id, i)}>
+                  <button type="button" class="action-option" class:selected={answerSelections[question.question_id]?.includes(i) === true} onclick={() => selectAnswer(question.question_id, i, question.multi_select === true)}>
                     <span class="opt-label">{opt.label}</span>
                     {#if opt.description}<span class="opt-desc">{opt.description}</span>{/if}
                   </button>
@@ -181,9 +238,25 @@
             </div>
           {/each}
         </div>
-        <button type="button" class="plan-action primary" disabled={actionBusy || questions.some((question) => answerSelections[question.question_id] === undefined)} onclick={submitAnswers}>
+        <button type="button" class="plan-action primary" disabled={actionBusy || questions.some((question) => (answerSelections[question.question_id]?.length ?? 0) === 0)} onclick={submitAnswers}>
           <span>{actionBusy ? 'Submitting…' : 'Submit answers'}</span>
         </button>
+      {:else if action.kind === 'permission'}
+        <div class="run-action-head">
+          <span>{action.title ?? t('Permission required')}</span>
+        </div>
+        <p class="action-prompt">{action.message ?? t('The agent requires permission to continue.')}</p>
+        <div class="plan-review-actions">
+          <div class="plan-decision">
+            <button type="button" class="plan-action primary" disabled={actionBusy} onclick={() => runSessionAction('permission_allow')}>
+              <span>{t('Allow')}</span>
+            </button>
+            <button type="button" class="plan-action danger" disabled={actionBusy} onclick={() => runSessionAction('permission_deny')}>
+              <Icon name="x" size={13} />
+              <span>{t('Deny')}</span>
+            </button>
+          </div>
+        </div>
       {:else if action.kind === 'plan_review'}
         {#if action.markdown}
           <div class="plan-review-card">
@@ -193,6 +266,7 @@
             </div>
           </div>
         {/if}
+        <textarea class="action-note" bind:value={actionText} rows="2" placeholder={t('Feedback for the agent')}></textarea>
         {@const docPath = action.plan_id ? `.specops/changes/${action.plan_id}` : undefined}
         <div class="plan-review-actions">
           {#if docPath}
@@ -202,10 +276,10 @@
             </button>
           {/if}
           <div class="plan-decision">
-            <button type="button" class="plan-action primary" onclick={() => respondPlanReview(action.plan_id ?? '', true)}>
+            <button type="button" class="plan-action primary" disabled={actionBusy} onclick={() => respondPlanReview(action.plan_id ?? '', true)}>
               <span>{t('Approve plan')}</span>
             </button>
-            <button type="button" class="plan-action danger" onclick={() => respondPlanReview(action.plan_id ?? '', false, actionText)}>
+            <button type="button" class="plan-action danger" disabled={actionBusy || actionText.trim().length === 0} onclick={() => respondPlanReview(action.plan_id ?? '', false, actionText)}>
               <Icon name="x" size={13} />
               <span>{t('Revise')}</span>
             </button>
@@ -217,6 +291,28 @@
           <button type="button" class="plan-action secondary" onclick={() => viewDocument(sessionDocumentPath())}>
             <Icon name="file-text" size={13} />
             <span>{t('Open document')}</span>
+          </button>
+        </div>
+      {:else if action.kind === 'promote_intake'}
+        <div class="run-action-head">
+          <span>{t('Clarification complete')}</span>
+        </div>
+        <p class="action-prompt">{action.prompt ?? t('Start intake with the approved plan and confirmed decisions.')}</p>
+        <div class="plan-review-actions">
+          <button type="button" class="plan-action primary" disabled={actionBusy} onclick={() => runSessionAction('promote_intake')}>
+            <Icon name="play" size={13} />
+            <span>{actionBusy ? t('Starting…') : t('Start intake')}</span>
+          </button>
+        </div>
+      {:else if action.kind === 'resume'}
+        <div class="run-action-head">
+          <span>{t('Execution needs to resume')}</span>
+        </div>
+        <p class="action-prompt">{action.reason ?? t('The previous execution is no longer attached. Resume from the durable workflow state.')}</p>
+        <div class="plan-review-actions">
+          <button type="button" class="plan-action primary" disabled={actionBusy} onclick={() => runSessionAction('resume')}>
+            <Icon name="refresh" size={13} />
+            <span>{actionBusy ? t('Resuming…') : t('Resume execution')}</span>
           </button>
         </div>
       {:else if action.kind === 'verify'}

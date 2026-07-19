@@ -2,6 +2,8 @@ export type SpecOpsSessionEventType =
   | 'session.created'
   | 'session.updated'
   | 'session.transcript_appended'
+  | 'session.transcript_delta'
+  | 'session.transcript_upsert'
   | 'session.action_required'
   | 'session.status_changed'
   | 'session.closed'

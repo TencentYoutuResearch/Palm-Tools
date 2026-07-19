@@ -5,16 +5,172 @@ import path from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { initWorkspace } from '../src/domain/commands.js'
-import { startServer, type ServeHandle } from '../src/server/index.js'
-import { cleanupRun, readRun } from '../src/domain/run.js'
+import { startServer, type ServeHandle, type ServeOptions, type SpecOpsExecutionRuntime } from '../src/server/index.js'
+import { cleanupRun, readRun, transitionRun } from '../src/domain/run.js'
 import { attachSessionAgent, createSpecOpsSession, readSpecOpsSession, updateSpecOpsSession } from '../src/domain/session.js'
+import { enqueueInteraction } from '../src/domain/interactions.js'
 import { parseDocument } from '../src/domain/spec.js'
 import { exists } from '../src/store/workspace.js'
 import type { KodeClient, KodeSession } from '../src/adapters/kode.js'
+import type { ExecutionIdentity } from '../src/domain/session.js'
+import type { ExecutionPromptInput, ExecutionRequestOutcome, ExecutionResponse, ExecutionTurnResult } from '../src/execution/types.js'
 import { gitCommit, gitWorkspace } from './helpers.js'
 
 const cleanup: string[] = []
 const servers: ServeHandle[] = []
+
+type RuntimeStartInput = Parameters<SpecOpsExecutionRuntime['start']>[0]
+type RuntimeLoadInput = Parameters<SpecOpsExecutionRuntime['load']>[0]
+type RuntimePromptHook = (call: { executionId: string; input: ExecutionPromptInput; binding: RuntimeStartInput }) => void | Promise<void>
+
+class FakeExecutionRuntime implements SpecOpsExecutionRuntime {
+  readonly starts: RuntimeStartInput[] = []
+  readonly loads: RuntimeLoadInput[] = []
+  readonly prompts: Array<{ executionId: string; input: ExecutionPromptInput }> = []
+  readonly responses: Array<{ executionId: string; input: ExecutionResponse }> = []
+  readonly cancellations: string[] = []
+  readonly closed: string[] = []
+  shutdownCount = 0
+
+  private readonly executions = new Map<string, { identity: ExecutionIdentity; binding: RuntimeStartInput }>()
+  private readonly pending = new Set<(outcome: ExecutionRequestOutcome<ExecutionTurnResult>) => void>()
+  private nextId = 1
+  private shutdownPromise: Promise<void> | undefined
+
+  constructor(private readonly onPrompt?: RuntimePromptHook) {}
+
+  async start(input: RuntimeStartInput): Promise<ExecutionIdentity> {
+    this.starts.push(input)
+    const id = `execution-${this.nextId++}`
+    const identity: ExecutionIdentity = {
+      execution_id: id,
+      transport: 'codebuddy_acp',
+      backend_key: input.backendKey,
+      native_session_id: `native-${id}`,
+      process_generation: 1,
+    }
+    await this.bind(input, identity)
+    return identity
+  }
+
+  async load(input: RuntimeLoadInput): Promise<ExecutionIdentity> {
+    this.loads.push(input)
+    const identity: ExecutionIdentity = {
+      execution_id: input.executionId,
+      transport: 'codebuddy_acp',
+      backend_key: input.backendKey,
+      native_session_id: input.nativeSessionId,
+      process_generation: (this.executions.get(input.executionId)?.identity.process_generation ?? 0) + 1,
+    }
+    await this.bind(input, identity)
+    return identity
+  }
+
+  async prompt(executionId: string, input: ExecutionPromptInput): Promise<ExecutionRequestOutcome<ExecutionTurnResult>> {
+    const execution = this.executions.get(executionId)
+    if (execution === undefined) throw new Error(`Unknown fake execution: ${executionId}`)
+    this.prompts.push({ executionId, input })
+    await this.onPrompt?.({ executionId, input, binding: execution.binding })
+    if (input.metadata?.purpose !== 'implement' && input.metadata?.purpose !== 'repair') {
+      return { outcome: 'completed', value: { turnId: input.requestId, stopReason: 'end_turn' } }
+    }
+    return new Promise((resolve) => this.pending.add(resolve))
+  }
+
+  async respond(executionId: string, input: ExecutionResponse) {
+    this.responses.push({ executionId, input })
+    return { outcome: 'completed' as const, value: undefined }
+  }
+
+  async cancel(executionId: string) {
+    this.cancellations.push(executionId)
+    return { outcome: 'completed' as const, value: undefined }
+  }
+
+  async close(executionId: string): Promise<void> {
+    const execution = this.executions.get(executionId)
+    if (execution === undefined) return
+    this.executions.delete(executionId)
+    this.closed.push(executionId)
+    await updateSpecOpsSession(execution.binding.workspace, execution.binding.sessionId, (record) => {
+      if (record.current_execution?.execution_id === executionId) record.current_execution = null
+      const agent = record.agents.find((item) => item.execution_id === executionId)
+      if (agent !== undefined) {
+        agent.status = 'closed'
+        agent.ended_at ??= new Date().toISOString()
+      }
+    }).catch(() => undefined)
+  }
+
+  get(executionOrSessionId: string): ExecutionIdentity | undefined {
+    const direct = this.executions.get(executionOrSessionId)?.identity
+    if (direct !== undefined) return direct
+    return [...this.executions.values()].find((item) => item.binding.sessionId === executionOrSessionId)?.identity
+  }
+
+  drop(executionId: string): void {
+    this.executions.delete(executionId)
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise !== undefined) return this.shutdownPromise
+    this.shutdownCount += 1
+    this.shutdownPromise = (async () => {
+      const outcome = { outcome: 'completed' as const, value: { stopReason: 'shutdown' } }
+      for (const resolve of this.pending) resolve(outcome)
+      this.pending.clear()
+      await Promise.all([...this.executions.keys()].map((id) => this.close(id)))
+    })()
+    return this.shutdownPromise
+  }
+
+  private async bind(input: RuntimeStartInput, identity: ExecutionIdentity): Promise<void> {
+    this.executions.set(identity.execution_id, { identity, binding: input })
+    await updateSpecOpsSession(input.workspace, input.sessionId, (record) => {
+      const now = new Date().toISOString()
+      for (const agent of record.agents) {
+        if (agent.execution_id === identity.execution_id || agent.ended_at !== null) continue
+        agent.status = 'replaced'
+        agent.ended_at = now
+      }
+      record.current_execution = identity
+      record.backend_key = identity.backend_key
+      record.kode_session_id = null
+      record.state = 'active'
+      const existing = record.agents.find((item) => item.execution_id === identity.execution_id)
+      if (existing !== undefined) {
+        existing.native_session_id = identity.native_session_id
+        existing.process_generation = identity.process_generation
+        existing.purpose = input.purpose
+        existing.status = 'ready'
+        existing.ended_at = null
+      } else {
+        record.agents.push({
+          execution_id: identity.execution_id,
+          transport: identity.transport,
+          native_session_id: identity.native_session_id,
+          process_generation: identity.process_generation,
+          kode_session_id: null,
+          session_uuid: identity.native_session_id,
+          backend_key: identity.backend_key,
+          model: input.model ?? null,
+          purpose: input.purpose,
+          status: 'ready',
+          started_at: now,
+          ended_at: null,
+          transcript_cursor: 0,
+        })
+      }
+    })
+  }
+}
+
+async function startTestServer(options: ServeOptions, runtime = new FakeExecutionRuntime()): Promise<ServeHandle> {
+  const server = await startServer({ ...options, executionRuntime: runtime })
+  servers.push(server)
+  return server
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()))
   await Promise.all(cleanup.splice(0).map((item) => rm(item, { recursive: true, force: true })))
@@ -24,8 +180,7 @@ async function fixture() {
   const workspace = await gitWorkspace()
   cleanup.push(workspace)
   await initWorkspace(workspace)
-  const server = await startServer({ workspace, token: 'test-token' })
-  servers.push(server)
+  const server = await startTestServer({ workspace, token: 'test-token' })
   return { workspace, server }
 }
 
@@ -77,7 +232,7 @@ describe('SpecOps server', () => {
       subscribe: () => socket,
       history: async () => ({ events: [], next_from: 0 }),
     } as unknown as KodeClient
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode }); servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token', kodeClient: kode })
     const loaded = await fetch(`${server.origin}/api/settings/agents`, auth(server))
     expect(loaded.status).toBe(200)
     expect((await loaded.json() as { backends: Array<{ key: string }> }).backends.map((item) => item.key)).toEqual(['codebuddy', 'codex'])
@@ -156,7 +311,7 @@ describe('SpecOps server', () => {
       document_path: '.specops/specs/project-overview.md', phase: 'clarify', state: 'active',
       agents: [{ kode_session_id: 91, session_uuid: null, backend_key: 'codebuddy', model: null, purpose: 'clarify', status: 'running', started_at: new Date().toISOString(), ended_at: null, transcript_cursor: 0 }],
     })
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode }); servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token', kodeClient: kode })
     const response = await fetch(`${server.origin}/api/document/deprecate`, auth(server, {
       method: 'POST', body: JSON.stringify({ path: '.specops/specs/project-overview.md' }),
     }))
@@ -179,19 +334,9 @@ describe('SpecOps server', () => {
     const workspace = await gitWorkspace()
     cleanup.push(workspace)
     await initWorkspace(workspace)
-    const calls = { answers: 0, plans: 0 }
-    const socket = { on: () => socket, close: () => undefined }
-    const kode = {
-      answer: async () => { calls.answers += 1 },
-      planResponse: async () => { calls.plans += 1 },
-      waitForReady: async () => ({ id: 73, backend_key: 'codebuddy', status: 'idle' }),
-      subscribe: () => socket,
-      history: async () => ({ events: [], next_from: 0 }),
-    } as unknown as KodeClient
     const session = await createSpecOpsSession(workspace, {
       title: 'Decision ledger',
       backend_key: 'codebuddy',
-      kode_session_id: 73,
       phase: 'clarify',
       state: 'awaiting_user',
       required_action: {
@@ -200,26 +345,86 @@ describe('SpecOps server', () => {
         prompt: 'Which compatibility target should win?',
         options: [{ label: 'macOS and Linux' }, { label: 'All platforms' }],
         questions: [
-          { question_id: 'question-1', prompt: 'Which compatibility target should win?', options: [{ label: 'macOS and Linux' }, { label: 'All platforms' }] },
+          { question_id: 'question-1', prompt: 'Which compatibility target should win?', options: [{ label: 'macOS and Linux' }, { label: 'All platforms' }], multi_select: true },
           { question_id: 'question-2', prompt: 'Which release mode?', options: [{ label: 'Gradual' }, { label: 'Immediate' }] },
         ],
       },
     })
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
+    const identity = await runtime.start({
+      workspace, sessionId: session.id, purpose: 'clarify', backendKey: 'codebuddy', cwd: workspace,
+    })
+
+    const invalidAnswer = await fetch(`${server.origin}/api/sessions/${session.id}/answer`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ answers: [
+        { question_id: 'question-1', choice_indices: [0, 99] },
+        { question_id: 'question-2', choice_index: 1 },
+      ] }),
+    }))
+    expect(invalidAnswer.status).toBe(400)
+    expect(runtime.responses).toHaveLength(0)
 
     const answered = await fetch(`${server.origin}/api/sessions/${session.id}/answer`, auth(server, {
       method: 'POST',
       body: JSON.stringify({ answers: [
-        { question_id: 'question-1', choice_index: 0, label: 'macOS and Linux' },
-        { question_id: 'question-2', choice_index: 1, label: 'Immediate' },
+        { question_id: 'question-1', choice_indices: [0, 1], label: 'forged client label' },
+        { question_id: 'question-2', choice_index: 1, label: 'forged client label' },
       ] }),
     }))
     expect(answered.status).toBe(200)
+    expect(runtime.responses.at(-1)).toMatchObject({
+      executionId: identity.execution_id,
+      input: {
+        kind: 'questions',
+        answers: {
+          'question-1': ['macOS and Linux', 'All platforms'],
+          'question-2': 'Immediate',
+        },
+      },
+    })
 
     await updateSpecOpsSession(workspace, session.id, (record) => {
+      enqueueInteraction(record, {
+        kind: 'permission',
+        source: 'agent',
+        idempotency_key: 'decision-ledger:permission-1',
+        payload: {
+          request_id: 'permission-1',
+          title: 'Run tests',
+          message: 'pnpm test',
+          options: [{ id: 'allow', label: 'Allow' }, { id: 'deny', label: 'Deny' }],
+        },
+      })
       record.state = 'awaiting_user'
-      record.required_action = { kind: 'plan_review', plan_id: 'plan-1', markdown: '# Approved plan' }
+    })
+    const permission = await fetch(`${server.origin}/api/sessions/${session.id}/action`, auth(server, {
+      method: 'POST', body: JSON.stringify({ kind: 'permission_allow' }),
+    }))
+    expect(permission.status).toBe(200)
+    expect((await permission.json() as { session: { required_action: unknown; state: string } }).session).toMatchObject({
+      required_action: null,
+      state: 'active',
+    })
+    expect(runtime.responses.at(-1)).toMatchObject({
+      executionId: identity.execution_id,
+      input: { kind: 'permission', requestId: 'permission-1', decision: 'allow', remember: false },
+    })
+
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      enqueueInteraction(record, {
+        kind: 'plan_review',
+        source: 'agent',
+        idempotency_key: 'decision-ledger:plan-1',
+        payload: {
+          request_id: 'plan-request-1',
+          plan_id: 'plan-1',
+          markdown: '# Approved plan',
+          generation: 1,
+        },
+      })
+      record.state = 'awaiting_user'
     })
     const approved = await fetch(`${server.origin}/api/sessions/${session.id}/plan_response`, auth(server, {
       method: 'POST',
@@ -228,19 +433,26 @@ describe('SpecOps server', () => {
     expect(approved.status).toBe(200)
 
     const detail = await (await fetch(`${server.origin}/api/sessions/${session.id}`, auth(server))).json() as {
-      session: { decisions: Array<{ id: string; outcome: string; prompt: string; selections: string[]; note: string | null }> }
+      session: {
+        decisions: Array<{ id: string; outcome: string; prompt: string; selections: string[]; note: string | null }>
+        clarification: { approved_plan: { plan_id: string; markdown: string } | null }
+        interactions: Array<{ kind: string; status: string }>
+      }
     }
-    expect(calls).toEqual({ answers: 2, plans: 1 })
+    expect(runtime.responses.map((call) => call.input.kind)).toEqual(['questions', 'permission', 'plan'])
+    expect(detail.session.clarification.approved_plan).toMatchObject({ plan_id: 'plan-1', markdown: '# Approved plan' })
+    expect(detail.session.interactions.at(-1)).toMatchObject({ kind: 'start_intake', status: 'pending' })
     expect(detail.session.decisions).toEqual([
       {
         id: 'question-1',
         outcome: 'answered',
         prompt: 'Which compatibility target should win?',
-        selections: ['macOS and Linux'],
+        selections: ['macOS and Linux', 'All platforms'],
         note: null,
         kind: 'answer',
         source: 'user',
-        kode_session_id: 73,
+        execution_id: identity.execution_id,
+        kode_session_id: null,
         at: expect.any(String),
       },
       {
@@ -251,7 +463,8 @@ describe('SpecOps server', () => {
         note: null,
         kind: 'answer',
         source: 'user',
-        kode_session_id: 73,
+        execution_id: identity.execution_id,
+        kode_session_id: null,
         at: expect.any(String),
       },
       {
@@ -262,10 +475,206 @@ describe('SpecOps server', () => {
         note: 'Keep the scope narrow.',
         kind: 'plan_review',
         source: 'user',
-        kode_session_id: 73,
+        execution_id: identity.execution_id,
+        kode_session_id: null,
         at: expect.any(String),
       },
     ])
+  })
+
+  test('delivers fallback questions through a follow-up prompt and orphans guessed plans', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Prompt fallback', backend_key: 'codebuddy', phase: 'clarify', state: 'active',
+    })
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
+    await runtime.start({
+      workspace, sessionId: session.id, purpose: 'clarify', backendKey: 'codebuddy', cwd: workspace,
+    })
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      enqueueInteraction(record, {
+        kind: 'questions', source: 'agent', idempotency_key: 'fallback:questions',
+        payload: {
+          request_id: 'failed-tool-call', prompt: 'Framework?', response_mode: 'prompt',
+          questions: [{
+            id: 'framework', prompt: 'Framework?', multi_select: false,
+            options: [{ id: 'svelte', label: 'Svelte' }, { id: 'react', label: 'React' }],
+          }],
+        },
+      })
+      enqueueInteraction(record, {
+        kind: 'plan_review', source: 'agent', idempotency_key: 'fallback:guessed-plan',
+        payload: {
+          request_id: 'guessed-plan', plan_id: 'guessed-plan', markdown: '# Guessed plan', generation: 1,
+          response_mode: 'prompt',
+        },
+      })
+      record.state = 'awaiting_user'
+    })
+
+    const answered = await fetch(`${server.origin}/api/sessions/${session.id}/answer`, auth(server, {
+      method: 'POST', body: JSON.stringify({ answers: [{ question_id: 'framework', choice_index: 0 }] }),
+    }))
+    expect(answered.status).toBe(200)
+    expect(runtime.responses).toHaveLength(0)
+    expect(runtime.prompts.at(-1)?.input).toMatchObject({ metadata: { purpose: 'question_answers' } })
+    expect(runtime.prompts.at(-1)?.input.text).toContain('Answer: Svelte')
+    const updated = await readSpecOpsSession(workspace, session.id)
+    expect(updated.interactions?.map((interaction) => ({ kind: interaction.kind, status: interaction.status }))).toEqual([
+      { kind: 'questions', status: 'resolved' },
+      { kind: 'plan_review', status: 'orphaned' },
+    ])
+    expect(updated.required_action).toBeNull()
+  })
+
+  test('promotes only the durable start_intake interaction created by plan approval', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Durable promotion', backend_key: 'codebuddy', phase: 'clarify', state: 'active',
+      transcript: [{ role: 'user', text: 'Build durable promotion', at: new Date().toISOString() }],
+    })
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
+    const original = await runtime.start({
+      workspace, sessionId: session.id, purpose: 'clarify', backendKey: 'codebuddy', cwd: workspace,
+    })
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      enqueueInteraction(record, {
+        kind: 'plan_review',
+        source: 'agent',
+        idempotency_key: 'durable-promotion:plan',
+        payload: {
+          request_id: 'durable-plan-request',
+          plan_id: 'durable-plan',
+          markdown: '# Durable plan\n\nCreate the intake from persisted state.',
+          generation: original.process_generation,
+        },
+      })
+      record.state = 'awaiting_user'
+    })
+
+    const approved = await fetch(`${server.origin}/api/sessions/${session.id}/plan_response`, auth(server, {
+      method: 'POST', body: JSON.stringify({ plan_id: 'durable-plan', accept: true }),
+    }))
+    expect(approved.status).toBe(200)
+    const ready = await readSpecOpsSession(workspace, session.id)
+    const startIntake = ready.interactions?.find((interaction) => interaction.kind === 'start_intake')
+    expect(startIntake).toMatchObject({
+      kind: 'start_intake',
+      status: 'pending',
+      payload: { plan_id: 'durable-plan' },
+    })
+    expect(ready.required_action).toMatchObject({
+      kind: 'promote_intake', interaction_id: startIntake?.id,
+    })
+
+    const promoted = await fetch(`${server.origin}/api/sessions/${session.id}/action`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'promote_intake',
+        interaction_id: startIntake?.id,
+        expected_updated_at: startIntake?.updated_at,
+      }),
+    }))
+    expect(promoted.status).toBe(201)
+    const durable = await readSpecOpsSession(workspace, session.id)
+    expect(durable).toMatchObject({
+      phase: 'analyze_request',
+      state: 'active',
+      intake_receipt_id: startIntake?.payload.receipt_id,
+      required_action: null,
+    })
+    expect(durable.interactions?.find((interaction) => interaction.id === startIntake?.id)).toMatchObject({
+      status: 'resolved',
+      response: { promoted: true, receipt_id: startIntake?.payload.receipt_id },
+    })
+    expect(runtime.starts).toHaveLength(2)
+    expect(runtime.prompts.at(-1)?.input.text).toContain('# Durable plan')
+  })
+
+  test('starts Codex Clarify with SpecOps-owned plan review', async () => {
+    const { server } = await fixture()
+    const response = await fetch(`${server.origin}/api/clarifies`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ request: 'Clarify this request', backend_key: 'codex' }),
+    }))
+    expect(response.status).toBe(201)
+    expect(await response.json()).toMatchObject({
+      specops_session: { backend_key: 'codex' },
+      session: { backend_key: 'codex' },
+    })
+  })
+
+  test('blocks freeform input while a durable interaction is pending', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Blocked input', backend_key: 'codebuddy', phase: 'clarify', state: 'active',
+    })
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
+    await runtime.start({
+      workspace, sessionId: session.id, purpose: 'clarify', backendKey: 'codebuddy', cwd: workspace,
+    })
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      enqueueInteraction(record, {
+        kind: 'permission',
+        source: 'agent',
+        idempotency_key: 'blocked-input:permission',
+        payload: {
+          request_id: 'blocked-permission',
+          title: 'Permission required',
+          message: 'Allow the command?',
+          options: [{ id: 'allow', label: 'Allow' }, { id: 'deny', label: 'Deny' }],
+        },
+      })
+      record.state = 'awaiting_user'
+    })
+
+    const response = await fetch(`${server.origin}/api/sessions/${session.id}/input`, auth(server, {
+      method: 'POST', body: JSON.stringify({ text: 'Ignore the pending action.' }),
+    }))
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      error: 'action_required', required_action: { kind: 'permission', request_id: 'blocked-permission' },
+    })
+    expect(runtime.prompts).toEqual([])
+  })
+
+  test('does not reuse a stale runtime session alias when durable execution is detached', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const documentPath = '.specops/changes/stale-runtime'
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Stale runtime', backend_key: 'codebuddy', document_path: documentPath,
+      phase: 'clarify', state: 'active',
+    })
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
+    const stale = await runtime.start({
+      workspace, sessionId: session.id, purpose: 'clarify', backendKey: 'codebuddy', cwd: workspace,
+    })
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      record.current_execution = null
+      record.state = 'active'
+    })
+    expect(runtime.get(stale.execution_id)).toEqual(stale)
+    expect(runtime.get(session.id)).toEqual(stale)
+
+    const response = await fetch(`${server.origin}/api/clarifies`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({ request: 'Continue from durable state', document_path: documentPath }),
+    }))
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: 'resume_required' })
+    expect(runtime.prompts).toEqual([])
   })
 
   test('creates every document kind in its canonical directory without overwriting', async () => {
@@ -300,8 +709,7 @@ describe('SpecOps server', () => {
     cleanup.push(workspace, cache)
     await initWorkspace(workspace)
     await gitCommit(workspace, 'Bootstrap\n\nBug: INIT-1')
-    const server = await startServer({ workspace, token: 'test-token', runCacheRoot: cache })
-    servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token', runCacheRoot: cache })
 
     const createdResponse = await fetch(`${server.origin}/api/runs`, auth(server, {
       method: 'POST',
@@ -313,6 +721,9 @@ describe('SpecOps server', () => {
     expect(createdResponse.status).toBe(201)
     const created = await createdResponse.json() as { run: { run_id: string; worktree_path: string } }
     await writeFile(path.join(created.run.worktree_path, 'result.txt'), 'verified\n')
+    const prematureVerify = await fetch(`${server.origin}/api/runs/${created.run.run_id}/verify`, auth(server, { method: 'POST' }))
+    expect(prematureVerify.status).toBe(409)
+    await transitionRun(await readRun(workspace, created.run.run_id), 'awaiting_verify')
 
     const verified = await fetch(`${server.origin}/api/runs/${created.run.run_id}/verify`, auth(server, { method: 'POST' }))
     expect(verified.status).toBe(200)
@@ -333,8 +744,7 @@ describe('SpecOps server', () => {
     cleanup.push(workspace, cache)
     await initWorkspace(workspace)
     await gitCommit(workspace, 'Bootstrap\n\nBug: INIT-1')
-    const server = await startServer({ workspace, token: 'test-token', runCacheRoot: cache })
-    servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token', runCacheRoot: cache })
 
     const response = await fetch(`${server.origin}/api/quick-run`, auth(server, {
       method: 'POST',
@@ -354,6 +764,7 @@ describe('SpecOps server', () => {
     expect(await exists(path.join(workspace, '.specops', 'changes', 'test-quick-run.md'))).toBe(true)
 
     await writeFile(path.join(result.run.worktree_path, 'result.txt'), 'verified\n')
+    await transitionRun(await readRun(workspace, result.run.run_id), 'awaiting_verify')
     const verified = await fetch(`${server.origin}/api/runs/${result.run.run_id}/verify`, auth(server, { method: 'POST' }))
     expect(verified.status).toBe(200)
     const accepted = await fetch(`${server.origin}/api/runs/${result.run.run_id}/decision`, auth(server, {
@@ -369,8 +780,7 @@ describe('SpecOps server', () => {
     cleanup.push(workspace, cache)
     await initWorkspace(workspace)
     await gitCommit(workspace, 'Bootstrap\n\nBug: INIT-1')
-    const server = await startServer({ workspace, token: 'test-token', runCacheRoot: cache })
-    servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token', runCacheRoot: cache })
 
     const createdResponse = await fetch(`${server.origin}/api/runs`, auth(server, {
       method: 'POST',
@@ -384,6 +794,7 @@ describe('SpecOps server', () => {
       specops_session: { id: string }
     }
     await writeFile(path.join(created.run.worktree_path, 'result.txt'), 'verified\n')
+    await transitionRun(await readRun(workspace, created.run.run_id), 'awaiting_verify')
     const verified = await fetch(`${server.origin}/api/runs/${created.run.run_id}/verify`, auth(server, { method: 'POST' }))
     expect(verified.status).toBe(200)
 
@@ -435,8 +846,7 @@ describe('SpecOps server', () => {
       record.transcript.push({ role: 'agent', text: `Intake complete: .specops/state/intakes/${receiptId}.json`, at: new Date().toISOString() })
       record.execution.last_error = 'transient finalize failure'
     })
-    const server = await startServer({ workspace, token: 'test-token' })
-    servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token' })
 
     const listed = await fetch(`${server.origin}/api/sessions`, auth(server))
     expect(listed.status).toBe(200)
@@ -444,7 +854,7 @@ describe('SpecOps server', () => {
     expect(recovered.execution.last_error).toBeNull()
     expect(recovered.phase).toBe('run_in_worktree')
     expect(recovered.state).toBe('awaiting_user')
-    expect(recovered.required_action).toEqual({ kind: 'run_in_worktree' })
+    expect(recovered.required_action).toMatchObject({ kind: 'run_in_worktree' })
     expect(recovered.document_path).toBe(`.specops/changes/${changeId}`)
   })
 
@@ -453,66 +863,58 @@ describe('SpecOps server', () => {
     cleanup.push(workspace)
     await initWorkspace(workspace)
     const prompts: string[] = []
-    const session: KodeSession = { id: 42, backend_key: 'codebuddy', status: 'idle' }
-    const socket = { on: () => socket, close: () => undefined }
-    const kode = {
-      createAnalysisSession: async (_backend: string, cwd: string, prompt: string) => {
-        expect(await realpath(cwd)).toBe(await realpath(workspace))
-        prompts.push(prompt)
-        const primaryPath = '.specops/changes/bug/session-filter'
-        const secondaryPath = '.specops/specs/session-filter-process.md'
-        const primaryFile = path.join(workspace, primaryPath, 'proposal.md')
-        await mkdir(path.dirname(primaryFile), { recursive: true })
-        await writeFile(primaryFile, [
-          '---',
-          'schema_version: 1',
-          'id: bug/session-filter',
-          'kind: change',
-          'title: Fix session filter',
-          'status: proposed',
-          'verifies: []',
-          'paths: [apps/gui/src]',
-          '---',
-          '',
-          '# Problem',
-          'The filter is stale.',
-          '',
-        ].join('\n'))
-        const secondary = path.join(workspace, secondaryPath)
-        await writeFile(secondary, [
-          '---',
-          'schema_version: 1',
-          'id: session-filter-process',
-          'kind: spec',
-          'title: Session filter process',
-          'status: active',
-          'verifies: []',
-          'paths: [apps/gui/src]',
-          '---',
-          '',
-          '# Process',
-          'Keep the filter synchronized.',
-          '',
-        ].join('\n'))
-        const receiptMatch = /\.specops\/state\/intakes\/([0-9a-f-]+)\.json/.exec(prompt)
-        expect(receiptMatch).not.toBeNull()
-        const receiptId = receiptMatch?.[1] ?? ''
-        const receipt = path.join(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
-        await mkdir(path.dirname(receipt), { recursive: true })
-        await writeFile(receipt, `${JSON.stringify({
-          schema_version: 1,
-          intake_id: receiptId,
-          status: 'completed',
-          primary: primaryPath,
-          documents: [primaryPath, secondaryPath],
-        })}\n`)
-        return session
-      },
-      getSession: async () => session,
-      subscribe: () => socket,
-    } as unknown as KodeClient
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
+    const runtime = new FakeExecutionRuntime(async ({ input, binding }) => {
+      prompts.push(input.text)
+      expect(await realpath(binding.cwd)).toBe(await realpath(workspace))
+      const primaryPath = '.specops/changes/bug/session-filter'
+      const secondaryPath = '.specops/specs/session-filter-process.md'
+      const primaryFile = path.join(workspace, primaryPath, 'proposal.md')
+      await mkdir(path.dirname(primaryFile), { recursive: true })
+      await writeFile(primaryFile, [
+        '---',
+        'schema_version: 1',
+        'id: bug/session-filter',
+        'kind: change',
+        'title: Fix session filter',
+        'status: proposed',
+        'verifies: []',
+        'paths: [apps/gui/src]',
+        '---',
+        '',
+        '# Problem',
+        'The filter is stale.',
+        '',
+      ].join('\n'))
+      const secondary = path.join(workspace, secondaryPath)
+      await writeFile(secondary, [
+        '---',
+        'schema_version: 1',
+        'id: session-filter-process',
+        'kind: spec',
+        'title: Session filter process',
+        'status: active',
+        'verifies: []',
+        'paths: [apps/gui/src]',
+        '---',
+        '',
+        '# Process',
+        'Keep the filter synchronized.',
+        '',
+      ].join('\n'))
+      const receiptMatch = /\.specops\/state\/intakes\/([0-9a-f-]+)\.json/.exec(input.text)
+      expect(receiptMatch).not.toBeNull()
+      const receiptId = receiptMatch?.[1] ?? ''
+      const receipt = path.join(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
+      await mkdir(path.dirname(receipt), { recursive: true })
+      await writeFile(receipt, `${JSON.stringify({
+        schema_version: 1,
+        intake_id: receiptId,
+        status: 'completed',
+        primary: primaryPath,
+        documents: [primaryPath, secondaryPath],
+      })}\n`)
+    })
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
 
     const started = await fetch(`${server.origin}/api/intakes`, auth(server, {
       method: 'POST',
@@ -527,7 +929,7 @@ describe('SpecOps server', () => {
     const listed = await (await fetch(`${server.origin}/api/sessions`, auth(server))).json() as { sessions: Array<{ id: string; title: string }> }
     expect(listed.sessions[0]?.id).toBe(specopsSession.id)
 
-    const result = await (await fetch(`${server.origin}/api/intakes/42`, auth(server))).json() as {
+    const result = await (await fetch(`${server.origin}/api/intakes/${specopsSession.id}`, auth(server))).json() as {
       document: { path: string }
       documents: string[]
     }
@@ -537,7 +939,7 @@ describe('SpecOps server', () => {
       '.specops/specs/session-filter-process.md',
     ])
     expect(await readFile(path.join(workspace, result.document.path, 'proposal.md'), 'utf8')).toContain('kind: change')
-    expect(await exists(path.join(workspace, '.specops', 'runs', '42'))).toBe(false)
+    expect(await exists(path.join(workspace, '.specops', 'runs', specopsSession.id))).toBe(false)
 
     const detail = await (await fetch(`${server.origin}/api/sessions/${specopsSession.id}`, auth(server))).json() as { session: { document_path: string; phase: string; state: string; required_action: { kind: string } } }
     expect(detail.session).toMatchObject({
@@ -554,52 +956,45 @@ describe('SpecOps server', () => {
     await initWorkspace(workspace)
     await gitCommit(workspace, 'Bootstrap\n\nBug: INIT-1')
     const headBeforeDocs = await (await import('./helpers.js')).git(workspace, ['rev-parse', 'HEAD'])
-    const session: KodeSession = { id: 51, backend_key: 'codebuddy', status: 'idle' }
-    const socket = { on: () => socket, close: () => undefined }
-    const kode = {
-      createAnalysisSession: async (_backend: string, _cwd: string, prompt: string) => {
-        const primaryPath = '.specops/changes/bug/plan-docs'
-        const primaryFile = path.join(workspace, primaryPath, 'proposal.md')
-        await mkdir(path.dirname(primaryFile), { recursive: true })
-        await writeFile(primaryFile, [
-          '---',
-          'schema_version: 1',
-          'id: bug/plan-docs',
-          'kind: change',
-          'title: Plan docs commit',
-          'status: proposed',
-          'verifies: []',
-          'paths: [apps/gui/src]',
-          '---',
-          '',
-          '# Problem',
-          'Need to commit plan docs.',
-          '',
-        ].join('\n'))
-        const receiptMatch = /\.specops\/state\/intakes\/([0-9a-f-]+)\.json/.exec(prompt)
-        const receiptId = receiptMatch?.[1] ?? ''
-        const receipt = path.join(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
-        await mkdir(path.dirname(receipt), { recursive: true })
-        await writeFile(receipt, `${JSON.stringify({
-          schema_version: 1,
-          intake_id: receiptId,
-          status: 'completed',
-          primary: primaryPath,
-          documents: [primaryPath],
-        })}\n`)
-        return session
-      },
-      getSession: async () => session,
-      subscribe: () => socket,
-    } as unknown as KodeClient
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
+    const runtime = new FakeExecutionRuntime(async ({ input }) => {
+      const primaryPath = '.specops/changes/bug/plan-docs'
+      const primaryFile = path.join(workspace, primaryPath, 'proposal.md')
+      await mkdir(path.dirname(primaryFile), { recursive: true })
+      await writeFile(primaryFile, [
+        '---',
+        'schema_version: 1',
+        'id: bug/plan-docs',
+        'kind: change',
+        'title: Plan docs commit',
+        'status: proposed',
+        'verifies: []',
+        'paths: [apps/gui/src]',
+        '---',
+        '',
+        '# Problem',
+        'Need to commit plan docs.',
+        '',
+      ].join('\n'))
+      const receiptMatch = /\.specops\/state\/intakes\/([0-9a-f-]+)\.json/.exec(input.text)
+      const receiptId = receiptMatch?.[1] ?? ''
+      const receipt = path.join(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
+      await mkdir(path.dirname(receipt), { recursive: true })
+      await writeFile(receipt, `${JSON.stringify({
+        schema_version: 1,
+        intake_id: receiptId,
+        status: 'completed',
+        primary: primaryPath,
+        documents: [primaryPath],
+      })}\n`)
+    })
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
 
-    await fetch(`${server.origin}/api/intakes`, auth(server, {
+    const started = await fetch(`${server.origin}/api/intakes`, auth(server, {
       method: 'POST',
       body: JSON.stringify({ request: 'Plan docs commit test', backend_key: 'codebuddy' }),
     }))
-    await (await fetch(`${server.origin}/api/intakes/51`, auth(server))).json()
+    const startedBody = await started.json() as { intake_id: string }
+    await (await fetch(`${server.origin}/api/intakes/${startedBody.intake_id}`, auth(server))).json()
 
     // The plan docs commit must have landed on the main workspace.
     const { git } = await import('./helpers.js')
@@ -641,47 +1036,35 @@ describe('SpecOps server', () => {
     return { kode, calls }
   }
 
-  test('resume on a clarify phase re-attaches when the kode session is still alive', async () => {
+  test('resume on a clarify phase reuses a live structured execution', async () => {
     const workspace = await gitWorkspace()
     cleanup.push(workspace)
     await initWorkspace(workspace)
-    const { kode } = buildKodeMock()
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
-
     const specopsSession = await createSpecOpsSession(workspace, {
-      title: 'Clarify resume',
-      backend_key: 'codebuddy',
-      kode_session_id: 55,
-      phase: 'clarify',
-      state: 'awaiting_user',
+      title: 'Clarify resume', backend_key: 'codebuddy', phase: 'clarify', state: 'awaiting_user',
     })
-    await attachSessionAgent(workspace, specopsSession.id, {
-      kode_session_id: 55,
-      session_uuid: 'clarify-uuid-55',
-      backend_key: 'codebuddy',
-      model: null,
-      purpose: 'clarify',
-      status: 'idle',
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
+    const identity = await runtime.start({
+      workspace, sessionId: specopsSession.id, purpose: 'clarify', backendKey: 'codebuddy', cwd: workspace,
     })
 
     const res = await fetch(`${server.origin}/api/sessions/${specopsSession.id}/action`, auth(server, {
-      method: 'POST',
-      body: JSON.stringify({ kind: 'resume' }),
+      method: 'POST', body: JSON.stringify({ kind: 'resume' }),
     }))
     expect(res.status).toBe(200)
-    const body = await res.json() as { session: { phase: string; state: string; kode_session_id: number } }
-    // Alive session is reused — kode_session_id stays 55, no new session created.
-    expect(body.session.kode_session_id).toBe(55)
+    const body = await res.json() as { session: { state: string; current_execution: ExecutionIdentity | null } }
+    expect(body.session.current_execution).toEqual(identity)
     expect(body.session.state).toBe('active')
+    expect(runtime.starts).toHaveLength(1)
+    expect(runtime.loads).toHaveLength(0)
   })
 
   test('reopens a completed work-item session without creating another intake document', async () => {
     const workspace = await gitWorkspace()
     cleanup.push(workspace)
     await initWorkspace(workspace)
-    const server = await startServer({ workspace, token: 'test-token' })
-    servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token' })
     const documentPath = '.specops/changes/reopen-existing-change'
     const specopsSession = await createSpecOpsSession(workspace, {
       title: 'Reopen existing change',
@@ -708,92 +1091,64 @@ describe('SpecOps server', () => {
     expect(reopened.kode_session_id).toBeNull()
     expect(reopened.phase).toBe('run_in_worktree')
     expect(reopened.state).toBe('awaiting_user')
-    expect(reopened.required_action).toEqual({ kind: 'run_in_worktree' })
+    expect(reopened.required_action).toMatchObject({ kind: 'run_in_worktree' })
     expect(reopened.transcript.some((entry) => entry.text === 'Keep this history')).toBe(true)
   })
 
-  test('resume on plan_discussion rebuilds using the agent UUID, not the numeric kode_session_id', async () => {
+  test('resume on plan_discussion restarts CodeBuddy with durable context', async () => {
     const workspace = await gitWorkspace()
     cleanup.push(workspace)
     await initWorkspace(workspace)
-    const planUuid = 'plan-uuid-aaaaaaaa'
-    const { kode, calls } = buildKodeMock({
-      // kode session already exited → handler must rebuild
-      getSession: async (id) => ({ id, backend_key: 'codebuddy', status: 'exited' }),
-    })
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
-
+    const previous: ExecutionIdentity = {
+      execution_id: 'plan-execution', transport: 'codebuddy_acp', backend_key: 'codebuddy',
+      native_session_id: 'plan-native-session', process_generation: 1,
+    }
     const specopsSession = await createSpecOpsSession(workspace, {
-      title: 'Plan resume',
-      backend_key: 'codebuddy',
-      kode_session_id: 77,
-      phase: 'plan_discussion',
-      state: 'awaiting_user',
+      title: 'Plan resume', backend_key: 'codebuddy', phase: 'plan_discussion', state: 'awaiting_user',
+      current_execution: previous,
+      agents: [{
+        ...previous, kode_session_id: null, session_uuid: previous.native_session_id, model: null,
+        purpose: 'plan', status: 'exited', started_at: new Date().toISOString(), ended_at: new Date().toISOString(),
+      }],
     })
-    await attachSessionAgent(workspace, specopsSession.id, {
-      kode_session_id: 77,
-      session_uuid: planUuid,
-      backend_key: 'codebuddy',
-      model: null,
-      purpose: 'plan',
-      status: 'exited',
-    })
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
 
     const res = await fetch(`${server.origin}/api/sessions/${specopsSession.id}/action`, auth(server, {
-      method: 'POST',
-      body: JSON.stringify({ kind: 'resume' }),
+      method: 'POST', body: JSON.stringify({ kind: 'resume' }),
     }))
     expect(res.status).toBe(200)
-    expect(calls.createSession).toHaveLength(1)
-    // The UUID, not the numeric id (77), must be passed as resume_session_uuid.
-    expect(calls.createSession[0]?.resumeSessionUuid).toBe(planUuid)
-    // cwd for a plan-phase session is the workspace itself (no worktree).
-    expect(await realpath(calls.createSession[0]!.cwd)).toBe(await realpath(workspace))
-    const body = await res.json() as { session: { kode_session_id: number; agents: Array<{ kode_session_id: number; purpose: string; session_uuid: string | null; status: string; ended_at: string | null }> } }
-    expect(body.session.kode_session_id).toBe(9001)
-    expect(body.session.agents.some((a) => a.purpose === 'repair' && a.session_uuid === 'new-uuid-9001')).toBe(true)
-    const previous = body.session.agents.find((a) => a.kode_session_id === 77)
-    expect(previous?.status).toBe('exited')
-    expect(previous?.ended_at).not.toBeNull()
+    expect(runtime.loads).toHaveLength(0)
+    expect(runtime.starts).toHaveLength(1)
+    expect(runtime.starts[0]).toMatchObject({
+      cwd: await realpath(workspace),
+      purpose: 'plan',
+      metadata: { resumed_with_fresh_context: true },
+    })
+    const body = await res.json() as { session: { current_execution: ExecutionIdentity | null } }
+    expect(body.session.current_execution).toMatchObject({ execution_id: 'execution-1', process_generation: 1 })
+    expect(runtime.prompts[0]?.input.text).toContain('Continue this existing SpecOps workflow')
+    expect(runtime.prompts[0]?.input.text).toContain('Phase: plan_discussion')
   })
 
-  test('resume degrades to a fresh session when no agent UUID is available', async () => {
+  test('resume starts fresh structured execution when no native session id is available', async () => {
     const workspace = await gitWorkspace()
     cleanup.push(workspace)
     await initWorkspace(workspace)
-    const { kode, calls } = buildKodeMock({
-      getSession: async (id) => ({ id, backend_key: 'codebuddy', status: 'exited' }),
-    })
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
-
     const specopsSession = await createSpecOpsSession(workspace, {
-      title: 'No uuid resume',
-      backend_key: 'codebuddy',
-      kode_session_id: 88,
-      phase: 'analyze_request',
-      state: 'awaiting_user',
+      title: 'No native resume', backend_key: 'codebuddy', phase: 'analyze_request', state: 'awaiting_user',
     })
-    // Agent predates the session_uuid field — null UUID, must not be passed as --resume.
-    await attachSessionAgent(workspace, specopsSession.id, {
-      kode_session_id: 88,
-      session_uuid: null,
-      backend_key: 'codebuddy',
-      model: null,
-      purpose: 'intake',
-      status: 'exited',
-    })
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
 
     const res = await fetch(`${server.origin}/api/sessions/${specopsSession.id}/action`, auth(server, {
-      method: 'POST',
-      body: JSON.stringify({ kind: 'resume' }),
+      method: 'POST', body: JSON.stringify({ kind: 'resume' }),
     }))
     expect(res.status).toBe(200)
-    expect(calls.createSession).toHaveLength(1)
-    expect(calls.createSession[0]?.resumeSessionUuid).toBeUndefined()
-    expect(calls.createSession[0]?.initialPrompt).toContain('Continue this existing SpecOps workflow')
-    expect(calls.createSession[0]?.initialPrompt).toContain('Phase: analyze_request')
+    expect(runtime.starts).toHaveLength(1)
+    expect(runtime.loads).toHaveLength(0)
+    expect(runtime.prompts[0]?.input.text).toContain('Continue this existing SpecOps workflow')
+    expect(runtime.prompts[0]?.input.text).toContain('Phase: analyze_request')
   })
 
   test('session listing detaches an exited kode session and exposes exact recovery', async () => {
@@ -818,8 +1173,7 @@ describe('SpecOps server', () => {
     const { kode } = buildKodeMock({
       getSession: async (id) => ({ id, backend_key: 'codebuddy', status: 'exited' }),
     })
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
+    const server = await startTestServer({ workspace, token: 'test-token', kodeClient: kode })
 
     const listed = await (await fetch(`${server.origin}/api/sessions`, auth(server))).json() as {
       sessions: Array<{
@@ -836,53 +1190,49 @@ describe('SpecOps server', () => {
     expect(recovered?.agents[0]?.ended_at).not.toBeNull()
   })
 
-  test('sending in review auto-resumes a destroyed kode session before delivering input', async () => {
+  test('sending in review resumes structured execution before delivering input', async () => {
     const workspace = await gitWorkspace()
     cleanup.push(workspace)
     await initWorkspace(workspace)
+    const previous: ExecutionIdentity = {
+      execution_id: 'review-execution', transport: 'codebuddy_acp', backend_key: 'codebuddy',
+      native_session_id: 'review-native-session', process_generation: 1,
+    }
     const specopsSession = await createSpecOpsSession(workspace, {
-      title: 'Review discussion',
-      backend_key: 'codebuddy',
-      kode_session_id: null,
-      phase: 'review',
-      state: 'awaiting_user',
+      title: 'Review discussion', backend_key: 'codebuddy', phase: 'review', state: 'awaiting_user',
+      current_execution: previous,
+      agents: [{
+        ...previous, kode_session_id: null, session_uuid: previous.native_session_id, model: null,
+        purpose: 'review', status: 'exited', started_at: new Date().toISOString(), ended_at: new Date().toISOString(),
+      }],
     })
-    await attachSessionAgent(workspace, specopsSession.id, {
-      kode_session_id: 77,
-      session_uuid: 'review-resume-uuid-77',
-      backend_key: 'codebuddy',
-      model: null,
-      purpose: 'review',
-      status: 'exited',
-    })
-    const { kode, calls } = buildKodeMock()
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode })
-    servers.push(server)
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
 
     const response = await fetch(`${server.origin}/api/sessions/${specopsSession.id}/input`, auth(server, {
-      method: 'POST',
-      body: JSON.stringify({ text: 'Please revise this review finding.' }),
+      method: 'POST', body: JSON.stringify({ text: 'Please revise this review finding.' }),
     }))
     expect(response.status).toBe(200)
-    expect(calls.createSession[0]?.resumeSessionUuid).toBe('review-resume-uuid-77')
-    expect(calls.sendPrompt).toEqual([{ id: 9001, prompt: 'Please revise this review finding.' }])
-    const body = await response.json() as { session: { kode_session_id: number; transcript: Array<{ text: string; kode_session_id: number }> } }
-    expect(body.session.kode_session_id).toBe(9001)
-    expect(body.session.transcript.at(-1)).toMatchObject({ text: 'Please revise this review finding.', kode_session_id: 9001 })
+    expect(runtime.loads).toHaveLength(0)
+    expect(runtime.starts[0]).toMatchObject({
+      purpose: 'repair', metadata: { resumed_with_fresh_context: true },
+    })
+    expect(runtime.prompts.at(-1)?.input.text).toContain('New user message:\nPlease revise this review finding.')
+    const body = await response.json() as { session: { current_execution: ExecutionIdentity | null; transcript: Array<{ text: string; execution_id: string | null; kode_session_id: number | null }> } }
+    expect(body.session.current_execution?.execution_id).toBe('execution-1')
+    expect(body.session.transcript.at(-1)).toMatchObject({
+      text: 'Please revise this review finding.', execution_id: null, kode_session_id: null,
+    })
   })
 
-  test('resume on run_in_worktree rebuilds inside the run worktree with the implement agent UUID', async () => {
+  test('resume on run_in_worktree restarts CodeBuddy inside the run worktree', async () => {
     const workspace = await gitWorkspace()
     const cache = await mkdtemp(path.join(os.tmpdir(), 'specops-resume-cache-'))
     cleanup.push(workspace, cache)
     await initWorkspace(workspace)
     await gitCommit(workspace, 'Bootstrap\n\nBug: INIT-1')
-    const implUuid = 'impl-uuid-bbbbbbbb'
-    const { kode, calls } = buildKodeMock({
-      getSession: async (id) => ({ id, backend_key: 'codebuddy', status: 'exited' }),
-    })
-    const server = await startServer({ workspace, token: 'test-token', kodeClient: kode, runCacheRoot: cache })
-    servers.push(server)
+    const runtime = new FakeExecutionRuntime()
+    const server = await startTestServer({ workspace, token: 'test-token', runCacheRoot: cache }, runtime)
 
     const created = await fetch(`${server.origin}/api/runs`, auth(server, {
       method: 'POST',
@@ -891,24 +1241,25 @@ describe('SpecOps server', () => {
         tasks: [{ id: 'task-1', title: 'Add result', prompt: 'Add result.txt', verify: [] }],
       }),
     }))
-    const createdBody = await created.json() as { run: { run_id: string; worktree_path: string }; specops_session: { id: string; kode_session_id: number } }
-    // Patch the implement agent with a real UUID so resume has something to use.
-    await updateSpecOpsSession(workspace, createdBody.specops_session.id, (record) => {
-      for (const agent of record.agents) {
-        if (agent.purpose === 'implement') agent.session_uuid = implUuid
-      }
-    })
+    const createdBody = await created.json() as {
+      run: { run_id: string; worktree_path: string }
+      specops_session: { id: string; current_execution: ExecutionIdentity | null }
+    }
+    const previous = createdBody.specops_session.current_execution
+    expect(previous?.native_session_id).toBeTruthy()
+    runtime.drop(previous!.execution_id)
 
     const res = await fetch(`${server.origin}/api/sessions/${createdBody.specops_session.id}/action`, auth(server, {
       method: 'POST',
       body: JSON.stringify({ kind: 'resume' }),
     }))
     expect(res.status).toBe(200)
-    // First createSession came from launchRun (no resume); the second is the resume rebuild.
-    expect(calls.createSession).toHaveLength(2)
-    expect(calls.createSession[0]?.resumeSessionUuid).toBeUndefined()
-    expect(calls.createSession[1]?.resumeSessionUuid).toBe(implUuid)
-    expect(await realpath(calls.createSession[1]!.cwd)).toBe(await realpath(createdBody.run.worktree_path))
+    expect(runtime.loads).toHaveLength(0)
+    expect(runtime.starts.at(-1)).toMatchObject({
+      purpose: 'implement',
+      metadata: { resumed_with_fresh_context: true },
+    })
+    expect(await realpath(runtime.starts.at(-1)!.cwd)).toBe(await realpath(createdBody.run.worktree_path))
     await cleanupRun(await readRun(workspace, createdBody.run.run_id))
   })
 })

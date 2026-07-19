@@ -4,6 +4,9 @@ import path from 'node:path'
 
 import { SpecOpsError } from '../core/errors.js'
 import { atomicWrite, pathInside, readText, resolveGitWorkspace } from '../store/workspace.js'
+import type { ClarificationState } from './clarify.js'
+import type { DurableInteraction } from './interactions.js'
+import { normalizeDurableWorkflowState } from './workflow-state.js'
 
 export type SpecOpsPhase =
   | 'analyze_request'
@@ -24,6 +27,21 @@ export type SpecOpsSessionState = 'created' | 'active' | 'awaiting_user' | 'clos
 export type SessionExecutionState = 'live' | 'resumable' | 'restartable' | 'detached' | 'unverified' | 'unavailable' | 'history'
 export type SessionResumeMode = 'exact' | 'fresh_context' | 'none'
 
+export type ExecutionTransport =
+  | 'codebuddy_acp'
+  | 'codex_app_server'
+  | 'claude_stream_json'
+  | 'legacy_kode_pty'
+
+/** Stable, transport-neutral identity for one agent process generation. */
+export interface ExecutionIdentity {
+  execution_id: string
+  transport: ExecutionTransport
+  backend_key: string
+  native_session_id: string | null
+  process_generation: number
+}
+
 export interface SessionExecution {
   state: SessionExecutionState
   resume_mode: SessionResumeMode
@@ -31,21 +49,38 @@ export interface SessionExecution {
   last_error: string | null
 }
 
-export type RequiredAction =
-  | { kind: 'answer'; prompt: string; question_id?: string; header?: string; options?: Array<{ label: string; description?: string }>; multi_select?: boolean; questions?: AnswerQuestion[] }
+export interface RequiredActionOption {
+  /** Stable option identity. Optional only for legacy callers during migration. */
+  id?: string
+  label: string
+  description?: string
+}
+
+interface RequiredActionMirror {
+  /** Compatibility pointer to the durable interaction queue head. */
+  interaction_id?: string
+  idempotency_key?: string
+}
+
+export type RequiredAction = (
+  | { kind: 'answer'; prompt: string; request_id?: string; question_id?: string; header?: string; options?: RequiredActionOption[]; multi_select?: boolean; questions?: AnswerQuestion[] }
   | { kind: 'promote_intake'; prompt: string }
-  | { kind: 'plan_review'; plan_id: string; markdown?: string }
-  | { kind: 'cli_error_decision'; title: string; message: string; options: Array<{ id: string; label: string }> }
+  | { kind: 'plan_review'; plan_id: string; request_id?: string; markdown?: string; generation?: number }
+  | { kind: 'cli_error_decision'; title: string; message: string; options: RequiredActionOption[] }
+  | { kind: 'permission'; request_id: string; title: string; message: string; options: RequiredActionOption[] }
   | { kind: 'run_in_worktree' }
   | { kind: 'verify' }
   | { kind: 'review'; patch_files: string[]; review_note?: string }
   | { kind: 'apply_patch' }
+  | { kind: 'resume'; reason: string; prompt: string }
+  | { kind: 'repository_base_required'; title: string; message: string; options: RequiredActionOption[] }
+) & RequiredActionMirror
 
 export interface AnswerQuestion {
   question_id: string
   prompt: string
   header?: string
-  options: Array<{ label: string; description?: string }>
+  options: RequiredActionOption[]
   multi_select?: boolean
 }
 
@@ -65,6 +100,7 @@ export interface SessionDecision {
   selections: string[]
   note: string | null
   source: 'user'
+  execution_id?: string | null
   kode_session_id: number | null
   at: string
 }
@@ -73,9 +109,11 @@ export interface TranscriptEntry {
   role: 'agent' | 'user' | 'system'
   text: string
   at: string
+  /** Stable execution identity for grouping across transport implementations. */
+  execution_id?: string | null
   /**
-   * The kode session this message belongs to. A SpecOps session spans multiple
-   * kode sessions over its lifetime (intake → plan → implement → repair ...);
+   * Compatibility mirror for legacy Kode PTY sessions. A SpecOps session spans
+   * multiple sessions over its lifetime (intake → plan → implement → repair ...);
    * this lets the UI group the transcript per kode session. Null/absent for
    * legacy entries written before per-agent segmentation existed.
    */
@@ -118,7 +156,12 @@ export interface WorkflowState {
 export type AgentPurpose = 'clarify' | 'plan' | 'intake' | 'implement' | 'repair' | 'review'
 
 export interface SessionAgent {
-  kode_session_id: number
+  execution_id?: string
+  transport?: ExecutionTransport
+  native_session_id?: string | null
+  process_generation?: number
+  /** Legacy Kode PTY mirror; structured transports such as ACP have no numeric id. */
+  kode_session_id: number | null
   session_uuid: string | null
   backend_key: string
   model: string | null
@@ -131,7 +174,7 @@ export interface SessionAgent {
    * record) so that switching kode sessions never crosses cursors — each
    * agent pulls its own history from its own offset. Optional for backward
    * compatibility with records written before segmentation; treated as 0 when
-   * absent (and backfilled by normalizeRecord on read/write).
+   * absent (and backfilled by normalizeSpecOpsSessionRecord on read/write).
    */
   transcript_cursor?: number
 }
@@ -145,10 +188,18 @@ export interface SpecOpsSessionRecord {
   kode_session_id: number | null
   run_id: string | null
   document_path: string | null
+  intake_receipt_id: string | null
   phase: SpecOpsPhase
   state: SpecOpsSessionState
   execution: SessionExecution
+  /** Current agent attachment; null when the durable session is detached. */
+  current_execution: ExecutionIdentity | null
+  /** Compatibility mirror of the first actionable durable interaction. */
   required_action: RequiredAction | null
+  /** Durable clarify kernel state; optional on disk for legacy schema compatibility. */
+  clarification?: ClarificationState
+  /** Ordered durable interaction queue; optional on disk for legacy schema compatibility. */
+  interactions?: DurableInteraction[]
   /** question_id / plan_id values already answered, so the monitor won't re-surface them. */
   answered_action_ids: string[]
   decisions: SessionDecision[]
@@ -170,9 +221,13 @@ export interface CreateSpecOpsSessionInput {
   kode_session_id?: number | null
   run_id?: string | null
   document_path?: string | null
+  intake_receipt_id?: string | null
   phase: SpecOpsPhase
   state?: SpecOpsSessionState
+  current_execution?: ExecutionIdentity | null
   required_action?: RequiredAction | null
+  clarification?: ClarificationState
+  interactions?: DurableInteraction[]
   workflow?: WorkflowState
   agents?: SessionAgent[]
   transcript?: TranscriptEntry[]
@@ -187,10 +242,14 @@ export type SpecOpsSessionSummary = Pick<SpecOpsSessionRecord,
   | 'kode_session_id'
   | 'run_id'
   | 'document_path'
+  | 'intake_receipt_id'
   | 'phase'
   | 'state'
   | 'execution'
+  | 'current_execution'
   | 'required_action'
+  | 'clarification'
+  | 'interactions'
   | 'decisions'
   | 'workflow_applicable'
   | 'workflow'
@@ -304,24 +363,91 @@ function syncWorkflow(record: SpecOpsSessionRecord): void {
   record.workflow = workflow
 }
 
-function normalizeRecord(record: SpecOpsSessionRecord): SpecOpsSessionRecord {
+export function legacyExecutionId(kodeSessionId: number): string {
+  return `legacy_kode_pty:${kodeSessionId}:0`
+}
+
+export function legacyExecutionIdentity(kodeSessionId: number, backendKey: string): ExecutionIdentity {
+  return {
+    execution_id: legacyExecutionId(kodeSessionId),
+    transport: 'legacy_kode_pty',
+    backend_key: backendKey,
+    native_session_id: String(kodeSessionId),
+    process_generation: 0,
+  }
+}
+
+export interface SessionAgentReference {
+  execution_id?: string | null
+  kode_session_id?: number | null
+}
+
+function canUseLegacyNumericFallback(reference: SessionAgentReference): reference is SessionAgentReference & { kode_session_id: number } {
+  if (typeof reference.kode_session_id !== 'number') return false
+  return !reference.execution_id || reference.execution_id === legacyExecutionId(reference.kode_session_id)
+}
+
+function normalizeAgentExecution(agent: SessionAgent): void {
+  if (typeof agent.kode_session_id !== 'number') agent.kode_session_id = null
+  if (agent.execution_id || agent.kode_session_id === null) return
+  const legacy = legacyExecutionIdentity(agent.kode_session_id, agent.backend_key)
+  agent.execution_id = legacy.execution_id
+  agent.transport ??= legacy.transport
+  if (agent.native_session_id === undefined) agent.native_session_id = legacy.native_session_id
+  agent.process_generation ??= legacy.process_generation
+}
+
+/** Match stable execution identity first; numeric fallback is only valid for legacy identities. */
+export function findSessionAgent(
+  agents: SessionAgent[],
+  reference: SessionAgentReference,
+): SessionAgent | undefined {
+  if (reference.execution_id) {
+    const exact = agents.find((agent) => agent.execution_id === reference.execution_id)
+    if (exact !== undefined) return exact
+  }
+  if (!canUseLegacyNumericFallback(reference)) return undefined
+  return agents.find((agent) => agent.kode_session_id === reference.kode_session_id)
+}
+
+export function normalizeSpecOpsSessionRecord(record: SpecOpsSessionRecord): SpecOpsSessionRecord {
   record.agents ??= []
   record.answered_action_ids ??= []
   record.decisions ??= []
   record.workflow_applicable ??= true
-  // Backfill per-agent cursor for files written before segmentation existed.
+  if (typeof record.intake_receipt_id !== 'string') record.intake_receipt_id = null
+  if (typeof record.kode_session_id !== 'number') record.kode_session_id = null
+  // Until structured runtimes take ownership, the numeric Kode attachment is
+  // authoritative for legacy PTY records. Never copy an execution id back into
+  // the numeric compatibility field.
+  if (record.current_execution == null || record.current_execution.transport === 'legacy_kode_pty') {
+    record.current_execution = record.kode_session_id === null
+      ? null
+      : legacyExecutionIdentity(record.kode_session_id, record.backend_key)
+  }
+  // Backfill execution identity and per-agent cursor for pre-execution records.
   for (const agent of record.agents) {
+    normalizeAgentExecution(agent)
     if (typeof agent.transcript_cursor !== 'number') agent.transcript_cursor = 0
   }
-  // Backfill kode_session_id on legacy transcript entries (null = unattributed).
+  // Backfill compatibility mirrors and execution ids on legacy transcript entries.
   if (Array.isArray(record.transcript)) {
     for (const entry of record.transcript) {
       if (entry.kode_session_id === undefined) entry.kode_session_id = null
+      if (entry.execution_id === undefined) {
+        entry.execution_id = entry.kode_session_id === null ? null : legacyExecutionId(entry.kode_session_id)
+      }
       // Legacy entries written before tool_use/tool_result existed have no kind —
       // treat them as ordinary chat text.
       if (entry.kind === undefined) entry.kind = 'text'
     }
   }
+  for (const decision of record.decisions) {
+    if (decision.execution_id === undefined) {
+      decision.execution_id = decision.kode_session_id === null ? null : legacyExecutionId(decision.kode_session_id)
+    }
+  }
+  normalizeDurableWorkflowState(record)
   record.workflow ??= createWorkflow(record.phase, record.state)
   const derivedExecution = deriveSessionExecution(record)
   record.execution = {
@@ -334,7 +460,7 @@ function normalizeRecord(record: SpecOpsSessionRecord): SpecOpsSessionRecord {
 }
 
 function summarize(record: SpecOpsSessionRecord): SpecOpsSessionSummary {
-  normalizeRecord(record)
+  normalizeSpecOpsSessionRecord(record)
   return {
     id: record.id,
     title: record.title,
@@ -342,10 +468,14 @@ function summarize(record: SpecOpsSessionRecord): SpecOpsSessionSummary {
     kode_session_id: record.kode_session_id,
     run_id: record.run_id,
     document_path: record.document_path,
+    intake_receipt_id: record.intake_receipt_id,
     phase: record.phase,
     state: record.state,
     execution: record.execution,
+    current_execution: record.current_execution,
     required_action: record.required_action,
+    clarification: record.clarification!,
+    interactions: record.interactions!,
     decisions: record.decisions,
     workflow_applicable: record.workflow_applicable,
     workflow: record.workflow,
@@ -357,7 +487,7 @@ function summarize(record: SpecOpsSessionRecord): SpecOpsSessionSummary {
 }
 
 export async function writeSpecOpsSession(record: SpecOpsSessionRecord): Promise<SpecOpsSessionRecord> {
-  normalizeRecord(record)
+  normalizeSpecOpsSessionRecord(record)
   record.updated_at = new Date().toISOString()
   await atomicWrite(sessionFile(record.workspace_root, record.id), `${JSON.stringify(record, null, 2)}\n`)
   return record
@@ -366,24 +496,32 @@ export async function writeSpecOpsSession(record: SpecOpsSessionRecord): Promise
 export async function createSpecOpsSession(workspaceInput: string, input: CreateSpecOpsSessionInput): Promise<SpecOpsSessionRecord> {
   const workspace = await resolveGitWorkspace(workspaceInput)
   const now = new Date().toISOString()
+  const kodeSessionId = input.kode_session_id ?? null
+  const currentExecution = input.current_execution ?? (
+    kodeSessionId === null ? null : legacyExecutionIdentity(kodeSessionId, input.backend_key)
+  )
   const record: SpecOpsSessionRecord = {
     schema_version: 1,
     id: input.id ?? randomUUID(),
     title: input.title,
     workspace_root: workspace,
     backend_key: input.backend_key,
-    kode_session_id: input.kode_session_id ?? null,
+    kode_session_id: kodeSessionId,
     run_id: input.run_id ?? null,
     document_path: input.document_path ?? null,
+    intake_receipt_id: input.intake_receipt_id ?? null,
     phase: input.phase,
     state: input.state ?? 'active',
     execution: {
-      state: (input.kode_session_id ?? null) === null ? 'restartable' : 'live',
-      resume_mode: (input.kode_session_id ?? null) === null ? 'fresh_context' : 'none',
+      state: currentExecution === null ? 'restartable' : 'live',
+      resume_mode: currentExecution === null ? 'fresh_context' : 'none',
       last_reconciled_at: null,
       last_error: null,
     },
+    current_execution: currentExecution,
     required_action: input.required_action ?? null,
+    ...(input.clarification === undefined ? {} : { clarification: input.clarification }),
+    ...(input.interactions === undefined ? {} : { interactions: input.interactions }),
     answered_action_ids: [],
     decisions: input.decisions ?? [],
     workflow_applicable: input.workflow_applicable ?? true,
@@ -401,7 +539,7 @@ export async function createSpecOpsSession(workspaceInput: string, input: Create
 
 export async function readSpecOpsSession(workspaceInput: string, id: string): Promise<SpecOpsSessionRecord> {
   const workspace = await resolveGitWorkspace(workspaceInput)
-  return normalizeRecord(JSON.parse(await readText(sessionFile(workspace, id))) as SpecOpsSessionRecord)
+  return normalizeSpecOpsSessionRecord(JSON.parse(await readText(sessionFile(workspace, id))) as SpecOpsSessionRecord)
 }
 
 export async function listSpecOpsSessionRecords(workspaceInput: string): Promise<SpecOpsSessionRecord[]> {
@@ -464,14 +602,30 @@ export async function findActiveSpecOpsSessionByDocument(
     !isTerminal(r.state) && canonicalDocumentKey(r.document_path) === key) ?? null
 }
 
+const sessionUpdateLocks = new Map<string, Promise<void>>()
+
 export async function updateSpecOpsSession(
   workspaceInput: string,
   id: string,
   update: (record: SpecOpsSessionRecord) => void | Promise<void>,
 ): Promise<SpecOpsSessionRecord> {
-  const record = await readSpecOpsSession(workspaceInput, id)
-  await update(record)
-  return writeSpecOpsSession(record)
+  const workspace = await resolveGitWorkspace(workspaceInput)
+  const key = `${workspace}\0${id}`
+  const previous = sessionUpdateLocks.get(key) ?? Promise.resolve()
+  let result!: SpecOpsSessionRecord
+  const operation = previous.then(async () => {
+    const record = await readSpecOpsSession(workspace, id)
+    await update(record)
+    result = await writeSpecOpsSession(record)
+  })
+  const tail = operation.then(() => undefined, () => undefined)
+  sessionUpdateLocks.set(key, tail)
+  try {
+    await operation
+    return result
+  } finally {
+    if (sessionUpdateLocks.get(key) === tail) sessionUpdateLocks.delete(key)
+  }
 }
 
 export async function appendTranscript(
@@ -480,9 +634,19 @@ export async function appendTranscript(
   role: TranscriptEntry['role'],
   text: string,
   kodeSessionId: number | null = null,
+  executionId?: string | null,
 ): Promise<SpecOpsSessionRecord> {
   return updateSpecOpsSession(workspaceInput, id, (record) => {
-    record.transcript.push({ role, text, at: new Date().toISOString(), kode_session_id: kodeSessionId })
+    const resolvedExecutionId = executionId === undefined
+      ? (kodeSessionId === null ? null : findSessionAgent(record.agents, { kode_session_id: kodeSessionId })?.execution_id ?? legacyExecutionId(kodeSessionId))
+      : executionId
+    record.transcript.push({
+      role,
+      text,
+      at: new Date().toISOString(),
+      execution_id: resolvedExecutionId,
+      kode_session_id: kodeSessionId,
+    })
   })
 }
 
@@ -492,16 +656,24 @@ export async function attachSessionAgent(
   agent: Omit<SessionAgent, 'started_at' | 'ended_at'>,
 ): Promise<SpecOpsSessionRecord> {
   return updateSpecOpsSession(workspaceInput, id, (record) => {
-    const existing = record.agents.find((item) => item.kode_session_id === agent.kode_session_id)
+    const normalizedAgent = { ...agent } as SessionAgent
+    normalizeAgentExecution(normalizedAgent)
+    const existing = findSessionAgent(record.agents, normalizedAgent)
     if (existing !== undefined) {
-      existing.status = agent.status
-      existing.session_uuid = agent.session_uuid
-      existing.model = agent.model
-      existing.purpose = agent.purpose
+      if (normalizedAgent.execution_id !== undefined) existing.execution_id = normalizedAgent.execution_id
+      if (normalizedAgent.transport !== undefined) existing.transport = normalizedAgent.transport
+      if (normalizedAgent.native_session_id !== undefined) existing.native_session_id = normalizedAgent.native_session_id
+      if (normalizedAgent.process_generation !== undefined) existing.process_generation = normalizedAgent.process_generation
+      existing.kode_session_id = normalizedAgent.kode_session_id
+      existing.backend_key = normalizedAgent.backend_key
+      existing.status = normalizedAgent.status
+      existing.session_uuid = normalizedAgent.session_uuid
+      existing.model = normalizedAgent.model
+      existing.purpose = normalizedAgent.purpose
       return
     }
     record.agents.push({
-      ...agent,
+      ...normalizedAgent,
       started_at: new Date().toISOString(),
       ended_at: null,
       transcript_cursor: 0,
@@ -512,11 +684,16 @@ export async function attachSessionAgent(
 export async function updateSessionAgentStatus(
   workspaceInput: string,
   id: string,
-  kodeSessionId: number,
+  reference: number | string | SessionAgentReference,
   status: string,
 ): Promise<SpecOpsSessionRecord> {
   return updateSpecOpsSession(workspaceInput, id, (record) => {
-    const agent = record.agents.find((item) => item.kode_session_id === kodeSessionId)
+    const normalizedReference = typeof reference === 'number'
+      ? { kode_session_id: reference }
+      : typeof reference === 'string'
+        ? { execution_id: reference }
+        : reference
+    const agent = findSessionAgent(record.agents, normalizedReference)
     if (agent === undefined) return
     agent.status = status
     if ((status === 'exited' || status === 'failed') && agent.ended_at === null) {
@@ -565,7 +742,7 @@ export function deriveSessionExecution(record: SpecOpsSessionRecord): SessionExe
   if (isTerminalSessionState(record.state)) {
     return { state: 'history', resume_mode: 'none', last_reconciled_at: null, last_error: null }
   }
-  if (record.kode_session_id !== null) {
+  if (record.current_execution !== null || record.kode_session_id !== null) {
     return { state: 'live', resume_mode: 'none', last_reconciled_at: null, last_error: null }
   }
   if (!RESUMABLE_SESSION_PHASES.has(record.phase)) {

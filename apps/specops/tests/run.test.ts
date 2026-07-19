@@ -4,18 +4,33 @@ import path from 'node:path'
 
 import { afterEach, describe, expect, test } from 'vitest'
 
-import type { KodeClient } from '../src/adapters/kode.js'
 import { initWorkspace } from '../src/domain/commands.js'
 import { parseDocument, serializeDocument, type SpecDocument } from '../src/domain/spec.js'
-import { advanceToNextTask, applyCompletedRun, applyWithVerify } from '../src/domain/run-loop.js'
-import { applyRunPatch, changedFilesForRun, cleanupRun, collectRunPatch, createRun, readRun, rollbackRunPatch, transitionRun, writeRun, type RunRecord } from '../src/domain/run.js'
-import { createSpecOpsSession, readSpecOpsSession } from '../src/domain/session.js'
+import { advanceToNextTask, applyCompletedRun, applyWithVerify, type RunExecutionRuntime } from '../src/domain/run-loop.js'
+import { initRunMonitor, shutdownMonitor, watchRun } from '../src/domain/run-monitor.js'
+import { applyRunPatch, changedFilesForRun, cleanupRun, collectRunPatch, createRun, readRun, rollbackRunPatch, runChangeEvidence, transitionRun, writeRun, type RunRecord } from '../src/domain/run.js'
+import { createSpecOpsSession, readSpecOpsSession, type ExecutionIdentity } from '../src/domain/session.js'
 import { git, gitCommit, gitWorkspace } from './helpers.js'
 
 const cleanup: string[] = []
 afterEach(async () => {
+  await shutdownMonitor()
   await Promise.all(cleanup.splice(0).map((item) => rm(item, { recursive: true, force: true })))
 })
+
+async function eventually(assertion: () => void | Promise<void>): Promise<void> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await assertion()
+      return
+    } catch (error) {
+      lastError = error
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  }
+  throw lastError
+}
 
 async function fixture() {
   const workspace = await gitWorkspace()
@@ -27,21 +42,55 @@ async function fixture() {
 }
 
 describe('Run worktree isolation', () => {
+  test('backfills legacy numeric execution identity when reading a Run', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [{ id: 'task-1', title: 'Legacy', prompt: 'noop', verify: [] }], 'codebuddy', 'HEAD', cache)
+    const recordPath = path.join(workspace, '.specops', 'runs', run.run_id, 'run.json')
+    const raw = JSON.parse(await readFile(recordPath, 'utf8')) as Record<string, unknown>
+    delete raw.execution
+    raw.kode_session_id = 42
+    await writeFile(recordPath, `${JSON.stringify(raw, null, 2)}\n`)
+
+    expect((await readRun(workspace, run.run_id).then((record) => record.execution))).toEqual({
+      execution_id: 'legacy_kode_pty:42:0',
+      transport: 'legacy_kode_pty',
+      backend_key: 'codebuddy',
+      native_session_id: '42',
+      process_generation: 0,
+    })
+    await cleanupRun(run)
+  })
+
   test('advances implementation tasks without entering verify between them', async () => {
     const { workspace, cache } = await fixture()
     const run = await createRun(workspace, [
       { id: 'task-1', title: 'First', prompt: 'first', verify: [] },
       { id: 'task-2', title: 'Second', prompt: 'second', verify: [] },
     ], 'codebuddy', 'HEAD', cache)
-    run.kode_session_id = 42
-    await writeRun(run)
+    await createSpecOpsSession(workspace, {
+      title: 'Multi-task run', backend_key: 'codebuddy', run_id: run.run_id,
+      phase: 'run_in_worktree', state: 'active',
+    })
     const prompts: string[] = []
-    const kode = {
-      waitForReady: async () => ({ id: 42, backend_key: 'codebuddy', status: 'idle' }),
-      sendPrompt: async (_id: number, prompt: string) => { prompts.push(prompt) },
-    } as unknown as KodeClient
+    let current: ExecutionIdentity | undefined
+    const runtime: RunExecutionRuntime = {
+      start: async (input) => {
+        current = {
+          execution_id: 'execution-42', transport: 'codebuddy_acp', backend_key: input.backendKey,
+          native_session_id: 'native-42', process_generation: 1,
+        }
+        return current
+      },
+      load: async () => { throw new Error('load should not be called') },
+      prompt: async (_id, input) => {
+        prompts.push(input.text)
+        return { outcome: 'completed', value: { turnId: input.requestId } }
+      },
+      close: async () => undefined,
+      get: () => current,
+    }
 
-    await advanceToNextTask(run, kode)
+    await advanceToNextTask(run, runtime)
 
     const updated = await readRun(workspace, run.run_id)
     expect(updated.state).toBe('running')
@@ -744,7 +793,7 @@ describe('transitionRun session phase sync', () => {
     const session = await readSpecOpsSession(workspace, sessionId)
     expect(session.phase).toBe('verify')
     expect(session.state).toBe('awaiting_user')
-    expect(session.required_action).toEqual({ kind: 'verify' })
+    expect(session.required_action).toMatchObject({ kind: 'verify' })
     await cleanupRun(run)
   })
 
@@ -767,7 +816,7 @@ describe('transitionRun session phase sync', () => {
     const session = await readSpecOpsSession(workspace, sessionId)
     expect(session.phase).toBe('apply_patch')
     expect(session.state).toBe('awaiting_user')
-    expect(session.required_action).toEqual({ kind: 'apply_patch' })
+    expect(session.required_action).toMatchObject({ kind: 'apply_patch' })
     await cleanupRun(run)
   })
 
@@ -851,6 +900,103 @@ describe('transitionRun session phase sync', () => {
     const unchanged = await readSpecOpsSession(workspace, session.id)
     expect(unchanged.phase).toBe('clarify')
     expect(unchanged.state).toBe('awaiting_user')
+    await cleanupRun(run)
+  })
+})
+
+describe('Run stage completion contract', () => {
+  function runtime(identity: ExecutionIdentity): RunExecutionRuntime {
+    return {
+      start: async () => identity,
+      load: async () => identity,
+      prompt: async (_executionId, input) => ({
+        outcome: 'completed',
+        value: { turnId: input.requestId, stopReason: 'end_turn' },
+      }),
+      close: async () => undefined,
+      get: () => identity,
+    }
+  }
+
+  test('final stage completion with new evidence opens the manual Verify gate', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [
+      { id: 'task-1', title: 'Implement', prompt: 'Add result.txt', verify: [] },
+    ], 'codebuddy', 'HEAD', cache)
+    const identity: ExecutionIdentity = {
+      execution_id: 'execution-stage-1', transport: 'codebuddy_acp', backend_key: 'codebuddy',
+      native_session_id: 'native-stage-1', process_generation: 1,
+    }
+    run.execution = identity
+    await writeRun(run)
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Stage completion', backend_key: 'codebuddy', run_id: run.run_id,
+      phase: 'run_in_worktree', state: 'active', current_execution: identity,
+    })
+    const baseline = await runChangeEvidence(run)
+    await writeFile(path.join(run.worktree_path, 'result.txt'), 'done\n')
+    const executionRuntime = runtime(identity)
+    initRunMonitor(executionRuntime, workspace)
+    watchRun(run.run_id, workspace, {
+      run,
+      binding: {
+        run_id: run.run_id, task_id: 'task-1', purpose: 'implement', request_id: 'request-stage-1',
+        execution_id: identity.execution_id, process_generation: identity.process_generation,
+        baseline_digest: baseline.digest,
+      },
+      completion: Promise.resolve({
+        outcome: 'completed', value: { turnId: 'turn-stage-1', stopReason: 'end_turn' },
+      }),
+    })
+
+    await eventually(async () => {
+      expect((await readRun(workspace, run.run_id)).state).toBe('awaiting_verify')
+      expect((await readSpecOpsSession(workspace, session.id)).required_action).toMatchObject({ kind: 'verify' })
+    })
+    expect((await readRun(workspace, run.run_id)).verify_results).toEqual([])
+    await cleanupRun(run)
+  })
+
+  test('interrupted stage preserves the current task and requires explicit resume', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [
+      { id: 'task-1', title: 'Implement', prompt: 'Add result.txt', verify: [] },
+    ], 'codebuddy', 'HEAD', cache)
+    const identity: ExecutionIdentity = {
+      execution_id: 'execution-stage-2', transport: 'codebuddy_acp', backend_key: 'codebuddy',
+      native_session_id: 'native-stage-2', process_generation: 1,
+    }
+    run.execution = identity
+    await writeRun(run)
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Interrupted stage', backend_key: 'codebuddy', run_id: run.run_id,
+      phase: 'run_in_worktree', state: 'active', current_execution: identity,
+    })
+    const baseline = await runChangeEvidence(run)
+    await writeFile(path.join(run.worktree_path, 'partial.txt'), 'partial\n')
+    const executionRuntime = runtime(identity)
+    initRunMonitor(executionRuntime, workspace)
+    watchRun(run.run_id, workspace, {
+      run,
+      binding: {
+        run_id: run.run_id, task_id: 'task-1', purpose: 'implement', request_id: 'request-stage-2',
+        execution_id: identity.execution_id, process_generation: identity.process_generation,
+        baseline_digest: baseline.digest,
+      },
+      completion: Promise.resolve({
+        outcome: 'completed', value: { turnId: 'turn-stage-2', stopReason: 'interrupted' },
+      }),
+    })
+
+    await eventually(async () => {
+      expect((await readSpecOpsSession(workspace, session.id)).required_action).toMatchObject({
+        kind: 'resume', reason: 'stop_reason_interrupted',
+      })
+    })
+    const current = await readRun(workspace, run.run_id)
+    expect(current.state).toBe('running')
+    expect(current.current_task).toBe(0)
+    expect(current.verify_results).toEqual([])
     await cleanupRun(run)
   })
 })

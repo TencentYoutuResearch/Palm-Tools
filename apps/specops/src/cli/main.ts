@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 import process from 'node:process'
-import { readFile } from 'node:fs/promises'
 
 import { SpecOpsError, type ExitCode } from '../core/errors.js'
 import { initWorkspace, scanWorkspace, archiveChange } from '../domain/commands.js'
 import { driftWorkspace, gateWorkspace, analyzeWorkspace } from '../domain/gate.js'
 import { serve } from '../server/index.js'
-import { KodeClient } from '../adapters/kode.js'
-import { applyCompletedRun, decideRun, launchRun, verifyRun } from '../domain/run-loop.js'
-import { cleanupRun, readRun, type Task } from '../domain/run.js'
+import { applyCompletedRun, decideRun, verifyRun } from '../domain/run-loop.js'
+import { cleanupRun, readRun } from '../domain/run.js'
 
 const VERSION = '0.1.0-dev'
 
@@ -133,19 +131,11 @@ export async function runCli(args: string[], io: CliIo): Promise<ExitCode> {
   }
   if (command === 'run') {
     const [action] = rest
-    const kode = process.env.KODE_BRIDGE_URL && process.env.KODE_BRIDGE_TOKEN
-      ? new KodeClient(process.env.KODE_BRIDGE_URL, process.env.KODE_BRIDGE_TOKEN)
-      : undefined
     if (action === 'create') {
-      const taskFile = option(rest, '--tasks')
-      const backend = option(rest, '--backend')
-      if (taskFile === undefined || backend === undefined) {
-        throw new SpecOpsError('missing_option', 'run create requires --tasks <json> and --backend <key>')
-      }
-      const tasks = JSON.parse(await readFile(taskFile, 'utf8')) as Task[]
-      const run = await launchRun(workspace, tasks, backend, option(rest, '--base') ?? 'HEAD', kode)
-      io.stdout(`${JSON.stringify({ run })}\n`)
-      return 0
+      throw new SpecOpsError(
+        'unsupported_cli_execution',
+        'run create requires the long-lived structured execution runtime; use `specops serve` and the Runs API',
+      )
     }
     const runId = option(rest, '--id')
     if (runId === undefined) throw new SpecOpsError('missing_option', `run ${action ?? ''} requires --id <run-id>`)
@@ -163,7 +153,14 @@ export async function runCli(args: string[], io: CliIo): Promise<ExitCode> {
       if (verdict !== 'accept' && verdict !== 'reject' && verdict !== 'feedback') {
         throw new SpecOpsError('invalid_option', '--verdict must be accept, reject, or feedback')
       }
-      io.stdout(`${JSON.stringify({ run: await decideRun(run, verdict, option(rest, '--note') ?? '', kode) })}\n`)
+      if (verdict === 'feedback' || (verdict === 'accept' && run.current_task + 1 < run.tasks.length)) {
+        throw new SpecOpsError(
+          'unsupported_cli_execution',
+          'feedback and multi-task continuation require the long-lived structured execution runtime; use `specops serve`',
+        )
+      }
+      const decision = await decideRun(run, verdict, option(rest, '--note') ?? '')
+      io.stdout(`${JSON.stringify({ run: decision.run })}\n`)
       return 0
     }
     if (action === 'apply') {

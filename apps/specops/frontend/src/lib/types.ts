@@ -135,6 +135,30 @@ export interface HistoryCommit {
 }
 
 // --- sessions (phase E) ---
+export type ExecutionTransport =
+  | 'codebuddy_acp'
+  | 'codex_app_server'
+  | 'claude_stream_json'
+  | 'legacy_kode_pty';
+
+export interface ExecutionIdentity {
+  execution_id: string;
+  transport: ExecutionTransport;
+  backend_key: string;
+  native_session_id: string | null;
+  process_generation: number;
+}
+
+/** Canonical UI grouping key, with numeric fallback for unnormalized v1 data. */
+export function executionGroupKey(
+  executionId: string | null | undefined,
+  kodeSessionId: number | null | undefined,
+): string | null {
+  if (executionId) return `execution:${executionId}`;
+  if (typeof kodeSessionId === 'number') return `legacy-kode:${kodeSessionId}`;
+  return null;
+}
+
 export type TranscriptKind = 'text' | 'tool_use' | 'tool_result';
 export type TranscriptRole = 'agent' | 'user' | 'system';
 
@@ -147,11 +171,16 @@ export interface TranscriptEntry {
   summary?: string;
   preview?: string;
   status?: 'running' | 'ok' | 'error';
-  kode_session_id?: number;
+  execution_id?: string | null;
+  kode_session_id?: number | null;
 }
 
 export interface SessionAgent {
-  kode_session_id: number;
+  execution_id?: string;
+  transport?: ExecutionTransport;
+  native_session_id?: string | null;
+  process_generation?: number;
+  kode_session_id: number | null;
   session_uuid?: string | null;
   backend_key: string;
   model?: string | null;
@@ -207,6 +236,7 @@ export interface SessionDecision {
   selections: string[];
   note: string | null;
   source: 'user';
+  execution_id?: string | null;
   kode_session_id: number | null;
   at: string;
 }
@@ -223,6 +253,7 @@ export interface SpecOpsSession {
     last_reconciled_at?: string | null;
     last_error?: string | null;
   };
+  current_execution?: ExecutionIdentity | null;
   document_path?: string;
   required_action?: RequiredAction | null;
   decisions?: SessionDecision[];

@@ -45,10 +45,11 @@ describe('Harness plugin and workflow contracts', () => {
     expect(() => parseWorkflowStages(['plan', 'plan'], 'workflow.feature.stages')).toThrow('duplicate stages')
   })
 
-  test('uses conservative capabilities for backends without structured semantic events', () => {
+  test('derives structured capabilities from each native backend transport', () => {
     expect(builtinBackendProfile('codebuddy').capabilities).toContain('conversation.ask')
     expect(builtinBackendProfile('codebuddy').capabilities).toContain('conversation.plan')
-    expect(builtinBackendProfile('codex').capabilities).not.toContain('conversation.ask')
+    expect(builtinBackendProfile('codex').capabilities).toContain('conversation.ask')
+    expect(builtinBackendProfile('codex').capabilities).not.toContain('conversation.plan')
     expect(workflowKindForDocumentKind('bug')).toBe('bug')
     expect(workflowKindForDocumentKind('change')).toBe('feature')
     expect(() => workflowKindForDocumentKind('spec')).toThrow('do not have an implementation workflow')
