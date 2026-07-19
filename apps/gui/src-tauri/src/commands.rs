@@ -394,6 +394,21 @@ pub fn list_backends(state: State<'_, AppState>) -> Vec<BackendInfo> {
         .collect()
 }
 
+/// Query the installed CLI at runtime instead of baking version-sensitive model IDs into the GUI.
+#[tauri::command]
+pub async fn discover_backend_models(
+    backend_key: String,
+    state: State<'_, AppState>,
+) -> Result<kode_bridge::model_discovery::ModelDiscoveryResult, String> {
+    let cfg = state
+        .ctx
+        .config
+        .backends
+        .get(&backend_key)
+        .ok_or_else(|| format!("backend '{backend_key}' not found"))?;
+    kode_bridge::model_discovery::discover_models(&backend_key, &cfg.command).await
+}
+
 /// Settings 面板用:返回**全部** backend(含被关掉的),附带 enabled。
 /// enabled 取 config.toml 实时值(回落冷快照),所以开关后立刻正确。
 #[tauri::command]

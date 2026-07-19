@@ -620,6 +620,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/api/v1/shells/:id/resize", post(shell_resize))
         .route("/api/v1/shells/:id/snapshot", get(shell_snapshot))
         .route("/api/v1/backends", get(list_backends))
+        .route("/api/v1/backends/:key/models", get(list_backend_models))
         .route("/api/v1/fs/list", get(fs_list))
         .route("/api/v1/fs/preview", get(fs_preview))
         .route("/api/v1/git/status", get(git_status))
@@ -1701,6 +1702,21 @@ async fn list_backends(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
     .await
     .unwrap_or_default();
     Json(json!({ "backends": out }))
+}
+
+async fn list_backend_models(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(key): Path<String>,
+) -> Result<Json<model_discovery::ModelDiscoveryResult>, ApiError> {
+    let cfg = ctx
+        .config
+        .backends
+        .get(&key)
+        .ok_or_else(|| ApiError::NotFound(format!("backend {key}")))?;
+    model_discovery::discover_models(&key, &cfg.command)
+        .await
+        .map(Json)
+        .map_err(ApiError::BadRequest)
 }
 
 #[derive(Deserialize)]
@@ -3122,6 +3138,7 @@ async fn memory_recent(
     Ok(Json(json!({ "hits": hits, "items": items })))
 }
 
+pub mod model_discovery;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;

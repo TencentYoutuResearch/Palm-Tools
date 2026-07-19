@@ -1341,6 +1341,13 @@
   "specops.settings.hidePreview": { "message": "Hide preview" },
   "specops.settings.backend": { "message": "Backend" },
   "specops.settings.model": { "message": "Model override" },
+  "specops.settings.refreshModels": { "message": "Refresh available models" },
+  "specops.settings.detectingModels": { "message": "Detecting available models…" },
+  "specops.settings.modelsDetected": { "message": "models detected" },
+  "specops.settings.defaultModel": { "message": "default" },
+  "specops.settings.customModelFallback": { "message": "Type a model ID if discovery is unavailable" },
+  "specops.settings.customModel": { "message": "Custom model…" },
+  "specops.settings.modelId": { "message": "Model ID" },
   "specops.settings.inheritDefault": { "message": "Inherit Default" },
   "specops.settings.builtinDefault": { "message": "Built-in fallback (codebuddy)" },
   "specops.settings.backendDefault": { "message": "Backend default" },
@@ -1350,5 +1357,6 @@
   "specops.settings.saving": { "message": "Saving…" },
   "specops.settings.saved": { "message": "Agent profiles saved to specops.toml." },
   "specops.settings.unsaved": { "message": "Unsaved workspace changes" },
-  "specops.settings.synced": { "message": "Synced with specops.toml" }
+  "specops.settings.synced": { "message": "Synced with specops.toml" },
+  "specops.rail.profiles": { "message": "Profiles" }
 }

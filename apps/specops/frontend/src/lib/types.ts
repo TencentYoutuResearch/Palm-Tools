@@ -245,6 +245,7 @@ export interface SpecOpsSession {
   id: string;
   title?: string;
   backend_key?: string;
+  run_id?: string | null;
   phase?: string;
   state?: string;
   execution?: {
@@ -262,4 +263,24 @@ export interface SpecOpsSession {
   agents?: SessionAgent[];
   transcript?: TranscriptEntry[];
   updated_at?: string;
+}
+
+export type ScheduledTaskState = 'blocked' | 'ready' | 'running' | 'verifying' | 'reviewing' | 'completed' | 'failed' | 'cancelled';
+
+export interface ScheduledTask {
+  id: string;
+  title: string;
+  depends_on: string[];
+  state: ScheduledTaskState;
+  attempt: number;
+  assigned_agent: string | null;
+  worktree: string | null;
+  updated_at: string;
+}
+
+export interface HarnessControlState {
+  run_id: string;
+  run_state: string;
+  tasks: ScheduledTask[];
+  updated_at: string;
 }

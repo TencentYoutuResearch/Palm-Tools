@@ -56,8 +56,10 @@ import { missingWorkflowCapabilities, type StructuredWorkflow } from '../executi
 import type { ExecutionRequestOutcome, ExecutionTurnResult } from '../execution/types.js'
 import { composeRolePrompt, resolveAgentPrompt } from '../domain/agent-prompts.js'
 import { loadAvatarLibrary } from '../domain/avatar-library.js'
+import { ModelDiscoveryService, discoverClaudeModels, discoverCodeBuddyModels, type ModelDiscoveryResult } from '../domain/model-discovery.js'
+import { CodexAppServerTransport } from '../adapters/codex-app-server.js'
 import { recordClarifyProtocolMiss, reconcileMissingStructuredExecution, setClarificationSubstate } from '../domain/workflow-state.js'
-import { enqueueInteraction, resolveActionableInteraction, resolveInteraction, type InteractionResponse } from '../domain/interactions.js'
+import { cancelInteraction, enqueueInteraction, resolveActionableInteraction, resolveInteraction, type InteractionResponse } from '../domain/interactions.js'
 import {
   blockingInteraction,
   claimInteractionResponse,
@@ -103,6 +105,8 @@ export interface ServeOptions {
   kodeClient?: KodeClient
   /** Test seam; production creates ExecutionManager + ExecutionRuntime below. */
   executionRuntime?: SpecOpsExecutionRuntime
+  /** Test seam; production probes the installed backend CLIs. */
+  modelDiscovery?: Pick<ModelDiscoveryService, 'discover'>
   runCacheRoot?: string
 }
 
@@ -127,6 +131,29 @@ function equalToken(actual: string, expected: string): boolean {
   const left = Buffer.from(actual)
   const right = Buffer.from(expected)
   return left.length === right.length && timingSafeEqual(left, right)
+}
+
+function createModelDiscovery(workspace: string): ModelDiscoveryService {
+  return new ModelDiscoveryService({
+    codex: async (): Promise<ModelDiscoveryResult> => {
+      const transport = new CodexAppServerTransport({ cwd: workspace, requestTimeoutMs: 15_000 })
+      try {
+        const [probe, models] = await Promise.all([transport.probe(), transport.listModels()])
+        return {
+          backend: 'codex',
+          source: 'codex-app-server',
+          ...(probe.version === undefined ? {} : { version: probe.version }),
+          custom_allowed: true,
+          models,
+        }
+      } finally {
+        await transport.close()
+      }
+    },
+    codebuddy: () => discoverCodeBuddyModels('codebuddy'),
+    claude: () => discoverClaudeModels('claude', undefined, undefined, 'claude'),
+    'claude-internal': () => discoverClaudeModels('claude-internal', undefined, undefined, 'claude-internal'),
+  })
 }
 
 function requestOriginAllowed(request: IncomingMessage, expectedOrigin: string): boolean {
@@ -358,7 +385,68 @@ interface FinalizedIntake {
 
 const intakeFinalizers = new Map<string, Promise<FinalizedIntake>>()
 
-/** Idempotently turn a completed receipt into the durable SpecOps session gate. */
+const IDLE_AGENT_STATUSES = new Set(['ready', 'idle', 'exited', 'closed', 'failed', 'cancelled', 'replaced'])
+
+function currentAgentIsBusy(record: SpecOpsSessionRecord): boolean {
+  const executionId = record.current_execution?.execution_id
+  if (executionId === undefined) return false
+  const agent = record.agents.find((candidate) => candidate.execution_id === executionId)
+  return agent !== undefined && !IDLE_AGENT_STATUSES.has(agent.status)
+}
+
+async function markIntakeFinalizationFailure(
+  workspace: string,
+  sessionId: string,
+  receiptId: string,
+  error: unknown,
+): Promise<SpecOpsSessionRecord> {
+  const message = error instanceof Error ? error.message : String(error)
+  // Keep the partially-created document attached to its durable session even
+  // when one of its files fails validation. Otherwise the document UI treats
+  // it as a standalone proposed change and incorrectly offers Launch Run while
+  // Chat still owns an intake that needs repair.
+  let documentPath: string | null = null
+  try {
+    const receiptPath = pathInside(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
+    const receipt = parseIntakeReceipt(await readText(receiptPath), receiptId)
+    documentPath = canonicalDocumentKey(receipt.primary)
+  } catch {
+    // The original validation error remains authoritative for malformed
+    // receipts; there may be no safe document path to attach in that case.
+  }
+  return updateSpecOpsSession(workspace, sessionId, (record) => {
+    if (record.document_path === null && documentPath !== null) record.document_path = documentPath
+    record.state = 'awaiting_user'
+    record.execution.last_error = message
+    record.execution.last_reconciled_at = new Date().toISOString()
+    const pendingRepair = record.interactions?.find((interaction) => (
+      interaction.kind === 'resume'
+      && interaction.payload.reason === 'intake_finalization_failed'
+      && (interaction.status === 'pending' || interaction.status === 'dispatching' || interaction.status === 'delivery_unknown')
+    ))
+    if (pendingRepair !== undefined) return
+    const attempt = record.interactions?.filter((interaction) => (
+      interaction.kind === 'resume' && interaction.payload.reason === 'intake_finalization_failed'
+    )).length ?? 0
+    enqueueInteraction(record, {
+      kind: 'resume',
+      source: 'reconciliation',
+      idempotency_key: `resume:${record.id}:intake_finalize:${receiptId}:${attempt + 1}`,
+      payload: {
+        reason: 'intake_finalization_failed',
+        prompt: [
+          'The SpecOps server rejected the intake documents during schema validation.',
+          `Validation error: ${message}`,
+          'Fix the invalid `.specops` documents without changing the intake id or implementing source code.',
+          'Normative schema-v2 documents must use draft/active/deprecated/superseded/archived; work items may use proposed.',
+          `Keep the receipt at .specops/state/intakes/${receiptId}.json with status ready, then finish so the server can validate it again.`,
+        ].join('\n'),
+      },
+    })
+  })
+}
+
+/** Idempotently validate a ready/completed receipt and advance the durable session gate. */
 async function finalizeCompletedIntake(
   workspace: string,
   sessionId: string,
@@ -383,7 +471,19 @@ async function finalizeCompletedIntake(
     await commitPlanDocs(workspace, completedTitle)
     const docKind = await readPrimaryKind(workspace, receipt.primary, primaryStat.isFile() ? primaryContent : null)
     const isDocOnly = docKind === 'spec' || docKind === 'investigation'
+    // `ready` is the agent-owned handoff state. Promote it before advancing the
+    // durable session so a write failure cannot leave a completed session with
+    // an uncommitted receipt.
+    if (receipt.status === 'ready') {
+      await atomicWrite(receiptPath, `${JSON.stringify({ ...receipt, status: 'completed' }, null, 2)}\n`)
+    }
     await updateSpecOpsSession(workspace, sessionId, (record) => {
+      const repair = record.interactions?.find((interaction) => (
+        interaction.kind === 'resume'
+        && interaction.payload.reason === 'intake_finalization_failed'
+        && (interaction.status === 'pending' || interaction.status === 'dispatching' || interaction.status === 'delivery_unknown')
+      ))
+      if (repair !== undefined) resolveInteraction(record, repair.id, { recovered: true })
       record.title = completedTitle
       record.document_path = canonicalDocumentKey(receipt.primary)
       record.execution.last_error = null
@@ -417,8 +517,8 @@ async function finalizeCompletedIntake(
 async function reconcileCompletedIntakeSessions(workspace: string): Promise<void> {
   const records = await listSpecOpsSessionRecords(workspace)
   for (const record of records) {
-    if (record.document_path !== null) continue
     if (record.phase !== 'plan_approved' && record.phase !== 'analyze_request' && record.phase !== 'failed') continue
+    if (record.state === 'active' && currentAgentIsBusy(record)) continue
 
     const receiptId = findLatestReceiptId(record.transcript.map((entry) => [
       entry.text,
@@ -435,10 +535,7 @@ async function reconcileCompletedIntakeSessions(workspace: string): Promise<void
     } catch (error) {
       // Best-effort recovery. If any candidate receipt is stale or malformed,
       // preserve the receipt-backed session and persist a useful diagnostic.
-      await updateSpecOpsSession(workspace, record.id, (current) => {
-        current.execution.last_error = error instanceof Error ? error.message : String(error)
-        current.execution.last_reconciled_at = new Date().toISOString()
-      }).catch(() => undefined)
+      await markIntakeFinalizationFailure(workspace, record.id, receiptId, error).catch(() => undefined)
     }
   }
 }
@@ -550,7 +647,28 @@ async function reconcileRunBackedSessions(workspace: string, runtime: SpecOpsExe
       // Never close a live agent merely because that bookkeeping has not
       // caught up: doing so races its prompt and produces "client is closed".
       // Only a genuinely absent runtime execution requires durable recovery.
-      if (liveExecution) continue
+      if (liveExecution) {
+        // Session polling can race watchRun registration immediately after a
+        // Run launch and enqueue a monitor_missing recovery card. Once the
+        // structured execution is visibly live, that card is stale and must
+        // not remain at the interaction queue head while later tasks run.
+        await updateSpecOpsSession(workspace, record.id, (current) => {
+          const staleResume = current.interactions?.find((interaction) => (
+            interaction.kind === 'resume'
+            && interaction.payload.reason === 'run_monitor_missing'
+            && (interaction.status === 'pending' || interaction.status === 'dispatching' || interaction.status === 'delivery_unknown')
+          ))
+          if (staleResume === undefined) return
+          cancelInteraction(current, staleResume.id, { reason: 'monitor_restored' })
+          current.phase = 'run_in_worktree'
+          current.state = 'active'
+          if (current.execution.last_error === 'Running Run has no live stage monitor/execution; explicit resume is required.') {
+            current.execution.last_error = null
+          }
+          current.execution.last_reconciled_at = new Date().toISOString()
+        })
+        continue
+      }
       const task = run.tasks[run.current_task]
       await updateSpecOpsSession(workspace, record.id, (current) => {
         if (isTerminalSessionState(current.state)) return
@@ -1131,6 +1249,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
       ? new KodeClient(process.env.KODE_BRIDGE_URL, process.env.KODE_BRIDGE_TOKEN)
       : undefined
   )
+  const modelDiscovery = options.modelDiscovery ?? createModelDiscovery(workspace)
   const runtime = options.executionRuntime ?? new ExecutionRuntime(
     new ExecutionManager(createExecutionTransportFactory()),
     { projectorOptions: { onError: (error) => console.error('[specops] execution projection failed', error) } },
@@ -1218,6 +1337,26 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
         }
         if (request.method === 'GET' && url.pathname === '/api/settings/agents') {
           return json(response, 200, await agentSettingsPayload(workspace, kode))
+        }
+        const modelSettingsMatch = /^\/api\/settings\/models\/([^/]+)$/.exec(url.pathname)
+        if (request.method === 'GET' && modelSettingsMatch !== null) {
+          const backend = decodeURIComponent(modelSettingsMatch[1]!)
+          const available = kode === undefined || typeof kode.listBackends !== 'function'
+            ? []
+            : await kode.listBackends().catch(() => [])
+          if (available.length > 0 && !available.some((item) => item.key === backend)) {
+            return json(response, 404, { error: 'backend_unavailable', backend })
+          }
+          try {
+            const result = await modelDiscovery.discover(backend, url.searchParams.get('refresh') === '1')
+            return json(response, 200, result)
+          } catch (error) {
+            return json(response, 502, {
+              error: 'model_discovery_failed',
+              backend,
+              detail: error instanceof Error ? error.message : String(error),
+            })
+          }
         }
         if (request.method === 'GET' && url.pathname === '/api/settings/avatars') {
           return json(response, 200, await loadAvatarLibrary())
@@ -1637,9 +1776,17 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
                 const updated = await readSpecOpsSession(workspace, session.id)
                 return json(response, 200, { session: updated, run: turn.run })
               }
-              await rebuildSpecOpsExecution(runtime, workspace, session)
-              await resolveRunInteraction(workspace, session.id, ['resume'], { resumed: true })
-              return json(response, 200, { session: await readSpecOpsSession(workspace, session.id) })
+              const pendingResume = interactionForAction(session)
+              const recoveryPrompt = pendingResume?.kind === 'resume' ? pendingResume.payload.prompt : undefined
+              await rebuildSpecOpsExecution(runtime, workspace, session, recoveryPrompt)
+              const updated = await updateSpecOpsSession(workspace, session.id, (record) => {
+                resolveActionableInteraction(record, ['resume'], { resumed: true })
+                record.state = 'active'
+                const executionId = record.current_execution?.execution_id
+                const agent = record.agents.find((candidate) => candidate.execution_id === executionId)
+                if (agent !== undefined) agent.status = 'running'
+              })
+              return json(response, 200, { session: updated })
             }
             if (kind === 'promote_intake') {
               const promoted = await promoteDurableClarify(runtime, workspace, sessionId, raw)
@@ -1895,6 +2042,16 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           const receiptPath = pathInside(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
           if (await exists(receiptPath)) {
             try {
+              if (session.state === 'active' && currentAgentIsBusy(session)) {
+                return json(response, 200, {
+                  intake_id: intakeId,
+                  session,
+                  document,
+                  documents,
+                  error,
+                  status: session.state,
+                })
+              }
               const finalized = await finalizeCompletedIntake(workspace, session.id, receiptId, session.title)
               documents = finalized.documents
               document = { path: finalized.primary, version: finalized.version }
@@ -1907,10 +2064,7 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
               session = await readSpecOpsSession(workspace, session.id)
             } catch (caught) {
               error = caught instanceof Error ? caught.message : String(caught)
-              session = await updateSpecOpsSession(workspace, session.id, (record) => {
-                record.execution.last_error = error
-                record.execution.last_reconciled_at = new Date().toISOString()
-              })
+              session = await markIntakeFinalizationFailure(workspace, session.id, receiptId, caught)
               specOpsSessionEvents.publish('session.updated', session.id, { intake_finalize_error: error })
             }
           }
@@ -2318,12 +2472,13 @@ export async function startServer(options: ServeOptions): Promise<ServeHandle> {
           if (!structuredBackendSupported(selected.backend)) {
             return json(response, 409, { error: 'unsupported_execution_backend', backend_key: selected.backend })
           }
-          // Optional: link this Run to a SpecOps change proposal. When non-null,
-          // apply paths will flip the matching proposal.md from `proposed` to
-          // `completed` once the Run lands. Omit for quick-runs.
-          const changeId = typeof raw.change_id === 'string' && raw.change_id.trim() !== '' ? raw.change_id : null
-          const run = await launchRun(workspace, tasks, selected.backend, typeof raw.base === 'string' ? raw.base : 'HEAD', options.runCacheRoot, runModel, changeId)
           const documentPath = typeof raw.document_path === 'string' ? raw.document_path : null
+          // Document launches normally send document_path rather than duplicating
+          // the proposal id in the UI payload. Resolve it authoritatively here so
+          // the Run remains linked to the change and apply can update its status.
+          const explicitChangeId = typeof raw.change_id === 'string' && raw.change_id.trim() !== '' ? raw.change_id : null
+          const changeId = explicitChangeId ?? (documentPath === null ? null : await readChangeIdFromDocumentPath(workspace, documentPath))
+          const run = await launchRun(workspace, tasks, selected.backend, typeof raw.base === 'string' ? raw.base : 'HEAD', options.runCacheRoot, runModel, changeId)
           // Authoritative dedup: reuse a live SpecOps session already bound to
           // this document (e.g. the clarify→intake session) instead of spawning
           // a second one. The frontend guard may miss on path-shape drift or the

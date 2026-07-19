@@ -7,7 +7,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event'
   import Icon from './Icon.svelte'
   import BackendIcon from './BackendIcon.svelte'
-  import { ipc, modelMonitorIpc, modelUsageIpc, type ModelUsagePeriod, type ModelUsageSnapshot, type ThemeMode } from './ipc'
+  import { modelMonitorIpc, modelUsageIpc, type ModelMonitorLayout, type ModelUsagePeriod, type ModelUsageSnapshot } from './ipc'
   import { formatTokens } from './model_alias'
 
   const periods: { id: ModelUsagePeriod; label: string }[] = [
@@ -27,10 +27,11 @@
   let refreshTimer: number | null = null
   let refreshSequence = 0
   let focusUnlisten: UnlistenFn | null = null
-  let themeUnlisten: UnlistenFn | null = null
+  let layoutUnlisten: UnlistenFn | null = null
   let resizeSequence = 0
   let hoverTimer: number | null = null
   let monitorPositionTimer: number | null = null
+  let monitorLayout: ModelMonitorLayout = $state({ isNotched: false, notchWidth: 185, notchHeight: 32, menuBarHeight: 24 })
 
   let islandRoot = $state<HTMLDivElement>()
   const maxTokens = $derived(Math.max(1, ...((snapshot?.rows ?? []).map((row) => row.total_tokens))))
@@ -136,11 +137,6 @@
     }, 220)
   }
 
-  function applyTheme(theme: ThemeMode) {
-    if (theme === 'system') document.documentElement.removeAttribute('data-theme')
-    else document.documentElement.setAttribute('data-theme', theme)
-  }
-
   function onWindowClick(event: MouseEvent) {
     if (islandRoot?.contains(event.target as Node)) return
     if (open) void setOpen(false)
@@ -165,18 +161,25 @@
     return Math.max(1, Math.min(4, Math.ceil(tokens / heatMax * 4)))
   }
 
+  async function syncMonitorLayout() {
+    try {
+      monitorLayout = await modelMonitorIpc.reposition()
+    } catch {
+      // The monitor is optional outside Tauri and on unsupported desktops.
+    }
+  }
+
   onMount(() => {
     document.documentElement.dataset.window = 'model-monitor'
-    void ipc.getTheme().then((theme) => {
-      if (theme === 'light' || theme === 'dark' || theme === 'system') applyTheme(theme)
-    }).catch(() => {})
-    void modelMonitorIpc.onThemeChanged(applyTheme).then((unlisten) => { themeUnlisten = unlisten })
+    // 刘海是硬件黑色，不跟随 app / system 的 light appearance。
+    document.documentElement.dataset.theme = 'dark'
     void refresh('today')
-    // macOS 显示器热插拔/主屏切换不会可靠地给透明 status window 发窗口事件，
-    // 用低频位置巡检保持灵动岛跟随主窗口所在屏幕，不参与尺寸动画。
-    monitorPositionTimer = window.setInterval(() => {
-      void modelMonitorIpc.reposition()
-    }, 1500)
+    // 主窗口跨屏由 Rust 原生 Moved 事件立即推送新几何；低频巡检只兜底显示器
+    // 热插拔等 AppKit 不稳定通知，不再承担实时切屏。
+    void syncMonitorLayout()
+    void modelMonitorIpc.onLayoutChanged((layout) => { monitorLayout = layout })
+      .then((unlisten) => { layoutUnlisten = unlisten })
+    monitorPositionTimer = window.setInterval(syncMonitorLayout, 1500)
     refreshTimer = window.setInterval(() => {
       if (period === 'today') void refresh('today')
     }, 60_000)
@@ -190,7 +193,7 @@
     if (monitorPositionTimer != null) window.clearInterval(monitorPositionTimer)
     clearHoverTimer()
     focusUnlisten?.()
-    themeUnlisten?.()
+    layoutUnlisten?.()
     delete document.documentElement.dataset.window
   })
 </script>
@@ -201,8 +204,10 @@
 <div
   class="model-island"
   class:open
+  class:notched={monitorLayout.isNotched}
   class:expanded-surface={panelMounted}
   class:closing-surface={panelClosing}
+  style={`--notch-width:${Math.max(96, monitorLayout.notchWidth)}px;--notch-height:${Math.max(24, monitorLayout.notchHeight)}px;--menu-bar-height:${Math.max(24, monitorLayout.menuBarHeight)}px;--closed-width:${Math.max(96, monitorLayout.notchWidth) + 180}px`}
   bind:this={islandRoot}
   onmouseenter={onIslandEnter}
   onmouseleave={onIslandLeave}
@@ -340,18 +345,19 @@
   :global(html[data-window='model-monitor'] #app) {
     width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent !important;
   }
-  .model-island { position: relative; width: 100%; height: 34px; padding-top: 0; margin: 0 auto; box-sizing: border-box; -webkit-app-region: no-drag; pointer-events: auto; color: var(--fg-primary); }
+  .model-island {
+    --bg-base: #050506; --bg-elevated: #000; --bg-hover: #1c1c1e; --bg-chip: #111113;
+    --fg-primary: #f5f5f7; --fg-secondary: #c7c7cc; --fg-tertiary: #8e8e93;
+    --bd-muted: #242426; --bd-default: #303033; --bd-strong: #3a3a3c;
+    position: relative; width: 100%; height: 34px; padding-top: 0; margin: 0 auto; box-sizing: border-box;
+    -webkit-app-region: no-drag; pointer-events: auto; color: var(--fg-primary);
+  }
   .model-island.expanded-surface { height: min(670px, 100%); }
   .island-trigger {
-    position: relative; z-index: 3; width: 420px; height: 24px; display: grid; grid-template-columns: 1fr 116px 1fr; align-items: center;
-    margin: 0 auto; padding: 0 11px; border: 1px solid var(--bd-default); border-radius: 12px;
-    background: color-mix(in srgb, var(--bg-elevated) 96%, transparent); color: var(--fg-primary);
-    box-shadow: none; cursor: pointer;
-    transition: border-color var(--t-fast), background var(--t-fast), transform var(--t-fast);
-  }
-  .model-island.expanded-surface .island-trigger {
-    border-color: transparent;
-    background: transparent;
+    width: var(--closed-width); height: var(--notch-height); grid-template-columns: 90px var(--notch-width) 90px;
+    position: relative; z-index: 3; display: grid; align-items: center; margin: 0 auto; padding: 0;
+    border: 0; border-radius: 0 0 14px 14px; background: #000; color: #f5f5f7; box-shadow: none; cursor: pointer;
+    transition: background var(--t-fast), transform var(--t-fast);
   }
   .model-island.open .island-trigger {
     animation: island-pill-settle 420ms cubic-bezier(.2,.8,.2,1);
@@ -359,21 +365,21 @@
   .model-island.closing-surface .island-trigger {
     animation: island-pill-return 360ms both;
   }
-  .island-trigger:hover { border-color: var(--bd-strong); background: var(--bg-elevated); }
+  .island-trigger:hover { background: #000; }
   .island-trigger:active { transform: scale(.985); }
   .island-trigger:focus-visible, button:focus-visible { outline: 2px solid var(--bd-focus); outline-offset: 2px; }
-  .trigger-side { min-width: 0; display: flex; align-items: center; gap: 8px; }
+  .trigger-side { min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 9px; box-sizing: border-box; }
   .trigger-side > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-  .trigger-side strong { overflow: hidden; color: var(--fg-primary); font: 650 9px/1 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-  .trigger-side small { color: var(--fg-tertiary); font: 700 6px/1 var(--font-mono); letter-spacing: .1em; white-space: nowrap; }
-  .trigger-right { justify-content: flex-end; text-align: right; }
+  .trigger-side strong { overflow: hidden; color: #f5f5f7; font: 650 9px/1 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .trigger-side small { color: #8e8e93; font: 700 6px/1 var(--font-mono); letter-spacing: .1em; white-space: nowrap; }
+  .trigger-left { justify-content: flex-end; text-align: right; }
+  .trigger-right { justify-content: flex-start; text-align: left; }
   .trigger-right strong { color: var(--st-tokens); font-size: 10px; }
-  .notch-gap { height: 20px; }
+  .notch-gap { width: var(--notch-width); height: 100%; }
   .usage-panel {
     position: absolute; top: 0; left: 50%; width: 620px; transform: translateX(-50%);
-    padding: 40px 16px 16px; border: 1px solid var(--bd-strong); border-radius: 18px;
-    background: color-mix(in srgb, var(--bg-elevated) 95%, transparent); box-shadow: var(--sh-md);
-    backdrop-filter: blur(24px) saturate(1.35); -webkit-backdrop-filter: blur(24px) saturate(1.35);
+    padding: calc(var(--notch-height) + 14px) 16px 16px; border: 0 solid var(--bd-strong); border-width: 0 1px 1px; border-radius: 0 0 18px 18px;
+    background: #000; box-shadow: 0 18px 48px rgba(0,0,0,.38);
     z-index: 2; transform-origin: 50% 12px;
     animation: island-unfold 420ms both;
     will-change: clip-path;
@@ -437,19 +443,19 @@
   .panel-footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 10px; color: var(--fg-tertiary); font: 9px var(--font-mono); }
 
   @keyframes island-unfold {
-    0% { clip-path: inset(0 100px calc(100% - 24px) 100px round 999px); }
-    38% { clip-path: inset(-3px -4px -8px -4px round 15px); }
+    0% { clip-path: inset(0 calc((100% - var(--closed-width)) / 2) calc(100% - var(--notch-height)) calc((100% - var(--closed-width)) / 2) round 0 0 14px 14px); }
+    38% { clip-path: inset(0 -4px -8px -4px round 0 0 15px 15px); }
     62% { clip-path: inset(2px 3px 4px 3px round 20px); }
     80% { clip-path: inset(-1px -1px -2px -1px round 17px); }
     100% { clip-path: inset(0 round 18px); }
   }
   @keyframes island-fold {
-    0% { opacity: 1; clip-path: inset(0 round 18px); }
+    0% { opacity: 1; clip-path: inset(0 round 0 0 18px 18px); }
     22% { opacity: 1; clip-path: inset(0 8px 8% 8px round 19px); }
     45% { opacity: 1; clip-path: inset(0 24px 32% 24px round 22px); }
     65% { opacity: 1; clip-path: inset(0 52px 58% 52px round 28px); }
     82% { opacity: .96; clip-path: inset(0 80px 78% 80px round 40px); }
-    100% { opacity: 0; clip-path: inset(0 100px calc(100% - 24px) 100px round 999px); }
+    100% { opacity: 0; clip-path: inset(0 calc((100% - var(--closed-width)) / 2) calc(100% - var(--notch-height)) calc((100% - var(--closed-width)) / 2) round 0 0 14px 14px); }
   }
   @keyframes island-pill-settle {
     0% { transform: scale(1); }
@@ -459,9 +465,8 @@
     100% { transform: scale(1); }
   }
   @keyframes island-pill-return {
-    0%, 72% { border-color: transparent; background: transparent; }
-    88% { border-color: color-mix(in srgb, var(--bd-default) 35%, transparent); background: color-mix(in srgb, var(--bg-elevated) 28%, transparent); }
-    100% { border-color: var(--bd-default); background: color-mix(in srgb, var(--bg-elevated) 96%, transparent); }
+    0%, 72% { opacity: .82; }
+    100% { opacity: 1; }
   }
   @media (prefers-reduced-motion: reduce) {
     .usage-panel, .usage-panel.closing, .model-island.open .island-trigger, .model-island.closing-surface .island-trigger { animation: none; }

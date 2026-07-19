@@ -136,6 +136,33 @@ async function startThread(
 }
 
 describe('Codex app-server transport sessions', () => {
+  test('discovers every visible model through the paginated model/list protocol', async () => {
+    const { transport, child, frames } = fixture()
+    const listing = transport.listModels()
+    const init = await frames.next()
+    respond(child, init, { protocolVersion: '2' })
+    await expect(frames.next()).resolves.toEqual({ jsonrpc: '2.0', method: 'initialized' })
+
+    const first = await frames.next()
+    expect(first).toMatchObject({ method: 'model/list', params: { includeHidden: false } })
+    respond(child, first, {
+      data: [{ id: 'gpt-5.4', model: 'gpt-5.4', displayName: 'GPT-5.4', description: 'Default', isDefault: true, hidden: false }],
+      nextCursor: 'page-2',
+    })
+    const second = await frames.next()
+    expect(second).toMatchObject({ method: 'model/list', params: { includeHidden: false, cursor: 'page-2' } })
+    respond(child, second, {
+      data: [{ id: 'gpt-5.3-codex', model: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', description: 'Coding', isDefault: false, hidden: false }],
+      nextCursor: null,
+    })
+
+    await expect(listing).resolves.toEqual([
+      { id: 'gpt-5.4', label: 'GPT-5.4', description: 'Default', is_default: true },
+      { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', description: 'Coding', is_default: false },
+    ])
+    await transport.close()
+  })
+
   test('starts a thread, applies supported modes, and resumes in a separate process', async () => {
     const started = fixture()
     await initialize(started.transport, started.child, started.frames)

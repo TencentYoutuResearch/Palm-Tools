@@ -3,7 +3,8 @@ import { SpecOpsError } from '../core/errors.js'
 export interface IntakeReceipt {
   schema_version: 1
   intake_id: string
-  status: 'completed'
+  /** `ready` is agent-authored; only the server promotes it to `completed`. */
+  status: 'ready' | 'completed'
   primary: string
   documents: string[]
 }
@@ -19,6 +20,8 @@ export const LANGUAGE_DIRECTIVE = [
   'If the request is in English, write them in English.',
   'Keep YAML frontmatter keys (schema_version, id, kind, document_class, spec_type, work_type, targets, workflow_profile, status, verifies, paths) in English — only the title value and body follow the request language.',
   'For bug documents use `kind: bug` with `work_type: bugfix`; `work_type: bug` is invalid.',
+  'For schema_version 2, normative documents use status `draft` (or active/deprecated/superseded/archived); work_item documents use status `proposed` (or approved/in_progress/blocked/completed/cancelled/archived). Never use `proposed` for a normative document.',
+  'Write the intake receipt with status `ready`; only the SpecOps server may promote a schema-validated receipt to `completed`.',
   'Do not translate the user request; quote it verbatim when referenced.',
 ].join('\n')
 
@@ -52,7 +55,8 @@ export function parseIntakeReceipt(text: string, expectedId: string): IntakeRece
     throw new SpecOpsError('invalid_intake_receipt', 'intake receipt must be an object')
   }
   const item = value as Record<string, unknown>
-  if (item.schema_version !== 1 || item.intake_id !== expectedId || item.status !== 'completed') {
+  if (item.schema_version !== 1 || item.intake_id !== expectedId
+      || (item.status !== 'ready' && item.status !== 'completed')) {
     throw new SpecOpsError('invalid_intake_receipt', 'intake receipt identity or status is invalid')
   }
   if (typeof item.primary !== 'string' || !Array.isArray(item.documents)
@@ -69,7 +73,7 @@ export function parseIntakeReceipt(text: string, expectedId: string): IntakeRece
   return {
     schema_version: 1,
     intake_id: expectedId,
-    status: 'completed',
+    status: item.status,
     primary: item.primary,
     documents,
   }

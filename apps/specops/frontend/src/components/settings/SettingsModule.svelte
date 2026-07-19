@@ -11,6 +11,8 @@
   type ProfileName = 'default' | 'analysis' | 'implementation' | 'review';
   type Profile = { backend?: string; model?: string; avatar?: string; prompt_file?: string };
   type Backend = { key: string; display_name: string; model_flag?: string | null; enabled: boolean };
+  type DiscoveredModel = { id: string; label: string; description?: string; is_default?: boolean };
+  type ModelCatalog = { backend: string; source: string; version?: string; custom_allowed: boolean; models: DiscoveredModel[]; warning?: string };
   type Resolved = { backend: string; model?: string; avatar?: string };
   type SettingsResponse = {
     profiles: Record<ProfileName, Profile>;
@@ -29,6 +31,10 @@
   let saved = $state(false);
   let editingAvatar = $state<ProfileName | null>(null);
   let previewingPrompt = $state<ProfileName | null>(null);
+  let modelCatalogs = $state<Record<string, ModelCatalog>>({});
+  let modelLoading = $state<Record<string, boolean>>({});
+  let modelErrors = $state<Record<string, string>>({});
+  let customModelEditing = $state<Partial<Record<ProfileName, boolean>>>({});
 
   function cloneProfiles(profiles: Record<ProfileName, Profile>): Record<ProfileName, Profile> {
     return Object.fromEntries(names.map((name) => [name, { ...profiles[name] }])) as Record<ProfileName, Profile>;
@@ -40,6 +46,7 @@
     try {
       data = await api.get<SettingsResponse>('/api/settings/agents');
       draft = cloneProfiles(data.profiles);
+      for (const backend of new Set(names.map((name) => resolvedBackend(name)))) void loadModels(backend);
       dirty = false;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -49,7 +56,13 @@
   }
 
   function update(name: ProfileName, field: keyof Profile, value: string): void {
-    draft[name] = { ...draft[name], [field]: value || undefined };
+    draft[name] = field === 'backend'
+      ? { ...draft[name], backend: value || undefined, model: undefined }
+      : { ...draft[name], [field]: value || undefined };
+    if (field === 'backend') {
+      customModelEditing = { ...customModelEditing, [name]: false };
+      void loadModels(resolvedBackend(name));
+    }
     dirty = true;
     saved = false;
   }
@@ -64,10 +77,58 @@
     return draft[name].backend || (name === 'default' ? 'codebuddy' : draft.default.backend || data?.resolved[name]?.backend || 'codebuddy');
   }
 
+  function backendChoices(name: ProfileName): Backend[] {
+    const choices = data?.backends ?? [];
+    const configured = draft[name].backend;
+    if (!configured || choices.some((backend) => backend.key === configured)) return choices;
+    return [{ key: configured, display_name: configured, enabled: true }, ...choices];
+  }
+
   function supportsModel(name: ProfileName): boolean {
     const key = resolvedBackend(name);
+    if (modelCatalogs[key] !== undefined) return modelCatalogs[key].custom_allowed;
     const backend = data?.backends.find((item) => item.key === key);
     return backend === undefined || Boolean(backend.model_flag);
+  }
+
+  async function loadModels(backend: string, refresh = false): Promise<void> {
+    if (!backend || modelLoading[backend] || (!refresh && modelCatalogs[backend])) return;
+    modelLoading = { ...modelLoading, [backend]: true };
+    const nextErrors = { ...modelErrors };
+    delete nextErrors[backend];
+    modelErrors = nextErrors;
+    try {
+      const suffix = refresh ? '?refresh=1' : '';
+      const catalog = await api.get<ModelCatalog>(`/api/settings/models/${encodeURIComponent(backend)}${suffix}`);
+      modelCatalogs = { ...modelCatalogs, [backend]: catalog };
+    } catch (err) {
+      modelErrors = { ...modelErrors, [backend]: err instanceof Error ? err.message : String(err) };
+    } finally {
+      modelLoading = { ...modelLoading, [backend]: false };
+    }
+  }
+
+  function catalogFor(name: ProfileName): ModelCatalog | undefined {
+    return modelCatalogs[resolvedBackend(name)];
+  }
+
+  function modelChoice(name: ProfileName): string {
+    if (customModelEditing[name]) return '__custom__';
+    const value = draft[name].model ?? '';
+    if (!value) return '';
+    return catalogFor(name)?.models.some((model) => model.id === value) ? value : '__custom__';
+  }
+
+  function chooseModel(name: ProfileName, value: string): void {
+    if (value === '__custom__') {
+      const current = draft[name].model ?? '';
+      customModelEditing = { ...customModelEditing, [name]: true };
+      if (catalogFor(name)?.models.some((model) => model.id === current)) update(name, 'model', '');
+      else { dirty = true; saved = false; }
+      return;
+    }
+    customModelEditing = { ...customModelEditing, [name]: false };
+    update(name, 'model', value);
   }
 
   function resolvedAvatar(name: ProfileName): string | null {
@@ -130,23 +191,43 @@
             </div>
 
             <div class="fields">
-              <label>
-                <span>{t('specops.settings.backend')}</span>
+              <label class="runtime-field">
+                <span class="field-label-row"><span>{t('specops.settings.backend')}</span></span>
                 <select value={draft[name].backend ?? ''} onchange={(event) => update(name, 'backend', event.currentTarget.value)}>
-                  <option value="">{name === 'default' ? t('specops.settings.builtinDefault') : t('specops.settings.inheritDefault')}</option>
-                  {#each data.backends as backend (backend.key)}
+                  <option value="" selected={!draft[name].backend}>{name === 'default' ? t('specops.settings.builtinDefault') : t('specops.settings.inheritDefault')}</option>
+                  {#each backendChoices(name) as backend (backend.key)}
                     <option value={backend.key}>{backend.display_name || backend.key}</option>
                   {/each}
                 </select>
               </label>
-              <label>
-                <span>{t('specops.settings.model')}</span>
-                <input
-                  value={draft[name].model ?? ''}
-                  oninput={(event) => update(name, 'model', event.currentTarget.value)}
-                  placeholder={t('specops.settings.backendDefault')}
-                  disabled={!supportsModel(name)}
-                />
+              <label class="runtime-field model-field">
+                <span class="field-label-row">
+                  <span>{t('specops.settings.model')}</span>
+                  <button type="button" class="model-refresh" onclick={() => loadModels(resolvedBackend(name), true)} disabled={modelLoading[resolvedBackend(name)]} aria-label={t('specops.settings.refreshModels')}>
+                    <Icon name="refresh" size={12} />
+                  </button>
+                </span>
+                <select value={modelChoice(name)} onchange={(event) => chooseModel(name, event.currentTarget.value)} disabled={!supportsModel(name)}>
+                  <option value="">{t('specops.settings.backendDefault')}</option>
+                  {#each catalogFor(name)?.models ?? [] as model (model.id)}
+                    <option value={model.id}>{model.label}{model.is_default ? ` · ${t('specops.settings.defaultModel')}` : ''}</option>
+                  {/each}
+                  {#if supportsModel(name)}<option value="__custom__">{t('specops.settings.customModel')}</option>{/if}
+                </select>
+                {#if modelChoice(name) === '__custom__'}
+                  <input class="custom-model" value={draft[name].model ?? ''} oninput={(event) => update(name, 'model', event.currentTarget.value)} placeholder={t('specops.settings.modelId')} />
+                {/if}
+                <small class="catalog-status" class:error={Boolean(modelErrors[resolvedBackend(name)])}>
+                  {#if modelLoading[resolvedBackend(name)]}
+                    {t('specops.settings.detectingModels')}
+                  {:else if modelErrors[resolvedBackend(name)]}
+                    {t('specops.settings.customModelFallback')}
+                  {:else if catalogFor(name)}
+                    {catalogFor(name)?.models.length ?? 0} {t('specops.settings.modelsDetected')} · {catalogFor(name)?.source}{catalogFor(name)?.version ? ` ${catalogFor(name)?.version}` : ''}
+                  {:else}
+                    {t('specops.settings.customModelFallback')}
+                  {/if}
+                </small>
               </label>
             </div>
 
@@ -226,7 +307,7 @@
   .profile-title h2 { margin: 0 0 4px; font-size: var(--fs-lg); text-transform: capitalize; }
   .profile-title p { margin: 0; color: var(--fg-tertiary); font-size: var(--fs-sm); }
   .inherit { border: 0; background: transparent; color: var(--acc); font-size: var(--fs-xs); padding: 3px 0; white-space: nowrap; }
-  .fields { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .fields { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 12px; padding: 11px; border: 1px solid var(--bd-muted); border-radius: var(--rad-md); background: color-mix(in srgb, var(--bg-input) 54%, transparent); }
   .avatar-field { margin-top: 12px; }
   .avatar-preview { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--bd-default); border-radius: var(--rad-md); background: var(--bg-input); }
   .avatar-editor { width: 100%; display: grid; grid-template-columns: 34px minmax(0, 1fr) 16px; align-items: center; gap: 9px; padding: 6px 8px; border: 1px solid var(--bd-default); border-radius: var(--rad-md); background: var(--bg-input); color: var(--fg-secondary); text-align: left; }
@@ -240,8 +321,18 @@
   .preview-toggle { margin-top: 7px; padding: 0; border: 0; background: transparent; color: var(--acc); font-size: var(--fs-xs); }
   .prompt-preview { max-height: 300px; margin-top: 9px; padding: 12px; overflow: auto; border: 1px solid var(--bd-muted); border-radius: var(--rad-md); background: var(--bg-base); }
   label { display: grid; gap: 6px; color: var(--fg-secondary); font-size: var(--fs-xs); }
+  .runtime-field { min-width: 0; align-content: start; grid-template-rows: 22px 34px auto; gap: 5px; }
+  .field-label-row { min-height: 22px; display: flex; align-items: center; justify-content: space-between; }
+  .model-refresh { width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: var(--rad-sm); background: transparent; color: var(--fg-tertiary); }
+  .model-refresh:hover:not(:disabled) { border-color: var(--bd-default); background: var(--bg-hover); color: var(--fg-primary); }
+  .model-refresh:disabled { opacity: .45; }
+  .fields label > small { overflow: hidden; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; line-height: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .fields label > small.error { color: var(--st-warn); }
   select, input { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--bd-default); border-radius: var(--rad-md); background: var(--bg-input); color: var(--fg-primary); outline: none; }
   select:focus, input:focus { border-color: var(--bd-focus); }
+  select { cursor: pointer; }
+  .custom-model { margin-top: 0; font-family: var(--font-mono); }
+  .catalog-status { min-height: 11px; padding: 0 2px; }
   input:disabled { opacity: .55; }
   .resolved { margin-top: 14px; display: flex; align-items: center; gap: 6px; color: var(--fg-tertiary); font-size: var(--fs-xs); }
   .resolved code { color: var(--st-info); font-family: var(--font-mono); }

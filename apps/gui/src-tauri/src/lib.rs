@@ -126,6 +126,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_backends,
+            commands::discover_backend_models,
             commands::list_avatar_library,
             commands::spawn_session,
             commands::write_input,
@@ -216,6 +217,7 @@ pub fn run() {
             endpoints::endpoint_test_connection,
             // Phase 11.5 BackendChooser 拉远端 backends + 远端 cwd 浏览
             endpoints::endpoint_get_remote_backends,
+            endpoints::endpoint_discover_backend_models,
             endpoints::endpoint_fs_list,
             endpoints::endpoint_list_sessions_for_cwd,
             // 远端 tab WorkspacePanel(Files + Git)支持

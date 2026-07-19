@@ -726,6 +726,17 @@ export async function runChangeEvidence(run: RunRecord): Promise<RunChangeEviden
 export async function collectRunPatch(run: RunRecord): Promise<{ patch: string; files: string[] }> {
   if (!await exists(run.worktree_path)) throw new SpecOpsError('worktree_missing', `Run worktree is missing: ${run.worktree_path}`)
   await execFile('git', ['-C', run.worktree_path, 'add', '-N', '.'])
+  const changed = await changedFilesForRun(run)
+  if (changed.includes('specops.toml')) {
+    const task = run.tasks[run.current_task]
+    const assignment = `${task?.title ?? ''}\n${task?.prompt ?? ''}`
+    if (!/\bspecops\.toml\b/i.test(assignment)) {
+      throw new SpecOpsError(
+        'protected_control_file_modified',
+        'The agent modified specops.toml even though the current task did not request a SpecOps configuration change. Revert that file in the Run worktree before continuing.',
+      )
+    }
+  }
   const patchPath = pathInside(run.workspace_root, '.specops', 'runs', run.run_id, 'output.patch')
   await gitToFile(run.worktree_path, ['diff', '--full-index', '--binary', run.base_commit, '--'], patchPath)
   const patch = await readFile(patchPath, 'utf8')

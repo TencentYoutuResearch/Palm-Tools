@@ -13,6 +13,22 @@ export interface BackendInfo {
   model_flag: string | null
 }
 
+export interface DiscoveredModel {
+  id: string
+  label: string
+  description?: string
+  is_default: boolean
+}
+
+export interface ModelDiscoveryResult {
+  backend: string
+  source: string
+  version?: string
+  custom_allowed: boolean
+  models: DiscoveredModel[]
+  warning?: string
+}
+
 /// Settings 面板用的 backend 列表项 —— 比 BackendInfo 多 enabled 字段,
 /// 因为 Settings 要展示全部(含被关掉的)backend 及其开关状态。
 export interface BackendListItem {
@@ -168,10 +184,19 @@ export const modelUsageIpc = {
     invoke<ModelUsageSnapshot>('model_usage_snapshot', { period }),
 }
 
+export interface ModelMonitorLayout {
+  isNotched: boolean
+  notchWidth: number
+  notchHeight: number
+  menuBarHeight: number
+}
+
 export const modelMonitorIpc = {
   setExpanded: (expanded: boolean) =>
     invoke<void>('model_monitor_set_expanded', { expanded }),
-  reposition: () => invoke<void>('model_monitor_reposition'),
+  reposition: () => invoke<ModelMonitorLayout>('model_monitor_reposition'),
+  onLayoutChanged: (cb: (layout: ModelMonitorLayout) => void) =>
+    listen<ModelMonitorLayout>('model-monitor-layout-changed', (event) => cb(event.payload)),
   onThemeChanged: (cb: (theme: ThemeMode) => void) =>
     listen<string>('theme-changed', (event) => cb(event.payload as ThemeMode)),
 }
@@ -215,6 +240,8 @@ export type LocaleMode = 'en' | 'zh-CN' | 'system'
 
 export const ipc = {
   listBackends: () => invoke<BackendInfo[]>('list_backends'),
+  discoverBackendModels: (backendKey: string) =>
+    invoke<ModelDiscoveryResult>('discover_backend_models', { backendKey }),
   /** Settings 面板用:返回全部 backend(含 disabled),带 enabled 字段 */
   listAllBackends: () => invoke<BackendListItem[]>('list_all_backends'),
   listAvatarLibrary: () => invoke<AvatarLibrary>('list_avatar_library'),
@@ -590,6 +617,8 @@ export const endpointIpc = {
   /** Phase 11.5:拉某 endpoint 的远端 backend 列表(BackendChooser 用) */
   getRemoteBackends: (id: string) =>
     invoke<RemoteBackendInfo[]>('endpoint_get_remote_backends', { id }),
+  discoverBackendModels: (id: string, backendKey: string) =>
+    invoke<ModelDiscoveryResult>('endpoint_discover_backend_models', { id, backendKey }),
   /** Phase 11.5.4:列举远端某目录的子目录(RemoteCwdPicker 用) */
   fsList: (id: string, path: string, show_hidden: boolean = false) =>
     invoke<RemoteFsListing>('endpoint_fs_list', {

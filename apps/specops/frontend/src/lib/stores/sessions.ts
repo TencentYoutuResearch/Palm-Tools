@@ -51,6 +51,7 @@ function sessionSummary(session: SpecOpsSession): SpecOpsSession {
     id: session.id,
     title: session.title,
     backend_key: session.backend_key,
+    run_id: session.run_id,
     phase: session.phase,
     state: session.state,
     execution: session.execution,

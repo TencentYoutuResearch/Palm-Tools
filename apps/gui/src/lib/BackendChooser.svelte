@@ -27,6 +27,7 @@
     ENDPOINT_LOCAL,
     endpointRemote,
     type BackendInfo,
+    type ModelDiscoveryResult,
     type EndpointId,
     type EndpointSummary,
     type PermissionMode,
@@ -88,6 +89,57 @@
   let selectedModelValue = $state('')
   let customModel = $state('')
   let modelOptions: ModelOption[] = $state([])
+  let modelLoading = $state(false)
+  let modelNotice = $state('')
+  let modelSource = $state('')
+  let customModelAllowed = $state(true)
+  const modelCache = new Map<string, ModelDiscoveryResult>()
+
+  async function probeModels(b: BackendInfo, ep: EndpointId, force = false) {
+    const cacheKey = ep.kind === 'remote' ? `${ep.id}:${b.key}` : `local:${b.key}`
+    const cached = !force ? modelCache.get(cacheKey) : undefined
+    if (cached) {
+      applyDiscoveredModels(cached)
+      return
+    }
+    modelLoading = true
+    modelNotice = ''
+    try {
+      const result = ep.kind === 'remote'
+        ? await endpointIpc.discoverBackendModels(ep.id, b.key)
+        : await ipc.discoverBackendModels(b.key)
+      const currentKey = selectedEndpoint.kind === 'remote'
+        ? `${selectedEndpoint.id}:${selected?.key}`
+        : `local:${selected?.key}`
+      if (currentKey !== cacheKey) return
+      modelCache.set(cacheKey, result)
+      applyDiscoveredModels(result)
+    } catch (e) {
+      const currentKey = selectedEndpoint.kind === 'remote'
+        ? `${selectedEndpoint.id}:${selected?.key}`
+        : `local:${selected?.key}`
+      if (currentKey === cacheKey) {
+        modelNotice = `Live model lookup unavailable; showing compatibility presets. ${String(e)}`
+      }
+    } finally {
+      const currentKey = selectedEndpoint.kind === 'remote'
+        ? `${selectedEndpoint.id}:${selected?.key}`
+        : `local:${selected?.key}`
+      if (currentKey === cacheKey) modelLoading = false
+    }
+  }
+
+  function applyDiscoveredModels(result: ModelDiscoveryResult) {
+    modelOptions = result.models.map((m) => ({
+      value: m.id,
+      label: m.is_default ? `${m.label} (default)` : m.label,
+      description: m.description,
+    }))
+    modelSource = result.source
+    customModelAllowed = result.custom_allowed
+    if (!customModelAllowed && selectedModelValue === '__custom__') selectedModelValue = ''
+    modelNotice = result.warning ?? ''
+  }
 
   // Phase 11.5:远端 endpoints + 每个 endpoint 的展开/loading/backends 状态。
   // 第一次展开才拉(lazy);折叠后缓存保留,再展开直接显示(同一打开周期内)。
@@ -203,9 +255,14 @@
     // 不能把本机 session_cwd 塞给 Remote:两台机器路径空间通常不一致。
     cwd = ep.kind === 'local' ? defaultCwd : (initialCwd?.trim() ?? '')
     modelOptions = modelsFor(b.key)
+    modelLoading = false
+    modelNotice = ''
+    modelSource = 'compatibility presets'
+    customModelAllowed = true
     selectedModelValue = ''
     customModel = ''
     phase = 'configure'
+    void probeModels(b, ep)
   }
 
   async function submitOnce(opts: {
@@ -549,7 +606,12 @@
         </div>
 
         <div class="field">
-          <label for="model-select">Model</label>
+          <div class="field-label-row">
+            <label for="model-select">Model</label>
+            <button class="model-refresh" type="button" disabled={modelLoading} aria-label="Refresh available models" title="Refresh available models" onclick={() => void probeModels(selected!, selectedEndpoint, true)}>
+              <span class:spinning={modelLoading}>↻</span>
+            </button>
+          </div>
           <select
             id="model-select"
             value={selectedModelValue}
@@ -559,7 +621,7 @@
             {#each modelOptions as m (m.value)}
               <option value={m.value}>{m.label}</option>
             {/each}
-            <option value="__custom__">Custom…</option>
+            {#if customModelAllowed}<option value="__custom__">Custom…</option>{/if}
           </select>
           {#if selectedModelValue === '__custom__'}
             <input
@@ -575,6 +637,10 @@
           <p class="hint-line">
             {modelHint(selected)}
           </p>
+          <p class="catalog-status" class:error={Boolean(modelNotice)}>
+            {modelLoading ? 'Detecting available models…' : `${modelOptions.length} models · ${modelSource}`}
+          </p>
+          {#if modelNotice}<p class="hint-line model-notice">{modelNotice}</p>{/if}
         </div>
 
         <div class="field">
@@ -943,6 +1009,44 @@
     flex-direction: column;
     gap: 4px;
   }
+  .field-label-row {
+    min-height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .model-refresh {
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: var(--fg-tertiary);
+    font-size: 16px;
+    line-height: 1;
+  }
+  .model-refresh:hover:not(:disabled),
+  .model-refresh:focus-visible {
+    border-color: var(--bd-default);
+    background: var(--bg-tab-hover);
+    color: var(--fg-primary);
+    box-shadow: none;
+  }
+  .model-refresh:disabled { opacity: .45; }
+  .model-refresh .spinning { animation: model-spin .8s linear infinite; }
+  .catalog-status {
+    min-height: 12px;
+    margin: 0;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+  .catalog-status.error { color: var(--st-warn); }
+  @keyframes model-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .model-refresh .spinning { animation: none; } }
   label {
     font-size: var(--fs-xs);
     font-weight: var(--fw-med);

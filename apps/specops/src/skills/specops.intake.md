@@ -109,6 +109,15 @@ Technical design decisions and trade-offs.
 
 Delta specs — each subfolder is a spec name, containing a `spec.md` with YAML frontmatter (kind `spec`). Only create these if the change introduces new constraints or modifies existing ones.
 
+For schema-version 2, keep document class and status paired:
+
+| document_class | Default status | Other valid statuses |
+|---|---|---|
+| `normative` | `draft` | `active`, `deprecated`, `superseded`, `archived` |
+| `work_item` | `proposed` | `approved`, `in_progress`, `blocked`, `completed`, `cancelled`, `archived` |
+
+Never use `status: proposed` for `document_class: normative`, including `design.md` and delta `spec.md` files.
+
 ## Checklist
 
 Run the `specops.checklist` skill before writing the receipt. The proposal.md
@@ -125,7 +134,7 @@ the intake prompt as the filename):
 {
   "schema_version": 1,
   "intake_id": "<id from intake prompt>",
-  "status": "completed",
+  "status": "ready",
   "primary": ".specops/changes/add-dark-mode",
   "documents": [
     ".specops/changes/add-dark-mode",
@@ -139,6 +148,8 @@ the intake prompt as the filename):
 
 The `primary` must be the main change folder path or the main spec file path.
 List every created path exactly once and include `primary` in `documents`.
+Only write `status: ready`; the SpecOps server validates every listed document
+with its canonical schema parser and promotes the receipt to `completed`.
 Finish by reporting only the created relative paths.
 
 ## Document language policy

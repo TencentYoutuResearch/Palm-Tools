@@ -254,6 +254,7 @@ export class CodeBuddyAcpClient {
     return result.sessionId
   }
 
+
   async loadSession(sessionId: string, cwd: string): Promise<string> {
     const initialized = await this.initialize()
     if (initialized.agentCapabilities.loadSession !== true) {

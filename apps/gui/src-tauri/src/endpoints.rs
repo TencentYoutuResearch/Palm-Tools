@@ -560,6 +560,42 @@ pub async fn endpoint_get_remote_backends(
     Ok(result.backends)
 }
 
+/// Ask an updated remote bridge to probe the CLI installed on that machine.
+#[tauri::command]
+pub async fn endpoint_discover_backend_models(
+    id: String,
+    backend_key: String,
+) -> Result<kode_bridge::model_discovery::ModelDiscoveryResult, String> {
+    let persisted = persistence::load();
+    let ep = persisted
+        .endpoints
+        .unwrap_or_default()
+        .into_iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| format!("endpoint '{id}' not found"))?;
+    if !ep.ssh_host.trim().is_empty() {
+        return Err("live model discovery over SSH endpoints is unavailable in this build".into());
+    }
+    let url = format!(
+        "{}/api/v1/backends/{}/models",
+        ep.base_url.trim_end_matches('/'),
+        backend_key
+    );
+    let response = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(&ep.token)
+        .send()
+        .await
+        .map_err(|e| format!("remote model discovery failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("remote bridge returned {}", response.status()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| format!("invalid remote model catalogue: {e}"))
+}
+
 #[derive(Debug, Serialize)]
 pub struct RemoteFsEntry {
     pub name: String,

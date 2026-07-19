@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { SessionAgent, SpecOpsSession, WorkflowStep } from '../../lib/types.ts';
+  import type { HarnessControlState, ScheduledTask, SessionAgent, SpecOpsSession, WorkflowStep } from '../../lib/types.ts';
   import { api } from '../../lib/api.ts';
   import AvatarSprite from '../shared/AvatarSprite.svelte';
   import StatusBadge from '../shared/StatusBadge.svelte';
@@ -36,6 +36,7 @@
   let expandedRole = $state<Role | null>(null);
   let observedPhase = $state<string | undefined>(undefined);
   let agentSettings = $state<AgentSettings | null>(null);
+  let harnessState = $state<HarnessControlState | null>(null);
   let activeRole = $derived(roleForPhase(session.phase));
   let currentPhase = $derived(phaseLabels[session.workflow?.current_phase ?? session.phase ?? ''] ?? session.phase ?? 'Waiting');
   let repairCount = $derived((session.agents ?? []).filter((agent) => agent.purpose === 'repair').length);
@@ -43,11 +44,32 @@
   let repairActive = $derived(activeRole === 'implement' && latestAgent('implement')?.purpose === 'repair');
   let returnActive = $derived(activeRole === 'review' || repairCount > 0);
   let returnMoving = $derived(activeRole === 'review' || repairActive);
+  let completedTasks = $derived(harnessState?.tasks.filter((task) => task.state === 'completed').length ?? 0);
 
   onMount(() => {
     void api.get<AgentSettings>('/api/settings/agents').then((settings) => {
       agentSettings = settings;
     }).catch(() => undefined);
+  });
+
+  onMount(() => {
+    let disposed = false;
+    const refresh = async (): Promise<void> => {
+      const runId = session.run_id;
+      if (!runId) {
+        harnessState = null;
+        return;
+      }
+      try {
+        const response = await api.get<{ state: HarnessControlState | null }>(`/api/runs/${runId}/harness`);
+        if (!disposed && response.state?.run_id === session.run_id) harnessState = response.state;
+      } catch {
+        // Keep the last durable snapshot during a transient sidecar refresh.
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => { void refresh(); }, 2000);
+    return () => { disposed = true; window.clearInterval(timer); };
   });
 
   $effect(() => {
@@ -116,6 +138,21 @@
   function deliveryState(phase: 'apply_patch' | 'completed'): NodeState {
     if (session.state === 'failed') return 'failed';
     return stepState(phase);
+  }
+
+  function taskTone(task: ScheduledTask): 'done' | 'running' | 'waiting' | 'failed' {
+    if (task.state === 'completed') return 'done';
+    if (task.state === 'running' || task.state === 'verifying' || task.state === 'reviewing') return 'running';
+    if (task.state === 'failed' || task.state === 'cancelled') return 'failed';
+    return 'waiting';
+  }
+
+  function taskMark(task: ScheduledTask): string {
+    const state = taskTone(task);
+    if (state === 'done') return '✓';
+    if (state === 'running') return '●';
+    if (state === 'failed') return '×';
+    return '○';
   }
 </script>
 
@@ -186,6 +223,24 @@
                   <span>{agent?.backend_key ?? 'Agent not started'}{agent?.model ? ` / ${agent.model}` : ''}</span>
                   <span>{agentsFor(role).length} session{agentsFor(role).length === 1 ? '' : 's'} · {agent?.status ?? 'waiting'}</span>
                 </span>
+                {#if role === 'implement' && harnessState?.tasks.length}
+                  <span class="task-ledger" aria-label={`${completedTasks} of ${harnessState.tasks.length} tasks completed`}>
+                    <span class="task-summary">
+                      <strong>{completedTasks} / {harnessState.tasks.length} tasks</strong>
+                      <span>{harnessState.tasks.find((task) => taskTone(task) === 'running')?.state ?? harnessState.run_state}</span>
+                    </span>
+                    <span class="task-progress" aria-hidden="true"><i style={`width: ${(completedTasks / harnessState.tasks.length) * 100}%`}></i></span>
+                    <span class="task-list">
+                      {#each harnessState.tasks as task (task.id)}
+                        <span class="task-row" data-state={taskTone(task)} title={task.title}>
+                          <b aria-hidden="true">{taskMark(task)}</b>
+                          <span><small>{task.id}</small>{task.title}</span>
+                          {#if task.attempt > 0}<em>{task.attempt}×</em>{/if}
+                        </span>
+                      {/each}
+                    </span>
+                  </span>
+                {/if}
               {/if}
             </span>
             <span class="disclosure" aria-hidden="true">{showDetails ? '−' : '+'}</span>
@@ -266,6 +321,24 @@
   .phase-chip[data-state='failed'] { border-color: var(--st-err); color: var(--st-err); }
   .agent-detail { display: grid; gap: 2px; padding-top: 7px; border-top: 1px solid var(--bd-muted); color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 9px; }
   .agent-detail span:first-child { overflow: hidden; color: var(--fg-secondary); text-overflow: ellipsis; white-space: nowrap; }
+  .task-ledger { display: grid; gap: 7px; padding-top: 8px; border-top: 1px solid var(--bd-muted); }
+  .task-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .task-summary strong { color: var(--fg-primary); font-size: 10px; }
+  .task-summary > span { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; }
+  .task-progress { overflow: hidden; height: 2px; border-radius: 1px; background: var(--bd-muted); }
+  .task-progress i { display: block; height: 100%; background: var(--st-ok); transition: width 180ms ease-out; }
+  .task-list { display: grid; max-height: 246px; overflow-y: auto; }
+  .task-row { display: grid; grid-template-columns: 13px minmax(0, 1fr) auto; align-items: start; gap: 6px; padding: 6px 2px; border-top: 1px solid color-mix(in srgb, var(--bd-muted) 72%, transparent); color: var(--fg-secondary); font-size: 9px; }
+  .task-row:first-child { border-top: 0; }
+  .task-row > b { color: var(--fg-tertiary); font-family: var(--font-mono); font-weight: 500; }
+  .task-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-row small { margin-right: 5px; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; }
+  .task-row em { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; font-style: normal; }
+  .task-row[data-state='done'] { color: var(--fg-tertiary); }
+  .task-row[data-state='done'] > b { color: var(--st-ok); }
+  .task-row[data-state='running'] { margin: 1px 0; padding-right: 5px; padding-left: 5px; border-radius: 4px; background: color-mix(in srgb, var(--st-busy) 9%, transparent); color: var(--fg-primary); }
+  .task-row[data-state='running'] > b { color: var(--st-busy); }
+  .task-row[data-state='failed'] > b { color: var(--st-err); }
   .disclosure { align-self: start; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--fs-sm); }
   .handoff { height: 38px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding-left: 10px; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; letter-spacing: .04em; text-transform: uppercase; }
   .handoff-line { justify-self: center; width: 1px; height: 100%; background: var(--bd-default); }

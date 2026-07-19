@@ -8,6 +8,7 @@
   import type { RegistryFile, SpecOpsSession } from '../../lib/types.ts';
   import Icon from '../shared/Icon.svelte';
   import { shouldSubmitOnEnter } from '../../lib/ime.ts';
+  import { buildLaunchTasks, checklistProgress, type ChecklistProgress } from '../../lib/launch-tasks.ts';
 
   interface Props {
     source: string;
@@ -58,13 +59,6 @@
     created_by: string | null; quote: string; line_start: number | null; line_end: number | null;
   }
 
-  interface LaunchTask {
-    id: string;
-    title: string;
-    prompt: string;
-    verify: string[];
-  }
-
   type WorkflowStripState = 'done' | 'active' | 'waiting' | 'failed';
 
   interface WorkflowStripStep {
@@ -96,7 +90,14 @@
   let currentStatus = $derived(statusOverride ?? status);
   let deprecating = $state(false);
 
-  let workflow = $derived(buildWorkflowStrip(session, currentStatus));
+  let taskMarkdown = $derived(tasksSource ?? source);
+  let taskProgress = $derived(checklistProgress(taskMarkdown));
+  let displayStatus = $derived(
+    currentStatus === 'proposed' && taskProgress.completed > 0 && taskProgress.remaining > 0
+      ? 'in progress'
+      : currentStatus,
+  );
+  let workflow = $derived(buildWorkflowStrip(session, currentStatus, taskProgress));
   let workflowIndex = $derived.by(() => {
     const current = workflow.findIndex((step) => step.state === 'active' || step.state === 'failed');
     return current === -1 ? workflow.length : current;
@@ -107,10 +108,15 @@
   let testBlocks = $derived(blocks.filter((block) => block.kind === 'test_matrix').slice(0, 4));
   let decisions = $derived(session?.decisions ?? []);
   let requiredAction = $derived(session?.required_action ?? null);
-  let nextStep = $derived(describeNextStep(session));
-  let launchTasks = $derived(buildLaunchTasks(tasksSource ?? source, title, path));
+  let nextStep = $derived(describeNextStep(session, taskProgress));
+  let launchTasks = $derived(buildLaunchTasks(taskMarkdown, title, path));
   let canLaunchRun = $derived(session !== null && requiredAction?.kind === 'run_in_worktree');
-  let canLaunchStandalone = $derived(session === null && currentStatus === 'proposed' && path.replace(/\/+$/, '').startsWith('.specops/changes/'));
+  let canLaunchStandalone = $derived(
+    session === null
+      && currentStatus === 'proposed'
+      && launchTasks.length > 0
+      && path.replace(/\/+$/, '').startsWith('.specops/changes/'),
+  );
   let assurance = $derived($workspaceState?.assurance);
   let assuranceNode = $derived(assurance?.spec_graph.nodes.find((item) => item.path === path));
   let assuranceId = $derived(assuranceNode?.id ?? '');
@@ -120,7 +126,7 @@
   let assuranceImpact = $derived(assurance?.impact.find((item) => item.subject === assuranceId) ?? null);
   let assuranceRisk = $derived(assurance?.risk.find((item) => item.subject === assuranceId) ?? null);
 
-  function buildWorkflowStrip(current: SpecOpsSession | null, documentStatus: string): WorkflowStripStep[] {
+  function buildWorkflowStrip(current: SpecOpsSession | null, documentStatus: string, progress: ChecklistProgress): WorkflowStripStep[] {
     const groups = [
       { label: 'Intake', phases: ['clarify', 'analyze_request'] },
       { label: 'Plan', phases: ['plan_discussion', 'solution_options', 'plan_approved'] },
@@ -129,13 +135,22 @@
       { label: 'Review', phases: ['review'] },
       { label: 'Apply', phases: ['apply_patch', 'completed'] },
     ];
+    const partiallyImplemented = progress.completed > 0 && progress.remaining > 0;
     if (current === null) {
       if (documentStatus === 'completed' || documentStatus === 'archived') {
         return groups.map((group) => ({ label: group.label, state: 'done' }));
       }
+      if (partiallyImplemented) {
+        return groups.map((group, index) => ({ label: group.label, state: index < 2 ? 'done' : index === 2 ? 'active' : 'waiting' }));
+      }
       return groups.map((group, index) => ({ label: group.label, state: index === 0 ? 'done' : index === 1 ? 'active' : 'waiting' }));
     }
-    if (current.state === 'completed') return groups.map((group) => ({ label: group.label, state: 'done' }));
+    if (current.state === 'completed') {
+      if (partiallyImplemented) {
+        return groups.map((group, index) => ({ label: group.label, state: index < 2 ? 'done' : index === 2 ? 'active' : 'waiting' }));
+      }
+      return groups.map((group) => ({ label: group.label, state: 'done' }));
+    }
     const phase = current.workflow?.current_phase ?? current.phase ?? '';
     const activeIndex = groups.findIndex((group) => group.phases.includes(phase));
     const safeIndex = activeIndex === -1 ? 0 : activeIndex;
@@ -244,45 +259,6 @@
     } finally {
       tasksLoading = false;
     }
-  }
-
-  function buildLaunchTasks(markdown: string, docTitle: string, docPath: string): LaunchTask[] {
-    const tasks: LaunchTask[] = [];
-    const lines = markdown.replaceAll('\r\n', '\n').split('\n');
-    for (const line of lines) {
-      const match = /^\s*[-*]\s+(?:\[[ xX]\]\s*)?(.+?)\s*$/.exec(line);
-      if (match === null) continue;
-      const rawTitle = (match[1] ?? '').replace(/`/g, '').trim();
-      if (rawTitle.length < 4) continue;
-      if (/^(scope|out of scope|notes?|验收|测试|风险)[:：]?$/i.test(rawTitle)) continue;
-      const id = `task-${tasks.length + 1}`;
-      tasks.push({
-        id,
-        title: rawTitle.slice(0, 120),
-        prompt: [
-          `Implement task: ${rawTitle}`,
-          '',
-          `SpecOps document: ${docPath}`,
-          '',
-          'Follow the proposal/design/tasks documents in this change folder. Keep changes scoped to the requested task and update tests when needed.',
-        ].join('\n'),
-        verify: [],
-      });
-      if (tasks.length >= 8) break;
-    }
-    if (tasks.length > 0) return tasks;
-    return [{
-      id: 'task-1',
-      title: `Implement ${docTitle}`,
-      prompt: [
-        `Implement the SpecOps change: ${docTitle}`,
-        '',
-        `SpecOps document: ${docPath}`,
-        '',
-        markdown.slice(0, 4000),
-      ].join('\n'),
-      verify: [],
-    }];
   }
 
   function slug(value: string): string {
@@ -569,7 +545,10 @@
     activeModule.set('chat');
   }
 
-  function describeNextStep(current: SpecOpsSession | null): string {
+  function describeNextStep(current: SpecOpsSession | null, progress: ChecklistProgress): string {
+    if (progress.completed > 0 && progress.remaining > 0 && (current === null || current.state === 'completed')) {
+      return `${progress.completed} of ${progress.total} tasks are complete. Launch the ${progress.remaining} remaining task${progress.remaining === 1 ? '' : 's'} in a new isolated run.`;
+    }
     if (current === null) return 'No live SpecOps session is attached to this document yet.';
     const action = current.required_action;
     if (action?.kind === 'answer') return 'Choose an answer here; SpecOps will send it back to the agent and continue the same workflow.';
@@ -604,7 +583,7 @@
       <h1>{title}</h1>
     </div>
     <div class="page-actions">
-      <span class="status">{currentStatus}</span>
+      <span class="status">{displayStatus}</span>
       {#if !['deprecated', 'cancelled', 'archived'].includes(currentStatus)}
         <button type="button" class="danger deprecate" disabled={deprecating} onclick={deprecateDocument}>
           {deprecating ? 'Closing…' : documentClass === 'normative' ? 'Deprecate spec' : 'Cancel work item'}
@@ -833,7 +812,7 @@
         <span>Launch run</span>
         <strong>{launchTasks.length} task{launchTasks.length === 1 ? '' : 's'} ready</strong>
       </div>
-      <p class="action-prompt">This proposed change has no live SpecOps session attached. Launching will create one and run the tasks in an isolated worktree.</p>
+      <p class="action-prompt">{nextStep} Launching will create a session and run only the unchecked tasks in an isolated worktree.</p>
       {#if tasksLoading}
         <p class="action-muted">Loading tasks.md…</p>
       {/if}

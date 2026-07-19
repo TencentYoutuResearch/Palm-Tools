@@ -129,6 +129,25 @@ describe('Run worktree isolation', () => {
     await cleanupRun(run)
   })
 
+  test('rejects an incidental rewrite of the workspace control config', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [{ id: 'task-1', title: 'Build the UI', prompt: 'Implement the React interface', verify: [] }], 'codebuddy', 'HEAD', cache)
+    await writeFile(path.join(run.worktree_path, 'specops.toml'), '[specops]\nschema_version = 2\n')
+
+    await expect(collectRunPatch(run)).rejects.toMatchObject({ code: 'protected_control_file_modified' })
+    await cleanupRun(run)
+  })
+
+  test('allows an explicit task to update the workspace control config', async () => {
+    const { workspace, cache } = await fixture()
+    const run = await createRun(workspace, [{ id: 'task-1', title: 'Update specops.toml', prompt: 'Add the requested verify command to specops.toml', verify: [] }], 'codebuddy', 'HEAD', cache)
+    const original = await readFile(path.join(run.worktree_path, 'specops.toml'), 'utf8')
+    await writeFile(path.join(run.worktree_path, 'specops.toml'), `${original}\n[verify.extra]\ncommand = ["true"]\n`)
+
+    await expect(collectRunPatch(run)).resolves.toMatchObject({ files: expect.arrayContaining(['specops.toml']) })
+    await cleanupRun(run)
+  })
+
   test('streams patches larger than the former execFile stdout buffer', async () => {
     const { workspace, cache } = await fixture()
     const run = await createRun(workspace, [{ id: 'task-1', title: 'Large output', prompt: 'Add large.txt', verify: [] }], 'codebuddy', 'HEAD', cache)

@@ -39,6 +39,14 @@ describe('skill-driven intake', () => {
     expect(LANGUAGE_DIRECTIVE).toMatch(/Do not translate the user request/i)
   })
 
+  test('prompts distinguish normative and work-item statuses and use a ready handoff', () => {
+    const prompt = buildIntakePrompt('Document the session lifecycle', 'intake-status')
+    expect(prompt).toContain('normative documents use status `draft`')
+    expect(prompt).toContain('work_item documents use status `proposed`')
+    expect(prompt).toContain('Never use `proposed` for a normative document')
+    expect(prompt).toContain('status `ready`')
+  })
+
   test('validates a multi-document receipt', async () => {
     const { parseIntakeReceipt } = await import('../src/domain/intake.js')
     const receipt = parseIntakeReceipt(JSON.stringify({
@@ -53,6 +61,18 @@ describe('skill-driven intake', () => {
     }), 'intake-123')
     expect(receipt.documents).toHaveLength(2)
     expect(receipt.primary).toBe('.specops/changes/feature/search.md')
+  })
+
+  test('accepts a ready receipt for server-side finalization', async () => {
+    const { parseIntakeReceipt } = await import('../src/domain/intake.js')
+    const receipt = parseIntakeReceipt(JSON.stringify({
+      schema_version: 1,
+      intake_id: 'intake-ready',
+      status: 'ready',
+      primary: '.specops/specs/session-lifecycle.md',
+      documents: ['.specops/specs/session-lifecycle.md'],
+    }), 'intake-ready')
+    expect(receipt.status).toBe('ready')
   })
 
   test('checkProposal passes when all required sections exist', async () => {

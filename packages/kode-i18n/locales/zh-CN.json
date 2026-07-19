@@ -351,6 +351,13 @@
   "specops.settings.hidePreview": { "message": "收起预览" },
   "specops.settings.backend": { "message": "Backend" },
   "specops.settings.model": { "message": "模型覆盖" },
+  "specops.settings.refreshModels": { "message": "刷新可用模型" },
+  "specops.settings.detectingModels": { "message": "正在探测可用模型…" },
+  "specops.settings.modelsDetected": { "message": "个可用模型" },
+  "specops.settings.defaultModel": { "message": "默认" },
+  "specops.settings.customModelFallback": { "message": "探测不可用时可直接输入模型 ID" },
+  "specops.settings.customModel": { "message": "自定义模型…" },
+  "specops.settings.modelId": { "message": "模型 ID" },
   "specops.settings.inheritDefault": { "message": "继承默认配置" },
   "specops.settings.builtinDefault": { "message": "内置回退（codebuddy）" },
   "specops.settings.backendDefault": { "message": "Backend 默认模型" },
@@ -360,5 +367,6 @@
   "specops.settings.saving": { "message": "保存中…" },
   "specops.settings.saved": { "message": "Agent 配置已保存到 specops.toml。" },
   "specops.settings.unsaved": { "message": "工作区配置尚未保存" },
-  "specops.settings.synced": { "message": "已与 specops.toml 同步" }
+  "specops.settings.synced": { "message": "已与 specops.toml 同步" },
+  "specops.rail.profiles": { "message": "配置" }
 }

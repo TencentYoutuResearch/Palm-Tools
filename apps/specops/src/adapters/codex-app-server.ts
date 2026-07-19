@@ -22,6 +22,7 @@ import {
   type TransportEventListener,
   type TransportExecutionEvent,
 } from '../execution/types.js'
+import type { DiscoveredModel } from '../domain/model-discovery.js'
 
 export interface CodexAppServerTransportOptions {
   cwd: string
@@ -137,6 +138,31 @@ export class CodexAppServerTransport implements AgentExecutionTransport {
         modes: ['default', 'plan', 'acceptEdits', 'full-auto', 'bypassPermissions'],
       },
     }
+  }
+
+  async listModels(): Promise<DiscoveredModel[]> {
+    await this.ensureInitialized()
+    const models: DiscoveredModel[] = []
+    let cursor: string | undefined
+    do {
+      const params: Record<string, unknown> = { includeHidden: false }
+      if (cursor !== undefined) params.cursor = cursor
+      const result = recordResult(await this.rpc.request('model/list', params), 'model/list')
+      const data = Array.isArray(result.data) ? result.data : []
+      for (const value of data) {
+        if (!isRecord(value)) continue
+        const id = firstString(value.model, value.id)
+        if (id === undefined) continue
+        models.push({
+          id,
+          label: firstString(value.displayName, value.name) ?? id,
+          ...(typeof value.description === 'string' && value.description !== '' ? { description: value.description } : {}),
+          is_default: value.isDefault === true,
+        })
+      }
+      cursor = firstString(result.nextCursor)
+    } while (cursor !== undefined)
+    return models
   }
 
   async start(input: ExecutionStartInput): Promise<ExecutionSession> {

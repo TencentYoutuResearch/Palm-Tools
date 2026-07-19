@@ -33,22 +33,25 @@
 
   <div class="rail-foot">
     <button
-      class="rail-tool"
+      class="rail-item rail-settings"
       class:active={$activeModule === 'settings'}
       onclick={() => activeModule.set('settings')}
       aria-label={t('specops.settings.agents')}
       title={t('specops.settings.agents')}
     >
-      <Icon name="settings" size={16} />
+      <span class="icon-wrap"><Icon name="settings" size={19} /></span>
+      <span class="label">{t('specops.rail.profiles')}</span>
     </button>
-    <button
-      class="rail-tool"
-      onclick={() => theme.set(cycleTheme($theme))}
-      aria-label={t('specops.rail.theme')}
-      title={t('specops.rail.theme')}
-    >
-      <Icon name="theme" size={16} />
-    </button>
+    <div class="theme-slot">
+      <button
+        class="rail-tool"
+        onclick={() => theme.set(cycleTheme($theme))}
+        aria-label={t('specops.rail.theme')}
+        title={t('specops.rail.theme')}
+      >
+        <Icon name="theme" size={16} />
+      </button>
+    </div>
   </div>
 </nav>
 
@@ -127,14 +130,23 @@
   }
   .rail-foot {
     margin-top: auto;
-    padding: var(--sp-1);
+    padding: var(--sp-1) var(--sp-1) 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .rail-settings {
+    width: 100%;
+  }
+  .theme-slot {
     display: flex;
     justify-content: center;
-    gap: 2px;
+    padding-top: 6px;
+    border-top: 1px solid var(--bd-muted);
   }
   .rail-tool {
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -147,10 +159,5 @@
   .rail-tool:hover {
     background: var(--bg-tab-hover);
     color: var(--fg-primary);
-  }
-  .rail-tool.active {
-    background: var(--acc-soft);
-    color: var(--acc);
-    border-color: color-mix(in srgb, var(--acc) 30%, transparent);
   }
 </style>

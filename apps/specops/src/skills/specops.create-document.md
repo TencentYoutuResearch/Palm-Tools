@@ -29,7 +29,7 @@ Content-Type: application/json
   - Example: `2026-06-21-fix-session-char-loss`
 - **title** (required): non-empty string, 5-10 words describing the intent
 - **body** (required): markdown content after the YAML frontmatter
-- **status** (required): `active` for specs, `proposed` for changes
+- **status** (required): `draft` for new normative specs, `proposed` for work-item changes. Never use `proposed` with `document_class: normative`.
 
 ## Classification → Kind Mapping
 

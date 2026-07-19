@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 import { initWorkspace } from '../src/domain/commands.js'
 import { startServer, type ServeHandle, type ServeOptions, type SpecOpsExecutionRuntime } from '../src/server/index.js'
-import { cleanupRun, readRun, transitionRun } from '../src/domain/run.js'
+import { cleanupRun, createRun, readRun, transitionRun } from '../src/domain/run.js'
 import { attachSessionAgent, createSpecOpsSession, readSpecOpsSession, updateSpecOpsSession } from '../src/domain/session.js'
 import { enqueueInteraction } from '../src/domain/interactions.js'
 import { parseDocument } from '../src/domain/spec.js'
@@ -258,6 +258,44 @@ describe('SpecOps server', () => {
       } }),
     }))
     expect(invalid.status).toBe(400)
+  })
+
+  test('serves cached backend model discovery and supports explicit refresh', async () => {
+    const workspace = await gitWorkspace(); cleanup.push(workspace)
+    await initWorkspace(workspace)
+    let calls = 0
+    const modelDiscovery = {
+      discover: async (backend: string, refresh = false) => {
+        calls += 1
+        return {
+          backend, source: 'codex-app-server' as const, version: refresh ? '2-refresh' : '2', custom_allowed: true,
+          models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol', is_default: true }],
+        }
+      },
+    }
+    const server = await startTestServer({ workspace, token: 'test-token', modelDiscovery })
+    const loaded = await fetch(`${server.origin}/api/settings/models/codex`, auth(server))
+    expect(loaded.status).toBe(200)
+    expect(await loaded.json()).toMatchObject({ backend: 'codex', models: [{ id: 'gpt-5.6-sol' }] })
+    const refreshed = await fetch(`${server.origin}/api/settings/models/codex?refresh=1`, auth(server))
+    expect(refreshed.status).toBe(200)
+    expect(await refreshed.json()).toMatchObject({ version: '2-refresh' })
+    expect(calls).toBe(2)
+  })
+
+  test('returns a structured model discovery failure without breaking settings', async () => {
+    const workspace = await gitWorkspace(); cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const server = await startTestServer({
+      workspace, token: 'test-token',
+      modelDiscovery: { discover: async () => { throw new Error('backend probe unavailable') } },
+    })
+    const response = await fetch(`${server.origin}/api/settings/models/claude`, auth(server))
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({
+      error: 'model_discovery_failed', backend: 'claude', detail: 'backend probe unavailable',
+    })
+    expect((await fetch(`${server.origin}/api/settings/agents`, auth(server))).status).toBe(200)
   })
 
   test('rejects a wrong origin', async () => {
@@ -738,6 +776,38 @@ describe('SpecOps server', () => {
     await cleanupRun(await readRun(workspace, created.run.run_id))
   })
 
+  test('document launch resolves change_id from proposal when the client omits it', async () => {
+    const workspace = await gitWorkspace()
+    const cache = await mkdtemp(path.join(os.tmpdir(), 'specops-server-cache-'))
+    cleanup.push(workspace, cache)
+    await initWorkspace(workspace)
+    const changeId = 'feature/linked-document-run'
+    const changeDir = path.join(workspace, '.specops', 'changes', changeId)
+    await mkdir(changeDir, { recursive: true })
+    await writeFile(path.join(changeDir, 'proposal.md'), [
+      '---', 'schema_version: 2', `id: ${changeId}`, 'kind: feature', 'document_class: work_item',
+      'work_type: feature', 'title: Linked document run', 'status: proposed', 'targets: []', '---',
+      '# Linked document run', '## Motivation', 'Keep the run linked.', '## Scope', 'Test linkage.',
+      '## Acceptance criteria', '- [ ] Run is linked', '## Out of scope', 'Other behavior.', '',
+    ].join('\n'))
+    await gitCommit(workspace, 'Add linked proposal\n\nFeature: LINK-1')
+    const server = await startTestServer({ workspace, token: 'test-token', runCacheRoot: cache })
+
+    const response = await fetch(`${server.origin}/api/runs`, auth(server, {
+      method: 'POST',
+      body: JSON.stringify({
+        backend_key: 'codebuddy',
+        document_path: `.specops/changes/${changeId}`,
+        tasks: [{ id: 'task-1', title: 'Finish linkage', prompt: 'Finish linkage', verify: [] }],
+      }),
+    }))
+    expect(response.status).toBe(201)
+    const created = await response.json() as { run: { run_id: string; change_id: string | null } }
+    expect(created.run.change_id).toBe(changeId)
+    expect((await readRun(workspace, created.run.run_id)).change_id).toBe(changeId)
+    await cleanupRun(await readRun(workspace, created.run.run_id))
+  })
+
   test('quick-run creates a document and launches a run in one call', async () => {
     const workspace = await gitWorkspace()
     const cache = await mkdtemp(path.join(os.tmpdir(), 'specops-server-cache-'))
@@ -817,6 +887,48 @@ describe('SpecOps server', () => {
     await cleanupRun(await readRun(workspace, created.run.run_id))
   })
 
+  test('session reconciliation clears a stale monitor-missing resume when execution is live', async () => {
+    const workspace = await gitWorkspace()
+    const cache = await mkdtemp(path.join(os.tmpdir(), 'specops-server-cache-'))
+    cleanup.push(workspace, cache)
+    await initWorkspace(workspace)
+    await gitCommit(workspace, 'Bootstrap\n\nBug: INIT-1')
+    const run = await createRun(
+      workspace,
+      [{ id: 'task-1', title: 'Implement feature', prompt: 'Implement it', verify: [] }],
+      'codebuddy', 'HEAD', cache,
+    )
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Live run', backend_key: 'codebuddy', run_id: run.run_id, phase: 'run_in_worktree', state: 'awaiting_user',
+    })
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      record.execution.last_error = 'Running Run has no live stage monitor/execution; explicit resume is required.'
+      enqueueInteraction(record, {
+        kind: 'resume', source: 'reconciliation', idempotency_key: `resume:${run.run_id}:task-1:0:monitor_missing`,
+        payload: { reason: 'run_monitor_missing', prompt: 'Resume task-1.' },
+      })
+    })
+    const runtime = new FakeExecutionRuntime()
+    const identity = await runtime.start({
+      workspace, sessionId: session.id, runId: run.run_id, purpose: 'implement', backendKey: 'codebuddy', cwd: run.worktree_path,
+    })
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      const agent = record.agents.find((item) => item.execution_id === identity.execution_id)
+      if (agent !== undefined) agent.status = 'running'
+    })
+    const server = await startTestServer({ workspace, token: 'test-token', runCacheRoot: cache }, runtime)
+
+    expect((await fetch(`${server.origin}/api/sessions`, auth(server))).status).toBe(200)
+    const reconciled = await readSpecOpsSession(workspace, session.id)
+    expect(reconciled.state).toBe('active')
+    expect(reconciled.required_action).toBeNull()
+    expect(reconciled.execution.last_error).toBeNull()
+    expect(reconciled.interactions?.find((item) => item.kind === 'resume')).toMatchObject({
+      status: 'cancelled', response: { reason: 'monitor_restored' },
+    })
+    await cleanupRun(run)
+  })
+
   test('session list recovers a failed intake when its completed receipt exists', async () => {
     const workspace = await gitWorkspace()
     cleanup.push(workspace)
@@ -856,6 +968,78 @@ describe('SpecOps server', () => {
     expect(recovered.state).toBe('awaiting_user')
     expect(recovered.required_action).toMatchObject({ kind: 'run_in_worktree' })
     expect(recovered.document_path).toBe(`.specops/changes/${changeId}`)
+  })
+
+  test('invalid ready intake creates one repair action, resumes with the validation error, and recovers', async () => {
+    const workspace = await gitWorkspace()
+    cleanup.push(workspace)
+    await initWorkspace(workspace)
+    const specPath = '.specops/specs/intake-recovery.md'
+    const absoluteSpecPath = path.join(workspace, specPath)
+    await mkdir(path.dirname(absoluteSpecPath), { recursive: true })
+    const spec = (status: string) => [
+      '---', 'schema_version: 2', 'id: intake-recovery', 'kind: spec', 'document_class: normative',
+      'spec_type: policy', 'title: Intake recovery process', `status: ${status}`, '---',
+      '# Intake recovery process', '', 'Invalid intake documents must remain recoverable.', '',
+    ].join('\n')
+    await writeFile(absoluteSpecPath, spec('proposed'))
+    const receiptId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const receiptPath = path.join(workspace, '.specops', 'state', 'intakes', `${receiptId}.json`)
+    await mkdir(path.dirname(receiptPath), { recursive: true })
+    await writeFile(receiptPath, `${JSON.stringify({
+      schema_version: 1,
+      intake_id: receiptId,
+      status: 'ready',
+      primary: specPath,
+      documents: [specPath],
+    })}\n`)
+    const session = await createSpecOpsSession(workspace, {
+      title: 'Recover invalid intake', backend_key: 'codebuddy', phase: 'analyze_request', state: 'created',
+      intake_receipt_id: receiptId,
+      transcript: [{ role: 'agent', text: `Intake ready: .specops/state/intakes/${receiptId}.json`, at: new Date().toISOString() }],
+    })
+    const runtime = new FakeExecutionRuntime()
+    await runtime.start({ workspace, sessionId: session.id, purpose: 'intake', backendKey: 'codebuddy', cwd: workspace })
+    const server = await startTestServer({ workspace, token: 'test-token' }, runtime)
+
+    expect((await fetch(`${server.origin}/api/sessions`, auth(server))).status).toBe(200)
+    let failed = await readSpecOpsSession(workspace, session.id)
+    expect(failed.state).toBe('awaiting_user')
+    expect(failed.required_action).toMatchObject({ kind: 'resume', reason: 'intake_finalization_failed' })
+    expect(failed.execution.last_error).toContain('status is invalid for normative')
+    expect(failed.document_path).toBe(specPath)
+
+    // Reconciliation polling must not enqueue duplicate repair cards.
+    expect((await fetch(`${server.origin}/api/sessions`, auth(server))).status).toBe(200)
+    failed = await readSpecOpsSession(workspace, session.id)
+    expect(failed.interactions?.filter((item) => item.kind === 'resume' && item.status === 'pending')).toHaveLength(1)
+
+    const resumed = await fetch(`${server.origin}/api/sessions/${session.id}/action`, auth(server, {
+      method: 'POST', body: JSON.stringify({ kind: 'resume' }),
+    }))
+    expect(resumed.status).toBe(200)
+    expect(runtime.prompts.at(-1)?.input.text).toContain('Validation error:')
+    expect(runtime.prompts.at(-1)?.input.text).toContain('Normative schema-v2 documents')
+    const active = await readSpecOpsSession(workspace, session.id)
+    expect(active.state).toBe('active')
+    expect(active.required_action).toBeNull()
+
+    await writeFile(absoluteSpecPath, spec('draft'))
+    await updateSpecOpsSession(workspace, session.id, (record) => {
+      const current = record.agents.find((item) => item.execution_id === record.current_execution?.execution_id)
+      if (current !== undefined) current.status = 'ready'
+      // A successful repair turn clears this transient diagnostic before the
+      // receipt reconciler runs; document_path + null error must not be
+      // mistaken for a finalized intake.
+      record.execution.last_error = null
+    })
+    expect((await fetch(`${server.origin}/api/sessions`, auth(server))).status).toBe(200)
+    const recovered = await readSpecOpsSession(workspace, session.id)
+    expect(recovered.state).toBe('completed')
+    expect(recovered.phase).toBe('completed')
+    expect(recovered.execution.last_error).toBeNull()
+    expect(recovered.document_path).toBe(specPath)
+    expect(JSON.parse(await readFile(receiptPath, 'utf8'))).toMatchObject({ status: 'completed' })
   })
 
   test('intake analyzes in the primary workspace and writes the classified document without a run', async () => {
