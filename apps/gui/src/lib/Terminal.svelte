@@ -53,6 +53,12 @@
   let containerEl: HTMLDivElement
   let term: any = null
   let fitAddon: any = null
+  // WKWebView 会限制同一页面可同时持有的 WebGL context 数。所有常驻 tab 都
+  // load WebglAddon 时,较早的 context 会被浏览器回收;addon 虽会 fallback 到
+  // DOM renderer,但 WKWebView 下该降级路径可能把 true-color 字形画成默认前景色。
+  // 因此只允许当前可见 tab 持有 WebGL,后台 tab 仍持续解析/保存 PTY 字节。
+  let webglAddon: any = null
+  let webglLoadGeneration = 0
   let destroyed = false
 
   // 字体设置:从 localStorage 恢复;所有 Terminal 实例共享同一组设置。
@@ -201,20 +207,10 @@
     term.open(containerEl)
     if (destroyed || !term) return
 
-    // 3) WebGL 优先,失败 fallback canvas/DOM(默认 dom renderer)。
+    // 3) 只给当前可见 tab 装 WebGL。后台 tab 常驻但不能各占一个 context,
+    //    否则 WKWebView 达到上限后会随机回收较早 tab 的 context并触发丢色。
     //    必须在 open() **之后**装,理由见上面的注释。
-    try {
-      const { WebglAddon } = await import('@xterm/addon-webgl')
-      if (destroyed || !term) return
-      const wg = new WebglAddon()
-      // 万一上下文丢失也安全降级
-      wg.onContextLoss(() => {
-        try { wg.dispose() } catch {}
-      })
-      term.loadAddon(wg)
-    } catch (e) {
-      console.warn('[term] WebGL addon failed, falling back:', e)
-    }
+    if (visible) await setWebglActive(true)
 
     // IME-fix #5887 —— 豆包 / 搜狗中文输入法**英文模式**连续打字丢第二个字符
     // 上游 issue: https://github.com/xtermjs/xterm.js/issues/5887
@@ -545,45 +541,45 @@
     // capture phase = 在 xterm 自己的 keydown 之前跑;阻断后 xterm 也不再处理
     containerEl.addEventListener('keydown', onKeyCapture, { capture: true })
 
-    // 5) 先把当前 vt100 屏幕快照打回来,这样切换不丢画面
-    //    (对刚 spawn 的 session,snapshot 是空的,无副作用)
+    // 5) 原子订阅 PTY 字节流,并先回放 spawn 至今积累的原始字节。
     //
-    //    注意:term.write 是异步的(内部 writeBuffer queue),scrollToBottom 必须
-    //    在 write 的 callback 里调,否则会先滚底再写入 → viewport 又被推回顶部。
-    try {
-      const snap = await ipc.getScreenSnapshot(sessionId)
-      if (destroyed || !term) return
-      if (snap.length > 0) {
-        await new Promise<void>((resolve) => {
-          term.write(snap, () => {
-            try { term.scrollToBottom() } catch {}
-            resolve()
-          })
-        })
-        // snapshot 写完后强制 repairViewport —— 覆盖"看见刷新过程"后切走再切回
-        // 的场景:snapshot 写入会改变 buffer 长度,触发 syncScrollArea,但若容器尺寸
-        // 在 initTerminal 时未完全稳定,_lastRecordedViewportHeight 可能仍是旧值。
-        // 此处主动重置让下次 syncScrollArea 短路必然失败。
-        queueViewportRepair(true)
-      }
-    } catch (e) {
-      console.warn('[term] snapshot failed', e)
-    }
-
-    // 6) 订阅字节流;后端已经做了 ~8ms coalesce
-    bytesUnsubscribe = await ipc.subscribeSessionBytes(sessionId, (bytes) => {
+    //    为什么不用 vt100 snapshot:如果切点恰好位于半条 ANSI/OSC 序列中,
+    //    snapshot 无法携带 parser 的中间状态,会偶发丢颜色/样式。原始字节则能
+    //    完整重放 startup scrollback 和所有终端控制序列。
+    //
+    //    channel 在 invoke 返回后就可能收到实时消息;ipc 层会先排队。必须等
+    //    initialBytes 写完再 start,确保 xterm 看到的字节顺序与 PTY 完全一致。
+    const byteSubscription = await ipc.subscribeSessionBytes(sessionId, (bytes) => {
       if (destroyed || !term) return
       term.write(bytes)
       if (visible) queueViewportRepair(false)
     })
     if (destroyed || !term) {
-      const unsubscribe = bytesUnsubscribe
-      bytesUnsubscribe = null
-      await unsubscribe?.().catch((e) => console.warn('[term] unsubscribe bytes failed', e))
+      await byteSubscription.unsubscribe().catch((e) => console.warn('[term] unsubscribe bytes failed', e))
       return
     }
+    bytesUnsubscribe = byteSubscription.unsubscribe
+    try {
+      if (byteSubscription.initialBytes.length > 0) {
+        await new Promise<void>((resolve) => {
+          term.write(byteSubscription.initialBytes, () => {
+            try { term.scrollToBottom() } catch {}
+            resolve()
+          })
+        })
+        // 初始字节写完后强制 repairViewport:大量 startup 输出会改变 buffer 长度,
+        // 触发 syncScrollArea,但若容器尺寸
+        // 在 initTerminal 时未完全稳定,_lastRecordedViewportHeight 可能仍是旧值。
+        // 此处主动重置让下次 syncScrollArea 短路必然失败。
+        queueViewportRepair(true)
+      }
+    } catch (e) {
+      console.warn('[term] initial PTY replay failed', e)
+    } finally {
+      byteSubscription.start()
+    }
 
-    // 7) 把当前 cols/rows 同步给 PTY —— 但只有 fit 出健康尺寸时才发,
+    // 6) 把当前 cols/rows 同步给 PTY —— 但只有 fit 出健康尺寸时才发,
     //    否则交给后续 ResizeObserver 触发(scheduleResize 内部也有最小尺寸守卫)。
     if (term.cols >= MIN_COLS && term.rows >= MIN_ROWS) {
       await ipc.resizeSession(sessionId, term.cols, term.rows, endpointId)
@@ -592,14 +588,14 @@
       scheduleResize(true)
     }
 
-    // 8) ResizeObserver + debounce 50ms
+    // 7) ResizeObserver + debounce 50ms
     resizeObserver = new ResizeObserver(() => scheduleResize())
     resizeObserver.observe(containerEl)
 
-    // 9) HiDPI 切显示器:监听 devicePixelRatio 变化
+    // 8) HiDPI 切显示器:监听 devicePixelRatio 变化
     setupDprWatcher()
 
-    // 10) Cmd+Click 路径 / URL 识别 —— registerLinkProvider
+    // 9) Cmd+Click 路径 / URL 识别 —— registerLinkProvider
     //
     // ── 坐标约定(xterm 5.x 源码确认) ──────────────────────────────────
     // • provideLinks(bufferedRowIndex, cb): bufferedRowIndex 是 1-based buffer
@@ -1439,6 +1435,7 @@
 
   onDestroy(() => {
     destroyed = true
+    webglLoadGeneration++
     resizeObserver?.disconnect()
     if (resizeTimer != null) clearTimeout(resizeTimer)
     if (viewportRepairRaf != null) cancelAnimationFrame(viewportRepairRaf)
@@ -1452,6 +1449,7 @@
     terminalSettingsUnsubscribe?.()
     if (_onWheelFallback) containerEl?.removeEventListener('wheel', _onWheelFallback, { capture: true })
     bytesUnsubscribe?.().catch((e) => console.warn('[term] unsubscribe bytes failed', e))
+    disposeWebgl()
     try {
       term?.dispose()
     } catch {}
@@ -1459,6 +1457,37 @@
     fitAddon = null
     searchAddon = null
   })
+
+  function disposeWebgl() {
+    const addon = webglAddon
+    webglAddon = null
+    if (!addon) return
+    try { addon.dispose() } catch {}
+  }
+
+  async function setWebglActive(active: boolean) {
+    const generation = ++webglLoadGeneration
+    if (!active) {
+      disposeWebgl()
+      return
+    }
+    if (destroyed || !term || webglAddon) return
+    try {
+      const { WebglAddon } = await import('@xterm/addon-webgl')
+      if (destroyed || !term || !visible || generation !== webglLoadGeneration) return
+      const addon = new WebglAddon()
+      addon.onContextLoss(() => {
+        // context loss 后立即释放并回到 xterm 原生 renderer。下一次 tab 激活会
+        // 再尝试创建;正常情况下 active-only 策略不会再撞 context 上限。
+        if (webglAddon === addon) disposeWebgl()
+      })
+      term.loadAddon(addon)
+      webglAddon = addon
+      term.refresh(0, term.rows - 1)
+    } catch (e) {
+      console.warn('[term] WebGL addon failed, falling back:', e)
+    }
+  }
 
   // 父组件 visible 变化时调一下 fit(从隐藏切回显示后,字号可能变了)。
   // 传 stickToBottom=true:fit 完成后强制把 viewport 推回底部。
@@ -1476,6 +1505,7 @@
   // 常规切换路径每次执行 —— 来回切 tab 会累积成明显卡顿。已移除;上面两道防线
   // 已能覆盖绝大多数 scroll-area 高度不同步的场景。
   $effect(() => {
+    void setWebglActive(visible)
     if (visible) {
       try { term?.focus?.() } catch {}
       scheduleResize(true)

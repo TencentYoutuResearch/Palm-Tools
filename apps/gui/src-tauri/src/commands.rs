@@ -592,26 +592,34 @@ fn resolve_session_cwd(explicit: Option<&str>, state: &AppState) -> std::path::P
 }
 
 /// 前端订阅某个 session 的字节流。
+///
+/// 返回 spawn 至订阅建立前积累的原始 PTY 字节。`pending` 的取出与 channel 安装
+/// 在同一把锁内完成,因此其后的字节只会进入新 channel,不存在 snapshot → live
+/// 之间的丢包窗口。前端必须先回放返回值,再消费订阅建立期间排队的 channel 消息。
 #[tauri::command]
 pub async fn subscribe_session_bytes(
     id: SessionId,
     on_bytes: Channel<Vec<u8>>,
+    subscription_id: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     let mut g = state.ctx.byte_buffers.lock();
     let buf = g.entry(id).or_insert_with(SessionByteBuffer::new);
+    let initial = buf.take_initial_bytes();
     buf.channel = Some(on_bytes);
-    Ok(())
+    buf.subscriber_id = Some(subscription_id);
+    Ok(initial)
 }
 
 /// 前端 Terminal 组件销毁时取消字节流订阅。
 #[tauri::command]
 pub async fn unsubscribe_session_bytes(
     id: SessionId,
+    subscription_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     if let Some(buf) = state.ctx.byte_buffers.lock().get_mut(&id) {
-        buf.channel = None;
+        buf.unsubscribe_if_current(&subscription_id);
     }
     Ok(())
 }
@@ -814,9 +822,9 @@ pub async fn get_screen_snapshot(
     // 等模式的 enable 序列,否则 tab 切换重建 xterm 后这些模式会丢(鼠标移动变文本选择)。
     let bytes = s.screen_snapshot_bytes();
     drop(g);
-    if let Some(buf) = state.ctx.byte_buffers.lock().get_mut(&id) {
-        buf.pending.clear();
-    }
+    // 这里只做只读快照,绝不能清 pending。清理动作与实时订阅不在同一个临界区时,
+    // 会把快照生成后刚到达的 ANSI/文本字节一起删掉。Terminal 首次挂载改由
+    // subscribe_session_bytes 原子取走原始 pending,本命令仅保留给诊断/兼容调用。
     // UTF-8 加固:screen_snapshot_bytes 应始终返回合法 UTF-8(vt100 cell contents
     // 是纯文本),但若因 bug 产生非法字节,from_utf8_lossy 会静默替换为 U+FFFD。
     // 这里先做严格校验,失败时记录 warning 再 fallback 到 lossy 转换。

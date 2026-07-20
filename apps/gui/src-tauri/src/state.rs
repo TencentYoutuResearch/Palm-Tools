@@ -33,6 +33,9 @@ pub struct SessionByteBuffer {
     pub pending: Vec<u8>,
     /// 前端订阅的 channel(如有,channel 在 subscribe_session_bytes 命令里设置)
     pub channel: Option<Channel<Vec<u8>>>,
+    /// 当前订阅的唯一 id。组件销毁时只允许取消自己创建的订阅,避免旧组件的
+    /// 异步 unsubscribe 晚到一步,把刚挂载的新 Terminal channel 清掉。
+    pub subscriber_id: Option<String>,
     /// 上次发送时末尾截断的 UTF-8 字节(防御纵深:确保 xterm.js 不收到不完整序列)
     pub utf8_remnant: Vec<u8>,
 }
@@ -42,8 +45,39 @@ impl SessionByteBuffer {
         Self {
             pending: Vec::with_capacity(16 * 1024),
             channel: None,
+            subscriber_id: None,
             utf8_remnant: Vec::with_capacity(8),
         }
+    }
+
+    /// 首次订阅时取走 spawn 至今积累的原始 PTY 字节。
+    ///
+    /// 不能在这里改用 vt100 screen snapshot:快照只包含已经落到 cell 上的状态,
+    /// 如果 PTY chunk 恰好截在半条 ANSI/OSC 序列中,parser 内部的中间状态无法被
+    /// `contents_formatted()` 序列化,后续半条序列就会失去前缀。直接回放原始字节
+    /// 能完整保留颜色、样式、光标和 startup scrollback。
+    pub fn take_initial_bytes(&mut self) -> Vec<u8> {
+        if !self.utf8_remnant.is_empty() {
+            let mut merged = std::mem::take(&mut self.utf8_remnant);
+            merged.append(&mut self.pending);
+            self.pending = merged;
+        }
+
+        let (complete, remnant) = kode_core::session::split_at_complete_utf8(&self.pending);
+        let initial = complete.to_vec();
+        self.utf8_remnant = remnant;
+        self.pending.clear();
+        initial
+    }
+
+    /// 只取消调用方自己创建的订阅。返回是否真的清掉了当前 channel。
+    pub fn unsubscribe_if_current(&mut self, subscription_id: &str) -> bool {
+        if self.subscriber_id.as_deref() != Some(subscription_id) {
+            return false;
+        }
+        self.channel = None;
+        self.subscriber_id = None;
+        true
     }
 }
 
@@ -1018,6 +1052,44 @@ fn simple_hash(s: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_byte_handoff_preserves_split_ansi_sequence() {
+        let mut buf = SessionByteBuffer::new();
+        buf.pending.extend_from_slice(b"\x1b[38;2;40;");
+
+        let initial = buf.take_initial_bytes();
+        buf.pending.extend_from_slice(b"184;148mgreen\x1b[0m");
+
+        let mut replay = initial;
+        replay.extend_from_slice(&buf.pending);
+        assert_eq!(replay, b"\x1b[38;2;40;184;148mgreen\x1b[0m");
+    }
+
+    #[test]
+    fn initial_byte_handoff_keeps_truncated_utf8_for_live_stream() {
+        let mut buf = SessionByteBuffer::new();
+        buf.pending.extend_from_slice(&[0xE4, 0xBD]);
+
+        assert!(buf.take_initial_bytes().is_empty());
+        assert_eq!(buf.utf8_remnant, vec![0xE4, 0xBD]);
+
+        buf.pending.push(0xA0);
+        let live = buf.take_initial_bytes();
+        assert_eq!(live, "你".as_bytes());
+        assert!(buf.utf8_remnant.is_empty());
+    }
+
+    #[test]
+    fn stale_unsubscribe_cannot_clear_new_subscriber() {
+        let mut buf = SessionByteBuffer::new();
+        buf.subscriber_id = Some("new".to_string());
+
+        assert!(!buf.unsubscribe_if_current("old"));
+        assert_eq!(buf.subscriber_id.as_deref(), Some("new"));
+        assert!(buf.unsubscribe_if_current("new"));
+        assert!(buf.subscriber_id.is_none());
+    }
 
     #[test]
     fn extract_change_session_uuid_from_pty_text() {

@@ -291,19 +291,47 @@ export const ipc = {
     invoke<void>('kill_session', { id, endpointId: endpoint_id ?? null }),
   setTitle: (id: SessionId, title: string) =>
     invoke<void>('set_title', { id, title }),
-  getScreenSnapshot: (id: SessionId) => invoke<string>('get_screen_snapshot', { id }),
   /**
    * 订阅高频字节流 —— 用 Tauri 2 的 Channel<Vec<u8>>(直接 typed array,无 base64 开销)。
-   * 后端按 ~8ms 节奏 send,前端 onBytes 里直接 term.write。
+   * 后端原子返回订阅前积累的原始 PTY 字节并安装 channel。channel 可能在 invoke
+   * 返回后立刻来消息,所以先在本地排队;Terminal 回放 initialBytes 后再调用 start。
    */
   subscribeSessionBytes: async (
     id: SessionId,
     onBytes: (data: Uint8Array) => void,
-  ): Promise<() => Promise<void>> => {
+  ): Promise<{
+    initialBytes: Uint8Array
+    start: () => void
+    unsubscribe: () => Promise<void>
+  }> => {
+    const subscriptionId = crypto.randomUUID()
+    const queued: Uint8Array[] = []
+    let started = false
     const ch = new Channel<number[]>()
-    ch.onmessage = (data) => onBytes(new Uint8Array(data))
-    await invoke<void>('subscribe_session_bytes', { id, onBytes: ch })
-    return () => invoke<void>('unsubscribe_session_bytes', { id })
+    ch.onmessage = (data) => {
+      const bytes = new Uint8Array(data)
+      if (started) {
+        onBytes(bytes)
+      } else {
+        queued.push(bytes)
+      }
+    }
+    const initial = await invoke<number[]>('subscribe_session_bytes', {
+      id,
+      onBytes: ch,
+      subscriptionId,
+    })
+    return {
+      initialBytes: new Uint8Array(initial),
+      start: () => {
+        if (started) return
+        started = true
+        for (const bytes of queued) onBytes(bytes)
+        queued.length = 0
+      },
+      unsubscribe: () =>
+        invoke<void>('unsubscribe_session_bytes', { id, subscriptionId }),
+    }
   },
   // 低频事件 —— emit 即可
   onSessionMeta: (cb: (m: SessionMeta) => void): Promise<UnlistenFn> =>
