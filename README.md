@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="apps/gui/src-tauri/icons/icon.png" alt="kode app icon" width="112" />
+  <img src="kode/apps/gui/src-tauri/icons/icon.png" alt="kode app icon" width="112" />
 </p>
 
 <h1 align="center">kode</h1>
@@ -22,7 +22,7 @@
 <p align="center"><strong>Status:</strong> early access. Expect rough edges.</p>
 
 <p align="center">
-  <img src="docs/images/screenshot-main.png" alt="kode — a multi-backend terminal workspace for AI coding agents" width="880" />
+  <img src="kode/docs/images/screenshot-main.png" alt="kode — a multi-backend terminal workspace for AI coding agents" width="880" />
 </p>
 
 ---
@@ -36,7 +36,7 @@ The backend chooser is a cold snapshot at startup; manage backends from `Setting
 No accounts, no telemetry, no cloud sync. Your code, tokens, and conversations stay on your machine.
 
 <p align="center">
-  <img src="docs/videos/new-session-demo.gif" alt="New session demo — pick a backend, choose a working directory" width="880" />
+  <img src="kode/docs/videos/new-session-demo.gif" alt="New session demo — pick a backend, choose a working directory" width="880" />
 </p>
 <p align="center"><sub>Pick a backend, choose a working directory, and a live session spins up in a new tab.</sub></p>
 
@@ -63,7 +63,7 @@ avatars/gallery/<avatar-id>/error/frame-01.png ... frame-04.png
 Set `KODE_AVATAR_DIR=/path/to/avatars` while developing to load a different avatar root without touching your app config directory.
 
 <p align="center">
-  <img src="docs/videos/custom-avatar-demo.gif" alt="Custom avatar demo — drop a PNG and name your preset" width="720" />
+  <img src="kode/docs/videos/custom-avatar-demo.gif" alt="Custom avatar demo — drop a PNG and name your preset" width="720" />
 </p>
 
 ## Memory that survives the session.
@@ -71,7 +71,7 @@ Set `KODE_AVATAR_DIR=/path/to/avatars` while developing to load a different avat
 Agents forget. `kode` doesn't. A shared memory pool (`~/.kode-memory/`) is exposed to every agent through an MCP server (`kode-memory-mcp`). Agents `memory_propose`; you review in the GUI (`⌘⇧M`); approved facts land in a retrieval pool that every subsequent agent — across tabs, sessions, and backend types — can `memory_search` from.
 
 <p align="center">
-  <img src="docs/videos/memory-demo.gif" alt="Memory demo — agent proposes, you approve, next session recalls" width="880" />
+  <img src="kode/docs/videos/memory-demo.gif" alt="Memory demo — agent proposes, you approve, next session recalls" width="880" />
 </p>
 <p align="center"><sub>An agent proposes a fact, you approve it in the review queue, and the next session recalls it.</sub></p>
 
@@ -84,16 +84,16 @@ Agents forget. `kode` doesn't. A shared memory pool (`~/.kode-memory/`) is expos
 `⌘⇧B` opens the browse panel for the approved pool; the status bar shows pending count and 7-day accept rate.
 
 <p align="center">
-  <img src="docs/images/screenshot-browse.png" alt="Memory browse panel — search and inspect approved facts" width="880" />
+  <img src="kode/docs/images/screenshot-browse.png" alt="Memory browse panel — search and inspect approved facts" width="880" />
 </p>
 <p align="center"><sub>The browse panel (⌘⇧B) — search and inspect the approved fact pool.</sub></p>
 
 ## SpecOps: specs that run themselves.
 
-Specs aren't just docs — they're runnable. `.specops/specs/*.md` files become isolated git worktrees bound to an immutable base commit, executed in the platform cache directory without polluting your main workspace. Each spec declares `verifies:` and `paths:` so a change to `crates/kode-core` automatically runs the specs that depend on it. This README's own roadmap, memory design, and remote protocol are all SpecOps-managed.
+Specs aren't just docs — they're runnable. `kode/.specops/specs/*.md` files become isolated git worktrees bound to an immutable base commit, executed in the platform cache directory without polluting your main workspace. Each spec declares `verifies:` and `paths:` so a change to `kode/crates/kode-core` automatically runs the specs that depend on it. This README's own roadmap, memory design, and remote protocol are all SpecOps-managed.
 
 <p align="center">
-  <img src="docs/images/screenshot-specops.png" alt="SpecOps console — spec-driven task execution in an isolated worktree" width="720" />
+  <img src="kode/docs/images/screenshot-specops.png" alt="SpecOps console — spec-driven task execution in an isolated worktree" width="720" />
 </p>
 <p align="center"><sub>The SpecOps console (⌘S) runs specs in an isolated worktree, never on your main branch.</sub></p>
 
@@ -101,12 +101,12 @@ Open the SpecOps console with `⌘S` and pick a Git workspace. The TypeScript/Bu
 
 ## Remote and mobile, first-class.
 
-`crates/kode-bridge` is a standalone axum HTTP/WS server — run it headless on a dev box, pair from the desktop GUI, or connect the Flutter companion app (`apps/mobile`) by scanning a QR code. The protocol is documented and verified by 173 cross-implementation tests (115 Rust + 58 Go).
+`kode/crates/kode-bridge` is a standalone axum HTTP/WS server — run it headless on a dev box, pair from the desktop GUI, or connect the Flutter companion app (`kode/apps/mobile`) by scanning a QR code. The protocol is documented and verified by 173 cross-implementation tests (115 Rust + 58 Go).
 
 SSH-tunneled remote tabs come built-in: `ssh -N -L` brings a no-public-IP devcloud server into your local tab list without Tailscale. Run agents on a beefy remote box; read the output on your laptop.
 
 <p align="center">
-  <img src="docs/videos/remote-ssh-demo.gif" alt="Remote SSH demo — tunnel a remote box into a local tab" width="720" />
+  <img src="kode/docs/videos/remote-ssh-demo.gif" alt="Remote SSH demo — tunnel a remote box into a local tab" width="720" />
 </p>
 <p align="center"><sub>An SSH tunnel brings a remote box into a local tab — PTY bytes stream back over the bridge.</sub></p>
 
@@ -114,7 +114,7 @@ SSH-tunneled remote tabs come built-in: `ssh -N -L` brings a no-public-IP devclo
 
 - **Tauri 2 + xterm.js + Svelte 5.** A native Rust backend drives the PTY and session kernel. xterm.js is the same engine VSCode, Cursor, and GitHub Codespaces use.
 - **PTY byte path is coalesced in Rust (~8ms) and pushed through a Tauri v2 Channel — not `emit`.** Each tab is one xterm.js instance; background tabs keep feeding, switching back is zero-latency.
-- **Backend definitions are data-driven.** Defaults live in `crates/kode-core/src/config.rs`; override per-backend in `~/.config/kode/config.toml`. No `if key == "codebuddy"` branches in business logic.
+- **Backend definitions are data-driven.** Defaults live in `kode/crates/kode-core/src/config.rs`; override per-backend in `~/.config/kode/config.toml`. No `if key == "codebuddy"` branches in business logic.
 - **Status bar reads from CLI jsonl files, not PTY scraping.** `codebuddy` / `claude` / `codex` each write their own metadata; kode tails them.
 - **Cross-platform core.** `kode-core`, `kode-bridge`, `kode-memory` are pure Rust; GUI is Tauri 2 (macOS + Linux); mobile is Flutter (iOS + Android).
 
@@ -127,8 +127,8 @@ Pre-built binaries are coming with the first public release. For now, build from
 ### Build from source
 
 ```bash
-git clone <repo-url> kode
-cd kode
+git clone <repo-url> palm-tools
+cd palm-tools/kode
 ./run.sh dev        # Vite + Tauri dev, opens GUI
 ```
 
@@ -160,30 +160,35 @@ On Sequoia the button sometimes doesn't appear until you've tried to launch once
 ## Workspace layout
 
 ```
-kode/
-├── crates/
-│   ├── kode-core/       PTY, Session, Config, CoreEvent — the pure Rust kernel
-│   ├── kode-bridge/     axum HTTP/WS bridge, semantic events, headless bin
-│   └── kode-memory/     SQLite + markdown store, MCP server, CLI, git sync
-├── apps/
-│   ├── gui/             Tauri 2 + Svelte 5 + xterm.js — the desktop main line
-│   ├── mobile/          Flutter companion (iOS + Android)
-│   └── specops/         TypeScript/Bun SpecOps sidecar + Web console
-├── .specops/specs/      specs (roadmap, protocol, memory, SpecOps)
-├── deploy/              remote memory bridge build/deploy scripts
-└── docs/                smoke scripts, screenshots, demo videos
+palm-tools/
+├── .github/             CI + release workflows
+├── README.md            this file
+├── LICENSE              Apache-2.0
+├── NOTICE.md            third-party notices
+└── kode/                project root
+    ├── crates/
+    │   ├── kode-core/       PTY, Session, Config, CoreEvent — the pure Rust kernel
+    │   ├── kode-bridge/     axum HTTP/WS bridge, semantic events, headless bin
+    │   └── kode-memory/     SQLite + markdown store, MCP server, CLI, git sync
+    ├── apps/
+    │   ├── gui/             Tauri 2 + Svelte 5 + xterm.js — the desktop main line
+    │   ├── mobile/          Flutter companion (iOS + Android)
+    │   └── specops/         TypeScript/Bun SpecOps sidecar + Web console
+    ├── .specops/specs/      specs (roadmap, protocol, memory, SpecOps)
+    ├── deploy/              remote memory bridge build/deploy scripts
+    └── docs/                smoke scripts, screenshots, demo videos
 ```
 
 ## Configuration
 
-Default at `~/.config/kode/config.toml`. Backend definitions are data-driven — defaults live in [`crates/kode-core/src/config.rs`](./crates/kode-core/src/config.rs), override per-backend in the config file. Memory root is `~/.kode-memory/` (override with `KODE_MEMORY_ROOT`). Bridge token and GUI state persist to `~/.kode/state.json`.
+Default at `~/.config/kode/config.toml`. Backend definitions are data-driven — defaults live in [`kode/crates/kode-core/src/config.rs`](./kode/crates/kode-core/src/config.rs), override per-backend in the config file. Memory root is `~/.kode-memory/` (override with `KODE_MEMORY_ROOT`). Bridge token and GUI state persist to `~/.kode/state.json`.
 
 ## Documentation
 
-- [`CODEBUDDY.md`](./CODEBUDDY.md) — project rules, constraints, known gotchas (start here)
-- [`.specops/specs/roadmap.md`](./.specops/specs/roadmap.md) — phases and decision log
-- [`.specops/specs/memory-design.md`](./.specops/specs/memory-design.md) — memory architecture
-- [`.specops/specs/remote-protocol.md`](./.specops/specs/remote-protocol.md) — REST/WS protocol
+- [`kode/CODEBUDDY.md`](./kode/CODEBUDDY.md) — project rules, constraints, known gotchas (start here)
+- [`kode/.specops/specs/roadmap.md`](./kode/.specops/specs/roadmap.md) — phases and decision log
+- [`kode/.specops/specs/memory-design.md`](./kode/.specops/specs/memory-design.md) — memory architecture
+- [`kode/.specops/specs/remote-protocol.md`](./kode/.specops/specs/remote-protocol.md) — REST/WS protocol
 
 ## Acknowledgements
 
