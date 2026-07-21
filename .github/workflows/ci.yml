@@ -21,6 +21,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: kode
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.2.2'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: pnpm
+          cache-dependency-path: |
+            kode/apps/specops/pnpm-lock.yaml
+            kode/apps/specops/frontend/pnpm-lock.yaml
+      - name: Ensure optional remote bridge resource exists
+        run: |
+          set -euo pipefail
+          res_dir="apps/gui/src-tauri/resources"
+          res_file="$res_dir/kode-remote-memory-bridge-linux-musl.tar.gz"
+          mkdir -p "$res_dir"
+          if [ ! -f "$res_file" ]; then
+            echo "remote bridge tarball missing; creating empty placeholder for CI compile checks"
+            tmp_dir="$(mktemp -d)"
+            tar -C "$tmp_dir" -czf "$res_file" .
+            rm -rf "$tmp_dir"
+          fi
+      - name: Build Tauri sidecar binaries
+        run: bash apps/gui/build-sidecar.sh
       - run: cargo test -- --test-threads=1
 
   specops:
@@ -34,7 +58,7 @@ jobs:
           version: '11.2.2'
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.13'
           cache: pnpm
           cache-dependency-path: kode/apps/specops/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
