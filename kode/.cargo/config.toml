@@ -1,7 +1,6 @@
-# 国内镜像加速。项目级配置,不影响系统其它 Rust 项目。
-# rsproxy(字节跳动)— 全球可用、sparse 协议
+# 默认使用 crates.io，避免在无法访问 rsproxy.cn 的环境里构建失败。
+# 如需镜像加速，可在本机通过 cargo 参数或用户级配置启用下面的 rsproxy 源。
 [source.crates-io]
-replace-with = "rsproxy-sparse"
 
 [source.rsproxy]
 registry = "https://rsproxy.cn/crates.io-index"
