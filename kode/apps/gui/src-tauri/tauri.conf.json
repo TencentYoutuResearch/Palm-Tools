@@ -51,7 +51,7 @@
       "icons/icon.png"
     ],
     "externalBin": ["binaries/kode-memory", "binaries/kode-memory-mcp", "binaries/specops"],
-    "resources": ["resources/kode-remote-memory-bridge-linux-musl.tar.gz"],
+    "resources": ["resources"],
     "category": "DeveloperTool",
     "shortDescription": "Multi-tab AI session manager",
     "longDescription": "kode — manage multiple codebuddy / claude code sessions in one window.",

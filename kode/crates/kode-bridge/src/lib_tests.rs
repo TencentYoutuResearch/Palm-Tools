@@ -2,6 +2,20 @@ use std::path::PathBuf;
 
 use super::*;
 
+fn config_with_fake_codebuddy() -> Config {
+    let mut config = Config::default();
+    let backend = config
+        .backends
+        .get_mut("codebuddy")
+        .expect("default config should include codebuddy");
+    backend.command = "/bin/sh".to_string();
+    backend.args = vec!["-c".to_string(), "sleep 5".to_string()];
+    backend.model_flag = None;
+    backend.permission_mode_flag = None;
+    backend.default_model = None;
+    config
+}
+
 #[test]
 fn answer_input_selects_and_confirms_the_choice() {
     assert_eq!(answer_input(0), b"\r");
@@ -190,7 +204,7 @@ fn resume_meta_snapshot_reads_codebuddy_history_for_cwd() {
 /// bus 上必须 emit `session.created` 事件，让 GUI 前端能创建对应 tab。
 #[tokio::test]
 async fn create_session_emits_session_created_on_bus() {
-    let config = Config::default();
+    let config = config_with_fake_codebuddy();
     let token = "test-token-create-session".to_string();
     let ctx = build_test_ctx(config, token);
     let mut rx = ctx.bus.subscribe();
@@ -238,7 +252,7 @@ async fn create_session_emits_session_created_on_bus() {
 /// SpecOps Open session 通过 bridge focus endpoint 请求 GUI 聚焦对应 tab。
 #[tokio::test]
 async fn focus_session_emits_focus_requested_on_bus() {
-    let config = Config::default();
+    let config = config_with_fake_codebuddy();
     let token = "test-token-focus-session".to_string();
     let ctx = build_test_ctx(config, token);
     let req = CreateSessionReq {

@@ -12,14 +12,14 @@ jobs:
       run:
         working-directory: kode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89'
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: '11.2.2'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22.13'
           cache: pnpm
@@ -30,18 +30,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: kode
-      - name: Ensure optional remote bridge resource exists
-        run: |
-          set -euo pipefail
-          res_dir="${GITHUB_WORKSPACE}/kode/apps/gui/src-tauri/resources"
-          res_file="$res_dir/kode-remote-memory-bridge-linux-musl.tar.gz"
-          mkdir -p "$res_dir"
-          if [ ! -f "$res_file" ]; then
-            echo "remote bridge tarball missing; creating empty placeholder for CI compile checks"
-            tmp_dir="$(mktemp -d)"
-            tar -C "$tmp_dir" -czf "$res_file" .
-            rm -rf "$tmp_dir"
-          fi
       - name: Build Tauri sidecar binaries
         run: bash "${GITHUB_WORKSPACE}/kode/apps/gui/build-sidecar.sh"
       - name: Build GUI frontend
@@ -52,13 +40,13 @@ jobs:
   specops:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: '11.2.2'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22.13'
           cache: pnpm

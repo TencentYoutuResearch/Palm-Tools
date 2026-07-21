@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build musl remote memory bridge
         working-directory: kode
@@ -30,7 +30,7 @@ jobs:
           cp kode/target/remote-memory-bridge/kode-remote-memory-bridge-x86_64-unknown-linux-musl.tar.gz \
             release-assets/remote-bridge/kode-remote-memory-bridge-linux-musl.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: remote-memory-bridge
           path: release-assets/remote-bridge/*.tar.gz
@@ -54,7 +54,7 @@ jobs:
       APPLE_SIGNING_AVAILABLE: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 != '' && secrets.APPLE_DEVELOPER_ID_P12_PASSWORD != '' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -64,11 +64,11 @@ jobs:
         with:
           workspaces: kode
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: "11.2.2"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22.13"
           cache: pnpm
@@ -80,7 +80,7 @@ jobs:
       - name: Install GUI dependencies
         run: pnpm --dir kode/apps/gui install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           name: remote-memory-bridge
           path: release-assets/remote-bridge
@@ -131,7 +131,7 @@ jobs:
               "release-assets/macos/kode-${GITHUB_REF_NAME:-dev}-macos-${RUNNER_ARCH}.app.zip"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: macos-app-${{ matrix.arch }}
           path: release-assets/macos/*
@@ -146,13 +146,13 @@ jobs:
       - macos-app
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           pattern: macos-app-*
           path: release-assets/macos
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           name: remote-memory-bridge
           path: release-assets/remote-bridge

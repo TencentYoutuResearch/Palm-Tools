@@ -1871,6 +1871,7 @@ fn extract_session_meta(path: &FsPath) -> (Option<String>, Option<String>, Optio
             if let Some(pd) = v.get("providerData") {
                 if let Some(m) = pd
                     .get("requestModelId")
+                    .or_else(|| pd.get("requestModelName"))
                     .or_else(|| pd.get("model"))
                     .and_then(|v| v.as_str())
                 {

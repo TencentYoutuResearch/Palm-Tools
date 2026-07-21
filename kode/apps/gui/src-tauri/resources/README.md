@@ -6,4 +6,5 @@
 # which auto-copies it into this directory.
 #
 # This placeholder ensures the directory exists in git so Tauri's
-# `bundle.resources` glob always resolves at build time.
+# `bundle.resources` entry can include the directory even when the
+# optional tarball has not been built locally.
