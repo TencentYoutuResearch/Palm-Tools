@@ -7,24 +7,50 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     defaults:
       run:
         working-directory: kode
     steps:
       - uses: actions/checkout@v4
-      - name: Install Tauri system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.2.2'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: pnpm
+          cache-dependency-path: |
+            kode/apps/gui/pnpm-lock.yaml
+            kode/apps/specops/pnpm-lock.yaml
+            kode/apps/specops/frontend/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: kode
+      - name: Ensure optional remote bridge resource exists
+        run: |
+          set -euo pipefail
+          res_dir="${GITHUB_WORKSPACE}/kode/apps/gui/src-tauri/resources"
+          res_file="$res_dir/kode-remote-memory-bridge-linux-musl.tar.gz"
+          mkdir -p "$res_dir"
+          if [ ! -f "$res_file" ]; then
+            echo "remote bridge tarball missing; creating empty placeholder for CI compile checks"
+            tmp_dir="$(mktemp -d)"
+            tar -C "$tmp_dir" -czf "$res_file" .
+            rm -rf "$tmp_dir"
+          fi
+      - name: Build Tauri sidecar binaries
+        run: bash "${GITHUB_WORKSPACE}/kode/apps/gui/build-sidecar.sh"
+      - name: Build GUI frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: kode/apps/gui
       - run: cargo test -- --test-threads=1
 
   specops:
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,10 +60,14 @@ jobs:
           version: '11.2.2'
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.13'
           cache: pnpm
-          cache-dependency-path: kode/apps/specops/pnpm-lock.yaml
+          cache-dependency-path: |
+            kode/apps/specops/pnpm-lock.yaml
+            kode/apps/specops/frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+        working-directory: kode/apps/specops
+      - run: pnpm -C frontend install --frozen-lockfile
         working-directory: kode/apps/specops
       - run: pnpm check
         working-directory: kode/apps/specops

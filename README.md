@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
-  <a href="#install"><img src="https://img.shields.io/badge/Platform-macOS%20%C2%B7%20Linux-lightgrey.svg" alt="Platform: macOS · Linux" /></a>
+  <a href="#install"><img src="https://img.shields.io/badge/Platform-macOS-lightgrey.svg" alt="Platform: macOS" /></a>
   <a href="https://v2.tauri.app"><img src="https://img.shields.io/badge/Built%20with-Tauri%202-red.svg" alt="Built with Tauri 2" /></a>
 </p>
 
@@ -45,9 +45,6 @@ Every backend gets an icon in the chooser and sidebar. Drop in any PNG in `Setti
 ```text
 # macOS
 ~/Library/Application Support/kode/avatars/gallery/<avatar-id>/frame-01.png ... frame-04.png
-
-# Linux
-~/.config/kode/avatars/gallery/<avatar-id>/frame-01.png ... frame-04.png
 ```
 
 For state-aware avatars, split the frames by session state. Each state can contain one 4-frame set directly, or multiple variants (`01`, `02`, ...) that kode will cycle through:
@@ -116,7 +113,7 @@ SSH-tunneled remote tabs come built-in: `ssh -N -L` brings a no-public-IP devclo
 - **PTY byte path is coalesced in Rust (~8ms) and pushed through a Tauri v2 Channel — not `emit`.** Each tab is one xterm.js instance; background tabs keep feeding, switching back is zero-latency.
 - **Backend definitions are data-driven.** Defaults live in `kode/crates/kode-core/src/config.rs`; override per-backend in `~/.config/kode/config.toml`. No `if key == "codebuddy"` branches in business logic.
 - **Status bar reads from CLI jsonl files, not PTY scraping.** `codebuddy` / `claude` / `codex` each write their own metadata; kode tails them.
-- **Cross-platform core.** `kode-core`, `kode-bridge`, `kode-memory` are pure Rust; GUI is Tauri 2 (macOS + Linux); mobile is Flutter (iOS + Android).
+- **Cross-platform core.** `kode-core`, `kode-bridge`, `kode-memory` are pure Rust. The desktop GUI is Tauri 2 on macOS; mobile is Flutter (iOS + Android).
 
 ## Install
 
