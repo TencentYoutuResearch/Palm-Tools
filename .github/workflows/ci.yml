@@ -34,7 +34,7 @@ jobs:
       - name: Ensure optional remote bridge resource exists
         run: |
           set -euo pipefail
-          res_dir="apps/gui/src-tauri/resources"
+          res_dir="${GITHUB_WORKSPACE}/kode/apps/gui/src-tauri/resources"
           res_file="$res_dir/kode-remote-memory-bridge-linux-musl.tar.gz"
           mkdir -p "$res_dir"
           if [ ! -f "$res_file" ]; then
@@ -44,7 +44,7 @@ jobs:
             rm -rf "$tmp_dir"
           fi
       - name: Build Tauri sidecar binaries
-        run: bash apps/gui/build-sidecar.sh
+        run: bash "${GITHUB_WORKSPACE}/kode/apps/gui/build-sidecar.sh"
       - run: cargo test -- --test-threads=1
 
   specops:
