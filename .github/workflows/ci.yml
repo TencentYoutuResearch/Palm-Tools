@@ -8,6 +8,9 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kode
     steps:
       - uses: actions/checkout@v4
       - name: Install Tauri system dependencies
@@ -16,6 +19,8 @@ jobs:
         with:
           toolchain: '1.89'
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kode
       - run: cargo test -- --test-threads=1
 
   specops:
@@ -31,14 +36,14 @@ jobs:
         with:
           node-version: '20'
           cache: pnpm
-          cache-dependency-path: apps/specops/pnpm-lock.yaml
+          cache-dependency-path: kode/apps/specops/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-        working-directory: apps/specops
+        working-directory: kode/apps/specops
       - run: pnpm check
-        working-directory: apps/specops
+        working-directory: kode/apps/specops
       - run: pnpm test
-        working-directory: apps/specops
+        working-directory: kode/apps/specops
       - run: pnpm build
-        working-directory: apps/specops
+        working-directory: kode/apps/specops
       - if: github.event_name == 'pull_request'
-        run: node apps/specops/dist/cli/main.js gate --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --verify specops
+        run: node kode/apps/specops/dist/cli/main.js gate --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --verify specops
