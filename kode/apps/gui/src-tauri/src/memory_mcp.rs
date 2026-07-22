@@ -693,9 +693,13 @@ fn spec_style_label(spec: &McpSetupSpec) -> &'static str {
 /// - `JsonMerge { config_path }` → 用户指定的路径
 fn is_configured_for_spec(spec: &McpSetupSpec) -> bool {
     if matches!(spec, McpSetupSpec::Codex { .. }) {
+        // Codex 配置里可能遗留来自另一份 Kode checkout / 旧版本 app 的绝对路径。
+        // 只存在 `[mcp_servers.memory]` 不代表当前 GUI 的 sidecar 可用，必须与
+        // 本次运行解析出的 `kode-memory-mcp` 路径一致，才能视为已配置。
+        let expected_binary = resolve_binary();
         return config_check_paths(spec)
             .iter()
-            .any(|p| toml_has_memory_server(p));
+            .any(|p| toml_has_memory_server(p, expected_binary.as_deref()));
     }
     let candidates = config_check_paths(spec);
     candidates.iter().any(|p| json_has_memory_server(p))
@@ -740,17 +744,30 @@ fn json_has_memory_server(p: &Path) -> bool {
 }
 
 /// Codex MCP 配置写在 TOML 的 `[mcp_servers.<name>]`。
-fn toml_has_memory_server(p: &Path) -> bool {
+/// 若给了 `expected_binary`，还要求 command 指向当前 Kode 解析出的 sidecar，避免把
+/// 其它 checkout / 已删除 bundle 的遗留配置误判成可用。
+fn toml_has_memory_server(p: &Path, expected_binary: Option<&Path>) -> bool {
     let Ok(text) = std::fs::read_to_string(p) else {
         return false;
     };
     let Ok(doc) = text.parse::<DocumentMut>() else {
         return false;
     };
-    doc.get("mcp_servers")
+    let memory = doc
+        .get("mcp_servers")
         .and_then(|i| i.as_table())
-        .and_then(|t| t.get(MCP_SERVER_NAME))
-        .is_some()
+        .and_then(|t| t.get(MCP_SERVER_NAME));
+    let Some(memory) = memory else {
+        return false;
+    };
+    let Some(expected_binary) = expected_binary else {
+        return true;
+    };
+    memory
+        .as_table()
+        .and_then(|t| t.get("command"))
+        .and_then(|i| i.as_str())
+        .is_some_and(|command| command == expected_binary.to_string_lossy())
 }
 
 /// 决策:是否要提示用户。规则:
@@ -1237,7 +1254,12 @@ args = []
 "#,
         )
         .unwrap();
-        assert!(toml_has_memory_server(&cfg));
+        let current = Path::new("/path/to/kode-memory-mcp");
+        assert!(toml_has_memory_server(&cfg, Some(current)));
+        assert!(!toml_has_memory_server(
+            &cfg,
+            Some(Path::new("/other/checkout/kode-memory-mcp"))
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

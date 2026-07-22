@@ -1700,8 +1700,27 @@
          必须用 paths-floating(absolute + z-index 6)模式 —— 否则会被
          .term-wrapper(absolute inset:0)整个盖住,banner 看得见但点击被拦截。
          bind:this 让命令面板的"重新检测/配置"项能 forceShow banner。 -->
-    <div class="memory-mcp-floating">
-      <MemoryMcpBanner bind:this={memoryMcpBannerRef} />
+    <div class="top-banners">
+      <div class="memory-mcp-floating">
+        <MemoryMcpBanner bind:this={memoryMcpBannerRef} />
+      </div>
+      {#if $activeTab?.attention}
+        <!-- 当前 tab 仍需要用户操作 — sidebar 才是主要视觉焦点 -->
+        <div class="attention-banner attention-banner-{$activeTab.attention}" role="status">
+          <span class="attention-banner-icon">
+            {$activeTab.attention === 'plan' ? '!' : '?'}
+          </span>
+          <div class="attention-banner-text">
+            {#if $activeTab.attention === 'ask'}
+              <strong>{tr('attention.banner.ask')}</strong>
+              <span>{tr('attention.banner.askHint')}</span>
+            {:else}
+              <strong>{tr('attention.banner.plan')}</strong>
+              <span>{tr('attention.banner.planHint')}</span>
+            {/if}
+          </div>
+        </div>
+      {/if}
     </div>
     {#if pathsOpen && ($tabs.length === 0 || chooserOpen)}
       <!-- 顶部 banner 仅在 welcome / chooser 时常驻;有 tab 后 term 区会全屏覆盖,
@@ -1720,23 +1739,6 @@
           {theme}
           onThemeChange={setTheme}
         />
-      </div>
-    {/if}
-    {#if $activeTab?.attention}
-      <!-- 当前 tab 仍需要用户操作 — 顶部 banner 半透明常驻,sidebar 才是主要视觉焦点 -->
-      <div class="attention-banner attention-banner-{$activeTab.attention}" role="status">
-        <span class="attention-banner-icon">
-          {$activeTab.attention === 'plan' ? '!' : '?'}
-        </span>
-        <div class="attention-banner-text">
-          {#if $activeTab.attention === 'ask'}
-            <strong>{tr('attention.banner.ask')}</strong>
-            <span>{tr('attention.banner.askHint')}</span>
-          {:else}
-            <strong>{tr('attention.banner.plan')}</strong>
-            <span>{tr('attention.banner.planHint')}</span>
-          {/if}
-        </div>
       </div>
     {/if}
     {#if bootError}
@@ -3429,14 +3431,18 @@
     z-index: 6;
     pointer-events: auto;
   }
-  /* M4.1:跟 paths-floating 同套机制,浮在 term-wrapper 上能被点击。
-   * 与 paths-floating 在视觉上叠放(memory 在下方一点),但实际 banner 只
-   * 在内部 visible=true 时占空间,所以不会跟 paths banner 重叠。 */
-  .memory-mcp-floating {
+  /* 标题栏下方的交互/状态提示。子项在普通流中纵向堆叠，避免 memory 配置
+   * 横幅与 Awaiting answer/plan 同时出现时彼此遮住。 */
+  .top-banners {
     position: absolute;
-    top: 0; left: 0; right: 0;
-    z-index: 5;
+    top: 44px; left: 0; right: 0;
+    z-index: 6;
+    pointer-events: none;
+  }
+  /* M4.1 memory MCP 横幅可交互，必须退出 Tauri 原生拖拽命中区。 */
+  .memory-mcp-floating {
     pointer-events: auto;
+    -webkit-app-region: no-drag;
   }
 
   /* === main 顶部 attention banner ===
@@ -3446,9 +3452,7 @@
    * (因为它在闪、banner 不闪),banner 只补充说明位置(在终端里回应)。
    */
   .attention-banner {
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    z-index: 5;
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--sp-2);

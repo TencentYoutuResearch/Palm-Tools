@@ -1410,10 +1410,20 @@ pub fn list_sessions_for_cwd(
         }
     }
 
-    // 按 mtime 降序(最新的在前)
-    sessions.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
+    dedupe_session_summaries(&mut sessions);
 
     Ok(sessions)
+}
+
+/// 按最新修改时间保留每个逻辑 session 的一个 rollout。
+///
+/// Codex 的 `resume` 会创建新的 rollout 文件，但其 session_meta 仍可能指向
+/// 同一个逻辑 session_id。这里必须去重，确保前端的
+/// `{#each sessions as s (s.session_id)}` 不会收到重复 key。
+fn dedupe_session_summaries(sessions: &mut Vec<SessionSummary>) {
+    sessions.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
+    let mut seen = HashSet::new();
+    sessions.retain(|session| seen.insert(session.session_id.clone()));
 }
 
 fn collect_codex_session_summaries(
@@ -1686,7 +1696,9 @@ mod specops_bridge_tests {
 
     use parking_lot::Mutex;
 
-    use super::{extract_session_meta, wait_for_bridge_addr};
+    use super::{
+        dedupe_session_summaries, extract_session_meta, wait_for_bridge_addr, SessionSummary,
+    };
 
     #[test]
     fn extract_session_meta_uses_latest_codebuddy_usage_tokens() {
@@ -1744,6 +1756,40 @@ mod specops_bridge_tests {
         assert_eq!(title.as_deref(), Some("真实 Codex 用户问题"));
         assert_eq!(model.as_deref(), Some("gpt-5.5"));
         assert_eq!(total_tokens, Some(123));
+    }
+
+    #[test]
+    fn session_history_keeps_only_the_latest_rollout_for_each_session_id() {
+        let mut sessions = vec![
+            SessionSummary {
+                session_id: "same-session".into(),
+                title: Some("older rollout".into()),
+                model: None,
+                total_tokens: None,
+                last_modified_secs: 10,
+            },
+            SessionSummary {
+                session_id: "other-session".into(),
+                title: None,
+                model: None,
+                total_tokens: None,
+                last_modified_secs: 15,
+            },
+            SessionSummary {
+                session_id: "same-session".into(),
+                title: Some("newer rollout".into()),
+                model: None,
+                total_tokens: None,
+                last_modified_secs: 20,
+            },
+        ];
+
+        dedupe_session_summaries(&mut sessions);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "same-session");
+        assert_eq!(sessions[0].title.as_deref(), Some("newer rollout"));
+        assert_eq!(sessions[1].session_id, "other-session");
     }
 
     #[tokio::test]
