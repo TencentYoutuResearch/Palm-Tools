@@ -8,18 +8,17 @@
 //! CodeBuddy / Claude 的 usage 是每次请求值，直接累加；Codex 的
 //! `total_token_usage` 是 session 累计值，必须先做相邻事件增量再归属到当前 model。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone};
 use serde::Serialize;
 use serde_json::Value;
 
-const CACHE_TTL: Duration = Duration::from_secs(8);
 const MAX_JSONL_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HISTORY_FILES: usize = 50_000;
 const DAILY_HISTORY_DAYS: i64 = 84;
@@ -69,34 +68,54 @@ struct UsageBucket {
     requests: u64,
 }
 
+#[derive(Debug, Clone)]
+struct UsageEvent {
+    backend: String,
+    model: String,
+    timestamp_ms: Option<i64>,
+    usage: UsageBucket,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileFingerprint {
+    len: u64,
+    modified_ns: Option<u128>,
+}
+
+impl FileFingerprint {
+    fn modified_ms(self) -> Option<i64> {
+        self.modified_ns
+            .map(|value| (value / 1_000_000).min(i64::MAX as u128) as i64)
+    }
+}
+
+#[derive(Debug)]
+struct CachedHistoryFile {
+    backend: String,
+    fingerprint: FileFingerprint,
+    events: Vec<UsageEvent>,
+}
+
+#[derive(Debug, Default)]
+struct HistoryCache {
+    files: HashMap<PathBuf, CachedHistoryFile>,
+}
+
 type UsageMap = HashMap<(String, String), UsageBucket>;
 type DailyMap = HashMap<String, u64>;
 
-fn cache() -> &'static Mutex<HashMap<String, (Instant, ModelUsageSnapshot)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, ModelUsageSnapshot)>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn history_cache() -> &'static Mutex<HistoryCache> {
+    static CACHE: OnceLock<Mutex<HistoryCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HistoryCache::default()))
 }
 
 #[tauri::command]
 pub async fn model_usage_snapshot(period: String) -> Result<ModelUsageSnapshot, String> {
     let period = normalize_period(&period)?;
-    if let Ok(guard) = cache().lock() {
-        if let Some((at, snapshot)) = guard.get(period) {
-            if at.elapsed() < CACHE_TTL {
-                return Ok(snapshot.clone());
-            }
-        }
-    }
-
     let period_owned = period.to_string();
-    let snapshot = tauri::async_runtime::spawn_blocking(move || collect_snapshot(&period_owned))
+    tauri::async_runtime::spawn_blocking(move || collect_snapshot(&period_owned))
         .await
-        .map_err(|error| format!("model usage task failed: {error}"))??;
-
-    if let Ok(mut guard) = cache().lock() {
-        guard.insert(period.to_string(), (Instant::now(), snapshot.clone()));
-    }
-    Ok(snapshot)
+        .map_err(|error| format!("model usage task failed: {error}"))?
 }
 
 fn normalize_period(period: &str) -> Result<&'static str, String> {
@@ -140,6 +159,11 @@ fn collect_snapshot(period: &str) -> Result<ModelUsageSnapshot, String> {
     let mut usage = UsageMap::new();
     let mut daily = DailyMap::new();
     let mut scanned_files = 0usize;
+    let mut considered_files = 0usize;
+    let mut seen_paths = HashSet::new();
+    let mut history = history_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let sources = [
         ("codebuddy", home.join(".codebuddy/projects")),
@@ -150,46 +174,34 @@ fn collect_snapshot(period: &str) -> Result<ModelUsageSnapshot, String> {
     for (backend, root) in sources {
         let mut files = Vec::new();
         collect_jsonl_files(&root, 0, &mut files);
-        for path in files
-            .into_iter()
-            .take(MAX_HISTORY_FILES.saturating_sub(scanned_files))
-        {
-            if !file_can_overlap(&path, file_since_ms) {
+        for path in files {
+            if considered_files >= MAX_HISTORY_FILES {
+                break;
+            }
+            considered_files += 1;
+            seen_paths.insert(path.clone());
+
+            let Some(fingerprint) = file_fingerprint(&path) else {
+                continue;
+            };
+            if !file_can_overlap(fingerprint, file_since_ms) {
                 continue;
             }
             scanned_files += 1;
-            match backend {
-                "codebuddy" => scan_request_file(
-                    &path,
-                    backend,
-                    since_ms,
-                    history_since_ms,
-                    &mut usage,
-                    &mut daily,
-                    RequestFormat::CodeBuddy,
-                ),
-                "claude" => scan_request_file(
-                    &path,
-                    backend,
-                    since_ms,
-                    history_since_ms,
-                    &mut usage,
-                    &mut daily,
-                    RequestFormat::Claude,
-                ),
-                "codex" => {
-                    scan_codex_file(&path, since_ms, history_since_ms, &mut usage, &mut daily)
+
+            refresh_history_file(&mut history, &path, backend, fingerprint);
+            if let Some(cached) = history.files.get(&path) {
+                for event in &cached.events {
+                    aggregate_event(event, since_ms, history_since_ms, &mut usage, &mut daily);
                 }
-                _ => {}
-            }
-            if scanned_files >= MAX_HISTORY_FILES {
-                break;
             }
         }
-        if scanned_files >= MAX_HISTORY_FILES {
+        if considered_files >= MAX_HISTORY_FILES {
             break;
         }
     }
+
+    history.files.retain(|path, _| seen_paths.contains(path));
 
     Ok(finish_snapshot(period, scanned_files, usage, daily))
 }
@@ -222,17 +234,26 @@ fn collect_jsonl_files(root: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn file_can_overlap(path: &Path, since_ms: Option<i64>) -> bool {
+fn file_can_overlap(fingerprint: FileFingerprint, since_ms: Option<i64>) -> bool {
     let Some(since) = since_ms else {
         return true;
     };
-    file_modified_ms(path).is_none_or(|modified| modified >= since)
+    fingerprint
+        .modified_ms()
+        .is_none_or(|modified| modified >= since)
 }
 
-fn file_modified_ms(path: &Path) -> Option<i64> {
-    let modified = path.metadata().ok()?.modified().ok()?;
-    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
-    Some(duration.as_millis().min(i64::MAX as u128) as i64)
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let metadata = path.metadata().ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    Some(FileFingerprint {
+        len: metadata.len(),
+        modified_ns,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -241,31 +262,63 @@ enum RequestFormat {
     Claude,
 }
 
-fn scan_request_file(
+fn refresh_history_file(
+    history: &mut HistoryCache,
     path: &Path,
     backend: &str,
-    since_ms: Option<i64>,
-    history_since_ms: i64,
-    usage: &mut UsageMap,
-    daily: &mut DailyMap,
+    fingerprint: FileFingerprint,
+) -> bool {
+    let unchanged = history
+        .files
+        .get(path)
+        .is_some_and(|cached| cached.backend == backend && cached.fingerprint == fingerprint);
+    if unchanged {
+        return false;
+    }
+
+    let events = parse_history_file(path, backend, fingerprint.modified_ms());
+    history.files.insert(
+        path.to_path_buf(),
+        CachedHistoryFile {
+            backend: backend.to_string(),
+            fingerprint,
+            events,
+        },
+    );
+    true
+}
+
+fn parse_history_file(path: &Path, backend: &str, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
+    match backend {
+        "codebuddy" => request_file_events(path, backend, fallback_ms, RequestFormat::CodeBuddy),
+        "claude" => request_file_events(path, backend, fallback_ms, RequestFormat::Claude),
+        "codex" => codex_file_events(path, fallback_ms),
+        _ => Vec::new(),
+    }
+}
+
+fn request_file_events(
+    path: &Path,
+    backend: &str,
+    fallback_ms: Option<i64>,
     format: RequestFormat,
-) {
-    let fallback_ms = file_modified_ms(path);
+) -> Vec<UsageEvent> {
+    let mut events = Vec::new();
     for_each_json_line(path, |value| {
         let request = match format {
             RequestFormat::CodeBuddy => parse_codebuddy_request(value),
             RequestFormat::Claude => parse_claude_request(value),
         };
         if let Some((model, bucket)) = request {
-            let at = event_timestamp_ms(value).or(fallback_ms);
-            if since_ms.is_none_or(|since| at.is_some_and(|event_at| event_at >= since)) {
-                add_usage(usage, backend, &model, bucket.clone());
-            }
-            if at.is_some_and(|event_at| event_at >= history_since_ms) {
-                add_daily(daily, at.unwrap_or_default(), bucket.total);
-            }
+            events.push(UsageEvent {
+                backend: backend.to_string(),
+                model,
+                timestamp_ms: event_timestamp_ms(value).or(fallback_ms),
+                usage: bucket,
+            });
         }
     });
+    events
 }
 
 fn parse_codebuddy_request(value: &Value) -> Option<(String, UsageBucket)> {
@@ -336,14 +389,8 @@ fn parse_claude_request(value: &Value) -> Option<(String, UsageBucket)> {
     ))
 }
 
-fn scan_codex_file(
-    path: &Path,
-    since_ms: Option<i64>,
-    history_since_ms: i64,
-    usage: &mut UsageMap,
-    daily: &mut DailyMap,
-) {
-    let fallback_ms = file_modified_ms(path);
+fn codex_file_events(path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
+    let mut events = Vec::new();
     let mut model = String::from("unknown");
     let mut previous = UsageBucket::default();
 
@@ -382,23 +429,18 @@ fn scan_codex_file(
             current
         };
         if delta.total > 0 {
-            let at = event_timestamp_ms(value).or(fallback_ms);
-            if since_ms.is_none_or(|since| at.is_some_and(|event_at| event_at >= since)) {
-                add_usage(
-                    usage,
-                    "codex",
-                    &model,
-                    UsageBucket {
-                        requests: 1,
-                        ..delta.clone()
-                    },
-                );
-            }
-            if at.is_some_and(|event_at| event_at >= history_since_ms) {
-                add_daily(daily, at.unwrap_or_default(), delta.total);
-            }
+            events.push(UsageEvent {
+                backend: "codex".to_string(),
+                model: model.clone(),
+                timestamp_ms: event_timestamp_ms(value).or(fallback_ms),
+                usage: UsageBucket {
+                    requests: 1,
+                    ..delta
+                },
+            });
         }
     });
+    events
 }
 
 fn codex_usage(value: &Value) -> UsageBucket {
@@ -491,6 +533,32 @@ fn number(value: &Value, key: &str) -> u64 {
         .get(key)
         .and_then(|raw| raw.as_u64().or_else(|| raw.as_str()?.parse().ok()))
         .unwrap_or(0)
+}
+
+fn aggregate_event(
+    event: &UsageEvent,
+    since_ms: Option<i64>,
+    history_since_ms: i64,
+    usage: &mut UsageMap,
+    daily: &mut DailyMap,
+) {
+    if since_ms.is_none_or(|since| {
+        event
+            .timestamp_ms
+            .is_some_and(|timestamp| timestamp >= since)
+    }) {
+        add_usage(usage, &event.backend, &event.model, event.usage.clone());
+    }
+    if event
+        .timestamp_ms
+        .is_some_and(|timestamp| timestamp >= history_since_ms)
+    {
+        add_daily(
+            daily,
+            event.timestamp_ms.unwrap_or_default(),
+            event.usage.total,
+        );
+    }
 }
 
 fn add_usage(usage: &mut UsageMap, backend: &str, model: &str, add: UsageBucket) {
@@ -650,5 +718,82 @@ mod tests {
         let snapshot = finish_snapshot("today", 0, UsageMap::new(), DailyMap::new());
         assert_eq!(snapshot.daily.len(), DAILY_HISTORY_DAYS as usize);
         assert!(snapshot.daily.iter().all(|day| day.total_tokens == 0));
+    }
+
+    #[test]
+    fn unchanged_history_file_reuses_cached_events() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-model-usage-cache-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        let first_line = serde_json::json!({
+            "timestamp": "2026-07-21T12:00:00Z",
+            "providerData": {
+                "requestModelId": "claude-opus-4.7",
+                "usage": {"totalTokens": 120, "inputTokens": 100, "outputTokens": 20}
+            }
+        });
+        fs::write(&path, format!("{first_line}\n")).unwrap();
+
+        let mut history = HistoryCache::default();
+        let first_fingerprint = file_fingerprint(&path).unwrap();
+        assert!(refresh_history_file(
+            &mut history,
+            &path,
+            "codebuddy",
+            first_fingerprint
+        ));
+        assert_eq!(history.files[&path].events.len(), 1);
+        assert!(!refresh_history_file(
+            &mut history,
+            &path,
+            "codebuddy",
+            first_fingerprint
+        ));
+
+        fs::write(&path, format!("{first_line}\n{first_line}\n")).unwrap();
+        let second_fingerprint = file_fingerprint(&path).unwrap();
+        assert_ne!(first_fingerprint, second_fingerprint);
+        assert!(refresh_history_file(
+            &mut history,
+            &path,
+            "codebuddy",
+            second_fingerprint
+        ));
+        assert_eq!(history.files[&path].events.len(), 2);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cached_events_are_filtered_when_building_a_period_snapshot() {
+        let mut usage = UsageMap::new();
+        let mut daily = DailyMap::new();
+        let event = UsageEvent {
+            backend: "codex".to_string(),
+            model: "gpt-5.6".to_string(),
+            timestamp_ms: Some(1_000),
+            usage: UsageBucket {
+                input: 90,
+                output: 10,
+                total: 100,
+                requests: 1,
+                ..UsageBucket::default()
+            },
+        };
+
+        aggregate_event(&event, Some(2_000), 0, &mut usage, &mut daily);
+        assert!(usage.is_empty());
+        assert_eq!(daily.values().copied().sum::<u64>(), 100);
+
+        aggregate_event(&event, None, 0, &mut usage, &mut daily);
+        assert_eq!(
+            usage[&("codex".to_string(), "gpt-5.6".to_string())].total,
+            100
+        );
     }
 }
