@@ -194,9 +194,13 @@ export interface ModelMonitorLayout {
 export const modelMonitorIpc = {
   setExpanded: (expanded: boolean) =>
     invoke<void>('model_monitor_set_expanded', { expanded }),
+  fitHeight: (height: number) =>
+    invoke<void>('model_monitor_fit_height', { height }),
   reposition: () => invoke<ModelMonitorLayout>('model_monitor_reposition'),
   onLayoutChanged: (cb: (layout: ModelMonitorLayout) => void) =>
     listen<ModelMonitorLayout>('model-monitor-layout-changed', (event) => cb(event.payload)),
+  onNativeHoverChanged: (cb: (hovered: boolean) => void) =>
+    listen<boolean>('model-monitor-native-hover-changed', (event) => cb(event.payload)),
   onThemeChanged: (cb: (theme: ThemeMode) => void) =>
     listen<string>('theme-changed', (event) => cb(event.payload as ThemeMode)),
 }

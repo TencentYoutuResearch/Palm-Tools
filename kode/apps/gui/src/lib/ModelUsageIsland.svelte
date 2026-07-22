@@ -15,6 +15,9 @@
     { id: 'month', label: 'Month' },
     { id: 'all', label: 'All time' },
   ]
+  const panelWindowGutter = 12
+  const panelOpenDurationMs = 360
+  const panelCloseDurationMs = 300
 
   let open = $state(false)
   let panelMounted = $state(false)
@@ -28,9 +31,15 @@
   let refreshSequence = 0
   let focusUnlisten: UnlistenFn | null = null
   let layoutUnlisten: UnlistenFn | null = null
+  let nativeHoverUnlisten: UnlistenFn | null = null
   let resizeSequence = 0
   let hoverTimer: number | null = null
   let monitorPositionTimer: number | null = null
+  let panelSettleTimer: number | null = null
+  let panelCloseTimer: number | null = null
+  let panelFitFrame: number | null = null
+  let panelElement: HTMLElement | null = null
+  let panelSettled = false
   let monitorLayout: ModelMonitorLayout = $state({ isNotched: false, notchWidth: 185, notchHeight: 32, menuBarHeight: 24 })
 
   let islandRoot = $state<HTMLDivElement>()
@@ -52,6 +61,12 @@
     const y = 48 - (day.total_tokens / trendMax * 42)
     return `${x.toFixed(1)},${y.toFixed(1)}`
   }).join(' '))
+
+  $effect(() => {
+    void monitorLayout.notchWidth
+    void monitorLayout.notchHeight
+    if (panelElement) updatePanelMorphMetrics(panelElement)
+  })
 
   async function refresh(nextPeriod = period) {
     const sequence = ++refreshSequence
@@ -78,6 +93,10 @@
     if (next === open) return
     const sequence = ++resizeSequence
     if (next) {
+      if (panelCloseTimer != null) {
+        window.clearTimeout(panelCloseTimer)
+        panelCloseTimer = null
+      }
       try {
         await modelMonitorIpc.setExpanded(true)
       } catch (cause) {
@@ -85,20 +104,99 @@
         return
       }
       if (sequence !== resizeSequence) return
+      // Give WKWebView one frame to commit the enlarged native surface before the
+      // panel transition starts. Mounting it in the resize completion microtask can
+      // make the first animation frame absorb surface allocation and layout together.
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+      if (sequence !== resizeSequence) return
+      panelSettled = false
       panelClosing = false
       panelMounted = true
       open = true
-      void refresh()
+      if (panelSettleTimer != null) window.clearTimeout(panelSettleTimer)
+      // reduced-motion 下没有 animationend；fallback 同时避免未来 CSS 动画改名后
+      // 原生窗口一直停留在 720px 的 staging 高度。
+      panelSettleTimer = window.setTimeout(settlePanelWindow, panelOpenDurationMs + 40)
       return
+    }
+    panelSettled = false
+    if (panelSettleTimer != null) {
+      window.clearTimeout(panelSettleTimer)
+      panelSettleTimer = null
     }
     open = false
     panelClosing = true
-    window.setTimeout(() => {
-      if (sequence !== resizeSequence) return
-      panelMounted = false
-      panelClosing = false
-      void modelMonitorIpc.setExpanded(false)
-    }, 360)
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    panelCloseTimer = window.setTimeout(
+      finishPanelClose,
+      reducedMotion ? 0 : panelCloseDurationMs + 40,
+    )
+  }
+
+  function finishPanelClose() {
+    if (panelCloseTimer != null) {
+      window.clearTimeout(panelCloseTimer)
+      panelCloseTimer = null
+    }
+    if (open || !panelClosing) return
+    panelMounted = false
+    panelClosing = false
+    void modelMonitorIpc.setExpanded(false)
+  }
+
+  function schedulePanelFit() {
+    if (!open || panelClosing || !panelSettled || !panelElement || panelFitFrame != null) return
+    panelFitFrame = window.requestAnimationFrame(() => {
+      panelFitFrame = null
+      if (!open || panelClosing || !panelSettled || !panelElement) return
+      const height = Math.ceil(panelElement.offsetHeight + panelWindowGutter)
+      void modelMonitorIpc.fitHeight(height).catch(() => {
+        // 尺寸收紧是视觉优化；窗口已关闭或显示器切换时允许这次请求自然失效。
+      })
+    })
+  }
+
+  function settlePanelWindow() {
+    if (panelSettleTimer != null) {
+      window.clearTimeout(panelSettleTimer)
+      panelSettleTimer = null
+    }
+    if (!open || panelClosing) return
+    panelSettled = true
+    schedulePanelFit()
+  }
+
+  function onPanelAnimationEnd(event: AnimationEvent) {
+    if (event.target === event.currentTarget && event.animationName === 'island-unfold') {
+      settlePanelWindow()
+    } else if (event.target === event.currentTarget && event.animationName === 'island-fold') {
+      finishPanelClose()
+    }
+  }
+
+  function observePanel(node: HTMLElement) {
+    panelElement = node
+    updatePanelMorphMetrics(node)
+    const observer = new ResizeObserver(() => {
+      updatePanelMorphMetrics(node)
+      schedulePanelFit()
+    })
+    observer.observe(node)
+    return {
+      destroy() {
+        observer.disconnect()
+        if (panelElement === node) panelElement = null
+      },
+    }
+  }
+
+  function updatePanelMorphMetrics(node: HTMLElement) {
+    const fullWidth = Math.max(1, node.offsetWidth)
+    const fullHeight = Math.max(1, node.offsetHeight)
+    const closedWidth = Math.min(fullWidth, Math.max(96, monitorLayout.notchWidth) + 180)
+    const closedHeight = Math.min(fullHeight, Math.max(24, monitorLayout.notchHeight))
+    node.style.setProperty('--panel-closed-scale-x', String(closedWidth / fullWidth))
+    node.style.setProperty('--panel-closed-scale-y', String(closedHeight / fullHeight))
   }
 
   function toggle() {
@@ -163,7 +261,15 @@
 
   async function syncMonitorLayout() {
     try {
-      monitorLayout = await modelMonitorIpc.reposition()
+      const next = await modelMonitorIpc.reposition()
+      if (
+        next.isNotched !== monitorLayout.isNotched
+        || next.notchWidth !== monitorLayout.notchWidth
+        || next.notchHeight !== monitorLayout.notchHeight
+        || next.menuBarHeight !== monitorLayout.menuBarHeight
+      ) {
+        monitorLayout = next
+      }
     } catch {
       // The monitor is optional outside Tauri and on unsupported desktops.
     }
@@ -179,6 +285,10 @@
     void syncMonitorLayout()
     void modelMonitorIpc.onLayoutChanged((layout) => { monitorLayout = layout })
       .then((unlisten) => { layoutUnlisten = unlisten })
+    void modelMonitorIpc.onNativeHoverChanged((hovered) => {
+      if (hovered) onIslandEnter()
+      else onIslandLeave()
+    }).then((unlisten) => { nativeHoverUnlisten = unlisten })
     monitorPositionTimer = window.setInterval(syncMonitorLayout, 1500)
     refreshTimer = window.setInterval(() => {
       if (period === 'today') void refresh('today')
@@ -192,8 +302,12 @@
     if (refreshTimer != null) window.clearInterval(refreshTimer)
     if (monitorPositionTimer != null) window.clearInterval(monitorPositionTimer)
     clearHoverTimer()
+    if (panelSettleTimer != null) window.clearTimeout(panelSettleTimer)
+    if (panelCloseTimer != null) window.clearTimeout(panelCloseTimer)
+    if (panelFitFrame != null) window.cancelAnimationFrame(panelFitFrame)
     focusUnlisten?.()
     layoutUnlisten?.()
+    nativeHoverUnlisten?.()
     delete document.documentElement.dataset.window
   })
 </script>
@@ -203,10 +317,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="model-island"
-  class:open
   class:notched={monitorLayout.isNotched}
   class:expanded-surface={panelMounted}
-  class:closing-surface={panelClosing}
   style={`--notch-width:${Math.max(96, monitorLayout.notchWidth)}px;--notch-height:${Math.max(24, monitorLayout.notchHeight)}px;--menu-bar-height:${Math.max(24, monitorLayout.menuBarHeight)}px;--closed-width:${Math.max(96, monitorLayout.notchWidth) + 180}px`}
   bind:this={islandRoot}
   onmouseenter={onIslandEnter}
@@ -234,6 +346,8 @@
       class="usage-panel"
       class:closing={panelClosing}
       aria-label="Model token monitor"
+      use:observePanel
+      onanimationend={onPanelAnimationEnd}
     >
       <header class="panel-header">
         <div>
@@ -352,21 +466,15 @@
     position: relative; width: 100%; height: 34px; padding-top: 0; margin: 0 auto; box-sizing: border-box;
     -webkit-app-region: no-drag; pointer-events: auto; color: var(--fg-primary);
   }
-  .model-island.expanded-surface { height: min(670px, 100%); }
+  .model-island.expanded-surface { height: 100%; }
   .island-trigger {
     width: var(--closed-width); height: var(--notch-height); grid-template-columns: 90px var(--notch-width) 90px;
     position: relative; z-index: 3; display: grid; align-items: center; margin: 0 auto; padding: 0;
     border: 0; border-radius: 0 0 14px 14px; background: #000; color: #f5f5f7; box-shadow: none; cursor: pointer;
-    transition: background var(--t-fast), transform var(--t-fast);
-  }
-  .model-island.open .island-trigger {
-    animation: island-pill-settle 420ms cubic-bezier(.2,.8,.2,1);
-  }
-  .model-island.closing-surface .island-trigger {
-    animation: island-pill-return 360ms both;
+    transition: background var(--t-fast), opacity var(--t-fast);
   }
   .island-trigger:hover { background: #000; }
-  .island-trigger:active { transform: scale(.985); }
+  .island-trigger:active { opacity: .88; }
   .island-trigger:focus-visible, button:focus-visible { outline: 2px solid var(--bd-focus); outline-offset: 2px; }
   .trigger-side { min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 9px; box-sizing: border-box; }
   .trigger-side > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -377,14 +485,15 @@
   .trigger-right strong { color: var(--st-tokens); font-size: 10px; }
   .notch-gap { width: var(--notch-width); height: 100%; }
   .usage-panel {
+    --panel-closed-scale-x: .6; --panel-closed-scale-y: .06;
     position: absolute; top: 0; left: 50%; width: 620px; transform: translateX(-50%);
     padding: calc(var(--notch-height) + 14px) 16px 16px; border: 0 solid var(--bd-strong); border-width: 0 1px 1px; border-radius: 0 0 18px 18px;
-    background: #000; box-shadow: 0 18px 48px rgba(0,0,0,.38);
-    z-index: 2; transform-origin: 50% 12px;
-    animation: island-unfold 420ms both;
-    will-change: clip-path;
+    background: #000; box-shadow: 0 6px 14px rgba(0,0,0,.28);
+    z-index: 2; transform-origin: 50% 0;
+    animation: island-unfold 360ms cubic-bezier(.2,.78,.22,1) both;
+    will-change: transform, opacity;
   }
-  .usage-panel.closing { pointer-events: none; animation: island-fold 360ms both; }
+  .usage-panel.closing { pointer-events: none; animation: island-fold 300ms cubic-bezier(.45,0,.75,.2) both; }
   .panel-header { display: flex; align-items: flex-start; justify-content: space-between; }
   .eyebrow { display: block; margin-bottom: 3px; color: var(--fg-tertiary); font: 700 9px var(--font-mono); letter-spacing: .16em; }
   .panel-header h2 { margin: 0; font-size: 16px; line-height: 1.2; letter-spacing: -.02em; }
@@ -425,7 +534,7 @@
   .heat-cell.level-4 { background: var(--st-tokens); }
 
   .model-heading { display: flex; justify-content: space-between; padding: 0 3px 6px; color: var(--fg-tertiary); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; }
-  .model-list { max-height: max(120px, min(290px, calc(100vh - 420px))); overflow-y: auto; border-top: 1px solid var(--bd-muted); transition: opacity var(--t-fast); }
+  .model-list { max-height: 290px; overflow-y: auto; border-top: 1px solid var(--bd-muted); transition: opacity var(--t-fast); }
   .model-list.loading { opacity: .55; }
   .model-row { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 9px; align-items: center; min-height: 58px; padding: 8px 4px; border-bottom: 1px solid var(--bd-muted); }
   .backend-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: var(--bg-chip); }
@@ -443,33 +552,27 @@
   .panel-footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 10px; color: var(--fg-tertiary); font: 9px var(--font-mono); }
 
   @keyframes island-unfold {
-    0% { clip-path: inset(0 calc((100% - var(--closed-width)) / 2) calc(100% - var(--notch-height)) calc((100% - var(--closed-width)) / 2) round 0 0 14px 14px); }
-    38% { clip-path: inset(0 -4px -8px -4px round 0 0 15px 15px); }
-    62% { clip-path: inset(2px 3px 4px 3px round 20px); }
-    80% { clip-path: inset(-1px -1px -2px -1px round 17px); }
-    100% { clip-path: inset(0 round 18px); }
+    0% {
+      opacity: 0;
+      transform: translateX(-50%) scale(var(--panel-closed-scale-x), var(--panel-closed-scale-y));
+      border-radius: 0 0 14px 14px;
+    }
+    24% { opacity: .18; }
+    72% { opacity: 1; transform: translateX(-50%) scale(1.008, 1.012); }
+    100% { opacity: 1; transform: translateX(-50%) scale(1); border-radius: 0 0 18px 18px; }
   }
   @keyframes island-fold {
-    0% { opacity: 1; clip-path: inset(0 round 0 0 18px 18px); }
-    22% { opacity: 1; clip-path: inset(0 8px 8% 8px round 19px); }
-    45% { opacity: 1; clip-path: inset(0 24px 32% 24px round 22px); }
-    65% { opacity: 1; clip-path: inset(0 52px 58% 52px round 28px); }
-    82% { opacity: .96; clip-path: inset(0 80px 78% 80px round 40px); }
-    100% { opacity: 0; clip-path: inset(0 calc((100% - var(--closed-width)) / 2) calc(100% - var(--notch-height)) calc((100% - var(--closed-width)) / 2) round 0 0 14px 14px); }
-  }
-  @keyframes island-pill-settle {
-    0% { transform: scale(1); }
-    30% { transform: scale(.975,.91); }
-    58% { transform: scale(1.012,1.035); }
-    78% { transform: scale(.996,.985); }
-    100% { transform: scale(1); }
-  }
-  @keyframes island-pill-return {
-    0%, 72% { opacity: .82; }
-    100% { opacity: 1; }
+    0% { opacity: 1; transform: translateX(-50%) scale(1); border-radius: 0 0 18px 18px; }
+    24% { opacity: 1; transform: translateX(-50%) scale(1.004, .996); }
+    72% { opacity: .2; }
+    100% {
+      opacity: 0;
+      transform: translateX(-50%) scale(var(--panel-closed-scale-x), var(--panel-closed-scale-y));
+      border-radius: 0 0 14px 14px;
+    }
   }
   @media (prefers-reduced-motion: reduce) {
-    .usage-panel, .usage-panel.closing, .model-island.open .island-trigger, .model-island.closing-surface .island-trigger { animation: none; }
+    .usage-panel, .usage-panel.closing { animation: none; }
     .island-trigger { transition: none; }
   }
 </style>

@@ -170,6 +170,7 @@ pub fn run() {
             commands::list_sessions_for_cwd,
             model_usage::model_usage_snapshot,
             model_monitor::model_monitor_set_expanded,
+            model_monitor::model_monitor_fit_height,
             model_monitor::model_monitor_reposition,
             // M4 memory review queue
             memory::memory_list_pending,
