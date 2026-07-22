@@ -94,7 +94,7 @@ set_tauri_resource_args() {
     info "tar.gz 已存在,将打入 app"
   else
     warn "tar.gz 不存在,本次跳过打包 remote bridge resource"
-    TAURI_RESOURCE_ARGS=(--config '{"bundle":{"resources":[]}}')
+    TAURI_RESOURCE_ARGS=(--config 'bundle.resources=[]')
   fi
 }
 
@@ -111,7 +111,7 @@ set_signing_args() {
   SIGN_ADHOC=0
   if ! security find-identity -p codesigning -v 2>/dev/null | grep -q "Developer ID Application"; then
     warn "未找到 Developer ID 签名证书 → ad-hoc 签名,只打 .app(跳过 DMG)"
-    SIGN_ARGS=(--config '{"bundle":{"macOS":{"signingIdentity":null}}}')
+    SIGN_ARGS=(--config 'bundle.macOS.signingIdentity=null')
     BUNDLE_TARGETS=(--bundles app)
     SIGN_ADHOC=1
   fi
