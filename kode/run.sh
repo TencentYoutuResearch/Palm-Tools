@@ -102,6 +102,7 @@ set_tauri_resource_args() {
 # codesign 会失败;DMG 步骤也需要证书签名。这里检测后自动降级:
 #   - 无证书 → ad-hoc 签名(signingIdentity=null)+ 只打 .app(跳过 DMG)
 #   - 有证书 → 走原配置(打 .app + .dmg)
+# CI 可设 KODE_FORCE_DMG=1 在 ad-hoc 模式下也生成 DMG(用户需手动绕过 Gatekeeper)。
 SIGN_ARGS=()
 BUNDLE_TARGETS=()
 SIGN_ADHOC=0
@@ -110,10 +111,15 @@ set_signing_args() {
   BUNDLE_TARGETS=()
   SIGN_ADHOC=0
   if ! security find-identity -p codesigning -v 2>/dev/null | grep -q "Developer ID Application"; then
-    warn "未找到 Developer ID 签名证书 → ad-hoc 签名,只打 .app(跳过 DMG)"
     SIGN_ARGS=(--config 'bundle.macOS.signingIdentity=null')
-    BUNDLE_TARGETS=(--bundles app)
     SIGN_ADHOC=1
+    if [ "${KODE_FORCE_DMG:-0}" = "1" ]; then
+      warn "未找到 Developer ID 签名证书 → ad-hoc 签名,KODE_FORCE_DMG=1 → 打 .app + .dmg"
+      BUNDLE_TARGETS=(--bundles app,dmg)
+    else
+      warn "未找到 Developer ID 签名证书 → ad-hoc 签名,只打 .app(跳过 DMG)"
+      BUNDLE_TARGETS=(--bundles app)
+    fi
   fi
 }
 

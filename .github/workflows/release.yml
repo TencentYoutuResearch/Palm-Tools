@@ -101,6 +101,8 @@ jobs:
 
       - name: Build macOS app
         working-directory: kode
+        env:
+          KODE_FORCE_DMG: "1"
         run: ./run.sh app
 
       - name: Verify macOS bundle architecture
