@@ -35,6 +35,9 @@ jobs:
       - name: Build GUI frontend
         run: pnpm install --frozen-lockfile && pnpm build
         working-directory: kode/apps/gui
+      - name: Build SpecOps node bundle
+        run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: kode/apps/specops
       - run: cargo test -- --test-threads=1
 
   specops:
