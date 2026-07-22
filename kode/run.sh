@@ -329,6 +329,32 @@ case "$CMD" in
     (cd "$GUI_DIR" && pnpm list --depth 0) || true
     ;;
 
+  version)
+    NEW_VERSION="${1:-}"
+    if [ -z "$NEW_VERSION" ]; then
+      error "用法: ./run.sh version <版本号>  例: ./run.sh version 0.2.1-dev"
+    fi
+    hdr "更新版本号 → $NEW_VERSION"
+    # 1. Cargo workspace version
+    sed -i.bak 's/^version = ".*"/version = "'"$NEW_VERSION"'"/' "$ROOT_DIR/Cargo.toml"
+    rm -f "$ROOT_DIR/Cargo.toml.bak"
+    info "  Cargo.toml [workspace.package] → $NEW_VERSION"
+    # 2. GUI package.json
+    sed -i.bak 's/"version": *"[^"]*"/"version": "'"$NEW_VERSION"'"/' "$GUI_DIR/package.json"
+    rm -f "$GUI_DIR/package.json.bak"
+    info "  apps/gui/package.json → $NEW_VERSION"
+    # 3. Tauri config
+    sed -i.bak 's/"version": *"[^"]*"/"version": "'"$NEW_VERSION"'"/' "$TAURI_DIR/tauri.conf.json"
+    rm -f "$TAURI_DIR/tauri.conf.json.bak"
+    info "  apps/gui/src-tauri/tauri.conf.json → $NEW_VERSION"
+    # 4. Refresh Cargo.lock
+    cargo update -p kode-core --precise "$NEW_VERSION" 2>/dev/null || true
+    cargo update -p kode-bridge --precise "$NEW_VERSION" 2>/dev/null || true
+    cargo update -p kode-gui --precise "$NEW_VERSION" 2>/dev/null || true
+    info "  Cargo.lock 已刷新"
+    hint "git diff 确认后 commit"
+    ;;
+
   # ===========================================================
   # 信息
   # ===========================================================
@@ -378,6 +404,9 @@ case "$CMD" in
     printf '  %s./run.sh clean%s          清 target/ dist/(谨慎)\n' "$G" "$N"
     printf '  %s./run.sh size%s           各个产物体积\n' "$G" "$N"
     printf '  %s./run.sh deps%s           列依赖\n\n' "$G" "$N"
+
+    printf '%s版本%s\n' "$C" "$N"
+    printf '  %s./run.sh version <ver>%s  更新所有版本号(Cargo + package.json + tauri.conf.json)\n\n' "$G" "$N"
 
     printf '%s信息%s\n' "$C" "$N"
     printf '  %s./run.sh status%s         git/toolchain/workspace 摘要\n\n' "$G" "$N"

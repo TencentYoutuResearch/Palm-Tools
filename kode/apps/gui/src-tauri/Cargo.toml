@@ -1,7 +1,7 @@
 [package]
 name = "kode-gui"
-version = "0.2.0-dev"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "kill la kode GUI: Tauri 2 + xterm.js + Svelte 5"
 
 [lib]
