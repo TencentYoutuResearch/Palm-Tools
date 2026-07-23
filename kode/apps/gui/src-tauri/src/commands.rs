@@ -171,6 +171,85 @@ pub struct AvatarLibrary {
     pub gallery: Vec<AvatarSet>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AvatarGenerationPrompt {
+    pub prompt: String,
+    pub skill_path: String,
+    pub gallery_dir: String,
+}
+
+const AVATAR_SKILL_RELATIVE_PATH: &str = "resources/skills/kode-generate-avatar/SKILL.md";
+const AVATAR_SPLITTER_RELATIVE_PATH: &str = "scripts/split_avatar_sheets.py";
+
+/// Build the request sent by the avatar picker's create button to the current CLI.
+///
+/// The skill is bundled as a Kode resource instead of installed into a specific
+/// backend's home directory. Supplying its absolute path lets every local backend
+/// load the same version while still writing generated avatars to Kode's config dir.
+#[tauri::command]
+pub fn get_avatar_generation_prompt() -> Result<AvatarGenerationPrompt, String> {
+    let skill_path = avatar_skill_path()
+        .ok_or_else(|| "Kode's built-in avatar generation skill is unavailable".to_string())?;
+    let splitter_path = avatar_splitter_path(&skill_path);
+    if !splitter_path.is_file() {
+        return Err(format!(
+            "Kode's built-in avatar splitter is unavailable: {}",
+            splitter_path.display()
+        ));
+    }
+    let avatar_root = avatar_root_dir()
+        .ok_or_else(|| "cannot resolve Kode's avatar config directory".to_string())?;
+    let gallery_dir = avatar_root.join("gallery");
+    std::fs::create_dir_all(&gallery_dir)
+        .map_err(|error| format!("create avatar gallery {}: {error}", gallery_dir.display()))?;
+
+    Ok(build_avatar_generation_prompt(skill_path, gallery_dir))
+}
+
+fn build_avatar_generation_prompt(
+    skill_path: PathBuf,
+    gallery_dir: PathBuf,
+) -> AvatarGenerationPrompt {
+    let splitter_path = avatar_splitter_path(&skill_path);
+    let skill_path = skill_path.to_string_lossy().into_owned();
+    let splitter_path = splitter_path.to_string_lossy().into_owned();
+    let gallery_dir = gallery_dir.to_string_lossy().into_owned();
+    let prompt = format!(
+        "请调用 Kode 内置技能 `$kode-generate-avatar` 为我生成自定义动态 avatar。先完整读取 `{skill_path}` 并严格按技能执行；技能自带分割脚本为 `{splitter_path}`；最终 avatar 输出目录必须位于 `{gallery_dir}`。请先询问角色与画风、可选角色参考图和 avatar-id。若 `{gallery_dir}/all.png` 存在可优先作为版式参考；若不存在，不要阻塞，直接采用技能的 reference-free 3x3 + 2x2 quad 流程生成一张 36 小帧套图，再拆分为 running/01..06、error、idle、awaiting 共 36 帧并完成逐态目视检查和目录校验。"
+    );
+    AvatarGenerationPrompt {
+        prompt,
+        skill_path,
+        gallery_dir,
+    }
+}
+
+fn avatar_skill_path() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(executable_dir) = executable.parent() {
+            candidates.push(executable_dir.join(AVATAR_SKILL_RELATIVE_PATH));
+            // macOS app bundle: Kode.app/Contents/MacOS/kode -> Contents/Resources/...
+            if let Some(contents_dir) = executable_dir.parent() {
+                candidates.push(
+                    contents_dir
+                        .join("Resources")
+                        .join(AVATAR_SKILL_RELATIVE_PATH),
+                );
+            }
+        }
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(AVATAR_SKILL_RELATIVE_PATH));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn avatar_splitter_path(skill_path: &Path) -> PathBuf {
+    skill_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(AVATAR_SPLITTER_RELATIVE_PATH)
+}
+
 /// Load optional animated tab avatars from the user config directory.
 ///
 /// Convention:
@@ -1686,6 +1765,44 @@ fn persist_paths(state: &AppState) {
         .clone()
         .map(|p| p.to_string_lossy().into_owned());
     state.persist.request_save(s);
+}
+
+#[cfg(test)]
+mod avatar_generation_tests {
+    use std::path::PathBuf;
+
+    use super::{avatar_skill_path, avatar_splitter_path, build_avatar_generation_prompt};
+
+    #[test]
+    fn bundled_avatar_skill_is_available_in_development() {
+        let skill_path = avatar_skill_path().expect("bundled avatar skill should exist");
+
+        assert!(skill_path.is_file());
+        assert!(skill_path.ends_with("kode-generate-avatar/SKILL.md"));
+        assert!(avatar_splitter_path(&skill_path).is_file());
+    }
+
+    #[test]
+    fn avatar_prompt_is_single_line_and_contains_required_context() {
+        let result = build_avatar_generation_prompt(
+            PathBuf::from("/tmp/kode skill/SKILL.md"),
+            PathBuf::from("/tmp/kode avatars/gallery"),
+        );
+
+        assert!(!result.prompt.contains('\n'));
+        assert!(result.prompt.contains("$kode-generate-avatar"));
+        assert!(result.prompt.contains("/tmp/kode skill/SKILL.md"));
+        assert!(result
+            .prompt
+            .contains("/tmp/kode skill/scripts/split_avatar_sheets.py"));
+        assert!(result.prompt.contains("/tmp/kode avatars/gallery"));
+        assert!(result.prompt.contains("/tmp/kode avatars/gallery/all.png"));
+        assert!(result.prompt.contains("reference-free"));
+        assert!(result.prompt.contains("2x2 quad"));
+        for state in ["running", "idle", "awaiting", "error"] {
+            assert!(result.prompt.contains(state));
+        }
+    }
 }
 
 #[cfg(test)]

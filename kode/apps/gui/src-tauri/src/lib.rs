@@ -128,6 +128,7 @@ pub fn run() {
             commands::list_backends,
             commands::discover_backend_models,
             commands::list_avatar_library,
+            commands::get_avatar_generation_prompt,
             commands::spawn_session,
             commands::write_input,
             commands::write_input_remote,

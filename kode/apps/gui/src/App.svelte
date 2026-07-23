@@ -64,6 +64,7 @@
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
+  import { pushToast } from './lib/toast'
 
   /**
    * 模板专用的响应式翻译函数。t() 本身不读任何 reactive 源,直接在常驻模板里用
@@ -442,6 +443,47 @@
   }
   function closeAvatarPicker() {
     pickerState = null
+  }
+  async function requestAvatarGeneration(tabId: SessionId) {
+    const tab = $tabs.find((candidate) => candidate.id === tabId)
+    if (!tab || tab.exited != null) {
+      pushToast({
+        severity: 'error',
+        title: 'Avatar request not sent',
+        detail: 'The selected CLI session is no longer available.',
+      })
+      return
+    }
+    if (tab.endpointId?.kind === 'remote') {
+      pushToast({
+        severity: 'warning',
+        title: 'Local session required',
+        detail: 'Custom avatar generation currently writes to this device, so choose a local CLI tab.',
+      })
+      return
+    }
+
+    try {
+      const request = await ipc.getAvatarGenerationPrompt()
+      selectTab(tab.id)
+      await ipc.writeInput(
+        tab.id,
+        new TextEncoder().encode(`${request.prompt}\r`),
+        tab.endpointId,
+      )
+      pickerState = null
+      pushToast({
+        severity: 'success',
+        title: 'Avatar request sent',
+        detail: 'Continue the design conversation in the selected CLI tab.',
+      })
+    } catch (error) {
+      pushToast({
+        severity: 'error',
+        title: 'Avatar request not sent',
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
   function startRename(id: SessionId, currentTitle: string) {
     editingId = id
@@ -1959,6 +2001,10 @@
       if (id_ == null) return
       setTabAvatar(id_, id)
       pickerState = null
+    }}
+    onGenerate={() => {
+      const id_ = pickerState?.tabId
+      if (id_ != null) void requestAvatarGeneration(id_)
     }}
     onClose={closeAvatarPicker}
   />

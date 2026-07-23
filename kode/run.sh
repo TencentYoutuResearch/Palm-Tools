@@ -93,8 +93,10 @@ set_tauri_resource_args() {
   if [ -f "$tarball_resource" ]; then
     info "tar.gz 已存在,将打入 app"
   else
-    warn "tar.gz 不存在,本次跳过打包 remote bridge resource"
-    TAURI_RESOURCE_ARGS=(--config 'bundle.resources=[]')
+    warn "tar.gz 不存在,本次仅跳过 remote bridge resource,保留内置 skills"
+    # 数组 override 会替换 tauri.conf.json 的全部 resources。这里必须显式
+    # 保留 skills,否则本地无 remote bridge tarball 时 avatar 技能也会消失。
+    TAURI_RESOURCE_ARGS=(--config 'bundle.resources=["resources/skills"]')
   fi
 }
 

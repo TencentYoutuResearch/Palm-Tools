@@ -13,6 +13,7 @@
     /** 触发头像的视口位置,用于定位 popover */
     anchorRect: DOMRect
     onPick: (id: string | null) => void
+    onGenerate: () => void
     onClose: () => void
   }
 
@@ -21,6 +22,7 @@
     currentAvatarId,
     anchorRect,
     onPick,
+    onGenerate,
     onClose,
   }: Props = $props()
 
@@ -41,7 +43,7 @@
   }
 
   onMount(() => {
-    loadAvatarLibrary()
+    loadAvatarLibrary(true)
     // 初始化每个 set 在 frame 0
     const init: Record<string, number> = {}
     for (const set of gallerySets) init[set.name] = 0
@@ -126,6 +128,15 @@
         {#if isCurrent(null)}
           <span class="check"><Icon name="check" size={10} /></span>
         {/if}
+      </button>
+      <button
+        class="cell generate-cell"
+        onclick={onGenerate}
+        title="Create a custom avatar"
+        aria-label="Create a custom avatar"
+      >
+        <span class="cell-avatar generate-avatar" aria-hidden="true">+</span>
+        <span class="cell-label">create</span>
       </button>
       <!-- gallery sets -->
       {#each gallerySets as set, i (set.name)}
@@ -238,6 +249,19 @@
   }
   .default-avatar {
     border-radius: 50%;
+  }
+  .generate-avatar {
+    color: var(--acc);
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--acc) 55%, var(--bd-default));
+    font-family: var(--font-mono);
+    font-size: 26px;
+    font-weight: 300;
+    line-height: 1;
+  }
+  .generate-cell:hover .generate-avatar {
+    background: color-mix(in srgb, var(--acc) 10%, var(--bg-base));
+    border-color: var(--acc);
   }
   .cell-avatar img {
     display: block;

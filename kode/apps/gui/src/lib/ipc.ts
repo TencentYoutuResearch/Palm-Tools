@@ -54,6 +54,12 @@ export interface AvatarLibrary {
   gallery: AvatarSet[]
 }
 
+export interface AvatarGenerationPrompt {
+  prompt: string
+  skill_path: string
+  gallery_dir: string
+}
+
 export interface SpecOpsSession {
   origin: string
   token: string
@@ -249,6 +255,8 @@ export const ipc = {
   /** Settings 面板用:返回全部 backend(含 disabled),带 enabled 字段 */
   listAllBackends: () => invoke<BackendListItem[]>('list_all_backends'),
   listAvatarLibrary: () => invoke<AvatarLibrary>('list_avatar_library'),
+  getAvatarGenerationPrompt: () =>
+    invoke<AvatarGenerationPrompt>('get_avatar_generation_prompt'),
   spawnSession: (
     backend_key: string,
     cols: number,

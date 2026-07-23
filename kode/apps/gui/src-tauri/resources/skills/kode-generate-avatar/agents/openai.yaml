@@ -1,0 +1,4 @@
+interface:
+  display_name: "Generate Kode Avatar"
+  short_description: "Create and split 36-frame Kode avatars"
+  default_prompt: "Use $kode-generate-avatar to create a custom 36-frame Kode avatar, with or without a layout reference."
