@@ -146,7 +146,6 @@
   "command.group.other": { "message": "其它" },
   "command.tab.close": { "message": "关闭当前 tab" },
   "command.tab.rename": { "message": "重命名当前 tab 标题" },
-  "command.tab.newWindow": { "message": "新建窗口" },
   "command.view.showPaths": { "message": "显示路径横幅..." },
   "command.view.hidePaths": { "message": "隐藏路径横幅" },
   "command.view.sidebar": { "message": "侧栏：{mode}" },

@@ -1156,27 +1156,6 @@ pub fn memory_browse_state_set(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn open_new_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::WebviewWindowBuilder;
-    let label = format!(
-        "kode-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    let url = tauri::WebviewUrl::App("index.html?skip_persist=1".into());
-    WebviewWindowBuilder::new(&app, &label, url)
-        .title("kode")
-        .inner_size(1100.0, 720.0)
-        .decorations(false)
-        .transparent(true)
-        .build()
-        .map_err(|e| format!("create window failed: {e}"))?;
-    Ok(())
-}
-
 /// 把 kode 主窗口拉到最前并聚焦。
 ///
 /// SpecOps 窗口里点 "Open in kode" 时,主窗口可能被 SpecOps 窗口遮挡或最小化。

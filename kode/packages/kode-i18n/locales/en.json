@@ -587,10 +587,6 @@
     "message": "Rename active tab title",
     "description": "Command: rename active tab"
   },
-  "command.tab.newWindow": {
-    "message": "New window",
-    "description": "Command: create new window"
-  },
   "command.view.showPaths": {
     "message": "Show paths banner...",
     "description": "Command: show paths banner"
