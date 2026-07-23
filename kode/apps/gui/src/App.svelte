@@ -806,15 +806,6 @@
     // 保留空实现以防未来需要
     void event
   }
-  /** 是否跳过持久化恢复(新窗口走这里;query string 检测) */
-  const skipPersist = (() => {
-    try {
-      return new URLSearchParams(window.location.search).has('skip_persist')
-    } catch {
-      return false
-    }
-  })()
-
   // 监听系统主题变化(只在 theme=system 时影响 UI;其它模式下我们仍跟踪以防切回 system)。
   let mql: MediaQueryList | null = null
   function onSystemThemeChange(e: MediaQueryListEvent | MediaQueryList) {
@@ -908,11 +899,9 @@
       } catch {
         // 无持久化或失败 — 静默,Browse 自带空默认
       }
-      if (!skipPersist) {
-        const persisted = await ipc.getPersistedTabs()
-        if (persisted && persisted.length > 0) {
-          restorable = persisted
-        }
+      const persisted = await ipc.getPersistedTabs()
+      if (persisted && persisted.length > 0) {
+        restorable = persisted
       }
       // 不自动 spawn —— 等用户在 BackendChooser 里点选,或 Cmd+T,或点 restore
     } catch (e) {
@@ -1144,9 +1133,6 @@
         e.preventDefault()
         closeTab(id)
       }
-    } else if (k === 'n' || k === 'N') {
-      e.preventDefault()
-      ipc.openNewWindow().catch((err) => console.error('open_new_window failed:', err))
     } else if (k === ']') {
       e.preventDefault()
       const arr = $tabs
@@ -1247,15 +1233,6 @@
       group: 'tab',
       run: () => {
         if ($activeTab) renameOpen = true
-      },
-    },
-    {
-      id: 'new-window',
-      label: t('command.tab.newWindow'),
-      detail: '⌘N',
-      group: 'tab',
-      run: () => {
-        ipc.openNewWindow().catch((e) => console.error(e))
       },
     },
     // ── View ──

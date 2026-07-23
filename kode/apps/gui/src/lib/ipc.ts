@@ -3,6 +3,7 @@
  */
 import { invoke, Channel } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 
 export type SessionId = number
 
@@ -205,9 +206,15 @@ export const modelMonitorIpc = {
     invoke<void>('model_monitor_fit_height', { height }),
   reposition: () => invoke<ModelMonitorLayout>('model_monitor_reposition'),
   onLayoutChanged: (cb: (layout: ModelMonitorLayout) => void) =>
-    listen<ModelMonitorLayout>('model-monitor-layout-changed', (event) => cb(event.payload)),
+    getCurrentWebviewWindow().listen<ModelMonitorLayout>(
+      'model-monitor-layout-changed',
+      (event) => cb(event.payload),
+    ),
   onNativeHoverChanged: (cb: (hovered: boolean) => void) =>
-    listen<boolean>('model-monitor-native-hover-changed', (event) => cb(event.payload)),
+    getCurrentWebviewWindow().listen<boolean>(
+      'model-monitor-native-hover-changed',
+      (event) => cb(event.payload),
+    ),
   onThemeChanged: (cb: (theme: ThemeMode) => void) =>
     listen<string>('theme-changed', (event) => cb(event.payload as ThemeMode)),
 }
@@ -368,10 +375,9 @@ export const ipc = {
   onSessionFocusRequested: (cb: (m: SessionFocusRequestedEvent) => void): Promise<UnlistenFn> =>
     listen<SessionFocusRequestedEvent>('session-focus-requested', (e) => cb(e.payload)),
 
-  // 持久化 + 多窗口
+  // 持久化 + 主窗口聚焦
   getPersistedTabs: () => invoke<PersistedTab[]>('get_persisted_tabs'),
   saveTabs: (tabs: PersistedTab[]) => invoke<void>('save_tabs', { tabs }),
-  openNewWindow: () => invoke<void>('open_new_window'),
   focusMainWindow: () => invoke<void>('focus_main_window'),
   openSpecOpsWindow: (session: SpecOpsSession, theme: ThemeMode, locale: LocaleMode) =>
     invoke<void>('open_specops_window', { session, theme, locale }),

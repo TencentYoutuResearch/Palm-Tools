@@ -140,7 +140,6 @@ pub fn run() {
             commands::unsubscribe_session_bytes,
             commands::get_persisted_tabs,
             commands::save_tabs,
-            commands::open_new_window,
             commands::focus_main_window,
             commands::open_specops_window,
             commands::specops_open,

@@ -34,7 +34,6 @@
   let nativeHoverUnlisten: UnlistenFn | null = null
   let resizeSequence = 0
   let hoverTimer: number | null = null
-  let monitorPositionTimer: number | null = null
   let panelSettleTimer: number | null = null
   let panelCloseTimer: number | null = null
   let panelFitFrame: number | null = null
@@ -280,8 +279,8 @@
     // 刘海是硬件黑色，不跟随 app / system 的 light appearance。
     document.documentElement.dataset.theme = 'dark'
     void refresh('today')
-    // 主窗口跨屏由 Rust 原生 Moved 事件立即推送新几何；低频巡检只兜底显示器
-    // 热插拔等 AppKit 不稳定通知，不再承担实时切屏。
+    // Rust 为每块显示器维护独立窗口并处理热插拔；前端只在挂载时读取一次本屏
+    // 几何，避免周期性 reposition 和全屏 child-window 调整互相拉扯。
     void syncMonitorLayout()
     void modelMonitorIpc.onLayoutChanged((layout) => { monitorLayout = layout })
       .then((unlisten) => { layoutUnlisten = unlisten })
@@ -289,7 +288,6 @@
       if (hovered) onIslandEnter()
       else onIslandLeave()
     }).then((unlisten) => { nativeHoverUnlisten = unlisten })
-    monitorPositionTimer = window.setInterval(syncMonitorLayout, 1500)
     refreshTimer = window.setInterval(() => {
       if (period === 'today') void refresh('today')
     }, 60_000)
@@ -300,7 +298,6 @@
 
   onDestroy(() => {
     if (refreshTimer != null) window.clearInterval(refreshTimer)
-    if (monitorPositionTimer != null) window.clearInterval(monitorPositionTimer)
     clearHoverTimer()
     if (panelSettleTimer != null) window.clearTimeout(panelSettleTimer)
     if (panelCloseTimer != null) window.clearTimeout(panelCloseTimer)
