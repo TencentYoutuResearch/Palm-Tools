@@ -176,6 +176,7 @@ pub struct AvatarGenerationPrompt {
     pub prompt: String,
     pub skill_path: String,
     pub gallery_dir: String,
+    pub locale: String,
 }
 
 const AVATAR_SKILL_RELATIVE_PATH: &str = "resources/skills/kode-generate-avatar/SKILL.md";
@@ -187,7 +188,9 @@ const AVATAR_SPLITTER_RELATIVE_PATH: &str = "scripts/split_avatar_sheets.py";
 /// backend's home directory. Supplying its absolute path lets every local backend
 /// load the same version while still writing generated avatars to Kode's config dir.
 #[tauri::command]
-pub fn get_avatar_generation_prompt() -> Result<AvatarGenerationPrompt, String> {
+pub fn get_avatar_generation_prompt(
+    locale: Option<String>,
+) -> Result<AvatarGenerationPrompt, String> {
     let skill_path = avatar_skill_path()
         .ok_or_else(|| "Kode's built-in avatar generation skill is unavailable".to_string())?;
     let splitter_path = avatar_splitter_path(&skill_path);
@@ -203,24 +206,48 @@ pub fn get_avatar_generation_prompt() -> Result<AvatarGenerationPrompt, String> 
     std::fs::create_dir_all(&gallery_dir)
         .map_err(|error| format!("create avatar gallery {}: {error}", gallery_dir.display()))?;
 
-    Ok(build_avatar_generation_prompt(skill_path, gallery_dir))
+    let locale = resolve_avatar_prompt_locale(locale.as_deref());
+    Ok(build_avatar_generation_prompt(
+        skill_path,
+        gallery_dir,
+        locale,
+    ))
+}
+
+fn resolve_avatar_prompt_locale(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some("zh-CN") => "zh-CN",
+        Some("en") => "en",
+        _ => match crate::persistence::load().locale.as_deref() {
+            Some("zh-CN") => "zh-CN",
+            _ => "en",
+        },
+    }
 }
 
 fn build_avatar_generation_prompt(
     skill_path: PathBuf,
     gallery_dir: PathBuf,
+    locale: &str,
 ) -> AvatarGenerationPrompt {
     let splitter_path = avatar_splitter_path(&skill_path);
     let skill_path = skill_path.to_string_lossy().into_owned();
     let splitter_path = splitter_path.to_string_lossy().into_owned();
     let gallery_dir = gallery_dir.to_string_lossy().into_owned();
-    let prompt = format!(
-        "请调用 Kode 内置技能 `$kode-generate-avatar` 为我生成自定义动态 avatar。先完整读取 `{skill_path}` 并严格按技能执行；技能自带分割脚本为 `{splitter_path}`；最终 avatar 输出目录必须位于 `{gallery_dir}`。请先询问角色与画风、可选角色参考图和 avatar-id。若 `{gallery_dir}/all.png` 存在可优先作为版式参考；若不存在，不要阻塞，直接采用技能的 reference-free 3x3 + 2x2 quad 流程生成一张 36 小帧套图，再拆分为 running/01..06、error、idle、awaiting 共 36 帧并完成逐态目视检查和目录校验。"
-    );
+    let prompt = if locale == "zh-CN" {
+        format!(
+            "请调用 Kode 内置技能 `$kode-generate-avatar` 为我生成自定义动态 avatar。当前界面语言是简体中文；技能的所有提问、进度说明和最终报告都必须使用简体中文。先完整读取 `{skill_path}` 并严格按技能执行；技能自带分割脚本为 `{splitter_path}`；最终 avatar 输出目录必须位于 `{gallery_dir}`。第一步必须先用简体中文询问我需要生成的人物名称，或人物形象/参考图；在我提供人物信息后，再询问画风和 avatar-id。若 `{gallery_dir}/all.png` 存在可优先作为版式参考；若不存在，不要阻塞，直接采用技能的 reference-free 3x3 + 2x2 quad 流程生成一张 36 小帧套图，再拆分为 running/01..06、error、idle、awaiting 共 36 帧并完成逐态目视检查和目录校验。"
+        )
+    } else {
+        format!(
+            "Use the built-in Kode skill `$kode-generate-avatar` to create a custom animated avatar for me. The current UI language is English; all questions, progress updates, and the final report must be in English. First read `{skill_path}` completely and follow it; the bundled splitter is `{splitter_path}`; the final avatar must be written under `{gallery_dir}`. Your first step must ask me in English for the character name or a character image/reference; only after I provide the character information should you ask for the style and avatar-id. If `{gallery_dir}/all.png` exists, prefer it as the layout reference; otherwise proceed with the skill's reference-free 3x3 + 2x2 quad workflow, generate one 36-frame sheet, split it into running/01..06, error, idle, and awaiting, then inspect and verify the directory."
+        )
+    };
     AvatarGenerationPrompt {
         prompt,
         skill_path,
         gallery_dir,
+        locale: locale.to_string(),
     }
 }
 
@@ -458,10 +485,8 @@ fn effective_enabled(
 #[tauri::command]
 pub fn list_backends(state: State<'_, AppState>) -> Vec<BackendInfo> {
     let overrides = crate::backend_admin::read_enabled_overrides(&state);
-    state
-        .ctx
-        .config
-        .backends
+    let backends = state.ctx.backend_configs.read().clone();
+    backends
         .iter()
         .filter(|(k, v)| effective_enabled(k, v, &overrides))
         .map(|(k, v)| BackendInfo {
@@ -479,10 +504,8 @@ pub async fn discover_backend_models(
     backend_key: String,
     state: State<'_, AppState>,
 ) -> Result<kode_bridge::model_discovery::ModelDiscoveryResult, String> {
-    let cfg = state
-        .ctx
-        .config
-        .backends
+    let backends = state.ctx.backend_configs.read().clone();
+    let cfg = backends
         .get(&backend_key)
         .ok_or_else(|| format!("backend '{backend_key}' not found"))?;
     kode_bridge::model_discovery::discover_models(&backend_key, &cfg.command).await
@@ -493,10 +516,8 @@ pub async fn discover_backend_models(
 #[tauri::command]
 pub fn list_all_backends(state: State<'_, AppState>) -> Vec<BackendListItem> {
     let overrides = crate::backend_admin::read_enabled_overrides(&state);
-    state
-        .ctx
-        .config
-        .backends
+    let backends = state.ctx.backend_configs.read().clone();
+    backends
         .iter()
         .map(|(k, v)| BackendListItem {
             key: k.clone(),
@@ -615,8 +636,7 @@ fn sanitize_spawn_model(model: Option<String>) -> Option<String> {
     })
 }
 
-// 注意:不再保留 list_backends 之外的旧 BackendConfig 引用,但 Tauri command
-// list_backends 仍直接读 ctx.config(那是 Local 端的 backend 列表)。Remote 端
+// 本地 backend 列表和 spawn 统一读取可刷新的 runtime snapshot。Remote 端
 // backend 列表通过 RemoteTransport 的 HTTP `GET /api/v1/backends` 拉,不走这里。
 #[allow(dead_code)]
 fn _phase_11_marker(_b: &BackendConfig) {}
@@ -1787,6 +1807,7 @@ mod avatar_generation_tests {
         let result = build_avatar_generation_prompt(
             PathBuf::from("/tmp/kode skill/SKILL.md"),
             PathBuf::from("/tmp/kode avatars/gallery"),
+            "zh-CN",
         );
 
         assert!(!result.prompt.contains('\n'));
@@ -1797,11 +1818,28 @@ mod avatar_generation_tests {
             .contains("/tmp/kode skill/scripts/split_avatar_sheets.py"));
         assert!(result.prompt.contains("/tmp/kode avatars/gallery"));
         assert!(result.prompt.contains("/tmp/kode avatars/gallery/all.png"));
+        assert!(result.prompt.contains("人物名称"));
+        assert_eq!(result.locale, "zh-CN");
         assert!(result.prompt.contains("reference-free"));
         assert!(result.prompt.contains("2x2 quad"));
         for state in ["running", "idle", "awaiting", "error"] {
             assert!(result.prompt.contains(state));
         }
+    }
+
+    #[test]
+    fn avatar_prompt_uses_english_when_requested() {
+        let result = build_avatar_generation_prompt(
+            PathBuf::from("/tmp/skill/SKILL.md"),
+            PathBuf::from("/tmp/gallery"),
+            "en",
+        );
+
+        assert!(result
+            .prompt
+            .contains("character name or a character image/reference"));
+        assert!(!result.prompt.contains("请调用"));
+        assert_eq!(result.locale, "en");
     }
 }
 

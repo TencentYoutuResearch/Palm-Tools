@@ -87,8 +87,9 @@ impl SessionTransport for LocalTransport {
     async fn spawn(&self, spec: SpawnSpec) -> Result<SpawnedSession, TransportError> {
         let backend: BackendConfig = self
             .ctx
-            .config
-            .backend(&spec.backend_key)
+            .backend_configs
+            .read()
+            .get(&spec.backend_key)
             .ok_or_else(|| {
                 TransportError::BadRequest(format!("backend not configured: {}", spec.backend_key))
             })?

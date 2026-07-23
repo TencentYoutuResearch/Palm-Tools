@@ -142,8 +142,10 @@ impl AppState {
         // SQLite WAL 模式支持并发读写，行为与 MCP server / CLI 并发访问一致。
         let memory_handle = crate::memory::try_open();
 
+        let backend_configs = Arc::new(parking_lot::RwLock::new(config.backends.clone()));
         let ctx = Arc::new(BridgeCtx {
             config,
+            backend_configs,
             sessions: Arc::clone(&sessions),
             byte_buffers: Arc::clone(&byte_buffers),
             core_tx,
@@ -236,8 +238,10 @@ pub(crate) fn build_test_ctx(config: Config, token: String) -> Arc<BridgeCtx> {
     let bus = Arc::new(BridgeBus::new());
     let prompt_states = Arc::new(Mutex::new(HashMap::new()));
 
+    let backend_configs = Arc::new(parking_lot::RwLock::new(config.backends.clone()));
     let ctx = Arc::new(BridgeCtx {
         config,
+        backend_configs,
         sessions: Arc::clone(&sessions),
         byte_buffers: Arc::clone(&byte_buffers),
         core_tx,

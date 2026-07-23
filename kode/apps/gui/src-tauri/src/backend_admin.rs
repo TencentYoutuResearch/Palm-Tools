@@ -12,10 +12,9 @@
 //!    **范围被刻意限制**(不扫所有 PATH 上跑得了 `mcp add` 的工具) —— 用户已经
 //!    答复:false-positive 太烦,不要那条路。
 //!
-//! 3. **变更通知**:写盘后 emit `backends-changed`(payload 空),前端可以重新拉
-//!    `list_backends`。但**注意**:`AppState.ctx.config.backends` 是冷快照,
-//!    BackendChooser 真要看到新 backend 必须重启 GUI。前端 toast 提示这条限制。
-//!    跟 `set_config_path` 行为对齐。
+//! 3. **变更通知**:写盘后 emit `backends-changed`(payload 空),同时更新运行时
+//!    backend snapshot,前端可以立即重新拉 `list_backends`。`ctx.config` 仍保留
+//!    启动时的其他全局配置,backend CRUD 走独立的可刷新 snapshot。
 
 use std::path::PathBuf;
 
@@ -171,7 +170,7 @@ pub struct DetectedBackend {
 #[tauri::command]
 pub fn detect_known_backends(state: State<'_, AppState>) -> Vec<DetectedBackend> {
     let existing_keys: std::collections::HashSet<String> =
-        state.ctx.config.backends.keys().cloned().collect();
+        state.ctx.backend_configs.read().keys().cloned().collect();
     KNOWN_CANDIDATES
         .iter()
         .filter_map(|c| {
@@ -277,9 +276,7 @@ impl BackendSaveRequest {
 /// 创建 / 更新 backend 配置。read-modify-write `~/.config/kode/config.toml`,
 /// 用 `toml_edit` 保留用户已有注释和其他配置项。失败时不写文件。
 ///
-/// 写盘后 emit `backends-changed` 让前端 refresh。注意:**已运行的进程仍持有
-/// 旧的 `AppState.ctx.config`**,新 tab 选择列表(BackendChooser)不会自动反映
-/// 这次保存,得重启 GUI 才生效。前端应弹 toast 提示。
+/// 写盘后同步运行时 backend snapshot 并 emit `backends-changed`,新 tab 无需重启即可使用。
 #[tauri::command]
 pub fn backend_save(
     request: BackendSaveRequest,
@@ -293,15 +290,32 @@ pub fn backend_save(
         return Err("backend command cannot be empty".into());
     }
     let key = request.key.clone();
-    let backend = request
+    let mut backend = request
         .clone()
         .into_backend_config()
         .map_err(|e| format!("invalid backend config: {e}"))?;
+
+    // 编辑表单为了兼容旧配置可能把 enabled 留成 None;保留已有显式开关,
+    // 避免保存其它字段时意外把 backend 重新打开。
+    if backend.enabled.is_none() {
+        backend.enabled = state
+            .ctx
+            .backend_configs
+            .read()
+            .get(&key)
+            .and_then(|existing| existing.enabled);
+    }
 
     let path = config_toml_path(&state)?;
     let mut doc = load_or_init_doc(&path)?;
     upsert_backend_table(&mut doc, &key, &backend);
     write_doc(&path, &doc)?;
+
+    state
+        .ctx
+        .backend_configs
+        .write()
+        .insert(key.clone(), backend);
 
     let _ = app.emit("backends-changed", ());
     Ok(())
@@ -329,6 +343,7 @@ pub fn backend_delete(
         backends.remove(&key);
     }
     write_doc(&path, &doc)?;
+    state.ctx.backend_configs.write().remove(&key);
     let _ = app.emit("backends-changed", ());
     Ok(())
 }
@@ -341,7 +356,7 @@ pub fn backend_delete(
 /// **table 不存在时自动创建**(从内存里的 `BackendConfig` 完整物化一份再设 enabled)——
 /// 因为首次启动时 config.toml 里可能根本没有这个 backend(它只存在于内置默认列表),
 /// 用户却需要能直接在 Settings 里关掉它。早期版本在此报错,导致开关全部点不动。
-/// 写盘后 emit `backends-changed`。受冷快照限制 —— BackendChooser 需重启 GUI 生效。
+/// 写盘后 emit `backends-changed`,运行时 backend snapshot 立即同步。
 #[tauri::command]
 pub fn backend_set_enabled(
     key: String,
@@ -374,8 +389,8 @@ pub fn backend_set_enabled(
         // 文件里没有 → 从内存默认物化一份完整 table 再设 enabled。
         let cfg = state
             .ctx
-            .config
-            .backends
+            .backend_configs
+            .read()
             .get(&key)
             .cloned()
             .ok_or_else(|| format!("backend '{key}' not found"))?;
@@ -385,6 +400,9 @@ pub fn backend_set_enabled(
     }
 
     write_doc(&path, &doc)?;
+    if let Some(cfg) = state.ctx.backend_configs.write().get_mut(&key) {
+        cfg.enabled = Some(enabled);
+    }
     let _ = app.emit("backends-changed", ());
     Ok(())
 }
@@ -406,11 +424,11 @@ pub fn resolve_pending_enabled(state: &State<'_, AppState>) -> Result<bool, Stri
     let mut doc = load_or_init_doc(&path)?;
     let mut changed = false;
 
-    // 遍历内存里的全部 backend(冷快照),稳定顺序方便测试 / 阅读。
+    // 遍历运行时 backend snapshot,稳定顺序方便测试 / 阅读。
     let mut entries: Vec<(String, BackendConfig)> = state
         .ctx
-        .config
-        .backends
+        .backend_configs
+        .read()
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();

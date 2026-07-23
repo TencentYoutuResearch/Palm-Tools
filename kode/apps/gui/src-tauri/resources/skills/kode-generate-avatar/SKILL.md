@@ -19,6 +19,20 @@ independent sheets.
 5. Split into a gallery-local preview, inspect all nine states, then publish the accepted output.
 6. Verify the exact directory structure, frame count, and image dimensions.
 
+## Language and first question
+
+The launch prompt includes Kode's effective locale: `en` or `zh-CN`. Use that locale consistently for every
+user-facing question, displayed image-generation prompt, progress update, validation message, and final report.
+Do not mix languages. Keep paths, command names, state-directory names, and fixed numeric constraints unchanged.
+
+Your first response must ask for the character identity before doing any generation:
+
+- `zh-CN`: `请提供要生成的 avatar 人物名称，或上传/引用一张人物形象参考图。也可以补充发型、服装、配色和性格等身份描述。`
+- `en`: `Please provide the avatar character's name, or upload/reference a character image. You may also describe the hairstyle, outfit, palette, and personality.`
+
+If the user provides neither a name nor an image/identity description, ask again and do not call image generation.
+After identity is clear, ask for the art style and `avatar-id` (and layout-reference preference when relevant).
+
 ## Inputs and paths
 
 Collect:
@@ -71,29 +85,46 @@ image when available and these fixed parameters when supported:
 size=1024x1024, n=1, quality=high, background=opaque, input_fidelity=high, revise=false
 ```
 
-For reference-free `quad` generation, use this prompt:
+For reference-free `quad` generation, use the localized prompt matching the launch locale. The wording may be
+localized, but the 3x3/2x2 geometry, state order, safe area, and rejection criteria are fixed.
+
+`zh-CN` prompt:
 
 ```text
-Create one opaque square Kode avatar sprite sheet for {角色}, in {画风}.
+为 {人物名称} 创建一张不透明的正方形 Kode avatar 动态精灵图，画风为 {画风}。
+
+画布必须是精确的 3x3 九宫格，每个状态面板内部再是精确的 2x2 四帧动画，共 36 个小帧。任何位置都不要
+绘制大型主视觉插图。使用细、直且一致的分隔线；不要添加标题、说明、标签、logo 或水印。
+
+九个状态面板按从左到右、从上到下排列：1 敲代码，2 吃薯片，3 喝可乐，4 看漫画，5 调试，6 编译成功，
+7 编译失败，8 摸鱼/玩手机，9 等待/思考。
+
+每个状态面板内的四帧展示该动作的细微连续动画。36 帧必须保持相同的人物身份、发型、脸型、眼睛、服装、
+配色、Q 版比例、线宽、镜头距离、背景和光照。人物和重要道具都要位于每个小帧内部 80% 的安全区域内。
+只使用 {人物名称} 自身的配色；不要写实风、卡片插画或裸露内容。
+```
+
+`en` prompt:
+
+```text
+Create one opaque square Kode avatar sprite sheet for {character name}, in {art style}.
 
 The canvas is an exact 3x3 grid of nine equal state panels. Every state panel is itself an exact 2x2 grid of four
 equal animation frames, for exactly 36 mini frames total. Do not draw a large hero illustration anywhere. Use thin,
 straight, consistent dividers. Do not add titles, captions, labels, logos, or watermarks.
 
-The nine state panels, left-to-right and top-to-bottom, are:
-1 typing code, 2 eating chips, 3 drinking cola,
-4 reading manga, 5 debugging, 6 compile success,
-7 compile error, 8 slacking/phone break, 9 waiting/thinking.
+The nine state panels, left-to-right and top-to-bottom, are: 1 typing code, 2 eating chips, 3 drinking cola,
+4 reading manga, 5 debugging, 6 compile success, 7 compile error, 8 slacking/phone break, 9 waiting/thinking.
 
 Within each state panel, the four subframes show a subtle continuous animation of that exact action. Keep the same
 character identity, hairstyle, face, eyes, outfit, palette, chibi proportions, line weight, camera distance,
 background, and lighting across all 36 frames. Keep the full character and all important props inside the inner 80%
-safe area of every subframe. Use only {角色}'s own palette. No realism, no card illustration, no nudity.
+safe area of every subframe. Use only {character name}'s own palette. No realism, no card illustration, no nudity.
 ```
 
 For `bottom-strip`, use the same state order and character constraints, but explicitly require the supplied reference's
-one-large-scene-plus-four-bottom-frames geometry. Treat the layout image as a layout reference and any character image
-as an identity reference.
+one-large-scene-plus-four-bottom-frames geometry. Use the corresponding localized wording. Treat the layout image as a
+layout reference and any character image as an identity reference.
 
 Reject and regenerate a source sheet if it has the wrong number of panels or subframes, character drift, inconsistent
 camera scale, clipped characters, labels, or an unusable grid. Save the accepted result as `<working-dir>/sheet.png`.
@@ -182,5 +213,5 @@ Confirm:
 - no frame contains a neighboring cell, hero-scene fragment, clipped face, or unexpected label;
 - the four frames form a coherent animation and each state matches its mapped meaning.
 
-Report the final absolute path, layout mode, source-sheet path, any backup path, and the exact splitter command. Tell the
-user to close and reopen the avatar picker so Kode refreshes the gallery.
+Report the final absolute path, layout mode, source-sheet path, any backup path, and the exact splitter command in the
+selected locale. Tell the user, in that same locale, to close and reopen the avatar picker so Kode refreshes the gallery.

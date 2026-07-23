@@ -58,6 +58,7 @@ export interface AvatarGenerationPrompt {
   prompt: string
   skill_path: string
   gallery_dir: string
+  locale: string
 }
 
 export interface SpecOpsSession {
@@ -255,8 +256,8 @@ export const ipc = {
   /** Settings 面板用:返回全部 backend(含 disabled),带 enabled 字段 */
   listAllBackends: () => invoke<BackendListItem[]>('list_all_backends'),
   listAvatarLibrary: () => invoke<AvatarLibrary>('list_avatar_library'),
-  getAvatarGenerationPrompt: () =>
-    invoke<AvatarGenerationPrompt>('get_avatar_generation_prompt'),
+  getAvatarGenerationPrompt: (locale?: 'en' | 'zh-CN') =>
+    invoke<AvatarGenerationPrompt>('get_avatar_generation_prompt', { locale: locale ?? null }),
   spawnSession: (
     backend_key: string,
     cols: number,
@@ -555,16 +556,14 @@ export interface BackendSaveRequest {
 export const backendAdminIpc = {
   /** 扫 PATH 上的内置已知 candidate(codebuddy / claude / claude-internal / codex) */
   detect: () => invoke<DetectedBackend[]>('detect_known_backends'),
-  /** 创建或更新 backend。**新 tab 选择列表需重启 GUI 才生效**(BackendChooser 持有冷快照)。 */
+  /** 创建或更新 backend。保存后新 tab 选择列表立即刷新。 */
   save: (request: BackendSaveRequest) => invoke<void>('backend_save', { request }),
   /** 删除 backend(table 不存在不报错) */
   delete: (key: string) => invoke<void>('backend_delete', { key }),
-  /** 设置单个 backend 的 enabled 开关(surgical RMW,保留注释)。开关立即生效,
-   *  App.svelte 订阅 `backends-changed` 后会重拉 list_backends;新增 backend 因
-   *  ctx.config 是冷快照,需重启 GUI 才出现在 BackendChooser 中。 */
+  /** 设置单个 backend 的 enabled 开关(surgical RMW,保留注释)。开关立即生效。 */
   setEnabled: (key: string, enabled: boolean) =>
     invoke<void>('backend_set_enabled', { key, enabled }),
-  /** 后端写盘后 emit;前端可重新拉 list_backends(但 ctx.config 仍是冷的) */
+  /** 后端写盘并刷新运行时 backend snapshot 后 emit。 */
   onChanged: (cb: () => void): Promise<UnlistenFn> =>
     listen<unknown>('backends-changed', () => cb()),
 }

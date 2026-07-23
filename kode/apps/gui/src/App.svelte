@@ -464,7 +464,7 @@
     }
 
     try {
-      const request = await ipc.getAvatarGenerationPrompt()
+      const request = await ipc.getAvatarGenerationPrompt($currentLocale)
       selectTab(tab.id)
       await ipc.writeInput(
         tab.id,

@@ -158,7 +158,8 @@ pub struct BackendStatus {
 /// 拉一次状态。前端 banner mount 时调一次,后端 startup 800ms 后也调一次。
 #[tauri::command]
 pub fn memory_mcp_check(state: State<'_, AppState>) -> Result<CheckResult, String> {
-    Ok(probe(&state.ctx.config.backends, &state.persist))
+    let backends = state.ctx.backend_configs.read().clone();
+    Ok(probe(&backends, &state.persist))
 }
 
 // ============== 数据驱动 setup runner ==============
@@ -477,8 +478,8 @@ pub fn spawn_startup_probe(app: AppHandle) {
                 return;
             }
         };
-        let backends = &app_state.ctx.config.backends;
-        let result = probe(backends, &app_state.persist);
+        let backends = app_state.ctx.backend_configs.read().clone();
+        let result = probe(&backends, &app_state.persist);
 
         // Hook 注入：每次启动都检测所有 kode 管理的 hook 类型。
         // 已存在的跳过（幂等），缺失的补充。与 MCP auto_setup 结果无关。
@@ -575,7 +576,7 @@ pub fn spawn_startup_probe(app: AppHandle) {
 
         let any_failed = auto_results.iter().any(|o| !o.success);
         // 不管成功失败,都把 setup 之后**重新探测**的状态算一次,前端两个事件都用得上。
-        let post_check = probe(backends, &app_state.persist);
+        let post_check = probe(&backends, &app_state.persist);
         // attempts 报告:无论成功失败都 emit,前端可弹 toast。
         // (失败时 toast 显示红色 + 错因,成功时绿色"已自动接入")。
         let _ = app.emit(

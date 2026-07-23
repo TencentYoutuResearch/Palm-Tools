@@ -5,8 +5,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use kode_core::{config::Config, session::Session, CoreEvent, SessionId};
-use parking_lot::Mutex;
+use kode_core::{
+    config::{BackendConfig, Config},
+    session::Session,
+    CoreEvent, SessionId,
+};
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc;
 
 use crate::bridge::events::BridgeBus;
@@ -16,6 +20,9 @@ use crate::state::SessionByteBuffer;
 
 pub struct BridgeCtx {
     pub config: Config,
+    /// Runtime backend snapshot. Unlike `config`, this is refreshed after backend CRUD
+    /// so a newly saved backend can be listed and spawned without restarting the GUI.
+    pub backend_configs: Arc<RwLock<HashMap<String, BackendConfig>>>,
     pub sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
     pub byte_buffers: Arc<Mutex<HashMap<SessionId, SessionByteBuffer>>>,
     pub core_tx: mpsc::UnboundedSender<CoreEvent>,
