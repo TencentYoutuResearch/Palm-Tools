@@ -447,6 +447,54 @@ pub fn memory_prompt_set_enabled(enabled: bool, state: State<'_, AppState>) -> R
     Ok(())
 }
 
+/// 在前端能够创建 backend tab **之前**安装全部 kode 管理的 hooks。
+///
+/// CodeBuddy / Claude 会在 CLI 进程启动时拍 settings 快照，运行中修改不会热加载。
+/// 因此不能把注入留在延迟 800ms 的 startup probe 里，否则首次启动时存在竞态：
+/// tab 已经 spawn、随后 hook 才写盘，这个 session 就永远不会执行自动沉淀。
+pub fn install_managed_hooks(app_state: &AppState) {
+    // Stop 的 prompt 守门员不依赖 HookRelay，必须始终注入；否则 relay socket
+    // 偶发创建失败时，Memory MCP 虽可调用，但自动沉淀会完全失效。
+    // 其它 command hooks 需要 socket 才有实际作用，仅在 relay 可用时注入。
+    let relay_cmd = kode_memory::hook_setup::build_codebuddy_hook_command();
+    for (label, path) in kode_memory::hook_setup::target_settings() {
+        if let Err(e) = kode_memory::hook_setup::inject_stop_hook(&path, &relay_cmd) {
+            tracing::warn!("stop hook inject failed for {label}: {e}");
+        }
+        if app_state.hook_relay_socket.is_some() {
+            if let Err(e) = kode_memory::hook_setup::inject_notification_hook(&path, &relay_cmd) {
+                tracing::warn!("notification hook inject failed for {label}: {e}");
+            }
+            if let Err(e) =
+                kode_memory::hook_setup::inject_user_prompt_submit_hook(&path, &relay_cmd)
+            {
+                tracing::warn!("user_prompt_submit hook inject failed for {label}: {e}");
+            }
+            if let Err(e) = kode_memory::hook_setup::inject_pretooluse_hook(&path, &relay_cmd) {
+                tracing::warn!("pretooluse hook inject failed for {label}: {e}");
+            }
+            if let Err(e) = kode_memory::hook_setup::inject_session_start_hook(&path, &relay_cmd) {
+                tracing::warn!("session_start hook inject failed for {label}: {e}");
+            }
+            if label == "codebuddy" {
+                if let Err(e) =
+                    kode_memory::hook_setup::inject_config_change_hook(&path, &relay_cmd)
+                {
+                    tracing::warn!("config_change hook inject failed for {label}: {e}");
+                }
+            }
+        }
+    }
+
+    // Codex hooks are command-only and live in ~/.codex/hooks.json.
+    if let Some(path) = kode_memory::hook_setup::codex_hooks_path() {
+        let cmd = kode_memory::hook_setup::build_codex_hook_command();
+        if let Err(e) = kode_memory::hook_setup::inject_codex_hooks(&path, &cmd) {
+            tracing::warn!("codex hook inject failed: {e}");
+        }
+    }
+}
+
 /// setup hook 用:启动后 800ms 异步触发。
 ///
 /// **2026-06 行为变更**:之前只是 emit `memory-mcp-setup-required` 事件让前端弹
@@ -480,56 +528,6 @@ pub fn spawn_startup_probe(app: AppHandle) {
         };
         let backends = app_state.ctx.backend_configs.read().clone();
         let result = probe(&backends, &app_state.persist);
-
-        // Hook 注入：每次启动都检测所有 kode 管理的 hook 类型。
-        // 已存在的跳过（幂等），缺失的补充。与 MCP auto_setup 结果无关。
-        //
-        // 所有 hook 都依赖 HookRelay socket（type:"command" 子 hook 转发事件给 relay），
-        // 所以统一在 HookRelay 创建成功的分支内注入。Stop hook 额外含 `type:"prompt"`
-        // 守门员子 hook，和 command 并列执行。
-        if let Some(_socket_path) = app_state.hook_relay_socket.as_deref() {
-            let relay_cmd = kode_memory::hook_setup::build_codebuddy_hook_command();
-            for (label, path) in kode_memory::hook_setup::target_settings() {
-                if let Err(e) = kode_memory::hook_setup::inject_stop_hook(&path, &relay_cmd) {
-                    tracing::warn!("stop hook inject failed for {label}: {e}");
-                }
-                if let Err(e) = kode_memory::hook_setup::inject_notification_hook(&path, &relay_cmd)
-                {
-                    tracing::warn!("notification hook inject failed for {label}: {e}");
-                }
-                if let Err(e) =
-                    kode_memory::hook_setup::inject_user_prompt_submit_hook(&path, &relay_cmd)
-                {
-                    tracing::warn!("user_prompt_submit hook inject failed for {label}: {e}");
-                }
-                if let Err(e) = kode_memory::hook_setup::inject_pretooluse_hook(&path, &relay_cmd) {
-                    tracing::warn!("pretooluse hook inject failed for {label}: {e}");
-                }
-                // 取证(方案2):注入 SessionStart hook,确认 codebuddy 在 startup/resume/clear
-                // 时发的 payload(session_id uuid + transcript_path)。
-                if let Err(e) =
-                    kode_memory::hook_setup::inject_session_start_hook(&path, &relay_cmd)
-                {
-                    tracing::warn!("session_start hook inject failed for {label}: {e}");
-                }
-                if label == "codebuddy" {
-                    if let Err(e) =
-                        kode_memory::hook_setup::inject_config_change_hook(&path, &relay_cmd)
-                    {
-                        tracing::warn!("config_change hook inject failed for {label}: {e}");
-                    }
-                }
-            }
-        }
-
-        // Codex hooks are command-only and live in ~/.codex/hooks.json.
-        // They use `kode-memory codex-hook` for SessionStart/Stop plus GUI relay events.
-        if let Some(path) = kode_memory::hook_setup::codex_hooks_path() {
-            let cmd = kode_memory::hook_setup::build_codex_hook_command();
-            if let Err(e) = kode_memory::hook_setup::inject_codex_hooks(&path, &cmd) {
-                tracing::warn!("codex hook inject failed: {e}");
-            }
-        }
 
         // 用户之前 dismiss 过 → 尊重选择,不跑 MCP 自动配置。
         if result.dismissed_at.is_some() {

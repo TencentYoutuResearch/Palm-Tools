@@ -90,6 +90,9 @@ pub fn run() {
                     relay.run(bus, core_tx).await;
                 });
             }
+            // CodeBuddy / Claude 启动时只读取一次 hooks；必须在前端能 spawn tab 前
+            // 完成注入，不能等下面延迟 800ms 的 MCP probe。
+            crate::memory_mcp::install_managed_hooks(&app_state);
             let ctx_for_bridge = std::sync::Arc::clone(&app_state.protocol_ctx);
             app.manage(app_state);
             app.manage(shell_pty::ShellPtyManager::new());

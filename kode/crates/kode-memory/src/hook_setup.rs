@@ -83,16 +83,51 @@ pub fn codex_hooks_path() -> Option<PathBuf> {
 // Stop hook
 // ============================================================================
 
-/// 检查 `path` 对应的 settings.json 里是否已有 kode 管理的 Stop hook（`_kode_managed: true`）。
+/// 检查 `path` 对应的 settings.json 里是否已有**可驱动主 agent 继续执行**的
+/// kode Stop prompt hook。
+///
+/// 只看 `_kode_managed: true` 不够：早期版本没有写 `continueOnBlock`，
+/// CodeBuddy 即使让守门员返回 `{ "ok": false }` 也会直接结束当前轮次，不会把
+/// reason 注入主 agent。因此这种旧配置必须视为未配置，等待启动注入逻辑升级。
 pub fn is_stop_hook_configured(path: &Path) -> bool {
-    find_kode_hook_entry(path, "Stop").is_some()
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    doc.get("hooks")
+        .and_then(|hooks| hooks.get("Stop"))
+        .and_then(|stop| stop.as_array())
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry
+                    .get("_kode_managed")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|entry| entry.get("hooks"))
+        .and_then(|hooks| hooks.as_array())
+        .is_some_and(|hooks| {
+            hooks.iter().any(|hook| {
+                hook.get("type").and_then(|value| value.as_str()) == Some("prompt")
+                    && hook.get("prompt").and_then(|value| value.as_str()) == Some(STOP_HOOK_PROMPT)
+                    && hook
+                        .get("continueOnBlock")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+            })
+        })
 }
 
 /// 注入或更新 kode 管理的 Stop hook（幂等）。
 ///
 /// `hooks` 数组里并列两个子 hook：
 /// 1. `type:"command"` → 立即转发给 hook_relay（emit `turn_finished` + `attention_cleared`）
-/// 2. `type:"prompt"` → 守门员 LLM（判断本轮是否需要沉淀进 memory）
+/// 2. `type:"prompt"` → 守门员 LLM（判断本轮是否需要沉淀进 memory）。
+///    必须设置 `continueOnBlock:true`，否则 `{ok:false}` 只阻止 stop，却不会把
+///    reason 注入主 agent 继续调用 `memory_propose`。
 ///
 /// 两者并列执行：command 先跑（即时通知 GUI turn 结束），prompt 后跑（可能拦截让 agent 续跑沉淀）。
 ///
@@ -119,6 +154,7 @@ pub fn inject_stop_hook(path: &Path, relay_command: &str) -> Result<(), String> 
             {
                 "type": "prompt",
                 "timeout": 30,
+                "continueOnBlock": true,
                 "prompt": STOP_HOOK_PROMPT
             }
         ]
@@ -846,6 +882,27 @@ mod tests {
         let tmp = write_tmp("{}");
         inject_stop_hook(tmp.path(), "echo relay").unwrap();
         assert!(is_stop_hook_configured(tmp.path()));
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][1]["continueOnBlock"], true);
+    }
+
+    #[test]
+    fn stop_hook_without_continue_on_block_is_not_configured() {
+        let stale = serde_json::json!({
+            "hooks": {
+                "Stop": [{
+                    "_kode_managed": true,
+                    "hooks": [{
+                        "type": "prompt",
+                        "timeout": 30,
+                        "prompt": STOP_HOOK_PROMPT
+                    }]
+                }]
+            }
+        });
+        let tmp = write_tmp(&stale.to_string());
+        assert!(!is_stop_hook_configured(tmp.path()));
     }
 
     // --- Notification hook tests ---
