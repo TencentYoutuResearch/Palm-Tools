@@ -444,8 +444,24 @@
     "description": "Memory search loading state"
   },
   "memory.browse.noFacts": {
-    "message": "No facts yet",
-    "description": "No memory facts"
+    "message": "No approved memories yet",
+    "description": "No approved memory facts in the selected sources"
+  },
+  "memory.browse.noFactsDescription": {
+    "message": "Agent proposals appear here after you approve them in Memory Review.",
+    "description": "Explains how an empty memory pool gets populated"
+  },
+  "memory.browse.noFactsInScope": {
+    "message": "No approved memories in {scope}",
+    "description": "No memory facts in the selected scope"
+  },
+  "memory.browse.noFactsInScopeDescription": {
+    "message": "Memory MCP is available, but this project scope has not stored any memories yet.",
+    "description": "Explains that an empty scope does not mean Memory MCP is unavailable"
+  },
+  "memory.browse.showAllScopes": {
+    "message": "Show all scopes",
+    "description": "Clear the current scope filter"
   },
   "memory.browse.noMatches": {
     "message": "No matches for \"{query}\"",

@@ -466,11 +466,16 @@
             {#if !query.trim()}
               <div class="empty">
                 <Icon name="brain" size="28" />
-                <span>{t('memory.browse.noFacts')}</span>
-                <span class="muted small">
-                  Wait for agents to propose, or run<br/>
-                  <code>kode-memory init --with-baseline</code>
-                </span>
+                {#if scope}
+                  <span>{t('memory.browse.noFactsInScope', { scope })}</span>
+                  <span class="muted small">{t('memory.browse.noFactsInScopeDescription')}</span>
+                  <button class="btn empty-action" onclick={() => (scope = '')}>
+                    {t('memory.browse.showAllScopes')}
+                  </button>
+                {:else}
+                  <span>{t('memory.browse.noFacts')}</span>
+                  <span class="muted small">{t('memory.browse.noFactsDescription')}</span>
+                {/if}
               </div>
             {:else}
               <div class="empty muted">{t('memory.browse.noMatches', { query })}</div>
@@ -1013,15 +1018,8 @@
   }
   .empty :global(svg) { color: var(--fg-tertiary); opacity: 0.6; }
   .empty .small { font-size: var(--fs-xs); color: var(--fg-tertiary); line-height: 1.6; }
+  .empty .empty-action { margin-top: 2px; }
   .muted { color: var(--fg-tertiary); }
-  .empty code {
-    background: var(--bg-chip);
-    padding: 1px 6px;
-    border-radius: var(--rad-sm);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--fg-secondary);
-  }
   .d-empty { margin: auto; }
   .boot-error { color: var(--st-err); padding: 16px; font-size: var(--fs-sm); }
   .toast {
