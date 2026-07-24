@@ -96,7 +96,7 @@ set_tauri_resource_args() {
     warn "tar.gz 不存在,本次仅跳过 remote bridge resource,保留内置 skills"
     # 数组 override 会替换 tauri.conf.json 的全部 resources。这里必须显式
     # 保留 skills,否则本地无 remote bridge tarball 时 avatar 技能也会消失。
-    TAURI_RESOURCE_ARGS=(--config 'bundle.resources=["resources/skills"]')
+    TAURI_RESOURCE_ARGS=(--config '{"bundle":{"resources":["resources/skills"]}}')
   fi
 }
 
@@ -113,7 +113,7 @@ set_signing_args() {
   BUNDLE_TARGETS=()
   SIGN_ADHOC=0
   if ! security find-identity -p codesigning -v 2>/dev/null | grep -q "Developer ID Application"; then
-    SIGN_ARGS=(--config 'bundle.macOS.signingIdentity=null')
+    SIGN_ARGS=(--config '{"bundle":{"macOS":{"signingIdentity":null}}}')
     SIGN_ADHOC=1
     if [ "${KODE_FORCE_DMG:-0}" = "1" ]; then
       warn "未找到 Developer ID 签名证书 → ad-hoc 签名,KODE_FORCE_DMG=1 → 打 .app + .dmg"
@@ -157,7 +157,10 @@ case "$CMD" in
     cd "$GUI_DIR"
     # --features devtools:启用 WKWebView devtools(右键 Inspect / F12 / Cmd+Opt+I)。
     # release 打包(./run.sh app)不传该 feature,最终用户机器上彻底关闭调试器。
-    exec pnpm tauri dev -- --features devtools ${TAURI_RESOURCE_ARGS[@]+"${TAURI_RESOURCE_ARGS[@]}"}
+    # `--` 后的参数会转发给 Cargo；Tauri 自身的 --config 必须放在它前面。
+    exec pnpm tauri dev \
+      ${TAURI_RESOURCE_ARGS[@]+"${TAURI_RESOURCE_ARGS[@]}"} \
+      -- --features devtools
     ;;
 
   fe|frontend)
