@@ -668,32 +668,41 @@ class _MessageBubble extends StatelessWidget {
                 code: TextStyle(
                   fontFamily: 'Menlo',
                   fontSize: 12,
-                  color: isUser ? const Color(0xFF12321D) : KillLaColors.warning,
+                  color: isUser ? colors.onPrimary : colors.onSurface,
+                  fontWeight: FontWeight.w700,
                   backgroundColor: isUser
-                      ? const Color(0x1A07100B)
-                      : const Color(0x33000000),
+                      ? colors.onPrimary.withValues(alpha: 0.12)
+                      : colors.onSurface.withValues(alpha: 0.1),
                 ),
                 codeblockDecoration: BoxDecoration(
                   color: isUser
-                      ? const Color(0x1807100B)
-                      : colors.surfaceContainerHighest,
+                      ? colors.onPrimary.withValues(alpha: 0.1)
+                      : colors.onSurface.withValues(alpha: 0.08),
                   border: Border.all(
                     color: isUser
-                        ? const Color(0x3307100B)
+                        ? colors.onPrimary.withValues(alpha: 0.28)
                         : colors.outline,
                   ),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 blockquoteDecoration: BoxDecoration(
                   color: isUser
-                      ? const Color(0x1207100B)
-                      : colors.primary.withValues(alpha: .06),
+                      ? colors.onPrimary.withValues(alpha: 0.14)
+                      : colors.onSurface.withValues(alpha: 0.09),
                   border: Border(
-                    left: BorderSide(color: accentColor, width: 3),
+                    left: BorderSide(
+                      color: isUser
+                          ? colors.onPrimary.withValues(alpha: 0.72)
+                          : colors.primary,
+                      width: 4,
+                    ),
                   ),
+                  borderRadius: BorderRadius.circular(8),
                 ),
                 blockquote: TextStyle(
-                  color: textColor.withValues(alpha: 0.9),
+                  color: isUser ? colors.onPrimary : colors.onSurface,
+                  fontWeight: FontWeight.w600,
+                  height: 1.45,
                 ),
                 strong: TextStyle(
                   color: textColor,
@@ -704,13 +713,10 @@ class _MessageBubble extends StatelessWidget {
                 ),
                 listBullet: TextStyle(color: textColor),
                 a: TextStyle(
-                  color: isUser
-                      ? const Color(0xFF103B22)
-                      : colors.primary,
+                  color: isUser ? colors.onPrimary : colors.primary,
+                  fontWeight: FontWeight.w700,
                   decoration: TextDecoration.underline,
-                  decorationColor: isUser
-                      ? const Color(0xFF103B22)
-                      : colors.primary,
+                  decorationColor: isUser ? colors.onPrimary : colors.primary,
                 ),
               ),
             ),
