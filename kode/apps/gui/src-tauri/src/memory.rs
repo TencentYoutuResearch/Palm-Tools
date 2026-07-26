@@ -93,6 +93,10 @@ pub struct PendingDto {
     pub kind: String,
     pub subsystem: Option<String>,
     pub supersedes: Option<String>,
+    #[serde(default)]
+    pub related: Vec<String>,
+    #[serde(default)]
+    pub contradicts: Vec<String>,
     pub body: String,
     pub rationale: Option<String>,
     /// 当前作者剩余能量(approve/reject 之后会变;前端展示 "agent 还剩 X 点")
@@ -112,6 +116,8 @@ impl PendingDto {
             kind: p.meta.kind.as_str().to_string(),
             subsystem: p.meta.subsystem,
             supersedes: p.meta.supersedes,
+            related: p.meta.related,
+            contradicts: p.meta.contradicts,
             body: p.body,
             rationale: p.rationale,
             author_energy: energy,

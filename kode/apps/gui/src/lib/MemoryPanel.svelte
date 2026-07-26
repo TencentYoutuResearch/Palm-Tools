@@ -175,8 +175,8 @@
     editTagsStr = s.tags.join(', ')
     editScope = s.scope
     editConfidence = s.confidence
-    editRelated = []
-    editContradicts = []
+    editRelated = [...s.related]
+    editContradicts = [...s.contradicts]
   }
 
   function cancelEdit() {

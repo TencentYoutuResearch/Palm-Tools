@@ -201,6 +201,9 @@ fn tool_specs() -> Value {
                     "edited_tags": {"type": "array", "items": {"type": "string"}},
                     "edited_scope": {"type": "string"},
                     "edited_confidence": {"type": "number"},
+                    "related": {"type": "array", "items": {"type": "string"}},
+                    "contradicts": {"type": "array", "items": {"type": "string"}},
+                    "title": {"type": "string"},
                     "reason": {"type": "string"}
                 },
                 "required": ["id", "verdict"]

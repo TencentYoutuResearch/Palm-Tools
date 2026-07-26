@@ -178,8 +178,31 @@ pub struct DuplicateCandidate {
 const DUP_THRESHOLD: f32 = 0.75;
 /// `DuplicateInfo.candidates` 返回的最大条数。
 const DUP_CANDIDATES_K: usize = 5;
+/// 自动关联只取少量高置信候选，避免把相同关键词下的所有 fact 串成噪声图。
+const AUTO_RELATED_MAX: usize = 3;
+/// 无共同 tag 时要求更强的正文相似度。
+const AUTO_RELATED_STRONG_THRESHOLD: f32 = 0.68;
+/// 有共同 tag 时可稍微放宽正文相似度。
+const AUTO_RELATED_TAG_THRESHOLD: f32 = 0.60;
 /// body 最大长度;超过让 LLM 拆成多条
 pub const MAX_BODY_LEN: usize = 1000;
+
+fn select_auto_related(hits: &[SearchHit], tags: &[String]) -> Vec<String> {
+    let normalized_tags: std::collections::HashSet<String> =
+        tags.iter().map(|tag| tag.to_lowercase()).collect();
+    hits.iter()
+        .filter(|hit| {
+            let has_common_tag = hit
+                .tags
+                .iter()
+                .any(|tag| normalized_tags.contains(&tag.to_lowercase()));
+            hit.score >= AUTO_RELATED_STRONG_THRESHOLD
+                || (has_common_tag && hit.score >= AUTO_RELATED_TAG_THRESHOLD)
+        })
+        .take(AUTO_RELATED_MAX)
+        .map(|hit| hit.id.clone())
+        .collect()
+}
 
 pub struct MemoryStore {
     root: PathBuf,
@@ -504,6 +527,7 @@ impl MemoryStore {
         //     (force 是给"语义不同但 embedding 拉不开"的近似误判,完全相同不可能是误判)
         //  B. FTS5 语义近似 score ≥ DUP_THRESHOLD → 判 dup,带 candidates
         //     supersedes / force 任一为真时跳过 B,但仍跑 A
+        let mut auto_related = Vec::new();
         if supersedes.is_none() {
             // A. 完全相同:遍历同 scope 已 deprecated=0 的 fact,比 body
             let normalized = normalize_body(body);
@@ -561,6 +585,7 @@ impl MemoryStore {
                         candidates,
                     }));
                 }
+                auto_related = select_auto_related(&hits, &tags);
             }
         }
 
@@ -584,7 +609,7 @@ impl MemoryStore {
             subsystem: None,
             applies_to: vec![],
             links: vec![],
-            related: vec![],
+            related: auto_related,
             contradicts: vec![],
             tried: None,
             failed_because: None,
@@ -1792,6 +1817,49 @@ fn days_from_ymd(y: i32, m: u32, d: u32) -> Option<i64> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn relation_hit(id: &str, score: f32, tags: &[&str]) -> SearchHit {
+        SearchHit {
+            id: id.to_string(),
+            author: "test".into(),
+            scope: "shared".into(),
+            created: "2026-07-24T00:00:00Z".into(),
+            confidence: 0.8,
+            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+            snippet: String::new(),
+            score,
+            kind: "gotcha".into(),
+            subsystem: None,
+            title: None,
+        }
+    }
+
+    #[test]
+    fn auto_related_requires_strong_similarity_or_common_tag() {
+        let hits = vec![
+            relation_hit("strong", 0.69, &[]),
+            relation_hit("tagged", 0.61, &["memory"]),
+            relation_hit("weak", 0.61, &["gui"]),
+            relation_hit("too-weak", 0.59, &["memory"]),
+        ];
+
+        assert_eq!(
+            select_auto_related(&hits, &["Memory".into()]),
+            vec!["strong", "tagged"]
+        );
+    }
+
+    #[test]
+    fn auto_related_is_limited_to_three_candidates() {
+        let hits = vec![
+            relation_hit("a", 0.70, &[]),
+            relation_hit("b", 0.70, &[]),
+            relation_hit("c", 0.70, &[]),
+            relation_hit("d", 0.70, &[]),
+        ];
+
+        assert_eq!(select_auto_related(&hits, &[]), vec!["a", "b", "c"]);
+    }
 
     #[test]
     fn write_for_test_then_read_roundtrip() {
