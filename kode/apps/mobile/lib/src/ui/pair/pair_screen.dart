@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
@@ -19,8 +20,10 @@ class PairScreen extends ConsumerStatefulWidget {
 }
 
 class _PairScreenState extends ConsumerState<PairScreen> {
+  static const _channel = MethodChannel('kode/app');
   bool _scanning = false;
   bool _testing = false;
+  bool _openingSettings = false;
   String? _error;
 
   final _hostCtrl = TextEditingController(text: '');
@@ -159,13 +162,28 @@ class _PairScreenState extends ConsumerState<PairScreen> {
     return 'Cannot connect to ${ep.host}:${ep.port}\n'
         '$kind.\n'
         'Fix:\n'
+        '  · on iPhone: Settings > Kode Mobile > Wireless Data > WLAN & Cellular\n'
+        '  · on iPhone: Settings > Kode Mobile > Local Network = ON\n'
         '  · join same WiFi as Mac\n'
         '  · Android USB: `adb reverse tcp:${ep.port} tcp:${ep.port}` then retry\n'
         '  · or install Tailscale on both devices';
   }
 
+  Future<void> _openSettings() async {
+    if (!Platform.isIOS || _openingSettings) return;
+    setState(() => _openingSettings = true);
+    try {
+      await _channel.invokeMethod<void>('openSettings');
+    } finally {
+      if (mounted) setState(() => _openingSettings = false);
+    }
+  }
+
+  bool get _showSettingsHint => Platform.isIOS && _error != null;
+
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(title: const Text('PAIR WITH KODE')),
       body: SafeArea(
@@ -175,12 +193,12 @@ class _PairScreenState extends ConsumerState<PairScreen> {
             children: [
               if (_scanning) _buildScanner() else _buildScanCta(),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 'OR ENTER MANUALLY',
                 style: TextStyle(
                   fontWeight: FontWeight.w800,
                   letterSpacing: 1.2,
-                  color: KillLaColors.accent,
+                  color: colors.primary,
                 ),
               ),
               const SizedBox(height: 8),
@@ -214,6 +232,49 @@ class _PairScreenState extends ConsumerState<PairScreen> {
                     ),
                   ),
                 ),
+              if (_showSettingsHint) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: KillLaColors.warning.withValues(alpha: 0.1),
+                    border: Border.all(
+                      color: KillLaColors.warning.withValues(alpha: 0.35),
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'On iPhone, check both switches',
+                        style: TextStyle(
+                          color: KillLaColors.warning,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '1. Settings > Kode Mobile > Wireless Data > WLAN & Cellular\n2. Settings > Kode Mobile > Local Network = ON',
+                        style: TextStyle(
+                          color: colors.onSurfaceVariant,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      OutlinedButton.icon(
+                        onPressed: _openingSettings ? null : _openSettings,
+                        icon: const Icon(Icons.open_in_new, size: 16),
+                        label: Text(
+                          _openingSettings
+                              ? 'Opening Settings…'
+                              : 'Open Settings',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               FilledButton.icon(
                 icon: _testing
@@ -237,28 +298,30 @@ class _PairScreenState extends ConsumerState<PairScreen> {
   }
 
   Widget _buildScanCta() {
+    final colors = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: KillLaColors.bgSecondary,
-        border: Border.all(color: KillLaColors.accent, width: 1.5),
+        color: colors.surface,
+        border: Border.all(color: colors.primary, width: 1.5),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             'SCAN PAIRING QR',
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w900,
               letterSpacing: 1.2,
-              color: KillLaColors.accent,
+              color: colors.primary,
             ),
           ),
           const SizedBox(height: 6),
-          const Text(
+          Text(
             'On desktop GUI, open Command Palette (⌘P) → "Show Pairing QR…", then scan.',
-            style: TextStyle(color: KillLaColors.textSecondary),
+            style: TextStyle(color: colors.onSurfaceVariant),
           ),
           const SizedBox(height: 10),
           FilledButton.icon(
