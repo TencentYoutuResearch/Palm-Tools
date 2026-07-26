@@ -1,3 +1,6 @@
+node_modules/
+target/
+
 kode/target
 kode/.pnpm-store
 kode/node_modules
