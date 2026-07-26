@@ -1,14 +1,46 @@
 /// Riverpod providers — 全 app 共享的 endpoint / api / ws 状态。
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
 import '../protocol/protocol.dart';
 import '../storage/desktop_auto_pair.dart';
 import '../storage/endpoint_storage.dart';
+import '../storage/local_network_gate_storage.dart';
 
 final endpointStorageProvider = Provider<EndpointStorage>(
   (ref) => EndpointStorage(),
 );
+
+final localNetworkGateStorageProvider = Provider<LocalNetworkGateStorage>(
+  (ref) => LocalNetworkGateStorage(),
+);
+
+final localNetworkGateRequiredProvider = Provider<bool>((ref) {
+  return Platform.isIOS;
+});
+
+final localNetworkGateProvider =
+    AsyncNotifierProvider<LocalNetworkGateNotifier, bool>(
+      LocalNetworkGateNotifier.new,
+    );
+
+class LocalNetworkGateNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    if (!ref.watch(localNetworkGateRequiredProvider)) return true;
+    final storage = ref.read(localNetworkGateStorageProvider);
+    return storage.load();
+  }
+
+  Future<void> accept() async {
+    state = const AsyncLoading();
+    final storage = ref.read(localNetworkGateStorageProvider);
+    await storage.saveAccepted();
+    state = const AsyncData(true);
+  }
+}
 
 /// 当前激活的 endpoint。null = 未配对,App 路由到 /pair。
 final endpointProvider = StateProvider<Endpoint?>((ref) => null);
@@ -19,6 +51,12 @@ final endpointProvider = StateProvider<Endpoint?>((ref) => null);
 ///   2. 已存不通 → 走桌面自动发现(读本机 kode GUI 的 state.json + 候选端口 probe)
 ///   3. 都没有 / 都失败 → 留空,UI 走 /pair 屏让用户手填
 final endpointBootstrapProvider = FutureProvider<Endpoint?>((ref) async {
+  final gateAccepted = await ref.watch(localNetworkGateProvider.future);
+  if (!gateAccepted) {
+    ref.read(endpointProvider.notifier).state = null;
+    return null;
+  }
+
   final storage = ref.read(endpointStorageProvider);
 
   Future<bool> probe(Endpoint ep) async {
