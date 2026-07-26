@@ -282,7 +282,7 @@
         console.warn('[shell-term] modifier-scroll patch failed:', e)
       }
 
-      // 字体缩放快捷键拦截(Cmd+= / Cmd+- / Cmd+0)+ 剪贴板复制/粘贴
+      // 字体缩放快捷键拦截(Cmd+= / Cmd+- / Cmd+0)+ Cmd+K 清屏 + 剪贴板复制/粘贴
       // (参考 Terminal.svelte:Cmd+C 复制选区;Cmd+V 通过 Rust 读剪贴板粘贴到 PTY,
       //  绕过 WKWebView 每次都弹权限窗的问题)
       function onKeydown(e: KeyboardEvent) {
@@ -296,6 +296,9 @@
         } else if (e.key === '0') {
           e.preventDefault(); e.stopPropagation()
           resetFontSize()
+        } else if (!e.ctrlKey && !e.altKey && (e.key === 'k' || e.key === 'K')) {
+          e.preventDefault(); e.stopPropagation()
+          try { term.clear() } catch {}
         } else if (!e.ctrlKey && !e.altKey && e.key === 'c') {
           // Cmd+C:有选区 → 复制;无选区 → 仍 preventDefault(避免 WKWebView undo-focus)
           e.preventDefault(); e.stopPropagation()
