@@ -1161,8 +1161,7 @@ pub fn memory_browse_state_set(
 /// SpecOps 窗口里点 "Open in kode" 时,主窗口可能被 SpecOps 窗口遮挡或最小化。
 /// 在 macOS 上,webview 层的 `setFocus()` 对被遮挡的同 app 窗口经常不生效,
 /// 因此从 Rust 侧用窗口级 `unminimize + show + set_focus` 可靠置前。
-#[tauri::command]
-pub async fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn restore_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let win = app
         .get_webview_window("main")
@@ -1172,6 +1171,11 @@ pub async fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
     win.set_focus()
         .map_err(|e| format!("set_focus failed: {e}"))?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    restore_main_window(&app)
 }
 
 #[tauri::command]

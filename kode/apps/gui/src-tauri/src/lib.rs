@@ -22,6 +22,7 @@ mod model_monitor;
 mod model_usage;
 mod persistence;
 mod shell_pty;
+mod screenshot;
 mod specops;
 mod state;
 mod transport;
@@ -73,6 +74,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -170,6 +172,9 @@ pub fn run() {
             commands::memory_browse_state_set,
             workspace::open_path,
             commands::read_clipboard,
+            screenshot::capture_window_screenshot,
+            screenshot::capture_interactive_screenshot,
+            screenshot::save_png_bytes,
             commands::list_sessions_for_cwd,
             model_usage::model_usage_snapshot,
             model_monitor::model_monitor_set_expanded,
@@ -245,14 +250,23 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .run(|app_handle, event| match event {
             // app 退出时主动停掉所有 SpecOps sidecar 子进程,避免变成孤儿残留。
             // RunEvent::Exit 在主事件循环结束、进程真正退出前触发,比依赖
             // SpecOpsManager 的 Drop 更可靠(macOS GUI 直接 exit 时 Drop 不保证跑)。
-            if let tauri::RunEvent::Exit = event {
+            tauri::RunEvent::Exit => {
                 let state = app_handle.state::<AppState>();
                 state.specops.shutdown_all();
             }
+            // macOS 点击 Dock 图标会触发 Reopen。即使 model monitor 等辅助窗口
+            // 仍可见，也必须显式恢复 main；否则最小化后的主窗口不会重新出现。
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                if let Err(error) = commands::restore_main_window(app_handle) {
+                    tracing::warn!(%error, "restore main window on Dock reopen failed");
+                }
+            }
+            _ => {}
         });
 }
 

@@ -55,6 +55,50 @@
     "message": "Terminal",
     "description": "Settings tab for terminal appearance"
   },
+  "settings.capture.title": {
+    "message": "Capture",
+    "description": "Settings tab for screenshot capture"
+  },
+  "settings.capture.description": {
+    "message": "Configure screenshot shortcuts and choose whether they capture the current kode window or a global screen region.",
+    "description": "Screenshot settings description"
+  },
+  "settings.capture.shortcut": {
+    "message": "Shortcut",
+    "description": "Screenshot shortcut setting"
+  },
+  "settings.capture.shortcutHint": {
+    "message": "Global shortcuts may fail if another app already owns the same combination.",
+    "description": "Screenshot shortcut registration hint"
+  },
+  "settings.capture.mode": {
+    "message": "Capture mode",
+    "description": "Screenshot capture mode setting"
+  },
+  "settings.capture.modeWindow": {
+    "message": "Current window",
+    "description": "Capture current kode window"
+  },
+  "settings.capture.modeWindowDescription": {
+    "message": "Capture the active kode GUI window exactly as shown.",
+    "description": "Current window screenshot mode description"
+  },
+  "settings.capture.modeArea": {
+    "message": "Global area",
+    "description": "Capture arbitrary screen region"
+  },
+  "settings.capture.modeAreaDescription": {
+    "message": "Use the system region selector to capture any part of the screen.",
+    "description": "Global area screenshot mode description"
+  },
+  "settings.capture.takeNow": {
+    "message": "Take screenshot now",
+    "description": "Manual screenshot action in settings"
+  },
+  "settings.capture.saved": {
+    "message": "Screenshot settings saved: {shortcut} · {mode}",
+    "description": "Toast after saving screenshot settings"
+  },
   "settings.terminal.description": {
     "message": "Configure fonts and colors for the main PTY and workspace shell terminals.",
     "description": "Terminal settings description"
@@ -1050,6 +1094,10 @@
   "command.other.settings": {
     "message": "Settings...",
     "description": "Command: open settings"
+  },
+  "command.other.screenshot": {
+    "message": "Take screenshot...",
+    "description": "Command: trigger screenshot capture"
   },
   "command.other.openSpecOpsWindow": {
     "message": "Open SpecOps window",

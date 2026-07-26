@@ -256,6 +256,12 @@ export type ThemeMode = 'light' | 'dark' | 'system'
 /// 全局 UI 语言。system 走浏览器/系统语言。
 export type LocaleMode = 'en' | 'zh-CN' | 'system'
 
+export interface ScreenshotPayload {
+  png_base64: string
+  width: number
+  height: number
+}
+
 export const ipc = {
   listBackends: () => invoke<BackendInfo[]>('list_backends'),
   discoverBackendModels: (backendKey: string) =>
@@ -379,6 +385,12 @@ export const ipc = {
   getPersistedTabs: () => invoke<PersistedTab[]>('get_persisted_tabs'),
   saveTabs: (tabs: PersistedTab[]) => invoke<void>('save_tabs', { tabs }),
   focusMainWindow: () => invoke<void>('focus_main_window'),
+  captureWindowScreenshot: (windowLabel: string) =>
+    invoke<ScreenshotPayload>('capture_window_screenshot', { windowLabel }),
+  captureInteractiveScreenshot: () =>
+    invoke<ScreenshotPayload>('capture_interactive_screenshot'),
+  savePngBytes: (outputPath: string, pngBase64: string) =>
+    invoke<void>('save_png_bytes', { outputPath, pngBase64 }),
   openSpecOpsWindow: (session: SpecOpsSession, theme: ThemeMode, locale: LocaleMode) =>
     invoke<void>('open_specops_window', { session, theme, locale }),
   specopsOpen: (workspace: string) => invoke<SpecOpsSession>('specops_open', { workspace }),
@@ -823,6 +835,8 @@ export interface MemoryPending {
   kind: string
   subsystem: string | null
   supersedes: string | null
+  related: string[]
+  contradicts: string[]
   body: string
   rationale: string | null
   /** 当前 author 剩余能量(approve/reject 后会变;UI 给出"agent 还剩 X 点"提示) */

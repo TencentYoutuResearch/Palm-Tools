@@ -23,6 +23,14 @@
   import BackendIcon from './BackendIcon.svelte'
   import { currentLocale, systemLanguageLabel, t } from './i18n'
   import {
+    SCREENSHOT_MODE_OPTIONS,
+    SCREENSHOT_SHORTCUT_OPTIONS,
+    loadScreenshotSettings,
+    saveScreenshotSettings,
+    type ScreenshotMode,
+    type ScreenshotShortcut,
+  } from './screenshot_settings'
+  import {
     TERMINAL_FONT_PRESETS,
     TERMINAL_FONT_SIZE_MAX,
     TERMINAL_FONT_SIZE_MIN,
@@ -37,12 +45,13 @@
   type Props = {
     onClose: () => void
     onOpenMemorySync: () => void
+    onTakeScreenshot: () => void | Promise<void>
     locale: LocaleMode
     onLocaleChange: (locale: LocaleMode) => void
   }
-  let { onClose, onOpenMemorySync, locale, onLocaleChange }: Props = $props()
+  let { onClose, onOpenMemorySync, onTakeScreenshot, locale, onLocaleChange }: Props = $props()
 
-  type Tab = 'backends' | 'memory' | 'terminal' | 'language'
+  type Tab = 'backends' | 'memory' | 'terminal' | 'capture' | 'language'
   let tab: Tab = $state('backends')
 
   let backends: BackendListItem[] = $state([])
@@ -62,6 +71,9 @@
   let memoryPromptEnabled = $state(true)
   let ptyAppearance = $state<TerminalAppearance>(loadTerminalAppearance('pty'))
   let shellAppearance = $state<TerminalAppearance>(loadTerminalAppearance('shell'))
+  const initialScreenshotSettings = loadScreenshotSettings()
+  let screenshotShortcut = $state<ScreenshotShortcut>(initialScreenshotSettings.shortcut)
+  let screenshotMode = $state<ScreenshotMode>(initialScreenshotSettings.mode)
 
   function showToast(msg: string) {
     toast = msg
@@ -264,6 +276,24 @@
     return target === 'pty' ? tr('settings.terminal.mainPty') : tr('settings.terminal.shell')
   }
 
+  function saveCaptureSettings(next: { shortcut?: ScreenshotShortcut; mode?: ScreenshotMode }) {
+    const saved = saveScreenshotSettings({
+      shortcut: next.shortcut ?? screenshotShortcut,
+      mode: next.mode ?? screenshotMode,
+    })
+    screenshotShortcut = saved.shortcut
+    screenshotMode = saved.mode
+    const modeLabel = saved.mode === 'area'
+      ? tr('settings.capture.modeArea')
+      : tr('settings.capture.modeWindow')
+    showToast(t('settings.capture.saved', {
+      shortcut: saved.shortcut === 'disabled'
+        ? 'Disabled'
+        : SCREENSHOT_SHORTCUT_OPTIONS.find((option) => option.value === saved.shortcut)?.label ?? saved.shortcut,
+      mode: modeLabel,
+    }))
+  }
+
   function onKeyCapture(e: KeyboardEvent) {
     if (e.key !== 'Escape') return
     e.preventDefault()
@@ -331,6 +361,13 @@
           <line x1="12" y1="19" x2="20" y2="19" />
         </svg>
         <span>{tr('settings.terminal.title')}</span>
+      </button>
+      <button class="nav-item" class:active={tab === 'capture'} onclick={() => (tab = 'capture')}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 7h3l1.5-2h5L16 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z" />
+          <circle cx="12" cy="13" r="3.5" />
+        </svg>
+        <span>{tr('settings.capture.title')}</span>
       </button>
       <button class="nav-item" class:active={tab === 'language'} onclick={() => (tab = 'language')}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -645,6 +682,56 @@
               <option value={font}></option>
             {/each}
           </datalist>
+        </div>
+      {:else if tab === 'capture'}
+        <div class="content-head">
+          <h2>{tr('settings.capture.title')}</h2>
+          <p class="sub">{tr('settings.capture.description')}</p>
+        </div>
+
+        <div class="form">
+          <div class="field">
+            <label for="capture-shortcut">{tr('settings.capture.shortcut')}</label>
+            <select
+              id="capture-shortcut"
+              value={screenshotShortcut}
+              onchange={(e) => saveCaptureSettings({
+                shortcut: (e.target as HTMLSelectElement).value as ScreenshotShortcut,
+              })}
+            >
+              {#each SCREENSHOT_SHORTCUT_OPTIONS as option}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+            <p class="hint">{tr('settings.capture.shortcutHint')}</p>
+          </div>
+
+          <div class="field">
+            <div class="field-label">{tr('settings.capture.mode')}</div>
+            <div class="segmented capture-segmented">
+              {#each SCREENSHOT_MODE_OPTIONS as option}
+                <button
+                  class:active={screenshotMode === option.value}
+                  onclick={() => saveCaptureSettings({ mode: option.value })}
+                >
+                  {option.value === 'window'
+                    ? tr('settings.capture.modeWindow')
+                    : tr('settings.capture.modeArea')}
+                  <span>
+                    {option.value === 'window'
+                      ? tr('settings.capture.modeWindowDescription')
+                      : tr('settings.capture.modeAreaDescription')}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
+
+        <div class="form-actions capture-actions">
+          <button class="btn primary" onclick={() => void onTakeScreenshot()}>
+            {tr('settings.capture.takeNow')}
+          </button>
         </div>
       {:else if tab === 'language'}
         <div class="content-head">
@@ -998,6 +1085,11 @@
     font-weight: var(--fw-med);
     color: var(--fg-secondary);
   }
+  .field-label {
+    font-size: var(--fs-sm);
+    font-weight: var(--fw-med);
+    color: var(--fg-secondary);
+  }
   .field input,
   .field select {
     font-family: var(--font-ui);
@@ -1092,6 +1184,15 @@
   .segmented button.active {
     border-color: var(--acc);
     background: var(--acc-soft);
+  }
+  .capture-segmented {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .capture-actions {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+    justify-content: flex-start;
   }
 
   /* ---- 按钮 ---- */

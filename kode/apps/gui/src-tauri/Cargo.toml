@@ -22,6 +22,7 @@ kode-memory = { path = "../../../crates/kode-memory" }
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -67,6 +68,8 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSGraphics", "NSScreen", "NSWindow"] }
+core-graphics = "0.25"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 # 默认关闭所有 Tauri allowlist,只显式开启用得到的

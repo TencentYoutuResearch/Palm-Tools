@@ -13,7 +13,8 @@
    */
   import { onMount, onDestroy } from 'svelte'
   import { getCurrentWindow } from '@tauri-apps/api/window'
-  import { open } from '@tauri-apps/plugin-dialog'
+  import { open, save } from '@tauri-apps/plugin-dialog'
+  import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
   import Terminal from './lib/Terminal.svelte'
   import CommandPalette, { type Command } from './lib/CommandPalette.svelte'
   import RenameDialog from './lib/RenameDialog.svelte'
@@ -64,6 +65,13 @@
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
+  import {
+    loadScreenshotSettings,
+    onScreenshotSettingsChanged,
+    screenshotShortcutLabel,
+    screenshotShortcutMatches,
+    type ScreenshotSettings,
+  } from './lib/screenshot_settings'
   import { pushToast } from './lib/toast'
 
   /**
@@ -105,6 +113,10 @@
   let settingsOpen = $state(false)
   let deployOpen = $state(false)
   let workspacePanelOpen = $state(false)
+  let screenshotSettings = $state<ScreenshotSettings>(loadScreenshotSettings())
+  let screenshotBusy = false
+  let registeredScreenshotShortcut: string | null = null
+  let screenshotSettingsUnlisten: (() => void) | null = null
   // inspector 宽度可拖拽调整,带上下限。
   const INSPECTOR_MIN = 280
   const INSPECTOR_MAX = 1440
@@ -129,6 +141,83 @@
   async function onDeployCompleted() {
     await refreshEndpoints()
     window.dispatchEvent(new CustomEvent('kode:endpoints-changed'))
+  }
+
+  function screenshotAccelerator(): string | null {
+    if (screenshotSettings.shortcut === 'cmd-shift-s') return 'CommandOrControl+Shift+S'
+    if (screenshotSettings.shortcut === 'cmd-shift-k') return 'CommandOrControl+Shift+K'
+    if (screenshotSettings.shortcut === 'cmd-alt-s') return 'CommandOrControl+Alt+S'
+    return null
+  }
+
+  function screenshotDefaultName(): string {
+    const now = new Date()
+    const pad = (value: number) => String(value).padStart(2, '0')
+    return `kode-screenshot-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.png`
+  }
+
+  async function saveScreenshotPayload(payload: import('./lib/ipc').ScreenshotPayload): Promise<boolean> {
+    await appWindow.show().catch(() => {})
+    await appWindow.setFocus().catch(() => {})
+    const picked = await save({
+      title: t('command.other.screenshot'),
+      defaultPath: screenshotDefaultName(),
+      filters: [{ name: 'PNG image', extensions: ['png'] }],
+    })
+    if (typeof picked !== 'string' || picked.length === 0) return false
+    await ipc.savePngBytes(picked, payload.png_base64)
+    pushToast({
+      severity: 'success',
+      title: 'Screenshot saved',
+      detail: picked,
+    })
+    return true
+  }
+
+  async function runConfiguredScreenshot() {
+    if (screenshotBusy) return
+    screenshotBusy = true
+    try {
+      const payload = screenshotSettings.mode === 'area'
+        ? await ipc.captureInteractiveScreenshot()
+        : await ipc.captureWindowScreenshot(appWindow.label)
+      await saveScreenshotPayload(payload)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      if (detail.includes('cancelled')) return
+      pushToast({
+        severity: 'error',
+        title: 'Screenshot failed',
+        detail,
+      })
+    } finally {
+      screenshotBusy = false
+    }
+  }
+
+  async function syncScreenshotShortcutRegistration() {
+    if (registeredScreenshotShortcut) {
+      try {
+        await unregister(registeredScreenshotShortcut)
+      } catch {}
+      registeredScreenshotShortcut = null
+    }
+    const accelerator = screenshotAccelerator()
+    if (!accelerator) return
+    try {
+      await register(accelerator, (event: { state?: string }) => {
+        if ((event as { state?: string }).state === 'Released') return
+        void runConfiguredScreenshot()
+      })
+      registeredScreenshotShortcut = accelerator
+    } catch (error) {
+      pushToast({
+        severity: 'warning',
+        title: 'Global screenshot shortcut unavailable',
+        detail: `${screenshotShortcutLabel(screenshotSettings.shortcut)} may already be in use by another app.`,
+      })
+      console.warn('register screenshot shortcut failed:', error)
+    }
   }
 
   function toggleTerminalPanel() {
@@ -838,6 +927,11 @@
       mql = window.matchMedia('(prefers-color-scheme: dark)')
       systemPrefersDark = mql.matches
       mql.addEventListener('change', onSystemThemeChange)
+      await syncScreenshotShortcutRegistration()
+      screenshotSettingsUnlisten = onScreenshotSettingsChanged((detail) => {
+        screenshotSettings = detail
+        void syncScreenshotShortcutRegistration()
+      })
 
       // $HOME 拿一次就够 — 用于状态栏 cwd 路径 ~ 缩写
       try {
@@ -924,6 +1018,11 @@
     memoryUnlisten?.()
     remoteMemoryUnlisten?.()
     backendsUnlisten?.()
+    screenshotSettingsUnlisten?.()
+    if (registeredScreenshotShortcut) {
+      void unregister(registeredScreenshotShortcut).catch(() => {})
+      registeredScreenshotShortcut = null
+    }
   })
 
   // theme 变化 → 写 <html data-theme="…">。
@@ -1114,6 +1213,11 @@
       return
     }
     if (!e.metaKey && !e.ctrlKey) return
+    if (screenshotShortcutMatches(e, screenshotSettings.shortcut)) {
+      e.preventDefault()
+      void runConfiguredScreenshot()
+      return
+    }
     // 弹层（命令面板 / 重命名 / 选后端 / memory panel / deploy / endpoints / ...）打开时，
     // 只保留 Escape（上面已处理）；其余 Cmd/Ctrl 组合键一律不响应，
     // 让事件继续冒泡到弹层自己的 input，保证 Cmd+A / Cmd+C / Cmd+V / Cmd+Z 等在弹层内可用。
@@ -1330,6 +1434,15 @@
       run: () => { deployOpen = true },
     },
     // ── Other ──
+    {
+      id: 'take-screenshot',
+      label: t('command.other.screenshot'),
+      detail: screenshotSettings.shortcut === 'disabled'
+        ? undefined
+        : screenshotShortcutLabel(screenshotSettings.shortcut),
+      group: 'other',
+      run: () => { void runConfiguredScreenshot() },
+    },
     {
       id: 'open-settings',
       label: t('command.other.settings'),
@@ -1995,6 +2108,7 @@
   <SettingsPanel
     onClose={() => (settingsOpen = false)}
     onOpenMemorySync={() => { memorySyncOpen = true }}
+    onTakeScreenshot={() => void runConfiguredScreenshot()}
     {locale}
     onLocaleChange={setLocale}
   />
