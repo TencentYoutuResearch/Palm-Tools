@@ -20,6 +20,31 @@ import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
 import '../theme.dart';
 
+String _compactTokens(int value) {
+  if (value >= 1000000) {
+    return '${(value / 1000000).toStringAsFixed(value >= 10000000 ? 0 : 1)}M';
+  }
+  if (value >= 1000) {
+    return '${(value / 1000).toStringAsFixed(value >= 10000 ? 0 : 1)}k';
+  }
+  return '$value';
+}
+
+String _pathLeaf(String? path) {
+  if (path == null || path.trim().isEmpty) return 'workspace unset';
+  final normalized = path.replaceAll('\\', '/');
+  final parts = normalized.split('/').where((part) => part.isNotEmpty).toList();
+  return parts.isEmpty ? normalized : parts.last;
+}
+
+String _pathParent(String? path) {
+  if (path == null || path.trim().isEmpty) return 'No working directory';
+  final normalized = path.replaceAll('\\', '/');
+  final index = normalized.lastIndexOf('/');
+  if (index <= 0) return normalized;
+  return normalized.substring(0, index);
+}
+
 /// 一条对话气泡或工具调用卡。
 class _Item {
   final String key; // 去重 + ListView key
@@ -349,6 +374,15 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
     final ctxPct = (_meta['context_pct'] as num?)?.toDouble();
     final tokens = (_meta['tokens'] as num?)?.toInt();
     final title = _meta['title'] as String? ?? '';
+    final sessionList =
+        ref.watch(sessionsProvider).valueOrNull ?? const <SessionDto>[];
+    SessionDto? summary;
+    for (final item in sessionList) {
+      if (item.id == widget.sessionId) {
+        summary = item;
+        break;
+      }
+    }
     // 当前 session 是否仍需用户操作(prompt 还没解除)
     final attentionKind = ref.watch(
       sessionAttentionProvider.select((m) => m[widget.sessionId]),
@@ -369,6 +403,18 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
+            if (summary?.cwd != null && summary!.cwd!.isNotEmpty)
+              Text(
+                '${_pathLeaf(summary.cwd)} · ${_pathParent(summary.cwd)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 10,
+                  color: KillLaColors.textSecondary,
+                  fontWeight: FontWeight.w700,
+                  fontFamily: 'Menlo',
+                ),
+              ),
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -384,7 +430,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                 if (tokens != null) ...[
                   const SizedBox(width: 8),
                   Text(
-                    '$tokens tok',
+                    '${_compactTokens(tokens)} tok',
                     style: const TextStyle(
                       fontSize: 11,
                       color: KillLaColors.textMuted,
@@ -545,14 +591,28 @@ class _MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     final isUser = role == 'user';
-    // 用户气泡:深红主调,带左侧切角
-    // 助手气泡:中性深灰,带左侧黄色刀片切角
-    final bg = isUser
-        ? KillLaColors.accent.withValues(alpha: 0.12)
-        : KillLaColors.bgSecondary;
-    final accentColor = isUser ? KillLaColors.accent : KillLaColors.warning;
+    final isSystem = role == 'system';
     final align = isUser ? Alignment.centerRight : Alignment.centerLeft;
+    final label = isUser
+        ? 'YOU'
+        : (isSystem ? 'SYSTEM' : 'AGENT');
+    final accentColor = isSystem
+        ? colors.onSurfaceVariant
+        : (isUser ? colors.primary : colors.secondary);
+    final textColor = isSystem
+        ? colors.onSurfaceVariant
+        : (isUser ? colors.onPrimary : colors.onSurface);
+    final bubbleColor = isSystem
+        ? colors.surfaceContainerHighest
+        : (isUser ? colors.primary : colors.surface);
+    final bubbleBorder = isSystem
+        ? colors.outline
+        : (isUser ? colors.primary : colors.outline);
+    final bubbleShadow = isUser
+        ? colors.primary.withValues(alpha: 0.18)
+        : Colors.black.withValues(alpha: 0.16);
     return Container(
       alignment: align,
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -560,20 +620,32 @@ class _MessageBubble extends StatelessWidget {
         constraints: const BoxConstraints(maxWidth: 540),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(10),
-          border: Border(
-            left: BorderSide(color: accentColor, width: isUser ? 0 : 4),
-            right: BorderSide(color: accentColor, width: isUser ? 4 : 0),
-            top: BorderSide(color: KillLaColors.border),
-            bottom: BorderSide(color: KillLaColors.border),
-          ),
+          color: bubbleColor,
+          gradient: isUser
+              ? LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    colors.primary,
+                    Color.lerp(colors.primary, colors.onPrimary, 0.12)!,
+                  ],
+                )
+              : null,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: bubbleBorder),
+          boxShadow: [
+            BoxShadow(
+              color: bubbleShadow,
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              role.toUpperCase(),
+              label,
               style: TextStyle(
                 fontSize: 10,
                 color: accentColor,
@@ -588,25 +660,57 @@ class _MessageBubble extends StatelessWidget {
               data: text,
               selectable: true,
               styleSheet: MarkdownStyleSheet(
-                p: const TextStyle(
+                p: TextStyle(
                   fontSize: 14,
-                  color: KillLaColors.textPrimary,
+                  color: textColor,
+                  height: 1.45,
                 ),
-                code: const TextStyle(
+                code: TextStyle(
                   fontFamily: 'Menlo',
                   fontSize: 12,
-                  color: KillLaColors.warning,
-                  backgroundColor: Color(0x33000000),
+                  color: isUser ? const Color(0xFF12321D) : KillLaColors.warning,
+                  backgroundColor: isUser
+                      ? const Color(0x1A07100B)
+                      : const Color(0x33000000),
                 ),
                 codeblockDecoration: BoxDecoration(
-                  color: KillLaColors.bgPrimary,
-                  border: Border.all(color: KillLaColors.border),
+                  color: isUser
+                      ? const Color(0x1807100B)
+                      : colors.surfaceContainerHighest,
+                  border: Border.all(
+                    color: isUser
+                        ? const Color(0x3307100B)
+                        : colors.outline,
+                  ),
+                  borderRadius: BorderRadius.circular(10),
                 ),
                 blockquoteDecoration: BoxDecoration(
-                  color: KillLaColors.accent.withValues(alpha: .06),
+                  color: isUser
+                      ? const Color(0x1207100B)
+                      : colors.primary.withValues(alpha: .06),
                   border: Border(
-                    left: BorderSide(color: KillLaColors.accent, width: 3),
+                    left: BorderSide(color: accentColor, width: 3),
                   ),
+                ),
+                blockquote: TextStyle(
+                  color: textColor.withValues(alpha: 0.9),
+                ),
+                strong: TextStyle(
+                  color: textColor,
+                  fontWeight: FontWeight.w800,
+                ),
+                em: TextStyle(
+                  color: textColor.withValues(alpha: 0.95),
+                ),
+                listBullet: TextStyle(color: textColor),
+                a: TextStyle(
+                  color: isUser
+                      ? const Color(0xFF103B22)
+                      : colors.primary,
+                  decoration: TextDecoration.underline,
+                  decorationColor: isUser
+                      ? const Color(0xFF103B22)
+                      : colors.primary,
                 ),
               ),
             ),
@@ -629,6 +733,7 @@ class _ToolUseCardState extends State<_ToolUseCard> {
   @override
   Widget build(BuildContext context) {
     final p = widget.payload;
+    final colors = Theme.of(context).colorScheme;
     final tool = p['tool'] as String?;
     final summary = p['input_summary'] as String?;
     final preview = p['output_preview'] as String?;
@@ -639,9 +744,9 @@ class _ToolUseCardState extends State<_ToolUseCard> {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
-        color: KillLaColors.bgSecondary,
+        color: colors.surface,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: KillLaColors.border),
+        border: Border.all(color: colors.outline),
       ),
       child: Column(
         children: [
@@ -660,10 +765,10 @@ class _ToolUseCardState extends State<_ToolUseCard> {
                   Expanded(
                     child: Text(
                       summary ?? (tool != null ? '$tool · $status' : status),
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: 'Menlo',
                         fontSize: 12,
-                        color: KillLaColors.textPrimary,
+                        color: colors.onSurface,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -672,7 +777,7 @@ class _ToolUseCardState extends State<_ToolUseCard> {
                   Icon(
                     _open ? Icons.expand_less : Icons.expand_more,
                     size: 18,
-                    color: KillLaColors.textSecondary,
+                    color: colors.onSurfaceVariant,
                   ),
                 ],
               ),
@@ -685,15 +790,15 @@ class _ToolUseCardState extends State<_ToolUseCard> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: KillLaColors.bgPrimary,
-                  border: Border.all(color: KillLaColors.border),
+                  color: colors.surfaceContainerHighest,
+                  border: Border.all(color: colors.outline),
                 ),
                 child: SelectableText(
                   preview,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Menlo',
                     fontSize: 11,
-                    color: KillLaColors.textSecondary,
+                    color: colors.onSurfaceVariant,
                   ),
                 ),
               ),

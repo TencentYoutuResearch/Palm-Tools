@@ -26,9 +26,9 @@ class KillLaColors {
   KillLaColors._();
 
   // ---- Dark (主皮)----
-  static const bgPrimary = Color(0xFF0D0F0E);
-  static const bgSecondary = Color(0xFF111413);
-  static const bgTertiary = Color(0xFF181B19);
+  static const bgPrimary = Color(0xFF141815);
+  static const bgSecondary = Color(0xFF1A1F1B);
+  static const bgTertiary = Color(0xFF222922);
 
   /// Kode desktop accent.
   static const accent = Color(0xFF9FE870);
@@ -44,26 +44,26 @@ class KillLaColors {
   /// 火焰橙 —— busy / running
   static const busy = Color(0xFF7FB4E8);
 
-  static const textPrimary = Color(0xFFEDEFEB);
-  static const textSecondary = Color(0xFFA8AEA7);
-  static const textMuted = Color(0xFF70776F);
+  static const textPrimary = Color(0xFFF0F3EE);
+  static const textSecondary = Color(0xFFB6BDB5);
+  static const textMuted = Color(0xFF858E85);
 
-  static const border = Color(0xFF262B28);
-  static const borderStrong = Color(0xFF3A413C);
+  static const border = Color(0xFF303831);
+  static const borderStrong = Color(0xFF465047);
 
-  // ---- Light (副皮,降低纯度,用户切系统主题时用)----
-  static const lightBg = Color(0xFFF7F7F3);
-  static const lightSurface = Color(0xFFECEDE8);
-  static const lightElevated = Color(0xFFFFFFFF);
-  static const lightAccent = Color(0xFF216E45);
-  static const lightAccentHover = Color(0xFF2B8054);
+  // ---- Light (副皮,同样保持绿色中性调,避免与 dark 反差过猛)----
+  static const lightBg = Color(0xFFEFF2ED);
+  static const lightSurface = Color(0xFFE4E9E2);
+  static const lightElevated = Color(0xFFF8FAF6);
+  static const lightAccent = Color(0xFF2D704A);
+  static const lightAccentHover = Color(0xFF397E57);
   static const lightDanger = Color(0xFFB54750);
   static const lightWarning = Color(0xFF9A6B20);
   static const lightBusy = Color(0xFF3977A8);
-  static const lightTextPrimary = Color(0xFF171A18);
-  static const lightTextSecondary = Color(0xFF4F5750);
-  static const lightTextMuted = Color(0xFF7A827B);
-  static const lightBorder = Color(0xFFD9DDD5);
+  static const lightTextPrimary = Color(0xFF202620);
+  static const lightTextSecondary = Color(0xFF566057);
+  static const lightTextMuted = Color(0xFF778178);
+  static const lightBorder = Color(0xFFCCD4CB);
 
   /// session 状态点配色(starting/idle/busy/exited)
   static Color statusDot(String status) => switch (status) {
