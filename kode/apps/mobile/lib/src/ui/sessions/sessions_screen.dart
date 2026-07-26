@@ -8,11 +8,88 @@ import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
 import '../theme.dart';
 
-class SessionsScreen extends ConsumerWidget {
+String _compactTokens(int value) {
+  if (value >= 1000000) {
+    return '${(value / 1000000).toStringAsFixed(value >= 10000000 ? 0 : 1)}M';
+  }
+  if (value >= 1000) {
+    return '${(value / 1000).toStringAsFixed(value >= 10000 ? 0 : 1)}k';
+  }
+  return '$value';
+}
+
+String _pathLeaf(String? path) {
+  if (path == null || path.trim().isEmpty) return 'workspace unset';
+  final normalized = path.replaceAll('\\', '/');
+  final parts = normalized.split('/').where((part) => part.isNotEmpty).toList();
+  return parts.isEmpty ? normalized : parts.last;
+}
+
+String _pathParent(String? path) {
+  if (path == null || path.trim().isEmpty) return 'No working directory';
+  final normalized = path.replaceAll('\\', '/');
+  final index = normalized.lastIndexOf('/');
+  if (index <= 0) return normalized;
+  return normalized.substring(0, index);
+}
+
+String _groupKey(String? path) {
+  final raw = path?.trim();
+  if (raw == null || raw.isEmpty) return '__unset__';
+  return raw.replaceAll('\\', '/');
+}
+
+class _SessionGroup {
+  final String key;
+  final String leaf;
+  final String parent;
+  final List<SessionDto> sessions;
+  const _SessionGroup({
+    required this.key,
+    required this.leaf,
+    required this.parent,
+    required this.sessions,
+  });
+}
+
+List<_SessionGroup> _buildGroups(List<SessionDto> sessions) {
+  final buckets = <String, List<SessionDto>>{};
+  for (final session in sessions) {
+    final key = _groupKey(session.cwd);
+    buckets.putIfAbsent(key, () => <SessionDto>[]).add(session);
+  }
+
+  final groups = buckets.entries.map((entry) {
+    final sorted = [...entry.value]
+      ..sort((a, b) => b.id.compareTo(a.id));
+    return _SessionGroup(
+      key: entry.key,
+      leaf: _pathLeaf(sorted.first.cwd),
+      parent: _pathParent(sorted.first.cwd),
+      sessions: sorted,
+    );
+  }).toList()
+    ..sort((a, b) {
+      final cmp = a.leaf.toLowerCase().compareTo(b.leaf.toLowerCase());
+      if (cmp != 0) return cmp;
+      return a.parent.toLowerCase().compareTo(b.parent.toLowerCase());
+    });
+
+  return groups;
+}
+
+class SessionsScreen extends ConsumerStatefulWidget {
   const SessionsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SessionsScreen> createState() => _SessionsScreenState();
+}
+
+class _SessionsScreenState extends ConsumerState<SessionsScreen> {
+  final Set<String> _expandedGroups = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
     final sessions = ref.watch(sessionsProvider);
     final endpoint = ref.watch(endpointProvider);
     final wsState = ref.watch(eventStreamProvider);
@@ -54,10 +131,39 @@ class SessionsScreen extends ConsumerWidget {
                   : RefreshIndicator(
                       onRefresh: () =>
                           ref.read(sessionsProvider.notifier).refresh(),
-                      child: ListView.separated(
-                        itemCount: list.length,
-                        separatorBuilder: (_, __) => const Divider(height: 1),
-                        itemBuilder: (_, i) => _SessionTile(s: list[i]),
+                      child: Builder(
+                        builder: (context) {
+                          final groups = _buildGroups(list);
+                          if (_expandedGroups.isEmpty) {
+                            _expandedGroups.addAll(
+                              groups.map((group) => group.key),
+                            );
+                          } else {
+                            _expandedGroups.removeWhere(
+                              (key) => !groups.any((group) => group.key == key),
+                            );
+                          }
+                          return ListView.separated(
+                            padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+                            itemCount: groups.length,
+                            separatorBuilder: (_, index) =>
+                                const SizedBox(height: 12),
+                            itemBuilder: (_, i) {
+                              final group = groups[i];
+                              return _PathGroupCard(
+                                group: group,
+                                expanded: _expandedGroups.contains(group.key),
+                                onToggle: () {
+                                  setState(() {
+                                    if (!_expandedGroups.add(group.key)) {
+                                      _expandedGroups.remove(group.key);
+                                    }
+                                  });
+                                },
+                              );
+                            },
+                          );
+                        },
                       ),
                     ),
             ),
@@ -96,6 +202,118 @@ class _ConnBanner extends StatelessWidget {
   }
 }
 
+class _PathGroupCard extends StatelessWidget {
+  final _SessionGroup group;
+  final bool expanded;
+  final VoidCallback onToggle;
+  const _PathGroupCard({
+    required this.group,
+    required this.expanded,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: colors.outline),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: onToggle,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: colors.primary.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: colors.primary.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(
+                      Icons.folder_copy_outlined,
+                      size: 18,
+                      color: colors.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          group.leaf,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                            color: colors.onSurface,
+                            letterSpacing: 0.2,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          group.parent,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: colors.onSurfaceVariant,
+                            fontFamily: 'Menlo',
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            _Chip(
+                              text:
+                                  '${group.sessions.length} session${group.sessions.length == 1 ? '' : 's'}',
+                              color: KillLaColors.busy,
+                            ),
+                            _Chip(text: 'path', color: KillLaColors.accent),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    expanded ? Icons.expand_less : Icons.expand_more,
+                    color: colors.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (expanded) ...[
+            const Divider(height: 1),
+            for (var i = 0; i < group.sessions.length; i++) ...[
+              _SessionTile(s: group.sessions[i]),
+              if (i != group.sessions.length - 1)
+                const Divider(height: 1, indent: 14, endIndent: 14),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class _SessionTile extends ConsumerWidget {
   final SessionDto s;
   const _SessionTile({required this.s});
@@ -104,61 +322,114 @@ class _SessionTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final attention = ref.watch(sessionAttentionProvider);
     final kind = attention[s.id]; // 'ask' | 'plan' | null
+    final colors = Theme.of(context).colorScheme;
 
-    final tile = ListTile(
-      leading: _StatusDot(status: s.status),
-      title: Row(
-        children: [
-          Expanded(
-            child: Text(
-              s.title.isEmpty ? '(untitled)' : s.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.2,
-              ),
-            ),
-          ),
-          if (kind != null) ...[
-            const SizedBox(width: 6),
-            _AttentionBadge(kind: kind),
-          ],
-        ],
-      ),
-      subtitle: Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Row(
-          children: [
-            Flexible(
-              child: _Chip(text: s.backendKey, color: KillLaColors.accent),
-            ),
-            const SizedBox(width: 6),
-            Flexible(
-              child: _Chip(text: s.model, color: KillLaColors.warning),
-            ),
-            const SizedBox(width: 6),
-            if (s.tokens.total > 0)
-              Text(
-                '${s.tokens.total} tok',
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: KillLaColors.textMuted,
-                  fontFamily: 'Menlo',
-                ),
-              ),
-          ],
-        ),
-      ),
-      trailing: Text(
-        '#${s.id}',
-        style: const TextStyle(
-          fontSize: 12,
-          color: KillLaColors.textMuted,
-          fontFamily: 'Menlo',
-        ),
-      ),
+    final tile = InkWell(
       onTap: () => GoRouter.of(context).push('/sessions/${s.id}'),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: _StatusDot(status: s.status),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              s.title.isEmpty ? '(untitled)' : s.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.15,
+                                color: colors.onSurface,
+                              ),
+                            ),
+                          ),
+                          if (kind != null) ...[
+                            const SizedBox(width: 8),
+                            _AttentionBadge(kind: kind),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        s.sessionUuid ?? s.backendKey,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: colors.onSurfaceVariant,
+                          fontFamily: 'Menlo',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      '#${s.id}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: colors.onSurfaceVariant,
+                        fontFamily: 'Menlo',
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      s.status.toUpperCase(),
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.9,
+                        color: KillLaColors.statusDot(s.status),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                _Chip(text: s.model, color: KillLaColors.warning),
+                if (s.tokens.total > 0)
+                  _Chip(
+                    text: '${_compactTokens(s.tokens.total)} tok',
+                    color: KillLaColors.busy,
+                  ),
+                if ((s.contextPct ?? 0) > 0)
+                  _Chip(
+                    text: 'ctx ${s.contextPct!.toStringAsFixed(0)}%',
+                    color: (s.contextPct ?? 0) >= 80
+                        ? KillLaColors.danger
+                        : (s.contextPct ?? 0) >= 50
+                            ? KillLaColors.warning
+                            : KillLaColors.textSecondary,
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
 
     if (kind == null) return tile;
@@ -322,6 +593,7 @@ class _Chip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
         color: color.withValues(alpha: 0.16),
         border: Border.all(color: color.withValues(alpha: 0.55), width: 1),
       ),
