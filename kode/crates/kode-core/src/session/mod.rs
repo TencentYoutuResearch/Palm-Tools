@@ -1144,6 +1144,20 @@ mod tests {
         assert_eq!(p.screen().scrollback(), 0);
     }
 
+    #[test]
+    fn parser_resize_does_not_leave_orphan_wide_cell() {
+        let mut parser = vt100::Parser::new(2, 10, 0);
+        // Put a double-width glyph in columns 9-10, then shrink so its first
+        // half becomes the final cell. vt100-ctt 0.17.1 used to retain the
+        // wide flag while dropping the continuation cell; a later ED sequence
+        // then indexed column 10 and panicked, aborting the release GUI.
+        parser.process("\x1b[1;9H中".as_bytes());
+        parser.screen_mut().set_size(2, 9);
+        parser.process(b"\x1b[1;9H\x1b[J");
+
+        assert_eq!(parser.screen().size(), (2, 9));
+    }
+
     // ============== UTF-8 边界检测 ==============
 
     #[test]

@@ -5802,8 +5802,6 @@ dependencies = [
 [[package]]
 name = "vt100-ctt"
 version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e0333bcaa031b50f85eac76cb9d62a400be0915ac2d60c3cce28656c01e7e58"
 dependencies = [
  "itoa",
  "log",

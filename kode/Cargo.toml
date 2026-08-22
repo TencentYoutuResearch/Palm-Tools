@@ -8,6 +8,14 @@ members = [
     "crates/kode-sync-server",
     "apps/gui/src-tauri",
 ]
+exclude = ["vendor/vt100-ctt"]
+
+# vt100-ctt 0.17.1 leaves an orphaned wide cell when a resize truncates the
+# continuation column. A subsequent ED/EL sequence then indexes past the row
+# and aborts the release GUI (`panic = "abort"`). Keep the small upstream fork
+# local until the fix is released by the crate.
+[patch.crates-io]
+vt100-ctt = { path = "vendor/vt100-ctt" }
 
 [workspace.package]
 edition = "2021"
