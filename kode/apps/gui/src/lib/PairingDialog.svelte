@@ -37,6 +37,7 @@
   let pairing = $state<CloudPairingPayload | null>(null)
   let view = $state<View>('pair')
   let deployMode = $state<DeployMode>('ssh')
+  let redeployBackendId = $state('')
   let selectedBackendId = $state('')
   let busy = $state<BusyKind>('')
   let error = $state('')
@@ -63,6 +64,7 @@
   let expiresIn = $derived(
     pairing ? Math.max(0, Math.ceil((pairing.expires_at - now) / 1000)) : 0,
   )
+  let redeployingCurrent = $derived(Boolean(redeployBackendId))
   let activeBackend = $derived<CloudBackendSummary | null>(
     status?.backends.find((backend) => backend.id === status?.active_backend_id) ?? null,
   )
@@ -223,6 +225,7 @@
       })
       await refreshStatus()
       selectedBackendId = result.backend.id
+      redeployBackendId = ''
       view = 'pair'
       busy = ''
       await createPairing(result.backend.server_url)
@@ -259,6 +262,38 @@
 
   function showDeploy() {
     if (busy) return
+    redeployBackendId = ''
+    deployMode = 'ssh'
+    backendName = ''
+    sshHost = ''
+    sshPort = '22'
+    remotePort = '8787'
+    publicUrl = ''
+    resetDeploySteps()
+    view = 'deploy'
+    pairing = null
+    error = ''
+    queueMicrotask(() => sshHostInput?.focus())
+  }
+
+  function showRedeploy(backend: CloudBackendSummary) {
+    if (
+      busy ||
+      !backend.managed ||
+      !backend.ssh_host ||
+      !backend.ssh_port ||
+      !backend.remote_port
+    ) {
+      return
+    }
+    redeployBackendId = backend.id
+    deployMode = 'ssh'
+    backendName = backend.name
+    sshHost = backend.ssh_host
+    sshPort = String(backend.ssh_port)
+    remotePort = String(backend.remote_port)
+    publicUrl = backend.server_url
+    resetDeploySteps()
     view = 'deploy'
     pairing = null
     error = ''
@@ -267,6 +302,7 @@
 
   function showPair() {
     if (busy || !activeBackend) return
+    redeployBackendId = ''
     view = 'pair'
     error = ''
     if (!pairing) void createPairing(activeBackend.server_url)
@@ -329,7 +365,11 @@
 
     <div class="body">
       <p id="cloud-relay-description" class="intro">
-        {view === 'pair' ? tr('pairing.readyDescription') : tr('pairing.deploy.description')}
+        {view === 'pair'
+          ? tr('pairing.readyDescription')
+          : redeployingCurrent
+            ? tr('pairing.deploy.redeployDescription')
+            : tr('pairing.deploy.description')}
       </p>
 
       {#if error}
@@ -402,10 +442,23 @@
               </div>
             {/if}
 
-            <button type="button" class="text-button" onclick={showDeploy} disabled={Boolean(busy)}>
-              <Icon name="plus" size={13} />
-              {tr('pairing.deployAnother')}
-            </button>
+            <div class="backend-actions">
+              {#if activeBackend.managed && activeBackend.ssh_host && activeBackend.ssh_port && activeBackend.remote_port}
+                <button
+                  type="button"
+                  class="text-button"
+                  onclick={() => showRedeploy(activeBackend)}
+                  disabled={Boolean(busy)}
+                >
+                  <Icon name="refresh-cw" size={13} />
+                  {tr('pairing.redeployCurrent')}
+                </button>
+              {/if}
+              <button type="button" class="text-button" onclick={showDeploy} disabled={Boolean(busy)}>
+                <Icon name="plus" size={13} />
+                {tr('pairing.deployAnother')}
+              </button>
+            </div>
           </section>
 
           <section class="qr-column" aria-label={tr('pairing.scanTitle')}>
@@ -583,8 +636,10 @@
                     <span class="spinner" aria-hidden="true"></span>
                     {tr('pairing.deploy.deploying')}
                   {:else}
-                    <Icon name="server" size={14} />
-                    {tr('pairing.deploy.action')}
+                    <Icon name={redeployingCurrent ? 'refresh-cw' : 'server'} size={14} />
+                    {redeployingCurrent
+                      ? tr('pairing.deploy.redeployAction')
+                      : tr('pairing.deploy.action')}
                   {/if}
                 </button>
               </div>
@@ -812,6 +867,7 @@
   .sync-state span { color: var(--fg-secondary); font-size: var(--fs-xs); line-height: 1.4; }
   .text-button { display: inline-flex; width: fit-content; align-items: center; gap: 6px; border: 0; background: transparent; padding: 0; color: var(--fg-secondary); font: var(--fs-sm) var(--font-ui); cursor: pointer; }
   .text-button:hover:not(:disabled) { color: var(--acc); }
+  .backend-actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
   .qr-column { display: flex; flex-direction: column; gap: var(--sp-2); }
   .qr-frame { display: grid; width: 100%; aspect-ratio: 1; place-items: center; border-radius: var(--rad-md); background: #fff; padding: var(--sp-2); }
   .qr-frame.loading { background: color-mix(in srgb, #fff 88%, var(--fg-tertiary)); }

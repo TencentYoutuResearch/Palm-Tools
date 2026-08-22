@@ -868,6 +868,14 @@ pub async fn set_title(
     let backend_key = s.backend_key.clone();
     let cwd = s.cwd.clone();
     drop(g);
+    // A desktop rename is authoritative session metadata. Emit it immediately
+    // so cloud/mobile consumers do not have to wait for a reconnect snapshot
+    // (and so backends that do not persist titles to transcripts still sync).
+    state.ctx.bus.emit(EventEnvelope::new(
+        id,
+        "meta",
+        serde_json::json!({ "title": title.clone() }),
+    ));
     if let Some(sid) = session_id {
         let mut persisted = crate::persistence::load();
         persisted.session_titles.insert(sid.clone(), title.clone());

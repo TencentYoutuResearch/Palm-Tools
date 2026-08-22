@@ -764,6 +764,7 @@ fn sync_session_snapshot(
     sessions: Vec<AgentSession>,
 ) -> Result<(), ApiError> {
     let mut created = Vec::new();
+    let mut updated = Vec::new();
     {
         let mut db = state.inner.db.lock();
         let tx = db.transaction()?;
@@ -781,6 +782,12 @@ fn sync_session_snapshot(
                 upsert_session_tx(&tx, device_id, boot_id, session.local_id, session.dto)?;
             if was_created {
                 created.push((cloud_id, dto));
+            } else {
+                // Hello snapshots are authoritative. Existing mobile clients
+                // may still hold a stale/empty title from before reconnect, so
+                // publish the complete refreshed DTO instead of silently
+                // updating SQLite only.
+                updated.push((cloud_id, dto));
             }
         }
         tx.commit()?;
@@ -789,6 +796,12 @@ fn sync_session_snapshot(
         state.publish(
             device_id,
             CloudEnvelope::new(cloud_id, "session.created", dto),
+        );
+    }
+    for (cloud_id, dto) in updated {
+        state.publish(
+            device_id,
+            CloudEnvelope::new(cloud_id, "session.updated", dto),
         );
     }
     Ok(())
@@ -1585,6 +1598,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "exited");
+    }
+
+    #[test]
+    fn existing_snapshot_publishes_complete_session_update() {
+        let (_dir, state) = state();
+        state
+            .inner
+            .db
+            .lock()
+            .execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES('d','i','desktop','x',1,1)",
+                [],
+            )
+            .unwrap();
+        let mut mobile = state.mobile_bus("d").subscribe();
+
+        sync_session_snapshot(
+            &state,
+            "d",
+            "boot",
+            vec![AgentSession {
+                local_id: 7,
+                dto: json!({
+                    "id": 7,
+                    "backend_key": "codex",
+                    "title": "",
+                    "model": "auto",
+                    "status": "idle",
+                    "tokens": {}
+                }),
+            }],
+        )
+        .unwrap();
+        assert_eq!(mobile.try_recv().unwrap().kind, "session.created");
+
+        sync_session_snapshot(
+            &state,
+            "d",
+            "boot",
+            vec![AgentSession {
+                local_id: 7,
+                dto: json!({
+                    "id": 7,
+                    "backend_key": "codex",
+                    "title": "修复 mobile title",
+                    "model": "gpt-test",
+                    "status": "busy",
+                    "tokens": {"total": 42}
+                }),
+            }],
+        )
+        .unwrap();
+
+        let update = mobile.try_recv().unwrap();
+        assert_eq!(update.kind, "session.updated");
+        assert_eq!(update.payload["title"], "修复 mobile title");
+        assert_eq!(update.payload["id"], update.session_id);
+        assert_eq!(update.payload["tokens"]["total"], 42);
     }
 
     #[test]

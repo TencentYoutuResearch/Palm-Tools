@@ -91,6 +91,14 @@ recent 512 command receipts. It records
 `accepted` before PTY execution and never replays a command whose previous
 execution outcome is uncertain.
 
+An authoritative hello snapshot publishes `session.created` for a new cloud
+row and `session.updated` with the complete DTO for an existing row. Mobile
+must replace its cached DTO on either event. A new/reconnected mobile socket
+also refreshes `GET /api/v1/sessions` after `connection.hello`, because mobile
+operating systems may suspend the incremental WebSocket while backgrounded.
+Desktop title changes additionally emit sparse `meta { title }` events so a
+live mobile view updates without waiting for either reconnect.
+
 Snapshots contain active sessions only. Exited sessions remain server-side for
 audit/history retention but are excluded from the mobile list, and a live
 `session.exited` event removes the row immediately. Raw `pty_bytes` frames stay
