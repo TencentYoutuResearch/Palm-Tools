@@ -1,8 +1,10 @@
-//! 解析 codebuddy / claude 的 session JSONL 文件,提取 model / title / tokens。
+//! 解析 codebuddy / claude / codex jsonl,以及 cursor-agent 的 chat meta。
 //!
-//! 两个后端都把 session 写到 `~/.{codebuddy|claude}/projects/<slug>/<sid>.jsonl`,
-//! 但格式 / slug 算法 / 字段命名都不同。我们用 [`Backend`] 枚举做分流,
-//! 共用 tail 主循环。
+//! 状态栏的 model / title / tokens 不靠解析 PTY 输出:
+//! - codebuddy:`~/.codebuddy/projects/<slug>/<sid>.jsonl`
+//! - claude:`~/.claude/projects/<slug>/<sid>.jsonl`
+//! - codex:`~/.codex/sessions/**/rollout-*.jsonl`
+//! - cursor:`~/.cursor/chats/<hash>/<chatId>/meta.json`(title);token 走 hook
 //!
 //! 设计:
 //! - 启动一个 tokio task 持续 tail 该文件
@@ -33,6 +35,7 @@ pub enum Backend {
     Codebuddy,
     Claude,
     Codex,
+    Cursor,
 }
 
 impl Backend {
@@ -42,6 +45,7 @@ impl Backend {
             "codebuddy" => Some(Backend::Codebuddy),
             "claude" | "claude-internal" => Some(Backend::Claude),
             "codex" => Some(Backend::Codex),
+            "cursor" => Some(Backend::Cursor),
             _ => None,
         }
     }
@@ -76,7 +80,7 @@ impl Backend {
                         .join(format!("{session_id}.jsonl")),
                 )
             }
-            Backend::Codex => None,
+            Backend::Codex | Backend::Cursor => None,
         }
     }
 }
@@ -95,6 +99,9 @@ pub fn resolve_session_path(backend: Backend, cwd: &Path, session_id: &str) -> O
     if backend == Backend::Codex {
         return find_codex_session_by_id(session_id);
     }
+    if backend == Backend::Cursor {
+        return crate::session::cursor_tail::find_cursor_session_by_id(session_id);
+    }
     // 先用 cwd 推算
     if let Some(p) = backend.session_path(cwd, session_id) {
         if p.exists() {
@@ -112,7 +119,7 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
     let projects_root = match backend {
         Backend::Codebuddy => home.join(".codebuddy").join("projects"),
         Backend::Claude => home.join(".claude").join("projects"),
-        Backend::Codex => return None,
+        Backend::Codex | Backend::Cursor => return None,
     };
     let filename = format!("{session_id}.jsonl");
     let entries = fs::read_dir(&projects_root).ok()?;
@@ -522,6 +529,7 @@ async fn run(
             Backend::Codebuddy => parse_codebuddy_line(line, &mut state),
             Backend::Claude => parse_claude_line(line, &mut state),
             Backend::Codex => parse_codex_line(line, &mut state),
+            Backend::Cursor => LineUpdate::default(),
         };
 
         // 自驱动 retarget:源文件里读到 `change session <target>`(in-TUI `/resume`)。
@@ -1262,8 +1270,49 @@ fn find_codex_session_candidate_under(
 
 fn find_codex_session_by_id_under(root: &Path, session_id: &str) -> Option<PathBuf> {
     let mut found = None;
+    // The rollout filename (and session_meta.id) identifies the actual Codex
+    // conversation. A derived/sub-agent rollout may carry the parent's UUID in
+    // session_meta.session_id, so metadata fallback must never beat an exact
+    // filename match elsewhere in the tree.
+    collect_codex_session_by_filename(root, session_id, &mut found);
+    if found.is_some() {
+        return found;
+    }
     collect_codex_session_by_id(root, session_id, &mut found);
     found
+}
+
+fn collect_codex_session_by_filename(dir: &Path, session_id: &str, found: &mut Option<PathBuf>) {
+    if found.is_some() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            collect_codex_session_by_filename(&path, session_id, found);
+            if found.is_some() {
+                return;
+            }
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let matches = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|stem| stem.ends_with(session_id));
+        if matches {
+            *found = Some(path);
+            return;
+        }
+    }
 }
 
 fn collect_codex_session_by_id(dir: &Path, session_id: &str, found: &mut Option<PathBuf>) {
@@ -1288,12 +1337,7 @@ fn collect_codex_session_by_id(dir: &Path, session_id: &str, found: &mut Option<
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        let file_name_matches = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.contains(session_id))
-            .unwrap_or(false);
-        if file_name_matches || codex_session_meta_id(&path).as_deref() == Some(session_id) {
+        if codex_session_meta_id(&path).as_deref() == Some(session_id) {
             *found = Some(path);
             return;
         }
@@ -1313,10 +1357,32 @@ pub fn codex_session_meta_id(path: &Path) -> Option<String> {
         }
         return entry
             .payload
-            .get("session_id")
-            .or_else(|| entry.payload.get("id"))
+            .get("id")
+            .or_else(|| entry.payload.get("session_id"))
             .and_then(|v| v.as_str())
             .map(String::from);
+    }
+    None
+}
+
+pub fn codex_session_cwd(path: &Path) -> Option<(String, PathBuf)> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return None;
+    };
+    for line in text.lines().take(8) {
+        let Ok(entry) = serde_json::from_str::<CodexEntry>(line) else {
+            continue;
+        };
+        if entry.r#type.as_deref() != Some("session_meta") {
+            continue;
+        }
+        let sid = entry
+            .payload
+            .get("id")
+            .or_else(|| entry.payload.get("session_id"))
+            .and_then(|v| v.as_str())?;
+        let cwd = entry.payload.get("cwd").and_then(|v| v.as_str())?;
+        return Some((sid.to_string(), PathBuf::from(cwd)));
     }
     None
 }
@@ -1393,22 +1459,22 @@ mod tests {
 
     #[test]
     fn codebuddy_slug_strips_leading_slash_and_replaces_seps() {
-        let p = PathBuf::from("/Users/marxwang/Projects/youtu/app/kode");
+        let p = PathBuf::from("/Users/tester/Projects/example/kode");
         let path = Backend::Codebuddy.session_path(&p, "abc").unwrap();
         let s = path.to_string_lossy();
         assert!(
-            s.contains("/.codebuddy/projects/Users-marxwang-Projects-youtu-app-kode/abc.jsonl"),
+            s.contains("/.codebuddy/projects/Users-tester-Projects-example-kode/abc.jsonl"),
             "got {s}"
         );
     }
 
     #[test]
     fn claude_slug_has_leading_dash() {
-        let p = PathBuf::from("/Users/marxwang/Projects/youtu/app/kode");
+        let p = PathBuf::from("/Users/tester/Projects/example/kode");
         let path = Backend::Claude.session_path(&p, "abc").unwrap();
         let s = path.to_string_lossy();
         assert!(
-            s.contains("/.claude/projects/-Users-marxwang-Projects-youtu-app-kode/abc.jsonl"),
+            s.contains("/.claude/projects/-Users-tester-Projects-example-kode/abc.jsonl"),
             "got {s}"
         );
     }
@@ -1425,12 +1491,19 @@ mod tests {
             Some(Backend::Claude)
         );
         assert_eq!(Backend::from_backend_key("codex"), Some(Backend::Codex));
+        assert_eq!(Backend::from_backend_key("cursor"), Some(Backend::Cursor));
         assert_eq!(Backend::from_backend_key("foo"), None);
     }
 
     #[test]
+    fn cursor_session_path_is_discovered_not_session_id_based() {
+        let p = PathBuf::from("/Users/tester/Projects/example/kode");
+        assert!(Backend::Cursor.session_path(&p, "abc").is_none());
+    }
+
+    #[test]
     fn codex_session_path_is_discovered_not_session_id_based() {
-        let p = PathBuf::from("/Users/marxwang/Projects/youtu/app/kode");
+        let p = PathBuf::from("/Users/tester/Projects/example/kode");
         assert!(Backend::Codex.session_path(&p, "abc").is_none());
     }
 
@@ -2501,6 +2574,45 @@ mod tests {
         let found = find_codex_session_by_id_under(&root, sid);
         assert_eq!(found.as_deref(), Some(expected.as_path()));
         assert_eq!(codex_session_meta_id(&expected).as_deref(), Some(sid));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_session_lookup_prefers_rollout_id_over_parent_session_id() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kode-codex-parent-id-test-{stamp}"));
+        let earlier = root.join("2026/08/19/a");
+        let later = root.join("2026/08/19/z");
+        std::fs::create_dir_all(&earlier).unwrap();
+        std::fs::create_dir_all(&later).unwrap();
+        let target = "01a019a6-c89a-7690-b2ce-f61c87d3f1e8";
+        let derived = "01a019a6-ca06-7183-9f51-0a407b654077";
+        let misleading = earlier.join(format!("rollout-{derived}.jsonl"));
+        std::fs::write(
+            &misleading,
+            format!(r#"{{"type":"session_meta","payload":{{"id":"{derived}","session_id":"{target}","cwd":"/tmp/maestro"}}}}"#),
+        )
+        .unwrap();
+        let expected = later.join(format!("rollout-{target}.jsonl"));
+        std::fs::write(
+            &expected,
+            format!(r#"{{"type":"session_meta","payload":{{"id":"{target}","session_id":"{target}","cwd":"/tmp/maestro"}}}}"#),
+        )
+        .unwrap();
+
+        assert_eq!(codex_session_meta_id(&misleading).as_deref(), Some(derived));
+        assert_eq!(
+            codex_session_cwd(&misleading).map(|(id, _)| id),
+            Some(derived.to_string())
+        );
+        assert_eq!(
+            find_codex_session_by_id_under(&root, target).as_deref(),
+            Some(expected.as_path())
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

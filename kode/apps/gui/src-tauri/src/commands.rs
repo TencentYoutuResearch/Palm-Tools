@@ -573,6 +573,8 @@ pub async fn spawn_session(
     model: Option<String>,
     // Phase 11.2:可选 endpoint;前端不传 = Local(向后兼容,改造前行为)
     endpoint_id: Option<EndpointId>,
+    // Kode xterm 当前主题。`light` / `dark`;缺省时回退到持久化 GUI 主题。
+    term_theme: Option<String>,
     memory_handle: State<'_, Arc<MemoryHandle>>,
     state: State<'_, AppState>,
 ) -> Result<SpawnedSession, String> {
@@ -609,6 +611,9 @@ pub async fn spawn_session(
         permission_mode,
         model,
         memory_context,
+        terminal_dark: Some(crate::term_theme::resolve_terminal_dark(
+            term_theme.as_deref(),
+        )),
     };
 
     let spawned = transport.spawn(spec).await.map_err(String::from)?;
@@ -878,15 +883,15 @@ fn persist_renamed_session_title_to_jsonl(
     session_id: &str,
     title: &str,
 ) -> Result<(), String> {
-    let Some(backend) = kode_core::session::jsonl_tail::Backend::from_backend_key(backend_key)
-    else {
+    let Some(profile) = kode_core::session::backend::profile_for_key(backend_key) else {
         return Ok(());
     };
-    if backend == kode_core::session::jsonl_tail::Backend::Codex {
+    if !profile.persist_title_to_transcript() {
         return Ok(());
     }
-    let Some(path) = kode_core::session::jsonl_tail::resolve_session_path(backend, cwd, session_id)
-        .or_else(|| backend.session_path(cwd, session_id))
+    let Some(path) = profile
+        .find_session_path(cwd, session_id)
+        .or_else(|| profile.session_path(cwd, session_id))
     else {
         return Ok(());
     };
@@ -1441,56 +1446,21 @@ pub fn list_sessions_for_cwd(
         return Err("cwd must be an absolute path".into());
     }
 
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
+    let Some(profile) = kode_core::session::backend::profile_for_key(&backend_key) else {
+        return Ok(Vec::new());
+    };
     let pinned_titles = crate::persistence::load().session_titles;
-    let mut sessions: Vec<SessionSummary> = Vec::new();
-
-    if backend_key == "codex" {
-        let root = home.join(".codex").join("sessions");
-        collect_codex_session_summaries(&root, cwd_path, &pinned_titles, &mut sessions);
-    } else {
-        let slug = cwd.trim_start_matches('/').replace('/', "-");
-        let projects_dir = match backend_key.as_str() {
-            "codebuddy" => home.join(".codebuddy").join("projects").join(&slug),
-            "claude" | "claude-internal" => {
-                let claude_slug = format!("-{}", slug);
-                home.join(".claude").join("projects").join(&claude_slug)
-            }
-            _ => return Ok(Vec::new()),
-        };
-
-        if !projects_dir.is_dir() {
-            return Ok(Vec::new());
-        }
-
-        let entries =
-            std::fs::read_dir(&projects_dir).map_err(|e| format!("read_dir failed: {e}"))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("entry error: {e}"))?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(session_id) = path.file_stem().and_then(|s| s.to_str()).map(String::from)
-            else {
-                continue;
-            };
-            if session_id.is_empty() {
-                continue;
-            }
-            let last_modified_secs = modified_secs(&path);
-            let (title, model, total_tokens) = extract_session_meta(&path);
-            let title = session_title_with_override(&session_id, title, &pinned_titles);
-
-            sessions.push(SessionSummary {
-                session_id,
-                title,
-                model,
-                total_tokens,
-                last_modified_secs,
-            });
-        }
-    }
+    let mut sessions: Vec<SessionSummary> = profile
+        .list_sessions(cwd_path)
+        .into_iter()
+        .map(|s| SessionSummary {
+            session_id: s.session_id.clone(),
+            title: session_title_with_override(&s.session_id, s.title, &pinned_titles),
+            model: s.model,
+            total_tokens: s.total_tokens,
+            last_modified_secs: s.last_modified_secs,
+        })
+        .collect();
 
     dedupe_session_summaries(&mut sessions);
 
@@ -1508,54 +1478,6 @@ fn dedupe_session_summaries(sessions: &mut Vec<SessionSummary>) {
     sessions.retain(|session| seen.insert(session.session_id.clone()));
 }
 
-fn collect_codex_session_summaries(
-    dir: &Path,
-    cwd: &Path,
-    pinned_titles: &HashMap<String, String>,
-    sessions: &mut Vec<SessionSummary>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if meta.is_dir() {
-            collect_codex_session_summaries(&path, cwd, pinned_titles, sessions);
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some((session_id, session_cwd)) = codex_session_meta(&path) else {
-            continue;
-        };
-        if session_cwd != cwd {
-            continue;
-        }
-        let (title, model, total_tokens) = extract_session_meta(&path);
-        let title = session_title_with_override(&session_id, title, pinned_titles);
-        sessions.push(SessionSummary {
-            session_id,
-            title,
-            model,
-            total_tokens,
-            last_modified_secs: modified_secs(&path),
-        });
-    }
-}
-
-fn modified_secs(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn session_title_with_override(
     session_id: &str,
     jsonl_title: Option<String>,
@@ -1564,191 +1486,12 @@ fn session_title_with_override(
     pinned_titles.get(session_id).cloned().or(jsonl_title)
 }
 
-fn codex_session_meta(path: &Path) -> Option<(String, PathBuf)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines().take(8) {
-        let v: serde_json::Value = serde_json::from_str(line).ok()?;
-        if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
-            continue;
-        }
-        let payload = v.get("payload")?;
-        let sid = payload
-            .get("session_id")
-            .or_else(|| payload.get("id"))
-            .and_then(|v| v.as_str())?;
-        let cwd = payload.get("cwd").and_then(|v| v.as_str())?;
-        return Some((sid.to_string(), PathBuf::from(cwd)));
-    }
-    None
-}
-
-/// 从 jsonl 文件读取 title / 最新 model,并提取当前 tokens。
+/// 从 jsonl / meta.json 读取 title / 最新 model / 当前 tokens。
 pub(crate) fn extract_session_meta(
     path: &std::path::Path,
 ) -> (Option<String>, Option<String>, Option<u64>) {
-    use std::io::{BufRead, BufReader};
-
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return (None, None, None),
-    };
-
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
-
-    if lines.is_empty() {
-        return (None, None, None);
-    }
-
-    let mut title: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut total_tokens = 0_u64;
-    let mut saw_tokens = false;
-
-    // 扫完整文件找最新 aiTitle 或第一条用户消息；title 往往在会话开始后若干行才生成。
-    for line in &lines {
-        if let Some(t) = extract_title_from_line(line) {
-            title = Some(t);
-        } else if title.is_none() {
-            title = extract_user_title_from_line(line).or_else(|| extract_codex_user_title(line));
-        }
-    }
-
-    // model 取最新 providerData 或 Codex turn_context。
-    for line in lines.iter().rev() {
-        if model.is_none() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(pd) = v.get("providerData") {
-                    if model.is_none() {
-                        model = pd
-                            .get("requestModelId")
-                            .or_else(|| pd.get("model"))
-                            .and_then(|v| v.as_str())
-                            .map(|m| kode_core::model_alias::sanitize_model_name(&m));
-                    }
-                } else if v.get("type").and_then(|t| t.as_str()) == Some("turn_context") {
-                    model = v
-                        .get("payload")
-                        .and_then(|p| p.get("model"))
-                        .and_then(|v| v.as_str())
-                        .map(kode_core::model_alias::sanitize_model_name);
-                }
-            }
-        }
-        if model.is_some() {
-            break;
-        }
-    }
-
-    for line in &lines {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(t) = v
-                .get("providerData")
-                .and_then(|pd| pd.get("usage"))
-                .and_then(|u| u.get("totalTokens"))
-                .and_then(|v| v.as_u64())
-            {
-                total_tokens = t;
-                saw_tokens = true;
-            } else if let Some(t) = v
-                .get("payload")
-                .filter(|_| v.get("type").and_then(|t| t.as_str()) == Some("event_msg"))
-                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("token_count"))
-                .and_then(|p| p.get("info"))
-                .and_then(|i| {
-                    i.get("last_token_usage")
-                        .or_else(|| i.get("total_token_usage"))
-                })
-                .and_then(|u| u.get("total_tokens"))
-                .and_then(|v| v.as_u64())
-            {
-                total_tokens = t;
-                saw_tokens = true;
-            }
-        }
-    }
-
-    (title, model, saw_tokens.then_some(total_tokens))
-}
-
-fn extract_codex_user_title(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let payload = v.get("payload")?;
-    if v.get("type").and_then(|t| t.as_str()) != Some("response_item")
-        || payload.get("type").and_then(|t| t.as_str()) != Some("message")
-        || payload.get("role").and_then(|r| r.as_str()) != Some("user")
-    {
-        return None;
-    }
-    let text = json_content_to_text(payload.get("content")?)?;
-    let trimmed = text.trim();
-    if trimmed.is_empty()
-        || trimmed.starts_with('/')
-        || trimmed.starts_with("C-b")
-        || is_codex_title_noise(trimmed)
-    {
-        return None;
-    }
-    Some(trimmed.chars().take(60).collect())
-}
-
-fn is_codex_title_noise(s: &str) -> bool {
-    s.starts_with("# AGENTS.md instructions")
-        || s.starts_with("<environment_context>")
-        || s.starts_with("<kode-memory>")
-        || s.starts_with("<permissions instructions>")
-        || s.starts_with("<collaboration_mode>")
-        || s.starts_with("<skills_instructions>")
-}
-
-fn extract_title_from_line(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    if v.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
-        v.get("aiTitle").and_then(|t| t.as_str()).map(String::from)
-    } else {
-        None
-    }
-}
-
-fn extract_user_title_from_line(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let role_is_user = v.get("role").and_then(|r| r.as_str()) == Some("user")
-        || v.get("type").and_then(|t| t.as_str()) == Some("user");
-    if !role_is_user {
-        return None;
-    }
-    let text = json_content_to_text(
-        v.get("content")
-            .or_else(|| v.get("message").and_then(|m| m.get("content")))?,
-    )?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with("C-b") {
-        return None;
-    }
-    Some(trimmed.chars().take(60).collect())
-}
-
-fn json_content_to_text(v: &serde_json::Value) -> Option<String> {
-    if let Some(s) = v.as_str() {
-        return Some(s.to_string());
-    }
-    if let Some(arr) = v.as_array() {
-        let text = arr
-            .iter()
-            .filter_map(|item| {
-                item.get("text")
-                    .or_else(|| item.get("input_text"))
-                    .or_else(|| item.get("output_text"))
-                    .or_else(|| item.get("content"))
-                    .and_then(|x| x.as_str())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !text.trim().is_empty() {
-            return Some(text);
-        }
-    }
-    None
+    let snap = kode_core::session::backend::transcript_snapshot(path);
+    (snap.title, snap.model, snap.total_tokens)
 }
 
 /// 把当前 paths override 同步到磁盘上的 state.json(merge 进现有 PersistedState)。

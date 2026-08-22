@@ -247,13 +247,10 @@
     window.addEventListener('kode:endpoints-changed', endpointRefreshHandler)
   })
 
-  function pickBackend(b: BackendInfo, ep: EndpointId, initialCwd?: string | null) {
+  async function pickBackend(b: BackendInfo, ep: EndpointId, initialCwd?: string | null) {
     selected = b
     selectedEndpoint = ep
     bypass = false
-    // Local 用全局 default cwd 预填;Remote 只使用远端协议返回的 default_cwd。
-    // 不能把本机 session_cwd 塞给 Remote:两台机器路径空间通常不一致。
-    cwd = ep.kind === 'local' ? defaultCwd : (initialCwd?.trim() ?? '')
     modelOptions = modelsFor(b.key)
     modelLoading = false
     modelNotice = ''
@@ -263,6 +260,22 @@
     customModel = ''
     phase = 'configure'
     void probeModels(b, ep)
+
+    // 先同步给一个兜底值(Local 全局默认 cwd / Remote 协议返回的 default_cwd),
+    // 避免输入框在异步查询期间闪一下上个 backend 遗留的 cwd。
+    cwd = ep.kind === 'local' ? defaultCwd : (initialCwd?.trim() ?? '')
+
+    // cwd 预填优先级:该 endpoint bucket 最近用过的目录 > 上面的兜底值。
+    // 历史按 bucket 隔离(本地 vs 各远端各自一份),跟 $effect 拉取下拉候选
+    // 用的是同一份数据,这里只是取第一条(最近一次)直接预填,省得每次新建
+    // tab 都要手动点开历史下拉重新选。查询失败静默回退,不阻断流程。
+    const bucket = ep.kind === 'remote' ? ep.id : 'local'
+    try {
+      const recent = (await cwdHistoryIpc.get(bucket))[0]
+      if (recent) cwd = recent
+    } catch (e) {
+      console.warn('cwd_history_get failed:', e)
+    }
   }
 
   async function submitOnce(opts: {

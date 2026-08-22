@@ -25,6 +25,11 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
+/// Codex reads this during MCP initialization. Keep the local-only trust boundary and
+/// the read/write split self-contained in the first 512 characters: approval reviewers
+/// may otherwise infer that "shared memory" means a remote data sink.
+const SERVER_INSTRUCTIONS: &str = "Kode Memory is a local-only STDIO MCP server. It reads and writes only files under the local KODE_MEMORY_ROOT directory, makes no network requests, and never sends data to third parties. memory_search, memory_read, memory_list_recent, memory_list_pending, and memory_budget_status are read-only and idempotent. memory_propose only creates a local pending proposal; it does not publish a searchable fact until user review. memory_review and memory_deprecate are user-only local write operations. No tool has open-world access.";
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let root = match std::env::var("KODE_MEMORY_ROOT") {
@@ -96,7 +101,8 @@ async fn handle(
         "initialize" => Ok(Some(json!({
             "protocolVersion": "2024-11-05",
             "serverInfo": { "name": "kode-memory", "version": "0.1.0" },
-            "capabilities": { "tools": {} }
+            "capabilities": { "tools": {} },
+            "instructions": SERVER_INSTRUCTIONS
         }))),
         "notifications/initialized" | "notifications/cancelled" => Ok(None),
         "tools/list" => Ok(Some(json!({ "tools": tool_specs() }))),
@@ -130,7 +136,8 @@ fn tool_specs() -> Value {
                     "top_k": {"type": "integer", "default": 10}
                 },
                 "required": ["query"]
-            }
+            },
+            "annotations": read_only_annotations("Search local memory")
         },
         {
             "name": "memory_read",
@@ -139,7 +146,8 @@ fn tool_specs() -> Value {
                 "type": "object",
                 "properties": { "id": {"type": "string"} },
                 "required": ["id"]
-            }
+            },
+            "annotations": read_only_annotations("Read a local memory fact")
         },
         {
             "name": "memory_propose",
@@ -171,7 +179,8 @@ fn tool_specs() -> Value {
                     "title": {"type": "string", "description": "Short human-readable title (max 80 chars, kebab-case auto-derived for Obsidian filename). If omitted, the store derives a fallback title from tags/body; only all-non-ASCII/empty inputs fall back to bare ULID."}
                 },
                 "required": ["author", "scope", "body"]
-            }
+            },
+            "annotations": local_write_annotations("Propose a local memory fact", false)
         },
         {
             "name": "memory_list_recent",
@@ -182,12 +191,14 @@ fn tool_specs() -> Value {
                     "scope": {"type": "string"},
                     "since_hours": {"type": "integer", "default": 24}
                 }
-            }
+            },
+            "annotations": read_only_annotations("List recent local memory facts")
         },
         {
             "name": "memory_list_pending",
             "description": "(user-only) List proposals awaiting review.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": read_only_annotations("List local pending proposals")
         },
         {
             "name": "memory_review",
@@ -207,7 +218,8 @@ fn tool_specs() -> Value {
                     "reason": {"type": "string"}
                 },
                 "required": ["id", "verdict"]
-            }
+            },
+            "annotations": local_write_annotations("Review a local memory proposal", true)
         },
         {
             "name": "memory_deprecate",
@@ -219,7 +231,8 @@ fn tool_specs() -> Value {
                     "reason": {"type": "string"}
                 },
                 "required": ["id", "reason"]
-            }
+            },
+            "annotations": local_write_annotations("Deprecate a local memory fact", true)
         },
         {
             "name": "memory_budget_status",
@@ -228,9 +241,30 @@ fn tool_specs() -> Value {
                 "type": "object",
                 "properties": { "author": {"type": "string"} },
                 "required": ["author"]
-            }
+            },
+            "annotations": read_only_annotations("Read local memory budget status")
         }
     ])
+}
+
+fn read_only_annotations(title: &str) -> Value {
+    json!({
+        "title": title,
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+    })
+}
+
+fn local_write_annotations(title: &str, destructive: bool) -> Value {
+    json!({
+        "title": title,
+        "readOnlyHint": false,
+        "destructiveHint": destructive,
+        "idempotentHint": false,
+        "openWorldHint": false
+    })
 }
 
 async fn call_tool(
@@ -523,4 +557,54 @@ async fn handle_review(
         "energy_after": energy_after
     })
     .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_instructions_lead_with_local_only_boundary() {
+        let prefix: String = SERVER_INSTRUCTIONS.chars().take(512).collect();
+        assert!(prefix.contains("local-only STDIO MCP server"));
+        assert!(prefix.contains("KODE_MEMORY_ROOT"));
+        assert!(prefix.contains("makes no network requests"));
+        assert!(prefix.contains("never sends data to third parties"));
+        assert!(prefix.contains("read-only and idempotent"));
+    }
+
+    #[test]
+    fn tool_annotations_describe_read_write_and_network_behavior() {
+        let specs = tool_specs();
+        let tools = specs.as_array().expect("tool_specs must return an array");
+
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            let annotations = &tool["annotations"];
+            assert_eq!(annotations["openWorldHint"], false, "{name}");
+            assert!(annotations["readOnlyHint"].is_boolean(), "{name}");
+            assert!(annotations["destructiveHint"].is_boolean(), "{name}");
+            assert!(annotations["idempotentHint"].is_boolean(), "{name}");
+        }
+
+        let search = tools
+            .iter()
+            .find(|tool| tool["name"] == "memory_search")
+            .unwrap();
+        assert_eq!(search["annotations"]["readOnlyHint"], true);
+        assert_eq!(search["annotations"]["idempotentHint"], true);
+
+        let propose = tools
+            .iter()
+            .find(|tool| tool["name"] == "memory_propose")
+            .unwrap();
+        assert_eq!(propose["annotations"]["readOnlyHint"], false);
+        assert_eq!(propose["annotations"]["destructiveHint"], false);
+
+        let deprecate = tools
+            .iter()
+            .find(|tool| tool["name"] == "memory_deprecate")
+            .unwrap();
+        assert_eq!(deprecate["annotations"]["destructiveHint"], true);
+    }
 }

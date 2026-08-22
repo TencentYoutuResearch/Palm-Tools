@@ -166,6 +166,11 @@ enum Cmd {
     /// CodeBuddy/Claude command hook bridge. Rewrites session_id → KODE_SESSION_ID
     /// and relays to KODE_HOOK_SOCK. Called by ~/.codebuddy|.claude/settings.json hooks.
     CodebuddyHook,
+    /// Cursor Agent command hook. Called by ~/.cursor/hooks.json.
+    CursorHook {
+        /// sessionStart / afterAgentResponse / stop
+        event: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -251,6 +256,7 @@ fn main() -> Result<()> {
         } => cmd_sync(&root, init, remote, branch, no_push, enable, disable),
         Cmd::CodexHook => kode_memory::codex_hook::run(),
         Cmd::CodebuddyHook => kode_memory::codebuddy_hook::run(),
+        Cmd::CursorHook { event } => kode_memory::cursor_hook::run(event.as_deref()),
     }
 }
 

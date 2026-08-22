@@ -19,11 +19,12 @@
 //! |----------------|------|---------------|------|
 //! | `Notification` | `notification_type: "permission_prompt"` | `ask_user_question_hint` | 即时点亮 attention |
 //! | `PermissionRequest` | — | `ask_user_question_hint` | Codex 权限请求点亮 attention |
-//! | `UserPromptSubmit` | — | `session.attention_cleared` | 用户回车后即时清除 attention |
-//! | `PreToolUse` | — | `session.mode_changed` | 实时获取 permission_mode |
+//! | `UserPromptSubmit` | — | `session.attention_cleared` + `TurnHold(true)` | 用户回车后即时清除 attention,并锁 busy |
+//! | `PreToolUse` | `permission_mode` | `session.mode_changed` + `TurnHold(true)` | 工具开始,保持 running |
 //! | `ConfigChange` | `model` 非空 | `CoreEvent::JsonlMeta` | 同步 CodeBuddy 当前 model |
 //! | `PostToolUse` / `SubagentStop` / `SessionEnd` | — | `session.attention_cleared` | Codex 本轮结束后清除 stale attention |
-//! | `Stop` | — | `session.turn_finished` + `session.attention_cleared` | codebuddy/claude 本轮真正结束,权威 turn_finished 信号 |
+//! | `Stop` / `stop` | — | `session.turn_finished` + `session.attention_cleared` + `TurnHold(false)` | 本轮真正结束 |
+//! | `afterAgentResponse` / `stop`(Cursor) | token 字段 | `CoreEvent::JsonlMeta` | Cursor CLI 单轮 token;stop 在 CLI 更可靠,generation_id 去重 |
 //!
 //! ## 安全
 //!
@@ -31,8 +32,9 @@
 //! - relay 只解析已知字段,忽略未知 JSON 字段
 //! - socket 文件在 kode 退出时自动清理(Drop impl)
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{BridgeBus, EventEnvelope};
 use kode_core::CoreEvent;
@@ -190,11 +192,7 @@ fn process_hook_json_inner(
         "HookRelay RAW payload"
     );
 
-    let session_id = doc
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+    let session_id = resolve_hook_session_id(&doc);
 
     if session_id == 0 {
         tracing::debug!(?doc, "HookRelay skipping event with no session_id");
@@ -244,6 +242,13 @@ fn process_hook_json_inner(
         "UserPromptSubmit" => {
             tracing::info!(%session_id, "HookRelay: UserPromptSubmit → attention_cleared");
 
+            if let Some(tx) = core_tx {
+                let _ = tx.send(CoreEvent::TurnHold {
+                    id: session_id,
+                    active: true,
+                });
+            }
+
             bus.emit(EventEnvelope::new(
                 session_id,
                 "session.attention_cleared",
@@ -282,6 +287,13 @@ fn process_hook_json_inner(
 
             tracing::debug!(%session_id, %permission_mode, "HookRelay: PreToolUse → mode_changed");
 
+            if let Some(tx) = core_tx {
+                let _ = tx.send(CoreEvent::TurnHold {
+                    id: session_id,
+                    active: true,
+                });
+            }
+
             bus.emit(EventEnvelope::new(
                 session_id,
                 "session.mode_changed",
@@ -311,7 +323,7 @@ fn process_hook_json_inner(
                 context_pct: None,
             });
         }
-        "SessionStart" => {
+        "SessionStart" | "sessionStart" => {
             // codebuddy/claude/codex 在会话创建或恢复时发 SessionStart。
             // hook bridge 已把 session_id 改写成 kode tab id,并保留真实 backend uuid
             // 与 transcript_path。用 transcript_path 权威地把 tab 绑定到真实 jsonl/rollout。
@@ -319,6 +331,7 @@ fn process_hook_json_inner(
                 .get("codebuddy_session_uuid")
                 .or_else(|| doc.get("codex_session_uuid"))
                 .or_else(|| doc.get("session_uuid"))
+                .or_else(|| doc.get("conversation_id"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let transcript_path = doc
@@ -327,6 +340,35 @@ fn process_hook_json_inner(
                 .map(String::from);
             let source = doc.get("source").and_then(|v| v.as_str()).unwrap_or("");
             let model = doc.get("model").and_then(|v| v.as_str()).map(String::from);
+
+            if let Some(ref uuid) = session_uuid {
+                kode_core::session::backend::bind_hook_conversation(uuid, session_id);
+            }
+
+            let resets_binding = source != "compact";
+            if kode_core::session::backend::hook_resets_tokens(event_name) {
+                reset_hook_tokens(session_id);
+            }
+
+            // SessionStart is the authoritative conversation binding for every
+            // backend. Publish it immediately instead of waiting for the newly
+            // targeted transcript tail to open and replay. That replay remains
+            // responsible for the target title/model/token snapshot.
+            if let Some(core_tx) = core_tx {
+                let _ = core_tx.send(CoreEvent::JsonlMeta {
+                    id: session_id,
+                    model: model.clone(),
+                    title: None,
+                    session_uuid: session_uuid.clone(),
+                    tokens_reset: resets_binding,
+                    tokens: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cached_tokens: None,
+                    cost_usd: None,
+                    context_pct: None,
+                });
+            }
 
             tracing::info!(
                 %session_id,
@@ -348,11 +390,17 @@ fn process_hook_json_inner(
                 }),
             ));
         }
-        "Stop" => {
-            // agent 本轮真正结束(codebuddy/claude 的 Stop hook 语义)。
+        "afterAgentResponse" => {}
+        "Stop" | "stop" => {
             // 这是 turn_finished 的权威信号 —— semantic.rs 不再基于 jsonl
             // `status=completed` emit(那条是"message 流完",一轮会有多条)。
             tracing::info!(%session_id, "HookRelay: Stop → turn_finished + attention_cleared");
+            if let Some(tx) = core_tx {
+                let _ = tx.send(CoreEvent::TurnHold {
+                    id: session_id,
+                    active: false,
+                });
+            }
             bus.emit(EventEnvelope::new(
                 session_id,
                 "session.turn_finished",
@@ -389,6 +437,106 @@ fn process_hook_json_inner(
             tracing::debug!(%session_id, %other, "HookRelay: unknown hook event");
         }
     }
+
+    if let Some(usage) = kode_core::session::backend::hook_usage(event_name, &doc) {
+        emit_hook_token_update(session_id, &usage, core_tx);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct HookTokenAcc {
+    input: u64,
+    output: u64,
+    cached: u64,
+}
+
+impl HookTokenAcc {
+    fn total(self) -> u64 {
+        self.input.saturating_add(self.output)
+    }
+}
+
+fn hook_token_acc() -> &'static Mutex<HashMap<u64, HookTokenAcc>> {
+    static ACC: OnceLock<Mutex<HashMap<u64, HookTokenAcc>>> = OnceLock::new();
+    ACC.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn reset_hook_tokens(session_id: u64) {
+    if let Ok(mut acc) = hook_token_acc().lock() {
+        acc.remove(&session_id);
+    }
+    if let Ok(mut gens) = hook_token_generations().lock() {
+        gens.remove(&session_id);
+    }
+}
+
+fn emit_hook_token_update(
+    session_id: u64,
+    usage: &kode_core::session::backend::HookUsage,
+    core_tx: Option<&mpsc::UnboundedSender<CoreEvent>>,
+) {
+    if let Some(generation_id) = usage.generation_id.as_ref() {
+        let mut gens = hook_token_generations()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if gens.get(&session_id) == Some(generation_id) {
+            return;
+        }
+        gens.insert(session_id, generation_id.clone());
+    }
+    let totals = add_hook_tokens(session_id, usage.input, usage.output, usage.cached);
+    if let Some(core_tx) = core_tx {
+        let _ = core_tx.send(CoreEvent::JsonlMeta {
+            id: session_id,
+            model: usage.model.clone(),
+            title: None,
+            session_uuid: usage.conversation_id.clone(),
+            tokens_reset: false,
+            tokens: Some(totals.total()),
+            input_tokens: Some(totals.input),
+            output_tokens: Some(totals.output),
+            cached_tokens: (totals.cached > 0).then_some(totals.cached),
+            cost_usd: None,
+            context_pct: None,
+        });
+    }
+}
+
+fn hook_token_generations() -> &'static Mutex<HashMap<u64, String>> {
+    static GENS: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
+    GENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn resolve_hook_session_id(doc: &serde_json::Value) -> u64 {
+    if let Some(raw) = doc.get("session_id").and_then(|v| v.as_str()) {
+        if let Ok(id) = raw.parse::<u64>() {
+            if id != 0 {
+                return id;
+            }
+        }
+        if let Some(tab) = kode_core::session::backend::tab_for_hook_conversation(raw) {
+            return tab;
+        }
+    }
+    for key in ["session_uuid", "conversation_id"] {
+        if let Some(raw) = doc.get(key).and_then(|v| v.as_str()) {
+            if let Some(tab) = kode_core::session::backend::tab_for_hook_conversation(raw) {
+                return tab;
+            }
+        }
+    }
+    0
+}
+
+fn add_hook_tokens(session_id: u64, input: u64, output: u64, cached: u64) -> HookTokenAcc {
+    let mut acc = hook_token_acc()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = acc.entry(session_id).or_default();
+    entry.input = entry.input.saturating_add(input);
+    entry.output = entry.output.saturating_add(output);
+    entry.cached = entry.cached.saturating_add(cached);
+    *entry
 }
 
 /// 获取 Unix socket peer 凭据(仅用于日志)。
@@ -481,13 +629,22 @@ mod tests {
         // attention_cleared(关掉 awaiting answer banner)。
         let bus = Arc::new(BridgeBus::new());
         let mut rx = bus.subscribe();
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = r#"{
             "session_id": "42",
             "hook_event_name": "Stop"
         }"#;
 
-        process_hook_json(json, &bus);
+        process_hook_json_with_core_tx(json, &bus, &core_tx);
+
+        match core_rx.try_recv().expect("turn hold release") {
+            CoreEvent::TurnHold { id, active } => {
+                assert_eq!(id, 42);
+                assert!(!active);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
 
         let env1 = rx.try_recv().expect("should receive turn_finished");
         assert_eq!(env1.r#type, "session.turn_finished");
@@ -541,6 +698,7 @@ mod tests {
     fn process_codex_session_start_maps_transcript_path() {
         let bus = Arc::new(BridgeBus::new());
         let mut rx = bus.subscribe();
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = r#"{
             "session_id": "42",
@@ -551,7 +709,23 @@ mod tests {
             "model": "gpt-5"
         }"#;
 
-        process_hook_json(json, &bus);
+        process_hook_json_with_core_tx(json, &bus, &core_tx);
+
+        match core_rx.try_recv().expect("authoritative session metadata") {
+            CoreEvent::JsonlMeta {
+                id,
+                model,
+                session_uuid,
+                tokens_reset,
+                ..
+            } => {
+                assert_eq!(id, 42);
+                assert_eq!(model.as_deref(), Some("gpt-5"));
+                assert_eq!(session_uuid.as_deref(), Some("codex-uuid"));
+                assert!(tokens_reset);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
 
         let env = rx.try_recv().expect("should receive event");
         assert_eq!(env.r#type, "session.session_uuid_mapped");
@@ -560,6 +734,127 @@ mod tests {
         assert_eq!(env.payload["transcript_path"], "/tmp/rollout.jsonl");
         assert_eq!(env.payload["source"], "startup");
         assert_eq!(env.payload["model"], "gpt-5");
+    }
+
+    #[test]
+    fn compact_retargets_without_resetting_session_totals() {
+        let bus = Arc::new(BridgeBus::new());
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"42","hook_event_name":"SessionStart","codex_session_uuid":"codex-uuid","source":"compact"}"#,
+            &bus,
+            &core_tx,
+        );
+        match core_rx.try_recv().expect("session metadata") {
+            CoreEvent::JsonlMeta { tokens_reset, .. } => assert!(!tokens_reset),
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn process_cursor_after_agent_response_accumulates_tokens() {
+        let bus = Arc::new(BridgeBus::new());
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+        reset_hook_tokens(77);
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"77","hook_event_name":"afterAgentResponse","conversation_id":"chat-1","model":"grok-4.6","input_tokens":100,"output_tokens":20,"cache_read_tokens":10}"#,
+            &bus,
+            &core_tx,
+        );
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"77","hook_event_name":"afterAgentResponse","input_tokens":50,"output_tokens":5}"#,
+            &bus,
+            &core_tx,
+        );
+        let first = core_rx.try_recv().expect("first token event");
+        let second = core_rx.try_recv().expect("second token event");
+        match (first, second) {
+            (
+                CoreEvent::JsonlMeta {
+                    tokens: Some(t1),
+                    input_tokens: Some(i1),
+                    output_tokens: Some(o1),
+                    cached_tokens: Some(c1),
+                    ..
+                },
+                CoreEvent::JsonlMeta {
+                    tokens: Some(t2),
+                    input_tokens: Some(i2),
+                    output_tokens: Some(o2),
+                    ..
+                },
+            ) => {
+                assert_eq!((t1, i1, o1, c1), (120, 100, 20, 10));
+                assert_eq!((t2, i2, o2), (175, 150, 25));
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_cursor_stop_applies_tokens_once_per_generation() {
+        let bus = Arc::new(BridgeBus::new());
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+        reset_hook_tokens(78);
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"78","hook_event_name":"afterAgentResponse","generation_id":"g1","input_tokens":10,"output_tokens":2}"#,
+            &bus,
+            &core_tx,
+        );
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"78","hook_event_name":"stop","generation_id":"g1","input_tokens":10,"output_tokens":2}"#,
+            &bus,
+            &core_tx,
+        );
+        let first = core_rx.try_recv().expect("token event");
+        match first {
+            CoreEvent::JsonlMeta {
+                tokens: Some(12),
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                ..
+            } => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(
+            core_rx.try_recv(),
+            Ok(CoreEvent::TurnHold {
+                id: 78,
+                active: false
+            })
+        ));
+        assert!(core_rx.try_recv().is_err(), "stop must not double-count");
+    }
+
+    #[test]
+    fn process_cursor_conversation_uuid_routes_to_bound_tab() {
+        let bus = Arc::new(BridgeBus::new());
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+        reset_hook_tokens(91);
+        kode_core::session::backend::bind_hook_conversation(
+            "e3e9a409-7742-49e5-97ef-e3adccf24df9",
+            91,
+        );
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"e3e9a409-7742-49e5-97ef-e3adccf24df9","hook_event_name":"stop","model":"grok-4.6","input_tokens":8,"output_tokens":1}"#,
+            &bus,
+            &core_tx,
+        );
+        assert!(matches!(
+            core_rx.try_recv(),
+            Ok(CoreEvent::TurnHold {
+                id: 91,
+                active: false
+            })
+        ));
+        match core_rx.try_recv().expect("routed token event") {
+            CoreEvent::JsonlMeta {
+                id: 91,
+                tokens: Some(9),
+                ..
+            } => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

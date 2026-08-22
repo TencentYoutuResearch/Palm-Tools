@@ -1,5 +1,7 @@
 //! Session = 一个 tab 的全部状态:子进程 PTY + vt100 终端模拟 + 元信息。
 
+pub mod backend;
+pub mod cursor_tail;
 pub mod heuristic;
 pub mod jsonl_tail;
 pub mod state;
@@ -113,8 +115,10 @@ impl Session {
         } else {
             backend.args.clone()
         };
+        let flags_before_resume =
+            backend::profile_for_key(backend_key).is_some_and(|p| p.flags_before_resume());
         let (final_args_pre_prompt, session_id) = if let Some(sid) = resume_session_id {
-            if backend_key == "codex" {
+            if flags_before_resume {
                 // Codex resume is a subcommand. Keep global/session options before
                 // `resume <id>` so the CLI does not treat them as resume prompt text.
                 let args = inject_model_flag(
@@ -193,48 +197,29 @@ impl Session {
             extra_env,
         )?;
 
-        // 启动 jsonl tail。codebuddy / claude 可用注入的 session-id 精确定位;
-        // Codex CLI 不支持 --session-id,且 `codex resume <sid>` 也会创建本次
-        // 进程的新 rollout,所以按 cwd + mtime 找本次启动后新建的 rollout jsonl。
-        //
-        // resume 场景:优先用 cwd 推算路径;若文件不存在(cwd 被 session_cwd_override
-        // 错误覆盖的情况),全局扫描 projects 目录找正确文件。
-        // retarget 通道:hook 给出 transcript_path 时,给 tail 一个 watch::Receiver,
-        // sender 存进 Session 供 relay 通知。Codex 也依赖这个精确绑定,避免多 tab
-        // 同 cwd 同时启动时靠 cwd/mtime 误认领 rollout。
+        // 启动 jsonl / meta tail。具体认领策略由 BackendProfile::spawn_tail 决定:
+        // codebuddy/claude 用注入的 session-id 精确定位;Codex/Cursor 不接受外部
+        // --session-id,按 cwd + mtime 认领本次启动后的文件,resume 则按 uuid 扫描。
+        // retarget 通道:hook 给出 transcript_path 时通知 tail 切到正确文件。
         let mut retarget_tx: Option<tokio::sync::watch::Sender<Option<PathBuf>>> = None;
-        if let Some(backend_kind) = jsonl_tail::Backend::from_backend_key(backend_key) {
-            if backend_kind == jsonl_tail::Backend::Codex {
-                tracing::debug!(
-                    ?cwd,
-                    resume_session_id = ?resume_session_id,
-                    "spawn codex latest-jsonl tail"
-                );
-                let (tx, rx) = tokio::sync::watch::channel::<Option<PathBuf>>(None);
-                retarget_tx = Some(tx);
-                jsonl_tail::spawn_latest(
-                    id,
-                    backend_kind,
-                    cwd.to_path_buf(),
-                    spawn_started_at,
-                    evt_tx,
-                    Some(rx),
-                );
-            } else if let Some(sid) = session_id.as_ref() {
-                let path = if resume_session_id.is_some() {
-                    // resume 时用带全局搜索兜底的版本
-                    jsonl_tail::resolve_session_path(backend_kind, cwd, sid)
-                } else {
-                    // 新建 session:文件还不存在,直接用 cwd 算出来的路径,让 tail 等文件出现
-                    backend_kind.session_path(cwd, sid)
-                };
-                if let Some(path) = path {
-                    tracing::debug!(?path, %sid, ?backend_kind, is_resume = resume_session_id.is_some(), "spawn jsonl tail");
-                    let (tx, rx) = tokio::sync::watch::channel::<Option<PathBuf>>(None);
-                    retarget_tx = Some(tx);
-                    jsonl_tail::spawn(id, backend_kind, path, evt_tx, Some(rx));
-                }
-            }
+        if let Some(profile) = backend::profile_for_key(backend_key) {
+            tracing::debug!(
+                ?cwd,
+                resume_session_id = ?resume_session_id,
+                kind = ?profile.kind(),
+                "spawn backend meta tail"
+            );
+            let (tx, rx) = tokio::sync::watch::channel::<Option<PathBuf>>(None);
+            retarget_tx = Some(tx);
+            profile.spawn_tail(backend::MetaTailRequest {
+                id,
+                cwd: cwd.to_path_buf(),
+                resume_session_id: resume_session_id.map(str::to_string),
+                injected_session_id: session_id.clone(),
+                spawn_started_at,
+                evt_tx,
+                retarget_rx: rx,
+            });
         }
 
         Ok(Self {
@@ -269,11 +254,12 @@ impl Session {
     /// 目标 jsonl 路径并通知 tail 切过去。目标文件可能尚未创建;jsonl_tail 会保留
     /// 这个 path 并在 EOF 轮询中重试。
     pub fn retarget_tail_to_session_id(&self, session_id: &str) -> bool {
-        let Some(backend) = jsonl_tail::Backend::from_backend_key(&self.backend_key) else {
+        let Some(profile) = backend::profile_for_key(&self.backend_key) else {
             return false;
         };
-        let Some(path) = jsonl_tail::resolve_session_path(backend, &self.cwd, session_id)
-            .or_else(|| backend.session_path(&self.cwd, session_id))
+        let Some(path) = profile
+            .find_session_path(&self.cwd, session_id)
+            .or_else(|| profile.session_path(&self.cwd, session_id))
         else {
             return false;
         };
@@ -321,13 +307,39 @@ impl Session {
         }
     }
 
+    /// 用户提交了一轮。PTY 之后即使长时间无输出也保持 busy,直到 [`mark_turn_end`]。
+    pub fn mark_turn_start(&mut self) {
+        if matches!(self.state.status, Status::Exited(_)) {
+            return;
+        }
+        self.busy.hold_turn();
+        self.state.status = Status::Busy;
+    }
+
+    /// Stop / turn_finished。下一拍 `tick_status` 若 PTY 也静默则翻 idle。
+    pub fn mark_turn_end(&mut self) {
+        self.busy.release_turn();
+    }
+
     pub fn mark_exited(&mut self, code: Option<i32>) {
+        self.busy.release_turn();
         self.state.status = Status::Exited(code);
         // 释放 PTY,reader/reaper 线程会因 EOF 自行退出
         self.pty = None;
     }
 
     pub fn write_input(&self, bytes: &[u8]) {
+        if looks_like_turn_submit(bytes) {
+            self.busy.hold_turn();
+        } else if looks_like_turn_cancel(bytes) {
+            // Bare Escape is the terminal-level cancel gesture. Some backends
+            // (notably Codex) return to their composer without writing a
+            // task_complete/turn_aborted transcript event, so the semantic
+            // tail cannot release the local turn hold. Drop only that hold;
+            // any continuing PTY output still keeps the session busy through
+            // the ordinary activity threshold.
+            self.busy.release_turn();
+        }
         if let Some(p) = &self.pty {
             if let Err(e) = p.write_all(bytes) {
                 tracing::warn!(?e, "pty write failed");
@@ -534,18 +546,16 @@ fn inject_session_id(
     backend_key: &str,
     resume_session_id: Option<&str>,
 ) -> (Vec<String>, Option<String>) {
-    let supports = match jsonl_tail::Backend::from_backend_key(backend_key) {
-        Some(jsonl_tail::Backend::Codebuddy | jsonl_tail::Backend::Claude) => true,
-        Some(jsonl_tail::Backend::Codex) => false,
-        None => {
+    let supports = backend::profile_for_key(backend_key)
+        .map(|p| p.supports_session_id_flag())
+        .unwrap_or_else(|| {
             // 兼容老逻辑:命令名兜底(用户改了 backend_key 但命令还是 codebuddy/claude)
             std::path::Path::new(command)
                 .file_name()
                 .and_then(|s| s.to_str())
                 .map(|s| s.contains("codebuddy") || s == "cbc" || s.starts_with("claude"))
                 .unwrap_or(false)
-        }
-    };
+        });
 
     if !supports {
         return (args.to_vec(), None);
@@ -570,7 +580,10 @@ fn inject_session_id(
 /// 把 `--resume <sid>` 注入 args(若用户没已显式提供)。
 /// codebuddy 用 `-r/--resume`,claude 也是 `-r/--resume`,统一注入 long form。
 fn inject_resume_flag(backend_key: &str, args: &[String], sid: &str) -> Vec<String> {
-    if backend_key == "codex" {
+    let style = backend::profile_for_key(backend_key)
+        .map(|p| p.resume_style())
+        .unwrap_or(backend::ResumeStyle::Flag);
+    if style == backend::ResumeStyle::Subcommand {
         if args.iter().any(|a| a == "resume") {
             return args.to_vec();
         }
@@ -697,7 +710,7 @@ fn inject_kode_memory_prompt(
     if !enabled {
         return args.to_vec();
     }
-    if backend_key == "codex" {
+    if !backend::profile_for_key(backend_key).is_some_and(|p| p.supports_append_system_prompt()) {
         return args.to_vec();
     }
     if args.iter().any(|a| {
@@ -722,6 +735,14 @@ fn inject_kode_memory_prompt(
     new_args.push("--append-system-prompt".into());
     new_args.push(full);
     new_args
+}
+
+fn looks_like_turn_submit(bytes: &[u8]) -> bool {
+    bytes.iter().any(|b| *b == b'\n' || *b == b'\r')
+}
+
+fn looks_like_turn_cancel(bytes: &[u8]) -> bool {
+    bytes == b"\x1b"
 }
 
 #[cfg(test)]
@@ -759,6 +780,16 @@ mod tests {
         assert!(
             args.is_empty(),
             "codex must not receive unsupported --session-id"
+        );
+        assert!(sid.is_none());
+    }
+
+    #[test]
+    fn inject_session_id_skips_for_cursor_backend() {
+        let (args, sid) = inject_session_id("cursor-agent", &[], "cursor", None);
+        assert!(
+            args.is_empty(),
+            "cursor-agent must not receive unsupported --session-id"
         );
         assert!(sid.is_none());
     }
@@ -1050,6 +1081,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inject_kode_memory_prompt_skips_for_cursor_backend() {
+        let cwd = std::path::PathBuf::from("/tmp");
+        let out = inject_kode_memory_prompt(&[], "cursor", &cwd, true, None);
+        assert!(
+            out.is_empty(),
+            "Cursor must not receive unsupported --append-system-prompt args"
+        );
+    }
+
     /// 关键回归:用户已显式给 --append-system-prompt 时不重复注入。
     /// (跟 codebuddy 双 --append 实测会以最后一份为准 → 不会语义错误,
     ///  但用户既然明确指定就 100% 尊重)
@@ -1305,6 +1346,22 @@ mod tests {
             "screen should contain '😀' after cross-chunk feed, got: {:?}",
             contents
         );
+    }
+
+    #[test]
+    fn enter_is_a_turn_submit_arrow_keys_are_not() {
+        assert!(looks_like_turn_submit(b"hello\r"));
+        assert!(looks_like_turn_submit(b"hello\n"));
+        assert!(!looks_like_turn_submit(b"hello"));
+        assert!(!looks_like_turn_submit(&[0x1b, b'[', b'A']));
+    }
+
+    #[test]
+    fn bare_escape_is_a_turn_cancel_escape_sequences_are_not() {
+        assert!(looks_like_turn_cancel(b"\x1b"));
+        assert!(!looks_like_turn_cancel(b"\x1b[A"));
+        assert!(!looks_like_turn_cancel(b"\x1bb"));
+        assert!(!looks_like_turn_cancel(b""));
     }
 
     #[test]

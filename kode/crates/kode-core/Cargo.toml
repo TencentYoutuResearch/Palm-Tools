@@ -14,6 +14,7 @@ toml = "0.8"
 anyhow = "1"
 tracing = "0.1"
 dirs = "5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4"] }
 # Phase 11.2:`SessionTransport` trait 的 async 方法需要 async-trait,
 # 因为 RemoteTransport 实现要做 HTTP / WS 异步 IO。本地实现不需要 async,

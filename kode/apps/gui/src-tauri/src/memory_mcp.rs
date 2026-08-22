@@ -43,7 +43,7 @@ use std::sync::Arc;
 use kode_core::config::{BackendConfig, McpSetupSpec};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use toml_edit::DocumentMut;
+use toml_edit::{value, Array, DocumentMut, Item, Table};
 
 use crate::memory::resolve_memory_root;
 use crate::persistence;
@@ -258,26 +258,118 @@ fn run_codex_style(cli: &str, bin: &Path, root: &Path) -> Result<(), String> {
     if which(cli).is_none() {
         return Err(format!("{cli} CLI not found in PATH"));
     }
-    let env_arg = format!("KODE_MEMORY_ROOT={}", root.display());
-    let output = Command::new(cli)
-        .args([
-            "mcp",
-            "add",
-            MCP_SERVER_NAME,
-            "--env",
-            &env_arg,
-            "--",
-            &bin.display().to_string(),
-        ])
-        .output()
-        .map_err(|e| format!("spawn {cli} mcp add failed: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{cli} mcp add failed (status={:?})\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+
+    let config_path = codex_config_path().ok_or("cannot resolve Codex config.toml path")?;
+    // `codex mcp add` may reject an existing name. If the command already points at this
+    // sidecar, only repair the missing policy tables below and preserve the server entry.
+    if !toml_has_memory_server(&config_path, Some(bin)) {
+        let env_arg = format!("KODE_MEMORY_ROOT={}", root.display());
+        let output = Command::new(cli)
+            .args([
+                "mcp",
+                "add",
+                MCP_SERVER_NAME,
+                "--env",
+                &env_arg,
+                "--",
+                &bin.display().to_string(),
+            ])
+            .output()
+            .map_err(|e| format!("spawn {cli} mcp add failed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{cli} mcp add failed (status={:?})\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+
+    merge_codex_memory_approval_policy(&config_path)
+}
+
+/// Add the least-privilege Codex policy, including one narrow migration of Kode's old
+/// memory_propose default from `prompt` to `approve`:
+/// - read-only annotated tools are allowed by the `writes` default;
+/// - the hot-path search is explicitly approved, even with an older sidecar;
+/// - proposing a fact is approved because it only creates a local pending item; publishing
+///   it as searchable memory still requires the user's Memory Review decision;
+/// - GUI-owned review/deprecation tools are hidden from the agent-facing MCP surface.
+fn merge_codex_memory_approval_policy(path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {} failed after codex mcp add: {e}", path.display()))?;
+    let mut doc = text
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("parse {} failed after codex mcp add: {e}", path.display()))?;
+
+    let mcp_servers = doc
+        .entry("mcp_servers")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers must be a TOML table")?;
+    let memory = mcp_servers
+        .entry(MCP_SERVER_NAME)
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers.memory must be a TOML table")?;
+
+    if !memory.contains_key("default_tools_approval_mode") {
+        memory.insert("default_tools_approval_mode", value("writes"));
+    }
+    if !memory.contains_key("disabled_tools") {
+        let mut disabled_tools = Array::new();
+        disabled_tools.push("memory_list_pending");
+        disabled_tools.push("memory_review");
+        disabled_tools.push("memory_deprecate");
+        memory.insert("disabled_tools", value(disabled_tools));
+    }
+    let tools = memory
+        .entry("tools")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers.memory.tools must be a TOML table")?;
+    insert_codex_tool_approval_if_missing(tools, "memory_search", "approve")?;
+    migrate_codex_memory_propose_approval(tools)?;
+
+    let tmp = path.with_extension("tmp.kode");
+    std::fs::write(&tmp, doc.to_string())
+        .map_err(|e| format!("write {} failed: {e}", tmp.display()))?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, metadata.permissions());
+    }
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {} -> {} failed: {e}", tmp.display(), path.display()))
+}
+
+/// Kode used `prompt` for this tool before pending proposals were treated as the first
+/// stage of the product's own review workflow. Migrate that exact legacy value; keep
+/// other explicit modes intact so unusual user policies are not normalized silently.
+fn migrate_codex_memory_propose_approval(tools: &mut Table) -> Result<(), String> {
+    let tool = tools
+        .entry("memory_propose")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers.memory.tools.memory_propose must be a TOML table")?;
+    let current = tool.get("approval_mode").and_then(|item| item.as_str());
+    if current.is_none() || current == Some("prompt") {
+        tool.insert("approval_mode", value("approve"));
+    }
+    Ok(())
+}
+
+fn insert_codex_tool_approval_if_missing(
+    tools: &mut Table,
+    tool_name: &str,
+    approval_mode: &str,
+) -> Result<(), String> {
+    let tool = tools
+        .entry(tool_name)
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("mcp_servers.memory.tools.{tool_name} must be a TOML table"))?;
+    if !tool.contains_key("approval_mode") {
+        tool.insert("approval_mode", value(approval_mode));
     }
     Ok(())
 }
@@ -493,6 +585,12 @@ pub fn install_managed_hooks(app_state: &AppState) {
             tracing::warn!("codex hook inject failed: {e}");
         }
     }
+
+    if let Some(path) = kode_memory::hook_setup::cursor_hooks_path() {
+        if let Err(e) = kode_memory::hook_setup::inject_cursor_hooks(&path) {
+            tracing::warn!("cursor hook inject failed: {e}");
+        }
+    }
 }
 
 /// setup hook 用:启动后 800ms 异步触发。
@@ -696,9 +794,10 @@ fn is_configured_for_spec(spec: &McpSetupSpec) -> bool {
         // 只存在 `[mcp_servers.memory]` 不代表当前 GUI 的 sidecar 可用，必须与
         // 本次运行解析出的 `kode-memory-mcp` 路径一致，才能视为已配置。
         let expected_binary = resolve_binary();
-        return config_check_paths(spec)
-            .iter()
-            .any(|p| toml_has_memory_server(p, expected_binary.as_deref()));
+        return config_check_paths(spec).iter().any(|p| {
+            toml_has_memory_server(p, expected_binary.as_deref())
+                && toml_has_memory_approval_policy(p)
+        });
     }
     let candidates = config_check_paths(spec);
     candidates.iter().any(|p| json_has_memory_server(p))
@@ -706,6 +805,9 @@ fn is_configured_for_spec(spec: &McpSetupSpec) -> bool {
 
 /// 给定 spec,返回**所有候选**的 user-scope 配置文件路径(顺序:新版优先,老版兜底)。
 fn config_check_paths(spec: &McpSetupSpec) -> Vec<PathBuf> {
+    if matches!(spec, McpSetupSpec::Codex { .. }) {
+        return codex_config_path().into_iter().collect();
+    }
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
@@ -724,7 +826,7 @@ fn config_check_paths(spec: &McpSetupSpec) -> Vec<PathBuf> {
             //     cli="claude-internal" → ~/.claude-internal/.claude.json
             vec![home.join(format!(".{cli}")).join(".claude.json")]
         }
-        McpSetupSpec::Codex { .. } => vec![home.join(".codex").join("config.toml")],
+        McpSetupSpec::Codex { .. } => unreachable!("handled above"),
         McpSetupSpec::JsonMerge { config_path } => vec![expand_tilde(config_path)],
     }
 }
@@ -767,6 +869,53 @@ fn toml_has_memory_server(p: &Path, expected_binary: Option<&Path>) -> bool {
         .and_then(|t| t.get("command"))
         .and_then(|i| i.as_str())
         .is_some_and(|command| command == expected_binary.to_string_lossy())
+}
+
+fn codex_config_path() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home).join("config.toml"));
+    }
+    dirs::home_dir().map(|home| home.join(".codex").join("config.toml"))
+}
+
+/// Readiness check for the Kode-managed policy. In particular, the old `prompt` value for
+/// memory_propose is not ready: startup must run the one-time migration to `approve`.
+fn toml_has_memory_approval_policy(p: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(p) else {
+        return false;
+    };
+    let Ok(doc) = text.parse::<DocumentMut>() else {
+        return false;
+    };
+    let Some(memory) = doc
+        .get("mcp_servers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(MCP_SERVER_NAME))
+        .and_then(|item| item.as_table())
+    else {
+        return false;
+    };
+    let has_default = memory
+        .get("default_tools_approval_mode")
+        .and_then(|item| item.as_str())
+        .is_some();
+    let has_disabled_tools = memory
+        .get("disabled_tools")
+        .and_then(|item| item.as_array())
+        .is_some();
+    let tool_mode = |name: &str| {
+        memory
+            .get("tools")
+            .and_then(|item| item.as_table())
+            .and_then(|tools| tools.get(name))
+            .and_then(|item| item.as_table())
+            .and_then(|tool| tool.get("approval_mode"))
+            .and_then(|item| item.as_str())
+    };
+    has_default
+        && has_disabled_tools
+        && tool_mode("memory_search").is_some()
+        && tool_mode("memory_propose") == Some("approve")
 }
 
 /// 决策:是否要提示用户。规则:
@@ -1255,10 +1404,85 @@ args = []
         .unwrap();
         let current = Path::new("/path/to/kode-memory-mcp");
         assert!(toml_has_memory_server(&cfg, Some(current)));
+        assert!(!toml_has_memory_approval_policy(&cfg));
         assert!(!toml_has_memory_server(
             &cfg,
             Some(Path::new("/other/checkout/kode-memory-mcp"))
         ));
+
+        merge_codex_memory_approval_policy(&cfg).unwrap();
+        assert!(toml_has_memory_approval_policy(&cfg));
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let doc = text.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["memory"]["default_tools_approval_mode"].as_str(),
+            Some("writes")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["memory"]["tools"]["memory_search"]["approval_mode"].as_str(),
+            Some("approve")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["memory"]["tools"]["memory_propose"]["approval_mode"].as_str(),
+            Some("approve")
+        );
+        let disabled = doc["mcp_servers"]["memory"]["disabled_tools"]
+            .as_array()
+            .unwrap();
+        assert_eq!(disabled.len(), 3);
+        assert!(disabled
+            .iter()
+            .any(|value| value.as_str() == Some("memory_review")));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn codex_policy_merge_migrates_legacy_propose_and_preserves_other_config() {
+        let tmp =
+            std::env::temp_dir().join(format!("kode-mcp-codex-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cfg = tmp.join("config.toml");
+        std::fs::write(
+            &cfg,
+            r#"
+model = "custom-model"
+
+[mcp_servers.memory]
+command = "/path/to/kode-memory-mcp"
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.memory.tools.memory_search]
+approval_mode = "prompt"
+
+[mcp_servers.memory.tools.memory_propose]
+approval_mode = "prompt"
+"#,
+        )
+        .unwrap();
+
+        merge_codex_memory_approval_policy(&cfg).unwrap();
+        merge_codex_memory_approval_policy(&cfg).unwrap();
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let doc = text.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model"].as_str(), Some("custom-model"));
+        assert_eq!(
+            doc["mcp_servers"]["memory"]["default_tools_approval_mode"].as_str(),
+            Some("prompt"),
+            "an explicit user default must not be overwritten"
+        );
+        assert_eq!(
+            doc["mcp_servers"]["memory"]["tools"]["memory_search"]["approval_mode"].as_str(),
+            Some("prompt"),
+            "an explicit per-tool choice must not be overwritten"
+        );
+        assert_eq!(
+            doc["mcp_servers"]["memory"]["tools"]["memory_propose"]["approval_mode"].as_str(),
+            Some("approve"),
+            "Kode's legacy propose prompt must migrate to the pending-review policy"
+        );
+        assert!(toml_has_memory_approval_policy(&cfg));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

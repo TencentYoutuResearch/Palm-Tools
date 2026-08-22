@@ -192,7 +192,34 @@ impl BridgeBus {
         if env.r#type != "pty_bytes" && env.r#type != "shell.pty_bytes" {
             let mut h = self.history.lock();
             let list = h.entry(env.session_id).or_default();
-            list.push(env.clone());
+            if env.r#type == "meta" {
+                // Metadata is state, not timeline content. Long restored Codex
+                // sessions can replay thousands of token_count records; keeping
+                // every one evicts all message events from this 1000-item ring,
+                // so cloud/mobile receives the session shell but no transcript.
+                // Keep one merged snapshot in history while still broadcasting
+                // every original event below for live consumers.
+                let mut stored = env.clone();
+                if let Some(index) = list.iter().rposition(|item| item.r#type == "meta") {
+                    let previous = list.remove(index);
+                    if let (Some(previous), Some(current)) =
+                        (previous.payload.as_object(), stored.payload.as_object_mut())
+                    {
+                        let mut merged = previous.clone();
+                        for (key, value) in current.iter() {
+                            // JSON null means "this incremental event did not
+                            // update the field", so retain the prior value.
+                            if !value.is_null() {
+                                merged.insert(key.clone(), value.clone());
+                            }
+                        }
+                        *current = merged;
+                    }
+                }
+                list.push(stored);
+            } else {
+                list.push(env.clone());
+            }
             if list.len() > 1000 {
                 let drop_n = list.len() - 1000;
                 list.drain(0..drop_n);
@@ -336,7 +363,8 @@ fn inject_hooks_into_settings() {
 /// - `KODE_SESSION_ID`:让 `kode-memory codebuddy-hook` 把 codebuddy 的 uuid session_id
 ///   改写成 kode tab id(u64),使 relay 能正确路由
 /// - `KODE_MEMORY_ROOT`:让 hook 子进程与 bridge/MCP 使用同一份 memory root
-fn build_session_env(ctx: &Ctx, id: SessionId) -> Vec<(String, String)> {
+/// - `TERM_THEME` / `COLORFGBG`:让 cursor-agent / Claude / 其它 TUI 跳过 OSC 11
+fn build_session_env(ctx: &Ctx, id: SessionId, term_theme: Option<&str>) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if let Some(sock) = ctx.hook_relay_socket.as_deref() {
         env.push((
@@ -349,6 +377,8 @@ fn build_session_env(ctx: &Ctx, id: SessionId) -> Vec<(String, String)> {
         "KODE_MEMORY_ROOT".to_string(),
         resolve_memory_root().display().to_string(),
     ));
+    let dark = kode_core::pty::parse_term_theme(term_theme).unwrap_or(true);
+    env.extend(kode_core::pty::terminal_theme_env(dark));
     env
 }
 
@@ -520,6 +550,15 @@ pub fn spawn_event_router(ctx: Arc<Ctx>, mut rx: mpsc::UnboundedReceiver<CoreEve
                 } => {
                     ctx.bus.emit(EventEnvelope::new(id, event_type, payload));
                 }
+                CoreEvent::TurnHold { id, active } => {
+                    if let Some(s) = ctx.sessions.lock().get_mut(&id) {
+                        if active {
+                            s.mark_turn_start();
+                        } else {
+                            s.mark_turn_end();
+                        }
+                    }
+                }
             }
         }
     });
@@ -530,6 +569,7 @@ pub fn spawn_event_router(ctx: Arc<Ctx>, mut rx: mpsc::UnboundedReceiver<CoreEve
 /// GUI 端的 `spawn_prompt_scan_loop`(state.rs)做同样的事 —— bridge 端需要
 /// 独立 tick,因为 GUI 端没有 bridge sessions 的引用。
 fn spawn_status_ticker(ctx: Arc<Ctx>) {
+    spawn_turn_hold_from_bus(Arc::clone(&ctx));
     tokio::spawn(async move {
         tracing::info!("status ticker started (200ms interval)");
         let mut last_status: HashMap<SessionId, &'static str> = HashMap::new();
@@ -555,6 +595,26 @@ fn spawn_status_ticker(ctx: Arc<Ctx>) {
                         json!({ "status": current }),
                     ));
                 }
+            }
+        }
+    });
+}
+
+/// jsonl `turn_ended` / semantic 发出的 turn_finished 不经过 HookRelay。
+/// 这里把 bus 上的结束信号同步到 Session.turn_hold,否则 Cursor 思考期锁住的
+/// busy 永远翻不回去。
+fn spawn_turn_hold_from_bus(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let mut rx = ctx.bus.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(env) if env.r#type == "session.turn_finished" => {
+                    if let Some(s) = ctx.sessions.lock().get_mut(&env.session_id) {
+                        s.mark_turn_end();
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                _ => {}
             }
         }
     });
@@ -791,6 +851,10 @@ struct CreateSessionReq {
     /// exists and is reachable via the HTTP API (get/transcript/kill).
     #[serde(default)]
     headless: bool,
+    /// `light` / `dark`. When omitted the child gets Kode's dark default so
+    /// cursor-agent skips the OSC 11 probe that times out over PTY IPC.
+    #[serde(default)]
+    term_theme: Option<String>,
 }
 
 async fn create_session(
@@ -818,7 +882,7 @@ async fn create_session(
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("/"));
     let model = sanitize_requested_model(req.model.as_deref());
-    let extra_env = build_session_env(&ctx, id);
+    let extra_env = build_session_env(&ctx, id, req.term_theme.as_deref());
     let mut session = Session::new(
         id,
         &req.backend_key,
@@ -925,16 +989,16 @@ fn resume_meta_snapshot(
     session_id: Option<&str>,
 ) -> Option<ResumeMetaSnapshot> {
     let sid = session_id?;
-    let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(backend_key)?;
-    let path = kode_core::session::jsonl_tail::resolve_session_path(backend, cwd, sid)?;
-    let (title, model, total_tokens) = extract_session_meta(&path);
-    if title.is_none() && model.is_none() && total_tokens.is_none() {
+    let profile = kode_core::session::backend::profile_for_key(backend_key)?;
+    let path = profile.find_session_path(cwd, sid)?;
+    let snap = kode_core::session::backend::transcript_snapshot(&path);
+    if snap.title.is_none() && snap.model.is_none() && snap.total_tokens.is_none() {
         return None;
     }
     Some(ResumeMetaSnapshot {
-        title,
-        model,
-        total_tokens,
+        title: snap.title,
+        model: snap.model,
+        total_tokens: snap.total_tokens,
     })
 }
 
@@ -1032,6 +1096,29 @@ async fn get_transcript(
 /// - `{role:"agent", kind:"tool_result", tool, tool_call_id, preview, status}`
 ///   for `type:"function_call_result"` (same protocol-level skip)
 ///
+fn json_content_to_text(v: &Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = v.as_array() {
+        let text = arr
+            .iter()
+            .filter_map(|item| {
+                item.get("text")
+                    .or_else(|| item.get("input_text"))
+                    .or_else(|| item.get("output_text"))
+                    .or_else(|| item.get("content"))
+                    .and_then(|x| x.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.trim().is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
 /// Extracted from `get_transcript` so it can be unit-tested without spinning up
 /// a real PTY-backed Session.
 fn parse_transcript_lines<S: AsRef<str>>(lines: impl IntoIterator<Item = S>) -> Vec<Value> {
@@ -1191,6 +1278,84 @@ struct InputReq {
     bytes_b64: Option<String>,
 }
 
+const TEXT_INPUT_SUBMIT_DELAY: Duration = Duration::from_millis(50);
+
+/// REST `text` 表示一条要提交的消息，不是原始 PTY 字节。
+///
+/// Mobile 会在正文末尾补 LF；这里去掉所有末尾 CR/LF，保留正文内部换行。
+/// 正文和 Enter 必须分两次写入，否则 Ink 会把整批字节识别成 paste，导致文字
+/// 出现在输入框里却没有触发 onSubmit。
+fn text_input_body(text: &str) -> &str {
+    text.trim_end_matches(['\r', '\n'])
+}
+
+#[derive(Debug)]
+pub struct TextInputError {
+    pub session_id: SessionId,
+}
+
+impl std::fmt::Display for TextInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "session {} not found", self.session_id)
+    }
+}
+
+impl std::error::Error for TextInputError {}
+
+/// Submit one logical text message to a local session.
+///
+/// The body and Enter are deliberately written separately. Ink-based CLI UIs
+/// otherwise classify one combined write as a paste and leave the text in the
+/// composer without submitting it. Cloud command routing calls this same path
+/// so direct-bridge and centralized mobile input remain behaviorally identical.
+pub fn submit_text_input(ctx: &Ctx, id: SessionId, text: &str) -> Result<(), TextInputError> {
+    let body = text_input_body(text);
+    let enter_writer = {
+        let mut sessions = ctx.sessions.lock();
+        let session = sessions.get_mut(&id).ok_or(TextInputError { session_id: id })?;
+        session.mark_turn_start();
+        if body.is_empty() {
+            session.write_input(b"\r");
+            None
+        } else {
+            tracing::debug!(session = id, bytes = body.len(), "bridge input write text");
+            session.write_input(body.as_bytes());
+            session.pty.as_ref().map(|pty| Arc::clone(&pty.writer))
+        }
+    };
+
+    if let Some(writer) = enter_writer {
+        std::thread::spawn(move || {
+            std::thread::sleep(TEXT_INPUT_SUBMIT_DELAY);
+            tracing::debug!(session = id, "bridge input write enter");
+            match writer.lock() {
+                Ok(mut writer) => {
+                    if let Err(error) = writer.write_all(b"\r") {
+                        tracing::warn!(?error, session = id, "bridge input enter failed");
+                    }
+                    let _ = writer.flush();
+                }
+                Err(error) => {
+                    tracing::warn!(?error, session = id, "bridge input writer poisoned");
+                }
+            }
+        });
+    }
+
+    ctx.bus.emit(EventEnvelope::new(
+        id,
+        "session.attention_cleared",
+        json!({
+            "reason": if body.is_empty() {
+                "user_enter_via_api"
+            } else {
+                "user_input_via_api"
+            }
+        }),
+    ));
+    Ok(())
+}
+
 async fn post_focus(
     Extension(ctx): Extension<Arc<Ctx>>,
     Path(id): Path<SessionId>,
@@ -1217,18 +1382,28 @@ async fn post_input(
     Path(id): Path<SessionId>,
     Json(req): Json<InputReq>,
 ) -> Result<StatusCode, ApiError> {
-    let bytes = match (req.bytes_b64, req.text) {
-        (Some(b64), _) => base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .map_err(|e| ApiError::BadRequest(format!("invalid base64: {e}")))?,
-        (None, Some(t)) => t.into_bytes(),
-        (None, None) => return Err(ApiError::BadRequest("text or bytes_b64 required".into())),
-    };
     let g = ctx.sessions.lock();
     let s = g
         .get(&id)
         .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
-    s.write_input(&bytes);
+
+    match (req.bytes_b64, req.text) {
+        // 原始字节路径用于控制键和高级序列，保持完全透传。
+        (Some(b64), _) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| ApiError::BadRequest(format!("invalid base64: {e}")))?;
+            s.write_input(&bytes);
+        }
+        (None, Some(text)) => {
+            drop(g);
+            submit_text_input(&ctx, id, &text)
+                .map_err(|_| ApiError::NotFound(format!("session {id}")))?;
+        }
+        (None, None) => {
+            return Err(ApiError::BadRequest("text or bytes_b64 required".into()));
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1256,33 +1431,9 @@ async fn post_answer(
             req.choice_index
         )));
     }
-    let input = answer_input(req.choice_index);
-    {
-        let g = ctx.sessions.lock();
-        let s = g
-            .get(&id)
-            .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
-        // CodeBuddy's AskPanel only handles up/down (or j/k) plus Enter; number
-        // keys are ignored. Each question starts at option zero, so move down
-        // to the requested option and confirm it.
-        s.write_input(&input);
-    }
-    if req.submit {
-        // After the final question AskPanel opens a separate summary/submit
-        // phase. Give Ink a render tick, then confirm that page as well; without
-        // this second Enter doneAsk() is never called and the agent stays stuck.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let g = ctx.sessions.lock();
-        let s = g
-            .get(&id)
-            .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
-        s.write_input(b"\r");
-    }
-    ctx.bus.emit(EventEnvelope::new(
-        id,
-        "session.attention_cleared",
-        json!({ "reason": "user_answered_via_api" }),
-    ));
+    submit_answer(&ctx, id, req.choice_index, req.submit)
+        .await
+        .map_err(|_| ApiError::NotFound(format!("session {id}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1293,6 +1444,36 @@ fn answer_input(choice_index: u32) -> Vec<u8> {
     }
     input.push(b'\r');
     input
+}
+
+pub async fn submit_answer(
+    ctx: &Ctx,
+    id: SessionId,
+    choice_index: u32,
+    submit: bool,
+) -> Result<(), TextInputError> {
+    if choice_index > 8 {
+        return Err(TextInputError { session_id: id });
+    }
+    let input = answer_input(choice_index);
+    {
+        let sessions = ctx.sessions.lock();
+        let session = sessions.get(&id).ok_or(TextInputError { session_id: id })?;
+        // AskPanel handles arrows plus Enter rather than number shortcuts.
+        session.write_input(&input);
+    }
+    if submit {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sessions = ctx.sessions.lock();
+        let session = sessions.get(&id).ok_or(TextInputError { session_id: id })?;
+        session.write_input(b"\r");
+    }
+    ctx.bus.emit(EventEnvelope::new(
+        id,
+        "session.attention_cleared",
+        json!({ "reason": "user_answered_via_api" }),
+    ));
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1308,13 +1489,17 @@ async fn post_plan_response(
     Json(req): Json<PlanResponseReq>,
 ) -> Result<StatusCode, ApiError> {
     let _ = req.plan_id;
+    submit_plan_response(&ctx, id, req.accept)
+        .map_err(|_| ApiError::NotFound(format!("session {id}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub fn submit_plan_response(ctx: &Ctx, id: SessionId, accept: bool) -> Result<(), TextInputError> {
     // accept=true → '1'（接受计划）, accept=false → '2'（拒绝/继续规划）
     // codebuddy ExitPlanMode 后弹出的选择题，标准按键为数字 1/2
-    let digit: u8 = if req.accept { b'1' } else { b'2' };
+    let digit: u8 = if accept { b'1' } else { b'2' };
     let g = ctx.sessions.lock();
-    let s = g
-        .get(&id)
-        .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
+    let s = g.get(&id).ok_or(TextInputError { session_id: id })?;
     s.write_input(&[digit]);
     drop(g);
     ctx.bus.emit(EventEnvelope::new(
@@ -1322,7 +1507,7 @@ async fn post_plan_response(
         "session.attention_cleared",
         json!({ "reason": "plan_responded_via_api" }),
     ));
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1387,20 +1572,29 @@ async fn post_mode(
     Path(id): Path<SessionId>,
     Json(req): Json<ModeReq>,
 ) -> Result<Json<ModeResp>, ApiError> {
-    let target = PermissionMode::from_str(&req.mode)
+    PermissionMode::from_str(&req.mode)
         .ok_or_else(|| ApiError::BadRequest(format!("invalid mode: {}", req.mode)))?;
+    let (mode, cycles) = set_session_permission_mode(&ctx, id, &req.mode)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(ModeResp { mode, cycles }))
+}
+
+pub async fn set_session_permission_mode(
+    ctx: &Ctx,
+    id: SessionId,
+    mode: &str,
+) -> Result<(String, u32), String> {
+    let target = PermissionMode::from_str(mode).ok_or_else(|| format!("invalid mode: {mode}"))?;
     const SHIFT_TAB: &[u8] = b"\x1b[Z";
 
     {
         let g = ctx.sessions.lock();
         let s = g
             .get(&id)
-            .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
+            .ok_or_else(|| format!("session {id} not found"))?;
         if detect_mode(&s.screen_text()) == Some(target) {
-            return Ok(Json(ModeResp {
-                mode: target.as_str().to_string(),
-                cycles: 0,
-            }));
+            return Ok((target.as_str().to_string(), 0));
         }
     }
 
@@ -1409,7 +1603,7 @@ async fn post_mode(
             let g = ctx.sessions.lock();
             let s = g
                 .get(&id)
-                .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
+                .ok_or_else(|| format!("session {id} not found"))?;
             s.write_input(SHIFT_TAB);
         }
         tokio::time::sleep(Duration::from_millis(180)).await;
@@ -1417,7 +1611,7 @@ async fn post_mode(
             let g = ctx.sessions.lock();
             let s = g
                 .get(&id)
-                .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
+                .ok_or_else(|| format!("session {id} not found"))?;
             detect_mode(&s.screen_text())
         };
         if cur == Some(target) {
@@ -1426,17 +1620,14 @@ async fn post_mode(
                 "session.mode_changed",
                 json!({ "mode": target.as_str() }),
             ));
-            return Ok(Json(ModeResp {
-                mode: target.as_str().to_string(),
-                cycles: cycle,
-            }));
+            return Ok((target.as_str().to_string(), cycle));
         }
     }
 
-    Err(ApiError::Internal(format!(
+    Err(format!(
         "could not reach mode {} after 5 cycles; CLI bundle layout may have changed",
         target.as_str()
-    )))
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1741,257 +1932,21 @@ async fn list_sessions_history(
     if !cwd.is_absolute() {
         return Err(ApiError::BadRequest("cwd must be absolute".into()));
     }
-    let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(&q.backend_key)
+    let profile = kode_core::session::backend::profile_for_key(&q.backend_key)
         .ok_or_else(|| ApiError::BadRequest(format!("unsupported backend: {}", q.backend_key)))?;
-    let mut sessions = Vec::new();
-    if matches!(backend, kode_core::session::jsonl_tail::Backend::Codex) {
-        if let Some(home) = dirs::home_dir() {
-            collect_codex_session_summaries(
-                &home.join(".codex").join("sessions"),
-                &cwd,
-                &mut sessions,
-            );
-        }
-    } else {
-        let probe = backend.session_path(&cwd, "__probe__").ok_or_else(|| {
-            ApiError::BadRequest(format!("unsupported backend: {}", q.backend_key))
-        })?;
-        let Some(projects_dir) = probe.parent().map(|p| p.to_path_buf()) else {
-            return Ok(Json(json!({ "sessions": [] })));
-        };
-        if !projects_dir.is_dir() {
-            return Ok(Json(json!({ "sessions": [] })));
-        }
-
-        let entries = std::fs::read_dir(&projects_dir)
-            .map_err(|e| ApiError::Internal(format!("read_dir: {e}")))?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(session_id) = path.file_stem().and_then(|s| s.to_str()).map(String::from)
-            else {
-                continue;
-            };
-            if session_id.is_empty() {
-                continue;
-            }
-            let (title, model, total_tokens) = extract_session_meta(&path);
-            sessions.push(SessionSummary {
-                session_id,
-                title,
-                model,
-                total_tokens,
-                last_modified_secs: modified_secs(&path),
-            });
-        }
-    }
+    let mut sessions: Vec<SessionSummary> = profile
+        .list_sessions(&cwd)
+        .into_iter()
+        .map(|s| SessionSummary {
+            session_id: s.session_id,
+            title: s.title,
+            model: s.model,
+            total_tokens: s.total_tokens,
+            last_modified_secs: s.last_modified_secs,
+        })
+        .collect();
     sessions.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
     Ok(Json(json!({ "sessions": sessions })))
-}
-
-fn collect_codex_session_summaries(dir: &FsPath, cwd: &FsPath, sessions: &mut Vec<SessionSummary>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if meta.is_dir() {
-            collect_codex_session_summaries(&path, cwd, sessions);
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some((session_id, session_cwd)) = codex_session_meta(&path) else {
-            continue;
-        };
-        if session_cwd != cwd {
-            continue;
-        }
-        let (title, model, total_tokens) = extract_session_meta(&path);
-        sessions.push(SessionSummary {
-            session_id,
-            title,
-            model,
-            total_tokens,
-            last_modified_secs: modified_secs(&path),
-        });
-    }
-}
-
-fn modified_secs(path: &FsPath) -> u64 {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn codex_session_meta(path: &FsPath) -> Option<(String, PathBuf)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines().take(8) {
-        let v: Value = serde_json::from_str(line).ok()?;
-        if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
-            continue;
-        }
-        let payload = v.get("payload")?;
-        let sid = payload
-            .get("session_id")
-            .or_else(|| payload.get("id"))
-            .and_then(|v| v.as_str())?;
-        let cwd = payload.get("cwd").and_then(|v| v.as_str())?;
-        return Some((sid.to_string(), PathBuf::from(cwd)));
-    }
-    None
-}
-
-fn extract_session_meta(path: &FsPath) -> (Option<String>, Option<String>, Option<u64>) {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return (None, None, None),
-    };
-    let reader = std::io::BufReader::new(file);
-    let mut title = None;
-    let mut model = None;
-    let mut total_tokens = 0_u64;
-    let mut saw_tokens = false;
-    for line in reader.lines().map_while(Result::ok) {
-        if let Some(t) = extract_title_from_line(&line) {
-            title = Some(t);
-        } else if title.is_none() {
-            title = extract_user_title_from_line(&line).or_else(|| extract_codex_user_title(&line));
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if let Some(pd) = v.get("providerData") {
-                if let Some(m) = pd
-                    .get("requestModelId")
-                    .or_else(|| pd.get("requestModelName"))
-                    .or_else(|| pd.get("model"))
-                    .and_then(|v| v.as_str())
-                {
-                    // 复用 kode-core 的 sanitize，避免脏值被原样塞进 `--model` argv。
-                    model = Some(kode_core::model_alias::sanitize_model_name(m));
-                }
-                if let Some(t) = pd
-                    .get("usage")
-                    .and_then(|u| u.get("totalTokens"))
-                    .and_then(|v| v.as_u64())
-                {
-                    total_tokens = t;
-                    saw_tokens = true;
-                }
-            } else if v.get("type").and_then(|t| t.as_str()) == Some("turn_context") {
-                if let Some(m) = v
-                    .get("payload")
-                    .and_then(|p| p.get("model"))
-                    .and_then(|v| v.as_str())
-                {
-                    model = Some(kode_core::model_alias::sanitize_model_name(m));
-                }
-            } else if let Some(t) = v
-                .get("payload")
-                .filter(|_| v.get("type").and_then(|t| t.as_str()) == Some("event_msg"))
-                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("token_count"))
-                .and_then(|p| p.get("info"))
-                .and_then(|i| {
-                    i.get("last_token_usage")
-                        .or_else(|| i.get("total_token_usage"))
-                })
-                .and_then(|u| u.get("total_tokens"))
-                .and_then(|v| v.as_u64())
-            {
-                total_tokens = t;
-                saw_tokens = true;
-            }
-        }
-    }
-    (title, model, saw_tokens.then_some(total_tokens))
-}
-
-fn extract_codex_user_title(line: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    let payload = v.get("payload")?;
-    if v.get("type").and_then(|t| t.as_str()) != Some("response_item")
-        || payload.get("type").and_then(|t| t.as_str()) != Some("message")
-        || payload.get("role").and_then(|r| r.as_str()) != Some("user")
-    {
-        return None;
-    }
-    let text = json_content_to_text(payload.get("content")?)?;
-    let trimmed = text.trim();
-    if trimmed.is_empty()
-        || trimmed.starts_with('/')
-        || trimmed.starts_with("C-b")
-        || is_codex_title_noise(trimmed)
-    {
-        return None;
-    }
-    Some(trimmed.chars().take(60).collect())
-}
-
-fn is_codex_title_noise(s: &str) -> bool {
-    s.starts_with("# AGENTS.md instructions")
-        || s.starts_with("<environment_context>")
-        || s.starts_with("<kode-memory>")
-        || s.starts_with("<permissions instructions>")
-        || s.starts_with("<collaboration_mode>")
-        || s.starts_with("<skills_instructions>")
-}
-
-fn extract_title_from_line(line: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    if v.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
-        v.get("aiTitle").and_then(|t| t.as_str()).map(String::from)
-    } else {
-        None
-    }
-}
-
-fn extract_user_title_from_line(line: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    let role_is_user = v.get("role").and_then(|r| r.as_str()) == Some("user")
-        || v.get("type").and_then(|t| t.as_str()) == Some("user");
-    if !role_is_user {
-        return None;
-    }
-    let text = json_content_to_text(
-        v.get("content")
-            .or_else(|| v.get("message").and_then(|m| m.get("content")))?,
-    )?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with("C-b") {
-        return None;
-    }
-    Some(trimmed.chars().take(60).collect())
-}
-
-fn json_content_to_text(v: &Value) -> Option<String> {
-    if let Some(s) = v.as_str() {
-        return Some(s.to_string());
-    }
-    if let Some(arr) = v.as_array() {
-        let text = arr
-            .iter()
-            .filter_map(|item| {
-                item.get("text")
-                    .or_else(|| item.get("input_text"))
-                    .or_else(|| item.get("output_text"))
-                    .or_else(|| item.get("content"))
-                    .and_then(|x| x.as_str())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !text.trim().is_empty() {
-            return Some(text);
-        }
-    }
-    None
 }
 
 #[derive(Deserialize)]

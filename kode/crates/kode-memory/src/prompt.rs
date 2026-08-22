@@ -92,8 +92,9 @@ pub fn build(cwd: &Path, backend_key: &str) -> String {
         .to_string()
 }
 
-/// kode-memory prompt 当前只支持的 LLM agent backend 列表。
-/// 加新 backend 时改这里 + `Backend::from_backend_key`(jsonl_tail)+ 三处一致即可。
+/// kode-memory prompt 模板适用的 LLM agent backend。
+/// CLI 是否注入 `--append-system-prompt` 由 `BackendProfile::supports_append_system_prompt`
+/// 决定;这里只控制 prompt 文本本身(Codex SessionStart hook 仍会复用本模板)。
 fn is_supported_backend(backend_key: &str) -> bool {
     matches!(
         backend_key,

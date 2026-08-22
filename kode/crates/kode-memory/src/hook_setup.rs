@@ -709,6 +709,81 @@ pub fn build_codex_hook_command() -> String {
     format!("{bin} codex-hook")
 }
 
+/// Cursor Agent `~/.cursor/hooks.json` 路径。
+pub fn cursor_hooks_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".cursor").join("hooks.json"))
+}
+
+/// Cursor hook command:`<kode-memory> cursor-hook <event>`。
+pub fn build_cursor_hook_command(event: &str) -> String {
+    let bin = resolve_named_binary(HOOK_BINARY_NAME)
+        .map(|p| shell_quote(&p.display().to_string()))
+        .unwrap_or_else(|| HOOK_BINARY_NAME.to_string());
+    format!("{bin} cursor-hook {event}")
+}
+
+/// 注入 Cursor Agent user hooks(幂等)。Cursor 的 hooks.json 是
+/// `{ version: 1, hooks: { event: [{ command }] } }`,和 codebuddy 的嵌套
+/// `hooks: [{ hooks: [{ command }] }]` 不同。
+pub fn inject_cursor_hooks(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {} failed: {e}", parent.display()))?;
+        }
+    }
+
+    let mut doc: serde_json::Value = if path.exists() {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("read {} failed: {e}", path.display()))?;
+        if bytes.is_empty() {
+            serde_json::json!({ "version": 1 })
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({ "version": 1 }))
+        }
+    } else {
+        serde_json::json!({ "version": 1 })
+    };
+
+    if doc.get("version").is_none() {
+        doc["version"] = serde_json::json!(1);
+    }
+
+    let hooks_obj = doc
+        .as_object_mut()
+        .ok_or("hooks.json root must be a JSON object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("hooks must be a JSON object")?;
+
+    for event in ["sessionStart", "afterAgentResponse", "stop"] {
+        let command = build_cursor_hook_command(event);
+        let arr = hooks_obj
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("hooks.{event} must be an array"))?;
+        let entry = serde_json::json!({
+            "command": command,
+        });
+        if let Some(existing) = arr.iter_mut().find(|e| is_kode_cursor_entry(e)) {
+            *existing = entry;
+        } else {
+            arr.push(entry);
+        }
+    }
+
+    write_json_atomic(path, &doc)
+}
+
+fn is_kode_cursor_entry(entry: &serde_json::Value) -> bool {
+    entry
+        .get("command")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("cursor-hook"))
+}
+
 fn raw_hook_relay_command() -> String {
     // shell 展开 $KODE_HOOK_SOCK:有值时连接 relay,无值时 nc 立刻失败 exit 0。
     "cat | nc -U -w 1 \"$KODE_HOOK_SOCK\" 2>/dev/null; exit 0".to_string()
@@ -1133,5 +1208,39 @@ mod tests {
         // 对齐 GUI memory_mcp.rs 原有的 which_finds_sh 测试。
         let sh = super::resolve_named_binary("sh");
         assert!(sh.is_some(), "sh should be resolvable on PATH");
+    }
+
+    #[test]
+    fn inject_cursor_hooks_creates_command_entries_and_preserves_user_hooks() {
+        let initial = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "sessionStart": [{ "command": "user-start" }]
+            }
+        });
+        let tmp = write_tmp(&initial.to_string());
+        inject_cursor_hooks(tmp.path()).unwrap();
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(doc["version"], 1);
+        let start = doc["hooks"]["sessionStart"].as_array().unwrap();
+        assert!(start.iter().any(|e| e["command"] == "user-start"));
+        assert!(start.iter().any(|e| e["command"]
+            .as_str()
+            .is_some_and(|s| s.contains("cursor-hook"))));
+        assert!(doc["hooks"]["afterAgentResponse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["command"]
+                .as_str()
+                .is_some_and(|s| s.contains("cursor-hook"))));
+        assert!(doc["hooks"]["stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["command"]
+                .as_str()
+                .is_some_and(|s| s.contains("cursor-hook"))));
     }
 }

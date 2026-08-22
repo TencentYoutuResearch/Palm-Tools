@@ -1,25 +1,17 @@
 //! 按 CLI + model 聚合本地 token 历史。
 //!
-//! 数据直接读各 CLI 的 JSONL/rollout，不依赖当前 kode tab：
-//! - CodeBuddy: `~/.codebuddy/projects/**/*.jsonl`
-//! - Claude: `~/.claude/projects/**/*.jsonl`
-//! - Codex: `~/.codex/sessions/**/rollout-*.jsonl`
-//!
-//! CodeBuddy / Claude 的 usage 是每次请求值，直接累加；Codex 的
-//! `total_token_usage` 是 session 累计值，必须先做相邻事件增量再归属到当前 model。
+//! 扫描哪些目录、怎么解析 usage,由 `kode_core::session::backend::BackendProfile`
+//! 决定。GUI 这里只做缓存、时间窗过滤和聚合。
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone};
+use kode_core::session::backend::{self, UsageBucket, UsageEvent};
 use serde::Serialize;
-use serde_json::Value;
-
-const MAX_JSONL_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HISTORY_FILES: usize = 50_000;
 const DAILY_HISTORY_DAYS: i64 = 84;
 
@@ -57,23 +49,6 @@ pub struct ModelUsageSnapshot {
 pub struct ModelUsageDay {
     pub date: String,
     pub total_tokens: u64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct UsageBucket {
-    input: u64,
-    output: u64,
-    cached: u64,
-    total: u64,
-    requests: u64,
-}
-
-#[derive(Debug, Clone)]
-struct UsageEvent {
-    backend: String,
-    model: String,
-    timestamp_ms: Option<i64>,
-    usage: UsageBucket,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,35 +140,37 @@ fn collect_snapshot(period: &str) -> Result<ModelUsageSnapshot, String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let sources = [
-        ("codebuddy", home.join(".codebuddy/projects")),
-        ("claude", home.join(".claude/projects")),
-        ("codex", home.join(".codex/sessions")),
-    ];
+    for profile in backend::all_profiles() {
+        for root in profile.usage_roots(&home) {
+            let mut files = Vec::new();
+            collect_jsonl_files(&root, 0, &mut files);
+            for path in files {
+                if considered_files >= MAX_HISTORY_FILES {
+                    break;
+                }
+                if !profile.usage_file_matches(&path) {
+                    continue;
+                }
+                considered_files += 1;
+                seen_paths.insert(path.clone());
 
-    for (backend, root) in sources {
-        let mut files = Vec::new();
-        collect_jsonl_files(&root, 0, &mut files);
-        for path in files {
+                let Some(fingerprint) = file_fingerprint(&path) else {
+                    continue;
+                };
+                if !file_can_overlap(fingerprint, file_since_ms) {
+                    continue;
+                }
+                scanned_files += 1;
+
+                refresh_history_file(&mut history, &path, *profile, fingerprint);
+                if let Some(cached) = history.files.get(&path) {
+                    for event in &cached.events {
+                        aggregate_event(event, since_ms, history_since_ms, &mut usage, &mut daily);
+                    }
+                }
+            }
             if considered_files >= MAX_HISTORY_FILES {
                 break;
-            }
-            considered_files += 1;
-            seen_paths.insert(path.clone());
-
-            let Some(fingerprint) = file_fingerprint(&path) else {
-                continue;
-            };
-            if !file_can_overlap(fingerprint, file_since_ms) {
-                continue;
-            }
-            scanned_files += 1;
-
-            refresh_history_file(&mut history, &path, backend, fingerprint);
-            if let Some(cached) = history.files.get(&path) {
-                for event in &cached.events {
-                    aggregate_event(event, since_ms, history_since_ms, &mut usage, &mut daily);
-                }
             }
         }
         if considered_files >= MAX_HISTORY_FILES {
@@ -256,18 +233,13 @@ fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     })
 }
 
-#[derive(Clone, Copy)]
-enum RequestFormat {
-    CodeBuddy,
-    Claude,
-}
-
 fn refresh_history_file(
     history: &mut HistoryCache,
     path: &Path,
-    backend: &str,
+    profile: &dyn backend::BackendProfile,
     fingerprint: FileFingerprint,
 ) -> bool {
+    let backend = profile.usage_key();
     let unchanged = history
         .files
         .get(path)
@@ -276,7 +248,7 @@ fn refresh_history_file(
         return false;
     }
 
-    let events = parse_history_file(path, backend, fingerprint.modified_ms());
+    let events = profile.parse_usage_file(path, fingerprint.modified_ms());
     history.files.insert(
         path.to_path_buf(),
         CachedHistoryFile {
@@ -286,253 +258,6 @@ fn refresh_history_file(
         },
     );
     true
-}
-
-fn parse_history_file(path: &Path, backend: &str, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
-    match backend {
-        "codebuddy" => request_file_events(path, backend, fallback_ms, RequestFormat::CodeBuddy),
-        "claude" => request_file_events(path, backend, fallback_ms, RequestFormat::Claude),
-        "codex" => codex_file_events(path, fallback_ms),
-        _ => Vec::new(),
-    }
-}
-
-fn request_file_events(
-    path: &Path,
-    backend: &str,
-    fallback_ms: Option<i64>,
-    format: RequestFormat,
-) -> Vec<UsageEvent> {
-    let mut events = Vec::new();
-    for_each_json_line(path, |value| {
-        let request = match format {
-            RequestFormat::CodeBuddy => parse_codebuddy_request(value),
-            RequestFormat::Claude => parse_claude_request(value),
-        };
-        if let Some((model, bucket)) = request {
-            events.push(UsageEvent {
-                backend: backend.to_string(),
-                model,
-                timestamp_ms: event_timestamp_ms(value).or(fallback_ms),
-                usage: bucket,
-            });
-        }
-    });
-    events
-}
-
-fn parse_codebuddy_request(value: &Value) -> Option<(String, UsageBucket)> {
-    let provider = value.get("providerData")?;
-    let raw_model = provider
-        .get("requestModelId")
-        .or_else(|| provider.get("model"))?
-        .as_str()?;
-    let model = clean_model(raw_model);
-    if model.is_empty() {
-        return None;
-    }
-    let usage = provider.get("usage")?;
-    let input = number(usage, "inputTokens");
-    let output = number(usage, "outputTokens");
-    let total = number(usage, "totalTokens").max(input.saturating_add(output));
-    if total == 0 {
-        return None;
-    }
-    let cached = usage
-        .get("inputTokensDetails")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .map(|item| number(item, "cached_tokens"))
-        .unwrap_or(0);
-    Some((
-        model,
-        UsageBucket {
-            input,
-            output,
-            cached,
-            total,
-            requests: 1,
-        },
-    ))
-}
-
-fn parse_claude_request(value: &Value) -> Option<(String, UsageBucket)> {
-    if value.get("type").and_then(Value::as_str) != Some("assistant") {
-        return None;
-    }
-    let message = value.get("message")?;
-    let model = clean_model(message.get("model")?.as_str()?);
-    if model.is_empty() {
-        return None;
-    }
-    let usage = message.get("usage")?;
-    let fresh_input = number(usage, "input_tokens");
-    let cache_write = number(usage, "cache_creation_input_tokens");
-    let cached = number(usage, "cache_read_input_tokens");
-    let input = fresh_input
-        .saturating_add(cache_write)
-        .saturating_add(cached);
-    let output = number(usage, "output_tokens");
-    let total = input.saturating_add(output);
-    if total == 0 {
-        return None;
-    }
-    Some((
-        model,
-        UsageBucket {
-            input,
-            output,
-            cached,
-            total,
-            requests: 1,
-        },
-    ))
-}
-
-fn codex_file_events(path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
-    let mut events = Vec::new();
-    let mut model = String::from("unknown");
-    let mut previous = UsageBucket::default();
-
-    for_each_json_line(path, |value| {
-        let entry_type = value.get("type").and_then(Value::as_str);
-        let payload = value.get("payload").unwrap_or(&Value::Null);
-        if entry_type == Some("turn_context") {
-            if let Some(raw) = payload.get("model").and_then(Value::as_str) {
-                let next = clean_model(raw);
-                if !next.is_empty() {
-                    model = next;
-                }
-            }
-            return;
-        }
-        if entry_type != Some("event_msg")
-            || payload.get("type").and_then(Value::as_str) != Some("token_count")
-        {
-            return;
-        }
-        let Some(info) = payload.get("info") else {
-            return;
-        };
-        let (current, cumulative) = if let Some(total) = info.get("total_token_usage") {
-            (codex_usage(total), true)
-        } else if let Some(last) = info.get("last_token_usage") {
-            (codex_usage(last), false)
-        } else {
-            return;
-        };
-        let delta = if cumulative {
-            let delta = usage_delta(&current, &previous);
-            previous = current;
-            delta
-        } else {
-            current
-        };
-        if delta.total > 0 {
-            events.push(UsageEvent {
-                backend: "codex".to_string(),
-                model: model.clone(),
-                timestamp_ms: event_timestamp_ms(value).or(fallback_ms),
-                usage: UsageBucket {
-                    requests: 1,
-                    ..delta
-                },
-            });
-        }
-    });
-    events
-}
-
-fn codex_usage(value: &Value) -> UsageBucket {
-    let input = number(value, "input_tokens");
-    let output = number(value, "output_tokens");
-    let cached = number(value, "cached_input_tokens");
-    let total = number(value, "total_tokens").max(input.saturating_add(output));
-    UsageBucket {
-        input,
-        output,
-        cached,
-        total,
-        requests: 0,
-    }
-}
-
-fn usage_delta(current: &UsageBucket, previous: &UsageBucket) -> UsageBucket {
-    fn delta(current: u64, previous: u64) -> u64 {
-        if current >= previous {
-            current - previous
-        } else {
-            current
-        }
-    }
-    UsageBucket {
-        input: delta(current.input, previous.input),
-        output: delta(current.output, previous.output),
-        cached: delta(current.cached, previous.cached),
-        total: delta(current.total, previous.total),
-        requests: 0,
-    }
-}
-
-fn for_each_json_line(path: &Path, mut visit: impl FnMut(&Value)) {
-    let Ok(file) = File::open(path) else {
-        return;
-    };
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let Ok(read) = reader.read_line(&mut line) else {
-            break;
-        };
-        if read == 0 {
-            break;
-        }
-        if read > MAX_JSONL_LINE_BYTES {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(&line) {
-            visit(&value);
-        }
-    }
-}
-
-fn event_timestamp_ms(value: &Value) -> Option<i64> {
-    let raw = value
-        .get("timestamp")
-        .or_else(|| value.get("created_at"))
-        .or_else(|| value.get("createdAt"))?;
-    if let Some(number) = raw.as_i64() {
-        return Some(if number.abs() < 100_000_000_000 {
-            number * 1_000
-        } else {
-            number
-        });
-    }
-    let text = raw.as_str()?.trim();
-    if let Ok(number) = text.parse::<i64>() {
-        return Some(if number.abs() < 100_000_000_000 {
-            number * 1_000
-        } else {
-            number
-        });
-    }
-    chrono::DateTime::parse_from_rfc3339(text)
-        .ok()
-        .map(|value| value.timestamp_millis())
-}
-
-fn clean_model(model: &str) -> String {
-    kode_core::model_alias::sanitize_model_name(model)
-        .trim()
-        .to_string()
-}
-
-fn number(value: &Value, key: &str) -> u64 {
-    value
-        .get(key)
-        .and_then(|raw| raw.as_u64().or_else(|| raw.as_str()?.parse().ok()))
-        .unwrap_or(0)
 }
 
 fn aggregate_event(
@@ -645,75 +370,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codebuddy_request_is_grouped_by_model() {
-        let value = serde_json::json!({
-            "type": "message",
-            "providerData": {
-                "requestModelId": "claude-opus-4.7",
-                "usage": {
-                    "totalTokens": 120,
-                    "inputTokens": 100,
-                    "outputTokens": 20,
-                    "inputTokensDetails": [{"cached_tokens": 40}]
-                }
-            }
-        });
-        let (model, usage) = parse_codebuddy_request(&value).unwrap();
-        assert_eq!(model, "claude-opus-4.7");
-        assert_eq!(
-            (usage.input, usage.output, usage.cached, usage.total),
-            (100, 20, 40, 120)
-        );
-    }
-
-    #[test]
-    fn claude_cache_write_and_read_are_input() {
-        let value = serde_json::json!({
-            "type": "assistant",
-            "message": {"model": "claude-sonnet-4", "usage": {
-                "input_tokens": 10,
-                "cache_creation_input_tokens": 30,
-                "cache_read_input_tokens": 50,
-                "output_tokens": 20
-            }}
-        });
-        let (_, usage) = parse_claude_request(&value).unwrap();
-        assert_eq!(
-            (usage.input, usage.output, usage.cached, usage.total),
-            (90, 20, 50, 110)
-        );
-    }
-
-    #[test]
-    fn codex_cumulative_usage_uses_delta() {
-        let previous = UsageBucket {
-            input: 100,
-            output: 20,
-            cached: 40,
-            total: 120,
-            requests: 0,
-        };
-        let current = UsageBucket {
-            input: 160,
-            output: 35,
-            cached: 70,
-            total: 195,
-            requests: 0,
-        };
-        let delta = usage_delta(&current, &previous);
-        assert_eq!(
-            (delta.input, delta.output, delta.cached, delta.total),
-            (60, 15, 30, 75)
-        );
-    }
-
-    #[test]
-    fn parses_rfc3339_event_timestamp() {
-        let value = serde_json::json!({"timestamp": "2026-01-01T00:00:00Z"});
-        assert_eq!(event_timestamp_ms(&value), Some(1_767_225_600_000));
-    }
-
-    #[test]
     fn snapshot_always_contains_twelve_weeks_of_days() {
         let snapshot = finish_snapshot("today", 0, UsageMap::new(), DailyMap::new());
         assert_eq!(snapshot.daily.len(), DAILY_HISTORY_DAYS as usize);
@@ -741,17 +397,18 @@ mod tests {
 
         let mut history = HistoryCache::default();
         let first_fingerprint = file_fingerprint(&path).unwrap();
+        let profile = backend::profile_for_key("codebuddy").unwrap();
         assert!(refresh_history_file(
             &mut history,
             &path,
-            "codebuddy",
+            profile,
             first_fingerprint
         ));
         assert_eq!(history.files[&path].events.len(), 1);
         assert!(!refresh_history_file(
             &mut history,
             &path,
-            "codebuddy",
+            profile,
             first_fingerprint
         ));
 
@@ -761,7 +418,7 @@ mod tests {
         assert!(refresh_history_file(
             &mut history,
             &path,
-            "codebuddy",
+            profile,
             second_fingerprint
         ));
         assert_eq!(history.files[&path].events.len(), 2);

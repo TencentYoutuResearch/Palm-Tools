@@ -14,6 +14,7 @@
 pub mod budget;
 pub mod codebuddy_hook;
 pub mod codex_hook;
+pub mod cursor_hook;
 pub mod fact;
 pub mod git_sync;
 pub mod hook_setup;

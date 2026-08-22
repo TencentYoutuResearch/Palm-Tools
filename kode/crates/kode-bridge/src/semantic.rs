@@ -42,6 +42,19 @@ pub fn spawn(
     session_id: String,
     bus: Arc<BridgeBus>,
 ) {
+    if backend == Backend::Cursor {
+        let Some(path) = kode_core::session::cursor_tail::cursor_transcript_path(&cwd, &session_id)
+        else {
+            tracing::debug!(?cwd, %session_id, "no cursor transcript path; semantic tail not spawned");
+            return;
+        };
+        tokio::spawn(async move {
+            if let Err(e) = run(id, backend, path, bus).await {
+                tracing::debug!(error = %e, "cursor semantic tail exited");
+            }
+        });
+        return;
+    }
     // 优先 cwd 推算路径;文件不存在时全局扫描(处理 resume 时 cwd 被 override 的情况)
     let path = match kode_core::session::jsonl_tail::resolve_session_path(
         backend,
@@ -118,6 +131,7 @@ pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvel
         Backend::Codebuddy => parse_codebuddy(id, line),
         Backend::Claude => parse_claude(id, line),
         Backend::Codex => parse_codex(id, line),
+        Backend::Cursor => parse_cursor(id, line),
     }
 }
 
@@ -172,6 +186,7 @@ fn parse_codebuddy_message(id: SessionId, v: &Value) -> Vec<EventEnvelope> {
             "role": role,
             "text": cap_text(trimmed, 16 * 1024),
             "tool_calls": Vec::<Value>::new(),
+            "timestamp_ms": source_timestamp_ms(v),
         }),
     )];
     // 不基于 `status=="completed"` emit turn_finished:codebuddy jsonl 里每条
@@ -433,7 +448,12 @@ struct ClMessage {
 }
 
 fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
-    let entry: ClEntry = match serde_json::from_str(line) {
+    let raw: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let timestamp_ms = source_timestamp_ms(&raw);
+    let entry: ClEntry = match serde_json::from_value(raw) {
         Ok(v) => v,
         Err(_) => return vec![],
     };
@@ -639,6 +659,7 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
             "role": role,
             "text": cap_text(&merged, 16 * 1024),
             "tool_calls": tool_call_ids,
+            "timestamp_ms": timestamp_ms,
         });
         // 把 message 放在 tool_use 之前,符合 jsonl 时序(text 先于工具调用结果)
         let env = EventEnvelope::new(id, "message", payload.take());
@@ -699,6 +720,7 @@ fn parse_codex_response_item(id: SessionId, v: &Value) -> Vec<EventEnvelope> {
             "role": role,
             "text": cap_text(trimmed, 16 * 1024),
             "tool_calls": Vec::<Value>::new(),
+            "timestamp_ms": source_timestamp_ms(v),
         }),
     )]
 }
@@ -735,6 +757,88 @@ fn is_codex_control_message(role: &str, s: &str) -> bool {
             || s.starts_with("<collaboration_mode>")
             || s.starts_with("<skills_instructions>")
             || s.starts_with("● DeferExecuteTool("))
+}
+
+// ============================================================================
+// cursor
+// ============================================================================
+
+fn parse_cursor(id: SessionId, line: &str) -> Vec<EventEnvelope> {
+    let v: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    if v.get("type").and_then(Value::as_str) == Some("turn_ended") {
+        let status = match v.get("status").and_then(Value::as_str) {
+            Some("success") => "completed",
+            Some("cancelled") => "cancelled",
+            _ => "failed",
+        };
+        return vec![turn_finished_event(id, status, None, None, None)];
+    }
+
+    let role = v.get("role").and_then(Value::as_str).unwrap_or("");
+    if !matches!(role, "user" | "assistant" | "system") {
+        return Vec::new();
+    }
+    let Some(content) = v.get("message").and_then(|message| message.get("content")) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    if let Some(text) = content_to_text(content) {
+        let text = if role == "user" {
+            cursor_user_query(&text)
+        } else {
+            text.trim().to_string()
+        };
+        if !text.is_empty() {
+            events.push(EventEnvelope::new(
+                id,
+                "message",
+                json!({
+                    "id": format!("{}-{}-{}", id, role, fnv_hash(&text)),
+                    "role": role,
+                    "text": cap_text(&text, 16 * 1024),
+                    "tool_calls": Vec::<Value>::new(),
+                    "timestamp_ms": source_timestamp_ms(&v),
+                }),
+            ));
+        }
+    }
+    if let Some(items) = content.as_array() {
+        for (index, item) in items.iter().enumerate() {
+            if item.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let tool = item.get("name").and_then(Value::as_str).unwrap_or("?");
+            let input = item.get("input").cloned().unwrap_or(Value::Null);
+            events.push(EventEnvelope::new(
+                id,
+                "tool_use",
+                json!({
+                    "id": format!("cursor-{}-{}-{}", id, fnv_hash(line), index),
+                    "tool": tool,
+                    "input_summary": summarize_tool_input(tool, &input),
+                    "output_preview": Value::Null,
+                    "status": "running",
+                }),
+            ));
+        }
+    }
+    events
+}
+
+fn cursor_user_query(text: &str) -> String {
+    if let Some(start) = text.find("<user_query>") {
+        let rest = &text[start + "<user_query>".len()..];
+        return rest
+            .split("</user_query>")
+            .next()
+            .unwrap_or(rest)
+            .trim()
+            .to_string();
+    }
+    text.trim().to_string()
 }
 
 // ============================================================================
@@ -784,6 +888,37 @@ fn content_to_text(v: &Value) -> Option<String> {
     None
 }
 
+/// Read the message's own timestamp from a backend transcript record.
+///
+/// `EventEnvelope.ts` intentionally remains the bridge ingestion time because
+/// it is also the `/history?from=` cursor. Reusing it in the UI makes a replayed
+/// session look as if every historical message arrived at the replay minute.
+/// Backends currently use either unix milliseconds (CodeBuddy) or RFC 3339
+/// strings (Claude/Codex). Cursor transcripts do not contain a reliable time,
+/// so callers receive `None` and the mobile UI omits the label.
+fn source_timestamp_ms(v: &Value) -> Option<i64> {
+    let raw = ["timestamp", "created_at", "createdAt", "ts"]
+        .iter()
+        .find_map(|key| v.get(*key))?;
+
+    match raw {
+        Value::Number(number) => {
+            let value = number.as_i64()?;
+            // Accept unix seconds defensively, while preserving the millisecond
+            // values emitted by CodeBuddy.
+            Some(if value.abs() < 100_000_000_000 {
+                value.saturating_mul(1000)
+            } else {
+                value
+            })
+        }
+        Value::String(value) => chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|timestamp| timestamp.timestamp_millis()),
+        _ => None,
+    }
+}
+
 /// 简单 FNV-1a 32-bit,用于事件 id 去重(不需要密码学强度)
 pub(crate) fn fnv_hash(s: &str) -> u32 {
     let mut h: u32 = 0x811c9dc5;
@@ -822,17 +957,26 @@ pub(crate) fn summarize_tool_input(tool: &str, input: &Value) -> String {
     let s = match (tool, input) {
         ("Read", v) => format!(
             "Read {}",
-            v.get("file_path").and_then(|x| x.as_str()).unwrap_or("?")
+            v.get("file_path")
+                .or_else(|| v.get("path"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("?")
         ),
         ("Write", v) => format!(
             "Write {}",
-            v.get("file_path").and_then(|x| x.as_str()).unwrap_or("?")
+            v.get("file_path")
+                .or_else(|| v.get("path"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("?")
         ),
-        ("Edit", v) => format!(
+        ("Edit" | "StrReplace", v) => format!(
             "Edit {}",
-            v.get("file_path").and_then(|x| x.as_str()).unwrap_or("?")
+            v.get("file_path")
+                .or_else(|| v.get("path"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("?")
         ),
-        ("Bash", v) => format!(
+        ("Bash" | "Shell", v) => format!(
             "$ {}",
             v.get("command").and_then(|x| x.as_str()).unwrap_or("?")
         ),
@@ -875,12 +1019,13 @@ mod tests {
 
     #[test]
     fn codebuddy_user_message_string_content() {
-        let line = r#"{"type":"message","role":"user","content":"please refactor"}"#;
+        let line = r#"{"type":"message","role":"user","content":"please refactor","timestamp":1787294626109}"#;
         let evs = parse_line(1, Backend::Codebuddy, line);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].r#type, "message");
         assert_eq!(evs[0].payload["role"], "user");
         assert_eq!(evs[0].payload["text"], "please refactor");
+        assert_eq!(evs[0].payload["timestamp_ms"], 1_787_294_626_109_i64);
     }
 
     #[test]
@@ -967,11 +1112,12 @@ mod tests {
 
     #[test]
     fn claude_user_string_content_emits_message() {
-        let line = r#"{"type":"user","message":{"role":"user","content":"hi there"}}"#;
+        let line = r#"{"type":"user","timestamp":"2026-07-22T09:14:00.649Z","message":{"role":"user","content":"hi there"}}"#;
         let evs = parse_line(2, Backend::Claude, line);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].payload["role"], "user");
         assert_eq!(evs[0].payload["text"], "hi there");
+        assert_eq!(evs[0].payload["timestamp_ms"], 1_784_711_640_649_i64);
     }
 
     #[test]
@@ -1198,12 +1344,13 @@ mod tests {
 
     #[test]
     fn codex_response_item_user_message_emits_message() {
-        let line = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为什么 mobile 详情没有消息"}]}}"#;
+        let line = r#"{"timestamp":"2026-08-19T10:53:04.194Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为什么 mobile 详情没有消息"}]}}"#;
         let evs = parse_line(17, Backend::Codex, line);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].r#type, "message");
         assert_eq!(evs[0].payload["role"], "user");
         assert_eq!(evs[0].payload["text"], "为什么 mobile 详情没有消息");
+        assert_eq!(evs[0].payload["timestamp_ms"], 1_787_136_784_194_i64);
     }
 
     #[test]
@@ -1214,6 +1361,40 @@ mod tests {
         assert_eq!(evs[0].r#type, "message");
         assert_eq!(evs[0].payload["role"], "assistant");
         assert_eq!(evs[0].payload["text"], "我会检查 bridge semantic parser。");
+    }
+
+    #[test]
+    fn cursor_user_message_extracts_user_query_wrapper() {
+        let line = r#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wed</timestamp>\n<user_query>\n同步这个内容\n</user_query>"}]}}"#;
+        let events = parse_line(20, Backend::Cursor, line);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].r#type, "message");
+        assert_eq!(events[0].payload["role"], "user");
+        assert_eq!(events[0].payload["text"], "同步这个内容");
+        assert!(events[0].payload["timestamp_ms"].is_null());
+    }
+
+    #[test]
+    fn cursor_assistant_message_and_tool_are_semantic_events() {
+        let line = r#"{"role":"assistant","message":{"content":[{"type":"text","text":"我来检查"},{"type":"tool_use","name":"Read","input":{"path":"/tmp/a.rs"}}]}}"#;
+        let events = parse_line(21, Backend::Cursor, line);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].r#type, "message");
+        assert_eq!(events[0].payload["text"], "我来检查");
+        assert_eq!(events[1].r#type, "tool_use");
+        assert_eq!(events[1].payload["input_summary"], "Read /tmp/a.rs");
+    }
+
+    #[test]
+    fn cursor_turn_ended_emits_turn_finished() {
+        let events = parse_line(
+            22,
+            Backend::Cursor,
+            r#"{"type":"turn_ended","status":"success"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].r#type, "session.turn_finished");
+        assert_eq!(events[0].payload["status"], "completed");
     }
 
     #[test]

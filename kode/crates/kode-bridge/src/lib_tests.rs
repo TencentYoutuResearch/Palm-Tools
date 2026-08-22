@@ -2,6 +2,43 @@ use std::path::PathBuf;
 
 use super::*;
 
+#[test]
+fn bridge_history_coalesces_meta_without_evicting_messages() {
+    let bus = BridgeBus::new();
+    let mut live = bus.subscribe();
+    bus.emit(EventEnvelope::new(
+        7,
+        "message",
+        json!({"id":"m1","role":"assistant","text":"kept"}),
+    ));
+    bus.emit(EventEnvelope::new(
+        7,
+        "meta",
+        json!({"model":"gpt-5.6-sol","tokens":1,"title":"analysis"}),
+    ));
+    // Coalescing is history-only. Live consumers still receive the original
+    // message/meta events rather than a synthesized snapshot.
+    assert_eq!(live.try_recv().unwrap().r#type, "message");
+    assert_eq!(live.try_recv().unwrap().payload["tokens"], 1);
+
+    for tokens in 2..=1200 {
+        bus.emit(EventEnvelope::new(
+            7,
+            "meta",
+            json!({"model":null,"tokens":tokens,"title":null}),
+        ));
+    }
+
+    let history = bus.history_for(7, 0, 1000);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].r#type, "message");
+    assert_eq!(history[0].payload["text"], "kept");
+    assert_eq!(history[1].r#type, "meta");
+    assert_eq!(history[1].payload["model"], "gpt-5.6-sol");
+    assert_eq!(history[1].payload["title"], "analysis");
+    assert_eq!(history[1].payload["tokens"], 1200);
+}
+
 fn config_with_fake_codebuddy() -> Config {
     let mut config = Config::default();
     let backend = config
@@ -20,6 +57,107 @@ fn config_with_fake_codebuddy() -> Config {
 fn answer_input_selects_and_confirms_the_choice() {
     assert_eq!(answer_input(0), b"\r");
     assert_eq!(answer_input(3), b"\x1b[B\x1b[B\x1b[B\r");
+}
+
+#[test]
+fn mobile_text_input_strips_only_trailing_line_endings() {
+    assert_eq!(text_input_body("hello\n"), "hello");
+    assert_eq!(text_input_body("hello\r\n"), "hello");
+    assert_eq!(text_input_body("first\nsecond\n"), "first\nsecond");
+    assert_eq!(text_input_body("\n"), "");
+    assert_eq!(text_input_body("plain text"), "plain text");
+}
+
+#[tokio::test]
+async fn mobile_text_input_submits_with_a_separate_carriage_return() {
+    use std::collections::HashMap;
+
+    let root = std::env::temp_dir().join(format!(
+        "kode-bridge-mobile-input-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let captured = root.join("input.bin");
+
+    let mut backends = HashMap::new();
+    backends.insert(
+        "capture".to_string(),
+        BackendConfig {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "stty raw -echo; dd bs=1 count=6 of='{}' 2>/dev/null",
+                    captured.display()
+                ),
+            ],
+            default_model: None,
+            model_flag: None,
+            permission_mode_flag: None,
+            mcp_setup: None,
+            enabled: None,
+        },
+    );
+    let ctx = build_test_ctx(
+        Config {
+            default_backend: "capture".to_string(),
+            backends,
+            ui: kode_core::config::UiConfig::default(),
+        },
+        "test-mobile-input".to_string(),
+    );
+    let session = create_session(
+        axum::Extension(Arc::clone(&ctx)),
+        axum::Json(CreateSessionReq {
+            backend_key: "capture".to_string(),
+            cwd: Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            cols: Some(80),
+            rows: Some(24),
+            permission_mode: None,
+            model: None,
+            resume_session_uuid: None,
+            memory_context: None,
+            extra_args: None,
+            prompt: None,
+            headless: false,
+            term_theme: None,
+        }),
+    )
+    .await
+    .expect("capture session should start");
+
+    // Give the child enough time to switch the slave PTY into raw mode.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let status = post_input(
+        axum::Extension(Arc::clone(&ctx)),
+        axum::extract::Path(session.id),
+        axum::Json(InputReq {
+            text: Some("hello\n".to_string()),
+            bytes_b64: None,
+        }),
+    )
+    .await
+    .expect("mobile text input should be accepted");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let mut bytes = Vec::new();
+    for _ in 0..50 {
+        if let Ok(found) = std::fs::read(&captured) {
+            if found.len() >= 6 {
+                bytes = found;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(bytes, b"hello\r");
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -227,6 +365,7 @@ async fn create_session_emits_session_created_on_bus() {
         extra_args: None,
         prompt: Some("test specops prompt".to_string()),
         headless: false,
+        term_theme: None,
     };
 
     let response = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
@@ -272,6 +411,7 @@ async fn focus_session_emits_focus_requested_on_bus() {
         extra_args: None,
         prompt: Some("test focus prompt".to_string()),
         headless: false,
+        term_theme: None,
     };
     let response = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
         .await
@@ -386,13 +526,25 @@ mod build_session_env_tests {
         // 模拟 hook_relay_socket 已设
         let mut ctx = (*ctx).clone();
         ctx.hook_relay_socket = Some(std::path::PathBuf::from("/tmp/test-hook.sock"));
-        let env = build_session_env(&ctx, 42);
+        let env = build_session_env(&ctx, 42, None);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"KODE_HOOK_SOCK"), "missing KODE_HOOK_SOCK");
         assert!(keys.contains(&"KODE_SESSION_ID"), "missing KODE_SESSION_ID");
         assert!(
             keys.contains(&"KODE_MEMORY_ROOT"),
             "missing KODE_MEMORY_ROOT"
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "TERM_THEME")
+                .map(|(_, v)| v.as_str()),
+            Some("dark")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "COLORFGBG")
+                .map(|(_, v)| v.as_str()),
+            Some("15;0")
         );
         let sock = env.iter().find(|(k, _)| k == "KODE_HOOK_SOCK").unwrap();
         assert_eq!(sock.1, "/tmp/test-hook.sock");
@@ -405,7 +557,7 @@ mod build_session_env_tests {
         let config = Config::default();
         let ctx = build_test_ctx(config, "tok".into());
         // hook_relay_socket = None(build_test_ctx 默认)
-        let env = build_session_env(&ctx, 7);
+        let env = build_session_env(&ctx, 7, Some("light"));
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(
             !keys.contains(&"KODE_HOOK_SOCK"),
@@ -415,5 +567,17 @@ mod build_session_env_tests {
         assert!(keys.contains(&"KODE_MEMORY_ROOT"));
         let sid = env.iter().find(|(k, _)| k == "KODE_SESSION_ID").unwrap();
         assert_eq!(sid.1, "7");
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "TERM_THEME")
+                .map(|(_, v)| v.as_str()),
+            Some("light")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "COLORFGBG")
+                .map(|(_, v)| v.as_str()),
+            Some("0;15")
+        );
     }
 }
