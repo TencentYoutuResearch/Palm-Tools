@@ -285,6 +285,8 @@
   let renameInputEl: HTMLInputElement | null = $state(null)
   /** dnd 进行中 —— 禁用 ⋯ 按钮 hover 显形,避免拖拽途中误触 */
   let dragging = $state(false)
+  /** workspace 分组拖拽已真正开始;仅此时显示 header 前方的拖动提示。 */
+  let workspaceDragging = $state(false)
   /** workspace header 同时是折叠按钮和拖拽 handle;拖拽后的 click 不能再触发折叠。 */
   let suppressNextWorkspaceHeaderClick = $state(false)
   /**
@@ -359,14 +361,6 @@
     const first = group.tabs[0]
     return !!(group as any).isDndShadowItem && !!first && collapsedCwds.has(wsGroupKey(first))
   }
-
-  /** 全局序号(按 $tabs 顺序),用于 tab 角标 / tooltip / Cmd+1..9。 */
-  const wsGlobalIdx = $derived.by(() => {
-    const m = new Map<number, number>()
-    let i = 0
-    for (const t of $tabs) m.set(t.id, i++)
-    return m
-  })
 
   /** 每个 workspace 的 dnd 影子数组;非拖拽时由 $effect 从 wsGroups 同步。 */
   let groupShadows = $state<Record<string, TabInfo[]>>({})
@@ -712,6 +706,7 @@
   function onWsDndConsider(e: CustomEvent<DndEvent>) {
     if (e.target !== e.currentTarget) return
     dragging = true
+    workspaceDragging = true
     suppressNextWorkspaceHeaderClick = true
     menuOpenId = null
     wsShadows = [...(e.detail.items as WsGroup[])]
@@ -731,6 +726,7 @@
       finalGroups.some((g) => !origIds.has(g.id))
     ) {
       dragging = false
+      workspaceDragging = false
       wsShadows = [...wsGroups]
       clearWorkspaceHeaderClickSuppression()
       return
@@ -743,6 +739,7 @@
     }
     reorderTabs(nextOrder)
     dragging = false
+    workspaceDragging = false
     clearWorkspaceHeaderClickSuppression()
   }
 
@@ -815,8 +812,8 @@
   /** restore banner */
   let restorable: PersistedTab[] = $state([])
   /** 侧栏显示模式 — Cmd+B 三态循环 full → compact → hidden → full
-   *  - full:260px 完整 tab 卡片(title / chips / ctx 进度条)
-   *  - compact:52px 窄条,只显示序号 + status dot + unread/attention 标记
+   *  - full:232px 会话账本(title / live state / model / token usage)
+   *  - compact:52px 窄条,只显示模型缩写 + status dot + unread/attention 标记
    *    完整 title / model 通过 .tab 的 title 属性(native tooltip)悬停揭示
    *  - hidden:完全隐藏(0 列),主区占满
    *  Cmd+B 仍然在 hidden 下工作(svelte:window onkeydown 不依赖 sidebar 渲染),
@@ -1141,15 +1138,23 @@
   } {
     // 已退出最优先
     if (t.exited != null || t.status === 'exited') {
-      return { cls: 'exited', text: t.exited != null ? `exited ${t.exited}` : 'exited' }
+      return {
+        cls: 'exited',
+        text: t.exited != null
+          ? tr('tab.status.exitedCode', { code: t.exited })
+          : tr('tab.status.exited'),
+      }
     }
     // 等待用户操作覆盖 idle/busy(语义上"需要你");business 颜色用 attention
     if (t.attention) {
-      return { cls: 'attention', text: t.attention === 'plan' ? 'plan' : 'awaiting answer' }
+      return {
+        cls: 'attention',
+        text: t.attention === 'plan' ? tr('tab.status.plan') : tr('tab.status.awaiting'),
+      }
     }
-    if (t.status === 'busy') return { cls: 'busy', text: 'running' }
-    if (t.status === 'starting') return { cls: 'starting', text: 'starting' }
-    return { cls: 'idle', text: 'idle' }
+    if (t.status === 'busy') return { cls: 'busy', text: tr('tab.status.running') }
+    if (t.status === 'starting') return { cls: 'starting', text: tr('tab.status.starting') }
+    return { cls: 'idle', text: tr('tab.status.idle') }
   }
 
   function avatarStatusForTabStatus(status: ReturnType<typeof statusLabel>['cls']): AvatarStatus {
@@ -1504,8 +1509,9 @@
   })
 </script>
 
-{#snippet tabRow(t: TabInfo, i: number)}
-  {@const avatarStatus = avatarStatusForTabStatus(statusLabel(t).cls)}
+{#snippet tabRow(t: TabInfo)}
+  {@const sessionStatus = statusLabel(t)}
+  {@const avatarStatus = avatarStatusForTabStatus(sessionStatus.cls)}
   {@const bc = backendChip(t.backendKey)}
   {@const customAvatar = t.avatarId != null}
   <div
@@ -1519,7 +1525,8 @@
     role="button"
     tabindex="0"
     aria-current={t.id === $activeId ? 'true' : undefined}
-    title={`${i + 1}. ${t.title} · ${shortModelName(t.model)}`}
+    aria-label={`${t.title}, ${sessionStatus.text}, ${shortModelName(t.model)}`}
+    title={`${t.title} · ${shortModelName(t.model)}`}
     onclick={() => { selectTab(t.id); if (menuOpenId !== null) closeMenu() }}
     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectTab(t.id) } }}
     oncontextmenu={(e) => onTabContext(e, t.id)}
@@ -1555,7 +1562,7 @@
           <Icon name="pencil" size={10} />
         </button>
         {#if sidebarMode === 'compact'}
-          <span class="tile-idx" title={`#${i + 1}`}>{modelAbbr(t.model)}</span>
+          <span class="tile-idx" title={t.model}>{modelAbbr(t.model)}</span>
           {#if t.attention === 'ask'}
             <span class="tile-badge attention-ask" title={tr('tab.attention.ask')}>?</span>
           {:else if t.attention === 'plan'}
@@ -1571,7 +1578,6 @@
          icon 的通知 badge。tab 高度因此可以从 58px 压缩到 52px。 -->
     <div class="tab-body">
       <div class="tab-title-row">
-        <span class="tab-index">{i + 1}.</span>
         {#if editingId === t.id}
           <input
             class="tab-title-input"
@@ -1687,6 +1693,7 @@
   <aside class="sidebar" class:compact={sidebarMode === 'compact'}>
     <!-- 系统原生红绿灯(titleBarStyle: Overlay)落在这条顶栏左上角;整条 drag region。
          我们不再自绘按钮,只用 padding-left 给原生红绿灯让出位置(见 .sidebar-traffic)。 -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="sidebar-traffic" data-tauri-drag-region onmousedown={onTitlebarMouseDown}>
       <div class="brand-text">
         <span class="brand-name">Kill la Code</span>
@@ -1744,7 +1751,9 @@
                   onclick={(e) => onWorkspaceHeaderClick(e, group.id)}
                   use:dragHandle
                 >
-                  <span class="ws-grip" aria-hidden="true"><Icon name="grip-vertical" size={14} /></span>
+                  {#if workspaceDragging}
+                    <span class="ws-grip" aria-hidden="true"><Icon name="grip-vertical" size={14} /></span>
+                  {/if}
                   <span class="ws-chevron">
                     <Icon name={isWsGroupCollapsed(group) ? 'chevron-right' : 'chevron-down'} size={12} />
                   </span>
@@ -1775,8 +1784,7 @@
                   onfinalize={onDndFinalize}
                 >
                   {#each (groupShadows[group.id] ?? group.tabs) as t (t.id)}
-                    {@const i = wsGlobalIdx.get(t.id) ?? 0}
-                    {@render tabRow(t, i)}
+                    {@render tabRow(t)}
                   {/each}
                 </div>
               {/if}
@@ -1790,10 +1798,12 @@
   <main class="main" class:drag-over={dragOver} ondragover={onMainDragOver} ondragleave={onMainDragLeave}>
     <!-- 拖拽中覆盖终端区:捕获 drop 事件,防止 xterm.js 消费 -->
     {#if dragOver}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="drag-overlay" ondragover={(e) => e.preventDefault()} ondrop={onOverlayDrop} ondragleave={() => { dragOver = false }}></div>
     {/if}
     <!-- 浮在终端区顶部的单条标题栏(与左侧红绿灯条同高 44px,同一水平线):
          hidden 时左侧补红绿灯 + 新建;中间居中蓝色标题/副标题;右侧 inspector 开关。 -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <header class="main-titlebar" class:sidebar-hidden={sidebarMode === 'hidden'} data-tauri-drag-region onmousedown={onTitlebarMouseDown}>
       {#if sidebarMode === 'hidden'}
         <!-- hidden 模式下 sidebar 收起,系统原生红绿灯落在这条 titlebar 左上角;
@@ -2251,7 +2261,7 @@
   .root {
     position: relative;
     display: grid;
-    grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr) var(--inspector-w, 0px);
+    grid-template-columns: var(--sidebar-w, 232px) minmax(0, 1fr) var(--inspector-w, 0px);
     grid-template-rows: minmax(0, 1fr) 28px;
     height: 100vh;
     min-height: 0;
@@ -2569,7 +2579,11 @@
   .tab-list {
     flex: 1;
     overflow-y: auto;
-    padding: var(--sp-2);
+    padding: 6px 7px;
+    /* full 模式不常驻预留滚动槽：macOS“始终显示滚动条”会把 stable gutter
+       渲染成明显的右侧空带。内容溢出时继续使用全局可见滚动条。 */
+    scrollbar-gutter: auto;
+    scrollbar-width: thin;
   }
   .placeholder, .boot-error {
     padding: var(--sp-3);
@@ -2596,8 +2610,8 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 7px 8px 6px;
-    margin: 6px 0 2px;
+    padding: 6px 7px;
+    margin: 8px 1px 3px;
     border: 1px solid transparent;
     border-radius: var(--rad-md);
     background: transparent;
@@ -2687,7 +2701,11 @@
     line-height: 16px;
     text-align: center;
   }
-  .ws-group-tabs { display: flex; flex-direction: column; }
+  .ws-group-tabs {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
   /* compact 多 workspace 组间分隔线:1px 细线 + 左右 margin,不占横向空间。
      参考 VS Code activity bar / Slack sidebar 的组分隔风格。 */
   .ws-group-separator {
@@ -2700,15 +2718,19 @@
 
   /* ===== tab item ===== */
   .tab {
+    --tab-mask-base: color-mix(in srgb, var(--bg-elevated) 48%, var(--bg-sidebar));
     position: relative;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 8px;
-    margin: 2px 0;
+    gap: 6px;
+    min-height: 46px;
+    padding: 5px 6px;
+    margin: 0;
     border: 1px solid transparent;
-    border-radius: var(--rad-lg);
-    cursor: default !important;
+    border-radius: calc(var(--rad-md) + 2px);
+    background: var(--tab-mask-base);
+    cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
     transition: background var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
@@ -2718,13 +2740,14 @@
     padding-block: 5px;
   }
   .tab:hover {
-    background: var(--bg-tab-hover);
-    border-color: color-mix(in srgb, var(--bd-default) 76%, var(--fg-tertiary));
+    background: color-mix(in srgb, var(--bg-tab-hover) 82%, var(--bg-elevated));
+    border-color: color-mix(in srgb, var(--bd-default) 84%, transparent);
   }
   .tab.active {
-    background: var(--bg-tab-active);
-    border-color: color-mix(in srgb, var(--acc) 42%, var(--bd-default));
-    box-shadow: inset 2px 0 0 0 var(--acc), 0 8px 24px rgba(0, 0, 0, 0.10);
+    --tab-mask-base: color-mix(in srgb, var(--acc) 7%, var(--bg-elevated));
+    background: color-mix(in srgb, var(--acc) 7%, var(--bg-elevated));
+    border-color: color-mix(in srgb, var(--acc) 32%, var(--bd-default));
+    box-shadow: inset 3px 0 0 0 var(--acc);
   }
   .tab:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
   .tab-rail {
@@ -2800,24 +2823,23 @@
   .sidebar.compact .tab-list {
     padding: var(--sp-1) 4px;
   }
+  .sidebar.compact .ws-group-tabs { gap: 2px; }
   .sidebar.compact .tab {
     flex-direction: column;
     align-items: center;
     gap: 2px;
     padding: 4px 4px;
-    margin: 1px 2px;
+    margin: 0 2px;
     border-radius: var(--rad-lg);
     /* tile(44) + padding(8) = 52px。idx/badge 直接 overlay 在 tile 上,
        不额外占行。tab 之间只留 2px 间隙。 */
     height: 52px;
   }
   .sidebar.compact .tab.active {
-    /* 主动态:accent 内发光 + 微提升,取代细线 box-shadow */
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--acc) 55%, transparent),
-      0 0 0 1px color-mix(in srgb, var(--acc) 22%, transparent),
-      0 6px 18px rgba(0, 0, 0, 0.32);
-    background: color-mix(in srgb, var(--acc) 8%, transparent);
+    /* 与 full 会话 tab 共用同一层级:外层浅色选中面 + 单一边框。 */
+    border-color: color-mix(in srgb, var(--acc) 36%, var(--bd-default));
+    background: color-mix(in srgb, var(--acc) 8%, var(--bg-elevated));
+    box-shadow: none;
   }
   .sidebar.compact .tab-rail {
     width: 44px;
@@ -2826,8 +2848,8 @@
     gap: 0;
     padding-top: 0;
   }
-  /* tile 主体:非选中态完全透明,无框无背景,icon 自身就代表 tab。
-     只有 active 才有 accent ring + tinted halo。 */
+  /* tile 主体始终透明、无框；compact 的选中态只由外层 tab 表达，
+     避免 avatar 内外同时出现两层选中框。 */
   .sidebar.compact .avatar-wrap {
     width: 44px;
     height: 44px;
@@ -2836,18 +2858,6 @@
     background: transparent;
     border: 1px solid transparent;
     box-shadow: none;
-  }
-  /* active tab 的 tile:accent ring + tinted halo,让选中态清晰 */
-  .sidebar.compact .tab.active .avatar-wrap {
-    background:
-      radial-gradient(circle at 50% 35%,
-        color-mix(in srgb, var(--tab-tint) 36%, transparent) 0%,
-        color-mix(in srgb, var(--tab-tint) 18%, transparent) 60%,
-        transparent 100%);
-    border-color: color-mix(in srgb, var(--tab-tint) 45%, var(--acc));
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--acc) 28%, transparent),
-      0 2px 8px color-mix(in srgb, var(--tab-tint) 24%, transparent);
   }
   .sidebar.compact .avatar-edit-btn {
     width: 14px;
@@ -2930,7 +2940,7 @@
     box-shadow: 0 0 6px color-mix(in srgb, var(--acc) 60%, transparent);
   }
   /* status-dot:AvatarSprite 内部的 .fallback-status 在 compact 模式下
-     正常显示(idle/busy/exited)。但当 tile-badge 存在(attention/unread)时,
+     只显示 busy/attention/exited，idle 保持干净。但当 tile-badge 存在时，
      badge 已表达该状态,status-dot 冗余,用 :has() 隐藏避免重叠。
      :has() 在 Safari 15.4+ / Chrome 105+ 支持,Tauri WebView 都满足。 */
   .sidebar.compact .avatar-wrap :global(.fallback-status) {
@@ -2990,8 +3000,8 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    justify-content: center; /* rail avatar 固定 34px,内容行高可能略小,居中对齐 */
-    gap: 1px;
+    justify-content: center; /* 46px 整体行高内对齐 34px avatar 与两行信息 */
+    gap: 0;
   }
   /* close-btn 浮在 .tab-title-row 右侧(absolute),不再给 title-row 恒定 padding-right。
    * 标题可延伸到完整宽度,空间利用率最大化;hover/active 时 close-btn 淡入并遮住标题尾部
@@ -3000,19 +3010,9 @@
     display: flex;
     align-items: center;
     gap: var(--sp-1);
+    line-height: 1.25;
+    min-height: 16px;
   }
-  .tab-index {
-    flex-shrink: 0;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--fg-tertiary);
-    font-variant-numeric: tabular-nums;
-    line-height: 1.4;
-    user-select: none;
-    -webkit-user-select: none;
-    cursor: default;
-  }
-  .tab.active .tab-index { color: var(--acc); font-weight: var(--fw-med); }
   .tab-title {
     font-size: var(--fs-md);
     color: var(--fg-primary);
@@ -3032,28 +3032,6 @@
     flex-shrink: 0;
   }
 
-  .tab.needs-attention {
-    background: rgba(230, 180, 80, 0.10);
-    border-color: rgba(230, 180, 80, 0.42);
-    box-shadow: inset 2px 0 0 0 var(--st-warn);
-    animation: tab-attention-breath 1.6s ease-in-out infinite;
-  }
-  .tab.needs-attention.active {
-    animation: none;
-    background: rgba(230, 180, 80, 0.13);
-    border-color: rgba(230, 180, 80, 0.62);
-    box-shadow: inset 2px 0 0 0 var(--st-warn);
-  }
-  @keyframes tab-attention-breath {
-    0%, 100% {
-      background: rgba(230, 180, 80, 0.08);
-      box-shadow: inset 2px 0 0 0 var(--st-warn);
-    }
-    50% {
-      background: rgba(230, 180, 80, 0.16);
-      box-shadow: inset 2px 0 0 0 var(--st-warn), 0 0 0 2px rgba(230, 180, 80, 0.10);
-    }
-  }
   .attention-badge {
     flex-shrink: 0;
     width: 14px; height: 14px;
@@ -3071,28 +3049,6 @@
     0%, 100% { transform: scale(1);   box-shadow: 0 0 0 0 rgba(230, 180, 80, 0.58); }
     50%      { transform: scale(1.18); box-shadow: 0 0 0 5px rgba(230, 180, 80, 0); }
   }
-  .tab[data-attention="plan"] {
-    background: rgba(230, 180, 80, 0.10);
-    border-color: rgba(230, 180, 80, 0.42);
-    box-shadow: inset 2px 0 0 0 var(--st-busy);
-    animation: tab-attention-breath-plan 1.6s ease-in-out infinite;
-  }
-  .tab[data-attention="plan"].active {
-    animation: none;
-    background: rgba(230, 180, 80, 0.13);
-    border-color: rgba(230, 180, 80, 0.62);
-    box-shadow: inset 2px 0 0 0 var(--st-busy);
-  }
-  @keyframes tab-attention-breath-plan {
-    0%, 100% {
-      background: rgba(230, 180, 80, 0.08);
-      box-shadow: inset 2px 0 0 0 var(--st-busy);
-    }
-    50% {
-      background: rgba(230, 180, 80, 0.16);
-      box-shadow: inset 2px 0 0 0 var(--st-busy), 0 0 0 2px rgba(230, 180, 80, 0.10);
-    }
-  }
   .tab[data-attention="plan"] .attention-badge {
     animation: badge-pulse-plan 1.1s ease-in-out infinite;
   }
@@ -3100,10 +3056,8 @@
     0%, 100% { transform: scale(1);   box-shadow: 0 0 0 0 rgba(230, 180, 80, 0.58); }
     50%      { transform: scale(1.18); box-shadow: 0 0 0 5px rgba(230, 180, 80, 0); }
   }
-  /* 尊重用户偏好:Reduce Motion → 关动画,只保留高亮 */
+  /* 尊重用户偏好:Reduce Motion → 关闭角标动画。 */
   @media (prefers-reduced-motion: reduce) {
-    .tab.needs-attention,
-    .tab[data-attention="plan"],
     .attention-badge {
       animation: none;
     }
@@ -3113,7 +3067,8 @@
   .tab-meta {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
+    margin-top: 0;
     flex-wrap: nowrap;
     overflow: hidden;
   }
@@ -3132,7 +3087,14 @@
   .chip-codebuddy { background: rgba(159, 232, 112, 0.12); color: var(--acc); border-color: rgba(159, 232, 112, 0.25); }
   .chip-claude    { background: rgba(230, 180, 80, 0.12); color: var(--st-warn); border-color: rgba(230, 180, 80, 0.25); }
   .chip-other     { background: var(--bg-tab-hover); color: var(--fg-secondary); border-color: var(--bd-default); }
-  .chip-model     { background: var(--bg-tab-hover); color: var(--st-info); border-color: var(--bd-default); }
+  .chip-model {
+    background: color-mix(in srgb, var(--st-info) 7%, transparent);
+    color: color-mix(in srgb, var(--st-info) 82%, var(--fg-secondary));
+    border-color: transparent;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   /* 自定义 avatar 时只显示 backend icon(无文案),作为 chip 的轻量视觉锚点 */
   .chip-backend-icon {
     background: transparent;
@@ -3153,6 +3115,8 @@
     padding: 0 4px;
     border: none;
     font-variant-numeric: tabular-nums;
+    margin-left: auto;
+    flex-shrink: 0;
   }
   .exited-tag { color: var(--st-warn); margin-left: auto; font-size: var(--fs-xs); }
 
@@ -3175,19 +3139,19 @@
     right: 0;
     top: 0;
     bottom: 0;
-    width: 70px;
+    width: 60px;
     background: linear-gradient(
       to left,
-      var(--bg-sidebar) 0%,
-      color-mix(in srgb, var(--bg-sidebar) 94%, transparent) 48%,
-      color-mix(in srgb, var(--bg-sidebar) 58%, transparent) 78%,
+      var(--tab-mask-base) 0%,
+      color-mix(in srgb, var(--tab-mask-base) 94%, transparent) 48%,
+      color-mix(in srgb, var(--tab-mask-base) 58%, transparent) 78%,
       transparent 100%
     );
     opacity: 0;
     pointer-events: none;
     transition: opacity var(--t-fast);
     z-index: 2;
-    border-radius: 0 var(--rad-lg) var(--rad-lg) 0;
+    border-radius: 0 calc(var(--rad-md) + 2px) calc(var(--rad-md) + 2px) 0;
   }
   .tab:hover .close-mask {
     opacity: 1;
@@ -3906,5 +3870,15 @@
     color: var(--fg-primary);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  @media (forced-colors: active) {
+    .tab { border-color: ButtonBorder; }
+    .tab.active {
+      border-color: Highlight;
+      box-shadow: inset 3px 0 0 Highlight;
+    }
+    .sidebar.compact .tab.active { box-shadow: none; }
+    .tab:focus-visible { outline-color: Highlight; }
   }
 </style>

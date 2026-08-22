@@ -26,9 +26,11 @@
   } from './ipc'
   import Icon, { type IconName } from './Icon.svelte'
   import RelatedFactPicker from './RelatedFactPicker.svelte'
+  import SelectionCheckbox from './SelectionCheckbox.svelte'
   import { formatLocalDateTimeFull, formatLocalDateTimeShort } from './time'
   import { t } from './i18n'
   import { outsidePressClose } from './outside_close'
+  import { pushToast } from './toast'
 
   type Props = {
     onClose: () => void
@@ -47,7 +49,16 @@
   let loading = $state(true)
   /// 仅当**完全没有任何来源可用**(本地失败且没有远端)时才算 bootError。
   let bootError: string | null = $state(null)
-  let selectedId: string | null = $state(null)
+  /** 右侧详情当前聚焦项；包含来源，避免本地/远端出现相同 ULID 时选错。 */
+  let selectedKey: string | null = $state(null)
+  /** 批量审核勾选项；与详情聚焦互相独立。 */
+  let checkedKeys = $state<Set<string>>(new Set())
+  let batchConfirmMode: 'approve' | 'reject' | null = $state(null)
+  let bulkRejectReason = $state('')
+  let bulkRejectInputEl: HTMLInputElement | undefined = $state()
+  let batchProgress: { done: number; total: number } | null = $state(null)
+  let batchResult: { succeeded: number; failed: number } | null = $state(null)
+  let listScrollEl: HTMLDivElement | undefined = $state()
   let editing = $state(false)
   /** edit_then_approve 表单 — 仅当 editing 时使用,保留原始值便于撤回 */
   let editBody = $state('')
@@ -63,19 +74,27 @@
   let rejectMode: 'reject' | 'blacklist' | null = $state(null)
   let rejectReason = $state('')
   let rejectInputEl: HTMLInputElement | undefined = $state()
-  let toast: { kind: 'ok' | 'err'; msg: string } | null = $state(null)
-  let toastTimer: number | null = null
+  let refreshQueued = false
+
+  const checkedCount = $derived(checkedKeys.size)
+  const allChecked = $derived(pending.length > 0 && checkedKeys.size === pending.length)
+  const someChecked = $derived(checkedKeys.size > 0 && !allChecked)
 
   function showToast(kind: 'ok' | 'err', msg: string) {
-    toast = { kind, msg }
-    if (toastTimer != null) window.clearTimeout(toastTimer)
-    toastTimer = window.setTimeout(() => (toast = null), 2200)
+    pushToast({ severity: kind === 'ok' ? 'success' : 'error', title: msg })
   }
 
   function originLabel(o: MemoryOrigin | undefined): string {
     if (!o || o.kind === 'local') return t('memory.common.local')
     const ep = endpoints.find((e) => e.id === o.endpointId)
     return t('memory.common.remote', { name: ep?.display_name || o.endpointId })
+  }
+
+  function pendingKey(p: MemoryPending): string {
+    const origin = p.origin ?? { kind: 'local' }
+    return origin.kind === 'local'
+      ? `local:${p.id}`
+      : `remote:${origin.endpointId}:${p.id}`
   }
 
   /// 聚合拉取本地 + 所有已配置远端的 pending,失败隔离:单来源失败只挂局部错误。
@@ -130,8 +149,14 @@
     // 完全没有任何来源成功 → bootError(本地失败且远端也全挂 / 没远端)
     bootError = !anyOk && errs.length > 0 ? errs.map((e) => `${e.label}: ${e.detail}`).join('\n') : null
 
-    if (selectedId && !pending.find((p) => p.id === selectedId)) {
-      selectedId = null
+    const liveKeys = new Set(pending.map(pendingKey))
+    checkedKeys = new Set([...checkedKeys].filter((key) => liveKeys.has(key)))
+    if (checkedKeys.size === 0) {
+      batchConfirmMode = null
+      bulkRejectReason = ''
+    }
+    if (selectedKey && !liveKeys.has(selectedKey)) {
+      selectedKey = null
       editing = false
     }
     loading = false
@@ -149,9 +174,17 @@
     await refresh()
     // 后端 watcher 1.5s 一次,前端模态打开期间也订阅事件即时刷新(任一来源变化都整表重拉)
     unlistenPending = await memoryIpc.onPendingCount(async () => {
+      if (busy) {
+        refreshQueued = true
+        return
+      }
       await refresh()
     })
     unlistenRemotePending = await memoryIpc.onRemotePendingCount(async () => {
+      if (busy) {
+        refreshQueued = true
+        return
+      }
       await refresh()
     })
   })
@@ -159,12 +192,39 @@
   onDestroy(() => {
     unlistenPending?.()
     unlistenRemotePending?.()
-    if (toastTimer != null) window.clearTimeout(toastTimer)
   })
 
   function selected(): MemoryPending | null {
-    if (!selectedId) return null
-    return pending.find((p) => p.id === selectedId) ?? null
+    if (!selectedKey) return null
+    return pending.find((p) => pendingKey(p) === selectedKey) ?? null
+  }
+
+  function resetBatchDecision() {
+    batchConfirmMode = null
+    bulkRejectReason = ''
+    batchResult = null
+  }
+
+  function toggleChecked(p: MemoryPending, checked?: boolean) {
+    if (busy) return
+    const key = pendingKey(p)
+    const next = new Set(checkedKeys)
+    if (checked ?? !next.has(key)) next.add(key)
+    else next.delete(key)
+    checkedKeys = next
+    resetBatchDecision()
+  }
+
+  function toggleAllChecked(checked: boolean) {
+    if (busy) return
+    checkedKeys = checked ? new Set(pending.map(pendingKey)) : new Set()
+    resetBatchDecision()
+  }
+
+  function clearChecked() {
+    if (busy) return
+    checkedKeys = new Set()
+    resetBatchDecision()
   }
 
   function startEdit() {
@@ -185,18 +245,30 @@
     editContradicts = []
   }
 
+  function reviewPending(p: MemoryPending, verdict: MemoryVerdict) {
+    const origin = p.origin ?? { kind: 'local' }
+    return origin.kind === 'local'
+      ? memoryIpc.review(p.id, verdict)
+      : memoryIpc.reviewRemote(origin.endpointId, p.id, verdict)
+  }
+
+  async function flushQueuedRefresh() {
+    if (!refreshQueued) return
+    refreshQueued = false
+    await refresh()
+  }
+
   async function review(verdict: MemoryVerdict) {
     const s = selected()
     if (!s || busy) return
     busy = true
     try {
-      const origin = s.origin ?? { kind: 'local' }
-      const result = origin.kind === 'local'
-        ? await memoryIpc.review(s.id, verdict)
-        : await memoryIpc.reviewRemote(origin.endpointId, s.id, verdict)
+      const result = await reviewPending(s, verdict)
       // 乐观:从列表移除被审掉的条目
-      pending = pending.filter((p) => p.id !== s.id)
-      selectedId = null
+      const reviewedKey = pendingKey(s)
+      pending = pending.filter((p) => pendingKey(p) !== reviewedKey)
+      checkedKeys = new Set([...checkedKeys].filter((key) => key !== reviewedKey))
+      selectedKey = null
       editing = false
       const verb = result.outcome === 'approved' ? 'approved'
         : result.outcome === 'rejected' ? 'rejected' : 'blacklisted'
@@ -208,7 +280,87 @@
       showToast('err', String(e))
     } finally {
       busy = false
+      await flushQueuedRefresh()
     }
+  }
+
+  async function bulkReview(verdict: MemoryVerdict) {
+    if (busy || checkedKeys.size === 0) return
+    const targets = pending.filter((p) => checkedKeys.has(pendingKey(p)))
+    if (targets.length === 0) return
+
+    busy = true
+    editing = false
+    rejectMode = null
+    batchResult = null
+    batchProgress = { done: 0, total: targets.length }
+    const succeeded = new Set<string>()
+    const failures: string[] = []
+    try {
+      for (const [index, item] of targets.entries()) {
+        try {
+          await reviewPending(item, verdict)
+          succeeded.add(pendingKey(item))
+        } catch (error) {
+          failures.push(`${originLabel(item.origin)} · ${item.id}: ${String(error)}`)
+        }
+        batchProgress = { done: index + 1, total: targets.length }
+      }
+
+      pending = pending.filter((p) => !succeeded.has(pendingKey(p)))
+      checkedKeys = new Set([...checkedKeys].filter((key) => !succeeded.has(key)))
+      const selectedWasRemoved = selectedKey ? succeeded.has(selectedKey) : false
+      if (selectedWasRemoved) selectedKey = pending[0] ? pendingKey(pending[0]) : null
+      batchResult = { succeeded: succeeded.size, failed: failures.length }
+
+      if (failures.length > 0) {
+        showToast('err', t('memory.review.bulkPartial', {
+          succeeded: succeeded.size,
+          failed: failures.length,
+        }))
+        console.error('bulk memory review failures:', failures)
+      } else {
+        showToast('ok', verdict.kind === 'approve'
+          ? t('memory.review.bulkApproved', { count: succeeded.size })
+          : t('memory.review.bulkRejected', { count: succeeded.size }))
+      }
+    } finally {
+      batchProgress = null
+      busy = false
+      await flushQueuedRefresh()
+      requestAnimationFrame(() => {
+        listScrollEl?.querySelector<HTMLButtonElement>('.list-entry.checked .list-item, .list-item')?.focus()
+      })
+    }
+  }
+
+  function startBulkApprove() {
+    if (busy || checkedKeys.size === 0) return
+    batchConfirmMode = 'approve'
+    bulkRejectReason = ''
+    batchResult = null
+  }
+
+  function startBulkReject() {
+    if (busy || checkedKeys.size === 0) return
+    batchConfirmMode = 'reject'
+    bulkRejectReason = ''
+    batchResult = null
+    requestAnimationFrame(() => bulkRejectInputEl?.focus())
+  }
+
+  function cancelBatchDecision() {
+    batchConfirmMode = null
+    bulkRejectReason = ''
+  }
+
+  async function confirmBulkReview() {
+    if (!batchConfirmMode) return
+    const mode = batchConfirmMode
+    const reason = bulkRejectReason.trim() || 'rejected by user'
+    batchConfirmMode = null
+    bulkRejectReason = ''
+    await bulkReview(mode === 'approve' ? { kind: 'approve' } : { kind: 'reject', reason })
   }
 
   async function approve() { await review({ kind: 'approve' }) }
@@ -255,10 +407,12 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    // Esc 优先级:rejecting > editing > 关面板。
+    // Esc 优先级:批量确认 > 单条拒绝 > editing > 关面板。
     if (e.key === 'Escape') {
       e.preventDefault()
-      if (rejectMode) {
+      if (batchConfirmMode) {
+        cancelBatchDecision()
+      } else if (rejectMode) {
         cancelReject()
       } else if (editing) {
         cancelEdit()
@@ -267,20 +421,22 @@
       }
       return
     }
+    const target = e.target as HTMLElement | null
+    if (target?.closest('input, textarea, select, button, [contenteditable="true"]')) return
     // rejecting 状态下吞掉所有快捷键,焦点交给 reason input
-    if (rejectMode) return
+    if (rejectMode || batchConfirmMode) return
     // 列表导航
     if (!editing && pending.length > 0) {
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault()
-        const idx = pending.findIndex((p) => p.id === selectedId)
+        const idx = pending.findIndex((p) => pendingKey(p) === selectedKey)
         const next = pending[Math.min(pending.length - 1, idx + 1)] ?? pending[0]
-        selectedId = next.id
+        selectedKey = pendingKey(next)
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault()
-        const idx = pending.findIndex((p) => p.id === selectedId)
+        const idx = pending.findIndex((p) => pendingKey(p) === selectedKey)
         const prev = pending[Math.max(0, idx - 1)] ?? pending[0]
-        selectedId = prev.id
+        selectedKey = pendingKey(prev)
       } else if (e.key === 'Enter') {
         e.preventDefault()
         if (selected()) approve()
@@ -310,7 +466,7 @@
 <svelte:window onkeydown={onKey} />
 
 <div class="backdrop" use:outsidePressClose={{ onClose }} role="presentation">
-  <div class="panel" role="dialog" aria-label={t('memory.review.title')} tabindex="-1">
+  <div class="panel" role="dialog" aria-modal="true" aria-label={t('memory.review.title')} tabindex="-1">
     <header>
       <div class="title">
         <span class="status-dot"></span>
@@ -323,7 +479,7 @@
         {#if stats}
           <span class="root-path" title={stats.root}>{stats.root}</span>
         {/if}
-        <button class="x-btn" title={t('memory.common.close')} aria-label={t('memory.common.close')} onclick={onClose}>
+        <button type="button" class="x-btn" title={t('memory.common.close')} aria-label={t('memory.common.close')} onclick={onClose}>
           <Icon name="x" />
         </button>
       </div>
@@ -350,47 +506,184 @@
           <span>{t('memory.review.emptyDescription')}</span>
         </div>
       {:else}
-        <aside class="list" aria-label="Pending list">
-          {#if sourceErrors.length > 0}
-            {#each sourceErrors as se (se.label)}
-              <div class="src-error" title={se.detail}>
-                <Icon name="alert-triangle" /> {se.label} unavailable
+        <aside class="list" aria-label={t('memory.review.pendingList')} aria-busy={busy}>
+          <div class="list-toolbar">
+            <SelectionCheckbox
+              checked={allChecked}
+              indeterminate={someChecked}
+              disabled={busy}
+              label={t('memory.review.selectAllCount', { count: pending.length })}
+              ariaLabel={t('memory.review.selectAllCount', { count: pending.length })}
+              onChange={toggleAllChecked}
+            />
+            <span class="queue-hint" class:active={checkedCount > 0}>
+              {checkedCount > 0
+                ? t('memory.review.selectedCount', { count: checkedCount })
+                : t('memory.review.selectionHint')}
+            </span>
+          </div>
+
+          <div class="list-scroll" bind:this={listScrollEl}>
+            {#if sourceErrors.length > 0}
+              {#each sourceErrors as se (se.label)}
+                <div class="src-error" title={se.detail}>
+                  <Icon name="alert-triangle" /> {se.label} unavailable
+                </div>
+              {/each}
+            {/if}
+            {#each pending as p (pendingKey(p))}
+              <div
+                class="list-entry"
+                class:checked={checkedKeys.has(pendingKey(p))}
+                class:focused={pendingKey(p) === selectedKey}
+              >
+                <div class="item-check">
+                  <SelectionCheckbox
+                    checked={checkedKeys.has(pendingKey(p))}
+                    disabled={busy}
+                    ariaLabel={t('memory.review.toggleSelection')}
+                    title={t('memory.review.toggleSelection')}
+                    onChange={(checked) => toggleChecked(p, checked)}
+                  />
+                </div>
+                <button
+                  type="button"
+                  class="list-item"
+                  aria-current={pendingKey(p) === selectedKey ? 'true' : undefined}
+                  onclick={() => { selectedKey = pendingKey(p); editing = false }}
+                >
+                  <div class="li-row1">
+                    <span class="li-kind" title={p.kind}>
+                      <Icon name={kindIcon(p.kind)} />
+                      <span>{p.kind}</span>
+                    </span>
+                    <span class="li-author">{p.author}</span>
+                    <span
+                      class="li-origin"
+                      class:remote={(p.origin ?? { kind: 'local' }).kind === 'remote'}
+                      title={originLabel(p.origin)}
+                    >{originLabel(p.origin)}</span>
+                    <span class="li-date" title={formatLocalDateTimeFull(p.created)}>{formatLocalDateTimeShort(p.created)}</span>
+                  </div>
+                  <div class="li-body">{p.body}</div>
+                  <div class="li-row3">
+                    <span class="li-scope">{p.scope}</span>
+                    {#if p.subsystem}
+                      <span class="sub-chip">{p.subsystem}</span>
+                    {/if}
+                    {#each p.tags as tag}
+                      <span class="tag-chip">#{tag}</span>
+                    {/each}
+                    <span class="conf">conf {p.confidence.toFixed(2)}</span>
+                    <span class="energy" title="author remaining energy"><Icon name="zap" /> {p.author_energy.toFixed(1)}</span>
+                  </div>
+                </button>
               </div>
             {/each}
-          {/if}
-          {#each pending as p (p.id)}
-            <button
-              class="list-item"
-              class:selected={p.id === selectedId}
-              onclick={() => { selectedId = p.id; editing = false }}
-            >
-              <div class="li-row1">
-                <span class="kind-icon" title={p.kind}><Icon name={kindIcon(p.kind)} /></span>
-                <span class="li-author">{p.author}</span>
-                <span
-                  class="li-origin"
-                  class:remote={(p.origin ?? { kind: 'local' }).kind === 'remote'}
-                  title={originLabel(p.origin)}
-                >{originLabel(p.origin)}</span>
-                <span class="li-scope">{p.scope}</span>
-                <span class="li-date" title={formatLocalDateTimeFull(p.created)}>{formatLocalDateTimeShort(p.created)}</span>
-              </div>
-              <div class="li-body">{p.body}</div>
-              <div class="li-row3">
-                {#if p.subsystem}
-                  <span class="sub-chip">{p.subsystem}</span>
+          </div>
+
+          {#if checkedCount > 0 || batchResult}
+            <section class="selection-dock" aria-live="polite">
+              {#if checkedCount > 0}
+                <div class="dock-summary">
+                  <span class="selection-count">{checkedCount}</span>
+                  <div class="selection-copy">
+                    <strong>{t('memory.review.selectedCount', { count: checkedCount })}</strong>
+                    <span>{t('memory.review.selectionScope')}</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="dock-clear"
+                    disabled={busy}
+                    onclick={clearChecked}
+                  >
+                    <Icon name="x" size={12} /> {t('memory.review.clearSelection')}
+                  </button>
+                </div>
+
+                {#if batchProgress}
+                  <div class="batch-progress" role="status">
+                    <div class="progress-copy">
+                      <span>{t('memory.review.bulkProgress', { done: batchProgress.done, total: batchProgress.total })}</span>
+                      <span>{Math.round((batchProgress.done / batchProgress.total) * 100)}%</span>
+                    </div>
+                    <progress value={batchProgress.done} max={batchProgress.total}></progress>
+                  </div>
+                {:else if batchConfirmMode}
+                  <div class="batch-confirm" data-mode={batchConfirmMode}>
+                    <div class="confirm-copy">
+                      <strong>
+                        {batchConfirmMode === 'approve'
+                          ? t('memory.review.confirmBulkApprove', { count: checkedCount })
+                          : t('memory.review.confirmBulkReject', { count: checkedCount })}
+                      </strong>
+                      <span>
+                        {batchConfirmMode === 'approve'
+                          ? t('memory.review.bulkApproveConsequence')
+                          : t('memory.review.bulkRejectConsequence')}
+                      </span>
+                    </div>
+                    {#if batchConfirmMode === 'reject'}
+                      <label class="bulk-reason">
+                        <span>{t('memory.review.bulkRejectReason')}</span>
+                        <input
+                          bind:this={bulkRejectInputEl}
+                          bind:value={bulkRejectReason}
+                          placeholder={t('memory.review.bulkRejectPlaceholder')}
+                          spellcheck="false"
+                          onkeydown={(e) => {
+                            e.stopPropagation()
+                            if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); confirmBulkReview() }
+                            else if (e.key === 'Escape') { e.preventDefault(); cancelBatchDecision() }
+                          }}
+                        />
+                      </label>
+                    {/if}
+                    <div class="confirm-actions">
+                      <button type="button" class="dock-btn neutral" onclick={cancelBatchDecision}>
+                        {t('memory.common.cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        class="dock-btn"
+                        class:approve={batchConfirmMode === 'approve'}
+                        class:reject={batchConfirmMode === 'reject'}
+                        onclick={confirmBulkReview}
+                      >
+                        <Icon name={batchConfirmMode === 'approve' ? 'check' : 'x'} />
+                        {batchConfirmMode === 'approve'
+                          ? t('memory.review.confirmBulkApproveAction', { count: checkedCount })
+                          : t('memory.review.confirmBulkRejectAction', { count: checkedCount })}
+                      </button>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="dock-actions">
+                    <button type="button" class="dock-btn approve" disabled={busy} onclick={startBulkApprove}>
+                      <Icon name="check" /> {t('memory.review.bulkApprove')}
+                    </button>
+                    <button type="button" class="dock-btn reject" disabled={busy} onclick={startBulkReject}>
+                      <Icon name="x" /> {t('memory.review.bulkReject')}
+                    </button>
+                  </div>
                 {/if}
-                {#each p.tags as t}
-                  <span class="tag-chip">#{t}</span>
-                {/each}
-                <span class="conf">conf {p.confidence.toFixed(2)}</span>
-                <span class="energy" title="author remaining energy"><Icon name="zap" /> {p.author_energy.toFixed(1)}</span>
-              </div>
-              <div class="conf-bar">
-                <div class="conf-fill" style="width: {p.confidence * 100}%"></div>
-              </div>
-            </button>
-          {/each}
+              {/if}
+
+              {#if batchResult}
+                <div class="batch-result" class:error={batchResult.failed > 0} role={batchResult.failed > 0 ? 'alert' : 'status'}>
+                  <Icon name={batchResult.failed > 0 ? 'alert-triangle' : 'check'} />
+                  <span>
+                    {batchResult.failed > 0
+                      ? t('memory.review.bulkPartial', { succeeded: batchResult.succeeded, failed: batchResult.failed })
+                      : t('memory.review.bulkCompleted', { count: batchResult.succeeded })}
+                  </span>
+                  <button type="button" aria-label={t('memory.common.close')} onclick={() => (batchResult = null)}>
+                    <Icon name="x" size={12} />
+                  </button>
+                </div>
+              {/if}
+            </section>
+          {/if}
         </aside>
 
         <section class="detail">
@@ -428,7 +721,7 @@
             {#if editing}
               <div class="d-section">
                 <label>Body
-                  <textarea bind:value={editBody} rows="8"></textarea>
+                  <textarea class="resize-none" bind:value={editBody} rows="8"></textarea>
                 </label>
                 <label>Tags (comma-separated)
                   <input bind:value={editTagsStr} spellcheck="false"/>
@@ -476,7 +769,7 @@
                     bind:value={rejectReason}
                     placeholder={rejectMode === 'reject' ? 'why reject?' : 'why blacklist? (heavy penalty)'}
                     onkeydown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); confirmReject() }
+                      if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); confirmReject() }
                       else if (e.key === 'Escape') { e.preventDefault(); cancelReject() }
                     }}
                     spellcheck="false"
@@ -520,9 +813,6 @@
       {/if}
     </div>
 
-    {#if toast}
-      <div class="toast toast-{toast.kind}">{toast.msg}</div>
-    {/if}
   </div>
 </div>
 
@@ -599,12 +889,18 @@
     display: inline-flex; align-items: center; justify-content: center;
   }
   .x-btn:hover { background: var(--bg-tab-hover); color: var(--fg-primary); }
+  .x-btn:focus-visible,
+  .list-item:focus-visible,
+  .btn:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 2px;
+  }
 
   .body {
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 360px 1fr;
+    grid-template-columns: 400px 1fr;
     overflow: hidden;
   }
   .empty, .boot-error, .d-empty {
@@ -645,76 +941,342 @@
   /* ===== left list ===== */
   .list {
     border-right: 1px solid var(--bd-default);
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-sidebar);
+  }
+  .list-toolbar {
+    flex: 0 0 auto;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    padding: 6px 9px;
+    border-bottom: 1px solid var(--bd-default);
+    background: color-mix(in srgb, var(--bg-sidebar) 94%, var(--bg-elevated));
+  }
+  .queue-hint {
+    flex: 1 1 180px;
+    color: var(--fg-tertiary);
+    font-size: 10px;
+    line-height: 1.35;
+    text-align: right;
+  }
+  .queue-hint.active {
+    color: var(--acc);
+    font-family: var(--font-mono);
+  }
+  .list-scroll {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
-    padding: var(--sp-1);
+    display: grid;
+    grid-auto-rows: max-content;
+    align-content: start;
+    gap: 5px;
+    padding: 7px;
+    scrollbar-gutter: stable;
+  }
+  .selection-dock {
+    flex-shrink: 0;
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 8px 9px 9px;
+    border-top: 1px solid color-mix(in srgb, var(--acc) 28%, var(--bd-default));
+    background: color-mix(in srgb, var(--bg-elevated) 97%, var(--bg-sidebar));
+    box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.12);
+  }
+  .dock-summary {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+  }
+  .selection-count {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--acc) 38%, var(--bd-default));
+    border-radius: var(--rad-md);
+    background: var(--acc-soft);
+    color: var(--acc);
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    font-weight: var(--fw-semi);
+  }
+  .selection-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .selection-copy strong {
+    color: var(--fg-primary);
+    font-size: var(--fs-sm);
+    font-weight: var(--fw-semi);
+  }
+  .selection-copy span {
+    color: var(--fg-tertiary);
+    font-size: 10px;
+  }
+  .dock-clear {
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: var(--fg-tertiary);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .dock-clear:hover:not(:disabled) {
+    border-color: var(--bd-default);
+    background: var(--bg-hover);
+    color: var(--fg-primary);
+  }
+  .dock-actions,
+  .confirm-actions {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .dock-actions .dock-btn { flex: 1; }
+  .confirm-actions { justify-content: flex-end; }
+  .dock-btn {
+    min-height: 31px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 10px;
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-md);
+    background: var(--bg-hover);
+    color: var(--fg-primary);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-semi);
+    cursor: pointer;
+    transition: background var(--t-fast), border-color var(--t-fast), transform var(--t-fast);
+  }
+  .dock-btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .dock-btn:active:not(:disabled) { transform: translateY(0); }
+  .dock-btn:disabled,
+  .dock-clear:disabled { opacity: 0.48; cursor: not-allowed; }
+  .dock-btn.approve {
+    border-color: var(--st-ok);
+    background: var(--st-ok);
+    color: var(--fg-on-accent);
+  }
+  .dock-btn.reject {
+    border-color: color-mix(in srgb, var(--st-err) 55%, var(--bd-default));
+    background: color-mix(in srgb, var(--st-err) 9%, var(--bg-elevated));
+    color: var(--st-err);
+  }
+  .dock-btn.neutral { background: transparent; color: var(--fg-secondary); }
+  .batch-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 9px;
+    border: 1px solid color-mix(in srgb, var(--st-ok) 32%, var(--bd-default));
+    border-radius: var(--rad-md);
+    background: color-mix(in srgb, var(--st-ok) 6%, var(--bg-input));
+  }
+  .batch-confirm[data-mode='reject'] {
+    border-color: color-mix(in srgb, var(--st-err) 38%, var(--bd-default));
+    background: color-mix(in srgb, var(--st-err) 6%, var(--bg-input));
+  }
+  .confirm-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .confirm-copy strong { color: var(--fg-primary); font-size: var(--fs-xs); }
+  .confirm-copy span { color: var(--fg-tertiary); font-size: 10px; line-height: 1.4; }
+  .bulk-reason {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    color: var(--fg-secondary);
+    font-size: 10px;
+  }
+  .bulk-reason input {
+    flex: 1;
+    min-width: 0;
+    height: 31px;
+    padding: 0 9px;
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-md);
+    outline: none;
+    background: var(--bg-input);
+    color: var(--fg-primary);
+    font: inherit;
+    font-size: var(--fs-xs);
+  }
+  .bulk-reason input:focus {
+    border-color: var(--st-err);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--st-err) 10%, transparent);
+  }
+  .batch-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .progress-copy {
+    display: flex;
+    justify-content: space-between;
+    color: var(--fg-secondary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+  .batch-progress progress {
+    width: 100%;
+    height: 5px;
+    border: none;
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--bg-chip);
+    accent-color: var(--acc);
+  }
+  .batch-progress progress::-webkit-progress-bar { background: var(--bg-chip); }
+  .batch-progress progress::-webkit-progress-value { background: var(--acc); border-radius: 999px; }
+  .batch-result {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) 24px;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+    padding: 4px 4px 4px 8px;
+    border: 1px solid color-mix(in srgb, var(--st-ok) 30%, var(--bd-default));
+    border-radius: var(--rad-md);
+    background: color-mix(in srgb, var(--st-ok) 7%, transparent);
+    color: var(--st-ok);
+    font-size: 10px;
+  }
+  .batch-result.error {
+    border-color: color-mix(in srgb, var(--st-err) 32%, var(--bd-default));
+    background: color-mix(in srgb, var(--st-err) 7%, transparent);
+    color: var(--st-err);
+  }
+  .batch-result button {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: currentColor;
+    cursor: pointer;
+  }
+  .batch-result button:hover { background: var(--bg-hover); }
+  .dock-btn:focus-visible,
+  .dock-clear:focus-visible,
+  .batch-result button:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 2px;
+  }
+  .list-entry {
+    position: relative;
+    display: block;
+    min-width: 0;
+    border: 1px solid transparent;
+    border-radius: var(--rad-md);
+    background: color-mix(in srgb, var(--bg-elevated) 48%, transparent);
+    overflow: hidden;
+    transition: background var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast);
+  }
+  .list-entry.checked {
+    background: color-mix(in srgb, var(--acc) 6%, var(--bg-elevated));
+  }
+  .list-entry.focused {
+    border-color: color-mix(in srgb, var(--st-info) 52%, var(--bd-default));
+    box-shadow: 0 1px 4px color-mix(in srgb, var(--fg-primary) 8%, transparent);
+  }
+  .list-entry:focus-within {
+    box-shadow: inset 0 0 0 2px var(--acc);
+  }
+  .item-check {
+    position: absolute;
+    top: 2px;
+    left: 4px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
   }
   .list-item {
     display: block;
     width: 100%;
+    box-sizing: border-box;
     text-align: left;
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--rad-md);
-    padding: var(--sp-2);
-    margin: 2px 0;
+    border: 0;
+    border-radius: inherit;
+    padding: 8px 9px 9px 39px;
+    margin: 0;
     cursor: pointer;
     color: inherit;
-    transition: background var(--t-fast), border-color var(--t-fast);
-    position: relative;
-    overflow: hidden;
-  }
-  .list-item::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background: linear-gradient(135deg, transparent 60%, color-mix(in srgb, var(--acc) 4%, transparent));
-    opacity: 0;
-    transition: opacity 0.2s;
-    pointer-events: none;
+    transition: background var(--t-fast);
   }
   .list-item:hover { background: var(--bg-tab-hover); }
-  .list-item:hover::before { opacity: 1; }
-  .list-item.selected {
-    background: var(--bg-selected);
-    border-color: color-mix(in srgb, var(--acc) 35%, transparent);
-    box-shadow: var(--sh-sm), inset 0 0 0 1px color-mix(in srgb, var(--acc) 8%, transparent);
-  }
-  .list-item.selected::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 20%;
-    bottom: 20%;
-    width: 3px;
-    background: var(--acc);
-    border-radius: 0 2px 2px 0;
-    box-shadow: 0 0 8px color-mix(in srgb, var(--acc) 30%, transparent);
-  }
   .li-row1 {
-    display: flex; align-items: center; gap: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
     font-size: var(--fs-xs);
   }
-  .kind-icon { font-size: 13px; }
+  .li-kind {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--fg-secondary);
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    white-space: nowrap;
+  }
   .li-author { color: var(--fg-primary); font-weight: var(--fw-med); }
   .li-origin {
+    max-width: 100%;
     font-size: 9.5px;
     padding: 1px 6px;
     border-radius: 999px;
     background: var(--bg-chip);
     color: var(--fg-tertiary);
-    white-space: nowrap;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
   .li-origin.remote {
     background: color-mix(in srgb, var(--st-info) 16%, transparent);
     color: var(--st-info);
   }
-  .li-scope { color: var(--st-info); font-family: var(--font-mono); font-size: 10px; }
-  .li-date {
-    color: var(--fg-tertiary);
-    margin-left: auto;
+  .li-scope {
+    max-width: 100%;
+    color: var(--st-info);
     font-family: var(--font-mono);
     font-size: 10px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+  .li-date {
+    margin-left: auto;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    white-space: nowrap;
   }
   .li-body {
     margin-top: 4px;
@@ -722,17 +1284,18 @@
     color: var(--fg-secondary);
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
     line-height: 1.35;
   }
   .li-row3 {
-    margin-top: 6px;
+    margin-top: 5px;
     display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
     font-size: 10px;
   }
   .sub-chip, .tag-chip, .conf, .energy {
-    padding: 1px 6px;
+    padding: 1px 5px;
     border-radius: 3px;
     font-family: var(--font-mono);
     line-height: 1.4;
@@ -741,22 +1304,6 @@
   .tag-chip { background: var(--bg-chip); color: var(--fg-secondary); }
   .conf     { color: var(--fg-tertiary); margin-left: auto; }
   .energy   { color: var(--st-tokens); }
-
-  /* ── Confidence bar ── */
-  .conf-bar {
-    height: 2px;
-    background: var(--bg-chip);
-    border-radius: 1px;
-    margin-top: 4px;
-    overflow: hidden;
-  }
-  .conf-fill {
-    height: 100%;
-    background: var(--st-ok);
-    border-radius: 1px;
-    transition: width 0.3s ease;
-    box-shadow: 0 0 4px color-mix(in srgb, var(--st-ok) 40%, transparent);
-  }
 
   /* ===== right detail ===== */
   .detail {
@@ -838,6 +1385,10 @@
     font-size: 12.5px;
     line-height: 1.4;
   }
+  .d-section textarea {
+    min-height: 160px;
+    resize: none;
+  }
   .d-section input:focus, .d-section textarea:focus {
     outline: none;
     border-color: var(--acc);
@@ -903,24 +1454,27 @@
   .btn-err-strong { background: color-mix(in srgb, var(--st-err) 30%, transparent); color: var(--fg-on-accent); border-color: var(--st-err); }
   .btn-ghost { background: transparent; }
 
-  .toast {
-    position: absolute;
-    right: var(--sp-3);
-    bottom: var(--sp-3);
-    padding: 8px 14px;
-    border-radius: var(--rad-md);
-    font-size: var(--fs-sm);
-    box-shadow: var(--sh-modal);
-    animation: toast-in 180ms ease-out;
-  }
-  .toast-ok  { background: var(--st-ok);  color: var(--fg-on-accent); }
-  .toast-err { background: var(--st-err); color: var(--fg-on-accent); }
-  @keyframes toast-in {
-    from { transform: translateY(8px); opacity: 0; }
-    to   { transform: translateY(0); opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .panel, .backdrop { animation: none; }
+    .list-entry, .list-item, .dock-btn { transition: none; }
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .panel, .toast, .backdrop { animation: none; }
+  @media (max-width: 760px) {
+    .panel { width: 100vw; }
+    .body { grid-template-columns: minmax(280px, 44%) minmax(0, 1fr); }
+    .root-path { max-width: 18ch; }
+    .selection-dock { padding: 8px; }
+    .dock-actions { flex-direction: column; }
+    .dock-actions .dock-btn { width: 100%; }
+  }
+
+  @media (forced-colors: active) {
+    .list-entry.checked,
+    .list-entry.focused,
+    .selection-dock,
+    .batch-confirm,
+    .batch-result {
+      border-color: Highlight;
+    }
   }
 </style>

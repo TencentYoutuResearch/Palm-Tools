@@ -213,6 +213,164 @@ fn absolute_path(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+const SEARCH_SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "vendor",
+    ".turbo",
+    "coverage",
+    "Pods",
+    ".cache",
+];
+const MAX_SEARCH_RESULTS: usize = 200;
+const MAX_SEARCH_VISIT: usize = 12_000;
+
+#[tauri::command]
+pub async fn workspace_search(
+    cwd: String,
+    query: String,
+    show_hidden: Option<bool>,
+) -> Result<Vec<WorkspaceEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        search_workspace_entries(&cwd, &query, show_hidden.unwrap_or(true))
+    })
+    .await
+    .map_err(|e| format!("workspace search task failed: {e}"))?
+}
+
+pub(crate) fn search_query_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| c.is_whitespace() || c == '/' || c == '\\')
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+/// Match `rel` (posix relative path) and `name` against ordered query tokens.
+/// Tokens must appear left-to-right in the relative path, or all appear in the basename.
+pub(crate) fn search_path_matches(rel: &str, name: &str, tokens: &[String]) -> bool {
+    if tokens.is_empty() {
+        return true;
+    }
+    let hay = rel.replace('\\', "/").to_lowercase();
+    let name_l = name.to_lowercase();
+    let mut from = 0usize;
+    let ordered = tokens.iter().all(|token| {
+        let rest = hay.get(from..).unwrap_or("");
+        match rest.find(token.as_str()) {
+            Some(i) => {
+                from += i + token.len();
+                true
+            }
+            None => false,
+        }
+    });
+    if ordered {
+        return true;
+    }
+    tokens.iter().all(|token| name_l.contains(token.as_str()))
+}
+
+fn search_skip_dir(name: &str) -> bool {
+    SEARCH_SKIP_DIRS.iter().any(|skip| *skip == name)
+}
+
+fn search_score(rel: &str, name: &str, tokens: &[String]) -> i32 {
+    if tokens.is_empty() {
+        return 0;
+    }
+    let name_l = name.to_lowercase();
+    let joined = tokens.join("");
+    let mut score = 0;
+    if name_l.starts_with(&tokens[0]) {
+        score += 400;
+    }
+    if tokens.iter().all(|t| name_l.contains(t.as_str())) {
+        score += 250;
+    }
+    if name_l.contains(&joined) {
+        score += 80;
+    }
+    score += (120 - (rel.len().min(120) as i32)).max(0);
+    score
+}
+
+fn search_workspace_entries(
+    cwd: &str,
+    query: &str,
+    show_hidden: bool,
+) -> Result<Vec<WorkspaceEntry>, String> {
+    let tokens = search_query_tokens(query);
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = absolute_path(cwd)?;
+    if !root.is_dir() {
+        return Err(format!("not a directory: {}", root.display()));
+    }
+
+    let mut hits: Vec<(i32, WorkspaceEntry)> = Vec::new();
+    let mut stack = vec![root.clone()];
+    let mut visited = 0usize;
+
+    while let Some(dir) = stack.pop() {
+        if visited >= MAX_SEARCH_VISIT || hits.len() >= MAX_SEARCH_RESULTS {
+            break;
+        }
+        let reader = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in reader.flatten() {
+            visited += 1;
+            if visited >= MAX_SEARCH_VISIT || hits.len() >= MAX_SEARCH_RESULTS {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == ".git" || search_skip_dir(&name) {
+                continue;
+            }
+            if !show_hidden && name.starts_with('.') {
+                continue;
+            }
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            let abs = entry.path();
+            let rel = abs
+                .strip_prefix(&root)
+                .unwrap_or(&abs)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let is_dir = file_type.is_dir();
+            if search_path_matches(&rel, &name, &tokens) {
+                if let Some(item) = entry_to_workspace_entry(entry) {
+                    hits.push((search_score(&rel, &name, &tokens), item));
+                }
+            }
+            if is_dir && !file_type.is_symlink() {
+                stack.push(abs);
+            }
+        }
+    }
+
+    hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.is_dir.cmp(&b.1.is_dir))
+            .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
+    });
+    hits.truncate(MAX_SEARCH_RESULTS);
+    Ok(hits.into_iter().map(|(_, entry)| entry).collect())
+}
+
 fn list_workspace_entries(path: &Path, show_hidden: bool) -> Result<Vec<WorkspaceEntry>, String> {
     let mut entries = std::fs::read_dir(path)
         .map_err(|e| format!("read workspace {}: {e}", path.display()))?
@@ -1077,5 +1235,73 @@ mod tests {
         assert_eq!(result.kind, "binary");
         assert_eq!(result.mime, "");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn search_tokens_split_path_and_spaces() {
+        assert_eq!(
+            search_query_tokens("  src/lib WorkspacePanel  "),
+            vec!["src", "lib", "workspacepanel"]
+        );
+        assert!(search_query_tokens("   ").is_empty());
+    }
+
+    #[test]
+    fn search_matches_nested_relative_path_in_order() {
+        let tokens = search_query_tokens("lib panel");
+        assert!(search_path_matches(
+            "apps/gui/src/lib/WorkspacePanel.svelte",
+            "WorkspacePanel.svelte",
+            &tokens
+        ));
+        assert!(!search_path_matches(
+            "apps/gui/src/lib/WorkspacePanel.svelte",
+            "WorkspacePanel.svelte",
+            &search_query_tokens("panel lib")
+        ));
+        assert!(search_path_matches(
+            "crates/kode-core/src/pty/mod.rs",
+            "mod.rs",
+            &search_query_tokens("pty mod")
+        ));
+        assert!(search_path_matches(
+            "README.md",
+            "README.md",
+            &search_query_tokens("readme")
+        ));
+    }
+
+    #[test]
+    fn search_walks_nested_files_not_just_top_level() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kode-ws-search-{stamp}"));
+        let nested = root.join("src").join("lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("WorkspacePanel.svelte"), "ok").unwrap();
+        std::fs::write(root.join("README.md"), "top").unwrap();
+        std::fs::create_dir_all(root.join("node_modules").join("pkg")).unwrap();
+        std::fs::write(
+            root.join("node_modules").join("pkg").join("index.js"),
+            "skip",
+        )
+        .unwrap();
+
+        let hits = search_workspace_entries(root.to_str().unwrap(), "lib panel", true).unwrap();
+        let names: Vec<_> = hits.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"WorkspacePanel.svelte"),
+            "nested file should match, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| *n == "index.js"),
+            "node_modules should be skipped"
+        );
+
+        let top = search_workspace_entries(root.to_str().unwrap(), "readme", true).unwrap();
+        assert!(top.iter().any(|e| e.name == "README.md"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

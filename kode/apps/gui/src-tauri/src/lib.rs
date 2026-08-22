@@ -13,6 +13,8 @@
 
 mod backend_admin;
 mod bridge;
+mod cloud_deploy;
+mod cloud_sync;
 mod commands;
 mod deploy;
 mod endpoints;
@@ -21,10 +23,11 @@ mod memory_mcp;
 mod model_monitor;
 mod model_usage;
 mod persistence;
-mod shell_pty;
 mod screenshot;
+mod shell_pty;
 mod specops;
 mod state;
+mod term_theme;
 mod transport;
 mod workspace;
 
@@ -96,7 +99,12 @@ pub fn run() {
             // 完成注入，不能等下面延迟 800ms 的 MCP probe。
             crate::memory_mcp::install_managed_hooks(&app_state);
             let ctx_for_bridge = std::sync::Arc::clone(&app_state.protocol_ctx);
+            let cloud_sync = crate::cloud_sync::CloudSyncManager::new(std::sync::Arc::clone(
+                &app_state.protocol_ctx,
+            ));
+            cloud_sync.start_saved();
             app.manage(app_state);
+            app.manage(cloud_sync);
             app.manage(shell_pty::ShellPtyManager::new());
             // Phase 9.1:启动远程桥(0.0.0.0:47870 默认)
             spawn_bridge(ctx_for_bridge, BridgeConfig::default());
@@ -151,12 +159,17 @@ pub fn run() {
             commands::specops_init_git_workspace,
             commands::specops_close,
             commands::get_pairing_payload,
+            cloud_sync::cloud_sync_status,
+            cloud_sync::cloud_sync_create_pairing,
+            cloud_sync::cloud_sync_activate_backend,
+            cloud_deploy::deploy_cloud_sync,
             commands::get_paths_config,
             commands::set_session_cwd,
             commands::set_config_path,
             commands::get_home_dir,
             workspace::workspace_snapshot,
             workspace::workspace_list_dir,
+            workspace::workspace_search,
             workspace::workspace_preview_file,
             workspace::workspace_git_diff,
             workspace::workspace_git_commit_diff,

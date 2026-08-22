@@ -284,6 +284,8 @@ export const ipc = {
     /// Phase 11.2 endpoint。undefined / null / Local = 走本地 PTY(改造前老路径)。
     /// Remote { id } = 走 RemoteTransport。
     endpoint_id?: EndpointId | null,
+    /// Kode xterm 当前主题,注入 TERM_THEME/COLORFGBG 给子 CLI。
+    term_theme?: 'light' | 'dark' | null,
   ) =>
     invoke<SpawnedSession>('spawn_session', {
       backendKey: backend_key,
@@ -296,6 +298,7 @@ export const ipc = {
       permissionMode: permission_mode ?? null,
       model: model ?? null,
       endpointId: endpoint_id ?? null,
+      termTheme: term_theme ?? null,
     }),
   /// 写入 PTY。**按 endpoint 自动分流**:
   ///   - Local → sync command `write_input`(顺序保证,见 commands.rs 注释)
@@ -399,6 +402,13 @@ export const ipc = {
 
   // Phase 9.1.2-final 配对(Flutter App 扫 QR 拿到 host+port+token)
   getPairingPayload: () => invoke<PairingPayload>('get_pairing_payload'),
+  cloudSyncStatus: () => invoke<CloudSyncStatus>('cloud_sync_status'),
+  cloudSyncCreatePairing: (serverUrl: string) =>
+    invoke<CloudPairingPayload>('cloud_sync_create_pairing', { serverUrl }),
+  cloudSyncActivateBackend: (backendId: string) =>
+    invoke<CloudSyncStatus>('cloud_sync_activate_backend', { backendId }),
+  cloudSyncDeploy: (req: CloudDeployReq) =>
+    invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
 
   // 路径配置(GUI 启动 banner / 命令面板用)
   getPathsConfig: () => invoke<PathsConfig>('get_paths_config'),
@@ -416,6 +426,8 @@ export const ipc = {
     invoke<WorkspaceSnapshot>('workspace_snapshot', { cwd, showHidden: showHidden ?? null }),
   workspaceListDir: (path: string, showHidden?: boolean) =>
     invoke<WorkspaceEntry[]>('workspace_list_dir', { path, showHidden: showHidden ?? null }),
+  workspaceSearch: (cwd: string, query: string, showHidden?: boolean) =>
+    invoke<WorkspaceEntry[]>('workspace_search', { cwd, query, showHidden: showHidden ?? null }),
   workspacePreviewFile: (path: string) =>
     invoke<FilePreview>('workspace_preview_file', { path }),
   workspaceGitDiff: (cwd: string, path: string, bucket: string) =>
@@ -775,8 +787,8 @@ export type ShellId = number
 
 export const shellIpc = {
   /** Spawn a shell PTY ($SHELL). Returns the shell ID. */
-  spawn: (cwd: string, cols: number, rows: number, endpoint_id?: EndpointId | null) =>
-    invoke<ShellId>('spawn_shell', { cwd, cols, rows, endpointId: endpoint_id ?? null }),
+  spawn: (cwd: string, cols: number, rows: number, endpoint_id?: EndpointId | null, term_theme?: 'light' | 'dark' | null) =>
+    invoke<ShellId>('spawn_shell', { cwd, cols, rows, endpointId: endpoint_id ?? null, termTheme: term_theme ?? null }),
 
   /** Write bytes to the shell PTY stdin. */
   write: (id: ShellId, bytes: Uint8Array, endpoint_id?: EndpointId | null) =>
@@ -815,6 +827,55 @@ export interface PairingPayload {
   uri: string
   /** true = bridge 被 KODE_BRIDGE_DISABLE 关掉,无法配对 */
   bridge_disabled: boolean
+}
+
+export interface CloudSyncStatus {
+  server_url: string
+  device_id: string | null
+  active_backend_id: string | null
+  backends: CloudBackendSummary[]
+  state: 'not_configured' | 'connecting' | 'waiting_for_pairing' | 'syncing' | 'offline' | string
+  connected: boolean
+  sync_enabled: boolean
+  binding_count: number
+  last_error: string | null
+}
+
+export interface CloudBackendSummary {
+  id: string
+  name: string
+  server_url: string
+  ssh_host: string | null
+  ssh_port: number | null
+  remote_port: number | null
+  managed: boolean
+  active: boolean
+}
+
+export interface CloudDeployReq {
+  name: string
+  ssh_host: string
+  ssh_port: number
+  remote_port: number
+  server_url: string
+}
+
+export interface CloudDeployResult {
+  backend: CloudBackendSummary
+}
+
+export interface CloudDeployProgress {
+  step: string
+  status: 'running' | 'done' | 'failed'
+  message: string
+}
+
+export interface CloudPairingPayload {
+  pairing_id: string
+  /** One-time secret. Kept inside the QR/URI and never displayed in clear text. */
+  secret: string
+  uri: string
+  expires_at: number
 }
 
 // ============== M4 memory review queue ==============

@@ -50,8 +50,6 @@
   })
   let statusSet = $derived(allSets[foldIdx] ?? null)
   let activeSet = $derived(statusSet ?? gallerySet ?? null)
-  let showStatusDot = $derived(true)
-
   function tick() {
     if (!activeSet) return
     // 每播完一组 4 帧 → 切到另一个随机 fold
@@ -81,7 +79,6 @@
 
   /// 状态点样式映射
   function dotClass(s: AvatarStatus): string {
-    if (s === 'idle') return 'dot-idle'
     if (s === 'awaiting') return 'dot-attention'
     if (s === 'error') return 'dot-exited'
     return 'dot-busy'
@@ -95,7 +92,7 @@
       <span class="avatar gallery" class:compact title={activeSet.name} aria-label={label}>
         <img src={src} alt="" draggable="false" />
       </span>
-      {#if showStatusDot}
+      {#if status !== 'idle'}
         <span class="fallback-status {dotClass(status)}" aria-label={status}></span>
       {/if}
     </span>
@@ -108,7 +105,9 @@
         <BackendIcon {backendKey} size={compact ? 38 : 26} />
       </span>
     </span>
-    <span class="fallback-status {dotClass(status)}" aria-label={status}></span>
+    {#if status !== 'idle'}
+      <span class="fallback-status {dotClass(status)}" aria-label={status}></span>
+    {/if}
   </span>
 {/if}
 
@@ -179,7 +178,6 @@
     top: -2px;
   }
   .dot-starting { background: var(--fg-tertiary); }
-  .dot-idle      { background: var(--st-idle); }
   .dot-busy      { background: var(--st-busy); animation: busy-glow 1.4s ease-in-out infinite; }
   .dot-attention {
     background: var(--st-info);

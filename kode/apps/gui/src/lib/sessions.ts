@@ -17,6 +17,7 @@ import {
   clearAppEventsForSession,
 } from './app_events'
 import { pushToast } from './toast'
+import { currentTermTheme } from './terminal_settings'
 
 export interface TabInfo {
   id: SessionId
@@ -103,6 +104,7 @@ export async function newTab(
     permissionMode ?? null,
     model ?? null,
     endpointId ?? null,
+    currentTermTheme('pty'),
   )
   const t: TabInfo = {
     id: s.id,
@@ -222,18 +224,25 @@ export async function startEventSubscriptions() {
     tabs.update((arr) =>
       arr.map((t) => {
         if (t.id !== m.id) return t
+        // A new conversation binding invalidates every usage value from the
+        // previous conversation even if an older bridge omitted tokens_reset.
+        // The target tail will replay its authoritative totals afterwards.
+        const sessionChanged = Boolean(m.session_id && m.session_id !== t.sessionId)
         const next: TabInfo = {
           ...t,
           ...(m.title && !t.titlePinned ? { title: m.title } : null),
           ...(m.model ? { model: m.model } : null),
           ...(m.session_id ? { sessionId: m.session_id } : null),
         }
-        if (m.tokens_reset) {
+        if (m.tokens_reset || sessionChanged) {
           delete next.tokens
           delete next.inputTokens
           delete next.outputTokens
           delete next.cachedTokens
           delete next.costUsd
+        }
+        if (sessionChanged && !t.titlePinned && !m.title) {
+          next.title = `tab · ${t.backendKey}`
         }
         if (m.tokens != null) next.tokens = m.tokens
         if (m.input_tokens != null) next.inputTokens = m.input_tokens

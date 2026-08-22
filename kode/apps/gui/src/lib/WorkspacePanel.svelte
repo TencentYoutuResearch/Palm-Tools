@@ -15,6 +15,11 @@
     type WorkspaceSnapshot,
   } from './ipc'
   import type { TabInfo } from './sessions'
+  import {
+    WORKSPACE_SEARCH_SKIP_DIRS,
+    workspacePathMatches,
+    workspaceQueryTokens,
+  } from './workspace_match'
 
   type Props = {
     tab: TabInfo | null
@@ -63,6 +68,9 @@
 
   let activePanel = $state<PanelTab>('files')
   let filterQuery = $state('')
+  let fileHits = $state<WorkspaceEntry[]>([])
+  let fileSearchLoading = $state(false)
+  let fileSearchError: string | null = $state(null)
   let snapshot: WorkspaceSnapshot | null = $state(null)
   let error: string | null = $state(null)
   let loading = $state(false)
@@ -176,12 +184,20 @@
       loadingCommitDetails = new Set()
       commitDetailErrors = {}
       preview = emptyPreview()
+      filterQuery = ''
+      fileHits = []
+      fileSearchLoading = false
+      fileSearchError = null
       prevWorkspaceKey = currentWorkspaceKey
       return
     }
 
     // 3. workspace 变化:按 cache 决定是否保留视图状态
     if (loadedWorkspaceKey !== currentWorkspaceKey && !loading) {
+      filterQuery = ''
+      fileHits = []
+      fileSearchLoading = false
+      fileSearchError = null
       const saved = panelStateCache.get(currentWorkspaceKey)
       if (saved) {
         // 恢复:保留 expandedPaths/selectedPath,只清 loading/children,稍后 refreshExpanded 重建
@@ -231,6 +247,87 @@
     if (tab?.endpointId?.kind !== 'remote') return null
     return tab.endpointId.id
   }
+
+  let fileSearchGen = 0
+
+  function relPathFromRoot(root: string, abs: string): string {
+    const nroot = root.replace(/\\/g, '/').replace(/\/+$/, '')
+    const nabs = abs.replace(/\\/g, '/')
+    if (nabs === nroot) return ''
+    if (nabs.startsWith(nroot + '/')) return nabs.slice(nroot.length + 1)
+    return nabs
+  }
+
+  function searchHitDir(path: string): string {
+    const rel = relPathFromRoot(snapshot?.path || cwd, path)
+    const i = rel.lastIndexOf('/')
+    return i > 0 ? rel.slice(0, i) : ''
+  }
+
+  async function searchRemoteWorkspace(
+    rid: string,
+    root: string,
+    query: string,
+    hidden: boolean,
+  ): Promise<WorkspaceEntry[]> {
+    const tokens = workspaceQueryTokens(query)
+    if (tokens.length === 0) return []
+    const hits: WorkspaceEntry[] = []
+    const queue = [root]
+    let visited = 0
+    while (queue.length > 0 && hits.length < 200 && visited < 80) {
+      const dir = queue.shift()!
+      visited += 1
+      let children: WorkspaceEntry[]
+      try {
+        children = await endpointIpc.workspaceListDir(rid, dir, hidden)
+      } catch {
+        continue
+      }
+      for (const entry of children) {
+        if (WORKSPACE_SEARCH_SKIP_DIRS.has(entry.name)) continue
+        const rel = relPathFromRoot(root, entry.path)
+        if (workspacePathMatches(rel, entry.name, tokens)) hits.push(entry)
+        if (entry.is_dir && hits.length < 200) queue.push(entry.path)
+      }
+    }
+    return hits
+  }
+
+  $effect(() => {
+    const q = filterQuery.trim()
+    const root = cwd
+    const hidden = showHidden
+    const panel = activePanel
+    const rid = remoteId()
+    if (panel !== 'files' || !q || !root) {
+      fileHits = []
+      fileSearchLoading = false
+      fileSearchError = null
+      return
+    }
+    const gen = ++fileSearchGen
+    fileSearchLoading = true
+    fileSearchError = null
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const hits = rid
+            ? await searchRemoteWorkspace(rid, root, q, hidden)
+            : await ipc.workspaceSearch(root, q, hidden)
+          if (gen !== fileSearchGen) return
+          fileHits = hits
+        } catch (e) {
+          if (gen !== fileSearchGen) return
+          fileSearchError = String(e)
+          fileHits = []
+        } finally {
+          if (gen === fileSearchGen) fileSearchLoading = false
+        }
+      })()
+    }, 160)
+    return () => clearTimeout(timer)
+  })
 
   async function refresh() {
     if (!cwd) return
@@ -586,22 +683,22 @@
 
   function changesFor(bucket: string): WorkspaceGitChange[] {
     const all = snapshot?.git.changes.filter((c) => c.bucket === bucket) ?? []
-    const q = filterQuery.trim().toLowerCase()
-    if (!q) return all
-    return all.filter((c) => c.path.toLowerCase().includes(q))
+    const tokens = workspaceQueryTokens(filterQuery)
+    if (tokens.length === 0) return all
+    return all.filter((c) => {
+      const name = c.path.split('/').filter(Boolean).pop() ?? c.path
+      return workspacePathMatches(c.path, name, tokens)
+    })
   }
 
   function commitsForFilter(): GitCommitInfo[] {
     const all = snapshot?.git.commits ?? []
-    const q = filterQuery.trim().toLowerCase()
-    if (!q) return all
-    return all.filter((c) =>
-      c.short_hash.toLowerCase().includes(q)
-      || c.hash.toLowerCase().includes(q)
-      || c.author.toLowerCase().includes(q)
-      || c.subject.toLowerCase().includes(q)
-      || (c.decorations ?? []).some((d) => d.toLowerCase().includes(q)),
-    )
+    const tokens = workspaceQueryTokens(filterQuery)
+    if (tokens.length === 0) return all
+    return all.filter((c) => {
+      const hay = [c.short_hash, c.hash, c.author, c.subject, ...(c.decorations ?? [])].join(' ')
+      return tokens.every((t) => hay.toLowerCase().includes(t))
+    })
   }
 
   function visibleDirtyChanges(): WorkspaceGitChange[] {
@@ -617,14 +714,6 @@
     if (label.startsWith('tag:')) return 'tag'
     if (label.includes('/')) return 'remote'
     return 'branch'
-  }
-
-  // 文件过滤:按名字(大小写不敏感)过滤顶层 entries。有 query 时不递归子目录,
-  // 直接按当前已加载的 entries 名字匹配;空 query 时返回全部。
-  function filterEntries(entries: WorkspaceEntry[]): WorkspaceEntry[] {
-    const q = filterQuery.trim().toLowerCase()
-    if (!q) return entries
-    return entries.filter((e) => e.name.toLowerCase().includes(q))
   }
 
   function compactPath(path: string, max = 34): string {
@@ -862,7 +951,7 @@
           <input
             class="filter-input"
             type="text"
-            placeholder={activePanel === 'files' ? 'Filter files…' : gitFilterPlaceholder()}
+            placeholder={activePanel === 'files' ? 'Search files…' : gitFilterPlaceholder()}
             bind:value={filterQuery}
             spellcheck="false"
             autocomplete="off"
@@ -883,15 +972,20 @@
 
         {#if activePanel === 'files'}
           <section class="list-pane" aria-label="Files">
-            {#if snapshot && snapshot.entries.length === 0}
+            {#if snapshot && snapshot.entries.length === 0 && !filterQuery.trim()}
               <p class="muted pad">No files</p>
-            {:else if snapshot}
-              {@const shown = filterEntries(snapshot.entries)}
-              {#if shown.length === 0}
+            {:else if snapshot && filterQuery.trim()}
+              {#if fileSearchLoading && fileHits.length === 0}
+                <p class="muted pad">Searching...</p>
+              {:else if fileSearchError}
+                <p class="muted pad">{fileSearchError}</p>
+              {:else if fileHits.length === 0}
                 <p class="muted pad">No matches</p>
               {:else}
-                {@render tree(shown, 0)}
+                {@render searchHits(fileHits)}
               {/if}
+            {:else if snapshot}
+              {@render tree(snapshot.entries, 0)}
             {/if}
           </section>
         {:else}
@@ -1048,6 +1142,29 @@
     </div>
   {/if}
 </aside>
+
+{#snippet searchHits(entries: WorkspaceEntry[])}
+  <div class="tree-group">
+    {#each entries as entry (entry.path)}
+      <button
+        class="tree-row search-row"
+        class:selected={selectedPath === entry.path}
+        title={entry.path}
+        draggable="true"
+        onclick={() => onEntryClick(entry)}
+        oncontextmenu={(e) => openContextMenu(e, entry)}
+        ondragstart={(e) => onTreeDragStart(e, entry)}
+      >
+        <span class="twisty"></span>
+        <span class="file-icon">
+          <Icon name={entry.is_dir ? 'folder' : 'file-text'} size={14} />
+        </span>
+        <span class="file-name">{entry.name}{entry.is_symlink ? ' @' : ''}</span>
+        <span class="file-meta">{searchHitDir(entry.path)}</span>
+      </button>
+    {/each}
+  </div>
+{/snippet}
 
 {#snippet tree(entries: WorkspaceEntry[], depth: number)}
   <div class="tree-group">
@@ -1407,6 +1524,14 @@
   .file-name {
     font-size: 12px;
     white-space: nowrap;
+  }
+  .search-row .file-meta {
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
   }
   .file-meta {
     color: var(--fg-tertiary);

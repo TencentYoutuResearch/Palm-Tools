@@ -255,6 +255,10 @@
       }
 
       /* 自定义 scrollbar(macOS 风,只在 hover 区域显示) */
+      html {
+        scrollbar-color: var(--bd-default) transparent;
+        scrollbar-width: auto;
+      }
       ::-webkit-scrollbar {
         width: 10px;
         height: 10px;
@@ -267,6 +271,11 @@
         background-clip: padding-box;
       }
       ::-webkit-scrollbar-thumb:hover { background: var(--bd-strong); background-clip: padding-box; border: 2px solid transparent; }
+      ::-webkit-scrollbar-thumb:active { background: var(--fg-tertiary); background-clip: padding-box; border: 2px solid transparent; }
+      @media (forced-colors: active) {
+        html { scrollbar-color: auto; }
+        ::-webkit-scrollbar-thumb { background: CanvasText; }
+      }
     </style>
   </head>
   <body>
