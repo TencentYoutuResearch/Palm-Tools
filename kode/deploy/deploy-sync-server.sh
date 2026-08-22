@@ -60,7 +60,7 @@ case "$ACTION" in
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     curl --fail --silent --show-error --max-time 10 \
-      "https://${KODE_SYNC_DOMAIN}/healthz"
+      "https://${KODE_SYNC_DOMAIN}/api/v1/healthz"
     echo
     ;;
   *)

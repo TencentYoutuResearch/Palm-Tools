@@ -16,6 +16,7 @@
   type Props = { onClose: () => void }
   type View = 'pair' | 'deploy'
   type DeployMode = 'ssh' | 'existing'
+  type SshDeployKind = 'standalone' | 'docker'
   type BusyKind = '' | 'pairing' | 'switching' | 'deploying'
   type StepStatus = 'pending' | 'running' | 'done' | 'failed'
 
@@ -37,6 +38,7 @@
   let pairing = $state<CloudPairingPayload | null>(null)
   let view = $state<View>('pair')
   let deployMode = $state<DeployMode>('ssh')
+  let sshDeployKind = $state<SshDeployKind>('standalone')
   let redeployBackendId = $state('')
   let selectedBackendId = $state('')
   let busy = $state<BusyKind>('')
@@ -49,6 +51,7 @@
   let sshPort = $state('22')
   let remotePort = $state('8787')
   let publicUrl = $state('')
+  let remoteDeployDir = $state('')
   let existingUrl = $state('')
   let deploySteps = $state(
     DEPLOY_STEPS.map((step) => ({ step, status: 'pending' as StepStatus })),
@@ -56,6 +59,7 @@
   let dialogEl: HTMLDivElement
   let sshHostInput = $state<HTMLInputElement | null>(null)
   let publicUrlInput = $state<HTMLInputElement | null>(null)
+  let remoteDeployDirInput = $state<HTMLInputElement | null>(null)
   let existingUrlInput = $state<HTMLInputElement | null>(null)
   let qrcode: typeof import('qrcode') | null = null
   let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -213,6 +217,11 @@
       error = tr('pairing.deploy.portInvalid')
       return
     }
+    if (sshDeployKind === 'docker' && !remoteDeployDir.trim()) {
+      error = tr('pairing.deploy.remoteDirRequired')
+      remoteDeployDirInput?.focus()
+      return
+    }
     if (!validHttpsOrigin(publicUrl)) {
       error = tr('pairing.deploy.urlInvalid')
       publicUrlInput?.focus()
@@ -230,6 +239,8 @@
         ssh_port: sshPortValue,
         remote_port: remotePortValue,
         server_url: publicUrl.trim(),
+        deployment_kind: sshDeployKind,
+        remote_deploy_dir: sshDeployKind === 'docker' ? remoteDeployDir.trim() : null,
       })
       await refreshStatus()
       selectedBackendId = result.backend.id
@@ -272,11 +283,13 @@
     if (busy) return
     redeployBackendId = ''
     deployMode = 'ssh'
+    sshDeployKind = 'standalone'
     backendName = ''
     sshHost = ''
     sshPort = '22'
     remotePort = '8787'
     publicUrl = ''
+    remoteDeployDir = ''
     resetDeploySteps()
     view = 'deploy'
     pairing = null
@@ -288,11 +301,14 @@
     if (busy) return
     redeployBackendId = backend.id
     deployMode = 'ssh'
+    sshDeployKind = backend.deployment_kind === 'standalone' ? 'standalone' : 'docker'
     backendName = backend.name
     sshHost = backend.ssh_host ?? hostFromOrigin(backend.server_url)
     sshPort = String(backend.ssh_port ?? 22)
     remotePort = String(backend.remote_port ?? 8787)
     publicUrl = backend.server_url
+    remoteDeployDir =
+      backend.remote_deploy_dir ?? '~/kode-sync-server-0.2.2-dev-linux-amd64'
     resetDeploySteps()
     view = 'deploy'
     pairing = null
@@ -537,6 +553,26 @@
               }}
             >
               <div class="field">
+                <span class="field-label">{tr('pairing.deploy.installType')}</span>
+                <div class="deploy-kind" aria-label={tr('pairing.deploy.installType')}>
+                  <button
+                    type="button"
+                    class:active={sshDeployKind === 'standalone'}
+                    aria-pressed={sshDeployKind === 'standalone'}
+                    onclick={() => (sshDeployKind = 'standalone')}
+                    disabled={Boolean(busy)}
+                  >{tr('pairing.deploy.installStandalone')}</button>
+                  <button
+                    type="button"
+                    class:active={sshDeployKind === 'docker'}
+                    aria-pressed={sshDeployKind === 'docker'}
+                    onclick={() => (sshDeployKind = 'docker')}
+                    disabled={Boolean(busy)}
+                  >{tr('pairing.deploy.installDocker')}</button>
+                </div>
+              </div>
+
+              <div class="field">
                 <label for="cloud-backend-name">{tr('pairing.deploy.name')}</label>
                 <input
                   id="cloud-backend-name"
@@ -579,6 +615,7 @@
                     disabled={Boolean(busy)}
                   />
                 </div>
+                {#if sshDeployKind === 'standalone'}
                 <div class="field">
                   <label for="cloud-service-port">{tr('pairing.deploy.servicePort')}</label>
                   <input
@@ -590,7 +627,26 @@
                     disabled={Boolean(busy)}
                   />
                 </div>
+                {/if}
               </div>
+
+              {#if sshDeployKind === 'docker'}
+                <div class="field">
+                  <label for="cloud-remote-deploy-dir">{tr('pairing.deploy.remoteDir')}</label>
+                  <input
+                    id="cloud-remote-deploy-dir"
+                    bind:this={remoteDeployDirInput}
+                    type="text"
+                    bind:value={remoteDeployDir}
+                    placeholder="~/kode-sync-server-0.2.2-dev-linux-amd64"
+                    autocomplete="off"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    disabled={Boolean(busy)}
+                  />
+                  <p>{tr('pairing.deploy.remoteDirHint')}</p>
+                </div>
+              {/if}
 
               <div class="field">
                 <label for="cloud-public-url">{tr('pairing.deploy.publicUrl')}</label>
@@ -611,7 +667,9 @@
 
               <div class="ingress-note">
                 <Icon name="lock" size={14} />
-                <span>{tr('pairing.deploy.ingressNote', { port: remotePort || '8787' })}</span>
+                <span>{sshDeployKind === 'docker'
+                  ? tr('pairing.deploy.dockerNote')
+                  : tr('pairing.deploy.ingressNote', { port: remotePort || '8787' })}</span>
               </div>
 
               <div class="form-actions">
@@ -878,7 +936,8 @@
   .qr-actions,
   .form-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
   .button,
-  .deploy-mode button {
+  .deploy-mode button,
+  .deploy-kind button {
     display: inline-flex;
     min-height: 34px;
     align-items: center;
@@ -902,11 +961,15 @@
   .deploy-mode { display: flex; width: fit-content; gap: 2px; margin-bottom: var(--sp-4); border: 1px solid var(--bd-default); border-radius: var(--rad-md); padding: 2px; background: var(--bg-input); }
   .deploy-mode button { min-height: 30px; border: 0; background: transparent; color: var(--fg-tertiary); }
   .deploy-mode button.active { background: var(--bg-elevated); color: var(--fg-primary); box-shadow: inset 0 0 0 1px var(--bd-default); }
+  .field-label,
+  .field label { color: var(--fg-secondary); font-size: var(--fs-xs); font-weight: 600; }
+  .deploy-kind { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; border: 1px solid var(--bd-default); border-radius: var(--rad-md); padding: 2px; background: var(--bg-input); }
+  .deploy-kind button { min-height: 30px; border: 0; background: transparent; color: var(--fg-tertiary); }
+  .deploy-kind button.active { background: var(--bg-elevated); color: var(--fg-primary); box-shadow: inset 0 0 0 1px var(--bd-default); }
   .deploy-layout { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: var(--sp-5); align-items: start; }
   .deploy-form { display: grid; gap: var(--sp-3); }
   .field { display: grid; gap: 5px; min-width: 0; }
   .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
-  .field label { color: var(--fg-secondary); font-size: var(--fs-xs); font-weight: 600; }
   .field input {
     box-sizing: border-box;
     width: 100%;

@@ -104,11 +104,11 @@ class ApiClient {
   }
 
   Future<bool> healthz() async {
-    final resp = await _dio.getUri<String>(
-      Uri.parse('${endpoint.baseUrl}/healthz'),
-      options: Options(headers: const {}, responseType: ResponseType.plain),
+    final resp = await _dio.get<Map<String, dynamic>>(
+      '/api/v1/healthz',
+      options: Options(headers: const {}),
     );
-    return resp.statusCode == 200 && (resp.data?.trim() == 'ok');
+    return resp.statusCode == 200 && resp.data?['status'] == 'ok';
   }
 
   Future<List<SessionDto>> listSessions() async {

@@ -34,7 +34,7 @@ flutter analyze
 1. 桌面 kode GUI:`Cmd+P` → "Show Pairing QR…"
 2. 手机 App 启动 → 自动跳到 `/pair` 屏 → 点 "Open camera" → 扫 QR
 3. App 向中心服务兑换一次性 secret,获得 scoped mobile token
-   - 走 `GET /healthz` + `GET /api/v1/sessions` 双重验证
+   - 走 `GET /api/v1/healthz` + `GET /api/v1/sessions` 双重验证
 4. 跳转到 session 列表 → 实时反映桌面 spawn / kill / model 切换
 
 公网入口若由 DevCloud `AIO-Forward` 托管，客户端会先通过 `/healthz`

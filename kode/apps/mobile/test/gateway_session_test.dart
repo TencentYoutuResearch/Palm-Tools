@@ -8,6 +8,40 @@ import 'package:kode_mobile/src/api/gateway_session.dart';
 import 'package:kode_mobile/src/protocol/protocol.dart';
 
 void main() {
+  test('validates the namespaced sync-server health response', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final requestedPaths = <String>[];
+    final subscription = server.listen((request) async {
+      requestedPaths.add(request.uri.path);
+      request.response.headers.contentType = ContentType.json;
+      if (request.uri.path == '/api/v1/healthz') {
+        request.response.write(jsonEncode({'status': 'ok', 'version': 'test'}));
+      } else {
+        request.response.write('ok');
+      }
+      await request.response.close();
+    });
+
+    try {
+      final baseUrl = 'http://${server.address.host}:${server.port}';
+      final client = ApiClient(
+        Endpoint(
+          serverUrl: baseUrl,
+          token: 'mobile-token',
+          deviceId: 'device-1',
+          deviceName: 'Test Desktop',
+        ),
+      );
+
+      expect(await client.healthz(), isTrue);
+      expect(requestedPaths, contains('/healthz'));
+      expect(requestedPaths, contains('/api/v1/healthz'));
+    } finally {
+      await subscription.cancel();
+      await server.close(force: true);
+    }
+  });
+
   test('performs cookie challenge before the first API request', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     var healthRequests = 0;

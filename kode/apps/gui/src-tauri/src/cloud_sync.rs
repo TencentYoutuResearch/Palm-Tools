@@ -47,6 +47,8 @@ pub struct CloudBackendSummary {
     pub ssh_host: Option<String>,
     pub ssh_port: Option<u16>,
     pub remote_port: Option<u16>,
+    pub deployment_kind: Option<String>,
+    pub remote_deploy_dir: Option<String>,
     pub managed: bool,
     pub active: bool,
 }
@@ -68,6 +70,10 @@ struct CloudBackendConfig {
     ssh_port: Option<u16>,
     #[serde(default)]
     remote_port: Option<u16>,
+    #[serde(default)]
+    deployment_kind: Option<String>,
+    #[serde(default)]
+    remote_deploy_dir: Option<String>,
     #[serde(default)]
     managed: bool,
     #[serde(default)]
@@ -234,6 +240,8 @@ impl CloudSyncManager {
         ssh_host: String,
         ssh_port: u16,
         remote_port: u16,
+        deployment_kind: String,
+        remote_deploy_dir: Option<String>,
     ) -> Result<CloudBackendSummary, String> {
         let server_url = normalize_server_url(&server_url)?;
         let id = {
@@ -253,6 +261,8 @@ impl CloudSyncManager {
                 backend.ssh_host = Some(ssh_host);
                 backend.ssh_port = Some(ssh_port);
                 backend.remote_port = Some(remote_port);
+                backend.deployment_kind = Some(deployment_kind);
+                backend.remote_deploy_dir = remote_deploy_dir;
                 backend.managed = true;
             } else {
                 config.backends.push(CloudBackendConfig {
@@ -262,6 +272,8 @@ impl CloudSyncManager {
                     ssh_host: Some(ssh_host),
                     ssh_port: Some(ssh_port),
                     remote_port: Some(remote_port),
+                    deployment_kind: Some(deployment_kind),
+                    remote_deploy_dir,
                     managed: true,
                     device_id: None,
                     device_token: None,
@@ -323,6 +335,8 @@ impl CloudSyncManager {
                         ssh_host: None,
                         ssh_port: None,
                         remote_port: None,
+                        deployment_kind: None,
+                        remote_deploy_dir: None,
                         managed: false,
                         device_id: None,
                         device_token: None,
@@ -939,6 +953,8 @@ fn migrate_legacy_backend(config: &mut CloudSyncConfig) {
                 ssh_host: None,
                 ssh_port: None,
                 remote_port: None,
+                deployment_kind: None,
+                remote_deploy_dir: None,
                 managed: false,
                 device_id: config.device_id.take(),
                 device_token: config.device_token.take(),
@@ -970,6 +986,8 @@ fn backend_summaries(config: &CloudSyncConfig) -> Vec<CloudBackendSummary> {
             ssh_host: backend.ssh_host.clone(),
             ssh_port: backend.ssh_port,
             remote_port: backend.remote_port,
+            deployment_kind: backend.deployment_kind.clone(),
+            remote_deploy_dir: backend.remote_deploy_dir.clone(),
             managed: backend.managed,
             active: config.active_backend_id.as_deref() == Some(backend.id.as_str()),
         })
@@ -1146,6 +1164,8 @@ mod tests {
                 ssh_host: Some("one".into()),
                 ssh_port: Some(22),
                 remote_port: Some(8787),
+                deployment_kind: Some("standalone".into()),
+                remote_deploy_dir: None,
                 managed: true,
                 device_id: None,
                 device_token: None,
@@ -1158,6 +1178,8 @@ mod tests {
                 ssh_host: None,
                 ssh_port: None,
                 remote_port: None,
+                deployment_kind: None,
+                remote_deploy_dir: None,
                 managed: false,
                 device_id: None,
                 device_token: None,

@@ -33,6 +33,14 @@ pub struct CloudDeployReq {
     #[serde(default = "default_remote_port")]
     pub remote_port: u16,
     pub server_url: String,
+    #[serde(default = "default_deployment_kind")]
+    pub deployment_kind: String,
+    #[serde(default)]
+    pub remote_deploy_dir: Option<String>,
+}
+
+fn default_deployment_kind() -> String {
+    "standalone".into()
 }
 
 fn default_ssh_port() -> u16 {
@@ -82,14 +90,29 @@ pub async fn deploy_cloud_sync(
     };
     let local_tarball = resolve_local_tarball()?;
     let deployment_id = Uuid::new_v4().to_string();
+    let deployment_kind = req.deployment_kind.trim();
+    if !matches!(deployment_kind, "standalone" | "docker") {
+        return Err("deployment kind must be standalone or docker".into());
+    }
+    let remote_deploy_dir = if deployment_kind == "docker" {
+        Some(validate_remote_deploy_dir(
+            req.remote_deploy_dir.as_deref().unwrap_or_default(),
+        )?)
+    } else {
+        None
+    };
 
     emit(&app, "CheckingHost", "running", "checking the remote host");
-    run_ssh(
-        &ssh_host,
-        req.ssh_port,
-        "set -e; arch=$(uname -m); case \"$arch\" in x86_64|amd64) ;; *) echo \"unsupported architecture: $arch (expected x86_64)\" >&2; exit 2 ;; esac; command -v tar >/dev/null; command -v curl >/dev/null; command -v nohup >/dev/null; command -v readlink >/dev/null; command -v sleep >/dev/null",
-    )
-    .map_err(|error| fail(&app, "CheckingHost", "remote host check failed", error))?;
+    let preflight = if let Some(remote_dir) = &remote_deploy_dir {
+        format!(
+            "set -e; arch=$(uname -m); case \"$arch\" in x86_64|amd64) ;; *) echo \"unsupported architecture: $arch (expected x86_64)\" >&2; exit 2 ;; esac; command -v tar >/dev/null; command -v sha256sum >/dev/null; command -v docker >/dev/null; deploy_dir={}; test -x \"$deploy_dir/deploy.sh\"; test -f \"$deploy_dir/docker-compose.yml\"; test -f \"$deploy_dir/Dockerfile\"; test -d \"$deploy_dir/bin\"; docker compose version >/dev/null",
+            remote_dir.shell_expr
+        )
+    } else {
+        "set -e; arch=$(uname -m); case \"$arch\" in x86_64|amd64) ;; *) echo \"unsupported architecture: $arch (expected x86_64)\" >&2; exit 2 ;; esac; command -v tar >/dev/null; command -v curl >/dev/null; command -v nohup >/dev/null; command -v readlink >/dev/null; command -v sleep >/dev/null".into()
+    };
+    run_ssh(&ssh_host, req.ssh_port, &preflight)
+        .map_err(|error| fail(&app, "CheckingHost", "remote host check failed", error))?;
     emit(&app, "CheckingHost", "done", "remote host is compatible");
 
     emit(&app, "Uploading", "running", &format!("scp → {ssh_host}"));
@@ -97,30 +120,62 @@ pub async fn deploy_cloud_sync(
         .map_err(|error| fail(&app, "Uploading", "upload failed", error))?;
     emit(&app, "Uploading", "done", "uploaded");
 
-    emit(&app, "StoppingOld", "running", "stopping previous service");
-    run_ssh(
+    if let Some(remote_dir) = &remote_deploy_dir {
+        emit(
+            &app,
+            "StoppingOld",
+            "running",
+            "preparing Docker package update",
+        );
+        emit(&app, "StoppingOld", "done", "Docker deployment found");
+        emit(
+            &app,
+            "Extracting",
+            "running",
+            "replacing sync-server binary",
+        );
+        let update = format!(
+            "set -e; deploy_dir={}; stage=$(mktemp -d /tmp/kode-sync-update.XXXXXX); trap 'rm -rf \"$stage\"' EXIT; tar -xzf {} -C \"$stage\"; test -x \"$stage/bin/kode-sync-server\"; install -m 0755 \"$stage/bin/kode-sync-server\" \"$deploy_dir/bin/kode-sync-server.new\"; mv -f \"$deploy_dir/bin/kode-sync-server.new\" \"$deploy_dir/bin/kode-sync-server\"; cd \"$deploy_dir\"; sha256sum bin/kode-sync-server > SHA256SUMS; ./deploy.sh verify",
+            remote_dir.shell_expr,
+            shell_quote(REMOTE_TARBALL)
+        );
+        run_ssh(&ssh_host, req.ssh_port, &update)
+            .map_err(|error| fail(&app, "Extracting", "Docker package update failed", error))?;
+        emit(&app, "Extracting", "done", "binary and checksum updated");
+
+        emit(&app, "StartingNew", "running", "rebuilding Docker service");
+        let start = format!(
+            "set -e; deploy_dir={}; cd \"$deploy_dir\"; ./deploy.sh up",
+            remote_dir.shell_expr
+        );
+        run_ssh(&ssh_host, req.ssh_port, &start)
+            .map_err(|error| fail(&app, "StartingNew", "Docker deployment failed", error))?;
+        emit(&app, "StartingNew", "done", "Docker service rebuilt");
+    } else {
+        emit(&app, "StoppingOld", "running", "stopping previous service");
+        run_ssh(
         &ssh_host,
         req.ssh_port,
         "install_dir=$HOME/.local/kode-sync-server; pid_file=$install_dir/sync-server.pid; if [ -f \"$pid_file\" ]; then pid=$(cat \"$pid_file\" 2>/dev/null || true); case \"$pid\" in ''|*[!0-9]*) ;; *) running=$(readlink -f \"/proc/$pid/exe\" 2>/dev/null || true); expected=$(readlink -f \"$install_dir/bin/kode-sync-server\" 2>/dev/null || true); if [ -n \"$expected\" ] && [ \"$running\" = \"$expected\" ]; then kill \"$pid\" 2>/dev/null || true; attempts=0; while kill -0 \"$pid\" 2>/dev/null && [ \"$attempts\" -lt 20 ]; do sleep 0.1; attempts=$((attempts + 1)); done; kill -9 \"$pid\" 2>/dev/null || true; fi ;; esac; rm -f \"$pid_file\"; fi; exit 0",
     )
     .map_err(|error| fail(&app, "StoppingOld", "stop failed", error))?;
-    emit(&app, "StoppingOld", "done", "stopped (or none was running)");
+        emit(&app, "StoppingOld", "done", "stopped (or none was running)");
 
-    emit(&app, "Extracting", "running", "installing service bundle");
-    let extract = format!(
-        "mkdir -p ~/{REMOTE_INSTALL_DIR}/data && \
+        emit(&app, "Extracting", "running", "installing service bundle");
+        let extract = format!(
+            "mkdir -p ~/{REMOTE_INSTALL_DIR}/data && \
          tar -xzf {REMOTE_TARBALL} -C ~/{REMOTE_INSTALL_DIR} && \
          chmod +x ~/{REMOTE_INSTALL_DIR}/bin/kode-sync-server"
-    );
-    run_ssh(&ssh_host, req.ssh_port, &extract)
-        .map_err(|error| fail(&app, "Extracting", "extract failed", error))?;
-    emit(&app, "Extracting", "done", "installed");
+        );
+        run_ssh(&ssh_host, req.ssh_port, &extract)
+            .map_err(|error| fail(&app, "Extracting", "extract failed", error))?;
+        emit(&app, "Extracting", "done", "installed");
 
-    emit(&app, "StartingNew", "running", "starting sync service");
-    let public_url = shell_quote(&server_url);
-    let deployment_id_env = shell_quote(&deployment_id);
-    let start = format!(
-        "nohup env KODE_SYNC_BIND=0.0.0.0:{port} \
+        emit(&app, "StartingNew", "running", "starting sync service");
+        let public_url = shell_quote(&server_url);
+        let deployment_id_env = shell_quote(&deployment_id);
+        let start = format!(
+            "nohup env KODE_SYNC_BIND=0.0.0.0:{port} \
          KODE_SYNC_DATABASE=$HOME/{dir}/data/kode-sync.db \
          KODE_SYNC_PUBLIC_URL={public_url} \
          KODE_SYNC_DEPLOYMENT_ID={deployment_id_env} \
@@ -128,12 +183,13 @@ pub async fn deploy_cloud_sync(
          $HOME/{dir}/bin/kode-sync-server \
          > $HOME/{dir}/sync-server.log 2>&1 < /dev/null & \
          echo $! > $HOME/{dir}/sync-server.pid",
-        port = req.remote_port,
-        dir = REMOTE_INSTALL_DIR,
-    );
-    run_ssh(&ssh_host, req.ssh_port, &start)
-        .map_err(|error| fail(&app, "StartingNew", "start failed", error))?;
-    emit(&app, "StartingNew", "done", "started");
+            port = req.remote_port,
+            dir = REMOTE_INSTALL_DIR,
+        );
+        run_ssh(&ssh_host, req.ssh_port, &start)
+            .map_err(|error| fail(&app, "StartingNew", "start failed", error))?;
+        emit(&app, "StartingNew", "done", "started");
+    }
 
     emit(
         &app,
@@ -141,11 +197,18 @@ pub async fn deploy_cloud_sync(
         "running",
         "checking service on the remote host",
     );
-    let local_health = format!(
-        "curl -fsS --max-time 3 http://127.0.0.1:{}/healthz | grep -F {}",
-        req.remote_port,
-        shell_quote(&deployment_id),
-    );
+    let local_health = if let Some(remote_dir) = &remote_deploy_dir {
+        format!(
+            "set -e; deploy_dir={}; cd \"$deploy_dir\"; container=$(docker compose --env-file .env -f docker-compose.yml ps -q sync-server); test -n \"$container\"; state=$(docker inspect --format '{{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}{{{{.State.Status}}}}{{{{end}}}}' \"$container\"); case \"$state\" in healthy|running) ;; *) echo \"container state: $state\" >&2; exit 1 ;; esac",
+            remote_dir.shell_expr
+        )
+    } else {
+        format!(
+            "curl -fsS --max-time 3 http://127.0.0.1:{}/healthz | grep -F {}",
+            req.remote_port,
+            shell_quote(&deployment_id),
+        )
+    };
     let mut last_error = String::new();
     for attempt in 1..=LOCAL_HEALTH_RETRIES {
         match run_ssh(&ssh_host, req.ssh_port, &local_health) {
@@ -199,10 +262,13 @@ pub async fn deploy_cloud_sync(
                 match response.bytes().await {
                     Ok(body) => match serde_json::from_slice::<serde_json::Value>(&body) {
                         Ok(body)
-                            if body
-                                .get("deployment_id")
-                                .and_then(serde_json::Value::as_str)
-                                == Some(deployment_id.as_str()) =>
+                            if if deployment_kind == "docker" {
+                                body.get("status").and_then(serde_json::Value::as_str) == Some("ok")
+                            } else {
+                                body.get("deployment_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some(deployment_id.as_str())
+                            } =>
                         {
                             public_error.clear();
                             break;
@@ -251,6 +317,8 @@ pub async fn deploy_cloud_sync(
         ssh_host,
         req.ssh_port,
         req.remote_port,
+        deployment_kind.to_string(),
+        remote_deploy_dir.map(|dir| dir.original),
     )?;
     emit(&app, "SavingBackend", "done", "backend saved");
     emit(&app, "Done", "done", "deployment complete");
@@ -294,6 +362,41 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+struct RemoteDeployDir {
+    original: String,
+    shell_expr: String,
+}
+
+fn validate_remote_deploy_dir(value: &str) -> Result<RemoteDeployDir, String> {
+    let value = value.trim();
+    let rest = if let Some(rest) = value.strip_prefix("~/") {
+        rest
+    } else if let Some(rest) = value.strip_prefix('/') {
+        rest
+    } else {
+        return Err("remote Docker directory must start with ~/ or /".into());
+    };
+    if rest.is_empty()
+        || rest
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !rest
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
+    {
+        return Err("remote Docker directory contains unsupported path components".into());
+    }
+    let shell_expr = if value.starts_with("~/") {
+        format!("\"$HOME/{}\"", &value[2..])
+    } else {
+        shell_quote(value)
+    };
+    Ok(RemoteDeployDir {
+        original: value.into(),
+        shell_expr,
+    })
+}
+
 fn emit(app: &AppHandle, step: &str, status: &str, message: &str) {
     let _ = app.emit(
         "cloud-deploy-progress",
@@ -327,5 +430,17 @@ mod tests {
     #[test]
     fn public_health_uses_namespaced_route() {
         assert_eq!(PUBLIC_HEALTH_PATH, "/api/v1/healthz");
+    }
+
+    #[test]
+    fn validates_remote_docker_directory() {
+        let home = validate_remote_deploy_dir("~/kode-sync-server-0.2.2-dev-linux-amd64").unwrap();
+        assert_eq!(
+            home.shell_expr,
+            "\"$HOME/kode-sync-server-0.2.2-dev-linux-amd64\""
+        );
+        assert!(validate_remote_deploy_dir("relative/path").is_err());
+        assert!(validate_remote_deploy_dir("~/../escape").is_err());
+        assert!(validate_remote_deploy_dir("~/bad;command").is_err());
     }
 }

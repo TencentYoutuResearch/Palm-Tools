@@ -840,6 +840,8 @@ export interface CloudBackendSummary {
   ssh_host: string | null
   ssh_port: number | null
   remote_port: number | null
+  deployment_kind: 'standalone' | 'docker' | null
+  remote_deploy_dir: string | null
   managed: boolean
   active: boolean
 }
@@ -850,6 +852,8 @@ export interface CloudDeployReq {
   ssh_port: number
   remote_port: number
   server_url: string
+  deployment_kind: 'standalone' | 'docker'
+  remote_deploy_dir: string | null
 }
 
 export interface CloudDeployResult {
