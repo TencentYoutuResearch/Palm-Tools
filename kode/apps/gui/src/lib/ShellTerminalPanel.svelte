@@ -29,8 +29,10 @@
     loadTerminalAppearance,
     onTerminalSettingsChanged,
     updateTerminalFontSize,
+    currentTermTheme,
     type TerminalAppearance,
   } from './terminal_settings'
+  import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
 
   type Props = {
     tab: TabInfo | null
@@ -205,7 +207,7 @@
         convertEol: false,
         minimumContrastRatio: 4.5,
       })
-
+      const ansiThemeAdapter = new TerminalAnsiThemeAdapter()
       const fitAddon = new FitAddon()
       term.loadAddon(fitAddon)
       term.open(container)
@@ -340,7 +342,8 @@
       const state = { alive: true }
       const unsub = await shellIpc.subscribeBytes(shellId, shellTab.endpointId, (bytes) => {
         if (!state.alive || !term) return
-        term.write(bytes)
+        const themedBytes = ansiThemeAdapter.transform(bytes)
+        if (themedBytes.length > 0) term.write(themedBytes)
       })
       // subscribe 期间可能切走了,再检查一次
       if (containerEls.get(shellId) !== container) {
@@ -441,7 +444,7 @@
     try {
       const cols = 80, rows = 24
       const endpointId = tab.endpointId ?? ENDPOINT_LOCAL
-      const id = await shellIpc.spawn(tab.cwd, cols, rows, endpointId)
+      const id = await shellIpc.spawn(tab.cwd, cols, rows, endpointId, currentTermTheme('shell'))
       const newTab: ShellTerminalTab = { id, title: 'Shell', cwd: tab.cwd, endpointId }
       terminals = [...terminals, newTab]
       activeTerminalId = id

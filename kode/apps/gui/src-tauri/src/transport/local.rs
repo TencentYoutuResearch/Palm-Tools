@@ -105,6 +105,7 @@ impl SessionTransport for LocalTransport {
         // - KODE_HOOK_SOCK 供 hook command 定位 GUI relay socket。
         // - KODE_SESSION_ID 让 Codex hook 把 Codex 自己的 session id 映射回 Kode tab id。
         // - KODE_MEMORY_ROOT 让 hook 子进程与 GUI/MCP 使用同一份 memory root。
+        // - TERM_THEME / COLORFGBG 让 cursor-agent / Claude / 其它 TUI 跳过 OSC 11。
         let mut extra_env: Vec<(String, String)> = Vec::new();
         if let Some(sock) = self.hook_sock.as_deref() {
             extra_env.push(("KODE_HOOK_SOCK".to_string(), sock.to_string()));
@@ -113,6 +114,9 @@ impl SessionTransport for LocalTransport {
         extra_env.push((
             "KODE_MEMORY_ROOT".to_string(),
             crate::memory::resolve_memory_root().display().to_string(),
+        ));
+        extra_env.extend(kode_core::pty::terminal_theme_env(
+            spec.terminal_dark.unwrap_or(true),
         ));
 
         let mut session = Session::new(
@@ -312,6 +316,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                terminal_dark: None,
             })
             .await
             .expect("spawn ok");
@@ -359,6 +364,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                terminal_dark: None,
             })
             .await
             .expect_err("should fail");
@@ -403,6 +409,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                terminal_dark: None,
             })
             .await
             .unwrap();

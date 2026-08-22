@@ -29,6 +29,7 @@
     updateTerminalFontSize,
     type TerminalAppearance,
   } from './terminal_settings'
+  import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
 
   /**
    * 健康尺寸下限。低于此值的 cols/rows 一律视为容器还没准备好,
@@ -74,6 +75,7 @@
   let dprMql: MediaQueryList | null = null
   let bytesUnsubscribe: (() => Promise<void>) | null = null
   let terminalSettingsUnsubscribe: (() => void) | null = null
+  const ansiThemeAdapter = new TerminalAnsiThemeAdapter()
   // Cmd 键状态监听器(组件级,以便 onDestroy 时清理)
   let _onCmdDown: ((e: KeyboardEvent) => void) | null = null
   let _onCmdUp: ((e: KeyboardEvent) => void) | null = null
@@ -551,7 +553,8 @@
     //    initialBytes 写完再 start,确保 xterm 看到的字节顺序与 PTY 完全一致。
     const byteSubscription = await ipc.subscribeSessionBytes(sessionId, (bytes) => {
       if (destroyed || !term) return
-      term.write(bytes)
+      const themedBytes = ansiThemeAdapter.transform(bytes)
+      if (themedBytes.length > 0) term.write(themedBytes)
       if (visible) queueViewportRepair(false)
     })
     if (destroyed || !term) {
@@ -561,8 +564,13 @@
     bytesUnsubscribe = byteSubscription.unsubscribe
     try {
       if (byteSubscription.initialBytes.length > 0) {
+        const themedInitialBytes = ansiThemeAdapter.transform(byteSubscription.initialBytes)
         await new Promise<void>((resolve) => {
-          term.write(byteSubscription.initialBytes, () => {
+          if (themedInitialBytes.length === 0) {
+            resolve()
+            return
+          }
+          term.write(themedInitialBytes, () => {
             try { term.scrollToBottom() } catch {}
             resolve()
           })
@@ -1574,12 +1582,50 @@
    * 字符单元格区域、不覆盖 viewport 全部像素 —— gutter / 边缘缝隙会露底。
    * 显式对齐成 var(--bg-base),消除缝隙处的色差与潜在网格泄漏。
    */
-  .term-host :global(.xterm-viewport) {
-    background-color: var(--bg-base);
+  .term-host :global(.xterm .xterm-viewport) {
+    /* xterm.css 在组件挂载后动态加载，并写死 overflow-y:scroll。仅改 thumb
+       颜色无法阻止 WKWebView 绘制全高系统滑块，因此这里覆盖滚动行为本身：
+       没有 scrollback 时不生成滚动条，有溢出时仍可正常滚动。 */
+    overflow-y: auto !important;
+    background-color: var(--bg-base) !important;
+    scrollbar-color: color-mix(in srgb, var(--fg-tertiary) 46%, transparent) transparent;
+    scrollbar-width: thin;
+  }
+  /* xterm 强制 overflow-y:scroll；macOS 设为“始终显示滚动条”时即使内容很短也会
+     画出接近整高的 thumb。单独收敛终端滚动条，避免系统白色 thumb 在黑底上形成白条。 */
+  .term-host :global(.xterm .xterm-viewport::-webkit-scrollbar) {
+    width: 8px;
+    height: 8px;
+  }
+  .term-host :global(.xterm .xterm-viewport::-webkit-scrollbar-track) {
+    background: transparent;
+  }
+  .term-host :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb) {
+    min-height: 32px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg-tertiary) 46%, transparent);
+    background-clip: padding-box;
+  }
+  .term-host :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover) {
+    background: color-mix(in srgb, var(--fg-secondary) 58%, transparent);
+    background-clip: padding-box;
+  }
+  .term-host :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb:active) {
+    background: color-mix(in srgb, var(--fg-secondary) 78%, transparent);
+    background-clip: padding-box;
+  }
+  .term-host :global(.xterm .xterm-viewport::-webkit-scrollbar-corner) {
+    background: transparent;
   }
   /* Cmd 按住时整个终端显示 pointer,提示"有可点击的路径" */
   .term-host.cmd-held {
     cursor: pointer;
+  }
+
+  @media (forced-colors: active) {
+    .term-host :global(.xterm .xterm-viewport) { scrollbar-color: auto; }
+    .term-host :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb) { background: CanvasText; }
   }
   /* xterm link decorations(underline)的颜色追随主题 */
   .term-host :global(.xterm-underline-1) {

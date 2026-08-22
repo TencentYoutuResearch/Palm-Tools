@@ -23,6 +23,6 @@ pub mod transport;
 pub use config::{BackendConfig, Config, UiConfig};
 pub use event::CoreEvent;
 pub use model_alias::short_model_name;
-pub use pty::PtyHost;
+pub use pty::{parse_term_theme, terminal_theme_env, PtyHost};
 pub use session::{Session, SessionId};
 pub use transport::{EndpointId, SessionTransport, SpawnSpec, SpawnedSession, TransportError};

@@ -75,6 +75,10 @@ pub struct SpawnSpec {
     /// `None` = 跳过注入（memory 为空 / 查询失败 / prompt 注入总开关关掉）。
     /// Local transport 把它拼到 `--append-system-prompt` 末尾；Remote transport 忽略。
     pub memory_context: Option<String>,
+    /// Kode xterm 当前是 dark 还是 light。`Some` 时注入 `TERM_THEME`/`COLORFGBG`,
+    /// 让 cursor-agent / Claude / 其它 TUI 跳过容易超时的 OSC 11 探测。
+    /// `None` = PtyHost 默认 dark。
+    pub terminal_dark: Option<bool>,
 }
 
 /// transport spawn 后回的 DTO。前端接到后用来初始化 tab 状态。

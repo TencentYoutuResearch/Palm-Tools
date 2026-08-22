@@ -97,6 +97,7 @@ async fn spawn_then_write_then_kill_round_trip() {
             permission_mode: None,
             model: None,
             memory_context: None,
+            terminal_dark: None,
         })
         .await
         .expect("spawn ok");
@@ -133,6 +134,7 @@ async fn ws_relays_pty_bytes_into_core_tx() {
             permission_mode: None,
             model: None,
             memory_context: None,
+            terminal_dark: None,
         })
         .await
         .expect("spawn ok");
@@ -184,6 +186,7 @@ async fn ws_relays_session_exited_into_core_tx() {
             permission_mode: None,
             model: None,
             memory_context: None,
+            terminal_dark: None,
         })
         .await
         .expect("spawn ok");
@@ -224,6 +227,7 @@ async fn unknown_backend_returns_bad_request() {
             permission_mode: None,
             model: None,
             memory_context: None,
+            terminal_dark: None,
         })
         .await
         .expect_err("should fail");
@@ -251,6 +255,7 @@ async fn wrong_token_yields_internal_error_with_auth_prefix() {
             permission_mode: None,
             model: None,
             memory_context: None,
+            terminal_dark: None,
         })
         .await
         .expect_err("should fail");
@@ -292,6 +297,7 @@ async fn resize_below_minimum_propagates_to_server_validation() {
             permission_mode: None,
             model: None,
             memory_context: None,
+            terminal_dark: None,
         })
         .await
         .unwrap();

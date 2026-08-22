@@ -116,6 +116,7 @@ pub async fn spawn_shell(
     cols: u16,
     rows: u16,
     endpoint_id: Option<EndpointId>,
+    term_theme: Option<String>,
     state: tauri::State<'_, ShellPtyManager>,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<u32, String> {
@@ -154,6 +155,9 @@ pub async fn spawn_shell(
         || std::env::var_os("LC_CTYPE").is_some();
     if !has_locale {
         cmd.env("LANG", "en_US.UTF-8");
+    }
+    for (k, v) in crate::term_theme::theme_env(term_theme.as_deref()) {
+        cmd.env(k, v);
     }
 
     let mut child = pair

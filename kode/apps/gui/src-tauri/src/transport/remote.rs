@@ -834,6 +834,12 @@ impl SessionTransport for RemoteTransport {
         if let Some(s) = spec.model.as_ref() {
             body.insert("model".into(), Value::String(s.clone()));
         }
+        if let Some(dark) = spec.terminal_dark {
+            body.insert(
+                "term_theme".into(),
+                Value::String(if dark { "dark" } else { "light" }.into()),
+            );
+        }
 
         let resp = self
             .http
@@ -1130,6 +1136,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                terminal_dark: None,
             })
             .await
             .expect_err("should fail");

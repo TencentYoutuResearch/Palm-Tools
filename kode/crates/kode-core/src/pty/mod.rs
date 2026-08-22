@@ -73,6 +73,12 @@ impl PtyHost {
             cmd.env("COLORTERM", "truecolor");
         }
 
+        // TUI 主题提示:cursor-agent / Claude `theme: auto` / OpenCode / bat / vim
+        // 都会读这些变量。GUI 通过 extra_env 传入 Kode xterm 的真实 light/dark;
+        // legacy TUI 则保留外层终端已经提供的提示。两边都没有时才默认 dark,
+        // 避免子 CLI 的 OSC 11 探测在 PTY 转发链路上超时。
+        apply_terminal_theme_env(&mut cmd, extra_env);
+
         // 注入调用方提供的额外 env(追加/覆盖,不清空父进程 env)。
         // 典型:KODE_HOOK_SOCK — hook command 里的 $KODE_HOOK_SOCK 引用此变量
         // 定位 relay socket,无需把含 PID 的动态路径写死进 settings.json。
@@ -171,6 +177,45 @@ impl PtyHost {
     }
 }
 
+/// Parse a theme hint from spawn IPC / env (`"dark"` / `"light"`).
+pub fn parse_term_theme(value: Option<&str>) -> Option<bool> {
+    match value.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("dark") => Some(true),
+        Some("light") => Some(false),
+        _ => None,
+    }
+}
+
+/// Env vars that tell child TUIs the host terminal is dark or light.
+///
+/// - `TERM_THEME`: cursor-agent reads this first and skips its ~100ms OSC 11 probe.
+/// - `COLORFGBG`: Claude Code `theme: auto`, OpenCode, vim, bat, delta read this
+///   synchronously at startup (`15;0` = white on black, `0;15` = black on white).
+pub fn terminal_theme_env(dark: bool) -> Vec<(String, String)> {
+    if dark {
+        vec![
+            ("TERM_THEME".into(), "dark".into()),
+            ("COLORFGBG".into(), "15;0".into()),
+        ]
+    } else {
+        vec![
+            ("TERM_THEME".into(), "light".into()),
+            ("COLORFGBG".into(), "0;15".into()),
+        ]
+    }
+}
+
+/// Stamp default dark theme hints unless the parent env or `extra_env` already
+/// set the same keys. GUI's explicit `extra_env` is applied after this helper
+/// and therefore remains authoritative.
+pub fn apply_terminal_theme_env(cmd: &mut CommandBuilder, extra_env: &[(String, String)]) {
+    for (k, v) in terminal_theme_env(true) {
+        if cmd.get_env(&k).is_none() && !extra_env.iter().any(|(ek, _)| ek == &k) {
+            cmd.env(&k, &v);
+        }
+    }
+}
+
 fn resolve_spawn_command(command: &str) -> String {
     if command.contains('/') || command.contains('\\') {
         return command.to_string();
@@ -191,6 +236,17 @@ fn resolve_spawn_command(command: &str) -> String {
                 return cand.display().to_string();
             }
         }
+    }
+    // 通用兜底(2026-08):cursor-agent 报过这个坑之后审计了其它预置 backend
+    // (kimi / opencode / grok / kiro-cli 等)的官方安装脚本,发现它们同样倾向于
+    // 把二进制放进 `~/.local/bin` 这个事实上的"用户级 bin 目录"约定,而不保证
+    // 落在标准 Homebrew/npm 全局路径里。与其给每个新 backend 单独写一个
+    // `<name>_fallback_paths()`(codebuddy/codex 因为还有额外特殊候选路径才
+    // 那么写,继续保留),这里做一次通用兜底覆盖其余 backend:PATH 上找不到的
+    // 任何命令,最后都试一次 `~/.local/bin/<command>`。新增预置 backend 不需要
+    // 再改这个函数。
+    if let Some(cand) = local_bin_fallback(command) {
+        return cand.display().to_string();
     }
     command.to_string()
 }
@@ -228,6 +284,14 @@ fn codex_fallback_paths() -> Vec<PathBuf> {
         paths.push(home.join(".codex").join("bin").join("codex"));
     }
     paths
+}
+
+/// 通用 `~/.local/bin/<command>` 兜底,供 `codebuddy`/`codex` 之外的预置 backend
+/// 共用(cursor-agent / kimi / opencode / grok / kiro-cli 等官方安装脚本都倾向
+/// 把二进制放在这个目录)。找不到候选文件或非可执行时返回 `None`。
+fn local_bin_fallback(command: &str) -> Option<PathBuf> {
+    let cand = dirs::home_dir()?.join(".local").join("bin").join(command);
+    is_executable(&cand).then_some(cand)
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -312,6 +376,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 回归:`cursor-agent` 官方安装脚本默认落地 `~/.local/bin/cursor-agent`。
+    /// GUI 以 `.app` 方式启动时 PATH 可能不含这个目录,spawn 必须走通用
+    /// `local_bin_fallback` 而不是原样把命令名丢给 CommandBuilder(那样会直接
+    /// ENOENT)。用临时 `$HOME` 验证,覆盖 cursor-agent 之外的其它预置 backend
+    /// (kimi / opencode / grok / kiro-cli 等)同款风险。
+    #[test]
+    fn resolve_command_falls_back_to_local_bin_when_path_misses() {
+        let saved_path = std::env::var_os("PATH");
+        let saved_home = std::env::var_os("HOME");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home_dir = std::env::temp_dir().join(format!("kode-local-bin-home-test-{stamp}"));
+        let local_bin = home_dir.join(".local").join("bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let fake = local_bin.join("cursor-agent");
+        std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake, perms).unwrap();
+        }
+        unsafe {
+            std::env::set_var("PATH", "");
+            std::env::set_var("HOME", &home_dir);
+        }
+        let resolved = resolve_spawn_command("cursor-agent");
+        assert_eq!(resolved, fake.display().to_string());
+
+        unsafe {
+            match saved_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home_dir);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn spawn_reads_echo_output() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
@@ -390,17 +499,21 @@ mod tests {
     /// 回归:双击 .app 启动时 launchd 不传 TERM/COLORTERM,导致子 CLI(codebuddy/claude)
     /// 误判终端不支持颜色 → 视觉上"右边没颜色"。spawn 必须兜底设这两个环境变量。
     ///
-    /// 用 SAFETY:`std::env::remove_var` 在 spawn 前临时移除父进程的 TERM/COLORTERM,
-    /// 模拟 launchd 启动场景;spawn 后立即恢复,避免影响其他测试。
+    /// 用 SAFETY:`std::env::remove_var` 在 spawn 前临时移除父进程的终端能力和
+    /// 主题提示,模拟 launchd 启动场景;spawn 后立即恢复,避免影响其他测试。
     /// 依赖 `--test-threads=1`(CODEBUDDY.md 已固定)。
     #[tokio::test(flavor = "multi_thread")]
     async fn spawn_sets_term_when_parent_env_missing() {
         let saved_term = std::env::var_os("TERM");
         let saved_colorterm = std::env::var_os("COLORTERM");
+        let saved_term_theme = std::env::var_os("TERM_THEME");
+        let saved_colorfgbg = std::env::var_os("COLORFGBG");
         // SAFETY: 测试单线程跑(--test-threads=1),且 spawn 前同步完成 env 修改。
         unsafe {
             std::env::remove_var("TERM");
             std::env::remove_var("COLORTERM");
+            std::env::remove_var("TERM_THEME");
+            std::env::remove_var("COLORFGBG");
         }
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
@@ -409,7 +522,7 @@ mod tests {
             "bash",
             &[
                 "-c".into(),
-                "echo TERM=$TERM CT=$COLORTERM; sleep 0.1".into(),
+                "echo TERM=$TERM CT=$COLORTERM TT=$TERM_THEME CFG=$COLORFGBG; sleep 0.1".into(),
             ],
             portable_pty::PtySize {
                 cols: 80,
@@ -446,6 +559,12 @@ mod tests {
             if let Some(v) = saved_colorterm {
                 std::env::set_var("COLORTERM", v);
             }
+            if let Some(v) = saved_term_theme {
+                std::env::set_var("TERM_THEME", v);
+            }
+            if let Some(v) = saved_colorfgbg {
+                std::env::set_var("COLORFGBG", v);
+            }
         }
 
         let s = String::from_utf8_lossy(&got);
@@ -459,6 +578,112 @@ mod tests {
             "child COLORTERM not set, got: {:?}",
             s
         );
+        assert!(
+            s.contains("TT=dark"),
+            "child TERM_THEME should default dark, got: {:?}",
+            s
+        );
+        assert!(
+            s.contains("CFG=15;0"),
+            "child COLORFGBG should default dark, got: {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn terminal_theme_env_dark_and_light() {
+        let dark = terminal_theme_env(true);
+        assert_eq!(
+            dark,
+            vec![
+                ("TERM_THEME".into(), "dark".into()),
+                ("COLORFGBG".into(), "15;0".into()),
+            ]
+        );
+        let light = terminal_theme_env(false);
+        assert_eq!(
+            light,
+            vec![
+                ("TERM_THEME".into(), "light".into()),
+                ("COLORFGBG".into(), "0;15".into()),
+            ]
+        );
+        assert_eq!(parse_term_theme(Some("Dark")), Some(true));
+        assert_eq!(parse_term_theme(Some(" light ")), Some(false));
+        assert_eq!(parse_term_theme(Some("system")), None);
+        assert_eq!(parse_term_theme(None), None);
+    }
+
+    #[test]
+    fn terminal_theme_default_preserves_parent_hints() {
+        let mut cmd = CommandBuilder::new("echo");
+        cmd.env("TERM_THEME", "light");
+        cmd.env("COLORFGBG", "0;15");
+
+        apply_terminal_theme_env(&mut cmd, &[]);
+
+        assert_eq!(
+            cmd.get_env("TERM_THEME"),
+            Some(std::ffi::OsStr::new("light"))
+        );
+        assert_eq!(cmd.get_env("COLORFGBG"), Some(std::ffi::OsStr::new("0;15")));
+    }
+
+    #[test]
+    fn terminal_theme_defaults_to_dark_without_any_hint() {
+        let mut cmd = CommandBuilder::new("echo");
+        cmd.env_remove("TERM_THEME");
+        cmd.env_remove("COLORFGBG");
+
+        apply_terminal_theme_env(&mut cmd, &[]);
+
+        assert_eq!(
+            cmd.get_env("TERM_THEME"),
+            Some(std::ffi::OsStr::new("dark"))
+        );
+        assert_eq!(cmd.get_env("COLORFGBG"), Some(std::ffi::OsStr::new("15;0")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extra_env_overrides_default_terminal_theme() {
+        let extra = terminal_theme_env(false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let host = PtyHost::spawn(
+            98,
+            "bash",
+            &[
+                "-c".into(),
+                "echo TT=$TERM_THEME CFG=$COLORFGBG; sleep 0.1".into(),
+            ],
+            portable_pty::PtySize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            std::path::Path::new("/tmp"),
+            tx,
+            &extra,
+        )
+        .expect("spawn");
+
+        let mut got = Vec::<u8>::new();
+        let _ = timeout(Duration::from_secs(2), async {
+            while let Some(act) = rx.recv().await {
+                if let CoreEvent::PtyBytes { bytes, .. } = act {
+                    got.extend(bytes);
+                    if String::from_utf8_lossy(&got).contains("CFG=") {
+                        break;
+                    }
+                }
+            }
+        })
+        .await;
+        drop(host);
+
+        let s = String::from_utf8_lossy(&got);
+        assert!(s.contains("TT=light"), "extra_env should win, got: {:?}", s);
+        assert!(s.contains("CFG=0;15"), "extra_env should win, got: {:?}", s);
     }
 
     #[tokio::test(flavor = "multi_thread")]

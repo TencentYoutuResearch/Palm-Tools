@@ -1,3 +1,5 @@
+import { terminalSurfacePalette } from './terminal_ansi_theme'
+
 export type TerminalTarget = 'pty' | 'shell'
 export type TerminalThemeMode = 'system' | 'light' | 'dark'
 
@@ -100,6 +102,20 @@ export function effectiveTerminalDark(appIsDark: boolean, mode: TerminalThemeMod
   return appIsDark
 }
 
+export function appPrefersDark(): boolean {
+  if (typeof document === 'undefined') return true
+  const attr = document.documentElement.getAttribute('data-theme')
+  if (attr === 'dark') return true
+  if (attr === 'light') return false
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? true
+}
+
+/** Effective light/dark for a Kode xterm, matching `buildXtermTheme`. */
+export function currentTermTheme(target: TerminalTarget): 'light' | 'dark' {
+  const appearance = loadTerminalAppearance(target)
+  return effectiveTerminalDark(appPrefersDark(), appearance.themeMode) ? 'dark' : 'light'
+}
+
 export function buildXtermTheme(appIsDark: boolean, mode: TerminalThemeMode = 'system') {
   const dark = effectiveTerminalDark(appIsDark, mode)
   const ansiDark = {
@@ -118,9 +134,11 @@ export function buildXtermTheme(appIsDark: boolean, mode: TerminalThemeMode = 's
   }
   return dark
     ? { background: '#0D0F0E', foreground: '#EDEFEB', cursor: '#9FE870',
-        cursorAccent: '#0D0F0E', selectionBackground: 'rgba(159, 232, 112, 0.48)', ...ansiDark }
+        cursorAccent: '#0D0F0E', selectionBackground: 'rgba(159, 232, 112, 0.48)',
+        extendedAnsi: terminalSurfacePalette(true), ...ansiDark }
     : { background: '#F7F7F3', foreground: '#171A18', cursor: '#216E45',
-        cursorAccent: '#F7F7F3', selectionBackground: 'rgba(33, 110, 69, 0.42)', ...ansiLight }
+        cursorAccent: '#F7F7F3', selectionBackground: 'rgba(33, 110, 69, 0.42)',
+        extendedAnsi: terminalSurfacePalette(false), ...ansiLight }
 }
 
 export function dispatchTerminalSettingsChanged(target: TerminalTarget, settings = loadTerminalAppearance(target)) {
