@@ -13,7 +13,7 @@
    */
   import { onMount, onDestroy } from 'svelte'
   import { getCurrentWindow } from '@tauri-apps/api/window'
-  import { open, save } from '@tauri-apps/plugin-dialog'
+  import { open } from '@tauri-apps/plugin-dialog'
   import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
   import Terminal from './lib/Terminal.svelte'
   import CommandPalette, { type Command } from './lib/CommandPalette.svelte'
@@ -150,44 +150,25 @@
     return null
   }
 
-  function screenshotDefaultName(): string {
-    const now = new Date()
-    const pad = (value: number) => String(value).padStart(2, '0')
-    return `kode-screenshot-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.png`
-  }
-
-  async function saveScreenshotPayload(payload: import('./lib/ipc').ScreenshotPayload): Promise<boolean> {
-    await appWindow.show().catch(() => {})
-    await appWindow.setFocus().catch(() => {})
-    const picked = await save({
-      title: t('command.other.screenshot'),
-      defaultPath: screenshotDefaultName(),
-      filters: [{ name: 'PNG image', extensions: ['png'] }],
-    })
-    if (typeof picked !== 'string' || picked.length === 0) return false
-    await ipc.savePngBytes(picked, payload.png_base64)
-    pushToast({
-      severity: 'success',
-      title: 'Screenshot saved',
-      detail: picked,
-    })
-    return true
-  }
-
   async function runConfiguredScreenshot() {
     if (screenshotBusy) return
     screenshotBusy = true
     try {
-      const payload = screenshotSettings.mode === 'area'
-        ? await ipc.captureInteractiveScreenshot()
-        : await ipc.captureWindowScreenshot(appWindow.label)
-      await saveScreenshotPayload(payload)
+      if (screenshotSettings.mode === 'area') {
+        await ipc.captureInteractiveScreenshot()
+      } else {
+        await ipc.captureWindowScreenshot(appWindow.label)
+      }
+      pushToast({
+        severity: 'success',
+        title: t('settings.capture.copied'),
+      })
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       if (detail.includes('cancelled')) return
       pushToast({
         severity: 'error',
-        title: 'Screenshot failed',
+        title: t('settings.capture.failed'),
         detail,
       })
     } finally {

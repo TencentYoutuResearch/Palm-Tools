@@ -37,7 +37,7 @@ parking_lot = "0.12"
 base64 = "0.22"
 portable-pty = "0.9"
 dirs = "5"
-arboard = { version = "3", default-features = false }
+arboard = { version = "3", default-features = false, features = ["image-data"] }
 # Phase 11.2:LocalTransport 实现 SessionTransport trait,需要 async-trait
 async-trait = "0.1"
 # Phase 11.3:RemoteTransport 走 reqwest REST + tokio-tungstenite WS。

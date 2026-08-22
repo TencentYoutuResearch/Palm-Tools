@@ -1,60 +1,50 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::Serialize;
 use tauri::{Manager, WebviewWindow};
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowScreenshotPayload {
-    pub png_base64: String,
-    pub width: u32,
-    pub height: u32,
-}
 
 #[tauri::command]
 pub fn capture_window_screenshot(
     app: tauri::AppHandle,
     window_label: String,
-) -> Result<WindowScreenshotPayload, String> {
+) -> Result<(), String> {
     let window = app
         .get_webview_window(&window_label)
         .ok_or_else(|| format!("window '{window_label}' not found"))?;
     let png = capture_window_png(&window)?;
-    let (width, height) = screenshot_dimensions(&png)?;
-    Ok(WindowScreenshotPayload {
-        png_base64: BASE64.encode(png),
-        width,
-        height,
-    })
+    copy_png_to_clipboard(&png)
 }
 
 #[tauri::command]
-pub fn capture_interactive_screenshot() -> Result<WindowScreenshotPayload, String> {
-    let png = capture_interactive_png()?;
-    let (width, height) = screenshot_dimensions(&png)?;
-    Ok(WindowScreenshotPayload {
-        png_base64: BASE64.encode(png),
-        width,
-        height,
+pub fn capture_interactive_screenshot() -> Result<(), String> {
+    capture_interactive_to_clipboard()
+}
+
+#[cfg(target_os = "macos")]
+fn copy_png_to_clipboard(png: &[u8]) -> Result<(), String> {
+    let image = clipboard_image_from_png(png)?;
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|error| format!("open system clipboard failed: {error}"))?;
+    clipboard
+        .set_image(image)
+        .map_err(|error| format!("copy screenshot to clipboard failed: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn clipboard_image_from_png(png: &[u8]) -> Result<arboard::ImageData<'static>, String> {
+    use std::borrow::Cow;
+
+    let rgba = image::load_from_memory(png)
+        .map_err(|error| format!("decode screenshot for clipboard failed: {error}"))?
+        .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: Cow::Owned(rgba.into_raw()),
     })
 }
 
-#[tauri::command]
-pub fn save_png_bytes(output_path: String, png_base64: String) -> Result<(), String> {
-    let bytes = BASE64
-        .decode(png_base64.as_bytes())
-        .map_err(|error| format!("decode png failed: {error}"))?;
-    std::fs::write(&output_path, bytes)
-        .map_err(|error| format!("write screenshot {} failed: {error}", output_path))?;
-    Ok(())
-}
-
-fn screenshot_dimensions(png: &[u8]) -> Result<(u32, u32), String> {
-    if png.len() < 24 {
-        return Err("generated screenshot is not a valid PNG".into());
-    }
-    let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
-    let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
-    Ok((width, height))
+#[cfg(not(target_os = "macos"))]
+fn copy_png_to_clipboard(_png: &[u8]) -> Result<(), String> {
+    Err("image clipboard is currently only supported on macOS".into())
 }
 
 #[cfg(target_os = "macos")]
@@ -129,22 +119,40 @@ fn capture_window_png(_window: &WebviewWindow) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn capture_interactive_png() -> Result<Vec<u8>, String> {
-    let output_path =
-        std::env::temp_dir().join(format!("kode-screenshot-{}.png", uuid::Uuid::new_v4()));
+fn capture_interactive_to_clipboard() -> Result<(), String> {
     let status = std::process::Command::new("/usr/sbin/screencapture")
         .arg("-i")
+        .arg("-c")
         .arg("-x")
-        .arg(&output_path)
         .status()
         .map_err(|error| format!("launch screencapture failed: {error}"))?;
     if !status.success() {
         return Err("cancelled".into());
     }
-    std::fs::read(&output_path).map_err(|error| format!("read screenshot failed: {error}"))
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn capture_interactive_png() -> Result<Vec<u8>, String> {
+fn capture_interactive_to_clipboard() -> Result<(), String> {
     Err("interactive screenshot is currently only supported on macOS".into())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::clipboard_image_from_png;
+    use image::codecs::png::PngEncoder;
+    use image::{ColorType, ImageEncoder};
+
+    #[test]
+    fn decodes_png_into_rgba_clipboard_image() {
+        let rgba = [12, 34, 56, 255, 78, 90, 123, 200];
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&rgba, 2, 1, ColorType::Rgba8.into())
+            .expect("encode fixture png");
+
+        let image = clipboard_image_from_png(&png).expect("decode clipboard image");
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(image.bytes.as_ref(), rgba);
+    }
 }

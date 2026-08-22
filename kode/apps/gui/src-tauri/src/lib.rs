@@ -187,7 +187,6 @@ pub fn run() {
             commands::read_clipboard,
             screenshot::capture_window_screenshot,
             screenshot::capture_interactive_screenshot,
-            screenshot::save_png_bytes,
             commands::list_sessions_for_cwd,
             model_usage::model_usage_snapshot,
             model_monitor::model_monitor_set_expanded,

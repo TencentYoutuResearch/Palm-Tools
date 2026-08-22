@@ -60,7 +60,7 @@
     "description": "Settings tab for screenshot capture"
   },
   "settings.capture.description": {
-    "message": "Configure screenshot shortcuts and choose whether they capture the current kode window or a global screen region.",
+    "message": "Configure screenshot shortcuts and choose whether they capture the current kode window or a global screen region. Captures go directly to the clipboard.",
     "description": "Screenshot settings description"
   },
   "settings.capture.shortcut": {
@@ -92,8 +92,16 @@
     "description": "Global area screenshot mode description"
   },
   "settings.capture.takeNow": {
-    "message": "Take screenshot now",
+    "message": "Capture to clipboard",
     "description": "Manual screenshot action in settings"
+  },
+  "settings.capture.copied": {
+    "message": "Screenshot copied to clipboard",
+    "description": "Toast after copying a screenshot to the clipboard"
+  },
+  "settings.capture.failed": {
+    "message": "Screenshot failed",
+    "description": "Toast when screenshot capture or clipboard copy fails"
   },
   "settings.capture.saved": {
     "message": "Screenshot settings saved: {shortcut} · {mode}",
