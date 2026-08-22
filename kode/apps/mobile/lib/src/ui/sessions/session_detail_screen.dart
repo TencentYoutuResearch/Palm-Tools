@@ -12,15 +12,20 @@
 ///   - 输入框:发文本 → POST /input
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
 import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
 import '../theme.dart';
 import 'backend_identity.dart';
 import 'message_markdown.dart';
+import 'speech_locale.dart';
 
 String _compactTokens(int value) {
   if (value >= 1000000) {
@@ -77,7 +82,14 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
 
   /// 输入框
   final _inputCtrl = TextEditingController();
-  bool _sending = false;
+  final _inputFocus = FocusNode();
+  final _speech = SpeechToText();
+  bool _speechInitialized = false;
+  bool _speechAvailable = false;
+  bool _listening = false;
+  String _speechPrefix = '';
+  String? _speechError;
+  SpeechInputLanguage _speechLanguage = SpeechInputLanguage.mandarin;
 
   bool _historyLoaded = false;
   String? _historyError;
@@ -87,6 +99,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   final _scrollCtrl = ScrollController();
 
   ProviderSubscription<AsyncValue<Envelope>>? _wsSub;
+
+  void _dismissKeyboard() {
+    _inputFocus.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
 
   @override
   void initState() {
@@ -103,7 +120,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   @override
   void dispose() {
     _wsSub?.close();
+    if (_speechInitialized) unawaited(_speech.cancel());
     _inputCtrl.dispose();
+    _inputFocus.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
@@ -186,14 +205,27 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         _meta = {..._meta, ...env.payload};
         break;
       case 'message':
-        _upsert(
-          _Item(
-            key: 'm-${env.payload['id'] ?? env.ts}',
-            type: 'message',
-            ts: env.ts,
-            payload: env.payload,
-          ),
+        final messageId = env.payload['id'] as String?;
+        final messageText = env.payload['text'] as String?;
+        if (env.payload['role'] == 'user') {
+          ref
+              .read(sessionMessageQueueProvider.notifier)
+              .markProcessed(
+                widget.sessionId,
+                semanticMessageId: messageId,
+                text: messageText,
+              );
+        }
+        final incoming = _Item(
+          key: 'm-${env.payload['id'] ?? env.ts}',
+          type: 'message',
+          ts: env.ts,
+          payload: env.payload,
         );
+        if (env.payload['role'] != 'user' ||
+            !_replaceOptimisticUserMessage(incoming)) {
+          _upsert(incoming);
+        }
         break;
       case 'tool_use':
         // 同一 id 的事件 (running → ok/error) 合并
@@ -321,50 +353,210 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         i--;
       }
       _items.insert(i, item);
-      // 重建 byKey 索引
-      _byKey.clear();
-      for (var k = 0; k < _items.length; k++) {
-        _byKey[_items[k].key] = k;
-      }
+      _reindexItems();
+    }
+  }
+
+  bool _replaceOptimisticUserMessage(_Item incoming) {
+    final incomingText = (incoming.payload['text'] as String? ?? '').trim();
+    if (incomingText.isEmpty) return false;
+    final optimisticIndex = _items.indexWhere(
+      (item) =>
+          item.type == 'message' &&
+          item.payload['role'] == 'user' &&
+          item.payload['optimistic'] == true &&
+          (item.payload['text'] as String? ?? '').trim() == incomingText,
+    );
+    if (optimisticIndex < 0) return false;
+
+    final optimistic = _items[optimisticIndex];
+    final outboundId = optimistic.payload['outbound_id'] as String?;
+    final reconciled = _Item(
+      key: incoming.key,
+      type: incoming.type,
+      ts: incoming.ts,
+      payload: {...incoming.payload, 'outbound_id': ?outboundId},
+    );
+    final canonicalIndex = _byKey[incoming.key];
+    if (canonicalIndex != null && canonicalIndex != optimisticIndex) {
+      _items.removeAt(optimisticIndex);
+      _reindexItems();
+      _upsert(reconciled);
+    } else {
+      _items[optimisticIndex] = reconciled;
+      _reindexItems();
+    }
+    return true;
+  }
+
+  void _reindexItems() {
+    _byKey.clear();
+    for (var i = 0; i < _items.length; i++) {
+      _byKey[_items[i].key] = i;
     }
   }
 
   Future<void> _send() async {
-    if (_sending) return;
-    final text = _inputCtrl.text;
+    if (_listening) await _stopListening();
+    final text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
-    final api = ref.read(apiClientProvider);
-    if (api == null) return;
-    // Clear synchronously before the async REST round-trip. On iOS, clearing
-    // after await lets the active IME composing value restore the submitted
-    // prompt into the field. A failed send restores it only if the user has
-    // not started typing a replacement.
+
+    final outbound = ref
+        .read(sessionMessageQueueProvider.notifier)
+        .enqueue(sessionId: widget.sessionId, text: text);
+    if (outbound == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    setState(() {
+      _upsert(
+        _Item(
+          key: 'm-local-${outbound.id}',
+          type: 'message',
+          ts: now,
+          payload: {
+            'id': outbound.semanticMessageId,
+            'outbound_id': outbound.id,
+            'role': 'user',
+            'text': text,
+            'timestamp_ms': now,
+            'optimistic': true,
+          },
+        ),
+      );
+    });
+    _scrollToBottom();
+
+    // Clear before any asynchronous delivery and dismiss the IME immediately.
+    // This prevents iOS composing text from being restored after submit.
     _inputCtrl.clear();
-    setState(() => _sending = true);
+    _dismissKeyboard();
+  }
+
+  void _discardOutbound(String itemKey, QueuedSessionMessage message) {
+    ref
+        .read(sessionMessageQueueProvider.notifier)
+        .remove(widget.sessionId, message.id);
+    final index = _byKey[itemKey];
+    if (index == null) return;
+    setState(() {
+      _items.removeAt(index);
+      _reindexItems();
+    });
+  }
+
+  Future<void> _toggleSpeech() async {
+    if (_listening) {
+      await _stopListening();
+      return;
+    }
+    _dismissKeyboard();
+    if (mounted) setState(() => _speechError = null);
+
     try {
-      // bridge 会把 text 拆成两部分:`\x1b[200~ <body> \x1b[201~` + `\r`(单独发触发 Ink 提交)。
-      // 这里只需要保证:
-      //   1. 文本主体里换行用 \n(bridge paste 模式 / Ink 正确解析为多行),不能用 \r —
-      //      \r 在 bracketed paste 内部会被 Ink 当成"行尾标记"提前结束输入。
-      //   2. 末尾必须有一个换行字符(\n 或 \r),bridge 据此判断"用户要提交"。
-      var payload = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-      if (!payload.endsWith('\n')) payload = '$payload\n';
-      await api.sendInputText(widget.sessionId, payload);
-    } catch (e) {
-      if (mounted) {
-        if (_inputCtrl.text.isEmpty) {
-          _inputCtrl.value = TextEditingValue(
-            text: text,
-            selection: TextSelection.collapsed(offset: text.length),
+      if (!_speechInitialized) {
+        final available = await _speech.initialize(
+          options: [SpeechToText.androidNoBluetooth],
+          onStatus: (status) {
+            if (!mounted) return;
+            final active = status == SpeechToText.listeningStatus;
+            if (_listening != active) setState(() => _listening = active);
+          },
+          onError: (error) {
+            if (!mounted) return;
+            setState(() {
+              _listening = false;
+              _speechError = error.errorMsg.contains('permission')
+                  ? 'Microphone or speech access is off. Enable it in Settings.'
+                  : 'Voice input stopped. Tap the microphone to try again.';
+            });
+          },
+        );
+        if (!mounted) return;
+        setState(() {
+          _speechInitialized = true;
+          _speechAvailable = available;
+        });
+      }
+
+      if (!_speechAvailable) {
+        if (mounted) {
+          setState(
+            () => _speechError =
+                'Speech recognition is not available on this device.',
           );
         }
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('send failed: $e')));
+        return;
       }
-    } finally {
-      if (mounted) setState(() => _sending = false);
+
+      _speechPrefix = _inputCtrl.text.trimRight();
+      final availableLocales = await _speech.locales();
+      final localeId = resolveSpeechLocaleId(
+        availableLocales.map((locale) => locale.localeId),
+        _speechLanguage,
+      );
+      if (localeId == null) {
+        if (mounted) {
+          setState(
+            () => _speechError =
+                '${_speechLanguage.localeLabel} speech recognition is not available on this device.',
+          );
+        }
+        return;
+      }
+      await _speech.listen(
+        onResult: (result) {
+          if (!mounted) return;
+          final words = result.recognizedWords.trim();
+          if (words.isEmpty) return;
+          final separator = _speechPrefix.isEmpty ? '' : ' ';
+          final next = '$_speechPrefix$separator$words';
+          _inputCtrl.value = TextEditingValue(
+            text: next,
+            selection: TextSelection.collapsed(offset: next.length),
+          );
+        },
+        listenOptions: SpeechListenOptions(
+          listenMode: ListenMode.dictation,
+          localeId: localeId,
+          partialResults: true,
+          cancelOnError: true,
+          autoPunctuation: true,
+          pauseFor: const Duration(seconds: 3),
+          listenFor: const Duration(minutes: 1),
+        ),
+      );
+      if (mounted) setState(() => _listening = _speech.isListening);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _listening = false;
+          _speechError = 'Could not start voice input. Tap to try again.';
+        });
+      }
     }
+  }
+
+  Future<void> _stopListening() async {
+    if (!_speechInitialized) return;
+    await _speech.stop();
+    if (mounted) setState(() => _listening = false);
+  }
+
+  void _toggleSpeechLanguage() {
+    if (_listening) return;
+    final next = _speechLanguage.next;
+    unawaited(HapticFeedback.selectionClick());
+    setState(() {
+      _speechLanguage = next;
+      _speechError = null;
+    });
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('Voice input: ${next.localeLabel}'),
+          duration: const Duration(milliseconds: 1200),
+        ),
+      );
   }
 
   Future<void> _switchMode(String desired) async {
@@ -414,6 +606,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
     final cwd = summary?.cwd?.trim();
     final sessionStatus = _liveStatus ?? summary?.status ?? 'starting';
     final showAgentActivity = _showsAgentActivity(sessionStatus);
+    final queuedMessages = ref.watch(
+      sessionMessageQueueProvider.select(
+        (queues) => queues[widget.sessionId] ?? const [],
+      ),
+    );
     final hasHeaderMeta = model.isNotEmpty || tokens > 0 || ctxPct != null;
     // 当前 session 是否仍需用户操作(prompt 还没解除)
     final attentionKind = ref.watch(
@@ -490,6 +687,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                     )
                   : ListView.builder(
                       controller: _scrollCtrl,
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.onDrag,
                       padding: const EdgeInsets.fromLTRB(12, 14, 12, 18),
                       itemCount: _items.length + (showAgentActivity ? 1 : 0),
                       itemBuilder: (_, i) {
@@ -499,27 +698,59 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                             status: sessionStatus,
                           );
                         }
-                        return _buildItem(_items[i], backendKey: backendKey);
+                        return _buildItem(
+                          _items[i],
+                          backendKey: backendKey,
+                          outboundMessages: queuedMessages,
+                        );
                       },
                     ),
             ),
-            _buildInput(backendIdentity(backendKey).label),
+            _buildInput(
+              backendIdentity(backendKey).label,
+              sessionStatus: sessionStatus,
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildItem(_Item item, {required String backendKey}) {
+  Widget _buildItem(
+    _Item item, {
+    required String backendKey,
+    required List<QueuedSessionMessage> outboundMessages,
+  }) {
     switch (item.type) {
       case 'message':
         final role = item.payload['role'] as String? ?? '?';
         final text = item.payload['text'] as String? ?? '';
+        final messageId = item.payload['id'] as String?;
+        final outboundId = item.payload['outbound_id'] as String?;
+        final outbound = role == 'user'
+            ? outboundMessages.where((entry) {
+                if (outboundId != null) return entry.id == outboundId;
+                if (messageId != null && entry.semanticMessageId == messageId) {
+                  return true;
+                }
+                return entry.status == SessionMessageQueueStatus.processed &&
+                    entry.text.trim() == text.trim();
+              }).firstOrNull
+            : null;
         return _MessageBubble(
           role: role,
           text: text,
           backendKey: backendKey,
           timestamp: (item.payload['timestamp_ms'] as num?)?.toInt(),
+          deliveryStatus: outbound?.status,
+          onRetry: outbound?.status == SessionMessageQueueStatus.failed
+              ? () => ref
+                    .read(sessionMessageQueueProvider.notifier)
+                    .retry(widget.sessionId, outbound!.id)
+              : null,
+          onDiscard: outbound?.status == SessionMessageQueueStatus.failed
+              ? () => _discardOutbound(item.key, outbound!)
+              : null,
         );
       case 'tool_use':
         return _ToolUseCard(payload: item.payload);
@@ -565,88 +796,255 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
     }).toList();
   }
 
-  Widget _buildInput(String backendLabel) {
+  Widget _buildInput(String backendLabel, {required String sessionStatus}) {
     final colors = Theme.of(context).colorScheme;
+    final working = _showsAgentActivity(sessionStatus);
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: _inputCtrl,
       builder: (context, value, _) {
-        final canSend = value.text.trim().isNotEmpty && !_sending;
+        final canSend = value.text.trim().isNotEmpty;
         return Container(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          padding: const EdgeInsets.fromLTRB(10, 7, 10, 8),
           decoration: BoxDecoration(
             color: colors.surface,
             border: Border(top: BorderSide(color: colors.outline)),
           ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _inputCtrl,
-                  minLines: 1,
-                  maxLines: 4,
-                  keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.newline,
-                  decoration: InputDecoration(
-                    hintText: 'Message $backendLabel…',
-                    filled: true,
-                    fillColor: colors.surfaceContainerHighest,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(13),
-                      borderSide: BorderSide(color: colors.outline),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(13),
-                      borderSide: BorderSide(color: colors.outline),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(13),
-                      borderSide: BorderSide(color: colors.primary, width: 1.5),
-                    ),
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 13,
-                      vertical: 12,
-                    ),
-                  ),
+              if (_listening || _speechError != null)
+                _VoiceInputRail(
+                  listening: _listening,
+                  error: _speechError,
+                  languageLabel: _speechLanguage.localeLabel,
+                  onDismissError: () => setState(() => _speechError = null),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Semantics(
-                button: true,
-                label: 'Send message',
-                child: Tooltip(
-                  message: 'Send message',
-                  child: SizedBox(
-                    width: 48,
-                    height: 46,
-                    child: FilledButton(
-                      onPressed: canSend ? _send : null,
-                      style: FilledButton.styleFrom(
-                        elevation: 0,
-                        padding: EdgeInsets.zero,
-                        shape: RoundedRectangleBorder(
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _ComposerIconButton(
+                    icon: _listening
+                        ? Icons.stop_rounded
+                        : Icons.mic_none_rounded,
+                    label: _listening
+                        ? 'Stop ${_speechLanguage.localeLabel} voice input'
+                        : 'Start ${_speechLanguage.localeLabel} voice input',
+                    hint: _listening ? null : 'Long press to switch language',
+                    badge: _speechLanguage.compactLabel,
+                    active: _listening,
+                    onPressed: _toggleSpeech,
+                    onLongPress: _listening ? null : _toggleSpeechLanguage,
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: TextField(
+                      controller: _inputCtrl,
+                      focusNode: _inputFocus,
+                      onTapOutside: (_) => _dismissKeyboard(),
+                      minLines: 1,
+                      maxLines: 4,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
+                      decoration: InputDecoration(
+                        hintText: _listening
+                            ? 'Listening…'
+                            : 'Message $backendLabel…',
+                        filled: true,
+                        fillColor: colors.surfaceContainerHighest,
+                        border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(13),
+                          borderSide: BorderSide(color: colors.outline),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(13),
+                          borderSide: BorderSide(color: colors.outline),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(13),
+                          borderSide: BorderSide(
+                            color: colors.primary,
+                            width: 1.5,
+                          ),
+                        ),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 13,
+                          vertical: 12,
                         ),
                       ),
-                      child: _sending
-                          ? SizedBox(
-                              width: 17,
-                              height: 17,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: colors.onPrimary,
-                              ),
-                            )
-                          : const Icon(Icons.arrow_upward_rounded, size: 24),
                     ),
                   ),
-                ),
+                  const SizedBox(width: 7),
+                  Semantics(
+                    button: true,
+                    label: working
+                        ? 'Send message to backend queue'
+                        : 'Send message',
+                    child: Tooltip(
+                      message: working
+                          ? 'Send now · backend will queue it'
+                          : 'Send message',
+                      child: SizedBox(
+                        width: 48,
+                        height: 46,
+                        child: FilledButton(
+                          onPressed: canSend ? _send : null,
+                          style: FilledButton.styleFrom(
+                            elevation: 0,
+                            padding: EdgeInsets.zero,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(13),
+                            ),
+                          ),
+                          child: Icon(
+                            working
+                                ? Icons.schedule_send_rounded
+                                : Icons.arrow_upward_rounded,
+                            size: 23,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
         );
       },
+    );
+  }
+}
+
+class _ComposerIconButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String? hint;
+  final String badge;
+  final bool active;
+  final VoidCallback onPressed;
+  final VoidCallback? onLongPress;
+
+  const _ComposerIconButton({
+    required this.icon,
+    required this.label,
+    required this.hint,
+    required this.badge,
+    required this.active,
+    required this.onPressed,
+    required this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Semantics(
+      button: true,
+      label: label,
+      hint: hint,
+      child: SizedBox(
+        width: 44,
+        height: 46,
+        child: Material(
+          color: active
+              ? colors.errorContainer
+              : colors.surfaceContainerHighest,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(13),
+            side: BorderSide(color: active ? colors.error : colors.outline),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onPressed,
+            onLongPress: onLongPress,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(
+                  icon,
+                  size: 22,
+                  color: active
+                      ? colors.onErrorContainer
+                      : colors.onSurfaceVariant,
+                ),
+                Positioned(
+                  right: 4,
+                  bottom: 3,
+                  child: Text(
+                    badge,
+                    style: TextStyle(
+                      color: active ? colors.onErrorContainer : colors.primary,
+                      fontSize: 8,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VoiceInputRail extends StatelessWidget {
+  final bool listening;
+  final String? error;
+  final String languageLabel;
+  final VoidCallback onDismissError;
+
+  const _VoiceInputRail({
+    required this.listening,
+    required this.error,
+    required this.languageLabel,
+    required this.onDismissError,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final hasError = error != null;
+    final accent = hasError ? colors.error : colors.primary;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 7),
+      padding: const EdgeInsets.fromLTRB(10, 7, 6, 7),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: accent.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            hasError ? Icons.mic_off_outlined : Icons.graphic_eq_rounded,
+            size: 18,
+            color: accent,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              error ??
+                  'Listening in $languageLabel · transcript stays editable',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: hasError ? colors.onSurface : colors.primary,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          if (hasError)
+            IconButton(
+              onPressed: onDismissError,
+              tooltip: 'Dismiss',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close_rounded, size: 18),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -887,59 +1285,61 @@ class _AgentActivityLine extends StatelessWidget {
             Expanded(
               child: Container(
                 constraints: const BoxConstraints(minHeight: 38),
-                padding: const EdgeInsets.symmetric(horizontal: 11),
                 decoration: BoxDecoration(
                   color: statusColor.withValues(alpha: 0.08),
-                  border: Border(
-                    left: BorderSide(color: statusColor, width: 2),
-                    top: BorderSide(color: colors.outline),
-                    right: BorderSide(color: colors.outline),
-                    bottom: BorderSide(color: colors.outline),
-                  ),
+                  border: Border.all(color: colors.outline),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Row(
-                  children: [
-                    if (reduceMotion)
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: statusColor,
-                          shape: BoxShape.circle,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 11),
+                  decoration: BoxDecoration(
+                    border: Border(
+                      left: BorderSide(color: statusColor, width: 2),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      if (reduceMotion)
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: statusColor,
+                            shape: BoxShape.circle,
+                          ),
+                        )
+                      else
+                        SizedBox(
+                          width: 13,
+                          height: 13,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: statusColor,
+                          ),
                         ),
-                      )
-                    else
-                      SizedBox(
-                        width: 13,
-                        height: 13,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: statusColor,
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text(
+                          label,
+                          style: TextStyle(
+                            color: colors.onSurfaceVariant,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
                       ),
-                    const SizedBox(width: 9),
-                    Expanded(
-                      child: Text(
-                        label,
+                      Text(
+                        sessionStatusLabel(status),
                         style: TextStyle(
-                          color: colors.onSurfaceVariant,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
+                          color: statusColor,
+                          fontSize: 9,
+                          fontFamily: 'Menlo',
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.8,
                         ),
                       ),
-                    ),
-                    Text(
-                      sessionStatusLabel(status),
-                      style: TextStyle(
-                        color: statusColor,
-                        fontSize: 9,
-                        fontFamily: 'Menlo',
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.8,
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -955,12 +1355,18 @@ class _MessageBubble extends StatelessWidget {
   final String text;
   final String backendKey;
   final int? timestamp;
+  final SessionMessageQueueStatus? deliveryStatus;
+  final VoidCallback? onRetry;
+  final VoidCallback? onDiscard;
 
   const _MessageBubble({
     required this.role,
     required this.text,
     required this.backendKey,
     required this.timestamp,
+    this.deliveryStatus,
+    this.onRetry,
+    this.onDiscard,
   });
 
   @override
@@ -968,6 +1374,7 @@ class _MessageBubble extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     final isUser = role == 'user';
     final isSystem = role == 'system';
+    final deliveryFailed = deliveryStatus == SessionMessageQueueStatus.failed;
     final identity = backendIdentity(backendKey);
     final timestampLabel = timestamp == null || timestamp! <= 0
         ? ''
@@ -982,16 +1389,42 @@ class _MessageBubble extends StatelessWidget {
         : (isSystem ? 'SYSTEM' : identity.label.toUpperCase());
     final accentColor = isSystem
         ? colors.onSurfaceVariant
-        : (isUser ? colors.onPrimary.withValues(alpha: 0.78) : identity.accent);
+        : (isUser
+              ? (deliveryFailed
+                    ? colors.error
+                    : colors.onPrimary.withValues(alpha: 0.78))
+              : identity.accent);
     final textColor = isSystem
         ? colors.onSurfaceVariant
-        : (isUser ? colors.onPrimary : colors.onSurface);
+        : (isUser
+              ? (deliveryFailed ? colors.onSurface : colors.onPrimary)
+              : colors.onSurface);
     final bubbleColor = isSystem
         ? colors.surfaceContainerHighest
-        : (isUser ? colors.primary : colors.surface);
+        : (isUser
+              ? (deliveryFailed
+                    ? colors.error.withValues(alpha: 0.11)
+                    : colors.primary)
+              : colors.surface);
     final bubbleBorder = isSystem
         ? colors.outline
-        : (isUser ? colors.primary : identity.accent.withValues(alpha: 0.28));
+        : (isUser
+              ? (deliveryFailed ? colors.error : colors.primary)
+              : identity.accent.withValues(alpha: 0.28));
+    final delivery = switch (deliveryStatus) {
+      SessionMessageQueueStatus.submitting ||
+      SessionMessageQueueStatus.queued ||
+      SessionMessageQueueStatus.sent => (Icons.done_rounded, 'SENT'),
+      SessionMessageQueueStatus.processed => (
+        Icons.done_all_rounded,
+        'PROCESSED',
+      ),
+      SessionMessageQueueStatus.failed => (
+        Icons.error_outline_rounded,
+        'NOT SENT',
+      ),
+      null => null,
+    };
     final bubble = Container(
       constraints: const BoxConstraints(maxWidth: 540),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
@@ -1024,6 +1457,21 @@ class _MessageBubble extends StatelessWidget {
                     color: textColor.withValues(alpha: 0.62),
                     fontFamily: 'Menlo',
                     fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+              if (isUser && delivery != null) ...[
+                const SizedBox(width: 7),
+                Icon(delivery.$1, size: 12, color: accentColor),
+                const SizedBox(width: 3),
+                Text(
+                  delivery.$2,
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: accentColor,
+                    fontFamily: 'Menlo',
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.45,
                   ),
                 ),
               ],
@@ -1084,6 +1532,35 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
           ),
+          if (deliveryFailed && onRetry != null && onDiscard != null) ...[
+            const SizedBox(height: 7),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: onDiscard,
+                  style: TextButton.styleFrom(
+                    foregroundColor: colors.onSurfaceVariant,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                  child: const Text('Discard'),
+                ),
+                const SizedBox(width: 3),
+                OutlinedButton.icon(
+                  onPressed: onRetry,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: colors.error,
+                    side: BorderSide(color: colors.error),
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 9),
+                  ),
+                  icon: const Icon(Icons.refresh_rounded, size: 15),
+                  label: const Text('Retry'),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -1388,6 +1865,8 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
                   TextField(
                     controller: _controller(id),
                     enabled: !_submitted,
+                    onTapOutside: (_) =>
+                        FocusManager.instance.primaryFocus?.unfocus(),
                     minLines: 1,
                     maxLines: 3,
                     decoration: const InputDecoration(

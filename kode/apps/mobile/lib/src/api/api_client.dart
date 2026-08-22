@@ -28,6 +28,15 @@ class ApiException implements Exception {
   String toString() => 'ApiException($status, $error: $detail)';
 }
 
+class InputDispatchReceipt {
+  final String? commandId;
+  final String status;
+
+  const InputDispatchReceipt({required this.commandId, required this.status});
+
+  bool get isConfirmed => commandId == null || status == 'executed';
+}
+
 class ApiClient {
   final Endpoint endpoint;
   late final GatewaySession _gateway;
@@ -145,13 +154,23 @@ class ApiClient {
     _check(resp);
   }
 
-  Future<void> sendInputText(int id, String text) async {
+  Future<InputDispatchReceipt> sendInputText(int id, String text) async {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/input',
       data: {'text': text},
       options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
     );
     _check(resp);
+    final body = resp.data;
+    if (body is Map) {
+      return InputDispatchReceipt(
+        commandId: body['command_id'] as String?,
+        status: body['status'] as String? ?? 'dispatched',
+      );
+    }
+    // A direct kode-bridge returns 204 after writing into the local PTY. It
+    // has no cloud command lifecycle, so the HTTP acknowledgement is final.
+    return const InputDispatchReceipt(commandId: null, status: 'executed');
   }
 
   Future<List<Envelope>> getHistory(int id, {int? fromMs, int? limit}) async {

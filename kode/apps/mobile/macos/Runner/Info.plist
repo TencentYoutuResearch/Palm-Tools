@@ -26,6 +26,10 @@
 	<string>$(PRODUCT_COPYRIGHT)</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Kode uses the microphone to turn your voice into an editable session message.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Kode uses speech recognition to transcribe voice input in the session composer.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

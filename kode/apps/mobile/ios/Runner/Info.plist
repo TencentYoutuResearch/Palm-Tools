@@ -28,6 +28,10 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan QR code to pair with your desktop Kode server</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Kode uses the microphone to turn your voice into an editable session message.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Kode uses speech recognition to transcribe voice input in the session composer.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Kode needs to reach your desktop bridge on the local network to pair and stream sessions.</string>
 	<key>NSAppTransportSecurity</key>

@@ -35,6 +35,10 @@ dependencies:
   # flutter_markdown 官方已弃维护,社区主推此 fork,API 一致
   flutter_markdown_plus: ^1.0.3
 
+  # Short-form dictation for the session composer. Transcripts stay editable
+  # and are never submitted until the user taps Send.
+  speech_to_text: ^7.4.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

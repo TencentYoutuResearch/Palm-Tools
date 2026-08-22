@@ -1,4 +1,7 @@
 // Riverpod providers — 全 app 共享的 endpoint / api / ws 状态。
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
@@ -123,7 +126,32 @@ final sessionsProvider =
       SessionsNotifier.new,
     );
 
+/// Merge one authoritative full session snapshot without duplicating rows.
+/// `session.created` and `session.updated` intentionally share this reducer.
+List<SessionDto> mergeSessionSnapshot(
+  List<SessionDto> current,
+  SessionDto incoming,
+) {
+  if (incoming.status == 'exited') {
+    return current
+        .where((session) => session.id != incoming.id)
+        .toList(growable: false);
+  }
+  var replaced = false;
+  final merged = current
+      .map((session) {
+        if (session.id != incoming.id) return session;
+        replaced = true;
+        return incoming;
+      })
+      .toList(growable: true);
+  if (!replaced) merged.add(incoming);
+  return merged;
+}
+
 class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
+  int _refreshGeneration = 0;
+
   @override
   Future<List<SessionDto>> build() async {
     final api = ref.watch(apiClientProvider);
@@ -137,10 +165,19 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
       ev.whenData((env) async {
         switch (env.type) {
           case 'session.created':
+          case 'session.updated':
             try {
               final s = SessionDto.fromJson(env.payload);
-              state = AsyncData([...(state.value ?? const []), s]);
+              state = AsyncData(
+                mergeSessionSnapshot(state.value ?? const [], s),
+              );
             } catch (_) {}
+            break;
+          case 'connection.hello':
+            // The WS stream is incremental and can miss metadata while iOS is
+            // suspended. Every fresh/reconnected socket revalidates the full
+            // authoritative list while keeping stale content visible.
+            await refresh(showLoading: false);
             break;
           case 'session.exited':
             final sid = env.sessionId;
@@ -203,17 +240,325 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
     return await api.listSessions();
   }
 
-  Future<void> refresh() async {
+  Future<void> refresh({bool showLoading = true}) async {
     final api = ref.read(apiClientProvider);
     if (api == null) {
       state = const AsyncData([]);
       return;
     }
-    state = const AsyncLoading();
+    final generation = ++_refreshGeneration;
+    final previous = state.valueOrNull;
+    if (showLoading || previous == null) state = const AsyncLoading();
     try {
-      state = AsyncData(await api.listSessions());
+      final sessions = await api.listSessions();
+      if (generation == _refreshGeneration) state = AsyncData(sessions);
     } catch (e, st) {
-      state = AsyncError(e, st);
+      if (generation != _refreshGeneration) return;
+      if (showLoading || previous == null) {
+        state = AsyncError(e, st);
+      }
     }
   }
 }
+
+enum SessionMessageQueueStatus { submitting, queued, sent, processed, failed }
+
+/// Mirrors `kode-bridge::semantic::fnv_hash` so an optimistic mobile message
+/// owns the same semantic id as the later CLI transcript event.
+String sessionSemanticMessageId(int sessionId, String text) {
+  var hash = 0x811c9dc5;
+  for (final byte in utf8.encode(text.trim())) {
+    hash = ((hash ^ byte) * 0x01000193) & 0xffffffff;
+  }
+  return '$sessionId-$hash';
+}
+
+/// One outbound composer submission and its cloud command acknowledgement.
+class QueuedSessionMessage {
+  final String id;
+  final String semanticMessageId;
+  final String text;
+  final DateTime queuedAt;
+  final SessionMessageQueueStatus status;
+  final String? commandId;
+  final String? error;
+
+  const QueuedSessionMessage({
+    required this.id,
+    required this.semanticMessageId,
+    required this.text,
+    required this.queuedAt,
+    this.status = SessionMessageQueueStatus.submitting,
+    this.commandId,
+    this.error,
+  });
+
+  QueuedSessionMessage copyWith({
+    SessionMessageQueueStatus? status,
+    String? commandId,
+    String? error,
+    bool clearCommandId = false,
+    bool clearError = false,
+  }) => QueuedSessionMessage(
+    id: id,
+    semanticMessageId: semanticMessageId,
+    text: text,
+    queuedAt: queuedAt,
+    status: status ?? this.status,
+    commandId: clearCommandId ? null : commandId ?? this.commandId,
+    error: clearError ? null : error ?? this.error,
+  );
+}
+
+/// Tracks the actual server/desktop command lifecycle for mobile messages.
+///
+/// `POST /input` always happens immediately, even while the session is busy.
+/// A 202 response means the cloud server queued/dispatched the command; only
+/// `command.status=executed` confirms that the desktop wrote it to the PTY.
+class SessionMessageQueueNotifier
+    extends Notifier<Map<int, List<QueuedSessionMessage>>> {
+  final Map<String, ({String status, String? error})> _earlyStatuses = {};
+  int _sequence = 0;
+
+  @override
+  Map<int, List<QueuedSessionMessage>> build() {
+    ref.listen<AsyncValue<Envelope>>(eventStreamProvider, (_, event) {
+      event.whenData((envelope) {
+        if (envelope.type == 'message' && envelope.payload['role'] == 'user') {
+          final semanticId = envelope.payload['id'] as String?;
+          final text = envelope.payload['text'] as String?;
+          if (semanticId != null || text != null) {
+            markProcessed(
+              envelope.sessionId,
+              semanticMessageId: semanticId,
+              text: text,
+            );
+          }
+          return;
+        }
+        if (envelope.type != 'command.status') return;
+        final commandId = envelope.payload['command_id'] as String?;
+        final status = envelope.payload['status'] as String?;
+        if (commandId == null || status == null) return;
+        final error = envelope.payload['error'] as String?;
+        if (!_applyCommandStatus(
+          envelope.sessionId,
+          commandId,
+          status,
+          error,
+        )) {
+          // The WebSocket can outrun the HTTP 202 response that reveals the
+          // command id. Keep the newest receipt and reconcile after POST.
+          _earlyStatuses[commandId] = (status: status, error: error);
+        }
+      });
+    });
+    return const {};
+  }
+
+  QueuedSessionMessage? enqueue({
+    required int sessionId,
+    required String text,
+  }) {
+    final normalized = text.trim();
+    if (normalized.isEmpty) return null;
+    final entry = QueuedSessionMessage(
+      id: '${DateTime.now().microsecondsSinceEpoch}-${_sequence++}',
+      semanticMessageId: sessionSemanticMessageId(sessionId, normalized),
+      text: normalized,
+      queuedAt: DateTime.now(),
+    );
+    _replace(sessionId, [...(state[sessionId] ?? const []), entry]);
+    unawaited(_submit(sessionId, entry.id));
+    return entry;
+  }
+
+  void remove(int sessionId, String messageId) {
+    final messages = state[sessionId] ?? const [];
+    final target = messages.where((item) => item.id == messageId).firstOrNull;
+    if (target?.status == SessionMessageQueueStatus.submitting) return;
+    _replace(
+      sessionId,
+      messages.where((item) => item.id != messageId).toList(growable: false),
+    );
+  }
+
+  void retry(int sessionId, String messageId) {
+    final messages = state[sessionId] ?? const [];
+    _replace(
+      sessionId,
+      messages
+          .map(
+            (item) => item.id == messageId
+                ? item.copyWith(
+                    status: SessionMessageQueueStatus.submitting,
+                    clearCommandId: true,
+                    clearError: true,
+                  )
+                : item,
+          )
+          .toList(growable: false),
+    );
+    unawaited(_submit(sessionId, messageId));
+  }
+
+  Future<void> _submit(int sessionId, String messageId) async {
+    final messages = state[sessionId] ?? const [];
+    final message = messages.where((item) => item.id == messageId).firstOrNull;
+    if (message == null) return;
+    try {
+      final api = ref.read(apiClientProvider);
+      if (api == null) throw StateError('Desktop connection unavailable');
+      var payload = message.text
+          .replaceAll('\r\n', '\n')
+          .replaceAll('\r', '\n');
+      if (!payload.endsWith('\n')) payload = '$payload\n';
+      final receipt = await api.sendInputText(sessionId, payload);
+      final nextStatus = receipt.isConfirmed
+          ? SessionMessageQueueStatus.sent
+          : SessionMessageQueueStatus.queued;
+      _update(
+        sessionId,
+        messageId,
+        (item) => item.status == SessionMessageQueueStatus.processed
+            ? item
+            : item.copyWith(
+                status: nextStatus,
+                commandId: receipt.commandId,
+                clearError: true,
+              ),
+      );
+      if (receipt.commandId case final commandId?) {
+        final early = _earlyStatuses.remove(commandId);
+        if (early != null) {
+          _applyCommandStatus(sessionId, commandId, early.status, early.error);
+        }
+      }
+    } catch (error) {
+      _update(
+        sessionId,
+        messageId,
+        (item) => item.status == SessionMessageQueueStatus.processed
+            ? item
+            : item.copyWith(
+                status: SessionMessageQueueStatus.failed,
+                error: error.toString(),
+              ),
+      );
+    }
+  }
+
+  bool _applyCommandStatus(
+    int sessionId,
+    String commandId,
+    String status,
+    String? error,
+  ) {
+    final messages = state[sessionId] ?? const [];
+    final message = messages
+        .where((item) => item.commandId == commandId)
+        .firstOrNull;
+    if (message == null) return false;
+    if (message.status == SessionMessageQueueStatus.processed) return true;
+    switch (status) {
+      case 'dispatched':
+      case 'accepted':
+        _update(
+          sessionId,
+          message.id,
+          (item) => item.copyWith(
+            status: SessionMessageQueueStatus.queued,
+            clearError: true,
+          ),
+        );
+        break;
+      case 'executed':
+        _update(
+          sessionId,
+          message.id,
+          (item) => item.copyWith(
+            status: SessionMessageQueueStatus.sent,
+            clearError: true,
+          ),
+        );
+        break;
+      case 'failed':
+      case 'expired':
+        _update(
+          sessionId,
+          message.id,
+          (item) => item.copyWith(
+            status: SessionMessageQueueStatus.failed,
+            error: error ?? 'Desktop did not accept the message',
+          ),
+        );
+        break;
+    }
+    return true;
+  }
+
+  void markProcessed(int sessionId, {String? semanticMessageId, String? text}) {
+    final messages = state[sessionId] ?? const [];
+    final normalizedText = text?.trim();
+    final message = messages.where((item) {
+      if (item.status == SessionMessageQueueStatus.processed) return false;
+      if (semanticMessageId != null &&
+          item.semanticMessageId == semanticMessageId) {
+        return true;
+      }
+      return normalizedText != null && item.text.trim() == normalizedText;
+    }).firstOrNull;
+    if (message == null) return;
+    _update(
+      sessionId,
+      message.id,
+      (item) => item.copyWith(
+        status: SessionMessageQueueStatus.processed,
+        clearError: true,
+      ),
+    );
+  }
+
+  void _update(
+    int sessionId,
+    String messageId,
+    QueuedSessionMessage Function(QueuedSessionMessage) update,
+  ) {
+    final messages = state[sessionId] ?? const [];
+    _replace(
+      sessionId,
+      messages
+          .map((item) => item.id == messageId ? update(item) : item)
+          .toList(growable: false),
+    );
+  }
+
+  void _replace(int sessionId, List<QueuedSessionMessage> messages) {
+    var processedToDrop = messages.length - 100;
+    final retained = processedToDrop > 0
+        ? messages
+              .where((message) {
+                if (processedToDrop > 0 &&
+                    message.status == SessionMessageQueueStatus.processed) {
+                  processedToDrop--;
+                  return false;
+                }
+                return true;
+              })
+              .toList(growable: false)
+        : messages;
+    final next = Map<int, List<QueuedSessionMessage>>.from(state);
+    if (retained.isEmpty) {
+      next.remove(sessionId);
+    } else {
+      next[sessionId] = List.unmodifiable(retained);
+    }
+    state = Map.unmodifiable(next);
+  }
+}
+
+final sessionMessageQueueProvider =
+    NotifierProvider<
+      SessionMessageQueueNotifier,
+      Map<int, List<QueuedSessionMessage>>
+    >(SessionMessageQueueNotifier.new);
