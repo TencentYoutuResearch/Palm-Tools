@@ -346,6 +346,9 @@ fn spawn_event_router(
                         let mut g = sessions.lock();
                         match g.get_mut(&id) {
                             Some(s) => {
+                                let binding_changed = session_uuid
+                                    .as_ref()
+                                    .is_some_and(|sid| s.session_id.as_deref() != Some(sid));
                                 if let Some(m) = model.as_ref() {
                                     s.state.model = m.clone();
                                 }
@@ -354,11 +357,15 @@ fn spawn_event_router(
                                         s.state.title = t.clone();
                                     }
                                 }
-                                if tokens_reset {
+                                if tokens_reset || binding_changed {
                                     s.state.tokens = None;
                                     s.state.tokens_input = None;
                                     s.state.tokens_output = None;
                                     s.state.tokens_cached = None;
+                                    s.state.cost_usd = None;
+                                }
+                                if binding_changed && title.is_none() && !s.state.title_pinned {
+                                    s.state.title = format!("tab · {}", s.backend_key);
                                 }
                                 if let Some(t) = tokens {
                                     s.state.tokens = Some(t);
@@ -377,7 +384,7 @@ fn spawn_event_router(
                                 }
 
                                 if let Some(sid) = session_uuid.as_ref() {
-                                    let changed = s.session_id.as_deref() != Some(sid);
+                                    let changed = binding_changed;
                                     s.session_id = Some(sid.clone());
                                     if changed {
                                         kode_core::session::jsonl_tail::Backend::from_backend_key(
@@ -423,6 +430,15 @@ fn spawn_event_router(
                     payload,
                 } => {
                     bus.emit(EventEnvelope::new(id, event_type, payload));
+                }
+                CoreEvent::TurnHold { id, active } => {
+                    if let Some(s) = sessions.lock().get_mut(&id) {
+                        if active {
+                            s.mark_turn_start();
+                        } else {
+                            s.mark_turn_end();
+                        }
+                    }
                 }
             }
         }
@@ -664,7 +680,7 @@ fn spawn_prompt_scan_loop(
                             *id,
                             ScanRow {
                                 is_running,
-                                is_busy: s.busy.is_busy(),
+                                is_busy: s.busy.is_pty_busy(),
                                 status_str,
                             },
                         )
@@ -1006,6 +1022,12 @@ fn spawn_attention_forwarder(
                             );
                         }
                         "session.turn_finished" => {
+                            {
+                                let mut g = sessions.lock();
+                                if let Some(s) = g.get_mut(&env.session_id) {
+                                    s.mark_turn_end();
+                                }
+                            }
                             let mut payload = env.payload.clone();
                             match payload.as_object_mut() {
                                 Some(obj) => {

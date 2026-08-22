@@ -1,0 +1,15 @@
+.git
+.github
+.specops
+.agents
+.codex
+target
+**/target
+**/node_modules
+**/dist
+**/.dart_tool
+**/build
+**/.flutter-plugins*
+deploy/.env.sync
+*.log
+.DS_Store

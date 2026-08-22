@@ -304,7 +304,12 @@ fn expand_home(p: &str) -> String {
 
 /// `scp -P <port> -o BatchMode=yes <src> <host>:<dst>`
 /// 注意:scp 的端口参数是大写 `-P`(ssh 是小写 `-p`)。
-fn run_scp(ssh_host: &str, ssh_port: u16, local: &str, remote: &str) -> Result<String, String> {
+pub(crate) fn run_scp(
+    ssh_host: &str,
+    ssh_port: u16,
+    local: &str,
+    remote: &str,
+) -> Result<String, String> {
     let mut cmd = Command::new("scp");
     if ssh_port != 0 && ssh_port != 22 {
         cmd.arg("-P").arg(ssh_port.to_string());
@@ -316,7 +321,7 @@ fn run_scp(ssh_host: &str, ssh_port: u16, local: &str, remote: &str) -> Result<S
 }
 
 /// `ssh -p <port> -o BatchMode=yes <host> <cmd>`
-fn run_ssh(ssh_host: &str, ssh_port: u16, cmd_str: &str) -> Result<String, String> {
+pub(crate) fn run_ssh(ssh_host: &str, ssh_port: u16, cmd_str: &str) -> Result<String, String> {
     let mut cmd = Command::new("ssh");
     if ssh_port != 0 && ssh_port != 22 {
         cmd.arg("-p").arg(ssh_port.to_string());
@@ -524,12 +529,12 @@ mod tests {
     }
 
     // ── filter_ssh_noise ──
-    // 真实 devcloud 场景:stderr 混了 known_hosts 提示 + authz 横幅 + 真错误,
+    // 托管 SSH 场景:stderr 混了 known_hosts 提示 + authz 横幅 + 真错误,
     // 只应该把真错误留给用户看。
 
     #[test]
     fn filter_strips_known_hosts_warning() {
-        let s = "Warning: Permanently added '[marxwang-any4.devcloud.woa.com]:36000' (ED25519) to the list of known hosts.\nauthz success\n";
+        let s = "Warning: Permanently added '[sync-host.example.com]:2222' (ED25519) to the list of known hosts.\nauthz success\n";
         // known_hosts 提示 + authz 横幅都是噪声,全过滤掉
         assert_eq!(filter_ssh_noise(s), "");
     }

@@ -1,10 +1,14 @@
-# Place a built musl tarball here as `kode-remote-memory-bridge-linux-musl.tar.gz`
-# before running `cargo build` / `tauri build` for the GUI.
+# Bundled Linux deployment resources
+#
+# Place the built musl archives here before running a GUI release build:
+#   kode-remote-memory-bridge-linux-musl.tar.gz
+#   kode-sync-server-linux-musl.tar.gz
 #
 # The tarball is produced by:
 #   bash deploy/build-remote-memory-bridge.sh --musl
-# which auto-copies it into this directory.
+#   bash deploy/build-sync-server.sh
+# Both scripts auto-copy their artifact into this directory.
 #
 # This placeholder ensures the directory exists in git so Tauri's
 # `bundle.resources` entry can include the directory even when the
-# optional tarball has not been built locally.
+# optional tarballs have not been built locally.

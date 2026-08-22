@@ -1,0 +1,15 @@
+{
+  email {$ACME_EMAIL}
+}
+
+{$KODE_SYNC_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy sync-server:8787
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+    -Server
+  }
+}

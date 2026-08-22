@@ -1,0 +1,43 @@
+services:
+  sync-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.sync-server
+    image: kode-sync-server:local
+    restart: unless-stopped
+    environment:
+      KODE_SYNC_BIND: 0.0.0.0:8787
+      KODE_SYNC_DATABASE: /data/kode-sync.db
+      KODE_SYNC_PUBLIC_URL: https://${KODE_SYNC_DOMAIN:?set KODE_SYNC_DOMAIN}
+      RUST_LOG: ${KODE_SYNC_LOG:-info,kode_sync_server=info}
+    volumes:
+      - kode-sync-data:/data
+    networks: [kode-sync]
+    expose: ["8787"]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      sync-server:
+        condition: service_healthy
+    environment:
+      KODE_SYNC_DOMAIN: ${KODE_SYNC_DOMAIN:?set KODE_SYNC_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./${KODE_SYNC_CADDYFILE:-Caddyfile.sync}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [kode-sync]
+
+volumes:
+  kode-sync-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  kode-sync:

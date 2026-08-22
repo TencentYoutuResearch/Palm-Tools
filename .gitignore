@@ -28,6 +28,12 @@ kode/apps/gui/src-tauri/binaries
 # 不入库(dev 模式下 Tauri 找不到也不报错,只有 release 打包才需要)
 kode/apps/gui/src-tauri/resources/*.tar.gz
 kode/services/kode-server-go/deploy/config.yaml
+# 中心同步部署域名/ACME 邮箱等主机配置,由 .env.sync.example 初始化。
+kode/deploy/.env.sync
+# 本地生成的可上传 sync-server 发布包和解包目录。
+kode/releases/
+# run.sh 用的独立 Linux 构建目录(x86_64 sync-server 交叉产物)。
+kode/target-linux-amd64/
 # Flutter 默认在 mobile 项目里生成 build/(.gitignore 自带),
 # 但 flutter create 偶尔在 apps/ 顶层生成空 build/ios SourcePackages 缓存,
 # 一并忽略以免污染主仓

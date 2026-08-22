@@ -1,0 +1,13 @@
+http://{$KODE_SYNC_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy sync-server:8787
+
+  # DevCloud AIO terminates public HTTPS/WSS and forwards HTTP here.
+  # HSTS is still delivered to the public HTTPS client through the proxy.
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+    -Server
+  }
+}

@@ -84,19 +84,49 @@ build_specops_dev() {
   (cd "$SPECOPS_DIR" && pnpm build)
 }
 
+ensure_sync_server_bundle() {
+  local resource="$TAURI_DIR/resources/kode-sync-server-linux-musl.tar.gz"
+  local stale=0
+  if [ ! -s "$resource" ]; then
+    stale=1
+  elif find "$ROOT_DIR/crates/kode-sync-server" "$ROOT_DIR/Cargo.toml" "$ROOT_DIR/Cargo.lock" \
+      -type f -newer "$resource" -print -quit | grep -q .; then
+    stale=1
+  fi
+  if [ "$stale" -eq 1 ]; then
+    command -v docker >/dev/null 2>&1 \
+      || error "发布包需要内置 Linux sync server,但没有找到 Docker。请先安装/启动 Docker,或手动生成 resources/kode-sync-server-linux-musl.tar.gz。"
+    info "构建并嵌入 x86_64 Linux sync server"
+    bash "$ROOT_DIR/deploy/build-sync-server.sh"
+  else
+    info "sync server 内置资源已是最新"
+  fi
+}
+
 # 全局初始化,避免 set -u 下 ${TAURI_RESOURCE_ARGS[@]} 报 unbound
 TAURI_RESOURCE_ARGS=()
 
 set_tauri_resource_args() {
-  local tarball_resource="$TAURI_DIR/resources/kode-remote-memory-bridge-linux-musl.tar.gz"
+  local bridge_resource="$TAURI_DIR/resources/kode-remote-memory-bridge-linux-musl.tar.gz"
+  local sync_resource="$TAURI_DIR/resources/kode-sync-server-linux-musl.tar.gz"
   TAURI_RESOURCE_ARGS=()
-  if [ -f "$tarball_resource" ]; then
-    info "tar.gz 已存在,将打入 app"
+  if [ -f "$bridge_resource" ] && [ -f "$sync_resource" ]; then
+    info "remote bridge 与 sync server 资源已存在,将打入 app"
   else
-    warn "tar.gz 不存在,本次仅跳过 remote bridge resource,保留内置 skills"
-    # 数组 override 会替换 tauri.conf.json 的全部 resources。这里必须显式
-    # 保留 skills,否则本地无 remote bridge tarball 时 avatar 技能也会消失。
-    TAURI_RESOURCE_ARGS=(--config '{"bundle":{"resources":["resources/skills"]}}')
+    local resources='["resources/skills"]'
+    if [ -f "$bridge_resource" ]; then
+      resources='["resources/skills","resources/kode-remote-memory-bridge-linux-musl.tar.gz"]'
+    fi
+    if [ -f "$sync_resource" ]; then
+      if [ -f "$bridge_resource" ]; then
+        resources='["resources/skills","resources/kode-remote-memory-bridge-linux-musl.tar.gz","resources/kode-sync-server-linux-musl.tar.gz"]'
+      else
+        resources='["resources/skills","resources/kode-sync-server-linux-musl.tar.gz"]'
+      fi
+    fi
+    warn "部分 Linux 部署资源不存在,本次只打包现有资源"
+    # 数组 override 会替换 tauri.conf.json 的全部 resources,因此始终保留 skills。
+    TAURI_RESOURCE_ARGS=(--config "{\"bundle\":{\"resources\":$resources}}")
   fi
 }
 
@@ -181,6 +211,7 @@ case "$CMD" in
   # ===========================================================
   app|release)
     ensure_node_modules
+    ensure_sync_server_bundle
     APP_PATH="$ROOT_DIR/target/release/bundle/macos/kode.app"
     DMG_DIR="$ROOT_DIR/target/release/bundle/dmg"
     # 避免打包中途失败后误装上一次遗留的 DMG。

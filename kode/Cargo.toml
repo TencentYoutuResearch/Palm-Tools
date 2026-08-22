@@ -5,6 +5,7 @@ members = [
     "crates/kode-tui",
     "crates/kode-memory",
     "crates/kode-bridge",
+    "crates/kode-sync-server",
     "apps/gui/src-tauri",
 ]
 
