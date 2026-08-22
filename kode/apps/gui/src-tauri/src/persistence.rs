@@ -502,7 +502,7 @@ mod tests {
             "display_name":"Host B",
             "base_url":"http://127.0.0.1:9870",
             "token":"tok-1",
-            "ssh_host":"user@devcloud",
+            "ssh_host":"deploy@relay.example",
             "ssh_remote_port":9870
         }"#;
         let ep: PersistedEndpoint = serde_json::from_str(json).unwrap();

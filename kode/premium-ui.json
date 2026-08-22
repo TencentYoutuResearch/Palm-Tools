@@ -1,0 +1,16 @@
+{
+  "profile": "product-admin",
+  "auditRoot": "docs",
+  "sourceRoots": ["../apps/gui/src/lib"],
+  "locale": "en,zh-CN",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Table Selection", "Select/Listbox", "Form", "Scrollbar", "Toast", "CRUD"],
+  "ownership": {
+    "Select/Listbox": "native"
+  },
+  "requiredCommands": ["typecheck", "build"],
+  "commands": {
+    "typecheck": "pnpm --dir ../apps/gui check",
+    "build": "pnpm --dir ../apps/gui build"
+  }
+}

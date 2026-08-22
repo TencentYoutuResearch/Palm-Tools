@@ -595,12 +595,12 @@ mod tests {
 $ git diff HEAD apps/gui/src-tauri/src/bridge/semantic.rs
 
   Bash command
-  cd /Users/marxwang/Projects/youtu/app/kode && git diff HEAD apps/gui/src...
+  cd /Users/tester/Projects/example/kode && git diff HEAD apps/gui/src...
   看 semantic.rs 全部 diff
 
 Do you want to proceed?
 ❯ 1. Yes
-  2. Yes, and don't ask again for git diff commands in /Users/marxwang/Projects/youtu/app/kode
+  2. Yes, and don't ask again for git diff commands in /Users/tester/Projects/example/kode
   3. No, and tell CodeBuddy what to do differently
 
   Press Enter to confirm

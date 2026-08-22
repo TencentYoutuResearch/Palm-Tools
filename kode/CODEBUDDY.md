@@ -31,13 +31,14 @@ kode/
 ├── crates/
 │   ├── kode-core/       PTY、Session、Config、cost、model alias、CoreEvent
 │   ├── kode-bridge/     纯 axum HTTP/WS bridge、协议路由、语义事件解析、headless bridge bin
+│   ├── kode-sync-server/中心化 session 镜像、一次性绑定、在线命令路由
 │   ├── kode-memory/     shared memory store、MCP server、CLI、hooks、git sync
 │   └── kode-tui/        legacy TUI,已冻结,只修 P0
 ├── apps/
 │   ├── gui/             当前桌面主线:Tauri 2 后端 + Svelte 5/xterm.js 前端
 │   ├── mobile/          Flutter 手机/桌面伴侣
 │   └── specops/         TypeScript/Bun SpecOps sidecar + Web console
-├── docs/                smoke 脚本等操作文档
+├── docs/                DESIGN、UX contract、smoke 脚本等文档
 ├── deploy/              remote memory bridge 构建/部署脚本
 └── .specops/specs/      roadmap、协议、memory、SpecOps 规范
 ```
@@ -57,6 +58,7 @@ Cargo workspace 只包含 Rust crate 和 `apps/gui/src-tauri`。`apps/mobile`、
 - `apps/gui/src-tauri/src/backend_admin.rs`:Manage backends 写盘,用 `toml_edit` 保留用户注释。
 - `apps/gui/src-tauri/src/memory*.rs`:GUI memory 审核/搜索/MCP setup。
 - `apps/gui/src/lib/`:Svelte 组件和 IPC glue。
+- `docs/DESIGN.md` / `docs/UX-CONTRACT.md`:GUI 视觉意图与行为契约。
 
 ## Backend 规则
 
@@ -115,9 +117,11 @@ Cargo workspace 只包含 Rust crate 和 `apps/gui/src-tauri`。`apps/mobile`、
 ## 远端 / 手机协议
 
 - 协议文档:[`.specops/specs/remote-protocol.md`](./.specops/specs/remote-protocol.md)
+- 手机中心同步协议:[`.specops/specs/cloud-sync-protocol.md`](./.specops/specs/cloud-sync-protocol.md)
 - `crates/kode-bridge` 是可独立运行的 headless bridge,默认端口 `47870`。
 - GUI 内也启动同协议 bridge,共享 sessions/bus/token。
-- `apps/mobile` 通过 REST/WS 看 session、历史、输入、状态;桌面自动配对会读 GUI state 中的 bridge token。
+- `apps/mobile` 通过中心服务看 session、历史、输入、状态,不再发现 LAN bridge 或读取桌面永久 token。
+- `apps/gui/src-tauri/src/cloud_sync.rs` 只建立出站 WSS;未扫码绑定时中心服务不接受 session 上传。
 - Phase 11 已有 remote endpoint / SSH tunnel / remote workspace 支持;优先走 `apps/gui/src-tauri/src/transport/remote.rs` 和 `endpoints.rs`。
 
 ## SpecOps
@@ -187,6 +191,7 @@ flutter test
 
 - `./run.sh app` 会先删除固定 DMG 路径,避免打包失败后误装上一次遗留的旧 DMG。
 - `apps/gui/src-tauri/resources/kode-remote-memory-bridge-linux-musl.tar.gz` 不存在时,脚本会跳过该 resource 继续打包;需要带上远端 memory bridge 时先跑 `bash deploy/build-remote-memory-bridge.sh --musl`。
+- 自助 SSH 云同步部署依赖 `apps/gui/src-tauri/resources/kode-sync-server-linux-musl.tar.gz`;发布前先跑 `bash deploy/build-sync-server.sh`,把 x86_64 Linux 静态服务包嵌入 App。缺少该包时 GUI 仍可连接已有服务,但不能执行自动部署。
 - 没有 Developer ID 证书的机器会自动走 ad-hoc 签名并跳过 DMG,这是本地调试的正常路径。
 - `./run.sh dev` 会先构建 `apps/specops` 开发产物,确保 GUI 内嵌 SpecOps sidecar 可用。
 
@@ -198,6 +203,7 @@ flutter test
 4. 改 GUI 交互要跑 `pnpm check`,有条件就用真实 GUI 目视验证。
 5. 改 bridge / remote / mobile 协议要对照 `remote-protocol.md`,并补 REST/WS 测试。
 6. 改 memory 要保持 append-only + review queue 模型,不要绕过审核。
+7. SSH/网络测试 fixture 只用 `example.com` / `.example` 保留域名、RFC 5737 测试网段和虚构用户/路径;不要把个人主机名、内网域名、真实 IP 或本机用户目录带入测试。
 
 ## 不要做的事
 

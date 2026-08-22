@@ -50,7 +50,7 @@ pub fn save_png_bytes(output_path: String, png_base64: String) -> Result<(), Str
 
 fn screenshot_dimensions(png: &[u8]) -> Result<(u32, u32), String> {
     if png.len() < 24 {
-      return Err("generated screenshot is not a valid PNG".into());
+        return Err("generated screenshot is not a valid PNG".into());
     }
     let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
     let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
@@ -130,10 +130,8 @@ fn capture_window_png(_window: &WebviewWindow) -> Result<Vec<u8>, String> {
 
 #[cfg(target_os = "macos")]
 fn capture_interactive_png() -> Result<Vec<u8>, String> {
-    let output_path = std::env::temp_dir().join(format!(
-        "kode-screenshot-{}.png",
-        uuid::Uuid::new_v4()
-    ));
+    let output_path =
+        std::env::temp_dir().join(format!("kode-screenshot-{}.png", uuid::Uuid::new_v4()));
     let status = std::process::Command::new("/usr/sbin/screencapture")
         .arg("-i")
         .arg("-x")

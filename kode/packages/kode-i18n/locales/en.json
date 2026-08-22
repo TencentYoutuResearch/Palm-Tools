@@ -455,6 +455,98 @@
     "message": "Remote review does not load local related-fact links.",
     "description": "Remote memory review note"
   },
+  "memory.review.selectAll": {
+    "message": "Select all",
+    "description": "Select every pending memory proposal"
+  },
+  "memory.review.selectAllCount": {
+    "message": "Select all {count}",
+    "description": "Select every visible pending memory proposal"
+  },
+  "memory.review.pendingList": {
+    "message": "Pending memory proposals",
+    "description": "Accessible name for the memory review list"
+  },
+  "memory.review.selectionHint": {
+    "message": "Choose proposals to review together",
+    "description": "Hint beside the select-all control"
+  },
+  "memory.review.selectedCount": {
+    "message": "{count} selected",
+    "description": "Number of memory proposals selected for bulk review"
+  },
+  "memory.review.selectionScope": {
+    "message": "Visible proposals across all sources",
+    "description": "Scope of the current bulk memory selection"
+  },
+  "memory.review.bulkApprove": {
+    "message": "Approve selected",
+    "description": "Approve selected memory proposals"
+  },
+  "memory.review.bulkReject": {
+    "message": "Reject selected",
+    "description": "Reject selected memory proposals"
+  },
+  "memory.review.clearSelection": {
+    "message": "Clear selection",
+    "description": "Clear bulk memory review selection"
+  },
+  "memory.review.toggleSelection": {
+    "message": "Toggle proposal selection",
+    "description": "Toggle one proposal in the bulk review selection"
+  },
+  "memory.review.bulkRejectPlaceholder": {
+    "message": "Optional — tell the agents what to improve",
+    "description": "Bulk memory rejection reason input placeholder"
+  },
+  "memory.review.bulkRejectReason": {
+    "message": "Shared rejection reason",
+    "description": "Label for the reason applied to every selected proposal"
+  },
+  "memory.review.confirmBulkApprove": {
+    "message": "Approve {count} proposals?",
+    "description": "Bulk memory approval confirmation heading"
+  },
+  "memory.review.confirmBulkReject": {
+    "message": "Reject {count} proposals?",
+    "description": "Bulk memory rejection confirmation heading"
+  },
+  "memory.review.bulkApproveConsequence": {
+    "message": "They will enter the searchable memory pool.",
+    "description": "Consequence of bulk approving memory proposals"
+  },
+  "memory.review.bulkRejectConsequence": {
+    "message": "They will be archived and receive the same feedback.",
+    "description": "Consequence of bulk rejecting memory proposals"
+  },
+  "memory.review.confirmBulkApproveAction": {
+    "message": "Approve {count}",
+    "description": "Final bulk memory approval action"
+  },
+  "memory.review.confirmBulkRejectAction": {
+    "message": "Reject {count}",
+    "description": "Final bulk memory rejection action"
+  },
+  "memory.review.bulkProgress": {
+    "message": "Processing {done}/{total}...",
+    "description": "Bulk memory review progress"
+  },
+  "memory.review.bulkApproved": {
+    "message": "Approved {count} proposals",
+    "description": "Bulk memory approval completion toast"
+  },
+  "memory.review.bulkRejected": {
+    "message": "Rejected {count} proposals",
+    "description": "Bulk memory rejection completion toast"
+  },
+  "memory.review.bulkPartial": {
+    "message": "{succeeded} completed, {failed} failed",
+    "description": "Partial failure during bulk memory review"
+  },
+  "memory.review.bulkCompleted": {
+    "message": "Completed {count} proposals",
+    "description": "Inline completion status for a bulk memory review"
+  },
   "memory.browse.title": {
     "message": "Memory",
     "description": "Memory browse panel title"
@@ -1303,6 +1395,13 @@
     "message": "Plan awaiting accept/reject",
     "description": "Tab attention badge: plan awaiting decision"
   },
+  "tab.status.idle": { "message": "idle" },
+  "tab.status.running": { "message": "running" },
+  "tab.status.starting": { "message": "starting" },
+  "tab.status.awaiting": { "message": "waiting" },
+  "tab.status.plan": { "message": "plan" },
+  "tab.status.exited": { "message": "exited" },
+  "tab.status.exitedCode": { "message": "exit {code}" },
   "event_center.title": {
     "message": "Event center",
     "description": "Tooltip and aria-label for the event center bell button"
@@ -1418,5 +1517,77 @@
   "specops.settings.saved": { "message": "Agent profiles saved to specops.toml." },
   "specops.settings.unsaved": { "message": "Unsaved workspace changes" },
   "specops.settings.synced": { "message": "Synced with specops.toml" },
-  "specops.rail.profiles": { "message": "Profiles" }
+  "specops.rail.profiles": { "message": "Profiles" },
+  "pairing.eyebrow": { "message": "Cloud sync" },
+  "pairing.title": { "message": "Pair mobile device" },
+  "pairing.close": { "message": "Close pairing dialog" },
+  "pairing.description": { "message": "Create a one-time QR code. Session data starts syncing only after the mobile device scans and claims it." },
+  "pairing.serverUrl": { "message": "Sync server URL" },
+  "pairing.serverHint": { "message": "Use the public HTTPS origin from your deployment. Localhost is intended for development only." },
+  "pairing.permissions": { "message": "Permissions granted by this binding" },
+  "pairing.readSessions": { "message": "Read sessions and messages" },
+  "pairing.sendMessages": { "message": "Send messages to sessions" },
+  "pairing.connected": { "message": "Mobile binding active" },
+  "pairing.connectedHint": { "message": "{count} device binding(s); session sync and online command routing are enabled." },
+  "pairing.waiting": { "message": "Desktop connected" },
+  "pairing.waitingHint": { "message": "No session data is uploaded until this QR code is claimed." },
+  "pairing.offline": { "message": "Sync server unavailable" },
+  "pairing.qrAlt": { "message": "One-time kode cloud pairing QR code" },
+  "pairing.qrLoading": { "message": "Generating pairing QR code" },
+  "pairing.oneTimeCode": { "message": "One-time pairing" },
+  "pairing.expiresIn": { "message": "Expires in {seconds}s" },
+  "pairing.expired": { "message": "Expired" },
+  "pairing.copyUri": { "message": "Copy pairing URI" },
+  "pairing.copied": { "message": "Copied" },
+  "pairing.footer": { "message": "The code is single-use and expires after two minutes." },
+  "pairing.creating": { "message": "Creating code…" },
+  "pairing.createCode": { "message": "Create pairing code" },
+  "pairing.refreshCode": { "message": "Create new code" },
+  "pairing.qrFailed": { "message": "Could not render QR code: {error}" },
+  "pairing.statusFailed": { "message": "Could not read sync status: {error}" },
+  "pairing.copyFailed": { "message": "Could not copy pairing URI: {error}" },
+  "pairing.createFailed": { "message": "Could not create a pairing code: {error}" },
+  "pairing.switchFailed": { "message": "Could not switch sync backends: {error}" },
+  "pairing.relayTitle": { "message": "Mobile sync relay" },
+  "pairing.readyDescription": { "message": "Choose a deployed sync backend and scan to connect your phone, or deploy and update another server here." },
+  "pairing.backendLabel": { "message": "Active sync backend" },
+  "pairing.switchBackend": { "message": "Switch sync backend" },
+  "pairing.switching": { "message": "Switching" },
+  "pairing.online": { "message": "Online" },
+  "pairing.scanTitle": { "message": "Scan with Kode Mobile" },
+  "pairing.scanHint": { "message": "The code is single-use and expires after two minutes. Server credentials are never displayed." },
+  "pairing.deployAnother": { "message": "Deploy or connect another server" },
+  "pairing.backToQr": { "message": "Back to QR code" },
+  "pairing.deploy.description": { "message": "Kode uses system SSH to upload its bundled service, start it, and verify the public route. SSH keys remain managed by ~/.ssh/config and ssh-agent." },
+  "pairing.deploy.modeLabel": { "message": "Sync backend setup method" },
+  "pairing.deploy.modeSsh": { "message": "Deploy over SSH" },
+  "pairing.deploy.modeExisting": { "message": "Connect existing" },
+  "pairing.deploy.name": { "message": "Backend name" },
+  "pairing.deploy.namePlaceholder": { "message": "For example: DevCloud primary" },
+  "pairing.deploy.sshHost": { "message": "SSH host" },
+  "pairing.deploy.sshHint": { "message": "Use user@host or a Host alias from ~/.ssh/config. Non-interactive keys or ssh-agent are required." },
+  "pairing.deploy.sshPort": { "message": "SSH port" },
+  "pairing.deploy.servicePort": { "message": "Service port" },
+  "pairing.deploy.publicUrl": { "message": "Public HTTPS URL" },
+  "pairing.deploy.publicHint": { "message": "Enter an origin such as https://sync.example.com, without a path or query." },
+  "pairing.deploy.ingressNote": { "message": "Your public HTTPS ingress must forward HTTP and WebSocket traffic to port {port} on the target host. Kode verifies both remote and public /healthz before saving." },
+  "pairing.deploy.hostRequired": { "message": "Enter an SSH host or Host alias." },
+  "pairing.deploy.portInvalid": { "message": "Ports must be integers between 1 and 65535." },
+  "pairing.deploy.urlInvalid": { "message": "Enter a public HTTPS origin without a path or query." },
+  "pairing.deploy.failed": { "message": "Deployment did not complete: {error}" },
+  "pairing.deploy.deploying": { "message": "Deploying…" },
+  "pairing.deploy.action": { "message": "Deploy and create QR code" },
+  "pairing.deploy.progress": { "message": "Deployment progress" },
+  "pairing.deploy.step.CheckingHost": { "message": "Check remote host" },
+  "pairing.deploy.step.Uploading": { "message": "Upload service bundle" },
+  "pairing.deploy.step.StoppingOld": { "message": "Stop previous service" },
+  "pairing.deploy.step.Extracting": { "message": "Install new version" },
+  "pairing.deploy.step.StartingNew": { "message": "Start sync service" },
+  "pairing.deploy.step.LocalHealth": { "message": "Check remote service" },
+  "pairing.deploy.step.PublicHealth": { "message": "Check public route" },
+  "pairing.deploy.step.SavingBackend": { "message": "Save sync backend" },
+  "pairing.deploy.step.Done": { "message": "Create QR code" },
+  "pairing.deploy.existingTitle": { "message": "Existing sync service" },
+  "pairing.deploy.existingHint": { "message": "Enter its public HTTPS URL. A successful connection is saved as a switchable backend and immediately creates a QR code." },
+  "pairing.deploy.connectExisting": { "message": "Connect and create QR code" }
 }
