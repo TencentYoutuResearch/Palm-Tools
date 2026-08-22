@@ -54,6 +54,10 @@ under `~/.local/kode-sync-server/data` across redeployments. The bundled service
 currently targets x86_64 Linux; the app checks the remote architecture and base
 commands before it uploads anything.
 
+Kode verifies the public deployment through `/api/v1/healthz`, not the generic
+`/healthz`; platforms such as DevCloud/AIO may reserve and answer the latter
+without forwarding it to the sync service.
+
 ## Operations
 
 ```bash

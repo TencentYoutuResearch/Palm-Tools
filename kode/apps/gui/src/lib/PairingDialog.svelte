@@ -192,6 +192,14 @@
     }
   }
 
+  function hostFromOrigin(raw: string): string {
+    try {
+      return new URL(raw).hostname
+    } catch {
+      return ''
+    }
+  }
+
   async function deployBackend() {
     if (busy) return
     const sshPortValue = validatePort(sshPort)
@@ -277,21 +285,13 @@
   }
 
   function showRedeploy(backend: CloudBackendSummary) {
-    if (
-      busy ||
-      !backend.managed ||
-      !backend.ssh_host ||
-      !backend.ssh_port ||
-      !backend.remote_port
-    ) {
-      return
-    }
+    if (busy) return
     redeployBackendId = backend.id
     deployMode = 'ssh'
     backendName = backend.name
-    sshHost = backend.ssh_host
-    sshPort = String(backend.ssh_port)
-    remotePort = String(backend.remote_port)
+    sshHost = backend.ssh_host ?? hostFromOrigin(backend.server_url)
+    sshPort = String(backend.ssh_port ?? 22)
+    remotePort = String(backend.remote_port ?? 8787)
     publicUrl = backend.server_url
     resetDeploySteps()
     view = 'deploy'
@@ -443,17 +443,15 @@
             {/if}
 
             <div class="backend-actions">
-              {#if activeBackend.managed && activeBackend.ssh_host && activeBackend.ssh_port && activeBackend.remote_port}
-                <button
-                  type="button"
-                  class="text-button"
-                  onclick={() => showRedeploy(activeBackend)}
-                  disabled={Boolean(busy)}
-                >
-                  <Icon name="refresh-cw" size={13} />
-                  {tr('pairing.redeployCurrent')}
-                </button>
-              {/if}
+              <button
+                type="button"
+                class="text-button"
+                onclick={() => showRedeploy(activeBackend)}
+                disabled={Boolean(busy)}
+              >
+                <Icon name="refresh-cw" size={13} />
+                {tr('pairing.redeployCurrent')}
+              </button>
               <button type="button" class="text-button" onclick={showDeploy} disabled={Boolean(busy)}>
                 <Icon name="plus" size={13} />
                 {tr('pairing.deployAnother')}

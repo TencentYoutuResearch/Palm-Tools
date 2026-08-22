@@ -139,8 +139,9 @@ have a public HTTPS ingress (including DevCloud/AIO):
 3. deployment stops only the prior managed binary, installs under
    `~/.local/kode-sync-server`, preserves its SQLite data directory, and starts
    the static service with `nohup`;
-4. the desktop verifies both the remote loopback `/healthz` and the public HTTPS
-   `/healthz` before saving the backend or creating a pairing code.
+4. the desktop verifies the remote loopback `/healthz` and the public HTTPS
+   `/api/v1/healthz` before saving the backend or creating a pairing code. The
+   namespaced public route avoids platform ingress health-check interception.
 
 DNS, TLS certificates, firewall policy, and the public reverse proxy remain the
 host owner's responsibility. The public ingress must forward HTTP and WebSocket

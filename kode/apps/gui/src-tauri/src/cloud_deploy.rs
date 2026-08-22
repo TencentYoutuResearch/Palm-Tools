@@ -20,6 +20,7 @@ use crate::{
 const TARBALL_RESOURCE: &str = "resources/kode-sync-server-linux-musl.tar.gz";
 const REMOTE_TARBALL: &str = "/tmp/kode-sync-server-deploy.tar.gz";
 const REMOTE_INSTALL_DIR: &str = ".local/kode-sync-server";
+const PUBLIC_HEALTH_PATH: &str = "/api/v1/healthz";
 const LOCAL_HEALTH_RETRIES: u32 = 8;
 const PUBLIC_HEALTH_RETRIES: u32 = 6;
 
@@ -183,23 +184,42 @@ pub async fn deploy_cloud_sync(
         .map_err(|error| error.to_string())?;
     let mut public_error = String::new();
     for attempt in 1..=PUBLIC_HEALTH_RETRIES {
-        match client.get(format!("{server_url}/healthz")).send().await {
+        match client
+            .get(format!("{server_url}{PUBLIC_HEALTH_PATH}"))
+            .send()
+            .await
+        {
             Ok(response) if response.status().is_success() => {
-                match response.json::<serde_json::Value>().await {
-                    Ok(body)
-                        if body
-                            .get("deployment_id")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(deployment_id.as_str()) =>
-                    {
-                        public_error.clear();
-                        break;
-                    }
-                    Ok(_) => {
-                        public_error =
-                            "the public URL reached a different sync-server deployment".into()
-                    }
-                    Err(error) => public_error = format!("invalid health response: {error}"),
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("unknown content type")
+                    .to_string();
+                match response.bytes().await {
+                    Ok(body) => match serde_json::from_slice::<serde_json::Value>(&body) {
+                        Ok(body)
+                            if body
+                                .get("deployment_id")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(deployment_id.as_str()) =>
+                        {
+                            public_error.clear();
+                            break;
+                        }
+                        Ok(_) => {
+                            public_error =
+                                "the public URL reached a different sync-server deployment".into()
+                        }
+                        Err(error) => {
+                            let preview = String::from_utf8_lossy(&body);
+                            public_error = format!(
+                            "{PUBLIC_HEALTH_PATH} returned invalid JSON ({content_type}): {error}; body={:?}",
+                            preview.chars().take(120).collect::<String>()
+                        );
+                        }
+                    },
+                    Err(error) => public_error = format!("could not read health response: {error}"),
                 }
             }
             Ok(response) => public_error = format!("HTTP {}", response.status()),
@@ -302,5 +322,10 @@ mod tests {
             "'https://sync.example.com'"
         );
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn public_health_uses_namespaced_route() {
+        assert_eq!(PUBLIC_HEALTH_PATH, "/api/v1/healthz");
     }
 }

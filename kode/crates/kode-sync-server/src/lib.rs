@@ -275,6 +275,10 @@ impl ServerState {
 pub fn build_router(state: ServerState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        // DevCloud/AIO reserves the generic /healthz path and may answer it
+        // itself. Keep a namespaced alias so deployment verification can prove
+        // that the public ingress reaches this exact sync-server process.
+        .route("/api/v1/healthz", get(healthz))
         .route("/api/v1/devices/register", post(register_device))
         .route("/api/v1/devices/:id/pairings", post(create_pairing))
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
