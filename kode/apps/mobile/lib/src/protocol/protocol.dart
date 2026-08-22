@@ -2,7 +2,7 @@
 ///
 /// 凡事故意手写 from/to JSON,不引 build_runner / json_serializable —— 启动期
 /// 编译时间一倍以上,而 schema 字段就这么多,值不当那个。
-library protocol;
+library;
 
 import 'dart:convert';
 
@@ -86,6 +86,26 @@ class SessionDto {
     contextPct: (j['context_pct'] as num?)?.toDouble(),
     costUsd: (j['cost_usd'] as num?)?.toDouble(),
   );
+
+  SessionDto copyWith({
+    String? title,
+    String? model,
+    String? status,
+    TokensDto? tokens,
+    double? contextPct,
+    double? costUsd,
+  }) => SessionDto(
+    id: id,
+    backendKey: backendKey,
+    title: title ?? this.title,
+    model: model ?? this.model,
+    status: status ?? this.status,
+    cwd: cwd,
+    sessionUuid: sessionUuid,
+    tokens: tokens ?? this.tokens,
+    contextPct: contextPct ?? this.contextPct,
+    costUsd: costUsd ?? this.costUsd,
+  );
 }
 
 class TokensDto {
@@ -103,39 +123,76 @@ class TokensDto {
 ///
 /// 对应 docs/PROTOCOL.md §3 + 配对屏存储下来的内容。
 class Endpoint {
-  final String host;
-  final int port;
+  final String serverUrl;
   final String token;
-  final String? serverKind; // 'rust-bridge',首次连上后从 connection.hello 拿
+  final String deviceId;
+  final String deviceName;
+  final String? serverKind;
 
   Endpoint({
-    required this.host,
-    required this.port,
+    required this.serverUrl,
     required this.token,
+    required this.deviceId,
+    required this.deviceName,
     this.serverKind,
   });
 
-  String get baseUrl => 'http://$host:$port';
-  String get wsUrl =>
-      'ws://$host:$port/ws?token=${Uri.encodeQueryComponent(token)}';
+  String get baseUrl => serverUrl.replaceAll(RegExp(r'/+$'), '');
+  String get wsUrl {
+    final uri = Uri.parse(baseUrl);
+    return uri
+        .replace(
+          scheme: uri.scheme == 'https' ? 'wss' : 'ws',
+          path: '${uri.path.replaceAll(RegExp(r'/+$'), '')}/ws',
+        )
+        .toString();
+  }
 
   Map<String, dynamic> toJson() => {
-    'host': host,
-    'port': port,
+    'server_url': serverUrl,
     'token': token,
+    'device_id': deviceId,
+    'device_name': deviceName,
     if (serverKind != null) 'server_kind': serverKind,
   };
 
   factory Endpoint.fromJson(Map<String, dynamic> j) => Endpoint(
-    host: j['host'] as String,
-    port: (j['port'] as num).toInt(),
+    serverUrl: j['server_url'] as String,
     token: j['token'] as String,
+    deviceId: j['device_id'] as String,
+    deviceName: j['device_name'] as String? ?? 'Kode Desktop',
     serverKind: j['server_kind'] as String?,
   );
 
-  /// 从 `kode://pair?host=…&port=…&token=…` URI 解析。
-  /// 兼容 `kodepair://` 前缀(部分 OS scheme 限制)。
-  static Endpoint? tryParseUri(String raw) {
+  Endpoint copyWith({
+    String? serverUrl,
+    String? token,
+    String? deviceId,
+    String? deviceName,
+    String? serverKind,
+  }) => Endpoint(
+    serverUrl: serverUrl ?? this.serverUrl,
+    token: token ?? this.token,
+    deviceId: deviceId ?? this.deviceId,
+    deviceName: deviceName ?? this.deviceName,
+    serverKind: serverKind ?? this.serverKind,
+  );
+}
+
+/// One-time QR payload. This is exchanged for a mobile access token and is
+/// never stored after a successful claim.
+class PairingInvite {
+  final String serverUrl;
+  final String pairingId;
+  final String secret;
+
+  const PairingInvite({
+    required this.serverUrl,
+    required this.pairingId,
+    required this.secret,
+  });
+
+  static PairingInvite? tryParseUri(String raw) {
     final s = raw.trim();
     final Uri uri;
     try {
@@ -146,27 +203,32 @@ class Endpoint {
     if (uri.scheme != 'kode' && uri.scheme != 'kodepair') {
       return null;
     }
-    if (uri.host != 'pair' && uri.path != 'pair' && uri.path != '/pair') {
+    if (uri.host != 'cloud-pair' &&
+        uri.path != 'cloud-pair' &&
+        uri.path != '/cloud-pair') {
       return null;
     }
-    final host = uri.queryParameters['host'];
-    final port = int.tryParse(uri.queryParameters['port'] ?? '');
-    final token = uri.queryParameters['token'];
-    if (host == null || host.isEmpty || port == null || token == null) {
+    final serverUrl = uri.queryParameters['server'];
+    final pairingId = uri.queryParameters['pairing_id'];
+    final secret = uri.queryParameters['secret'];
+    if (serverUrl == null ||
+        serverUrl.isEmpty ||
+        pairingId == null ||
+        pairingId.isEmpty ||
+        secret == null ||
+        secret.isEmpty) {
       return null;
     }
-    return Endpoint(host: host, port: port, token: token);
+    final parsedServer = Uri.tryParse(serverUrl);
+    if (parsedServer == null ||
+        (parsedServer.scheme != 'http' && parsedServer.scheme != 'https') ||
+        parsedServer.host.isEmpty) {
+      return null;
+    }
+    return PairingInvite(
+      serverUrl: serverUrl.replaceAll(RegExp(r'/+$'), ''),
+      pairingId: pairingId,
+      secret: secret,
+    );
   }
-
-  Endpoint copyWith({
-    String? host,
-    int? port,
-    String? token,
-    String? serverKind,
-  }) => Endpoint(
-    host: host ?? this.host,
-    port: port ?? this.port,
-    token: token ?? this.token,
-    serverKind: serverKind ?? this.serverKind,
-  );
 }

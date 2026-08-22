@@ -1,46 +1,13 @@
-/// Riverpod providers — 全 app 共享的 endpoint / api / ws 状态。
-import 'dart:io';
-
+// Riverpod providers — 全 app 共享的 endpoint / api / ws 状态。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
 import '../protocol/protocol.dart';
-import '../storage/desktop_auto_pair.dart';
 import '../storage/endpoint_storage.dart';
-import '../storage/local_network_gate_storage.dart';
 
 final endpointStorageProvider = Provider<EndpointStorage>(
   (ref) => EndpointStorage(),
 );
-
-final localNetworkGateStorageProvider = Provider<LocalNetworkGateStorage>(
-  (ref) => LocalNetworkGateStorage(),
-);
-
-final localNetworkGateRequiredProvider = Provider<bool>((ref) {
-  return Platform.isIOS;
-});
-
-final localNetworkGateProvider =
-    AsyncNotifierProvider<LocalNetworkGateNotifier, bool>(
-      LocalNetworkGateNotifier.new,
-    );
-
-class LocalNetworkGateNotifier extends AsyncNotifier<bool> {
-  @override
-  Future<bool> build() async {
-    if (!ref.watch(localNetworkGateRequiredProvider)) return true;
-    final storage = ref.read(localNetworkGateStorageProvider);
-    return storage.load();
-  }
-
-  Future<void> accept() async {
-    state = const AsyncLoading();
-    final storage = ref.read(localNetworkGateStorageProvider);
-    await storage.saveAccepted();
-    state = const AsyncData(true);
-  }
-}
 
 /// 当前激活的 endpoint。null = 未配对,App 路由到 /pair。
 final endpointProvider = StateProvider<Endpoint?>((ref) => null);
@@ -48,15 +15,8 @@ final endpointProvider = StateProvider<Endpoint?>((ref) => null);
 /// 启动时一次性 bootstrap:
 ///   1. 优先用 secure storage 里曾经的 endpoint;但**先 probe 一遍** —— 如果不通
 ///      (端口变了 / token 失效),不要直接拿空白带进 /sessions 屏挂掉
-///   2. 已存不通 → 走桌面自动发现(读本机 kode GUI 的 state.json + 候选端口 probe)
-///   3. 都没有 / 都失败 → 留空,UI 走 /pair 屏让用户手填
+///   2. 已存不通 → 清除失效绑定,UI 走 /pair 重新扫码
 final endpointBootstrapProvider = FutureProvider<Endpoint?>((ref) async {
-  final gateAccepted = await ref.watch(localNetworkGateProvider.future);
-  if (!gateAccepted) {
-    ref.read(endpointProvider.notifier).state = null;
-    return null;
-  }
-
   final storage = ref.read(endpointStorageProvider);
 
   Future<bool> probe(Endpoint ep) async {
@@ -76,22 +36,6 @@ final endpointBootstrapProvider = FutureProvider<Endpoint?>((ref) async {
   if (stored != null && await probe(stored)) {
     ref.read(endpointProvider.notifier).state = stored;
     return stored;
-  }
-
-  // stored 不通(或没有)→ 试桌面自动发现
-  final auto = await DesktopAutoPair.tryDiscover();
-  if (auto != null) {
-    // 关键:storage.save 在 macOS sandbox 关闭后没有 keychain entitlement,
-    // flutter_secure_storage 会抛 -34018。此处带 1.5s 超时 + 吞错,
-    // 让 endpoint 仍能推给 UI(不持久化但当前会话能用)。
-    try {
-      await storage.save(auto).timeout(const Duration(milliseconds: 1500));
-    } catch (e) {
-      // ignore: avoid_print
-      print('[bootstrap] save failed (skip persistence): $e');
-    }
-    ref.read(endpointProvider.notifier).state = auto;
-    return auto;
   }
 
   if (stored != null) {
@@ -202,22 +146,22 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
             final sid = env.sessionId;
             state = AsyncData(
               (state.value ?? const [])
+                  .where((session) => session.id != sid)
+                  .toList(growable: false),
+            );
+            break;
+          case 'session.status':
+            final sid = env.sessionId;
+            final status = env.payload['status'] as String?;
+            if (status == null) break;
+            state = AsyncData(
+              (state.value ?? const [])
                   .map(
-                    (s) => s.id == sid
-                        ? SessionDto(
-                            id: s.id,
-                            backendKey: s.backendKey,
-                            title: s.title,
-                            model: s.model,
-                            status: 'exited',
-                            cwd: s.cwd,
-                            sessionUuid: s.sessionUuid,
-                            tokens: s.tokens,
-                            contextPct: s.contextPct,
-                            costUsd: s.costUsd,
-                          )
-                        : s,
+                    (session) => session.id == sid
+                        ? session.copyWith(status: status)
+                        : session,
                   )
+                  .where((session) => session.status != 'exited')
                   .toList(growable: false),
             );
             break;
@@ -229,14 +173,9 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
                   .map((s) {
                     if (s.id != sid) return s;
                     final p = env.payload;
-                    return SessionDto(
-                      id: s.id,
-                      backendKey: s.backendKey,
+                    return s.copyWith(
                       title: (p['title'] as String?) ?? s.title,
                       model: (p['model'] as String?) ?? s.model,
-                      status: s.status,
-                      cwd: s.cwd,
-                      sessionUuid: s.sessionUuid,
                       tokens: TokensDto(
                         input:
                             (p['input_tokens'] as num?)?.toInt() ??
@@ -249,10 +188,8 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
                             s.tokens.cached,
                         total: (p['tokens'] as num?)?.toInt() ?? s.tokens.total,
                       ),
-                      contextPct:
-                          (p['context_pct'] as num?)?.toDouble() ??
-                          s.contextPct,
-                      costUsd: (p['cost_usd'] as num?)?.toDouble() ?? s.costUsd,
+                      contextPct: (p['context_pct'] as num?)?.toDouble(),
+                      costUsd: (p['cost_usd'] as num?)?.toDouble(),
                     );
                   })
                   .toList(growable: false),

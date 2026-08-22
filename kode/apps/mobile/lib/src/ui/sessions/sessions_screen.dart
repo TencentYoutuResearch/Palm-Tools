@@ -1,4 +1,4 @@
-/// session 列表屏 — 启动 home。
+// session 列表屏 — 启动 home。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,6 +7,7 @@ import '../../api/api_client.dart';
 import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
 import '../theme.dart';
+import 'backend_identity.dart';
 
 String _compactTokens(int value) {
   if (value >= 1000000) {
@@ -59,21 +60,20 @@ List<_SessionGroup> _buildGroups(List<SessionDto> sessions) {
     buckets.putIfAbsent(key, () => <SessionDto>[]).add(session);
   }
 
-  final groups = buckets.entries.map((entry) {
-    final sorted = [...entry.value]
-      ..sort((a, b) => b.id.compareTo(a.id));
-    return _SessionGroup(
-      key: entry.key,
-      leaf: _pathLeaf(sorted.first.cwd),
-      parent: _pathParent(sorted.first.cwd),
-      sessions: sorted,
-    );
-  }).toList()
-    ..sort((a, b) {
-      final cmp = a.leaf.toLowerCase().compareTo(b.leaf.toLowerCase());
-      if (cmp != 0) return cmp;
-      return a.parent.toLowerCase().compareTo(b.parent.toLowerCase());
-    });
+  final groups =
+      buckets.entries.map((entry) {
+        final sorted = [...entry.value]..sort((a, b) => b.id.compareTo(a.id));
+        return _SessionGroup(
+          key: entry.key,
+          leaf: _pathLeaf(sorted.first.cwd),
+          parent: _pathParent(sorted.first.cwd),
+          sessions: sorted,
+        );
+      }).toList()..sort((a, b) {
+        final cmp = a.leaf.toLowerCase().compareTo(b.leaf.toLowerCase());
+        if (cmp != 0) return cmp;
+        return a.parent.toLowerCase().compareTo(b.parent.toLowerCase());
+      });
 
   return groups;
 }
@@ -98,7 +98,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('kode · ${endpoint?.host ?? '?'}'.toUpperCase()),
+        title: Text('kode · ${endpoint?.deviceName ?? '?'}'.toUpperCase()),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -109,6 +109,11 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
             tooltip: 'Unpair',
             icon: const Icon(Icons.logout),
             onPressed: () async {
+              try {
+                await ref.read(apiClientProvider)?.revokeBinding();
+              } catch (error) {
+                debugPrint('[unpair] server revoke failed: $error');
+              }
               await ref.read(endpointStorageProvider).clear();
               ref.read(endpointProvider.notifier).state = null;
               if (context.mounted) context.go('/pair');
@@ -223,80 +228,85 @@ class _PathGroupCard extends StatelessWidget {
       ),
       child: Column(
         children: [
-          InkWell(
-            borderRadius: BorderRadius.circular(18),
-            onTap: onToggle,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: colors.primary.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: colors.primary.withValues(alpha: 0.3),
+          Tooltip(
+            message: group.key == '__unset__'
+                ? 'No working directory'
+                : group.key,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(18),
+              onTap: onToggle,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 11,
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 30,
+                      height: 30,
+                      decoration: BoxDecoration(
+                        color: colors.primary.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: colors.primary.withValues(alpha: 0.3),
+                        ),
+                      ),
+                      alignment: Alignment.center,
+                      child: Icon(
+                        Icons.folder_copy_outlined,
+                        size: 16,
+                        color: colors.primary,
                       ),
                     ),
-                    alignment: Alignment.center,
-                    child: Icon(
-                      Icons.folder_copy_outlined,
-                      size: 18,
-                      color: colors.primary,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          group.leaf,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w900,
-                            color: colors.onSurface,
-                            letterSpacing: 0.2,
-                          ),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          group.parent,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: colors.onSurfaceVariant,
-                            fontFamily: 'Menlo',
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: [
-                            _Chip(
-                              text:
-                                  '${group.sessions.length} session${group.sessions.length == 1 ? '' : 's'}',
-                              color: KillLaColors.busy,
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            group.leaf,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w900,
+                              color: colors.onSurface,
+                              letterSpacing: 0.2,
                             ),
-                            _Chip(text: 'path', color: KillLaColors.accent),
-                          ],
-                        ),
-                      ],
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            group.parent,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.onSurfaceVariant,
+                              fontFamily: 'Menlo',
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Icon(
-                    expanded ? Icons.expand_less : Icons.expand_more,
-                    color: colors.onSurfaceVariant,
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    Text(
+                      '${group.sessions.length}',
+                      style: TextStyle(
+                        color: colors.onSurfaceVariant,
+                        fontSize: 11,
+                        fontFamily: 'Menlo',
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      expanded ? Icons.expand_less : Icons.expand_more,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -327,105 +337,69 @@ class _SessionTile extends ConsumerWidget {
     final tile = InkWell(
       onTap: () => GoRouter.of(context).push('/sessions/${s.id}'),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Column(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: _StatusDot(status: s.status),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
+            BackendStatusAvatar(
+              backendKey: s.backendKey,
+              statusLabel: sessionStatusLabel(s.status),
+              statusColor: KillLaColors.statusDot(s.status),
+              size: 38,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            child: Text(
-                              s.title.isEmpty ? '(untitled)' : s.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0.15,
-                                color: colors.onSurface,
-                              ),
-                            ),
+                      Expanded(
+                        child: Text(
+                          s.title.trim().isEmpty ? 'Untitled session' : s.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.15,
+                            color: colors.onSurface,
                           ),
-                          if (kind != null) ...[
-                            const SizedBox(width: 8),
-                            _AttentionBadge(kind: kind),
-                          ],
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        s.sessionUuid ?? s.backendKey,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: colors.onSurfaceVariant,
-                          fontFamily: 'Menlo',
                         ),
                       ),
+                      if (kind != null) ...[
+                        const SizedBox(width: 8),
+                        _AttentionBadge(kind: kind),
+                      ],
                     ],
                   ),
-                ),
-                const SizedBox(width: 10),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      '#${s.id}',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: colors.onSurfaceVariant,
-                        fontFamily: 'Menlo',
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      s.status.toUpperCase(),
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.9,
-                        color: KillLaColors.statusDot(s.status),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                _Chip(text: s.model, color: KillLaColors.warning),
-                if (s.tokens.total > 0)
-                  _Chip(
-                    text: '${_compactTokens(s.tokens.total)} tok',
-                    color: KillLaColors.busy,
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 5,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      _SessionStatus(status: s.status),
+                      if (s.model.trim().isNotEmpty)
+                        _Chip(text: s.model, color: KillLaColors.warning),
+                      if (s.tokens.total > 0)
+                        _Chip(
+                          text: '${_compactTokens(s.tokens.total)} tok',
+                          color: KillLaColors.busy,
+                        ),
+                      if ((s.contextPct ?? 0) > 0)
+                        _Chip(
+                          text: 'ctx ${s.contextPct!.toStringAsFixed(0)}%',
+                          color: (s.contextPct ?? 0) >= 80
+                              ? KillLaColors.danger
+                              : (s.contextPct ?? 0) >= 50
+                              ? KillLaColors.warning
+                              : KillLaColors.textSecondary,
+                        ),
+                    ],
                   ),
-                if ((s.contextPct ?? 0) > 0)
-                  _Chip(
-                    text: 'ctx ${s.contextPct!.toStringAsFixed(0)}%',
-                    color: (s.contextPct ?? 0) >= 80
-                        ? KillLaColors.danger
-                        : (s.contextPct ?? 0) >= 50
-                            ? KillLaColors.warning
-                            : KillLaColors.textSecondary,
-                  ),
-              ],
+                ],
+              ),
             ),
           ],
         ),
@@ -436,6 +410,37 @@ class _SessionTile extends ConsumerWidget {
 
     // 需要用户操作 — 整张卡片用呼吸高亮包一层
     return _AttentionWrap(kind: kind, child: tile);
+  }
+}
+
+class _SessionStatus extends StatelessWidget {
+  final String status;
+
+  const _SessionStatus({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = KillLaColors.statusDot(status);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 5,
+          height: 5,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          sessionStatusLabel(status),
+          style: TextStyle(
+            color: color,
+            fontSize: 10,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 0.7,
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -562,24 +567,6 @@ class _AttentionBadgeState extends State<_AttentionBadge>
         end: 1.22,
       ).chain(CurveTween(curve: Curves.easeInOut)).animate(_ctrl),
       child: dot,
-    );
-  }
-}
-
-class _StatusDot extends StatelessWidget {
-  final String status;
-  const _StatusDot({required this.status});
-  @override
-  Widget build(BuildContext context) {
-    final c = KillLaColors.statusDot(status);
-    return Container(
-      width: 12,
-      height: 12,
-      decoration: BoxDecoration(
-        color: c,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: KillLaColors.borderStrong),
-      ),
     );
   }
 }

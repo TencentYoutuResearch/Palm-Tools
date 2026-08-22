@@ -1,11 +1,11 @@
-/// 端点 + token 持久化(钥匙串 / Android Keystore)。
+// 端点 + token 持久化(钥匙串 / Android Keystore)。
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../protocol/protocol.dart';
 
-const _key = 'kode_endpoint_v1';
+const _key = 'kode_cloud_endpoint_v2';
 
 class EndpointStorage {
   static const _store = FlutterSecureStorage(

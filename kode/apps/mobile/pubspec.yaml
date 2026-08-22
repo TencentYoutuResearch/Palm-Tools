@@ -42,3 +42,20 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # Reuse the canonical desktop backend artwork instead of maintaining a
+    # second mobile-only icon set that can drift.
+    - ../gui/public/backend-icons/amp.png
+    - ../gui/public/backend-icons/antigravity.png
+    - ../gui/public/backend-icons/claudecode.png
+    - ../gui/public/backend-icons/codebuddy.png
+    - ../gui/public/backend-icons/codex.png
+    - ../gui/public/backend-icons/cursor.png
+    - ../gui/public/backend-icons/droid.png
+    - ../gui/public/backend-icons/gemini.png
+    - ../gui/public/backend-icons/githubcopilot.png
+    - ../gui/public/backend-icons/grok.png
+    - ../gui/public/backend-icons/kimi.png
+    - ../gui/public/backend-icons/kiro.png
+    - ../gui/public/backend-icons/opencode.png
+    - ../gui/public/backend-icons/pi.png

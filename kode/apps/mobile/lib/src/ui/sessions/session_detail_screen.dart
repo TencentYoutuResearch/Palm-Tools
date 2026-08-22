@@ -19,6 +19,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
 import '../theme.dart';
+import 'backend_identity.dart';
+import 'message_markdown.dart';
 
 String _compactTokens(int value) {
   if (value >= 1000000) {
@@ -30,20 +32,8 @@ String _compactTokens(int value) {
   return '$value';
 }
 
-String _pathLeaf(String? path) {
-  if (path == null || path.trim().isEmpty) return 'workspace unset';
-  final normalized = path.replaceAll('\\', '/');
-  final parts = normalized.split('/').where((part) => part.isNotEmpty).toList();
-  return parts.isEmpty ? normalized : parts.last;
-}
-
-String _pathParent(String? path) {
-  if (path == null || path.trim().isEmpty) return 'No working directory';
-  final normalized = path.replaceAll('\\', '/');
-  final index = normalized.lastIndexOf('/');
-  if (index <= 0) return normalized;
-  return normalized.substring(0, index);
-}
+bool _showsAgentActivity(String status) =>
+    status == 'busy' || status == 'starting';
 
 /// 一条对话气泡或工具调用卡。
 class _Item {
@@ -77,6 +67,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   /// AppBar 上显示的 meta(model / total tokens / context_pct)
   Map<String, dynamic> _meta = const {};
 
+  /// WebSocket 收到的即时状态。优先于列表快照，避免详情页晚一拍。
+  String? _liveStatus;
+
   /// 当前 PermissionMode(server 推 session.mode_changed 事件 → 这里更新)。
   /// null = 还不知道(刚连上 / 子进程还在 init);UI 显灰色 chip。
   String? _mode;
@@ -87,6 +80,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   bool _sending = false;
 
   bool _historyLoaded = false;
+  String? _historyError;
   int _lastTs = 0;
 
   /// ListView 控制器,加载完历史 / 收到新事件时自动滚到底
@@ -101,8 +95,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       // 注意:**不**在这里清 attention。用户只是点开屏幕看一眼,prompt 还卡着,
       // attention 应该继续提示。session.attention_cleared 事件由 server 推过来
       // (scan_loop 检测到 PTY 屏幕上 prompt 已经消失)时才清。
-      await _loadHistory();
       _subscribeLive();
+      await _loadHistory();
     });
   }
 
@@ -117,6 +111,12 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   Future<void> _loadHistory() async {
     final api = ref.read(apiClientProvider);
     if (api == null) return;
+    if (mounted) {
+      setState(() {
+        _historyLoaded = false;
+        _historyError = null;
+      });
+    }
     try {
       final events = await api.getHistory(
         widget.sessionId,
@@ -127,7 +127,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         _ingest(env);
       }
     } catch (e) {
-      debugPrint('[detail #${widget.sessionId}] history failed: $e');
+      debugPrint('[detail session ${widget.sessionId}] history failed: $e');
+      _historyError = e.toString();
     }
     if (mounted) {
       setState(() => _historyLoaded = true);
@@ -164,7 +165,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         // providers.dart 里的 SessionAttentionNotifier 监听并清除 — 那是 server
         // 在 PTY 屏幕检测到 prompt 真消失时发出的、唯一可信的"已回应"信号。
         if (mounted) {
-          setState(() => _ingest(env));
+          setState(() => _ingest(env, live: true));
           // 仅当用户已在底部 ±60px 时自动跟随;否则保留滚动位置
           if (_scrollCtrl.hasClients) {
             final pos = _scrollCtrl.position;
@@ -178,7 +179,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   }
 
   /// 把一条 envelope 吸收到本地状态。
-  void _ingest(Envelope env) {
+  void _ingest(Envelope env, {bool live = false}) {
     _lastTs = env.ts > _lastTs ? env.ts : _lastTs;
     switch (env.type) {
       case 'meta':
@@ -283,6 +284,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         }
         break;
       case 'session.exited':
+        if (live) _liveStatus = 'exited';
         _upsert(
           _Item(
             key: 'exit-${env.ts}',
@@ -293,6 +295,12 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
             },
           ),
         );
+        break;
+      case 'session.status':
+        if (live) {
+          final status = env.payload['status'] as String?;
+          if (status != null) _liveStatus = status;
+        }
         break;
       case 'session.mode_changed':
         // 不进消息流,只更新 AppBar 上的 mode chip
@@ -322,10 +330,16 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   }
 
   Future<void> _send() async {
+    if (_sending) return;
     final text = _inputCtrl.text;
     if (text.isEmpty) return;
     final api = ref.read(apiClientProvider);
     if (api == null) return;
+    // Clear synchronously before the async REST round-trip. On iOS, clearing
+    // after await lets the active IME composing value restore the submitted
+    // prompt into the field. A failed send restores it only if the user has
+    // not started typing a replacement.
+    _inputCtrl.clear();
     setState(() => _sending = true);
     try {
       // bridge 会把 text 拆成两部分:`\x1b[200~ <body> \x1b[201~` + `\r`(单独发触发 Ink 提交)。
@@ -336,9 +350,14 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       var payload = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
       if (!payload.endsWith('\n')) payload = '$payload\n';
       await api.sendInputText(widget.sessionId, payload);
-      _inputCtrl.clear();
     } catch (e) {
       if (mounted) {
+        if (_inputCtrl.text.isEmpty) {
+          _inputCtrl.value = TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          );
+        }
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('send failed: $e')));
@@ -370,10 +389,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final model = _meta['model'] as String? ?? '';
-    final ctxPct = (_meta['context_pct'] as num?)?.toDouble();
-    final tokens = (_meta['tokens'] as num?)?.toInt();
-    final title = _meta['title'] as String? ?? '';
+    final metaModel = _meta['model'] as String? ?? '';
+    final metaCtxPct = (_meta['context_pct'] as num?)?.toDouble();
+    final metaTokens = (_meta['tokens'] as num?)?.toInt();
+    final metaTitle = _meta['title'] as String? ?? '';
     final sessionList =
         ref.watch(sessionsProvider).valueOrNull ?? const <SessionDto>[];
     SessionDto? summary;
@@ -383,6 +402,19 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         break;
       }
     }
+    final backendKey =
+        summary?.backendKey ?? (_meta['backend_key'] as String?) ?? 'agent';
+    final model = metaModel.isNotEmpty ? metaModel : summary?.model ?? '';
+    final ctxPct = metaCtxPct ?? summary?.contextPct;
+    final tokens = metaTokens ?? summary?.tokens.total ?? 0;
+    final summaryTitle = summary?.title ?? '';
+    final displayTitle = metaTitle.isNotEmpty
+        ? metaTitle
+        : (summaryTitle.isNotEmpty ? summaryTitle : 'Untitled session');
+    final cwd = summary?.cwd?.trim();
+    final sessionStatus = _liveStatus ?? summary?.status ?? 'starting';
+    final showAgentActivity = _showsAgentActivity(sessionStatus);
+    final hasHeaderMeta = model.isNotEmpty || tokens > 0 || ctxPct != null;
     // 当前 session 是否仍需用户操作(prompt 还没解除)
     final attentionKind = ref.watch(
       sessionAttentionProvider.select((m) => m[widget.sessionId]),
@@ -390,78 +422,28 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title.isNotEmpty ? title : 'Session ${widget.sessionId}',
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 1.0,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (summary?.cwd != null && summary!.cwd!.isNotEmpty)
-              Text(
-                '${_pathLeaf(summary.cwd)} · ${_pathParent(summary.cwd)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 10,
-                  color: KillLaColors.textSecondary,
-                  fontWeight: FontWeight.w700,
-                  fontFamily: 'Menlo',
-                ),
-              ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (model.isNotEmpty)
-                  Text(
-                    model,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: KillLaColors.textMuted,
-                      fontFamily: 'Menlo',
-                    ),
-                  ),
-                if (tokens != null) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    '${_compactTokens(tokens)} tok',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: KillLaColors.textMuted,
-                      fontFamily: 'Menlo',
-                    ),
-                  ),
-                ],
-                if (ctxPct != null) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    'ctx ${ctxPct.toStringAsFixed(1)}%',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontFamily: 'Menlo',
-                      fontWeight: FontWeight.w700,
-                      color: ctxPct >= 80
-                          ? KillLaColors.accent
-                          : (ctxPct >= 50
-                                ? KillLaColors.busy
-                                : KillLaColors.textMuted),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ],
+        toolbarHeight: 56,
+        titleSpacing: 0,
+        title: _SessionHeaderTitle(
+          backendKey: backendKey,
+          title: displayTitle,
+          status: sessionStatus,
+          cwd: cwd,
         ),
         actions: [
           _ModeChip(mode: _mode, busy: _modeBusy, onPick: _switchMode),
           const SizedBox(width: 8),
         ],
+        bottom: hasHeaderMeta
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(28),
+                child: _SessionHeaderMeta(
+                  model: model,
+                  tokens: tokens,
+                  contextPct: ctxPct,
+                ),
+              )
+            : null,
       ),
       body: SafeArea(
         child: Column(
@@ -470,7 +452,36 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
             Expanded(
               child: !_historyLoaded
                   ? const Center(child: CircularProgressIndicator())
-                  : _items.isEmpty
+                  : _historyError != null && _items.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'Could not load session history.',
+                              style: TextStyle(color: KillLaColors.textMuted),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _historyError!,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: KillLaColors.textMuted,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            OutlinedButton(
+                              onPressed: _loadHistory,
+                              child: const Text('Retry'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : _items.isEmpty && !showAgentActivity
                   ? const Center(
                       child: Text(
                         'No messages yet — type below to send to the session.',
@@ -479,25 +490,37 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                     )
                   : ListView.builder(
                       controller: _scrollCtrl,
-                      padding: const EdgeInsets.all(12),
-                      itemCount: _items.length,
-                      itemBuilder: (_, i) => _buildItem(_items[i]),
+                      padding: const EdgeInsets.fromLTRB(12, 14, 12, 18),
+                      itemCount: _items.length + (showAgentActivity ? 1 : 0),
+                      itemBuilder: (_, i) {
+                        if (i == _items.length) {
+                          return _AgentActivityLine(
+                            backendKey: backendKey,
+                            status: sessionStatus,
+                          );
+                        }
+                        return _buildItem(_items[i], backendKey: backendKey);
+                      },
                     ),
             ),
-            const Divider(height: 1),
-            _buildInput(),
+            _buildInput(backendIdentity(backendKey).label),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildItem(_Item item) {
+  Widget _buildItem(_Item item, {required String backendKey}) {
     switch (item.type) {
       case 'message':
         final role = item.payload['role'] as String? ?? '?';
         final text = item.payload['text'] as String? ?? '';
-        return _MessageBubble(role: role, text: text);
+        return _MessageBubble(
+          role: role,
+          text: text,
+          backendKey: backendKey,
+          timestamp: (item.payload['timestamp_ms'] as num?)?.toInt(),
+        );
       case 'tool_use':
         return _ToolUseCard(payload: item.payload);
       case 'ask_user_question':
@@ -542,43 +565,386 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
     }).toList();
   }
 
-  Widget _buildInput() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _inputCtrl,
-              minLines: 1,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                hintText: 'Message session…',
-                border: OutlineInputBorder(),
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
+  Widget _buildInput(String backendLabel) {
+    final colors = Theme.of(context).colorScheme;
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: _inputCtrl,
+      builder: (context, value, _) {
+        final canSend = value.text.trim().isNotEmpty && !_sending;
+        return Container(
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          decoration: BoxDecoration(
+            color: colors.surface,
+            border: Border(top: BorderSide(color: colors.outline)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _inputCtrl,
+                  minLines: 1,
+                  maxLines: 4,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  decoration: InputDecoration(
+                    hintText: 'Message $backendLabel…',
+                    filled: true,
+                    fillColor: colors.surfaceContainerHighest,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(13),
+                      borderSide: BorderSide(color: colors.outline),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(13),
+                      borderSide: BorderSide(color: colors.outline),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(13),
+                      borderSide: BorderSide(color: colors.primary, width: 1.5),
+                    ),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 13,
+                      vertical: 12,
+                    ),
+                  ),
                 ),
               ),
-              onSubmitted: (_) => _send(),
+              const SizedBox(width: 8),
+              Semantics(
+                button: true,
+                label: 'Send message',
+                child: Tooltip(
+                  message: 'Send message',
+                  child: SizedBox(
+                    width: 48,
+                    height: 46,
+                    child: FilledButton(
+                      onPressed: canSend ? _send : null,
+                      style: FilledButton.styleFrom(
+                        elevation: 0,
+                        padding: EdgeInsets.zero,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(13),
+                        ),
+                      ),
+                      child: _sending
+                          ? SizedBox(
+                              width: 17,
+                              height: 17,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: colors.onPrimary,
+                              ),
+                            )
+                          : const Icon(Icons.arrow_upward_rounded, size: 24),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _SessionHeaderTitle extends StatelessWidget {
+  final String backendKey;
+  final String title;
+  final String status;
+  final String? cwd;
+
+  const _SessionHeaderTitle({
+    required this.backendKey,
+    required this.title,
+    required this.status,
+    required this.cwd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final statusColor = KillLaColors.statusDot(status);
+    return Row(
+      children: [
+        BackendStatusAvatar(
+          backendKey: backendKey,
+          statusLabel: sessionStatusLabel(status),
+          statusColor: statusColor,
+          size: 32,
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: colors.onSurface,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.15,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Row(
+                children: [
+                  if (cwd != null && cwd!.isNotEmpty) ...[
+                    Expanded(
+                      child: Tooltip(
+                        message: cwd!,
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.folder_outlined,
+                              size: 11,
+                              color: colors.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                cwd!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: colors.onSurfaceVariant,
+                                  fontSize: 9.5,
+                                  fontFamily: 'Menlo',
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ] else
+                    const Spacer(),
+                  Container(
+                    width: 5,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: statusColor,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    sessionStatusLabel(status),
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.75,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SessionHeaderMeta extends StatelessWidget {
+  final String model;
+  final int tokens;
+  final double? contextPct;
+
+  const _SessionHeaderMeta({
+    required this.model,
+    required this.tokens,
+    required this.contextPct,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final contextColor = contextPct == null
+        ? colors.onSurfaceVariant
+        : contextPct! >= 80
+        ? colors.error
+        : contextPct! >= 50
+        ? KillLaColors.warning
+        : colors.onSurfaceVariant;
+    return Container(
+      height: 28,
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 0, 10, 0),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: colors.outline)),
+      ),
+      child: Row(
+        children: [
+          if (model.isNotEmpty)
+            Expanded(
+              flex: 3,
+              child: _HeaderMetaValue(
+                icon: Icons.memory_rounded,
+                text: model,
+                tooltip: model,
+                color: KillLaColors.warning,
+              ),
+            ),
+          if (tokens > 0) ...[
+            const SizedBox(width: 10),
+            _HeaderMetaValue(
+              icon: Icons.data_usage_rounded,
+              text: '${_compactTokens(tokens)} tok',
+              color: colors.onSurfaceVariant,
+            ),
+          ],
+          if (contextPct != null) ...[
+            const SizedBox(width: 10),
+            _HeaderMetaValue(
+              icon: Icons.donut_large_rounded,
+              text: '${contextPct!.toStringAsFixed(0)}%',
+              color: contextColor,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _HeaderMetaValue extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final String? tooltip;
+  final Color color;
+
+  const _HeaderMetaValue({
+    required this.icon,
+    required this.text,
+    this.tooltip,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final content = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 11, color: color),
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: color,
+              fontSize: 9.5,
+              fontFamily: 'Menlo',
+              fontWeight: FontWeight.w700,
             ),
           ),
-          const SizedBox(width: 8),
-          IconButton.filled(
-            icon: _sending
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
+        ),
+      ],
+    );
+    return tooltip == null
+        ? content
+        : Tooltip(message: tooltip!, child: content);
+  }
+}
+
+class _AgentActivityLine extends StatelessWidget {
+  final String backendKey;
+  final String status;
+
+  const _AgentActivityLine({required this.backendKey, required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final identity = backendIdentity(backendKey);
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final statusColor = KillLaColors.statusDot(status);
+    final label = status == 'starting'
+        ? 'Starting ${identity.label}…'
+        : '${identity.label} is working';
+    return Semantics(
+      liveRegion: true,
+      label: label,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            BackendAvatar(backendKey: backendKey, size: 28),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Container(
+                constraints: const BoxConstraints(minHeight: 38),
+                padding: const EdgeInsets.symmetric(horizontal: 11),
+                decoration: BoxDecoration(
+                  color: statusColor.withValues(alpha: 0.08),
+                  border: Border(
+                    left: BorderSide(color: statusColor, width: 2),
+                    top: BorderSide(color: colors.outline),
+                    right: BorderSide(color: colors.outline),
+                    bottom: BorderSide(color: colors.outline),
+                  ),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    if (reduceMotion)
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: statusColor,
+                          shape: BoxShape.circle,
+                        ),
+                      )
+                    else
+                      SizedBox(
+                        width: 13,
+                        height: 13,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: statusColor,
+                        ),
+                      ),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          color: colors.onSurfaceVariant,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
                     ),
-                  )
-                : const Icon(Icons.send),
-            onPressed: _sending ? null : _send,
-          ),
-        ],
+                    Text(
+                      sessionStatusLabel(status),
+                      style: TextStyle(
+                        color: statusColor,
+                        fontSize: 9,
+                        fontFamily: 'Menlo',
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -587,20 +953,36 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
 class _MessageBubble extends StatelessWidget {
   final String role;
   final String text;
-  const _MessageBubble({required this.role, required this.text});
+  final String backendKey;
+  final int? timestamp;
+
+  const _MessageBubble({
+    required this.role,
+    required this.text,
+    required this.backendKey,
+    required this.timestamp,
+  });
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final isUser = role == 'user';
     final isSystem = role == 'system';
-    final align = isUser ? Alignment.centerRight : Alignment.centerLeft;
+    final identity = backendIdentity(backendKey);
+    final timestampLabel = timestamp == null || timestamp! <= 0
+        ? ''
+        : MaterialLocalizations.of(context).formatTimeOfDay(
+            TimeOfDay.fromDateTime(
+              DateTime.fromMillisecondsSinceEpoch(timestamp!),
+            ),
+            alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+          );
     final label = isUser
         ? 'YOU'
-        : (isSystem ? 'SYSTEM' : 'AGENT');
+        : (isSystem ? 'SYSTEM' : identity.label.toUpperCase());
     final accentColor = isSystem
         ? colors.onSurfaceVariant
-        : (isUser ? colors.primary : colors.secondary);
+        : (isUser ? colors.onPrimary.withValues(alpha: 0.78) : identity.accent);
     final textColor = isSystem
         ? colors.onSurfaceVariant
         : (isUser ? colors.onPrimary : colors.onSurface);
@@ -609,118 +991,151 @@ class _MessageBubble extends StatelessWidget {
         : (isUser ? colors.primary : colors.surface);
     final bubbleBorder = isSystem
         ? colors.outline
-        : (isUser ? colors.primary : colors.outline);
-    final bubbleShadow = isUser
-        ? colors.primary.withValues(alpha: 0.18)
-        : Colors.black.withValues(alpha: 0.16);
-    return Container(
-      alignment: align,
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 540),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: bubbleColor,
-          gradient: isUser
-              ? LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    colors.primary,
-                    Color.lerp(colors.primary, colors.onPrimary, 0.12)!,
-                  ],
-                )
-              : null,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: bubbleBorder),
-          boxShadow: [
-            BoxShadow(
-              color: bubbleShadow,
-              blurRadius: 18,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 10,
-                color: accentColor,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 1.2,
+        : (isUser ? colors.primary : identity.accent.withValues(alpha: 0.28));
+    final bubble = Container(
+      constraints: const BoxConstraints(maxWidth: 540),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: bubbleColor,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: bubbleBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: accentColor,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.2,
+                ),
               ),
-            ),
-            const SizedBox(height: 4),
-            // MarkdownBody(不是 Markdown):后者自带滚动容器,在 ListView 里会冲突。
-            // selectable=true 替代原 SelectableText,长按选中复制。
-            MarkdownBody(
-              data: text,
-              selectable: true,
-              styleSheet: MarkdownStyleSheet(
-                p: TextStyle(
-                  fontSize: 14,
-                  color: textColor,
-                  height: 1.45,
+              if (timestampLabel.isNotEmpty) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '· $timestampLabel',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: textColor.withValues(alpha: 0.62),
+                    fontFamily: 'Menlo',
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-                code: TextStyle(
-                  fontFamily: 'Menlo',
-                  fontSize: 12,
-                  color: isUser ? colors.onPrimary : colors.onSurface,
-                  fontWeight: FontWeight.w700,
-                  backgroundColor: isUser
-                      ? colors.onPrimary.withValues(alpha: 0.12)
-                      : colors.onSurface.withValues(alpha: 0.1),
-                ),
-                codeblockDecoration: BoxDecoration(
+              ],
+            ],
+          ),
+          const SizedBox(height: 4),
+          // MarkdownBody(不是 Markdown):后者自带滚动容器,在 ListView 里会冲突。
+          // selectable=true 替代原 SelectableText,长按选中复制。
+          MarkdownBody(
+            data: normalizeMessageMarkdown(text),
+            selectable: true,
+            styleSheet: MarkdownStyleSheet(
+              p: TextStyle(fontSize: 14, color: textColor, height: 1.45),
+              code: TextStyle(
+                fontFamily: 'Menlo',
+                fontSize: 12,
+                color: isUser ? colors.onPrimary : colors.onSurface,
+                fontWeight: FontWeight.w700,
+                backgroundColor: isUser
+                    ? colors.onPrimary.withValues(alpha: 0.12)
+                    : colors.onSurface.withValues(alpha: 0.1),
+              ),
+              codeblockDecoration: BoxDecoration(
+                color: isUser
+                    ? colors.onPrimary.withValues(alpha: 0.1)
+                    : colors.onSurface.withValues(alpha: 0.08),
+                border: Border.all(
                   color: isUser
-                      ? colors.onPrimary.withValues(alpha: 0.1)
-                      : colors.onSurface.withValues(alpha: 0.08),
-                  border: Border.all(
+                      ? colors.onPrimary.withValues(alpha: 0.28)
+                      : colors.outline,
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              blockquotePadding: const EdgeInsets.only(left: 10),
+              blockquoteDecoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(
                     color: isUser
-                        ? colors.onPrimary.withValues(alpha: 0.28)
-                        : colors.outline,
+                        ? colors.onPrimary.withValues(alpha: 0.62)
+                        : identity.accent.withValues(alpha: 0.72),
+                    width: 2,
                   ),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                blockquoteDecoration: BoxDecoration(
-                  color: isUser
-                      ? colors.onPrimary.withValues(alpha: 0.14)
-                      : colors.onSurface.withValues(alpha: 0.09),
-                  border: Border(
-                    left: BorderSide(
-                      color: isUser
-                          ? colors.onPrimary.withValues(alpha: 0.72)
-                          : colors.primary,
-                      width: 4,
-                    ),
-                  ),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                blockquote: TextStyle(
-                  color: isUser ? colors.onPrimary : colors.onSurface,
-                  fontWeight: FontWeight.w600,
-                  height: 1.45,
-                ),
-                strong: TextStyle(
-                  color: textColor,
-                  fontWeight: FontWeight.w800,
-                ),
-                em: TextStyle(
-                  color: textColor.withValues(alpha: 0.95),
-                ),
-                listBullet: TextStyle(color: textColor),
-                a: TextStyle(
-                  color: isUser ? colors.onPrimary : colors.primary,
-                  fontWeight: FontWeight.w700,
-                  decoration: TextDecoration.underline,
-                  decorationColor: isUser ? colors.onPrimary : colors.primary,
                 ),
               ),
+              blockquote: TextStyle(
+                color: isUser ? colors.onPrimary : colors.onSurface,
+                fontWeight: FontWeight.w500,
+                height: 1.45,
+              ),
+              strong: TextStyle(color: textColor, fontWeight: FontWeight.w800),
+              em: TextStyle(color: textColor.withValues(alpha: 0.95)),
+              listBullet: TextStyle(color: textColor),
+              a: TextStyle(
+                color: isUser ? colors.onPrimary : colors.primary,
+                fontWeight: FontWeight.w700,
+                decoration: TextDecoration.underline,
+                decorationColor: isUser ? colors.onPrimary : colors.primary,
+              ),
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+    final avatar = isUser
+        ? const _MessageRoleAvatar.user()
+        : isSystem
+        ? const _MessageRoleAvatar.system()
+        : BackendAvatar(backendKey: backendKey);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        mainAxisAlignment: isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: isUser
+            ? [Flexible(child: bubble), const SizedBox(width: 8), avatar]
+            : [avatar, const SizedBox(width: 8), Flexible(child: bubble)],
+      ),
+    );
+  }
+}
+
+class _MessageRoleAvatar extends StatelessWidget {
+  final bool system;
+
+  const _MessageRoleAvatar.user() : system = false;
+  const _MessageRoleAvatar.system() : system = true;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final foreground = system ? colors.onSurfaceVariant : colors.primary;
+    final label = system ? 'System message' : 'You';
+    return Semantics(
+      label: label,
+      image: true,
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: system
+              ? colors.surfaceContainerHighest
+              : colors.primary.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: foreground.withValues(alpha: 0.34)),
+        ),
+        child: Icon(
+          system ? Icons.settings_rounded : Icons.person_rounded,
+          size: 18,
+          color: foreground,
         ),
       ),
     );
@@ -1288,6 +1703,7 @@ class _ModeChip extends StatelessWidget {
     final (color, label) = _styleFor(mode);
     return PopupMenuButton<String>(
       tooltip: 'Permission mode',
+      borderRadius: BorderRadius.circular(8),
       enabled: !busy,
       onSelected: onPick,
       itemBuilder: (_) => const [
@@ -1312,11 +1728,13 @@ class _ModeChip extends StatelessWidget {
         ),
       ],
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        margin: const EdgeInsets.symmetric(vertical: 6),
+        height: 30,
+        padding: const EdgeInsets.symmetric(horizontal: 7),
+        margin: const EdgeInsets.symmetric(vertical: 13),
         decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.16),
-          border: Border.all(color: color, width: 1.5),
+          color: color.withValues(alpha: 0.10),
+          border: Border.all(color: color.withValues(alpha: 0.48)),
+          borderRadius: BorderRadius.circular(9),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1331,22 +1749,17 @@ class _ModeChip extends StatelessWidget {
                 ),
               )
             else
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(color: color),
-              ),
-            const SizedBox(width: 6),
+              Icon(Icons.shield_outlined, size: 13, color: color),
+            const SizedBox(width: 4),
             Text(
-              label.toUpperCase(),
+              label,
               style: TextStyle(
-                fontSize: 11,
+                fontSize: 9.5,
                 color: color,
                 fontWeight: FontWeight.w900,
-                letterSpacing: 0.8,
+                letterSpacing: 0.25,
               ),
             ),
-            Icon(Icons.arrow_drop_down, size: 16, color: color),
           ],
         ),
       ),
@@ -1358,10 +1771,10 @@ class _ModeChip extends StatelessWidget {
     return (
       c,
       switch (m) {
-        'default' => 'default',
-        'acceptEdits' => 'auto-accept',
-        'plan' => 'plan',
-        'bypassPermissions' => 'bypass',
+        'default' => 'Default',
+        'acceptEdits' => 'Auto',
+        'plan' => 'Plan',
+        'bypassPermissions' => 'Bypass',
         _ => '—',
       },
     );

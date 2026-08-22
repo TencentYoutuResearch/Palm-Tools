@@ -5,10 +5,10 @@ iOS / Android 伴侣 App,实时观察并轻量操作桌面 GUI 上跑的 codebud
 ## 架构对位
 
 ```
-桌面 GUI(Tauri+Svelte)              kode-mobile(Flutter)
-├── bridge::router (Rust axum)  ──── REST + WS ────► dio + web_socket_channel
-├── state.json bridge_token     ──── QR pairing ───► flutter_secure_storage
-└── command palette → Show QR
+桌面 GUI(Tauri+Svelte) ── outbound WSS ──► kode-sync-server
+                                              ▲
+kode-mobile(Flutter)    ─── HTTPS + WSS ──────┘
+一次性 QR secret        ─── claim token ─────► flutter_secure_storage
 ```
 
 按 [PROTOCOL.md v1](../../.specops/specs/remote-protocol.md) 协议通信。
@@ -33,12 +33,14 @@ flutter analyze
 
 1. 桌面 kode GUI:`Cmd+P` → "Show Pairing QR…"
 2. 手机 App 启动 → 自动跳到 `/pair` 屏 → 点 "Open camera" → 扫 QR
-3. 自动填入 host/port/token,点 "Test connection & save"
+3. App 向中心服务兑换一次性 secret,获得 scoped mobile token
    - 走 `GET /healthz` + `GET /api/v1/sessions` 双重验证
 4. 跳转到 session 列表 → 实时反映桌面 spawn / kill / model 切换
 
-如果桌面跟手机不在同一网络:
-- 推荐 [Tailscale](https://tailscale.com)(零配置 mesh VPN)
+公网入口若由 DevCloud `AIO-Forward` 托管，客户端会先通过 `/healthz`
+完成访问 Cookie 握手，并在后续 REST 与 WebSocket 请求中复用该内存 Cookie。
+Kode 的配对 secret 和 mobile bearer token 仍分别负责一次性绑定和 API 授权；
+AIO Cookie 不会写入 endpoint storage，也不会编码进二维码。
 
 ## 已完成(9.2.0-9.2.1)
 

@@ -1,4 +1,4 @@
-/// 协议解析单元测试 —— 与 Rust / Go 端 Envelope / SessionDto 字段对齐。
+// 协议解析单元测试 —— 与 Rust Envelope / SessionDto 字段对齐。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kode_mobile/src/protocol/protocol.dart';
 
@@ -11,38 +11,48 @@ void main() {
     });
   });
 
-  group('Endpoint.tryParseUri', () {
-    test('parses kode://pair correctly', () {
-      final ep = Endpoint.tryParseUri(
-        'kode://pair?host=100.64.0.1&port=9870&token=abc123',
+  group('PairingInvite.tryParseUri', () {
+    test('parses centralized pairing URI', () {
+      final invite = PairingInvite.tryParseUri(
+        'kode://cloud-pair?server=https%3A%2F%2Fsync.example.com&pairing_id=pair_123&secret=kp_abc',
       );
-      expect(ep, isNotNull);
-      expect(ep!.host, '100.64.0.1');
-      expect(ep.port, 9870);
-      expect(ep.token, 'abc123');
+      expect(invite, isNotNull);
+      expect(invite!.serverUrl, 'https://sync.example.com');
+      expect(invite.pairingId, 'pair_123');
+      expect(invite.secret, 'kp_abc');
     });
 
     test('rejects wrong scheme', () {
-      expect(Endpoint.tryParseUri('http://example.com'), isNull);
+      expect(PairingInvite.tryParseUri('http://example.com'), isNull);
     });
 
     test('rejects missing fields', () {
-      expect(Endpoint.tryParseUri('kode://pair?host=x'), isNull);
-      expect(Endpoint.tryParseUri('kode://pair?port=9'), isNull);
-    });
-
-    test('handles encoded host', () {
-      final ep = Endpoint.tryParseUri(
-        'kode://pair?host=mac.tail-net.ts&port=9870&token=t',
+      expect(
+        PairingInvite.tryParseUri(
+          'kode://cloud-pair?server=https%3A%2F%2Fsync.example.com',
+        ),
+        isNull,
       );
-      expect(ep, isNotNull);
-      expect(ep!.host, 'mac.tail-net.ts');
     });
 
+    test('rejects non-http server URLs', () {
+      final invite = PairingInvite.tryParseUri(
+        'kode://cloud-pair?server=file%3A%2F%2F%2Ftmp%2Fsync&pairing_id=p&secret=s',
+      );
+      expect(invite, isNull);
+    });
+  });
+
+  group('Endpoint URLs', () {
     test('builds correct base/ws URLs', () {
-      final ep = Endpoint(host: '1.2.3.4', port: 9870, token: 'T0kEn');
-      expect(ep.baseUrl, 'http://1.2.3.4:9870');
-      expect(ep.wsUrl, 'ws://1.2.3.4:9870/ws?token=T0kEn');
+      final ep = Endpoint(
+        serverUrl: 'https://sync.example.com/',
+        token: 'T0kEn',
+        deviceId: 'dev_1',
+        deviceName: 'Studio Mac',
+      );
+      expect(ep.baseUrl, 'https://sync.example.com');
+      expect(ep.wsUrl, 'wss://sync.example.com/ws');
     });
   });
 
@@ -103,6 +113,23 @@ void main() {
       });
       expect(s.tokens.total, 0);
       expect(s.contextPct, isNull);
+    });
+
+    test('copyWith updates live status without losing metadata', () {
+      final s = SessionDto.fromJson({
+        'id': 7,
+        'backend_key': 'codex',
+        'title': 'active task',
+        'model': 'gpt-test',
+        'status': 'idle',
+        'cwd': '/tmp/project',
+        'tokens': {'total': 12},
+      });
+      final busy = s.copyWith(status: 'busy');
+      expect(busy.status, 'busy');
+      expect(busy.title, 'active task');
+      expect(busy.cwd, '/tmp/project');
+      expect(busy.tokens.total, 12);
     });
   });
 }

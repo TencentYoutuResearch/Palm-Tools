@@ -17,6 +17,10 @@ paths:
 > **目标读者**:Rust 桥(`apps/gui/src-tauri/src/bridge/`)与 Go server(`kode-server-go`)的实现者,以及 Flutter App(`kode-mobile`)的调用方。
 >
 > **本文是契约**。两端独立实现、互为黑盒,但都按本文实现。**任何不一致都是 bug**。
+>
+> **移动端更新**:本协议的直连鉴权/配对仅保留给 Bridge/SSH transport。Kode Mobile
+> 已改用中心化会话镜像与命令路由,以
+> [cloud-sync-protocol.md](./cloud-sync-protocol.md) 为准,不再读取桌面 LAN 地址。
 
 ## 1. 设计目标
 
@@ -35,7 +39,7 @@ paths:
 
 - HTTP `Authorization: Bearer <token>`;WebSocket 用 query string `?token=<token>` 或 `Authorization` header(看实现)。
 - token 类型:**opaque string**(Rust 桥)或 **JWT**(Go server);客户端不解析,原样回传。
-- 首次配对:GUI 启动时生成 token 写入 `state.json`,命令面板 "Show pairing QR" 把 `host:port + token` 编码为 QR 给手机扫。
+- Bridge/SSH 直连首次配对可继续使用持久 bearer;手机配对改为中心服务两分钟一次性 QR,见 `cloud-sync-protocol.md`。
 - 错误:鉴权失败一律 `401 Unauthorized`,响应体 `{"error":"unauthorized","detail":"..."}`。
 
 ### 3.1 `POST /api/v1/auth/login`

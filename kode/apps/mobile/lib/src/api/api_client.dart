@@ -9,11 +9,15 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
 
 import 'package:dio/dio.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_socket_channel/io.dart';
 
 import '../protocol/protocol.dart';
+import 'gateway_session.dart';
 
 class ApiException implements Exception {
   final int status;
@@ -26,22 +30,69 @@ class ApiException implements Exception {
 
 class ApiClient {
   final Endpoint endpoint;
-  final Dio _dio;
+  late final GatewaySession _gateway;
+  late final Dio _dio;
 
-  ApiClient(this.endpoint)
-    : _dio = Dio(
-        BaseOptions(
-          baseUrl: endpoint.baseUrl,
-          headers: {
-            'Authorization': 'Bearer ${endpoint.token}',
-            'Content-Type': 'application/json',
-          },
-          connectTimeout: const Duration(seconds: 5),
-          receiveTimeout: const Duration(seconds: 15),
-          // 让我们自己处理状态码,而不是 dio 默认的"非 2xx 就 throw"
-          validateStatus: (_) => true,
-        ),
+  ApiClient(this.endpoint) {
+    _gateway = GatewaySession.forServer(endpoint.baseUrl);
+    _dio = _gateway.createDio(
+      BaseOptions(
+        baseUrl: endpoint.baseUrl,
+        headers: {
+          'Authorization': 'Bearer ${endpoint.token}',
+          'Content-Type': 'application/json',
+        },
+        connectTimeout: const Duration(seconds: 5),
+        receiveTimeout: const Duration(seconds: 15),
+        // 让我们自己处理状态码,而不是 dio 默认的"非 2xx 就 throw"
+        validateStatus: (_) => true,
+      ),
+    );
+  }
+
+  static Future<Endpoint> claimPairing(PairingInvite invite) async {
+    final gateway = GatewaySession.forServer(invite.serverUrl);
+    final dio = gateway.createDio(
+      BaseOptions(
+        baseUrl: invite.serverUrl,
+        headers: const {'Content-Type': 'application/json'},
+        connectTimeout: const Duration(seconds: 8),
+        receiveTimeout: const Duration(seconds: 15),
+        validateStatus: (_) => true,
+      ),
+    );
+    final path =
+        '/api/v1/pairings/${Uri.encodeComponent(invite.pairingId)}/claim';
+    final requestBody = {'secret': invite.secret, 'mobile_name': _mobileName()};
+    var response = await dio.post(path, data: requestBody);
+    if (gateway.isAioForbidden(response)) {
+      // AIO may rotate its session cookie on the rejected response. Refresh
+      // with the safe health endpoint, then retry this one-time claim once.
+      await gateway.ensureReady(refresh: true);
+      response = await dio.post(path, data: requestBody);
+    }
+    final code = response.statusCode ?? 0;
+    if (code < 200 || code >= 300) {
+      final body = response.data;
+      throw ApiException(
+        code,
+        body is Map<String, dynamic>
+            ? body['error'] as String? ?? 'http_$code'
+            : 'http_$code',
+        body is Map<String, dynamic>
+            ? body['detail'] as String? ?? 'pairing rejected'
+            : _plainErrorDetail(body),
       );
+    }
+    final responseBody = response.data as Map<String, dynamic>;
+    return Endpoint(
+      serverUrl: responseBody['server_url'] as String? ?? invite.serverUrl,
+      token: responseBody['access_token'] as String,
+      deviceId: responseBody['device_id'] as String,
+      deviceName: responseBody['device_name'] as String? ?? 'Kode Desktop',
+      serverKind: 'kode-sync-server',
+    );
+  }
 
   Future<bool> healthz() async {
     final resp = await _dio.getUri<String>(
@@ -52,16 +103,22 @@ class ApiClient {
   }
 
   Future<List<SessionDto>> listSessions() async {
-    final resp = await _dio.get('/api/v1/sessions');
+    final resp = await _get('/api/v1/sessions');
     _check(resp);
     final list = (resp.data['sessions'] as List?) ?? const [];
     return list
         .map((e) => SessionDto.fromJson(e as Map<String, dynamic>))
+        .where((session) => session.status != 'exited')
         .toList(growable: false);
   }
 
+  Future<void> revokeBinding() async {
+    final resp = await _dio.delete('/api/v1/bindings/current');
+    _check(resp);
+  }
+
   Future<SessionDto> getSession(int id) async {
-    final resp = await _dio.get('/api/v1/sessions/$id');
+    final resp = await _get('/api/v1/sessions/$id');
     _check(resp);
     return SessionDto.fromJson(resp.data as Map<String, dynamic>);
   }
@@ -75,8 +132,8 @@ class ApiClient {
       '/api/v1/sessions',
       data: {
         'backend_key': backendKey,
-        if (cwd != null) 'cwd': cwd,
-        if (resumeSessionUuid != null) 'resume_session_uuid': resumeSessionUuid,
+        'cwd': ?cwd,
+        'resume_session_uuid': ?resumeSessionUuid,
       },
     );
     _check(resp);
@@ -92,6 +149,7 @@ class ApiClient {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/input',
       data: {'text': text},
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
     );
     _check(resp);
   }
@@ -100,7 +158,7 @@ class ApiClient {
     final qp = <String, dynamic>{};
     if (fromMs != null) qp['from'] = fromMs;
     if (limit != null) qp['limit'] = limit;
-    final resp = await _dio.get(
+    final resp = await _get(
       '/api/v1/sessions/$id/history',
       queryParameters: qp.isEmpty ? null : qp,
     );
@@ -109,6 +167,18 @@ class ApiClient {
     return list
         .map((e) => Envelope.fromJson(e as Map<String, dynamic>))
         .toList(growable: false);
+  }
+
+  Future<Response<dynamic>> _get(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+  }) async {
+    var response = await _dio.get(path, queryParameters: queryParameters);
+    if (_gateway.isAioForbidden(response)) {
+      await _gateway.ensureReady(refresh: true);
+      response = await _dio.get(path, queryParameters: queryParameters);
+    }
+    return response;
   }
 
   /// 协议 §4.6 — 回答 AskUserQuestion。
@@ -124,10 +194,11 @@ class ApiClient {
   }) async {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/answer',
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
       data: {
         'question_id': questionId,
         'choice_index': choiceIndex,
-        if (freeText != null) 'free_text': freeText,
+        'free_text': ?freeText,
         if (submit) 'submit': true,
       },
     );
@@ -139,6 +210,7 @@ class ApiClient {
   Future<void> postPlanResponse(int id, String planId, bool accept) async {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/plan_response',
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
       data: {'plan_id': planId, 'accept': accept},
     );
     _check(resp);
@@ -151,6 +223,7 @@ class ApiClient {
   Future<String> setMode(int id, String mode) async {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/mode',
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
       data: {'mode': mode},
     );
     _check(resp);
@@ -168,9 +241,9 @@ class ApiClient {
       '/api/v1/sessions',
       data: {
         'backend_key': backendKey,
-        if (cwd != null) 'cwd': cwd,
-        if (resumeSessionUuid != null) 'resume_session_uuid': resumeSessionUuid,
-        if (permissionMode != null) 'permission_mode': permissionMode,
+        'cwd': ?cwd,
+        'resume_session_uuid': ?resumeSessionUuid,
+        'permission_mode': ?permissionMode,
       },
     );
     _check(resp);
@@ -197,6 +270,8 @@ class ApiClient {
       if (resp.data is Map<String, dynamic>) {
         name = resp.data['error'] as String? ?? name;
         detail = resp.data['detail'] as String? ?? '';
+      } else {
+        detail = _plainErrorDetail(resp.data);
       }
       final err = ApiException(code, name, detail);
       // ignore: avoid_print
@@ -208,12 +283,36 @@ class ApiClient {
   }
 }
 
+String _plainErrorDetail(dynamic body) {
+  final text = body?.toString().trim() ?? '';
+  if (text.isEmpty) return 'pairing rejected';
+  return text.length <= 300 ? text : '${text.substring(0, 300)}…';
+}
+
+String _mobileName() {
+  try {
+    final host = Platform.localHostname.trim();
+    if (host.isNotEmpty) return host;
+  } catch (_) {}
+  return 'Kode Mobile (${Platform.operatingSystem})';
+}
+
+String _idempotencyKey() {
+  final random = Random.secure();
+  final entropy = List<int>.generate(16, (_) => random.nextInt(256));
+  final encoded = base64Url.encode(entropy).replaceAll('=', '');
+  return '${DateTime.now().microsecondsSinceEpoch}-$encoded';
+}
+
 /// WebSocket 客户端 —— 单向接事件。
 ///
 /// 协议 §5.2:WS 是只读的;手机端写入用 REST。本类只暴露 onEvent stream,
 /// 不支持发自定义消息(除了协议允许的可选 ping)。
 class WSClient {
   final Endpoint endpoint;
+  late final GatewaySession _gateway = GatewaySession.forServer(
+    endpoint.baseUrl,
+  );
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
   final _events = StreamController<Envelope>.broadcast();
@@ -221,6 +320,7 @@ class WSClient {
   Timer? _reconnectTimer;
   Timer? _pingTimer;
   bool _disposed = false;
+  bool _connecting = false;
   Duration _backoff = const Duration(seconds: 1);
 
   WSClient(this.endpoint);
@@ -229,15 +329,28 @@ class WSClient {
   Stream<WSConnState> get connState => _connState.stream;
 
   void connect() {
-    if (_disposed) return;
+    unawaited(_connect());
+  }
+
+  Future<void> _connect() async {
+    if (_disposed || _connecting) return;
+    _connecting = true;
     _connState.add(WSConnState.connecting);
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(endpoint.wsUrl));
+      final headers = await _gateway.websocketHeaders(endpoint.token);
+      if (_disposed) return;
+      _channel = IOWebSocketChannel.connect(
+        Uri.parse(endpoint.wsUrl),
+        headers: headers,
+        connectTimeout: const Duration(seconds: 8),
+      );
     } catch (e) {
       // ignore: avoid_print
       print('[ws] connect failed: $e');
       _scheduleReconnect();
       return;
+    } finally {
+      _connecting = false;
     }
     _sub = _channel!.stream.listen(
       (raw) {
