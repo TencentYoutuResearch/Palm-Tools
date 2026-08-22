@@ -34,6 +34,9 @@ pub enum CoreEvent {
         /// 最新一次请求的 context 窗口占用百分比(0.0-100.0),由 jsonl_tail 算好。
         context_pct: Option<f32>,
     },
+    /// 一轮对话开始/结束。true = 用户已提交,agent 在跑(PTY 静默也保持 busy);
+    /// false = Stop / turn_finished,允许翻 idle。
+    TurnHold { id: SessionId, active: bool },
     /// 远端 transport 透传的任意 BridgeBus 事件
     /// (session.status / session.created / ask_user_question / plan_proposed /
     /// session.attention_cleared / session.mode_changed / session.focus_requested 等)。

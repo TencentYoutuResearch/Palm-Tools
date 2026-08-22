@@ -122,7 +122,7 @@ impl From<CoreEvent> for Action {
                 cost_usd,
             },
             // TUI 不处理远端 bus 事件,静默忽略
-            CoreEvent::BusEvent { .. } => Action::Redraw,
+            CoreEvent::BusEvent { .. } | CoreEvent::TurnHold { .. } => Action::Redraw,
         }
     }
 }
