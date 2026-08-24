@@ -83,6 +83,32 @@ impl Backend {
             Backend::Codex | Backend::Cursor => None,
         }
     }
+
+    /// Reject hook-provided transcript paths that belong to another backend.
+    ///
+    /// SessionStart payloads are routed by the Kode tab id. If a stale or
+    /// cross-process hook is routed to the wrong tab, accepting its path would
+    /// let (for example) a CodeBuddy JSONL overwrite a Codex tab's model,
+    /// title, and conversation id. Keep this check path-based so it also works
+    /// before the transcript has been fully written.
+    pub fn accepts_transcript_path(self, path: &Path) -> bool {
+        let components: Vec<_> = path
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect();
+        let contains_pair = |first: &str, second: &str| {
+            components
+                .windows(2)
+                .any(|pair| pair[0] == first && pair[1] == second)
+        };
+
+        match self {
+            Backend::Codebuddy => contains_pair(".codebuddy", "projects"),
+            Backend::Claude => contains_pair(".claude", "projects"),
+            Backend::Codex => contains_pair(".codex", "sessions"),
+            Backend::Cursor => contains_pair(".cursor", "projects"),
+        }
+    }
 }
 
 /// 给 Session 用的便捷封装:已知 backend_key + cwd + sid,返回 jsonl 路径。
@@ -1190,16 +1216,13 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
         && entry.payload.get("role").and_then(|v| v.as_str()) == Some("user")
         && !state.title_fallback_used
     {
-        if let Some(text) = extract_codex_content_text(entry.payload.get("content")) {
+        if let Some(text) = extract_codex_title_text(entry.payload.get("content")) {
             let trimmed = text.trim();
-            if !trimmed.is_empty() && !is_command_prefix(trimmed) && !is_codex_title_noise(trimmed)
-            {
-                let title: String = trimmed.chars().take(60).collect();
-                if state.last_title.as_deref() != Some(&title) {
-                    upd.new_title = Some(title);
-                }
-                state.title_fallback_used = true;
+            let title: String = trimmed.chars().take(60).collect();
+            if state.last_title.as_deref() != Some(&title) {
+                upd.new_title = Some(title);
             }
+            state.title_fallback_used = true;
         }
     }
 
@@ -1216,17 +1239,27 @@ fn is_codex_title_noise(s: &str) -> bool {
         || s.starts_with("● DeferExecuteTool(")
 }
 
-fn extract_codex_content_text(v: Option<&serde_json::Value>) -> Option<String> {
+fn extract_codex_title_text(v: Option<&serde_json::Value>) -> Option<String> {
     let v = v?;
     if let Some(s) = v.as_str() {
-        return Some(s.to_string());
+        let trimmed = s.trim();
+        return (!trimmed.is_empty()
+            && !is_command_prefix(trimmed)
+            && !is_codex_title_noise(trimmed))
+        .then(|| s.to_string());
     }
     if let Some(arr) = v.as_array() {
         for item in arr {
             if let Some(obj) = item.as_object() {
                 for key in ["text", "input_text", "output_text"] {
                     if let Some(t) = obj.get(key).and_then(|v| v.as_str()) {
-                        return Some(t.to_string());
+                        let trimmed = t.trim();
+                        if !trimmed.is_empty()
+                            && !is_command_prefix(trimmed)
+                            && !is_codex_title_noise(trimmed)
+                        {
+                            return Some(t.to_string());
+                        }
                     }
                 }
             }
@@ -2455,6 +2488,18 @@ mod tests {
     }
 
     #[test]
+    fn codex_title_skips_image_markup_before_user_text() {
+        let line = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/example.png\">"},{"type":"input_image","image_url":"data:image/png;base64,abc"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"你看看为啥这个tab显示不正常"}]}}"#;
+        let mut state = TailState::new();
+        let upd = parse_codex_line(line, &mut state);
+        assert_eq!(
+            upd.new_title.as_deref(),
+            Some("你看看为啥这个tab显示不正常")
+        );
+        assert!(state.title_fallback_used);
+    }
+
+    #[test]
     fn codex_title_skips_injected_startup_context() {
         let mut state = TailState::new();
         let noise = r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/p\n\n<INSTRUCTIONS>...</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>...</environment_context>"}]}}"##;
@@ -2483,6 +2528,17 @@ mod tests {
         let upd = parse_codex_line(real, &mut state);
         assert_eq!(upd.new_title.as_deref(), Some("为什么codex有三个tab"));
         assert!(state.title_fallback_used);
+    }
+
+    #[test]
+    fn backend_rejects_cross_backend_transcript_paths() {
+        let codebuddy = Path::new("/Users/test/.codebuddy/projects/Users-test-app/session.jsonl");
+        let codex = Path::new("/Users/test/.codex/sessions/2026/08/24/rollout-session.jsonl");
+
+        assert!(Backend::Codebuddy.accepts_transcript_path(codebuddy));
+        assert!(!Backend::Codex.accepts_transcript_path(codebuddy));
+        assert!(Backend::Codex.accepts_transcript_path(codex));
+        assert!(!Backend::Codebuddy.accepts_transcript_path(codex));
     }
 
     #[test]

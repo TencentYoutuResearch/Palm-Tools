@@ -244,6 +244,18 @@ impl Session {
     /// (transcript_path),通过它通知本 session 的 tail 切过去。
     /// 返回 false 表示本 session 不支持 tail retarget 或 tail 已退出。
     pub fn retarget_tail(&self, transcript_path: PathBuf) -> bool {
+        let Some(backend) = jsonl_tail::Backend::from_backend_key(&self.backend_key) else {
+            return false;
+        };
+        if !backend.accepts_transcript_path(&transcript_path) {
+            tracing::warn!(
+                tab_id = self.id,
+                backend = %self.backend_key,
+                path = %transcript_path.display(),
+                "rejected transcript retarget for mismatched backend"
+            );
+            return false;
+        }
         match &self.retarget_tx {
             Some(tx) => tx.send(Some(transcript_path)).is_ok(),
             None => false,
