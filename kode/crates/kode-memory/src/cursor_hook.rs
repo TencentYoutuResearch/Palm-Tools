@@ -5,7 +5,8 @@
 //! `afterAgentResponse` / `stop` 用 `conversation_id`。本 bridge:
 //! - 把 `$KODE_SESSION_ID` 写进 `session_id`,让 HookRelay 能路由到 tab;
 //! - 把 `conversation_id` 复制到 `session_uuid`;
-//! - 若能找到对应 `meta.json`,填 `transcript_path` 供 tail retarget;
+//! - 通过 `meta.json` 的 cwd 定位真实 agent transcript,填 `transcript_path`
+//!   供 tail retarget;
 //! - 用 CLI 传入的 event 名补上 `hook_event_name`(Cursor 不一定带这个字段)。
 //!
 //! Cursor 给 hook 的 env **不会**继承 cursor-agent 进程的 `KODE_*`。所以:
@@ -18,6 +19,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use fs2::FileExt;
 use serde_json::{json, Value};
 
 /// 与 `kode_bridge::hook_relay::HOOK_SOCKET_PATH` 保持一致。
@@ -27,6 +29,9 @@ const DEFAULT_HOOK_SOCK: &str = "/tmp/kode-hook.sock";
 pub fn run(event: Option<&str>) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
+    if std::env::var("KODE_BACKEND_KEY").is_ok_and(|backend| backend != "cursor") {
+        return Ok(());
+    }
     let tab_id = std::env::var("KODE_SESSION_ID").ok();
     let rewritten = rewrite_payload(&input, tab_id.as_deref(), event);
     let inferred = infer_event_name(
@@ -72,7 +77,7 @@ fn rewrite_payload(input: &str, tab_id: Option<&str>, event: Option<&str>) -> St
     if let Some(session_uuid) = cursor_session_uuid {
         payload["session_uuid"] = Value::String(session_uuid.clone());
         if payload.get("transcript_path").is_none() {
-            if let Some(path) = find_cursor_meta_path(&session_uuid) {
+            if let Some(path) = find_cursor_transcript_path(&session_uuid) {
                 payload["transcript_path"] = Value::String(path.display().to_string());
             }
         }
@@ -134,6 +139,16 @@ fn persist_usage(rewritten: &str) -> Result<()> {
     let Some(path) = cursor_usage_path() else {
         return Ok(());
     };
+    persist_usage_to_path(&path, &payload, input, output, cached)
+}
+
+fn persist_usage_to_path(
+    path: &Path,
+    payload: &Value,
+    input: u64,
+    output: u64,
+    cached: u64,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -148,7 +163,10 @@ fn persist_usage(rewritten: &str) -> Result<()> {
             .or_else(|| payload.get("session_uuid").cloned()),
     });
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.lock_exclusive()?;
     writeln!(file, "{record}")?;
+    file.flush()?;
+    file.unlock()?;
     Ok(())
 }
 
@@ -176,15 +194,51 @@ fn json_u64(doc: &Value, key: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn find_cursor_meta_path(session_id: &str) -> Option<PathBuf> {
+fn find_cursor_transcript_path(session_id: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
+    find_cursor_transcript_path_under(&home, session_id)
+}
+
+fn find_cursor_transcript_path_under(home: &Path, session_id: &str) -> Option<PathBuf> {
+    let projects = home.join(".cursor").join("projects");
+    if let Ok(workspaces) = fs::read_dir(&projects) {
+        for workspace in workspaces.flatten() {
+            let candidate = workspace
+                .path()
+                .join("agent-transcripts")
+                .join(session_id)
+                .join(format!("{session_id}.jsonl"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
     let root = home.join(".cursor").join("chats");
     let workspaces = std::fs::read_dir(&root).ok()?;
     for workspace in workspaces.flatten() {
-        let candidate = workspace.path().join(session_id).join("meta.json");
-        if candidate.is_file() {
-            return Some(candidate);
+        let meta_path = workspace.path().join(session_id).join("meta.json");
+        let Ok(bytes) = fs::read(meta_path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let Some(cwd) = meta.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        let cwd = cwd.trim();
+        if cwd.is_empty() {
+            continue;
         }
+        let slug = cwd.trim_start_matches('/').replace('/', "-");
+        return Some(
+            projects
+                .join(slug)
+                .join("agent-transcripts")
+                .join(session_id)
+                .join(format!("{session_id}.jsonl")),
+        );
     }
     None
 }
@@ -271,5 +325,60 @@ mod tests {
         assert!(text.contains("\"input_tokens\":11"));
         assert!(text.contains("grok-4.6"));
         assert_eq!(text.lines().count(), 1);
+    }
+
+    #[test]
+    fn cursor_transcript_path_comes_from_meta_cwd_not_meta_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "44c2880d-36c7-4d21-9fb8-55c28eec8c63";
+        let meta_dir = temp
+            .path()
+            .join(".cursor/chats/workspace-hash")
+            .join(session_id);
+        fs::create_dir_all(&meta_dir).unwrap();
+        fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"cwd":"/Users/test/My App"}"#,
+        )
+        .unwrap();
+
+        let path = find_cursor_transcript_path_under(temp.path(), session_id).unwrap();
+
+        assert_eq!(
+            path,
+            temp.path()
+                .join(".cursor/projects/Users-test-My App/agent-transcripts")
+                .join(session_id)
+                .join(format!("{session_id}.jsonl"))
+        );
+    }
+
+    #[test]
+    fn concurrent_usage_writes_remain_one_json_object_per_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cursor.jsonl");
+        let writers: Vec<_> = (0..32)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let payload = json!({
+                        "model": "cursor-test",
+                        "generation_id": format!("generation-{index}"),
+                        "conversation_id": "conversation-test",
+                    });
+                    persist_usage_to_path(&path, &payload, index + 1, 2, 3).unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let text = fs::read_to_string(path).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 32);
+        assert!(lines
+            .iter()
+            .all(|line| serde_json::from_str::<Value>(line).is_ok()));
     }
 }

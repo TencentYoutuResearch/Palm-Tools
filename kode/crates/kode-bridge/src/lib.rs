@@ -364,7 +364,12 @@ fn inject_hooks_into_settings() {
 ///   改写成 kode tab id(u64),使 relay 能正确路由
 /// - `KODE_MEMORY_ROOT`:让 hook 子进程与 bridge/MCP 使用同一份 memory root
 /// - `TERM_THEME` / `COLORFGBG`:让 cursor-agent / Claude / 其它 TUI 跳过 OSC 11
-fn build_session_env(ctx: &Ctx, id: SessionId, term_theme: Option<&str>) -> Vec<(String, String)> {
+fn build_session_env(
+    ctx: &Ctx,
+    id: SessionId,
+    backend_key: &str,
+    term_theme: Option<&str>,
+) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if let Some(sock) = ctx.hook_relay_socket.as_deref() {
         env.push((
@@ -373,6 +378,7 @@ fn build_session_env(ctx: &Ctx, id: SessionId, term_theme: Option<&str>) -> Vec<
         ));
     }
     env.push(("KODE_SESSION_ID".to_string(), id.to_string()));
+    env.push(("KODE_BACKEND_KEY".to_string(), backend_key.to_string()));
     env.push((
         "KODE_MEMORY_ROOT".to_string(),
         resolve_memory_root().display().to_string(),
@@ -882,7 +888,7 @@ async fn create_session(
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("/"));
     let model = sanitize_requested_model(req.model.as_deref());
-    let extra_env = build_session_env(&ctx, id, req.term_theme.as_deref());
+    let extra_env = build_session_env(&ctx, id, &req.backend_key, req.term_theme.as_deref());
     let mut session = Session::new(
         id,
         &req.backend_key,
@@ -1312,7 +1318,9 @@ pub fn submit_text_input(ctx: &Ctx, id: SessionId, text: &str) -> Result<(), Tex
     let body = text_input_body(text);
     let enter_writer = {
         let mut sessions = ctx.sessions.lock();
-        let session = sessions.get_mut(&id).ok_or(TextInputError { session_id: id })?;
+        let session = sessions
+            .get_mut(&id)
+            .ok_or(TextInputError { session_id: id })?;
         session.mark_turn_start();
         if body.is_empty() {
             session.write_input(b"\r");

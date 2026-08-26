@@ -6,7 +6,7 @@ pub mod heuristic;
 pub mod jsonl_tail;
 pub mod state;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -244,10 +244,23 @@ impl Session {
     /// (transcript_path),通过它通知本 session 的 tail 切过去。
     /// 返回 false 表示本 session 不支持 tail retarget 或 tail 已退出。
     pub fn retarget_tail(&self, transcript_path: PathBuf) -> bool {
+        if !self.accepts_transcript_path(&transcript_path) {
+            return false;
+        }
+        match &self.retarget_tx {
+            Some(tx) => tx.send(Some(transcript_path)).is_ok(),
+            None => false,
+        }
+    }
+
+    /// 只校验 hook 提供的 transcript 是否属于当前 tab backend。
+    /// Cursor 的 meta watcher 与 semantic transcript watcher 不是同一个 tail，
+    /// 因此 GUI 需要先校验路径，再单独启动 semantic tail。
+    pub fn accepts_transcript_path(&self, transcript_path: &Path) -> bool {
         let Some(backend) = jsonl_tail::Backend::from_backend_key(&self.backend_key) else {
             return false;
         };
-        if !backend.accepts_transcript_path(&transcript_path) {
+        if !backend.accepts_transcript_path(transcript_path) {
             tracing::warn!(
                 tab_id = self.id,
                 backend = %self.backend_key,
@@ -256,10 +269,7 @@ impl Session {
             );
             return false;
         }
-        match &self.retarget_tx {
-            Some(tx) => tx.send(Some(transcript_path)).is_ok(),
-            None => false,
-        }
+        true
     }
 
     /// PTY/jsonl 兜底 retarget:只知道目标 session uuid 时,按 backend + cwd 推出

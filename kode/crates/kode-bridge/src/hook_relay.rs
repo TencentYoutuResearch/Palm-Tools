@@ -341,34 +341,15 @@ fn process_hook_json_inner(
             let source = doc.get("source").and_then(|v| v.as_str()).unwrap_or("");
             let model = doc.get("model").and_then(|v| v.as_str()).map(String::from);
 
-            if let Some(ref uuid) = session_uuid {
-                kode_core::session::backend::bind_hook_conversation(uuid, session_id);
-            }
-
-            let resets_binding = source != "compact";
             if kode_core::session::backend::hook_resets_tokens(event_name) {
                 reset_hook_tokens(session_id);
             }
 
-            // SessionStart is the authoritative conversation binding for every
-            // backend. Publish it immediately instead of waiting for the newly
-            // targeted transcript tail to open and replay. That replay remains
-            // responsible for the target title/model/token snapshot.
-            if let Some(core_tx) = core_tx {
-                let _ = core_tx.send(CoreEvent::JsonlMeta {
-                    id: session_id,
-                    model: model.clone(),
-                    title: None,
-                    session_uuid: session_uuid.clone(),
-                    tokens_reset: resets_binding,
-                    tokens: None,
-                    input_tokens: None,
-                    output_tokens: None,
-                    cached_tokens: None,
-                    cost_usd: None,
-                    context_pct: None,
-                });
-            }
+            // Do not publish model/session UUID before the GUI has validated
+            // transcript_path against the tab backend. The targeted tail will
+            // replay the authoritative metadata after that validation. Sending
+            // JsonlMeta here allowed an inherited KODE_SESSION_ID from a nested
+            // CLI to pollute its parent tab even when retarget itself was rejected.
 
             tracing::info!(
                 %session_id,
@@ -711,21 +692,7 @@ mod tests {
 
         process_hook_json_with_core_tx(json, &bus, &core_tx);
 
-        match core_rx.try_recv().expect("authoritative session metadata") {
-            CoreEvent::JsonlMeta {
-                id,
-                model,
-                session_uuid,
-                tokens_reset,
-                ..
-            } => {
-                assert_eq!(id, 42);
-                assert_eq!(model.as_deref(), Some("gpt-5"));
-                assert_eq!(session_uuid.as_deref(), Some("codex-uuid"));
-                assert!(tokens_reset);
-            }
-            event => panic!("unexpected event: {event:?}"),
-        }
+        assert!(core_rx.try_recv().is_err());
 
         let env = rx.try_recv().expect("should receive event");
         assert_eq!(env.r#type, "session.session_uuid_mapped");
@@ -737,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_retargets_without_resetting_session_totals() {
+    fn compact_retargets_without_publishing_unvalidated_metadata() {
         let bus = Arc::new(BridgeBus::new());
         let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
         process_hook_json_with_core_tx(
@@ -745,10 +712,7 @@ mod tests {
             &bus,
             &core_tx,
         );
-        match core_rx.try_recv().expect("session metadata") {
-            CoreEvent::JsonlMeta { tokens_reset, .. } => assert!(!tokens_reset),
-            event => panic!("unexpected event: {event:?}"),
-        }
+        assert!(core_rx.try_recv().is_err());
     }
 
     #[test]

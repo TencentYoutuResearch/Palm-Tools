@@ -80,6 +80,16 @@ pub fn spawn(
     });
 }
 
+/// 用 hook 已验证的权威 transcript 路径启动语义 tail。
+/// Cursor 的 metadata watcher 继续读 meta.json，不能被该路径 retarget。
+pub fn spawn_path(id: SessionId, backend: Backend, path: PathBuf, bus: Arc<BridgeBus>) {
+    tokio::spawn(async move {
+        if let Err(e) = run(id, backend, path, bus).await {
+            tracing::debug!(error = %e, "semantic tail exited");
+        }
+    });
+}
+
 async fn run(
     id: SessionId,
     backend: Backend,

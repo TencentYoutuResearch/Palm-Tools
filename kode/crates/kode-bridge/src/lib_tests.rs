@@ -526,10 +526,14 @@ mod build_session_env_tests {
         // 模拟 hook_relay_socket 已设
         let mut ctx = (*ctx).clone();
         ctx.hook_relay_socket = Some(std::path::PathBuf::from("/tmp/test-hook.sock"));
-        let env = build_session_env(&ctx, 42, None);
+        let env = build_session_env(&ctx, 42, "codex", None);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"KODE_HOOK_SOCK"), "missing KODE_HOOK_SOCK");
         assert!(keys.contains(&"KODE_SESSION_ID"), "missing KODE_SESSION_ID");
+        assert!(
+            keys.contains(&"KODE_BACKEND_KEY"),
+            "missing KODE_BACKEND_KEY"
+        );
         assert!(
             keys.contains(&"KODE_MEMORY_ROOT"),
             "missing KODE_MEMORY_ROOT"
@@ -557,7 +561,7 @@ mod build_session_env_tests {
         let config = Config::default();
         let ctx = build_test_ctx(config, "tok".into());
         // hook_relay_socket = None(build_test_ctx 默认)
-        let env = build_session_env(&ctx, 7, Some("light"));
+        let env = build_session_env(&ctx, 7, "codebuddy", Some("light"));
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(
             !keys.contains(&"KODE_HOOK_SOCK"),

@@ -162,6 +162,9 @@ fn relay_to_kode(input: &str) -> Result<()> {
     if sock.is_empty() {
         return Ok(());
     }
+    if std::env::var("KODE_BACKEND_KEY").is_ok_and(|backend| backend != "codex") {
+        return Ok(());
+    }
 
     let tab_id = std::env::var("KODE_SESSION_ID").ok();
     let rewritten = rewrite_payload(input, tab_id.as_deref());

@@ -111,6 +111,10 @@ impl SessionTransport for LocalTransport {
             extra_env.push(("KODE_HOOK_SOCK".to_string(), sock.to_string()));
         }
         extra_env.push(("KODE_SESSION_ID".to_string(), id.to_string()));
+        // Hook commands are global and descendant CLIs inherit this process
+        // environment. Tag the owning backend so a nested CodeBuddy spawned
+        // inside a Codex tab cannot report metadata as that Codex tab.
+        extra_env.push(("KODE_BACKEND_KEY".to_string(), spec.backend_key.clone()));
         extra_env.push((
             "KODE_MEMORY_ROOT".to_string(),
             crate::memory::resolve_memory_root().display().to_string(),

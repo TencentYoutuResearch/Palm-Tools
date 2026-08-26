@@ -916,8 +916,9 @@ fn spawn_attention_forwarder(
                         }
                         "session.session_uuid_mapped" => {
                             // SessionStart hook 权威绑定:tab(env.session_id)当前真实 session 是
-                            // session_uuid,jsonl 文件是 transcript_path。指挥该 tab 的 jsonl tail
-                            // 切到正确文件,并更新 session.session_id(持久化/恢复用)。
+                            // session_uuid,jsonl 文件是 transcript_path。普通 backend 重定向
+                            // meta+semantic tail;Cursor 的 meta.json watcher 保持不动,只单独启动
+                            // transcript semantic tail。
                             let transcript = env.payload["transcript_path"].as_str();
                             let uuid = env.payload["session_uuid"].as_str();
                             let source = env.payload["source"].as_str().unwrap_or("");
@@ -931,10 +932,48 @@ fn spawn_attention_forwarder(
                             );
                             if let Some(path) = transcript {
                                 let known = sessions.lock().contains_key(&env.session_id);
-                                let retargeted = sessions
-                                    .lock()
-                                    .get(&env.session_id)
-                                    .map(|s| s.retarget_tail(std::path::PathBuf::from(path)));
+                                let path_buf = std::path::PathBuf::from(path);
+                                let cursor_semantic = uuid.and_then(|uuid| {
+                                    let mut locked = sessions.lock();
+                                    let session = locked.get_mut(&env.session_id)?;
+                                    let backend =
+                                        kode_core::session::jsonl_tail::Backend::from_backend_key(
+                                            &session.backend_key,
+                                        )?;
+                                    if backend != kode_core::session::jsonl_tail::Backend::Cursor
+                                        || !session.accepts_transcript_path(&path_buf)
+                                    {
+                                        return None;
+                                    }
+                                    let should_spawn = session.session_id.as_deref() != Some(uuid);
+                                    session.session_id = Some(uuid.to_string());
+                                    Some((backend, should_spawn))
+                                });
+                                let retargeted =
+                                    if let Some((backend, should_spawn)) = cursor_semantic {
+                                        if should_spawn {
+                                            kode_bridge::semantic::spawn_path(
+                                                env.session_id,
+                                                backend,
+                                                path_buf.clone(),
+                                                Arc::clone(&bus),
+                                            );
+                                        }
+                                        Some(true)
+                                    } else {
+                                        sessions
+                                            .lock()
+                                            .get(&env.session_id)
+                                            .map(|s| s.retarget_tail(path_buf))
+                                    };
+                                if retargeted == Some(true) {
+                                    if let Some(uuid) = uuid {
+                                        kode_core::session::backend::bind_hook_conversation(
+                                            uuid,
+                                            env.session_id,
+                                        );
+                                    }
+                                }
                                 tracing::info!(
                                     target: "kode_hook_probe",
                                     id = env.session_id,
@@ -944,8 +983,8 @@ fn spawn_attention_forwarder(
                                     "session_uuid_mapped → retarget tail result"
                                 );
                             }
-                            // session.session_id 会在 tail 切到新文件后通过 JsonlMeta 自然更新;
-                            // 这里不直接改,避免与 tail 竞争。前端 sessionId 由后续 session-meta 更新。
+                            // 普通 backend 的 session.session_id 由重定向后 JsonlMeta 更新;
+                            // Cursor 在上面直接绑定 UUID，meta watcher 后续仍可更新 title。
                         }
                         "ask_user_question_hint" => {
                             // Hook relay 即时通知:有权限请求出现,立即点亮 attention。

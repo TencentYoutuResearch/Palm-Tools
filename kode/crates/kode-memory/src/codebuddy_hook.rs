@@ -36,6 +36,11 @@ fn relay_to_kode(input: &str) -> Result<()> {
     if sock.is_empty() {
         return Ok(());
     }
+    if let Ok(backend) = std::env::var("KODE_BACKEND_KEY") {
+        if !matches!(backend.as_str(), "codebuddy" | "claude" | "claude-internal") {
+            return Ok(());
+        }
+    }
 
     let tab_id = std::env::var("KODE_SESSION_ID").ok();
     let rewritten = rewrite_payload(input, tab_id.as_deref());

@@ -18,6 +18,7 @@ tracing = "0.1"
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
 chrono = "0.4"
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
