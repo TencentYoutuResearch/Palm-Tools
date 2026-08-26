@@ -11,6 +11,7 @@ import 'package:kode_mobile/src/ui/theme.dart';
 
 class _FakeApiClient extends ApiClient {
   final sent = <String>[];
+  List<Envelope> history = const [];
   Future<InputDispatchReceipt> Function()? onSend;
 
   _FakeApiClient()
@@ -28,7 +29,7 @@ class _FakeApiClient extends ApiClient {
 
   @override
   Future<List<Envelope>> getHistory(int id, {int? fromMs, int? limit}) async =>
-      const [];
+      history;
 
   @override
   Future<InputDispatchReceipt> sendInputText(int id, String text) async {
@@ -64,8 +65,33 @@ Envelope _userMessageEvent(String text) => Envelope(
   },
 );
 
+Envelope _assistantMessageEvent(int index) => Envelope(
+  protocolVersion: 'v1',
+  schemaVersion: 1,
+  sessionId: 7,
+  ts: index,
+  type: 'message',
+  payload: {
+    'id': 'assistant-$index',
+    'role': 'assistant',
+    'text': [
+      'History message $index',
+      ...List.filled(
+        index % 7 + 1,
+        'Variable-height history content forces lazy list layout.',
+      ),
+    ].join('\n\n'),
+  },
+);
+
 Future<void> _settle() async {
   await Future<void>.delayed(const Duration(milliseconds: 20));
+}
+
+Future<void> _pumpFrames(WidgetTester tester, [int count = 24]) async {
+  for (var i = 0; i < count; i++) {
+    await tester.pump(const Duration(milliseconds: 16));
+  }
 }
 
 void main() {
@@ -221,7 +247,7 @@ void main() {
 
     await tester.enterText(find.byType(TextField), 'keep this visible');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.schedule_send_rounded));
+    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
     await tester.pump();
     expect(find.text('keep this visible'), findsOneWidget);
     expect(
@@ -289,4 +315,102 @@ void main() {
       isFalse,
     );
   });
+
+  testWidgets('keyboard inset lifts the transcript and composer above it', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
+
+    final api = _FakeApiClient()
+      ..history = List.generate(12, _assistantMessageEvent);
+    final events = StreamController<Envelope>();
+    addTearDown(events.close);
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(api),
+        eventStreamProvider.overrideWith((ref) => events.stream),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: KillLaTheme.light(),
+          home: const SessionDetailScreen(sessionId: 7),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final composer = find.byType(TextField).first;
+    await tester.tap(composer);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+
+    expect(tester.getBottomLeft(composer).dy, lessThanOrEqualTo(544));
+    expect(
+      tester.getBottomLeft(find.byKey(const ValueKey('session-transcript'))).dy,
+      lessThanOrEqualTo(544),
+    );
+  });
+
+  testWidgets(
+    'opens at latest message and offers a jump back after scrolling',
+    (tester) async {
+      final api = _FakeApiClient()
+        ..history = List.generate(160, _assistantMessageEvent);
+      final events = StreamController<Envelope>();
+      addTearDown(events.close);
+      final container = ProviderContainer(
+        overrides: [
+          apiClientProvider.overrideWithValue(api),
+          eventStreamProvider.overrideWith((ref) => events.stream),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: KillLaTheme.light(),
+            home: const SessionDetailScreen(sessionId: 7),
+          ),
+        ),
+      );
+      await tester.pump();
+      await _pumpFrames(tester);
+
+      expect(find.textContaining('History message 159'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('scroll-to-bottom')).hitTestable(),
+        findsNothing,
+      );
+
+      await tester.drag(find.byType(ListView), const Offset(0, 420));
+      await _pumpFrames(tester, 8);
+
+      expect(find.byKey(const ValueKey('scroll-to-bottom')), findsOneWidget);
+
+      tester
+          .widget<IconButton>(find.byKey(const ValueKey('scroll-to-bottom')))
+          .onPressed!();
+      await _pumpFrames(tester, 40);
+
+      final transcript = tester.widget<ListView>(
+        find.byKey(const ValueKey('session-transcript')),
+      );
+      expect(transcript.controller!.position.extentAfter, lessThan(1));
+      expect(
+        find.byKey(const ValueKey('scroll-to-bottom')).hitTestable(),
+        findsNothing,
+      );
+    },
+  );
 }

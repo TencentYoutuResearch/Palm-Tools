@@ -65,15 +65,6 @@ class KillLaColors {
   static const lightTextMuted = Color(0xFF778178);
   static const lightBorder = Color(0xFFCCD4CB);
 
-  /// session 状态点配色(starting/idle/busy/exited)
-  static Color statusDot(String status) => switch (status) {
-    'busy' => busy,
-    'idle' => warning,
-    'starting' => textMuted,
-    'exited' => textMuted,
-    _ => textMuted,
-  };
-
   /// permission mode chip 配色
   static Color modeColor(String? m) => switch (m) {
     'default' => textSecondary,

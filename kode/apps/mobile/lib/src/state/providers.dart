@@ -120,6 +120,58 @@ final sessionAttentionProvider =
       SessionAttentionNotifier.new,
     );
 
+/// 每个 session 的未读助手消息数。
+///
+/// 只统计非 user 的 message 事件，避免用户自己发出的消息在回流后被误标未读。
+/// 正在查看的 session 不累计；进入详情时清零。内部最多保留 100，UI 将其显示为 99+。
+class SessionUnreadCountNotifier extends Notifier<Map<int, int>> {
+  int? _viewedSessionId;
+
+  @override
+  Map<int, int> build() {
+    ref.listen<AsyncValue<Envelope>>(eventStreamProvider, (_, event) {
+      event.whenData((envelope) {
+        if (envelope.type == 'session.exited') {
+          _remove(envelope.sessionId);
+          return;
+        }
+        if (envelope.type != 'message' ||
+            envelope.payload['role'] == 'user' ||
+            envelope.sessionId == _viewedSessionId) {
+          return;
+        }
+        final current = state[envelope.sessionId] ?? 0;
+        state = {
+          ...state,
+          envelope.sessionId: current >= 99 ? 100 : current + 1,
+        };
+      });
+    });
+    return const {};
+  }
+
+  void viewSession(int sessionId) {
+    _viewedSessionId = sessionId;
+    _remove(sessionId);
+  }
+
+  void leaveSession(int sessionId) {
+    if (_viewedSessionId == sessionId) _viewedSessionId = null;
+  }
+
+  void _remove(int sessionId) {
+    if (!state.containsKey(sessionId)) return;
+    state = Map<int, int>.unmodifiable(
+      Map<int, int>.from(state)..remove(sessionId),
+    );
+  }
+}
+
+final sessionUnreadCountProvider =
+    NotifierProvider<SessionUnreadCountNotifier, Map<int, int>>(
+      SessionUnreadCountNotifier.new,
+    );
+
 /// session 列表 — 启动时拉一次 /sessions,WS 事件来了增量更新。
 final sessionsProvider =
     AsyncNotifierProvider<SessionsNotifier, List<SessionDto>>(

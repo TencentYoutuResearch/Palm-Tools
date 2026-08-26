@@ -352,6 +352,9 @@ class _SessionTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final attention = ref.watch(sessionAttentionProvider);
     final kind = attention[s.id]; // 'ask' | 'plan' | null
+    final unreadCount = ref.watch(
+      sessionUnreadCountProvider.select((counts) => counts[s.id] ?? 0),
+    );
     final colors = Theme.of(context).colorScheme;
 
     final tile = InkWell(
@@ -363,8 +366,7 @@ class _SessionTile extends ConsumerWidget {
           children: [
             BackendStatusAvatar(
               backendKey: s.backendKey,
-              statusLabel: sessionStatusLabel(s.status),
-              statusColor: KillLaColors.statusDot(s.status),
+              working: s.status == 'busy',
               size: 38,
             ),
             const SizedBox(width: 12),
@@ -391,6 +393,10 @@ class _SessionTile extends ConsumerWidget {
                         const SizedBox(width: 8),
                         _AttentionBadge(kind: kind),
                       ],
+                      if (unreadCount > 0) ...[
+                        const SizedBox(width: 8),
+                        _UnreadBadge(count: unreadCount),
+                      ],
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -399,7 +405,6 @@ class _SessionTile extends ConsumerWidget {
                     runSpacing: 5,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      _SessionStatus(status: s.status),
                       if (s.model.trim().isNotEmpty)
                         _Chip(text: s.model, color: KillLaColors.warning),
                       if (s.tokens.total > 0)
@@ -433,33 +438,42 @@ class _SessionTile extends ConsumerWidget {
   }
 }
 
-class _SessionStatus extends StatelessWidget {
-  final String status;
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.count});
 
-  const _SessionStatus({required this.status});
+  final int count;
 
   @override
   Widget build(BuildContext context) {
-    final color = KillLaColors.statusDot(status);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 5,
-          height: 5,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 4),
-        Text(
-          sessionStatusLabel(status),
-          style: TextStyle(
-            color: color,
-            fontSize: 10,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 0.7,
+    final colors = Theme.of(context).colorScheme;
+    final label = count > 99 ? '99+' : '$count';
+    final semanticsLabel = count == 1
+        ? '1 unread message'
+        : '$label unread messages';
+    return Semantics(
+      label: semanticsLabel,
+      child: ExcludeSemantics(
+        child: Container(
+          height: 20,
+          constraints: const BoxConstraints(minWidth: 20),
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 5),
+          decoration: BoxDecoration(
+            color: colors.primary,
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(color: colors.outlineVariant),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: colors.onPrimary,
+              fontSize: 10,
+              fontFamily: 'Menlo',
+              fontWeight: FontWeight.w900,
+            ),
           ),
         ),
-      ],
+      ),
     );
   }
 }

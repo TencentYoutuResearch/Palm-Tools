@@ -18,13 +18,6 @@ void main() {
     expect(identity.label, 'my_custom-agent');
   });
 
-  test('normalizes transport status into user-facing session labels', () {
-    expect(sessionStatusLabel('busy'), 'WORKING');
-    expect(sessionStatusLabel('idle'), 'READY');
-    expect(sessionStatusLabel('starting'), 'STARTING');
-    expect(sessionStatusLabel('custom'), 'CUSTOM');
-  });
-
   testWidgets('canonical backend artwork is bundled for mobile', (_) async {
     final path = backendIdentity('codex').assetPath!;
 
@@ -33,23 +26,29 @@ void main() {
     expect(bytes.lengthInBytes, greaterThan(0));
   });
 
-  testWidgets('status avatar exposes backend identity and state', (
-    tester,
-  ) async {
+  testWidgets('status avatar only shows a dot while working', (tester) async {
     final semantics = tester.ensureSemantics();
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
-          body: BackendStatusAvatar(
-            backendKey: 'codex',
-            statusLabel: 'busy',
-            statusColor: Colors.blue,
-          ),
+          body: BackendStatusAvatar(backendKey: 'codex', working: true),
         ),
       ),
     );
 
-    expect(find.bySemanticsLabel('Codex agent, busy'), findsOneWidget);
+    expect(find.byKey(const ValueKey('working-status-dot')), findsOneWidget);
+    expect(find.bySemanticsLabel('Codex agent, working'), findsOneWidget);
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: BackendStatusAvatar(backendKey: 'codex', working: false),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const ValueKey('working-status-dot')), findsNothing);
+    expect(find.bySemanticsLabel('Codex agent'), findsOneWidget);
     semantics.dispose();
   });
 }

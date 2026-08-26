@@ -37,9 +37,6 @@ String _compactTokens(int value) {
   return '$value';
 }
 
-bool _showsAgentActivity(String status) =>
-    status == 'busy' || status == 'starting';
-
 /// 一条对话气泡或工具调用卡。
 class _Item {
   final String key; // 去重 + ListView key
@@ -62,7 +59,10 @@ class SessionDetailScreen extends ConsumerStatefulWidget {
       _SessionDetailScreenState();
 }
 
-class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
+class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
+    with WidgetsBindingObserver {
+  static const double _bottomThreshold = 60;
+
   /// 顺序的事件列表(message / tool_use 按 ts 升序);meta 不进列表只更新 _meta
   final _items = <_Item>[];
 
@@ -97,6 +97,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
 
   /// ListView 控制器,加载完历史 / 收到新事件时自动滚到底
   final _scrollCtrl = ScrollController();
+  bool _showScrollToBottom = false;
+  bool _keepBottomPinnedForKeyboard = false;
+  int _scrollRequestGeneration = 0;
+  late final SessionUnreadCountNotifier _unreadCountNotifier;
 
   ProviderSubscription<AsyncValue<Envelope>>? _wsSub;
 
@@ -108,6 +112,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _unreadCountNotifier = ref.read(sessionUnreadCountProvider.notifier)
+      ..viewSession(widget.sessionId);
+    _scrollCtrl.addListener(_handleScroll);
+    _inputFocus.addListener(_handleComposerFocus);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       // 注意:**不**在这里清 attention。用户只是点开屏幕看一眼,prompt 还卡着,
       // attention 应该继续提示。session.attention_cleared 事件由 server 推过来
@@ -118,13 +127,49 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   }
 
   @override
+  void activate() {
+    super.activate();
+    _unreadCountNotifier.viewSession(widget.sessionId);
+  }
+
+  @override
+  void deactivate() {
+    _unreadCountNotifier.leaveSession(widget.sessionId);
+    super.deactivate();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _wsSub?.close();
     if (_speechInitialized) unawaited(_speech.cancel());
     _inputCtrl.dispose();
+    _inputFocus.removeListener(_handleComposerFocus);
     _inputFocus.dispose();
-    _scrollCtrl.dispose();
+    _scrollCtrl
+      ..removeListener(_handleScroll)
+      ..dispose();
     super.dispose();
+  }
+
+  void _handleComposerFocus() {
+    if (!_inputFocus.hasFocus) {
+      _keepBottomPinnedForKeyboard = false;
+      return;
+    }
+    _keepBottomPinnedForKeyboard =
+        !_scrollCtrl.hasClients ||
+        _scrollCtrl.position.extentAfter <= _bottomThreshold;
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (!_inputFocus.hasFocus || !_keepBottomPinnedForKeyboard) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _inputFocus.hasFocus && _keepBottomPinnedForKeyboard) {
+        _scrollToBottom(animate: false);
+      }
+    });
   }
 
   Future<void> _loadHistory() async {
@@ -157,12 +202,29 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
   }
 
   void _scrollToBottom({bool animate = true}) {
-    // 等下一帧 ListView 重新 layout 后再滚
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollCtrl.hasClients) return;
-      final target = _scrollCtrl.position.maxScrollExtent;
-      if (animate) {
-        _scrollCtrl.animateTo(
+    final request = ++_scrollRequestGeneration;
+    unawaited(_convergeToBottom(request, animate: animate));
+  }
+
+  Future<void> _convergeToBottom(int request, {required bool animate}) async {
+    // ListView.builder 只会 layout 当前视口附近的 item。长会话第一次跳到
+    // maxScrollExtent 后会继续构建旧 item，导致真实底部再次变远。
+    // 因此每帧重新取边界，直到 extentAfter 真正归零。
+    await WidgetsBinding.instance.endOfFrame;
+    for (var pass = 0; pass < 20; pass++) {
+      if (!mounted ||
+          request != _scrollRequestGeneration ||
+          !_scrollCtrl.hasClients) {
+        return;
+      }
+      final position = _scrollCtrl.position;
+      if (position.extentAfter <= 1) {
+        _handleScroll();
+        return;
+      }
+      final target = position.maxScrollExtent;
+      if (animate && pass == 0) {
+        await _scrollCtrl.animateTo(
           target,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
@@ -170,7 +232,20 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       } else {
         _scrollCtrl.jumpTo(target);
       }
-    });
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    _handleScroll();
+  }
+
+  void _handleScroll() {
+    if (!_scrollCtrl.hasClients) return;
+    final shouldShow = _scrollCtrl.position.extentAfter > _bottomThreshold;
+    if (shouldShow == _showScrollToBottom || !mounted) return;
+    setState(() => _showScrollToBottom = shouldShow);
+  }
+
+  void _jumpToLatestMessage() {
+    _scrollToBottom();
   }
 
   void _subscribeLive() {
@@ -605,7 +680,6 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
         : (summaryTitle.isNotEmpty ? summaryTitle : 'Untitled session');
     final cwd = summary?.cwd?.trim();
     final sessionStatus = _liveStatus ?? summary?.status ?? 'starting';
-    final showAgentActivity = _showsAgentActivity(sessionStatus);
     final queuedMessages = ref.watch(
       sessionMessageQueueProvider.select(
         (queues) => queues[widget.sessionId] ?? const [],
@@ -617,7 +691,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
       sessionAttentionProvider.select((m) => m[widget.sessionId]),
     );
 
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         toolbarHeight: 56,
         titleSpacing: 0,
@@ -642,75 +720,99 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
               )
             : null,
       ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            if (attentionKind != null) _AttentionBanner(kind: attentionKind),
-            Expanded(
-              child: !_historyLoaded
-                  ? const Center(child: CircularProgressIndicator())
-                  : _historyError != null && _items.isEmpty
-                  ? Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Text(
-                              'Could not load session history.',
-                              style: TextStyle(color: KillLaColors.textMuted),
+      body: AnimatedPadding(
+        padding: EdgeInsets.only(bottom: keyboardInset),
+        duration: reduceMotion
+            ? Duration.zero
+            : const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        child: SafeArea(
+          child: Column(
+            children: [
+              if (attentionKind != null) _AttentionBanner(kind: attentionKind),
+              Expanded(
+                child: !_historyLoaded
+                    ? const Center(child: CircularProgressIndicator())
+                    : _historyError != null && _items.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text(
+                                'Could not load session history.',
+                                style: TextStyle(color: KillLaColors.textMuted),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _historyError!,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: KillLaColors.textMuted,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              OutlinedButton(
+                                onPressed: _loadHistory,
+                                child: const Text('Retry'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    : _items.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'No messages yet — type below to send to the session.',
+                          style: TextStyle(color: KillLaColors.textMuted),
+                        ),
+                      )
+                    : Stack(
+                        children: [
+                          NotificationListener<ScrollStartNotification>(
+                            onNotification: (notification) {
+                              if (notification.dragDetails != null) {
+                                _scrollRequestGeneration++;
+                              }
+                              return false;
+                            },
+                            child: ListView.builder(
+                              key: const ValueKey('session-transcript'),
+                              controller: _scrollCtrl,
+                              keyboardDismissBehavior:
+                                  ScrollViewKeyboardDismissBehavior.onDrag,
+                              padding: const EdgeInsets.fromLTRB(
+                                12,
+                                14,
+                                12,
+                                18,
+                              ),
+                              itemCount: _items.length,
+                              itemBuilder: (_, i) {
+                                return _buildItem(
+                                  _items[i],
+                                  backendKey: backendKey,
+                                  outboundMessages: queuedMessages,
+                                );
+                              },
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _historyError!,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: KillLaColors.textMuted,
-                                fontSize: 12,
+                          ),
+                          if (_showScrollToBottom)
+                            Positioned(
+                              right: 16,
+                              bottom: 12,
+                              child: _ScrollToBottomButton(
+                                onPressed: _jumpToLatestMessage,
                               ),
                             ),
-                            const SizedBox(height: 12),
-                            OutlinedButton(
-                              onPressed: _loadHistory,
-                              child: const Text('Retry'),
-                            ),
-                          ],
-                        ),
+                        ],
                       ),
-                    )
-                  : _items.isEmpty && !showAgentActivity
-                  ? const Center(
-                      child: Text(
-                        'No messages yet — type below to send to the session.',
-                        style: TextStyle(color: KillLaColors.textMuted),
-                      ),
-                    )
-                  : ListView.builder(
-                      controller: _scrollCtrl,
-                      keyboardDismissBehavior:
-                          ScrollViewKeyboardDismissBehavior.onDrag,
-                      padding: const EdgeInsets.fromLTRB(12, 14, 12, 18),
-                      itemCount: _items.length + (showAgentActivity ? 1 : 0),
-                      itemBuilder: (_, i) {
-                        if (i == _items.length) {
-                          return _AgentActivityLine(
-                            backendKey: backendKey,
-                            status: sessionStatus,
-                          );
-                        }
-                        return _buildItem(
-                          _items[i],
-                          backendKey: backendKey,
-                          outboundMessages: queuedMessages,
-                        );
-                      },
-                    ),
-            ),
-            _buildInput(
-              backendIdentity(backendKey).label,
-              sessionStatus: sessionStatus,
-            ),
-          ],
+              ),
+              _buildInput(backendIdentity(backendKey).label),
+            ],
+          ),
         ),
       ),
     );
@@ -796,9 +898,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
     }).toList();
   }
 
-  Widget _buildInput(String backendLabel, {required String sessionStatus}) {
+  Widget _buildInput(String backendLabel) {
     final colors = Theme.of(context).colorScheme;
-    final working = _showsAgentActivity(sessionStatus);
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: _inputCtrl,
       builder: (context, value, _) {
@@ -877,13 +978,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                   const SizedBox(width: 7),
                   Semantics(
                     button: true,
-                    label: working
-                        ? 'Send message to backend queue'
-                        : 'Send message',
+                    label: 'Send message',
                     child: Tooltip(
-                      message: working
-                          ? 'Send now · backend will queue it'
-                          : 'Send message',
+                      message: 'Send message',
                       child: SizedBox(
                         width: 48,
                         height: 46,
@@ -896,10 +993,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen> {
                               borderRadius: BorderRadius.circular(13),
                             ),
                           ),
-                          child: Icon(
-                            working
-                                ? Icons.schedule_send_rounded
-                                : Icons.arrow_upward_rounded,
+                          child: const Icon(
+                            Icons.arrow_upward_rounded,
                             size: 23,
                           ),
                         ),
@@ -1065,13 +1160,11 @@ class _SessionHeaderTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final statusColor = KillLaColors.statusDot(status);
     return Row(
       children: [
         BackendStatusAvatar(
           backendKey: backendKey,
-          statusLabel: sessionStatusLabel(status),
-          statusColor: statusColor,
+          working: status == 'busy',
           size: 32,
         ),
         const SizedBox(width: 9),
@@ -1092,60 +1185,33 @@ class _SessionHeaderTitle extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              Row(
-                children: [
-                  if (cwd != null && cwd!.isNotEmpty) ...[
-                    Expanded(
-                      child: Tooltip(
-                        message: cwd!,
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.folder_outlined,
-                              size: 11,
-                              color: colors.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(
-                                cwd!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: colors.onSurfaceVariant,
-                                  fontSize: 9.5,
-                                  fontFamily: 'Menlo',
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
+              if (cwd != null && cwd!.isNotEmpty)
+                Tooltip(
+                  message: cwd!,
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.folder_outlined,
+                        size: 11,
+                        color: colors.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          cwd!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: colors.onSurfaceVariant,
+                            fontSize: 9.5,
+                            fontFamily: 'Menlo',
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                  ] else
-                    const Spacer(),
-                  Container(
-                    width: 5,
-                    height: 5,
-                    decoration: BoxDecoration(
-                      color: statusColor,
-                      shape: BoxShape.circle,
-                    ),
+                    ],
                   ),
-                  const SizedBox(width: 5),
-                  Text(
-                    sessionStatusLabel(status),
-                    style: TextStyle(
-                      color: statusColor,
-                      fontSize: 9.5,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 0.75,
-                    ),
-                  ),
-                ],
-              ),
+                ),
             ],
           ),
         ),
@@ -1257,94 +1323,26 @@ class _HeaderMetaValue extends StatelessWidget {
   }
 }
 
-class _AgentActivityLine extends StatelessWidget {
-  final String backendKey;
-  final String status;
+class _ScrollToBottomButton extends StatelessWidget {
+  const _ScrollToBottomButton({required this.onPressed});
 
-  const _AgentActivityLine({required this.backendKey, required this.status});
+  final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final identity = backendIdentity(backendKey);
-    final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final statusColor = KillLaColors.statusDot(status);
-    final label = status == 'starting'
-        ? 'Starting ${identity.label}…'
-        : '${identity.label} is working';
-    return Semantics(
-      liveRegion: true,
-      label: label,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 7),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            BackendAvatar(backendKey: backendKey, size: 28),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Container(
-                constraints: const BoxConstraints(minHeight: 38),
-                decoration: BoxDecoration(
-                  color: statusColor.withValues(alpha: 0.08),
-                  border: Border.all(color: colors.outline),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 11),
-                  decoration: BoxDecoration(
-                    border: Border(
-                      left: BorderSide(color: statusColor, width: 2),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      if (reduceMotion)
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: statusColor,
-                            shape: BoxShape.circle,
-                          ),
-                        )
-                      else
-                        SizedBox(
-                          width: 13,
-                          height: 13,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: statusColor,
-                          ),
-                        ),
-                      const SizedBox(width: 9),
-                      Expanded(
-                        child: Text(
-                          label,
-                          style: TextStyle(
-                            color: colors.onSurfaceVariant,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                      Text(
-                        sessionStatusLabel(status),
-                        style: TextStyle(
-                          color: statusColor,
-                          fontSize: 9,
-                          fontFamily: 'Menlo',
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.8,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
+    return Material(
+      color: colors.surfaceContainerHighest,
+      shape: CircleBorder(side: BorderSide(color: colors.outline)),
+      elevation: 3,
+      child: IconButton(
+        key: const ValueKey('scroll-to-bottom'),
+        tooltip: 'Jump to latest message',
+        onPressed: onPressed,
+        icon: const Icon(Icons.keyboard_arrow_down_rounded),
+        color: colors.primary,
+        iconSize: 26,
+        constraints: const BoxConstraints.tightFor(width: 44, height: 44),
       ),
     );
   }

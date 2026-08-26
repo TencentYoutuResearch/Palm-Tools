@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 const _backendAssetDirectory = '../gui/public/backend-icons';
 
 @immutable
@@ -166,14 +168,6 @@ BackendIdentity backendIdentity(String backendKey) {
   );
 }
 
-String sessionStatusLabel(String status) => switch (status) {
-  'busy' => 'WORKING',
-  'idle' => 'READY',
-  'starting' => 'STARTING',
-  'exited' => 'EXITED',
-  _ => status.toUpperCase(),
-};
-
 class BackendAvatar extends StatelessWidget {
   final String backendKey;
   final double size;
@@ -202,7 +196,7 @@ class BackendAvatar extends StatelessWidget {
       child: Container(
         width: size,
         height: size,
-        padding: EdgeInsets.all(size * 0.19),
+        padding: EdgeInsets.all(size * 0.06),
         decoration: BoxDecoration(
           color: Color.alphaBlend(
             identity.accent.withValues(alpha: 0.10),
@@ -225,15 +219,13 @@ class BackendAvatar extends StatelessWidget {
 
 class BackendStatusAvatar extends StatelessWidget {
   final String backendKey;
-  final String statusLabel;
-  final Color statusColor;
+  final bool working;
   final double size;
 
   const BackendStatusAvatar({
     super.key,
     required this.backendKey,
-    required this.statusLabel,
-    required this.statusColor,
+    required this.working,
     this.size = 40,
   });
 
@@ -242,7 +234,9 @@ class BackendStatusAvatar extends StatelessWidget {
     final identity = backendIdentity(backendKey);
     final colors = Theme.of(context).colorScheme;
     return Semantics(
-      label: '${identity.label} agent, $statusLabel',
+      label: working
+          ? '${identity.label} agent, working'
+          : '${identity.label} agent',
       image: true,
       child: ExcludeSemantics(
         child: SizedBox(
@@ -252,19 +246,21 @@ class BackendStatusAvatar extends StatelessWidget {
             clipBehavior: Clip.none,
             children: [
               BackendAvatar(backendKey: backendKey, size: size),
-              Positioned(
-                right: -1,
-                bottom: -1,
-                child: Container(
-                  width: size * 0.28,
-                  height: size * 0.28,
-                  decoration: BoxDecoration(
-                    color: statusColor,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: colors.surface, width: 2),
+              if (working)
+                Positioned(
+                  right: -1,
+                  bottom: -1,
+                  child: Container(
+                    key: const ValueKey('working-status-dot'),
+                    width: size * 0.28,
+                    height: size * 0.28,
+                    decoration: BoxDecoration(
+                      color: KillLaColors.busy,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: colors.surface, width: 2),
+                    ),
                   ),
                 ),
-              ),
             ],
           ),
         ),
