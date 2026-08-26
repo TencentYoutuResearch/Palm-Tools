@@ -19,6 +19,7 @@
     WORKSPACE_SEARCH_SKIP_DIRS,
     workspacePathMatches,
     workspaceQueryTokens,
+    workspaceSearchScore,
   } from './workspace_match'
 
   type Props = {
@@ -28,6 +29,7 @@
     terminalOpen?: boolean
     onToggleTerminal?: () => void
     onTitlebarMouseDown?: (e: MouseEvent) => void
+    onReference?: (text: string) => void | Promise<void>
   }
 
   type PanelTab = 'files' | 'git'
@@ -46,11 +48,20 @@
     lang?: string
     // image: MIME type (e.g. "image/png"),content 为 base64
     mime?: string
+    path?: string
   }
   type ContextMenuState = {
     x: number
     y: number
     entry: WorkspaceEntry
+  }
+  type PreviewContextMenuState = {
+    x: number
+    y: number
+    path: string
+    selection: string
+    startLine: number | null
+    endLine: number | null
   }
 
   /// 按 workspace(endpoint + cwd)缓存 WorkspacePanel 的用户视图状态。
@@ -64,7 +75,7 @@
   }
   const panelStateCache = new Map<string, SavedPanelState>()
 
-  let { tab, homeDir, onClose, terminalOpen = false, onToggleTerminal, onTitlebarMouseDown }: Props = $props()
+  let { tab, homeDir, onClose, terminalOpen = false, onToggleTerminal, onTitlebarMouseDown, onReference }: Props = $props()
 
   let activePanel = $state<PanelTab>('files')
   let filterQuery = $state('')
@@ -85,6 +96,7 @@
   let loadingCommitDetails = $state<Set<string>>(new Set())
   let commitDetailErrors = $state<Record<string, string>>({})
   let contextMenu: ContextMenuState | null = $state(null)
+  let previewContextMenu: PreviewContextMenuState | null = $state(null)
   let preview = $state<PreviewState>({
     kind: 'empty',
     title: 'Preview',
@@ -261,7 +273,7 @@
   function searchHitDir(path: string): string {
     const rel = relPathFromRoot(snapshot?.path || cwd, path)
     const i = rel.lastIndexOf('/')
-    return i > 0 ? rel.slice(0, i) : ''
+    return i > 0 ? rel.slice(0, i) : '.'
   }
 
   async function searchRemoteWorkspace(
@@ -275,7 +287,7 @@
     const hits: WorkspaceEntry[] = []
     const queue = [root]
     let visited = 0
-    while (queue.length > 0 && hits.length < 200 && visited < 80) {
+    while (queue.length > 0 && visited < 80) {
       const dir = queue.shift()!
       visited += 1
       let children: WorkspaceEntry[]
@@ -288,10 +300,18 @@
         if (WORKSPACE_SEARCH_SKIP_DIRS.has(entry.name)) continue
         const rel = relPathFromRoot(root, entry.path)
         if (workspacePathMatches(rel, entry.name, tokens)) hits.push(entry)
-        if (entry.is_dir && hits.length < 200) queue.push(entry.path)
+        if (entry.is_dir) queue.push(entry.path)
       }
     }
     return hits
+      .sort((a, b) => {
+        const aRel = relPathFromRoot(root, a.path)
+        const bRel = relPathFromRoot(root, b.path)
+        return workspaceSearchScore(bRel, b.name, tokens) - workspaceSearchScore(aRel, a.name, tokens)
+          || Number(a.is_dir) - Number(b.is_dir)
+          || aRel.localeCompare(bRel, undefined, { sensitivity: 'base' })
+      })
+      .slice(0, 200)
   }
 
   $effect(() => {
@@ -453,10 +473,70 @@
     event.stopPropagation()
     selectedPath = entry.path
     contextMenu = {
-      x: Math.min(event.clientX, window.innerWidth - 178),
-      y: Math.min(event.clientY, window.innerHeight - 112),
+      x: Math.min(event.clientX, window.innerWidth - 218),
+      y: Math.min(event.clientY, window.innerHeight - 142),
       entry,
     }
+  }
+
+  function lineFromSelectionPoint(root: HTMLElement, node: Node | null, offset: number): number | null {
+    if (!node || !root.contains(node)) return null
+    try {
+      const range = document.createRange()
+      range.selectNodeContents(root)
+      range.setEnd(node, offset)
+      return range.toString().split('\n').length
+    } catch {
+      return null
+    }
+  }
+
+  function openPreviewContextMenu(event: MouseEvent) {
+    if (!preview.path) return
+    const surface = event.currentTarget as HTMLElement
+    const root = surface.querySelector<HTMLElement>('.preview-text, .md-body') ?? surface
+    const selection = window.getSelection()
+    const selectedText = selection && selection.rangeCount > 0
+      && root.contains(selection.anchorNode) && root.contains(selection.focusNode)
+      ? selection.toString().trim()
+      : ''
+    const anchorLine = selectedText
+      ? lineFromSelectionPoint(root, selection?.anchorNode ?? null, selection?.anchorOffset ?? 0)
+      : null
+    const focusLine = selectedText
+      ? lineFromSelectionPoint(root, selection?.focusNode ?? null, selection?.focusOffset ?? 0)
+      : null
+    event.preventDefault()
+    event.stopPropagation()
+    previewContextMenu = {
+      x: Math.min(event.clientX, window.innerWidth - 218),
+      y: Math.min(event.clientY, window.innerHeight - (selectedText ? 82 : 46)),
+      path: preview.path,
+      selection: selectedText,
+      startLine: anchorLine == null || focusLine == null ? null : Math.min(anchorLine, focusLine),
+      endLine: anchorLine == null || focusLine == null ? null : Math.max(anchorLine, focusLine),
+    }
+  }
+
+  function referencePath(path: string) {
+    contextMenu = null
+    previewContextMenu = null
+    void onReference?.(`@${path.replace(/[\u0000-\u001f\u007f]/g, ' ')} `)
+  }
+
+  function referencePreviewSelection() {
+    const menu = previewContextMenu
+    if (!menu || !menu.selection) return
+    const lines = menu.startLine == null
+      ? ''
+      : menu.startLine === menu.endLine
+        ? ` (line ${menu.startLine})`
+        : ` (lines ${menu.startLine}-${menu.endLine})`
+    previewContextMenu = null
+    const selection = menu.selection.length > 20_000
+      ? `${menu.selection.slice(0, 20_000)}\n[selection truncated]`
+      : menu.selection
+    void onReference?.(`@${menu.path.replace(/[\u0000-\u001f\u007f]/g, ' ')}${lines}\n\n${selection}\n\n`)
   }
 
   async function previewFile(entry: WorkspaceEntry) {
@@ -467,6 +547,7 @@
       title: entry.name,
       subtitle: compactPath(entry.path, 42),
       content: '',
+      path: entry.path,
     }
     try {
       const rid = remoteId()
@@ -482,6 +563,7 @@
             title: data.name,
             subtitle: `${formatBytes(data.size)} · ${compactPath(data.path, 42)}`,
             content: 'Image too large to preview (max 10MB). Use Open to view it in the system app.',
+            path: data.path,
           }
         } else {
           preview = {
@@ -492,6 +574,7 @@
             truncated: data.truncated,
             renderKind: 'image',
             mime: data.mime || 'image/png',
+            path: data.path,
           }
         }
         return
@@ -524,6 +607,7 @@
         renderKind,
         html,
         lang,
+        path: data.path,
       }
     } catch (e) {
       preview = {
@@ -531,6 +615,7 @@
         title: entry.name,
         subtitle: entry.path,
         content: String(e),
+        path: entry.path,
       }
     }
   }
@@ -556,6 +641,7 @@
       title: change.path,
       subtitle: `${change.bucket} · ${change.status}`,
       content: '',
+      path: change.path.startsWith('/') ? change.path : `${cwd.replace(/\/$/, '')}/${change.path}`,
     }
     try {
       const rid = remoteId()
@@ -568,6 +654,7 @@
         subtitle: `${data.bucket} diff`,
         content: data.content || '(no textual diff)',
         truncated: data.truncated,
+        path: change.path.startsWith('/') ? change.path : `${cwd.replace(/\/$/, '')}/${change.path}`,
       }
     } catch (e) {
       preview = {
@@ -632,6 +719,7 @@
         subtitle: `${commit.short_hash} · file diff`,
         content: data.content || '(no textual diff)',
         truncated: data.truncated,
+        path: file.path.startsWith('/') ? file.path : `${cwd.replace(/\/$/, '')}/${file.path}`,
       }
     } catch (e) {
       preview = {
@@ -838,7 +926,12 @@
   }
 </script>
 
-<svelte:window onclick={() => (contextMenu = null)} onkeydown={(e) => e.key === 'Escape' && (contextMenu = null)} />
+<svelte:window
+  onclick={() => { contextMenu = null; previewContextMenu = null }}
+  onkeydown={(e) => {
+    if (e.key === 'Escape') { contextMenu = null; previewContextMenu = null }
+  }}
+/>
 
 <aside
   class="workspace-panel"
@@ -897,7 +990,7 @@
     <div class="panel-body" class:no-preview={preview.kind === 'empty'}>
       <!-- 左:preview(占大)——未打开文件/diff 时不渲染,nav-pane 占满整列 -->
       {#if preview.kind !== 'empty'}
-        <section class="preview-pane" aria-label="Preview">
+        <section class="preview-pane" aria-label="Preview" oncontextmenu={openPreviewContextMenu}>
         <header>
           <div>
             <strong>{preview.title}</strong>
@@ -922,11 +1015,17 @@
           <p class="muted pad">Binary file. Use Open to view it in the system app.</p>
         {:else if preview.kind === 'file' && preview.renderKind === 'markdown'}
           <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-          <div class="md-body">{@html preview.html}</div>
+          <div class="md-body" role="document">{@html preview.html}</div>
         {:else if preview.kind === 'file' && preview.renderKind === 'code'}
-          <pre class="preview-text hljs"><code>{@html preview.html}</code></pre>
+          <div class="source-preview" role="region" aria-label="File source">
+            <pre class="line-numbers" aria-hidden="true">{#each preview.content.split('\n') as _, index}<span>{index + 1}</span>{/each}</pre>
+            <pre class="preview-text hljs"><code>{@html preview.html}</code></pre>
+          </div>
         {:else}
-          <pre class="preview-text" class:diff={preview.kind === 'diff'}>{#each preview.content.split('\n') as line}<span class={lineClass(line)}>{line || ' '}</span>{/each}</pre>
+          <div class="source-preview" role="region" aria-label="File source">
+            <pre class="line-numbers" aria-hidden="true">{#each preview.content.split('\n') as _, index}<span>{index + 1}</span>{/each}</pre>
+            <pre class="preview-text" class:diff={preview.kind === 'diff'}>{#each preview.content.split('\n') as line}<span class={lineClass(line)}>{line || ' '}</span>{/each}</pre>
+          </div>
         {/if}
         </section>
       {/if}
@@ -1139,6 +1238,31 @@
           <Icon name="external-link" size={13} /> Open with app
         </button>
       {/if}
+      {#if onReference}
+        <button role="menuitem" onclick={() => referencePath(contextMenu!.entry.path)}>
+          <Icon name="link" size={13} /> Add reference to conversation
+        </button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if previewContextMenu}
+    <div
+      class="context-menu preview-context-menu"
+      style={`left:${previewContextMenu.x}px;top:${previewContextMenu.y}px`}
+      role="menu"
+      tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
+    >
+      {#if previewContextMenu.selection}
+        <button role="menuitem" onclick={referencePreviewSelection}>
+          <Icon name="link" size={13} /> Ask about selection
+        </button>
+      {/if}
+      <button role="menuitem" onclick={() => referencePath(previewContextMenu!.path)}>
+        <Icon name="file-text" size={13} /> Add file reference
+      </button>
     </div>
   {/if}
 </aside>
@@ -1501,6 +1625,16 @@
     text-align: left;
     cursor: default;
   }
+  .search-row {
+    min-height: 39px;
+    grid-template-rows: auto auto;
+    padding-block: 4px;
+  }
+  .search-row .twisty,
+  .search-row .file-icon,
+  .search-row .file-name {
+    grid-row: 1;
+  }
   .tree-row:hover,
   .tree-row.selected {
     background: var(--bg-tab-hover);
@@ -1526,11 +1660,12 @@
     white-space: nowrap;
   }
   .search-row .file-meta {
-    max-width: 140px;
+    grid-column: 3 / -1;
+    grid-row: 2;
+    max-width: none;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    direction: rtl;
     text-align: left;
   }
   .file-meta {
@@ -1910,6 +2045,40 @@
     border-radius: 4px;
   }
 
+  .source-preview {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: auto minmax(max-content, 1fr);
+    align-content: start;
+    overflow: auto;
+    background: var(--bg-pre);
+  }
+  .source-preview .preview-text {
+    overflow: visible;
+  }
+  .line-numbers {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    min-height: 100%;
+    margin: 0;
+    padding: 9px 8px 14px 10px;
+    border-right: 1px solid var(--bd-muted);
+    background: var(--bg-elevated);
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.45;
+    text-align: right;
+    user-select: none;
+  }
+  .line-numbers span {
+    display: block;
+    min-width: 2ch;
+    min-height: 1.45em;
+  }
+
   .preview-text {
     flex: 1 1 auto;
     min-height: 0;
@@ -2065,7 +2234,7 @@
   .context-menu {
     position: fixed;
     z-index: 1000;
-    width: 170px;
+    width: 210px;
     padding: 5px;
     border: 1px solid color-mix(in srgb, var(--fg-primary) 12%, transparent);
     border-radius: 7px;

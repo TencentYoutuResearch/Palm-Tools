@@ -646,6 +646,28 @@
     const el = document.querySelector<HTMLTextAreaElement>('.main .xterm-helper-textarea')
     el?.focus()
   }
+
+  /** Insert workspace context into the active CLI composer without submitting it. */
+  async function insertWorkspaceReference(text: string) {
+    const tab = $activeTab
+    if (!tab || !text) return
+    try {
+      // Never let referenced file content smuggle terminal control sequences into the PTY.
+      // Multiline context uses bracketed paste so embedded LF stays in the composer.
+      const safe = text
+        .replace(/\r\n?/g, '\n')
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+      const input = safe.includes('\n') ? `\x1b[200~${safe}\x1b[201~` : safe
+      await ipc.writeInput(tab.id, new TextEncoder().encode(input), tab.endpointId)
+      focusTerminal()
+    } catch (error) {
+      pushToast({
+        severity: 'error',
+        title: 'Reference not added',
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
   function onDndConsider(e: CustomEvent<DndEvent>) {
     e.stopPropagation()
     // svelte-dnd-action 不走原生 dragstart;第一次 consider 才表示拖拽真正开始。
@@ -1939,6 +1961,7 @@
             terminalOpen={terminalPanelOpen}
             onToggleTerminal={toggleTerminalPanel}
             {onTitlebarMouseDown}
+            onReference={insertWorkspaceReference}
           />
         </div>
         {#if terminalPanelOpen}

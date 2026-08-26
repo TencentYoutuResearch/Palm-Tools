@@ -289,6 +289,9 @@ fn search_score(rel: &str, name: &str, tokens: &[String]) -> i32 {
     let name_l = name.to_lowercase();
     let joined = tokens.join("");
     let mut score = 0;
+    if name_l == joined {
+        score += 800;
+    }
     if name_l.starts_with(&tokens[0]) {
         score += 400;
     }
@@ -321,7 +324,7 @@ fn search_workspace_entries(
     let mut visited = 0usize;
 
     while let Some(dir) = stack.pop() {
-        if visited >= MAX_SEARCH_VISIT || hits.len() >= MAX_SEARCH_RESULTS {
+        if visited >= MAX_SEARCH_VISIT {
             break;
         }
         let reader = match std::fs::read_dir(&dir) {
@@ -330,7 +333,7 @@ fn search_workspace_entries(
         };
         for entry in reader.flatten() {
             visited += 1;
-            if visited >= MAX_SEARCH_VISIT || hits.len() >= MAX_SEARCH_RESULTS {
+            if visited >= MAX_SEARCH_VISIT {
                 break;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -365,7 +368,7 @@ fn search_workspace_entries(
     hits.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| a.1.is_dir.cmp(&b.1.is_dir))
-            .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
+            .then_with(|| a.1.path.to_lowercase().cmp(&b.1.path.to_lowercase()))
     });
     hits.truncate(MAX_SEARCH_RESULTS);
     Ok(hits.into_iter().map(|(_, entry)| entry).collect())
@@ -1302,6 +1305,49 @@ mod tests {
 
         let top = search_workspace_entries(root.to_str().unwrap(), "readme", true).unwrap();
         assert!(top.iter().any(|e| e.name == "README.md"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_ranks_exact_names_and_keeps_same_named_paths_distinct() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kode-ws-ranking-{stamp}"));
+        std::fs::create_dir_all(root.join("apps").join("workflows")).unwrap();
+        std::fs::create_dir_all(root.join("packages").join("workflows")).unwrap();
+        std::fs::write(root.join("workflows.schema.json"), "{}").unwrap();
+
+        let hits = search_workspace_entries(root.to_str().unwrap(), "workflows", true).unwrap();
+        let exact_dirs: Vec<_> = hits
+            .iter()
+            .filter(|entry| entry.is_dir && entry.name == "workflows")
+            .collect();
+        assert_eq!(
+            exact_dirs.len(),
+            2,
+            "distinct paths must not be silently deduplicated"
+        );
+        assert!(exact_dirs
+            .iter()
+            .any(|entry| entry.path.contains("/apps/workflows")));
+        assert!(exact_dirs
+            .iter()
+            .any(|entry| entry.path.contains("/packages/workflows")));
+
+        let schema_index = hits
+            .iter()
+            .position(|entry| entry.name == "workflows.schema.json")
+            .unwrap();
+        let last_exact_dir = hits
+            .iter()
+            .rposition(|entry| entry.is_dir && entry.name == "workflows")
+            .unwrap();
+        assert!(
+            last_exact_dir < schema_index,
+            "exact basename matches should rank first"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

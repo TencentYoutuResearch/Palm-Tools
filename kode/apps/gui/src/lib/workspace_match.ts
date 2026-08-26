@@ -26,6 +26,21 @@ export function workspacePathMatches(relPath: string, name: string, tokens: stri
   return tokens.every((token) => nameL.includes(token))
 }
 
+/** Rank a matched path consistently across local and remote workspaces. */
+export function workspaceSearchScore(relPath: string, name: string, tokens: string[]): number {
+  if (tokens.length === 0) return 0
+  const rel = relPath.replace(/\\/g, '/').toLowerCase()
+  const nameL = name.toLowerCase()
+  const joined = tokens.join('')
+  let score = 0
+  if (nameL === joined) score += 800
+  if (nameL.startsWith(tokens[0])) score += 400
+  if (tokens.every((token) => nameL.includes(token))) score += 250
+  if (nameL.includes(joined)) score += 80
+  score += Math.max(0, 120 - Math.min(120, rel.length))
+  return score
+}
+
 export const WORKSPACE_SEARCH_SKIP_DIRS = new Set([
   '.git',
   'node_modules',
