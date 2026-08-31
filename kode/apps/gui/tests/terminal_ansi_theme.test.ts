@@ -34,17 +34,29 @@ test('rewrites only the truecolor background in a combined SGR', () => {
   )
 })
 
-test('maps diff backgrounds to stable red and green semantic slots', () => {
+test('maps diff backgrounds to theme-specific surface slots', () => {
   assert.equal(transform('\x1b[48;2;84;28;35mremoved'), '\x1b[48;5;18mremoved')
   assert.equal(transform('\x1b[48;2;20;72;38madded'), '\x1b[48;5;19madded')
   assert.equal(transform('\x1b[48;5;196mremoved'), '\x1b[48;5;18mremoved')
   assert.equal(transform('\x1b[48;5;34madded'), '\x1b[48;5;19madded')
 })
 
-test('leaves standard ANSI backgrounds on xterm own theme palette', () => {
-  const input = '\x1b[41mred\x1b[42mgreen\x1b[49mdefault'
-  assert.equal(transform(input), input)
-  assert.equal(transform('\x1b[48;5;2mindexed green'), '\x1b[48;5;2mindexed green')
+test('maps standard and bright diff backgrounds to the same surface slots', () => {
+  assert.equal(
+    transform('\x1b[41mred\x1b[42mgreen\x1b[101mbright red\x1b[102mbright green'),
+    '\x1b[48;5;18mred\x1b[48;5;19mgreen\x1b[48;5;18mbright red\x1b[48;5;19mbright green',
+  )
+  assert.equal(
+    rewriteSgrBackgrounds('1;38;2;41;209;119;101;4'),
+    '1;38;2;41;209;119;48;5;18;4',
+  )
+})
+
+test('maps low indexed diff backgrounds to the same surface slots', () => {
+  assert.equal(transform('\x1b[48;5;1mred'), '\x1b[48;5;18mred')
+  assert.equal(transform('\x1b[48;5;2mgreen'), '\x1b[48;5;19mgreen')
+  assert.equal(transform('\x1b[48;5;9mbright red'), '\x1b[48;5;18mbright red')
+  assert.equal(transform('\x1b[48;5;10mbright green'), '\x1b[48;5;19mbright green')
 })
 
 test('supports colon-form colors without touching colon-form foregrounds', () => {
@@ -82,6 +94,8 @@ test('dark and light palettes keep the same semantic slot ordering', () => {
   assert.equal(dark.length, 8)
   assert.equal(light.length, 8)
   assert.notDeepEqual(dark, light)
+  assert.equal(dark[2], '#3A2024')
   assert.equal(dark[3], '#173A27')
-  assert.equal(light[3], '#DFF1E4')
+  assert.equal(light[2], '#FF6B6B')
+  assert.equal(light[3], '#71D47D')
 })

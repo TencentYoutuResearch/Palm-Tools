@@ -4,8 +4,9 @@
  *
  * xterm can recolour indexed cells when `theme.extendedAnsi` changes, but a
  * truecolor background is stored as a literal RGB value in the buffer.  This
- * adapter maps only explicit extended background colours to semantic indexed
- * slots (16–23).  Foreground groups are parsed and skipped as one unit so an
+ * adapter maps painted backgrounds to semantic indexed slots (16–23), with
+ * red/green diff surfaces using distinct dark/light values.
+ * Foreground groups are parsed and skipped as one unit so an
  * RGB component such as the `41` in `38;2;41;209;119` can never be mistaken
  * for an SGR background opcode.
  */
@@ -32,6 +33,20 @@ const SURFACE_SLOT = {
   cyan: 23,
 } as const
 
+const STANDARD_DIFF_BACKGROUND_INDEX = new Map<number, number>([
+  [41, SURFACE_SLOT.red],
+  [42, SURFACE_SLOT.green],
+  [101, SURFACE_SLOT.red],
+  [102, SURFACE_SLOT.green],
+])
+
+const INDEXED_DIFF_BACKGROUND_INDEX = new Map<number, number>([
+  [1, SURFACE_SLOT.red],
+  [2, SURFACE_SLOT.green],
+  [9, SURFACE_SLOT.red],
+  [10, SURFACE_SLOT.green],
+])
+
 const DARK_SURFACES = [
   '#1A1D1B', // 16 neutral subtle
   '#2B302D', // 17 neutral strong
@@ -46,8 +61,8 @@ const DARK_SURFACES = [
 const LIGHT_SURFACES = [
   '#ECEDE8', // 16 neutral subtle
   '#D9DDD6', // 17 neutral strong
-  '#F7E2E3', // 18 red / removed diff
-  '#DFF1E4', // 19 green / added diff / input accent
+  '#FF6B6B', // 18 red / removed diff
+  '#71D47D', // 19 green / added diff / input accent
   '#F4EBCF', // 20 yellow
   '#DDECF4', // 21 blue
   '#EDE2F5', // 22 magenta
@@ -141,6 +156,8 @@ function rewriteColonBackground(field: string): string | null {
     const index = parseByte(parts[2])
     if (index == null) return null
     const rgb = indexedColorRgb(index)
+    const diffIndex = INDEXED_DIFF_BACKGROUND_INDEX.get(index)
+    if (diffIndex != null) return `48;5;${diffIndex}`
     return rgb == null ? field : `48;5;${surfaceSlotForRgb(...rgb)}`
   }
   if (parts[1] === '2') {
@@ -176,6 +193,12 @@ export function rewriteSgrBackgrounds(parameters: string): string {
     }
 
     const code = /^\d+$/.test(field) ? Number(field) : null
+    const standardDiffIndex = code == null ? null : STANDARD_DIFF_BACKGROUND_INDEX.get(code)
+    if (standardDiffIndex != null) {
+      rewritten.push('48', '5', String(standardDiffIndex))
+      index += 1
+      continue
+    }
     if (code !== 38 && code !== 48) {
       rewritten.push(field)
       index += 1
@@ -186,6 +209,17 @@ export function rewriteSgrBackgrounds(parameters: string): string {
     // one atom; backgrounds are mapped only when they use extended colours.
     const color = parseExtendedColor(fields, index)
     if (color == null) return parameters
+    if (code === 48 && fields[index + 1] === '5') {
+      const paletteIndex = parseByte(fields[index + 2] ?? '')
+      const indexedDiffIndex = paletteIndex == null
+        ? null
+        : INDEXED_DIFF_BACKGROUND_INDEX.get(paletteIndex)
+      if (indexedDiffIndex != null) {
+        rewritten.push('48', '5', String(indexedDiffIndex))
+        index = color.end
+        continue
+      }
+    }
     if (code === 38 || color.rgb == null) {
       rewritten.push(...fields.slice(index, color.end))
     } else {
