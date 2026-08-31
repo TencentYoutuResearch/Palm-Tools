@@ -33,19 +33,24 @@ const SURFACE_SLOT = {
   cyan: 23,
 } as const
 
-const STANDARD_DIFF_BACKGROUND_INDEX = new Map<number, number>([
-  [41, SURFACE_SLOT.red],
-  [42, SURFACE_SLOT.green],
-  [101, SURFACE_SLOT.red],
-  [102, SURFACE_SLOT.green],
-])
-
-const INDEXED_DIFF_BACKGROUND_INDEX = new Map<number, number>([
-  [1, SURFACE_SLOT.red],
-  [2, SURFACE_SLOT.green],
-  [9, SURFACE_SLOT.red],
-  [10, SURFACE_SLOT.green],
-])
+const ANSI_BACKGROUND_SLOTS = [
+  SURFACE_SLOT.neutralSubtle, // black
+  SURFACE_SLOT.red,
+  SURFACE_SLOT.green,
+  SURFACE_SLOT.yellow,
+  SURFACE_SLOT.blue,
+  SURFACE_SLOT.magenta,
+  SURFACE_SLOT.cyan,
+  SURFACE_SLOT.neutralStrong, // white
+  SURFACE_SLOT.neutralStrong, // bright black / gray
+  SURFACE_SLOT.red,
+  SURFACE_SLOT.green,
+  SURFACE_SLOT.yellow,
+  SURFACE_SLOT.blue,
+  SURFACE_SLOT.magenta,
+  SURFACE_SLOT.cyan,
+  SURFACE_SLOT.neutralStrong, // bright white
+] as const
 
 const DARK_SURFACES = [
   '#1A1D1B', // 16 neutral subtle
@@ -77,6 +82,16 @@ function parseByte(value: string): number | null {
   if (!/^\d{1,3}$/.test(value)) return null
   const parsed = Number(value)
   return parsed >= 0 && parsed <= 255 ? parsed : null
+}
+
+function standardBackgroundSlot(code: number): number | null {
+  if (code >= 40 && code <= 47) return ANSI_BACKGROUND_SLOTS[code - 40]
+  if (code >= 100 && code <= 107) return ANSI_BACKGROUND_SLOTS[code - 100 + 8]
+  return null
+}
+
+function indexedBackgroundSlot(index: number): number | null {
+  return index < ANSI_BACKGROUND_SLOTS.length ? ANSI_BACKGROUND_SLOTS[index] : null
 }
 
 function indexedColorRgb(index: number): [number, number, number] | null {
@@ -155,9 +170,9 @@ function rewriteColonBackground(field: string): string | null {
   if (parts[1] === '5' && parts.length === 3) {
     const index = parseByte(parts[2])
     if (index == null) return null
+    const indexedSlot = indexedBackgroundSlot(index)
+    if (indexedSlot != null) return `48;5;${indexedSlot}`
     const rgb = indexedColorRgb(index)
-    const diffIndex = INDEXED_DIFF_BACKGROUND_INDEX.get(index)
-    if (diffIndex != null) return `48;5;${diffIndex}`
     return rgb == null ? field : `48;5;${surfaceSlotForRgb(...rgb)}`
   }
   if (parts[1] === '2') {
@@ -172,10 +187,20 @@ function rewriteColonBackground(field: string): string | null {
   return null
 }
 
-export function rewriteSgrBackgrounds(parameters: string): string {
-  if (!parameters) return parameters
+type SgrRewriteResult = {
+  parameters: string
+  reverseSurfaceActive: boolean
+}
+
+function rewriteSgrBackgroundsWithState(
+  parameters: string,
+  initialReverseSurfaceActive: boolean,
+): SgrRewriteResult {
+  // An empty parameter list is SGR 0 and also ends a synthesized surface.
+  if (!parameters) return { parameters, reverseSurfaceActive: false }
   const fields = parameters.split(';')
   const rewritten: string[] = []
+  let reverseSurfaceActive = initialReverseSurfaceActive
 
   for (let index = 0; index < fields.length;) {
     const field = fields[index]
@@ -183,8 +208,11 @@ export function rewriteSgrBackgrounds(parameters: string): string {
       // A colon-form foreground is deliberately opaque to this adapter.
       if (field.startsWith('48:')) {
         const next = rewriteColonBackground(field)
-        if (next == null) return parameters
+        if (next == null) {
+          return { parameters, reverseSurfaceActive: initialReverseSurfaceActive }
+        }
         rewritten.push(next)
+        reverseSurfaceActive = false
       } else {
         rewritten.push(field)
       }
@@ -193,9 +221,33 @@ export function rewriteSgrBackgrounds(parameters: string): string {
     }
 
     const code = /^\d+$/.test(field) ? Number(field) : null
-    const standardDiffIndex = code == null ? null : STANDARD_DIFF_BACKGROUND_INDEX.get(code)
-    if (standardDiffIndex != null) {
-      rewritten.push('48', '5', String(standardDiffIndex))
+    const standardSlot = code == null ? null : standardBackgroundSlot(code)
+    if (standardSlot != null) {
+      rewritten.push('48', '5', String(standardSlot))
+      reverseSurfaceActive = false
+      index += 1
+      continue
+    }
+    // TUIs commonly paint their input row with reverse video.  Literal reverse
+    // swaps xterm's default foreground into a white background in dark mode and
+    // a black background in light mode.  Use the theme-owned neutral surface
+    // instead; SGR 27 also clears that synthesized background.
+    if (code === 7) {
+      rewritten.push('27', '48', '5', String(SURFACE_SLOT.neutralStrong))
+      reverseSurfaceActive = true
+      index += 1
+      continue
+    }
+    if (code === 27) {
+      rewritten.push('27')
+      if (reverseSurfaceActive) rewritten.push('49')
+      reverseSurfaceActive = false
+      index += 1
+      continue
+    }
+    if (code === 0 || code === 49) {
+      rewritten.push(field)
+      reverseSurfaceActive = false
       index += 1
       continue
     }
@@ -208,14 +260,17 @@ export function rewriteSgrBackgrounds(parameters: string): string {
     // Parse both foreground and background groups.  Foregrounds are copied as
     // one atom; backgrounds are mapped only when they use extended colours.
     const color = parseExtendedColor(fields, index)
-    if (color == null) return parameters
+    if (color == null) {
+      return { parameters, reverseSurfaceActive: initialReverseSurfaceActive }
+    }
     if (code === 48 && fields[index + 1] === '5') {
       const paletteIndex = parseByte(fields[index + 2] ?? '')
-      const indexedDiffIndex = paletteIndex == null
+      const indexedSlot = paletteIndex == null
         ? null
-        : INDEXED_DIFF_BACKGROUND_INDEX.get(paletteIndex)
-      if (indexedDiffIndex != null) {
-        rewritten.push('48', '5', String(indexedDiffIndex))
+        : indexedBackgroundSlot(paletteIndex)
+      if (indexedSlot != null) {
+        rewritten.push('48', '5', String(indexedSlot))
+        reverseSurfaceActive = false
         index = color.end
         continue
       }
@@ -224,11 +279,16 @@ export function rewriteSgrBackgrounds(parameters: string): string {
       rewritten.push(...fields.slice(index, color.end))
     } else {
       rewritten.push('48', '5', String(surfaceSlotForRgb(...color.rgb)))
+      reverseSurfaceActive = false
     }
     index = color.end
   }
 
-  return rewritten.join(';')
+  return { parameters: rewritten.join(';'), reverseSurfaceActive }
+}
+
+export function rewriteSgrBackgrounds(parameters: string): string {
+  return rewriteSgrBackgroundsWithState(parameters, false).parameters
 }
 
 function ascii(bytes: Uint8Array): string {
@@ -250,11 +310,13 @@ export class TerminalAnsiThemeAdapter {
   private pending = new Uint8Array(0)
   private stringControl: StringControl | null = null
   private stringEsc = false
+  private reverseSurfaceActive = false
 
   reset(): void {
     this.pending = new Uint8Array(0)
     this.stringControl = null
     this.stringEsc = false
+    this.reverseSurfaceActive = false
   }
 
   flush(): Uint8Array {
@@ -365,7 +427,9 @@ export class TerminalAnsiThemeAdapter {
 
       if (data[finalIndex] === 0x6d) {
         const original = ascii(data.subarray(paramsStart, finalIndex))
-        const next = rewriteSgrBackgrounds(original)
+        const rewritten = rewriteSgrBackgroundsWithState(original, this.reverseSurfaceActive)
+        const next = rewritten.parameters
+        this.reverseSurfaceActive = rewritten.reverseSurfaceActive
         if (next !== original) {
           const prefix = data[csiStart] === ESC ? '\x1b[' : '\x9b'
           replacements.push({
