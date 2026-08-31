@@ -60,7 +60,7 @@
     "description": "Settings tab for screenshot capture"
   },
   "settings.capture.description": {
-    "message": "Configure screenshot shortcuts and choose whether they capture the current kode window or a global screen region. Captures go directly to the clipboard.",
+    "message": "Configure screenshot shortcuts and choose whether they capture the current kode window or a global screen region. Adjust the crop before copying it to the clipboard.",
     "description": "Screenshot settings description"
   },
   "settings.capture.shortcut": {
@@ -88,7 +88,7 @@
     "description": "Capture arbitrary screen region"
   },
   "settings.capture.modeAreaDescription": {
-    "message": "Use the system region selector to capture any part of the screen.",
+    "message": "Capture the display under the pointer, then select the area you need in a full-screen preview.",
     "description": "Global area screenshot mode description"
   },
   "settings.capture.takeNow": {
@@ -107,6 +107,22 @@
     "message": "Screenshot settings saved: {shortcut} · {mode}",
     "description": "Toast after saving screenshot settings"
   },
+  "settings.capture.editorTitle": { "message": "Adjust capture area" },
+  "settings.capture.editorHint": { "message": "Drag on the image to draw a new area, or move and resize the current selection." },
+  "settings.capture.previewAlt": { "message": "Screenshot crop preview" },
+  "settings.capture.moveSelection": { "message": "Move screenshot selection" },
+  "settings.capture.keyboardHint": { "message": "Use arrow keys to adjust; hold Shift for 10 pixels" },
+  "settings.capture.cancel": { "message": "Cancel" },
+  "settings.capture.confirmCopy": { "message": "Confirm and copy" },
+  "settings.capture.copying": { "message": "Copying…" },
+  "settings.capture.handle.nw": { "message": "Resize from top left" },
+  "settings.capture.handle.n": { "message": "Resize top edge" },
+  "settings.capture.handle.ne": { "message": "Resize from top right" },
+  "settings.capture.handle.e": { "message": "Resize right edge" },
+  "settings.capture.handle.se": { "message": "Resize from bottom right" },
+  "settings.capture.handle.s": { "message": "Resize bottom edge" },
+  "settings.capture.handle.sw": { "message": "Resize from bottom left" },
+  "settings.capture.handle.w": { "message": "Resize left edge" },
   "settings.terminal.description": {
     "message": "Configure fonts and colors for the main PTY and workspace shell terminals.",
     "description": "Terminal settings description"

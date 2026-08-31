@@ -11,8 +11,16 @@
    *
    * Phase 3 mounted xterm 实例保持常驻,避免 LRU evict 丢 scrollback。
    */
-  import { onMount, onDestroy } from 'svelte'
-  import { getCurrentWindow } from '@tauri-apps/api/window'
+  import { onMount, onDestroy, tick } from 'svelte'
+  import {
+    getCurrentWindow,
+    cursorPosition,
+    monitorFromPoint,
+    currentMonitor,
+    PhysicalPosition,
+    PhysicalSize,
+    type Monitor,
+  } from '@tauri-apps/api/window'
   import { open } from '@tauri-apps/plugin-dialog'
   import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
   import Terminal from './lib/Terminal.svelte'
@@ -38,6 +46,7 @@
   import AvatarPicker from './lib/AvatarPicker.svelte'
   import EventCenter from './lib/EventCenter.svelte'
   import ToastHost from './lib/ToastHost.svelte'
+  import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
   import {
     tabs,
@@ -115,6 +124,16 @@
   let workspacePanelOpen = $state(false)
   let screenshotSettings = $state<ScreenshotSettings>(loadScreenshotSettings())
   let screenshotBusy = false
+  let screenshotDraft: ScreenshotDraft | null = $state(null)
+  let screenshotCopyBusy = $state(false)
+  let screenshotFocusOrigin: HTMLElement | null = null
+  type ScreenshotWindowState = {
+    position: PhysicalPosition
+    size: PhysicalSize
+    maximized: boolean
+    fullscreen: boolean
+  }
+  let screenshotWindowState: ScreenshotWindowState | null = null
   let registeredScreenshotShortcut: string | null = null
   let screenshotSettingsUnlisten: (() => void) | null = null
   // inspector 宽度可拖拽调整,带上下限。
@@ -152,17 +171,20 @@
 
   async function runConfiguredScreenshot() {
     if (screenshotBusy) return
+    screenshotFocusOrigin = document.activeElement instanceof HTMLElement ? document.activeElement : null
     screenshotBusy = true
     try {
+      let editorMonitor: Monitor | null
       if (screenshotSettings.mode === 'area') {
-        await ipc.captureInteractiveScreenshot()
+        const cursor = await cursorPosition()
+        editorMonitor = await monitorFromPoint(cursor.x, cursor.y)
+        screenshotDraft = await ipc.captureInteractiveScreenshot()
       } else {
-        await ipc.captureWindowScreenshot(appWindow.label)
+        editorMonitor = await currentMonitor()
+        screenshotDraft = await ipc.captureWindowScreenshot(appWindow.label)
       }
-      pushToast({
-        severity: 'success',
-        title: t('settings.capture.copied'),
-      })
+      if (!editorMonitor) throw new Error('Could not resolve the display for screenshot editing')
+      await enterScreenshotFullscreen(editorMonitor)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       if (detail.includes('cancelled')) return
@@ -173,7 +195,64 @@
       })
     } finally {
       screenshotBusy = false
+      if (!screenshotDraft) {
+        screenshotFocusOrigin?.focus()
+        screenshotFocusOrigin = null
+      }
     }
+  }
+
+  async function enterScreenshotFullscreen(monitor: Monitor) {
+    screenshotWindowState = {
+      position: await appWindow.outerPosition(),
+      size: await appWindow.outerSize(),
+      maximized: await appWindow.isMaximized(),
+      fullscreen: await appWindow.isFullscreen(),
+    }
+    if (screenshotWindowState.fullscreen) await appWindow.setFullscreen(false)
+    if (screenshotWindowState.maximized) await appWindow.unmaximize()
+    await appWindow.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y))
+    await appWindow.setSize(new PhysicalSize(monitor.size.width, monitor.size.height))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    await appWindow.setFullscreen(true)
+  }
+
+  async function confirmScreenshotCrop(crop: ScreenshotCrop) {
+    if (!screenshotDraft || screenshotCopyBusy) return
+    screenshotCopyBusy = true
+    try {
+      await ipc.copyScreenshotCrop(screenshotDraft.pngBase64, crop)
+      await closeScreenshotEditor()
+      pushToast({ severity: 'success', title: t('settings.capture.copied') })
+    } catch (error) {
+      pushToast({
+        severity: 'error',
+        title: t('settings.capture.failed'),
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      screenshotCopyBusy = false
+    }
+  }
+
+  async function closeScreenshotEditor() {
+    screenshotDraft = null
+    await restoreScreenshotWindow()
+    await tick()
+    screenshotFocusOrigin?.focus()
+    screenshotFocusOrigin = null
+  }
+
+  async function restoreScreenshotWindow() {
+    const previous = screenshotWindowState
+    screenshotWindowState = null
+    if (!previous) return
+    await appWindow.setFullscreen(false)
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    await appWindow.setPosition(previous.position)
+    await appWindow.setSize(previous.size)
+    if (previous.maximized) await appWindow.maximize()
+    if (previous.fullscreen) await appWindow.setFullscreen(true)
   }
 
   async function syncScreenshotShortcutRegistration() {
@@ -2125,6 +2204,15 @@
     onTakeScreenshot={() => void runConfiguredScreenshot()}
     {locale}
     onLocaleChange={setLocale}
+  />
+{/if}
+
+{#if screenshotDraft}
+  <ScreenshotEditor
+    draft={screenshotDraft}
+    busy={screenshotCopyBusy}
+    onConfirm={confirmScreenshotCrop}
+    onClose={() => { if (!screenshotCopyBusy) void closeScreenshotEditor() }}
   />
 {/if}
 

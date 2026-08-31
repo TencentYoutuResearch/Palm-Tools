@@ -1,20 +1,78 @@
+use base64::Engine;
+use serde::Serialize;
 use tauri::{Manager, WebviewWindow};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotDraft {
+    png_base64: String,
+    width: u32,
+    height: u32,
+}
 
 #[tauri::command]
 pub fn capture_window_screenshot(
     app: tauri::AppHandle,
     window_label: String,
-) -> Result<(), String> {
+) -> Result<ScreenshotDraft, String> {
     let window = app
         .get_webview_window(&window_label)
         .ok_or_else(|| format!("window '{window_label}' not found"))?;
-    let png = capture_window_png(&window)?;
-    copy_png_to_clipboard(&png)
+    screenshot_draft(capture_window_png(&window)?)
 }
 
 #[tauri::command]
-pub fn capture_interactive_screenshot() -> Result<(), String> {
-    capture_interactive_to_clipboard()
+pub fn capture_interactive_screenshot() -> Result<ScreenshotDraft, String> {
+    screenshot_draft(capture_main_screen_png()?)
+}
+
+#[tauri::command]
+pub fn copy_screenshot_crop(
+    png_base64: String,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(png_base64)
+        .map_err(|error| format!("decode screenshot draft failed: {error}"))?;
+    let cropped = crop_png(&png, x, y, width, height)?;
+    copy_png_to_clipboard(&cropped)
+}
+
+fn screenshot_draft(png: Vec<u8>) -> Result<ScreenshotDraft, String> {
+    let image = image::load_from_memory(&png)
+        .map_err(|error| format!("decode screenshot draft failed: {error}"))?;
+    Ok(ScreenshotDraft {
+        png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+        width: image.width(),
+        height: image.height(),
+    })
+}
+
+fn crop_png(png: &[u8], x: u32, y: u32, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use image::codecs::png::PngEncoder;
+    use image::{ColorType, ImageEncoder};
+
+    let image = image::load_from_memory(png)
+        .map_err(|error| format!("decode screenshot for crop failed: {error}"))?
+        .into_rgba8();
+    if width == 0
+        || height == 0
+        || x >= image.width()
+        || y >= image.height()
+        || x.saturating_add(width) > image.width()
+        || y.saturating_add(height) > image.height()
+    {
+        return Err("screenshot crop is outside the captured image".into());
+    }
+    let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
+    let mut output = Vec::new();
+    PngEncoder::new(&mut output)
+        .write_image(cropped.as_raw(), width, height, ColorType::Rgba8.into())
+        .map_err(|error| format!("encode cropped screenshot failed: {error}"))?;
+    Ok(output)
 }
 
 #[cfg(target_os = "macos")]
@@ -54,8 +112,6 @@ fn capture_window_png(window: &WebviewWindow) -> Result<Vec<u8>, String> {
         create_image, kCGWindowImageBestResolution, kCGWindowImageBoundsIgnoreFraming,
         kCGWindowListOptionIncludingWindow,
     };
-    use image::codecs::png::PngEncoder;
-    use image::{ColorType, ImageEncoder};
     use objc2_app_kit::NSWindow;
 
     let raw = window
@@ -80,7 +136,16 @@ fn capture_window_png(window: &WebviewWindow) -> Result<Vec<u8>, String> {
         kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution,
     )
     .ok_or_else(|| "macOS window capture returned no image".to_string())?;
-    let image_ref = image.as_ref();
+    encode_cg_image_png(image.as_ref())
+}
+
+#[cfg(target_os = "macos")]
+fn encode_cg_image_png(image_ref: &core_graphics::image::CGImageRef) -> Result<Vec<u8>, String> {
+    use image::codecs::png::PngEncoder;
+    use image::{ColorType, ImageEncoder};
+
+    let width = image_ref.width();
+    let height = image_ref.height();
     let data = image_ref.data();
     let bytes = data.bytes();
     let bytes_per_row = image_ref.bytes_per_row();
@@ -119,27 +184,36 @@ fn capture_window_png(_window: &WebviewWindow) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn capture_interactive_to_clipboard() -> Result<(), String> {
-    let status = std::process::Command::new("/usr/sbin/screencapture")
-        .arg("-i")
-        .arg("-c")
-        .arg("-x")
-        .status()
-        .map_err(|error| format!("launch screencapture failed: {error}"))?;
-    if !status.success() {
-        return Err("cancelled".into());
+fn capture_main_screen_png() -> Result<Vec<u8>, String> {
+    use core_graphics::display::CGDisplay;
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| "create cursor event source failed".to_string())?;
+    let cursor = CGEvent::new(source)
+        .map_err(|_| "read cursor position failed".to_string())?
+        .location();
+    let (display_ids, count) = CGDisplay::displays_with_point(cursor, 1)
+        .map_err(|error| format!("resolve display under cursor failed: {error}"))?;
+    if count == 0 {
+        return Err("no display found under cursor".into());
     }
-    Ok(())
+    let display = CGDisplay::new(display_ids[0]);
+    let image = display
+        .image()
+        .ok_or_else(|| "capture display under cursor returned no image".to_string())?;
+    encode_cg_image_png(image.as_ref())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn capture_interactive_to_clipboard() -> Result<(), String> {
-    Err("interactive screenshot is currently only supported on macOS".into())
+fn capture_main_screen_png() -> Result<Vec<u8>, String> {
+    Err("screen screenshot is currently only supported on macOS".into())
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::clipboard_image_from_png;
+    use super::{clipboard_image_from_png, crop_png};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder};
 
@@ -154,5 +228,23 @@ mod tests {
         let image = clipboard_image_from_png(&png).expect("decode clipboard image");
         assert_eq!((image.width, image.height), (2, 1));
         assert_eq!(image.bytes.as_ref(), rgba);
+    }
+
+    #[test]
+    fn crops_png_to_requested_pixel_bounds() {
+        let rgba = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&rgba, 2, 2, ColorType::Rgba8.into())
+            .expect("encode fixture png");
+
+        let cropped = crop_png(&png, 1, 0, 1, 2).expect("crop png");
+        let image = image::load_from_memory(&cropped)
+            .expect("decode crop")
+            .into_rgba8();
+        assert_eq!(image.dimensions(), (1, 2));
+        assert_eq!(image.as_raw(), &[0, 255, 0, 255, 255, 255, 255, 255]);
     }
 }

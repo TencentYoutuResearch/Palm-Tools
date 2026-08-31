@@ -383,9 +383,11 @@ export const ipc = {
   saveTabs: (tabs: PersistedTab[]) => invoke<void>('save_tabs', { tabs }),
   focusMainWindow: () => invoke<void>('focus_main_window'),
   captureWindowScreenshot: (windowLabel: string) =>
-    invoke<void>('capture_window_screenshot', { windowLabel }),
+    invoke<ScreenshotDraft>('capture_window_screenshot', { windowLabel }),
   captureInteractiveScreenshot: () =>
-    invoke<void>('capture_interactive_screenshot'),
+    invoke<ScreenshotDraft>('capture_interactive_screenshot'),
+  copyScreenshotCrop: (pngBase64: string, crop: ScreenshotCrop) =>
+    invoke<void>('copy_screenshot_crop', { pngBase64, ...crop }),
   openSpecOpsWindow: (session: SpecOpsSession, theme: ThemeMode, locale: LocaleMode) =>
     invoke<void>('open_specops_window', { session, theme, locale }),
   specopsOpen: (workspace: string) => invoke<SpecOpsSession>('specops_open', { workspace }),
@@ -1238,3 +1240,5 @@ export const syncIpc = {
       },
     }),
 }
+export type ScreenshotDraft = { pngBase64: string; width: number; height: number }
+export type ScreenshotCrop = { x: number; y: number; width: number; height: number }
