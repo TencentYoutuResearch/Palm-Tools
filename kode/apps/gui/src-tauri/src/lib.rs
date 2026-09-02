@@ -23,6 +23,7 @@ mod memory_mcp;
 mod model_monitor;
 mod model_usage;
 mod persistence;
+mod plugins;
 mod screenshot;
 mod shell_pty;
 mod specops;
@@ -216,6 +217,12 @@ pub fn run() {
             memory::memory_sync_config,
             memory::memory_sync_config_set,
             memory::memory_sync_now,
+            plugins::plugin_overview,
+            plugins::plugin_config_set,
+            plugins::plugin_sync_now,
+            plugins::plugin_set_enabled,
+            plugins::plugin_create,
+            plugins::native_plugin_overview,
             // M4.1 memory MCP setup
             memory_mcp::memory_mcp_check,
             memory_mcp::memory_mcp_setup_codebuddy,

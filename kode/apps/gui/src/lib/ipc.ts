@@ -1240,5 +1240,60 @@ export const syncIpc = {
       },
     }),
 }
+
+export type PluginCompatibility = 'native' | 'adapted' | 'partial' | 'unsupported'
+export interface PluginPlatformStatus {
+  platform: 'codex' | 'claude' | 'cursor' | 'codebuddy'
+  compatibility: PluginCompatibility
+  installed_skills: number
+  available_skills: number
+}
+export interface PluginInventory {
+  name: string
+  source: string
+  enabled: boolean
+  platforms: PluginPlatformStatus[]
+}
+export interface PluginOverview {
+  root: string
+  initialized: boolean
+  config: { remote: string | null; branch: string; auto_push: boolean }
+  plugins: PluginInventory[]
+}
+export interface PluginSyncReport {
+  initialized: boolean
+  pulled: boolean
+  pushed: boolean
+  deployed: Record<string, number>
+}
+export interface NativePlugin {
+  id: string
+  name: string
+  source: string | null
+  version: string | null
+  enabled: boolean | null
+  scope: string | null
+}
+export interface NativeBackendInventory {
+  backend: 'codex' | 'claude' | 'cursor' | 'codebuddy'
+  cli_available: boolean
+  status: 'ready' | 'partial' | 'unavailable' | 'error'
+  detail: string | null
+  capabilities: string[]
+  plugins: NativePlugin[]
+}
+export interface NativePluginOverview {
+  read_only: boolean
+  backends: NativeBackendInventory[]
+}
+export const pluginIpc = {
+  overview: () => invoke<PluginOverview>('plugin_overview'),
+  setConfig: (remote: string, branch: string, autoPush: boolean) =>
+    invoke<void>('plugin_config_set', { args: { remote, branch, auto_push: autoPush } }),
+  syncNow: () => invoke<PluginSyncReport>('plugin_sync_now'),
+  setEnabled: (name: string, enabled: boolean) => invoke<void>('plugin_set_enabled', { name, enabled }),
+  create: (name: string, description: string) => invoke<string>('plugin_create', { name, description }),
+  nativeOverview: () => invoke<NativePluginOverview>('native_plugin_overview'),
+}
 export type ScreenshotDraft = { pngBase64: string; width: number; height: number }
 export type ScreenshotCrop = { x: number; y: number; width: number; height: number }

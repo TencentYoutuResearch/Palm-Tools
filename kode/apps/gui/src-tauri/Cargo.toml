@@ -80,6 +80,7 @@ custom-protocol = ["tauri/custom-protocol"]
 devtools = ["tauri/devtools"]
 
 [dev-dependencies]
+tempfile = "3"
 # 端到端集成测试用:reqwest 走 REST,tokio-tungstenite 走 WS
 # (生产代码也用,移到上面 [dependencies] 后这里只剩 dev-only feature)
 tokio = { version = "1", features = ["full", "test-util"] }

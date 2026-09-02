@@ -45,13 +45,14 @@
   type Props = {
     onClose: () => void
     onOpenMemorySync: () => void
+    onOpenPlugins: () => void
     onTakeScreenshot: () => void | Promise<void>
     locale: LocaleMode
     onLocaleChange: (locale: LocaleMode) => void
   }
-  let { onClose, onOpenMemorySync, onTakeScreenshot, locale, onLocaleChange }: Props = $props()
+  let { onClose, onOpenMemorySync, onOpenPlugins, onTakeScreenshot, locale, onLocaleChange }: Props = $props()
 
-  type Tab = 'backends' | 'memory' | 'terminal' | 'capture' | 'language'
+  type Tab = 'backends' | 'plugins' | 'memory' | 'terminal' | 'capture' | 'language'
   let tab: Tab = $state('backends')
 
   let backends: BackendListItem[] = $state([])
@@ -355,6 +356,10 @@
         </svg>
         <span>{tr('settings.memory.title')}</span>
       </button>
+      <button class="nav-item" class:active={tab === 'plugins'} onclick={() => (tab = 'plugins')}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6l4-2 4 4-4 4 2 4h-6l-2 4-4-4 2-4-4-2 4-4Z"/></svg>
+        <span>{tr('plugins.title')}</span>
+      </button>
       <button class="nav-item" class:active={tab === 'terminal'} onclick={() => (tab = 'terminal')}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="4 17 10 11 4 5" />
@@ -584,6 +589,9 @@
             </div>
           </li>
         </ul>
+      {:else if tab === 'plugins'}
+        <div class="content-head"><h2>{tr('plugins.title')}</h2><p class="sub">{tr('plugins.description')}</p></div>
+        <ul class="list"><li class="item"><div class="item-body"><div class="item-title"><span class="name">{tr('plugins.marketplace')}</span></div><span class="item-cmd plain">{tr('plugins.marketplaceHint')}</span></div><div class="item-actions"><button class="btn ghost sm" onclick={onOpenPlugins}>{tr('settings.configure')}</button></div></li></ul>
       {:else if tab === 'terminal'}
         <div class="content-head">
           <h2>{tr('settings.terminal.title')}</h2>

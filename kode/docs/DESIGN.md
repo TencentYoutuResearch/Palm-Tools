@@ -102,9 +102,15 @@ Mobile session identity stays continuous from the session list into the detail h
 
 Mobile session rows show a compact unread-message count for assistant messages received outside the currently viewed session. Opening the session marks those messages read; counts above 99 use the stable `99+` label. Attention remains a separate semantic badge because it represents required action rather than unread volume.
 
+Mobile device bindings use a dedicated device ledger. The current desktop is named in the session AppBar and marked with explicit `Current` text in management; switching devices verifies connectivity before replacing the active API/WebSocket context. Adding a QR binding appends or refreshes one device without replacing unrelated credentials.
+
 ### Forms and overlays
 
 Fields use owned labels, dark input surfaces, border focus plus a soft ring, and inline recovery. Drawers and dialogs use application-owned surfaces, Escape behavior, and stable actions. Toasts use the shared `ToastHost`; actionable failures also remain inline.
+
+Plugin management is an operational inventory rather than an app-store gallery. One compact compatibility matrix compares Codex, Claude, Cursor, and CodeBuddy with exact `native`, `adapted`, `partial`, or `unsupported` states. Git source configuration stays above the inventory, and synchronization reports deployed skill counts without implying that platform-specific hooks, agents, or MCP configuration were converted.
+Plugins own a separate Settings category from Memory. The product calls its Git source the **Kode plugin sync repository**, never a marketplace: it is private cross-machine state and must not imply discovery, endorsement, or affiliation with any platform-native plugin marketplace. Local creation, selection, and platform deployment remain one bounded drawer.
+The same drawer separates the sync repository from **Native backend plugins** with a hard section rule and independent scan action. Native inventory is a compact operational ledger grouped by backend, showing source and version only when reported by that backend. The initial native scan is deliberately read-only; partial support and missing CLIs remain visible instead of being disguised as an empty successful result.
 
 Cloud relay setup is treated as an operational handoff, not a generic account wizard. A flat backend identity bar owns the active destination; an exact vertical deployment rail reports upload, install, local health, public health, and save stages. The QR code is the only high-contrast visual block. Existing deployments open directly on that QR surface, while deployment and backend switching remain explicit secondary actions.
 

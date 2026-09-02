@@ -36,6 +36,7 @@
   import MemorySyncPanel from './lib/MemorySyncPanel.svelte'
   import MemoryMcpBanner from './lib/MemoryMcpBanner.svelte'
   import SettingsPanel from './lib/SettingsPanel.svelte'
+  import PluginPanel from './lib/PluginPanel.svelte'
   import DeployPanel from './lib/DeployPanel.svelte'
   import MetricsHoverCard from './lib/MetricsHoverCard.svelte'
   import WorkspacePanel from './lib/WorkspacePanel.svelte'
@@ -115,6 +116,7 @@
   let memoryPanelOpen = $state(false)
   /** Memory git sync 配置面板。Cmd+P → "Memory: Sync settings…" */
   let memorySyncOpen = $state(false)
+  let pluginPanelOpen = $state(false)
   /** M4.3:memory browse 面板(已 approve 池)。Cmd+Shift+B 打开。 */
   let memoryBrowseOpen = $state(false)
   /** 2026-06:Settings 面板(命令面板「Settings…」或 ⌘, 打开)。
@@ -837,6 +839,7 @@
       pathsOpen ||
       memoryPanelOpen ||
       memorySyncOpen ||
+      pluginPanelOpen ||
       memoryBrowseOpen ||
       settingsOpen ||
       deployOpen ||
@@ -1290,6 +1293,7 @@
       if (workspacePanelOpen) { workspacePanelOpen = false; e.preventDefault(); return }
       if (memoryPromptPreviewText !== null) { memoryPromptPreviewText = null; e.preventDefault(); return }
       if (settingsOpen) { settingsOpen = false; e.preventDefault(); return }
+      if (pluginPanelOpen) { pluginPanelOpen = false; e.preventDefault(); return }
       if (chooserOpen && $tabs.length > 0) {
         chooserOpen = false; e.preventDefault(); return
       }
@@ -2201,6 +2205,7 @@
   <SettingsPanel
     onClose={() => (settingsOpen = false)}
     onOpenMemorySync={() => { memorySyncOpen = true }}
+    onOpenPlugins={() => { pluginPanelOpen = true }}
     onTakeScreenshot={() => void runConfiguredScreenshot()}
     {locale}
     onLocaleChange={setLocale}
@@ -2284,6 +2289,9 @@
 
 {#if memorySyncOpen}
   <MemorySyncPanel onClose={() => (memorySyncOpen = false)} />
+{/if}
+{#if pluginPanelOpen}
+  <PluginPanel onClose={() => (pluginPanelOpen = false)} />
 {/if}
 
 {#if memoryBrowseOpen}
