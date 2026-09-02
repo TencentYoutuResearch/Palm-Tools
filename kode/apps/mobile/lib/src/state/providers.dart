@@ -14,6 +14,7 @@ final endpointStorageProvider = Provider<EndpointStorage>(
 
 /// 当前激活的 endpoint。null = 未配对,App 路由到 /pair。
 final endpointProvider = StateProvider<Endpoint?>((ref) => null);
+final savedEndpointsProvider = StateProvider<List<Endpoint>>((ref) => const []);
 
 /// 启动时一次性 bootstrap:
 ///   1. 优先用 secure storage 里曾经的 endpoint;但**先 probe 一遍** —— 如果不通
@@ -35,16 +36,29 @@ final endpointBootstrapProvider = FutureProvider<Endpoint?>((ref) async {
     }
   }
 
-  final stored = await storage.load();
-  if (stored != null && await probe(stored)) {
-    ref.read(endpointProvider.notifier).state = stored;
-    return stored;
+  final collection = await storage.loadCollection();
+  ref.read(savedEndpointsProvider.notifier).state = collection.endpoints;
+  if (collection.endpoints.isEmpty) return null;
+
+  final preferred = collection.active ?? collection.endpoints.first;
+  final candidates = [
+    preferred,
+    ...collection.endpoints.where(
+      (endpoint) => endpoint.storageKey != preferred.storageKey,
+    ),
+  ];
+  final reachable = await Future.wait(candidates.map(probe));
+  for (var index = 0; index < candidates.length; index++) {
+    if (!reachable[index]) continue;
+    final endpoint = candidates[index];
+    await storage.activate(endpoint.storageKey);
+    ref.read(endpointProvider.notifier).state = endpoint;
+    return endpoint;
   }
 
-  if (stored != null) {
-    await storage.clear();
-  }
-  return null;
+  // Keep unreachable bindings available for device management and retry.
+  ref.read(endpointProvider.notifier).state = preferred;
+  return preferred;
 });
 
 /// 当 endpoint 变化时,自动产生匹配的 ApiClient。
@@ -82,6 +96,7 @@ final eventStreamProvider = StreamProvider<Envelope>((ref) {
 class SessionAttentionNotifier extends Notifier<Map<int, String>> {
   @override
   Map<int, String> build() {
+    ref.listen(endpointProvider, (_, _) => state = const {});
     // 监听 ws 事件,自动更新
     ref.listen<AsyncValue<Envelope>>(eventStreamProvider, (_, ev) {
       ev.whenData((env) {
@@ -129,6 +144,10 @@ class SessionUnreadCountNotifier extends Notifier<Map<int, int>> {
 
   @override
   Map<int, int> build() {
+    ref.listen(endpointProvider, (_, _) {
+      _viewedSessionId = null;
+      state = const {};
+    });
     ref.listen<AsyncValue<Envelope>>(eventStreamProvider, (_, event) {
       event.whenData((envelope) {
         if (envelope.type == 'session.exited') {
@@ -374,6 +393,10 @@ class SessionMessageQueueNotifier
 
   @override
   Map<int, List<QueuedSessionMessage>> build() {
+    ref.listen(endpointProvider, (_, _) {
+      _earlyStatuses.clear();
+      state = const {};
+    });
     ref.listen<AsyncValue<Envelope>>(eventStreamProvider, (_, event) {
       event.whenData((envelope) {
         if (envelope.type == 'message' && envelope.payload['role'] == 'user') {

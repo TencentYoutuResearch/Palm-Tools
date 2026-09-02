@@ -118,7 +118,26 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('kode · ${endpoint?.deviceName ?? '?'}'.toUpperCase()),
+        title: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => context.push('/devices'),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    'kode · ${endpoint?.deviceName ?? '?'}'.toUpperCase(),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.expand_more_rounded, size: 20),
+              ],
+            ),
+          ),
+        ),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -126,18 +145,9 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
             onPressed: () => ref.read(sessionsProvider.notifier).refresh(),
           ),
           IconButton(
-            tooltip: 'Unpair',
-            icon: const Icon(Icons.logout),
-            onPressed: () async {
-              try {
-                await ref.read(apiClientProvider)?.revokeBinding();
-              } catch (error) {
-                debugPrint('[unpair] server revoke failed: $error');
-              }
-              await ref.read(endpointStorageProvider).clear();
-              ref.read(endpointProvider.notifier).state = null;
-              if (context.mounted) context.go('/pair');
-            },
+            tooltip: 'Manage devices',
+            icon: const Icon(Icons.devices_rounded),
+            onPressed: () => context.push('/devices'),
           ),
         ],
       ),

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import 'src/state/providers.dart';
 import 'src/ui/pair/pair_screen.dart';
+import 'src/ui/devices/devices_screen.dart';
 import 'src/ui/sessions/session_detail_screen.dart';
 import 'src/ui/sessions/sessions_screen.dart';
 import 'src/ui/theme.dart';
@@ -24,6 +25,9 @@ final _routerProvider = Provider<GoRouter>((ref) {
         return loc == '/loading' ? null : '/loading';
       }
       if (ep == null) return loc == '/pair' ? null : '/pair';
+      if (loc == '/pair' && state.uri.queryParameters['add'] == '1') {
+        return null;
+      }
       // 已配对:/loading 或 /pair 跳 /sessions;其它(/sessions, /sessions/:id)放过
       if (loc == '/loading' || loc == '/pair') return '/sessions';
       return null;
@@ -32,6 +36,7 @@ final _routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: '/loading', builder: (_, _) => const _LoadingScreen()),
       GoRoute(path: '/pair', builder: (_, _) => const PairScreen()),
+      GoRoute(path: '/devices', builder: (_, _) => const DevicesScreen()),
       GoRoute(path: '/sessions', builder: (_, _) => const SessionsScreen()),
       GoRoute(
         path: '/sessions/:id',

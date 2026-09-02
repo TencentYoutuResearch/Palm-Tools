@@ -53,10 +53,10 @@ class _PairScreenState extends ConsumerState<PairScreen> {
       }
       await client.listSessions();
       try {
-        await ref
-            .read(endpointStorageProvider)
-            .save(endpoint)
-            .timeout(const Duration(seconds: 2));
+        final storage = ref.read(endpointStorageProvider);
+        await storage.save(endpoint).timeout(const Duration(seconds: 2));
+        ref.read(savedEndpointsProvider.notifier).state =
+            (await storage.loadCollection()).endpoints;
       } catch (error) {
         debugPrint(
           '[pair] secure storage failed; using in-memory binding: $error',

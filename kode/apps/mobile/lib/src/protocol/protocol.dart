@@ -138,6 +138,7 @@ class Endpoint {
   });
 
   String get baseUrl => serverUrl.replaceAll(RegExp(r'/+$'), '');
+  String get storageKey => '$baseUrl::$deviceId';
   String get wsUrl {
     final uri = Uri.parse(baseUrl);
     return uri
