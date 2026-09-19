@@ -12,6 +12,7 @@
    * Phase 3 mounted xterm 实例保持常驻,避免 LRU evict 丢 scrollback。
    */
   import { onMount, onDestroy, tick } from 'svelte'
+  import WindowsWindowControls from './lib/WindowsWindowControls.svelte'
   const isWindows = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
   import {
     getCurrentWindow,
@@ -1780,7 +1781,7 @@
   class:inspector-resizing={inspectorResizing}
   style={workspacePanelOpen ? `--inspector-w:${inspectorWidth}px` : ''}
 >
-  <div class="top-chrome-continuity" aria-hidden="true"></div>
+  {#if isWindows}<WindowsWindowControls />{/if}
   <aside class="sidebar" class:compact={sidebarMode === 'compact'}>
     <!-- 系统原生红绿灯(titleBarStyle: Overlay)落在这条顶栏左上角;整条 drag region。
          我们不再自绘按钮,只用 padding-left 给原生红绿灯让出位置(见 .sidebar-traffic)。 -->
@@ -2388,6 +2389,10 @@
     border-top-left-radius: 0;
     border-top-right-radius: 0;
   }
+  .root.windows:not(.inspector-open) .main-titlebar { padding-right: 134px; }
+  .root.windows :global(.workspace-panel .nav-top) { padding-top: 44px; height: auto; min-height: 88px; box-sizing: border-box; }
+  .root.windows .sidebar-traffic { padding-left: 8px; }
+  .root.windows .main-titlebar.sidebar-hidden { padding-left: 8px; }
 
   /* ── Noise texture overlay(原 body::after,迁入 .root)──
      z-index 100:在内容之上但低于所有 dialog/overlay(1000+)。 */
@@ -2403,21 +2408,6 @@
     background-size: 256px 256px;
   }
 
-  /* 顶部 chrome 切线必须由 root 统一画,而不是只挂在 .main-titlebar 上。
-     否则右侧 inspector 打开时会盖住 main 内部的标题栏阴影,形成断点。 */
-  .top-chrome-continuity {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 44px;
-    z-index: 8;
-    pointer-events: none;
-    border-bottom: 1px solid var(--bd-muted);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.05),
-      inset 0 2px 0 0 color-mix(in srgb, var(--acc) 28%, transparent);
-  }
 
   .specops-error {
     position: fixed;
@@ -2481,9 +2471,7 @@
 
   /* ===== 浮在终端区顶部的单条标题栏 =====
      不占 grid 行(absolute),不挤压终端,无边框;高度 44px 与左侧红绿灯条一致。
-     背景用纵向渐变:顶部不透明遮住标题区,底部渐隐到透明 → 与下面终端内容柔和过渡。
-     顶部 1px accent 线和底部分隔线由 .top-chrome-continuity 统一画到整窗宽度,
-     避免右侧 inspector 打开时截断。 */
+     全平台使用纯色背景,不叠加顶部高光、阴影或下沿渐隐。 */
   .main-titlebar {
     position: absolute;
     top: 0;
@@ -2495,32 +2483,11 @@
     align-items: center;
     gap: 8px;
     padding: 0 8px;
-    background: linear-gradient(
-      to bottom,
-      var(--bg-base) 0%,
-      var(--bg-base) 60%,
-      color-mix(in srgb, var(--bg-base) 70%, transparent) 82%,
-      transparent 100%
-    );
+    background: var(--bg-base);
     -webkit-app-region: drag;
     user-select: none;
     -webkit-user-select: none;
     pointer-events: none; /* 容器本身放行点击给终端;内部交互元素再各自开 auto */
-  }
-  /* 标题栏下沿再向终端延伸一段渐隐,让滚动内容从上往下淡入,没有硬切线 */
-  .main-titlebar::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 100%;
-    height: 14px;
-    pointer-events: none;
-    background: linear-gradient(
-      to bottom,
-      color-mix(in srgb, var(--bg-base) 65%, transparent) 0%,
-      transparent 100%
-    );
   }
   .main-titlebar[data-tauri-drag-region] { pointer-events: auto; }
   /* hidden 模式:sidebar 收起,原生红绿灯落在这条 titlebar 左上角 → 让出 70px */

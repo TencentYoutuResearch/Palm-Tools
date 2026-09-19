@@ -83,6 +83,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_decorations(false)?;
+            }
             let handle = app.handle().clone();
 
             // 创建 HookRelay(Unix Domain Socket),用于接收 codebuddy/claude hook 事件。
