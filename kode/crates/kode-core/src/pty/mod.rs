@@ -64,9 +64,10 @@ impl PtyHost {
         //   - 双击 .app:launchd 不设这两个环境变量,CommandBuilder 拿到的
         //     `std::env::vars_os()` 也就没有它们,子进程默认无色
         //
-        // 这里**只在父进程没有时**兜底设置,不覆盖用户/终端已有的值
-        // (例如用户在 iTerm 里有 COLORTERM=truecolor,我们不应该降级到默认)。
-        if std::env::var_os("TERM").is_none() {
+        // 这里在父进程没有 TERM，或明确继承到 TERM=dumb 时兜底设置。
+        // Windows GUI/宿主进程可能会注入 TERM=dumb；继续透传会让 Codex
+        // 拒绝启动交互 TUI。其它有效值仍保持不变。
+        if terminal_type_needs_fallback(std::env::var_os("TERM").as_deref()) {
             cmd.env("TERM", "xterm-256color");
         }
         if std::env::var_os("COLORTERM").is_none() {
@@ -173,6 +174,18 @@ impl PtyHost {
     pub fn kill(&self) {
         if let Ok(mut guard) = self.killer.lock() {
             let _ = guard.kill();
+        }
+    }
+}
+
+/// Whether an inherited TERM value cannot describe the xterm-compatible PTY
+/// that kode creates for its child process.
+fn terminal_type_needs_fallback(term: Option<&std::ffi::OsStr>) -> bool {
+    match term {
+        None => true,
+        Some(value) => {
+            let value = value.to_string_lossy();
+            value.is_empty() || value.eq_ignore_ascii_case("dumb")
         }
     }
 }
@@ -336,6 +349,21 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::time::timeout;
+
+    #[test]
+    fn terminal_type_falls_back_for_missing_empty_or_dumb_values() {
+        assert!(terminal_type_needs_fallback(None));
+        assert!(terminal_type_needs_fallback(Some(std::ffi::OsStr::new(""))));
+        assert!(terminal_type_needs_fallback(Some(std::ffi::OsStr::new(
+            "dumb"
+        ))));
+        assert!(terminal_type_needs_fallback(Some(std::ffi::OsStr::new(
+            "DUMB"
+        ))));
+        assert!(!terminal_type_needs_fallback(Some(std::ffi::OsStr::new(
+            "xterm-256color"
+        ))));
+    }
 
     #[test]
     fn resolve_codex_from_fallback_when_path_misses() {
