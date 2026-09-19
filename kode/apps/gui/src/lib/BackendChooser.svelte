@@ -43,6 +43,8 @@
 
   type Props = {
     backends: BackendInfo[]
+    /** Human-readable, recoverable start failure. Keep the chooser mounted so the user can retry. */
+    errorMessage?: string | null
     /// 提交回调。
     /// quick-pick(1..9 数字键)时 cwd 仍是预填的默认,permissionMode = 'default',model = undefined。
     onSubmit: (opts: {
@@ -57,7 +59,7 @@
       resumeSessionId?: string
     }) => void | Promise<void>
   }
-  let { backends, onSubmit }: Props = $props()
+  let { backends, onSubmit, errorMessage = null }: Props = $props()
 
   type Phase = 'list' | 'configure'
   let phase: Phase = $state('list')
@@ -510,6 +512,14 @@
         {/if}
       </p>
     </div>
+
+    {#if errorMessage}
+      <div class="start-error" role="alert">
+        <strong>无法启动会话</strong>
+        <span>{errorMessage}</span>
+        <small>检查命令路径或工作目录后重试；这不会影响左侧已有会话。</small>
+      </div>
+    {/if}
 
     {#if phase === 'list'}
       <!-- ======================== Local backends ======================== -->
@@ -1058,6 +1068,19 @@
     font-size: 10px;
   }
   .catalog-status.error { color: var(--st-warn); }
+  .start-error {
+    display: grid;
+    gap: 4px;
+    margin: 0 0 var(--sp-4);
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--st-err, #ef4444) 34%, transparent);
+    border-radius: var(--rad-md);
+    background: color-mix(in srgb, var(--st-err, #ef4444) 8%, var(--bg-elevated));
+    color: var(--fg-secondary);
+    font-size: var(--fs-sm);
+  }
+  .start-error strong { color: var(--st-err, #ef4444); }
+  .start-error small { color: var(--fg-tertiary); }
   @keyframes model-spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .model-refresh .spinning { animation: none; } }
   label {

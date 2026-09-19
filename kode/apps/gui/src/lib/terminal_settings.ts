@@ -8,6 +8,9 @@ export const TERMINAL_FONT_SIZE_MAX = 32
 export const TERMINAL_FONT_SIZE_DEFAULT = 13
 
 export const TERMINAL_FONT_PRESETS = [
+  'Cascadia Mono',
+  'Cascadia Code',
+  'Consolas',
   'SF Mono',
   'JetBrains Mono',
   'Menlo',
@@ -49,7 +52,9 @@ function keysFor(target: TerminalTarget) {
 }
 
 function defaultFontFamily(target: TerminalTarget): string {
-  return target === 'pty' ? '"JetBrains Mono", "SF Mono", Menlo, monospace' : 'SF Mono'
+  return target === 'pty'
+    ? '"Cascadia Mono", "Cascadia Code", Consolas, "JetBrains Mono", "SF Mono", Menlo, monospace'
+    : 'Cascadia Mono, Consolas, "SF Mono", Menlo, Monaco, monospace'
 }
 
 export function clampTerminalFontSize(size: number): number {
@@ -64,7 +69,14 @@ export function loadTerminalAppearance(target: TerminalTarget): TerminalAppearan
   let themeMode: TerminalThemeMode = 'system'
   try {
     const savedFamily = localStorage.getItem(keys.fontFamily)?.trim()
-    if (savedFamily) fontFamily = savedFamily
+    if (savedFamily) {
+      // Migrate the old PTY default. On Windows its final generic fallback
+      // resolves to Courier New when the optional developer fonts are absent.
+      const oldPtyDefault = '"JetBrains Mono", "SF Mono", Menlo, monospace'
+      fontFamily = target === 'pty' && savedFamily === oldPtyDefault
+        ? defaultFontFamily(target)
+        : savedFamily
+    }
     const savedSize = localStorage.getItem(keys.fontSize)
     if (savedSize) fontSize = clampTerminalFontSize(parseInt(savedSize, 10))
     const savedTheme = localStorage.getItem(keys.theme)

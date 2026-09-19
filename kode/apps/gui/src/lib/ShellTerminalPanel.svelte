@@ -112,7 +112,7 @@
   /// Apple Symbols(系统符号)→ monospace。
   /// 保证 box-drawing / powerline / 常见图标至少有一个字体能兜出来,不至于全方框。
   /// init 和 applyAppearance 都用这个,避免切字体后丢 fallback。
-  const FONT_FALLBACK = `"SF Mono", Menlo, Monaco, "Symbols Nerd Font Mono", "Noto Sans Mono", "Apple Symbols", monospace`
+  const FONT_FALLBACK = `"Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, Monaco, "Symbols Nerd Font Mono", "Noto Sans Mono", "Apple Symbols", monospace`
   const initialAppearance = loadTerminalAppearance('shell')
   let appearance = $state<TerminalAppearance>(initialAppearance)
   let fontSize = $state(initialAppearance.fontSize)

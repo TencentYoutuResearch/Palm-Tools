@@ -36,9 +36,10 @@
 
 <style>
   .window-controls { position: absolute; top: 0; right: 0; z-index: 110; display: flex; height: 44px; -webkit-app-region: no-drag; }
-  button { width: 42px; height: 44px; display: grid; place-items: center; border: 0; border-radius: 0; color: var(--fg-primary); background: transparent; cursor: default; }
-  button:hover { background: var(--bg-hover); }
+  button { width: 46px; height: 44px; display: grid; place-items: center; border: 0; border-radius: 0; color: var(--fg-primary); background: transparent; cursor: default; transition: background 120ms ease, color 120ms ease; }
+  button:hover { background: color-mix(in srgb, var(--fg-primary) 9%, transparent); }
+  button:active { background: color-mix(in srgb, var(--fg-primary) 15%, transparent); }
   button:focus-visible { outline: 2px solid var(--acc); outline-offset: -3px; }
   button.close:hover { background: #c42b1c; color: white; }
-  svg { fill: none; stroke: currentColor; stroke-width: 1; pointer-events: none; }
+  svg { fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linecap: square; pointer-events: none; }
 </style>

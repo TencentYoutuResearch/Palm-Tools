@@ -100,6 +100,22 @@
 
   let backends: BackendInfo[] = $state([])
   let bootError: string | null = $state(null)
+  let sessionStartError: string | null = $state(null)
+
+  function friendlySessionStartError(error: unknown): string {
+    const detail = error instanceof Error ? error.message : String(error)
+    const normalized = detail.toLowerCase()
+    if (normalized.includes('spawn child failed') || normalized.includes('enoent') || normalized.includes('not found')) {
+      return '找不到 Codex CLI。请确认已安装 Codex CLI，并在 设置 → Backends 中检查命令路径；如果刚安装过 CLI，请重启应用后再试。'
+    }
+    if (normalized.includes('permission denied') || normalized.includes('access is denied')) {
+      return 'Codex CLI 没有启动权限。请检查 CLI 文件权限，或在 设置 → Backends 中改用可执行文件的完整路径。'
+    }
+    if (normalized.includes('cwd') || normalized.includes('working directory') || normalized.includes('directory')) {
+      return '工作目录不可用。请返回并选择一个存在且有权限访问的目录后重试。'
+    }
+    return 'Codex 会话启动失败。请检查 CLI 配置、模型和工作目录后重试。'
+  }
   /** Phase 11.6:已配置的远端 endpoint 列表(含 connected 状态),用于状态栏指示器。
    * 不轮询 —— endpoint 变化时 EndpointDialog 关闭时手动刷新;connected 指向 WS 上线。
    * 启动时拉一次,EndpointDialog onClose 后再拉一次。 */
@@ -1326,6 +1342,7 @@
       void openSpecOps(e.altKey)
     } else if (k === 't' || k === 'T') {
       e.preventDefault()
+      sessionStartError = null
       chooserOpen = true
     } else if (k === 'w' || k === 'W') {
       const id = $activeId
@@ -1795,7 +1812,7 @@
         class="icon-btn"
         title={tr('tab.action.newTabTooltip')}
         aria-label={tr('tab.action.newTab')}
-        onclick={() => (chooserOpen = true)}
+        onclick={() => { sessionStartError = null; chooserOpen = true }}
       >
         <Icon name="plus" size={16} />
       </button>
@@ -1811,9 +1828,7 @@
       tabindex="-1"
       onscroll={closeMenu}
     >
-      {#if bootError}
-        <div class="boot-error">启动失败<br />{bootError}</div>
-      {:else if $tabs.length === 0}
+      {#if $tabs.length === 0}
         <div class="placeholder">No sessions</div>
       {:else}
         <!-- 多 workspace 且非 compact:渲染可折叠的分组 header + 每组独立 dndzone。
@@ -1904,7 +1919,7 @@
           class="icon-btn hidden-fallback-add"
           title={tr('tab.action.newTabTooltip')}
           aria-label={tr('tab.action.newTab')}
-          onclick={() => (chooserOpen = true)}
+          onclick={() => { sessionStartError = null; chooserOpen = true }}
         >
           <Icon name="plus" size={16} />
         </button>
@@ -1978,10 +1993,12 @@
     {/if}
     {#if bootError}
       <div class="main-error">
-        <strong>Boot failed</strong>
-        <pre>{bootError}</pre>
+        <strong>部分功能暂时不可用</strong>
+        <span>应用初始化没有完成，但你仍可以使用左侧栏并重试新建会话。</span>
+        <button class="btn-ghost" onclick={() => (bootError = null)}>关闭提示</button>
       </div>
-    {:else if restorable.length > 0 && $tabs.length === 0 && !chooserOpen}
+    {/if}
+    {#if restorable.length > 0 && $tabs.length === 0 && !chooserOpen}
       <div class="restore-banner">
         <div class="restore-text">
           <strong>Restore last session?</strong>
@@ -1995,8 +2012,8 @@
     {:else if $tabs.length === 0 || chooserOpen}
       <BackendChooser
         {backends}
+        errorMessage={sessionStartError}
         onSubmit={async (opts) => {
-          chooserOpen = false
           try {
             await newTab(opts.backendKey, {
               cwd: opts.cwd,
@@ -2005,9 +2022,12 @@
               endpointId: opts.endpointId,
               resumeSessionId: opts.resumeSessionId ?? null,
             })
+            sessionStartError = null
+            chooserOpen = false
           } catch (e) {
-            console.error(e)
-            bootError = String(e)
+            console.error('session start failed:', e)
+            sessionStartError = friendlySessionStartError(e)
+            chooserOpen = true
           }
         }}
       />
@@ -2389,8 +2409,11 @@
     border-top-left-radius: 0;
     border-top-right-radius: 0;
   }
-  .root.windows:not(.inspector-open) .main-titlebar { padding-right: 134px; }
-  .root.windows :global(.workspace-panel .nav-top) { padding-top: 44px; height: auto; min-height: 88px; box-sizing: border-box; }
+  .root.windows:not(.inspector-open) .main-titlebar { padding-right: 146px; }
+  /* The inspector has its own top bar; align it with the main titlebar instead
+     of adding a second 44px row. Reserve the native caption buttons on the
+     right so inspector actions remain clickable and never sit underneath them. */
+  .root.windows :global(.workspace-panel .nav-top) { padding-right: 146px; }
   .root.windows .sidebar-traffic { padding-left: 8px; }
   .root.windows .main-titlebar.sidebar-hidden { padding-left: 8px; }
 
@@ -3597,12 +3620,17 @@
   }
 
   .main-error {
-    padding: var(--sp-4);
-    color: var(--st-err);
-    font-family: var(--font-mono);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    color: var(--fg-secondary);
+    background: color-mix(in srgb, var(--st-warn, #eab308) 8%, var(--bg-base));
+    border-bottom: 1px solid color-mix(in srgb, var(--st-warn, #eab308) 28%, transparent);
     font-size: var(--fs-sm);
   }
-  .main-error pre { white-space: pre-wrap; margin-top: var(--sp-2); }
+  .main-error strong { color: var(--st-warn, #eab308); }
+  .main-error span { flex: 1; }
 
   /* paths banner 浮层模式(有 tab 时)— 不挡住 term 太多 */
   .paths-floating {

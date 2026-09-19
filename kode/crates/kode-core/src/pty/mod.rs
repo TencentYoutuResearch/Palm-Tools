@@ -307,19 +307,40 @@ fn codex_fallback_paths() -> Vec<PathBuf> {
 /// 共用(cursor-agent / kimi / opencode / grok / kiro-cli 等官方安装脚本都倾向
 /// 把二进制放在这个目录)。找不到候选文件或非可执行时返回 `None`。
 fn local_bin_fallback(command: &str) -> Option<PathBuf> {
-    let cand = dirs::home_dir()?.join(".local").join("bin").join(command);
-    is_executable(&cand).then_some(cand)
+    let dir = dirs::home_dir()?.join(".local").join("bin");
+    command_candidates(&dir, command)
+        .into_iter()
+        .find(|cand| is_executable(cand))
 }
 
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
-        let cand = dir.join(name);
-        if is_executable(&cand) {
-            return Some(cand);
+        for cand in command_candidates(&dir, name) {
+            if is_executable(&cand) {
+                return Some(cand);
+            }
         }
     }
     None
+}
+
+/// Windows CLI installations commonly expose npm commands as `*.cmd` shims,
+/// while Unix installations use an extensionless executable. A GUI process
+/// also tends to inherit a smaller PATH than an interactive shell, so resolve
+/// the platform launchers here before spawning the PTY.
+fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    if Path::new(name).extension().is_none() {
+        // npm places a Unix shell script, a .cmd shim, and a .ps1 shim next
+        // to each other. CreateProcessW cannot run the extensionless script;
+        // use the Windows launcher first and never return the Unix shim.
+        return ["cmd", "exe", "bat", "com"]
+            .into_iter()
+            .map(|ext| dir.join(format!("{name}.{ext}")))
+            .collect();
+    }
+    vec![dir.join(name)]
 }
 
 fn is_executable(path: &Path) -> bool {

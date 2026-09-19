@@ -72,3 +72,34 @@ jobs:
         working-directory: kode/apps/specops
       - if: github.event_name == 'pull_request'
         run: node kode/apps/specops/dist/cli/main.js gate --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --verify specops
+
+  windows:
+    name: Windows GUI build check
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: kode
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89'
+      - uses: pnpm/action-setup@v6
+        with:
+          version: '11.2.2'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.13'
+          cache: pnpm
+          cache-dependency-path: kode/apps/gui/pnpm-lock.yaml
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kode
+      - name: Install GUI dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: kode/apps/gui
+      - name: Check Windows GUI backend
+        run: cargo check -p kode-gui
+      - name: Check GUI frontend
+        run: pnpm check
+        working-directory: kode/apps/gui
