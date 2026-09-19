@@ -613,6 +613,14 @@ pub const HOOK_BINARY_NAME: &str = "kode-memory";
 /// 3. PATH 扫描(`which`)
 /// 4. 仓库 target/{release,debug}(dev 模式 cargo run)
 pub fn resolve_named_binary(name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let executable_name = if Path::new(name).extension().is_none() {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    #[cfg(windows)]
+    let name = executable_name.as_str();
     // (1) 同进程同目录 — 打包后的 sidecar 路径。
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -659,6 +667,17 @@ pub fn which(name: &str) -> Option<PathBuf> {
         if is_executable(&cand) {
             return Some(cand);
         }
+        #[cfg(windows)]
+        if cand.extension().is_none() {
+            let extensions =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+            for extension in extensions.split(';').filter(|ext| ext.starts_with('.')) {
+                let candidate = dir.join(format!("{name}{extension}"));
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
     }
     None
 }
@@ -704,9 +723,22 @@ pub fn build_codebuddy_hook_command() -> String {
 /// Codex hook command:`<kode-memory> codex-hook`。
 pub fn build_codex_hook_command() -> String {
     let bin = resolve_named_binary(HOOK_BINARY_NAME)
-        .map(|p| shell_quote(&p.display().to_string()))
+        .map(|p| codex_hook_quote(&p))
         .unwrap_or_else(|| HOOK_BINARY_NAME.to_string());
     format!("{bin} codex-hook")
+}
+
+fn codex_hook_quote(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        // Codex executes hooks through its selected PowerShell on Windows.
+        // A quoted path alone is a string expression, not an invocation.
+        format!("& '{}'", path.display().to_string().replace('\'', "''"))
+    }
+    #[cfg(not(windows))]
+    {
+        shell_quote(&path.display().to_string())
+    }
 }
 
 /// Cursor Agent `~/.cursor/hooks.json` 路径。
@@ -807,6 +839,60 @@ fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn unix_hook_resolution_and_quoting_preserve_original_behavior() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("Molly's memory helper");
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            super::resolve_named_binary(binary.to_str().unwrap()),
+            Some(binary.clone())
+        );
+        assert_eq!(super::which(binary.to_str().unwrap()), Some(binary.clone()));
+        let quoted = super::codex_hook_quote(&binary);
+        assert_eq!(quoted, super::shell_quote(binary.to_str().unwrap()));
+        assert!(std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("{quoted} codex-hook")])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(super::which(binary.to_str().unwrap()).is_none());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_binary_resolution_and_quoting() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("memory helper.exe");
+        std::fs::write(&binary, b"fixture").unwrap();
+        let stem = dir.path().join("memory helper");
+        assert_eq!(
+            super::resolve_named_binary(&stem.to_string_lossy()),
+            Some(binary.clone())
+        );
+        assert_eq!(
+            super::which(&stem.to_string_lossy())
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            binary.canonicalize().unwrap()
+        );
+        assert_eq!(
+            super::resolve_named_binary(&binary.to_string_lossy()),
+            Some(binary.clone())
+        );
+        assert_eq!(
+            super::codex_hook_quote(&binary),
+            format!("& '{}'", binary.display())
+        );
+        assert_eq!(
+            super::codex_hook_quote(Path::new("C:\\Molly's tools\\memory.exe")),
+            "& 'C:\\Molly''s tools\\memory.exe'"
+        );
+    }
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;

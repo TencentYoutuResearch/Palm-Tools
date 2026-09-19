@@ -30,7 +30,7 @@
     type TerminalAppearance,
   } from './terminal_settings'
   import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
-  import { installConptyCursorGuard } from './conpty_cursor'
+  import { installConptyCursorGuard, shouldInstallConptyCursorGuard } from './conpty_cursor'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import { ConsecutiveCtrlCGuard } from './consecutive_ctrl_c_guard'
@@ -237,7 +237,7 @@
     // 再异步加 WebglAddon。FitAddon 不读 renderer 内部,放 open 前后都行。
     term.open(containerEl)
     if (destroyed || !term) return
-    if (/Windows/i.test(navigator.userAgent) && endpointId?.kind !== 'remote') {
+    if (shouldInstallConptyCursorGuard(navigator.userAgent, endpointId?.kind === 'remote')) {
       disposeCursorGuard = installConptyCursorGuard(term)
     }
 

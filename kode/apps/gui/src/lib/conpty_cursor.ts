@@ -2,6 +2,10 @@
  * ConPTY can send DECSET 25 before DECRST 2026, then restore the input
  * position in a later packet. Let xterm parse split CSI sequences itself.
  */
+export function shouldInstallConptyCursorGuard(userAgent: string, remote: boolean): boolean {
+  return /Windows/i.test(userAgent) && !remote
+}
+
 export function installConptyCursorGuard(term: any): () => void {
   let synchronized = false
   let suppressedShow = false

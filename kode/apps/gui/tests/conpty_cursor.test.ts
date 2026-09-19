@@ -1,7 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { installConptyCursorGuard } from '../src/lib/conpty_cursor.ts'
+import { installConptyCursorGuard, shouldInstallConptyCursorGuard } from '../src/lib/conpty_cursor.ts'
+
+test('ConPTY guard is enabled only for local Windows terminals', () => {
+  for (const ua of ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'Mozilla/5.0 (X11; Linux x86_64)', '']) {
+    assert.equal(shouldInstallConptyCursorGuard(ua, false), false)
+    assert.equal(shouldInstallConptyCursorGuard(ua, true), false)
+  }
+  assert.equal(shouldInstallConptyCursorGuard('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', false), true)
+  assert.equal(shouldInstallConptyCursorGuard('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', true), false)
+})
 
 const { Terminal } = createRequire(import.meta.url)('@xterm/xterm')
 const write = (term: any, data: string) => new Promise<void>(resolve => term.write(data, resolve))

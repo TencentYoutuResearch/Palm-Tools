@@ -1,9 +1,10 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, feat/windows]
 
 jobs:
   rust:
@@ -34,6 +35,9 @@ jobs:
         run: bash "${GITHUB_WORKSPACE}/kode/apps/gui/build-sidecar.sh"
       - name: Build GUI frontend
         run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: kode/apps/gui
+      - name: Test terminal platform isolation
+        run: pnpm test:session-input
         working-directory: kode/apps/gui
       - name: Build SpecOps node bundle
         run: pnpm install --frozen-lockfile && pnpm build
