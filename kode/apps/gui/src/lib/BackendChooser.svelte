@@ -517,7 +517,7 @@
       {#if backends.length === 0}
         <div class="empty">
           <strong>No backend configured</strong>
-          <span>Edit <code>~/.config/kode/config.toml</code> to add one.</span>
+          <span>Open Settings → Backends to enable or add one.</span>
         </div>
       {:else}
         <ul>
@@ -721,7 +721,7 @@
     <div class="footer">
       <span class="footer-text">
         {#if phase === 'list'}
-          Configure backends in <code>~/.config/kode/config.toml</code> · Manage remotes via Cmd+P → "Remote endpoints…"
+          Configure backends in Settings → Backends · Manage remotes from the command palette
         {:else if selectedEndpoint.kind === 'remote'}
           Remote endpoint: <code>{selectedEndpoint.id}</code>
         {:else}

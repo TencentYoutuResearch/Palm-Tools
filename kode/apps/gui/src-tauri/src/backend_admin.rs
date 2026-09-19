@@ -615,7 +615,19 @@ fn upsert_backend_table(doc: &mut DocumentMut, key: &str, backend: &BackendConfi
 /// 的搜索增强而不影响这里。复制一份函数体可以接受。
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
+    let path_ext = std::env::var_os("PATHEXT");
+    which_in(name, &path, path_ext.as_deref())
+}
+
+fn which_in(
+    name: &str,
+    path: &std::ffi::OsStr,
+    path_ext: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    let _ = path_ext;
+
+    for dir in std::env::split_paths(path) {
         let cand = dir.join(name);
         if cand.is_file() {
             #[cfg(unix)]
@@ -632,6 +644,24 @@ fn which(name: &str) -> Option<PathBuf> {
                 return Some(cand);
             }
         }
+
+        // Windows command lookup applies PATHEXT when the command has no
+        // extension.  Checking only `PATH\codex` misses an installed
+        // `PATH\codex.exe`, which caused every built-in backend to be
+        // disabled on first launch.
+        #[cfg(windows)]
+        if std::path::Path::new(name).extension().is_none() {
+            let path_ext = path_ext
+                .map(|value| value.to_string_lossy())
+                .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+            for ext in path_ext.split(';').filter(|ext| !ext.is_empty()) {
+                let ext = ext.trim_start_matches('.');
+                let candidate = dir.join(name).with_extension(ext);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
     }
     None
 }
@@ -641,6 +671,24 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn which_finds_windows_executable_via_pathext() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("example-backend.exe");
+        fs::write(&exe, b"").unwrap();
+        let path = env::join_paths([dir.path()]).unwrap();
+
+        assert_eq!(
+            which_in(
+                "example-backend",
+                &path,
+                Some(std::ffi::OsStr::new(".EXE;.CMD")),
+            ),
+            Some(exe)
+        );
+    }
 
     /// 关键回归:`upsert_backend_table` 必须**保留**用户写的注释和其他 backend。
     /// 这是 toml_edit 选型的核心理由 —— 普通 toml::to_string 会全删。
