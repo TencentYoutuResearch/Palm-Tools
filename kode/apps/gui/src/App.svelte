@@ -12,6 +12,7 @@
    * Phase 3 mounted xterm 实例保持常驻,避免 LRU evict 丢 scrollback。
    */
   import { onMount, onDestroy, tick } from 'svelte'
+  const isWindows = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
   import {
     getCurrentWindow,
     cursorPosition,
@@ -1772,6 +1773,7 @@
 
 <div
   class="root"
+  class:windows={isWindows}
   class:sb-compact={sidebarMode === 'compact'}
   class:sb-hidden={sidebarMode === 'hidden'}
   class:inspector-open={workspacePanelOpen}
@@ -2379,6 +2381,12 @@
     font-size: var(--fs-md);
     /* 左右栏展开/收起:列宽过渡(180ms)给出顺滑的滑入滑出动画 */
     transition: grid-template-columns 180ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  /* Keep macOS rounding; Windows content meets the native title bar squarely. */
+  .root.windows {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
   }
 
   /* ── Noise texture overlay(原 body::after,迁入 .root)──
