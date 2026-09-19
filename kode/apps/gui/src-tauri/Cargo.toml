@@ -38,6 +38,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 portable-pty = "0.9"
 dirs = "5"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
@@ -72,7 +73,6 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSGraphics", "NSScreen", "NSWindow"] }
 core-graphics = "0.25"
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 # 默认关闭所有 Tauri allowlist,只显式开启用得到的

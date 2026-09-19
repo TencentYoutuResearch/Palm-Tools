@@ -11,6 +11,7 @@ kode/apps/gui/dist
 kode/apps/gui/.svelte-kit
 kode/apps/specops/node_modules
 kode/apps/specops/dist
+kode/apps/specops/dist-sidecar/
 kode/apps/specops/coverage
 # Compiled JS files in specops src (tsc output — tests load .ts via vitest, .js shadows them).
 # Note: .d.ts 不忽略 —— src/assets.d.ts 是手写的 ambient declaration(*.md / *.css 等
@@ -33,6 +34,7 @@ kode/services/kode-server-go/deploy/config.yaml
 kode/deploy/.env.sync
 # 本地生成的可上传 sync-server 发布包和解包目录。
 kode/releases/
+kode/artifacts/
 # run.sh 用的独立 Linux 构建目录(x86_64 sync-server 交叉产物)。
 kode/target-linux-amd64/
 # Flutter 默认在 mobile 项目里生成 build/(.gitignore 自带),

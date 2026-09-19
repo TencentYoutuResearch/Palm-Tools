@@ -1233,11 +1233,14 @@ pub async fn open_specops_window(
     // unless the origin is whitelisted — see capabilities/specops.json, which
     // grants start-dragging/toggle-maximize to `http://127.0.0.1:*` for
     // `specops-*` windows. Without that capability the drag strip does nothing.
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(url))
+    let builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(url))
         .title("")
-        .inner_size(1200.0, 800.0)
-        .hidden_title(true)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .inner_size(1200.0, 800.0);
+    #[cfg(target_os = "macos")]
+    let builder = builder.hidden_title(true);
+    #[cfg(target_os = "macos")]
+    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+    builder
         .on_navigation(move |candidate| candidate.origin().ascii_serialization() == allowed_origin)
         .build()
         .map_err(|e| format!("create specops window failed: {e}"))?;

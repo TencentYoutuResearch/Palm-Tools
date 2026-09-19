@@ -39,10 +39,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::{BridgeBus, EventEnvelope};
 use kode_core::CoreEvent;
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 /// Hook Relay 服务,持有 Unix Domain Socket 监听器。
+#[cfg(unix)]
 pub struct HookRelay {
     /// socket 文件路径
     socket_path: PathBuf,
@@ -55,6 +57,7 @@ pub struct HookRelay {
 /// 永不需要因 kode 重启/PID 变化而重写。
 pub const HOOK_SOCKET_PATH: &str = "/tmp/kode-hook.sock";
 
+#[cfg(unix)]
 impl HookRelay {
     /// 创建 HookRelay,绑定固定路径 UDS(`/tmp/kode-hook.sock`)。
     ///
@@ -126,6 +129,7 @@ impl HookRelay {
     }
 }
 
+#[cfg(unix)]
 impl Drop for HookRelay {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.socket_path);
@@ -136,6 +140,7 @@ impl Drop for HookRelay {
     }
 }
 
+#[cfg(unix)]
 /// 处理单个 UDS 连接:逐行读 JSON,解析并 emit。
 async fn handle_connection(
     stream: UnixStream,
@@ -154,6 +159,25 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+/// Windows 当前没有实现与 Unix 版等价的 hook relay transport。
+/// 保留空实现，使 bridge/GUI 的其余功能可以在 Windows 上构建运行；
+/// `new()` 返回错误后，调用方会按设计降级为不启用 hook relay。
+#[cfg(not(unix))]
+pub struct HookRelay;
+
+#[cfg(not(unix))]
+impl HookRelay {
+    pub async fn new() -> Result<Self, String> {
+        Err("hook relay is not available on this platform".to_string())
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        Path::new("")
+    }
+
+    pub async fn run(self, _bus: Arc<BridgeBus>, _core_tx: mpsc::UnboundedSender<CoreEvent>) {}
 }
 
 /// 解析一行 hook JSON 并 emit 对应的 BridgeBus 事件。
@@ -530,7 +554,7 @@ fn peer_cred(stream: &UnixStream) -> Option<(u32, u32, u32)> {
 }
 
 #[cfg(not(unix))]
-fn peer_cred(_stream: &UnixStream) -> Option<(u32, u32, u32)> {
+fn peer_cred<T>(_stream: &T) -> Option<(u32, u32, u32)> {
     None
 }
 
