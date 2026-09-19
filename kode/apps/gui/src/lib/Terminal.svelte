@@ -16,6 +16,7 @@
    *   - 字节流走 Channel<Uint8Array>,直接 term.write(Uint8Array)
    */
   import { onMount, onDestroy } from 'svelte'
+  import { handleWindowsClipboard } from './terminal_clipboard'
   import { get } from 'svelte/store'
   import { ipc, type SessionId, type EndpointId } from './ipc'
   import { tabs } from './sessions'
@@ -490,6 +491,7 @@
       }
 
       // ── (B) 剪贴板操作 ──────────────────────────────────────────────
+      if (handleWindowsClipboard(e, term, ipc.readClipboard)) return
       // Cmd+C:有选区 → 复制;无选区 → 仍 preventDefault(避免 WKWebView undo-focus)
       if (e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'c') {
         e.preventDefault()

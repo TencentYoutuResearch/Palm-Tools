@@ -18,6 +18,7 @@
    *           viewport repair(主终端专用,shell 终端不需要)
    */
   import { onDestroy, onMount } from 'svelte'
+  import { handleWindowsClipboard } from './terminal_clipboard'
   import { ENDPOINT_LOCAL, ipc, shellIpc, type EndpointId, type ShellId } from './ipc'
   import type { TabInfo } from './sessions'
   import Icon from './Icon.svelte'
@@ -322,6 +323,9 @@
           })
         }
       }
+      container.addEventListener('keydown', (e) => {
+        handleWindowsClipboard(e, term, ipc.readClipboard)
+      }, { capture: true })
       container.addEventListener('keydown', onKeydown)
 
       await waitForLayout(container)
