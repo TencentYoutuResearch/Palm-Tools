@@ -30,6 +30,7 @@
     type TerminalAppearance,
   } from './terminal_settings'
   import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
+  import { installConptyCursorGuard } from './conpty_cursor'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import { ConsecutiveCtrlCGuard } from './consecutive_ctrl_c_guard'
@@ -79,6 +80,7 @@
   let bytesUnsubscribe: (() => Promise<void>) | null = null
   let terminalSettingsUnsubscribe: (() => void) | null = null
   const ansiThemeAdapter = new TerminalAnsiThemeAdapter()
+  let disposeCursorGuard: (() => void) | undefined
   // Cmd 键状态监听器(组件级,以便 onDestroy 时清理)
   let _onCmdDown: ((e: KeyboardEvent) => void) | null = null
   let _onCmdUp: ((e: KeyboardEvent) => void) | null = null
@@ -235,6 +237,9 @@
     // 再异步加 WebglAddon。FitAddon 不读 renderer 内部,放 open 前后都行。
     term.open(containerEl)
     if (destroyed || !term) return
+    if (/Windows/i.test(navigator.userAgent) && endpointId?.kind !== 'remote') {
+      disposeCursorGuard = installConptyCursorGuard(term)
+    }
 
     // 3) 只给当前可见 tab 装 WebGL。后台 tab 常驻但不能各占一个 context,
     //    否则 WKWebView 达到上限后会随机回收较早 tab 的 context并触发丢色。
@@ -1473,6 +1478,7 @@
 
   onDestroy(() => {
     destroyed = true
+    disposeCursorGuard?.()
     webglLoadGeneration++
     resizeObserver?.disconnect()
     if (resizeTimer != null) clearTimeout(resizeTimer)
