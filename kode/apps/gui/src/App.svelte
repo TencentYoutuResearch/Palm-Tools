@@ -52,7 +52,7 @@
   import UpdateButton from './lib/UpdateButton.svelte'
   import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
-  import { absoluteDroppedFilePaths } from './lib/file_drop'
+  import { absoluteDroppedFilePaths, absoluteOsDroppedPaths } from './lib/file_drop'
   import {
     tabs,
     activeId,
@@ -688,13 +688,30 @@
   }
 
   /**
-   * 统一 HTML5 文件拖拽(dragDropEnabled:false)。支持三种来源:
-   *   1. WorkspacePanel 文件树内部拖拽 → 自定义 MIME `application/x-kode-file`
-   *   2. Finder / VS Code 拖文件进来 → dataTransfer.files,Tauri 给 File 注入 .path
+   * 文件拖入当前会话 composer。
    *
-   * xterm.js 会消费终端区的 drop 事件,所以拖拽中渲染一个 overlay div 覆盖终端,
-   * 由 overlay 捕获 drop —— 绕过 xterm 的事件拦截。
+   * 外部(Finder / Explorer / VS Code)走 Tauri `onDragDropEvent`:WKWebView 的
+   * HTML5 `File.path` / `text/uri-list` 经常是空的,只有原生事件带绝对路径。
+   * 内部 WorkspacePanel 文件树仍走 HTML5 自定义 MIME,与 OS 级拖拽互不干扰。
+   *
+   * xterm.js 会消费终端区的 HTML5 drop,所以拖拽中渲染 overlay 覆盖终端。
    */
+  function insertDroppedPaths(paths: string[], source: 'internal' | 'external') {
+    const tab = $activeTab
+    if (!tab || paths.length === 0) return
+    if (source === 'external' && tab.endpointId?.kind === 'remote') return
+    if (source === 'external') {
+      const key = `${tab.id}:${paths.join('\0')}`
+      const now = Date.now()
+      if (key === lastExternalDropKey && now - lastExternalDropAt < 500) return
+      lastExternalDropKey = key
+      lastExternalDropAt = now
+    }
+    const text = paths.map((p) => `@${p}`).join(' ') + ' '
+    ipc.writeInput(tab.id, new TextEncoder().encode(text), tab.endpointId)
+      .then(() => focusTerminal())
+      .catch((err) => console.warn(`${source} drag-drop failed:`, err))
+  }
   function onMainDragOver(e: DragEvent) {
     const types = e.dataTransfer?.types ?? []
     if (!types.includes('application/x-kode-file') && !types.includes('Files')) return
@@ -720,28 +737,35 @@
         const { path, endpointId } = JSON.parse(raw) as { path: string; endpointId: string | null }
         const tabEp = tab.endpointId?.kind === 'remote' ? tab.endpointId.id : null
         if (endpointId !== tabEp) return
-        ipc.writeInput(tab.id, new TextEncoder().encode(`@${path} `), tab.endpointId)
-          .then(() => focusTerminal())
-          .catch((err) => console.warn('internal drag-drop failed:', err))
+        insertDroppedPaths([path], 'internal')
       } catch {}
       return
     }
 
-    // 2. 外部文件拖拽(Finder / VS Code)
+    // 2. HTML5 fallback。原生 onDragDropEvent 才是外部拖入的权威路径;
+    // WKWebView 经常既没有 File.path 也没有 uri-list,那时这里会得到空数组。
     if (!dt.types.includes('Files')) return
-    if (tab.endpointId && tab.endpointId.kind === 'remote') return
-    // Prefer the desktop webview's File.path. Finder/VS Code may instead
-    // expose file:// URIs, which retain the absolute path and escaped spaces.
-    // Never degrade to File.name:the CLI must receive a trustworthy full path.
-    const paths = absoluteDroppedFilePaths(
-      dt.files as FileList & { [index: number]: File & { path?: string } },
-      dt.getData('text/uri-list'),
+    insertDroppedPaths(
+      absoluteDroppedFilePaths(
+        dt.files as FileList & { [index: number]: File & { path?: string } },
+        dt.getData('text/uri-list'),
+        dt.getData('text/plain'),
+      ),
+      'external',
     )
-    if (paths.length === 0) return
-    const text = paths.map((p) => `@${p}`).join(' ') + ' '
-    ipc.writeInput(tab.id, new TextEncoder().encode(text), tab.endpointId)
-      .then(() => focusTerminal())
-      .catch((err) => console.warn('external drag-drop failed:', err))
+  }
+  function onNativeFileDrop(event: { payload: { type: string; paths?: string[] } }) {
+    if (event.payload.type === 'enter' || event.payload.type === 'over') {
+      dragOver = true
+      return
+    }
+    if (event.payload.type === 'leave') {
+      dragOver = false
+      return
+    }
+    if (event.payload.type !== 'drop') return
+    dragOver = false
+    insertDroppedPaths(absoluteOsDroppedPaths(event.payload.paths ?? []), 'external')
   }
   /** 拖拽完成后 focus 到终端,让用户直接继续打字 */
   function focusTerminal() {
@@ -1099,6 +1123,11 @@
         await restoreTabs(persisted)
       }
       // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
+      try {
+        fileDropUnlisten = await getCurrentWindow().onDragDropEvent(onNativeFileDrop)
+      } catch (e) {
+        console.warn('onDragDropEvent failed:', e)
+      }
     } catch (e) {
       bootError = String(e)
       console.error(e)
@@ -1110,8 +1139,11 @@
   let remoteMemoryUnlisten: (() => void) | null = null
   /** backend 开关/增删变更 unlisten — 同上 */
   let backendsUnlisten: (() => void) | null = null
+  let fileDropUnlisten: (() => void) | null = null
   /** 文件正在拖入窗口(用于终端区高亮提示) */
   let dragOver = $state(false)
+  let lastExternalDropKey = ''
+  let lastExternalDropAt = 0
 
   onDestroy(() => {
     stopEventSubscriptions()
@@ -1119,6 +1151,7 @@
     memoryUnlisten?.()
     remoteMemoryUnlisten?.()
     backendsUnlisten?.()
+    fileDropUnlisten?.()
     screenshotSettingsUnlisten?.()
     if (registeredScreenshotShortcut) {
       void unregister(registeredScreenshotShortcut).catch(() => {})

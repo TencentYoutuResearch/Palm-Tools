@@ -867,7 +867,7 @@
    * 文件树行拖拽:把 path + endpointId 写进 dataTransfer,终端区 .main 的
    * HTML5 drop handler 读取后注入 @<path> 到 active tab。
    * 用自定义 MIME 类型 `application/x-kode-file`,与 Finder 的 OS 级拖拽
-   * (走 Tauri onDragDropEvent)互不干扰。
+   * (Tauri onDragDropEvent, dragDropEnabled:true)互不干扰。
    */
   function onTreeDragStart(e: DragEvent, entry: WorkspaceEntry) {
     if (!e.dataTransfer) return
