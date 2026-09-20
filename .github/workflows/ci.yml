@@ -98,6 +98,9 @@ jobs:
       - name: Install GUI dependencies
         run: pnpm install --frozen-lockfile
         working-directory: kode/apps/gui
+      - name: Build GUI frontend
+        run: pnpm build
+        working-directory: kode/apps/gui
       - name: Stage sidecar placeholders for Tauri externalBin check
         # cargo check 只需要 tauri-build 的存在性校验通过;binaries/ 不入库,
         # macOS rust job 用 build-sidecar.sh 产真件,这里用占位文件避免整条
