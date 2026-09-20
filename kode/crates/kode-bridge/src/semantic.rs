@@ -127,12 +127,22 @@ async fn run(
         }
         let is_replay = line_start < replay_boundary;
         for env in parse_line(id, backend, line) {
-            if is_replay && env.r#type == "session.turn_finished" {
+            // A resumed transcript is useful for reconstructing conversation
+            // content, but its lifecycle edges describe *past* turns. Replaying
+            // `turn_started` would acquire the local busy hold, while replayed
+            // completion used to be filtered below; the result was a Codex tab
+            // that looked busy forever after restore. Only newly appended edges
+            // may change the live session status.
+            if is_replay && is_turn_lifecycle_event(&env.r#type) {
                 continue;
             }
             bus.emit(env);
         }
     }
+}
+
+fn is_turn_lifecycle_event(event_type: &str) -> bool {
+    matches!(event_type, "session.turn_started" | "session.turn_finished")
 }
 
 /// 公开给单元测试用(不需要文件系统)。
@@ -1377,6 +1387,14 @@ mod tests {
         );
         assert_eq!(abort[0].r#type, "session.turn_finished");
         assert_eq!(abort[0].payload["status"], "cancelled");
+    }
+
+    #[test]
+    fn restored_turn_edges_do_not_mutate_live_status() {
+        assert!(is_turn_lifecycle_event("session.turn_started"));
+        assert!(is_turn_lifecycle_event("session.turn_finished"));
+        assert!(!is_turn_lifecycle_event("message"));
+        assert!(!is_turn_lifecycle_event("tool_use"));
     }
 
     #[test]
