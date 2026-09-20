@@ -7,9 +7,11 @@
 //! - 把 `conversation_id` 复制到 `session_uuid`;
 //! - 通过 `meta.json` 的 cwd 定位真实 agent transcript,填 `transcript_path`
 //!   供 tail retarget;
-//! - 用 CLI 传入的 event 名补上 `hook_event_name`(Cursor 不一定带这个字段)。
+//! - 用 CLI 传入的 event 名补上 `hook_event_name`(Cursor 不一定带这个字段)；
+//! - Kode 托管的 `sessionStart` 从 `CURSOR_PROJECT_DIR`（旧版本回退到 meta）
+//!   定位项目 cwd，并通过 `additional_context` 注入 kode-memory MCP 使用规则。
 //!
-//! Cursor 给 hook 的 env **不会**继承 cursor-agent 进程的 `KODE_*`。所以:
+//! Cursor 给后续 hook 的 env **不会**自动保留 cursor-agent 进程的 `KODE_*`。所以:
 //! - socket 默认 `/tmp/kode-hook.sock`(与 HookRelay 固定路径一致);
 //! - `sessionStart` 向 stdout 回写 `env`,把 sock / tab id 注入后续 hook;
 //! - 有 token 的事件额外落 `~/.kode/usage/cursor.jsonl`,给模型用量面板用。
@@ -34,13 +36,21 @@ pub fn run(event: Option<&str>) -> Result<()> {
     }
     let tab_id = std::env::var("KODE_SESSION_ID").ok();
     let rewritten = rewrite_payload(&input, tab_id.as_deref(), event);
-    let inferred = infer_event_name(
-        &serde_json::from_str(&rewritten).unwrap_or_else(|_| json!({})),
-        event,
-    );
+    let payload = serde_json::from_str(&rewritten).unwrap_or_else(|_| json!({}));
+    let inferred = infer_event_name(&payload, event);
     persist_usage(&rewritten)?;
     if inferred == "sessionStart" {
-        write_session_start_env(tab_id.as_deref())?;
+        let cwd = if crate::runtime_context::is_active(Some("cursor"))
+            && memory_prompt_enabled(std::env::var("KODE_MEMORY_PROMPT_ENABLED").ok().as_deref())
+        {
+            resolve_cursor_project_dir(
+                std::env::var("CURSOR_PROJECT_DIR").ok().as_deref(),
+                payload.get("session_uuid").and_then(Value::as_str),
+            )
+        } else {
+            None
+        };
+        write_session_start_output(tab_id.as_deref(), cwd.as_deref())?;
     }
     relay_rewritten(&rewritten)
 }
@@ -114,18 +124,29 @@ fn infer_event_name(payload: &Value, event: Option<&str>) -> String {
     "sessionStart".into()
 }
 
-fn write_session_start_env(tab_id: Option<&str>) -> Result<()> {
-    let mut env = serde_json::Map::new();
-    env.insert("KODE_HOOK_SOCK".into(), json!(hook_sock_path()));
-    if let Some(tab_id) = tab_id.filter(|s| !s.is_empty()) {
-        env.insert("KODE_SESSION_ID".into(), json!(tab_id));
-    }
-    let out = json!({ "env": env });
+fn write_session_start_output(tab_id: Option<&str>, cwd: Option<&Path>) -> Result<()> {
+    let out = build_session_start_output(tab_id, cwd);
     let mut stdout = std::io::stdout();
     stdout.write_all(out.to_string().as_bytes())?;
     stdout.write_all(b"\n")?;
     stdout.flush()?;
     Ok(())
+}
+
+fn build_session_start_output(tab_id: Option<&str>, cwd: Option<&Path>) -> Value {
+    let mut env = serde_json::Map::new();
+    env.insert("KODE_HOOK_SOCK".into(), json!(hook_sock_path()));
+    if let Some(tab_id) = tab_id.filter(|s| !s.is_empty()) {
+        env.insert("KODE_SESSION_ID".into(), json!(tab_id));
+    }
+    let mut out = json!({ "env": env });
+    if let Some(cwd) = cwd {
+        let context = crate::prompt::build(cwd, "cursor");
+        if !context.is_empty() {
+            out["additional_context"] = Value::String(context);
+        }
+    }
+    out
 }
 
 fn persist_usage(rewritten: &str) -> Result<()> {
@@ -194,6 +215,49 @@ fn json_u64(doc: &Value, key: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn memory_prompt_enabled(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
+fn resolve_cursor_project_dir(
+    project_dir: Option<&str>,
+    session_id: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(project_dir) = project_dir.map(str::trim).filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(project_dir));
+    }
+    find_cursor_session_cwd(session_id?)
+}
+
+fn find_cursor_session_cwd(session_id: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    find_cursor_session_cwd_under(&home, session_id)
+}
+
+fn find_cursor_session_cwd_under(home: &Path, session_id: &str) -> Option<PathBuf> {
+    let root = home.join(".cursor").join("chats");
+    let workspaces = fs::read_dir(root).ok()?;
+    for workspace in workspaces.flatten() {
+        let meta_path = workspace.path().join(session_id).join("meta.json");
+        let Ok(bytes) = fs::read(meta_path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let Some(cwd) = meta
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+        else {
+            continue;
+        };
+        return Some(PathBuf::from(cwd));
+    }
+    None
+}
+
 fn find_cursor_transcript_path(session_id: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     find_cursor_transcript_path_under(&home, session_id)
@@ -214,33 +278,18 @@ fn find_cursor_transcript_path_under(home: &Path, session_id: &str) -> Option<Pa
         }
     }
 
-    let root = home.join(".cursor").join("chats");
-    let workspaces = std::fs::read_dir(&root).ok()?;
-    for workspace in workspaces.flatten() {
-        let meta_path = workspace.path().join(session_id).join("meta.json");
-        let Ok(bytes) = fs::read(meta_path) else {
-            continue;
-        };
-        let Ok(meta) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let Some(cwd) = meta.get("cwd").and_then(Value::as_str) else {
-            continue;
-        };
-        let cwd = cwd.trim();
-        if cwd.is_empty() {
-            continue;
-        }
-        let slug = cwd.trim_start_matches('/').replace('/', "-");
-        return Some(
-            projects
-                .join(slug)
-                .join("agent-transcripts")
-                .join(session_id)
-                .join(format!("{session_id}.jsonl")),
-        );
-    }
-    None
+    let cwd = find_cursor_session_cwd_under(home, session_id)?;
+    let slug = cwd
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .replace('/', "-");
+    Some(
+        projects
+            .join(slug)
+            .join("agent-transcripts")
+            .join(session_id)
+            .join(format!("{session_id}.jsonl")),
+    )
 }
 
 #[cfg(unix)]
@@ -304,6 +353,18 @@ mod tests {
     }
 
     #[test]
+    fn session_start_output_injects_cursor_memory_context() {
+        let out = build_session_start_output(Some("42"), Some(Path::new("/Users/test/kode")));
+        assert_eq!(out["env"]["KODE_SESSION_ID"], "42");
+        assert_eq!(out["env"]["KODE_HOOK_SOCK"], DEFAULT_HOOK_SOCK);
+        let context = out["additional_context"].as_str().unwrap();
+        assert!(context.contains("backend=`cursor`"));
+        assert!(context.contains("project:kode"));
+        assert!(context.contains("memory_search"));
+        assert!(!context.contains("ToolSearch(\"memory_search\")"));
+    }
+
+    #[test]
     fn persist_usage_writes_token_line() {
         let path = std::env::temp_dir().join(format!(
             "kode-cursor-usage-{}-{}.jsonl",
@@ -328,6 +389,19 @@ mod tests {
     }
 
     #[test]
+    fn cursor_memory_prompt_flag_defaults_on_and_honors_disable() {
+        assert!(memory_prompt_enabled(None));
+        assert!(memory_prompt_enabled(Some("1")));
+        assert!(!memory_prompt_enabled(Some("0")));
+    }
+
+    #[test]
+    fn cursor_project_dir_prefers_hook_environment() {
+        let cwd = resolve_cursor_project_dir(Some(" /Users/test/direct "), Some("missing-session"));
+        assert_eq!(cwd, Some(PathBuf::from("/Users/test/direct")));
+    }
+
+    #[test]
     fn cursor_transcript_path_comes_from_meta_cwd_not_meta_file() {
         let temp = tempfile::tempdir().unwrap();
         let session_id = "44c2880d-36c7-4d21-9fb8-55c28eec8c63";
@@ -342,8 +416,10 @@ mod tests {
         )
         .unwrap();
 
-        let path = find_cursor_transcript_path_under(temp.path(), session_id).unwrap();
+        let cwd = find_cursor_session_cwd_under(temp.path(), session_id).unwrap();
+        assert_eq!(cwd, PathBuf::from("/Users/test/My App"));
 
+        let path = find_cursor_transcript_path_under(temp.path(), session_id).unwrap();
         assert_eq!(
             path,
             temp.path()

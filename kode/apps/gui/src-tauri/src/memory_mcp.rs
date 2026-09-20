@@ -391,7 +391,7 @@ fn insert_codex_tool_approval_if_missing(
 ///
 /// 流程:
 /// 1. 展开 `~`,确保父目录存在(必要时 mkdir -p)
-/// 2. 读现有文件 → JSON parse(不存在或 parse 失败 → 用 `{}` 兜底)
+/// 2. 读现有文件 → JSON parse(不存在或空文件用 `{}`；语法错误则保留原文件并报错)
 /// 3. 把 `mcpServers.memory = {command, env: {KODE_MEMORY_ROOT: root}, type: "stdio"}` 写进去
 /// 4. atomic write(写到 .tmp 再 rename)
 ///
@@ -411,7 +411,9 @@ fn merge_into_json_config(config_path: &str, bin: &Path, root: &Path) -> Result<
         if bytes.is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({}))
+            serde_json::from_slice(&bytes).map_err(|e| {
+                format!("parse {} failed; leaving it unchanged: {e}", path.display())
+            })?
         }
     } else {
         serde_json::json!({})
@@ -430,6 +432,19 @@ fn merge_into_json_config(config_path: &str, bin: &Path, root: &Path) -> Result<
     let servers_obj = servers
         .as_object_mut()
         .ok_or("mcpServers must be a JSON object")?;
+    if let Some(existing) = servers_obj.get(MCP_SERVER_NAME) {
+        let existing_command = existing.get("command").and_then(|value| value.as_str());
+        let is_kode_memory = existing_command
+            .and_then(|command| Path::new(command).file_stem())
+            .and_then(|name| name.to_str())
+            == Some(BINARY_NAME);
+        if !is_kode_memory {
+            return Err(format!(
+                "mcpServers.{MCP_SERVER_NAME} already exists in {} and is not managed by Kode",
+                path.display()
+            ));
+        }
+    }
     servers_obj.insert(MCP_SERVER_NAME.to_string(), entry);
 
     let pretty =
@@ -664,7 +679,7 @@ pub fn spawn_startup_probe(app: AppHandle) {
 
         // 遍历所有 backend,跑 setup —— 仅当:
         //   1. backend 声明了 mcp_setup
-        //   2. 它需要的 CLI 在 PATH 上(JsonMerge 风格无 CLI,直接 true)
+        //   2. setup CLI 在 PATH 上；JsonMerge 则要求 backend command 在 PATH 上
         //   3. 还没配好(已配的就别再 add 了,虽然幂等,但不打扰更安静)
         let mut auto_results: Vec<AutoSetupOutcome> = Vec::new();
         for (key, backend) in backends.iter() {
@@ -673,7 +688,7 @@ pub fn spawn_startup_probe(app: AppHandle) {
             };
             let cli_ok = match spec.cli() {
                 Some(cli) => which(cli).is_some(),
-                None => true, // JsonMerge 不需要 CLI
+                None => which(&backend.command).is_some(),
             };
             if !cli_ok {
                 continue;
@@ -837,7 +852,15 @@ fn is_configured_for_spec(spec: &McpSetupSpec) -> bool {
         });
     }
     let candidates = config_check_paths(spec);
-    candidates.iter().any(|p| json_has_memory_server(p))
+    if matches!(spec, McpSetupSpec::JsonMerge { .. }) {
+        let expected_binary = resolve_binary();
+        return candidates
+            .iter()
+            .any(|path| json_has_memory_server(path, expected_binary.as_deref()));
+    }
+    candidates
+        .iter()
+        .any(|path| json_has_memory_server(path, None))
 }
 
 /// 给定 spec,返回**所有候选**的 user-scope 配置文件路径(顺序:新版优先,老版兜底)。
@@ -868,17 +891,27 @@ fn config_check_paths(spec: &McpSetupSpec) -> Vec<PathBuf> {
     }
 }
 
-/// 读 JSON 文件,看 `mcpServers.memory` 是否存在。读不到 / parse 失败统一当作未配置。
-fn json_has_memory_server(p: &Path) -> bool {
+/// 读 JSON 文件,检查 `mcpServers.memory`。给出 expected_binary 时还要求 command
+/// 精确匹配当前 sidecar，避免旧安装路径或同名第三方 server 阻止自动修复。
+fn json_has_memory_server(p: &Path, expected_binary: Option<&Path>) -> bool {
     let Ok(bytes) = std::fs::read(p) else {
         return false;
     };
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return false;
     };
-    v.get("mcpServers")
-        .and_then(|m| m.get(MCP_SERVER_NAME))
-        .is_some()
+    let Some(memory) = v
+        .get("mcpServers")
+        .and_then(|servers| servers.get(MCP_SERVER_NAME))
+    else {
+        return false;
+    };
+    expected_binary.is_none_or(|expected| {
+        memory
+            .get("command")
+            .and_then(|command| command.as_str())
+            .is_some_and(|command| Path::new(command) == expected)
+    })
 }
 
 /// Codex MCP 配置写在 TOML 的 `[mcp_servers.<name>]`。
@@ -1215,10 +1248,6 @@ mod tests {
 
         // 用绝对路径,避开 ~ 展开依赖 HOME 的复杂性
         let cfg_path = tmp.join("nested/dir/mcp.json");
-        let spec = McpSetupSpec::JsonMerge {
-            config_path: cfg_path.display().to_string(),
-        };
-
         let bin = PathBuf::from("/path/to/kode-memory-mcp");
         let root = PathBuf::from("/r");
         merge_into_json_config(&cfg_path.display().to_string(), &bin, &root)
@@ -1243,8 +1272,12 @@ mod tests {
             Some("/r")
         );
 
-        // is_configured_for_spec 应该能识别我们刚写的
-        assert!(is_configured_for_spec(&spec));
+        // 精确 command 检测应识别刚写入的 sidecar，并拒绝旧路径。
+        assert!(json_has_memory_server(&cfg_path, Some(&bin)));
+        assert!(!json_has_memory_server(
+            &cfg_path,
+            Some(Path::new("/stale/kode-memory-mcp"))
+        ));
 
         // 再写一次 — 幂等,不破坏现有内容
         merge_into_json_config(&cfg_path.display().to_string(), &bin, &root)
@@ -1293,6 +1326,56 @@ mod tests {
             Some("preserve me")
         );
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn json_merge_preserves_invalid_config_and_reports_error() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("kode-mcp-invalid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let cfg_path = tmp.join("mcp.json");
+        let original = b"{ invalid json";
+        fs::write(&cfg_path, original).unwrap();
+
+        let error = merge_into_json_config(
+            &cfg_path.display().to_string(),
+            Path::new("/p/kode-memory-mcp"),
+            Path::new("/r"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("leaving it unchanged"));
+        assert_eq!(fs::read(&cfg_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn json_merge_rejects_unrelated_memory_server_name_collision() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("kode-mcp-collision-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let cfg_path = tmp.join("mcp.json");
+        let original = serde_json::json!({
+            "mcpServers": {
+                "memory": {"command": "third-party-memory-server"}
+            }
+        });
+        fs::write(&cfg_path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+
+        let error = merge_into_json_config(
+            &cfg_path.display().to_string(),
+            Path::new("/p/kode-memory-mcp"),
+            Path::new("/r"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("not managed by Kode"));
+        let after: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cfg_path).unwrap()).unwrap();
+        assert_eq!(after, original);
         let _ = fs::remove_dir_all(&tmp);
     }
 

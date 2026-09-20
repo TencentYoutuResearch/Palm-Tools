@@ -57,8 +57,8 @@ const KNOWN_CANDIDATES: &[KnownBackend] = &[
         suggested_setup_cli: "codex",
         suggested_json_path: None,
     },
-    // 2026-06:预置一批常见 AI CLI(参考 kooky)。这些大多不是 codebuddy/claude fork,
-    // 没有 mcp_setup 风格,所以 suggested_setup_style = "none"。
+    // 2026-06:预置一批常见 AI CLI(参考 kooky)。大多数没有已知 MCP 配置入口；
+    // Cursor 是例外,使用官方全局 ~/.cursor/mcp.json。
     KnownBackend {
         key: "gemini",
         command: "gemini",
@@ -83,9 +83,9 @@ const KNOWN_CANDIDATES: &[KnownBackend] = &[
     KnownBackend {
         key: "cursor",
         command: "cursor-agent",
-        suggested_setup_style: "none",
+        suggested_setup_style: "json-merge",
         suggested_setup_cli: "",
-        suggested_json_path: None,
+        suggested_json_path: Some("~/.cursor/mcp.json"),
     },
     KnownBackend {
         key: "copilot",
@@ -671,6 +671,18 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+
+    #[test]
+    fn cursor_candidate_uses_global_json_mcp_config() {
+        let cursor = KNOWN_CANDIDATES
+            .iter()
+            .find(|candidate| candidate.key == "cursor")
+            .expect("cursor candidate");
+        assert_eq!(cursor.command, "cursor-agent");
+        assert_eq!(cursor.suggested_setup_style, "json-merge");
+        assert_eq!(cursor.suggested_setup_cli, "");
+        assert_eq!(cursor.suggested_json_path, Some("~/.cursor/mcp.json"));
+    }
 
     #[cfg(windows)]
     #[test]

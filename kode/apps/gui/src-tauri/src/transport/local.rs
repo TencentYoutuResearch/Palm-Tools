@@ -106,7 +106,9 @@ impl SessionTransport for LocalTransport {
         // - KODE_HOOK_SOCK 供 hook command 定位 GUI relay socket。
         // - KODE_SESSION_ID 让 Codex hook 把 Codex 自己的 session id 映射回 Kode tab id。
         // - KODE_MEMORY_ROOT 让 hook 子进程与 GUI/MCP 使用同一份 memory root。
+        // - KODE_MEMORY_PROMPT_ENABLED 让 Cursor SessionStart hook 尊重 GUI 开关。
         // - TERM_THEME / COLORFGBG 让 cursor-agent / Claude / 其它 TUI 跳过 OSC 11。
+        let memory_prompt_enabled = self.read_memory_prompt_flag();
         let mut extra_env: Vec<(String, String)> = Vec::new();
         extra_env.push(("KODE_HOST".to_string(), "1".to_string()));
         if let Some(sock) = self.hook_sock.as_deref() {
@@ -120,6 +122,10 @@ impl SessionTransport for LocalTransport {
         extra_env.push((
             "KODE_MEMORY_ROOT".to_string(),
             crate::memory::resolve_memory_root().display().to_string(),
+        ));
+        extra_env.push((
+            "KODE_MEMORY_PROMPT_ENABLED".to_string(),
+            if memory_prompt_enabled { "1" } else { "0" }.to_string(),
         ));
         extra_env.extend(kode_core::pty::terminal_theme_env(
             spec.terminal_dark.unwrap_or(true),
@@ -138,7 +144,7 @@ impl SessionTransport for LocalTransport {
             spec.resume_session_uuid.as_deref(),
             spec.permission_mode.as_deref(),
             spec.model.as_deref(),
-            self.read_memory_prompt_flag(),
+            memory_prompt_enabled,
             spec.memory_context.as_deref(),
             &extra_env,
             None, // GUI does not use initial_prompt (user types interactively)

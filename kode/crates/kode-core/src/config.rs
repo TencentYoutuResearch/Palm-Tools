@@ -223,15 +223,28 @@ impl Default for Config {
                 enabled: None,
             },
         );
+        backends.insert(
+            "cursor".into(),
+            BackendConfig {
+                command: "cursor-agent".into(),
+                args: vec![],
+                default_model: None,
+                model_flag: Some("--model".into()),
+                permission_mode_flag: None,
+                mcp_setup: Some(McpSetupSpec::JsonMerge {
+                    config_path: "~/.cursor/mcp.json".into(),
+                }),
+                enabled: None,
+            },
+        );
         // 2026-06:预置一批常见 AI CLI(参考 kooky)。这些大多不是 codebuddy/claude
-        // fork,没有兼容的 `mcp add`,所以 mcp_setup 一律 None。command = 二进制名。
+        // fork,没有兼容的 MCP 配置入口,所以 mcp_setup 一律 None。command = 二进制名。
         // enabled = None:GUI 首次启动按 PATH 探测落地(只开实际装了的)。
         // model_flag 多数填 "--model"(常见约定;不对的 backend 用户可在 config.toml 改)。
         for (key, command) in [
             ("gemini", "gemini"),
             ("opencode", "opencode"),
             ("amp", "amp"),
-            ("cursor", "cursor-agent"),
             ("copilot", "copilot"),
             ("grok", "grok"),
             ("antigravity", "agy"),
@@ -280,10 +293,20 @@ impl Config {
         };
         match toml::from_str::<Config>(&txt) {
             Ok(mut c) => {
-                // 合并默认 backends(用户没写也能用)
+                // 合并默认 backends(用户没写也能用)。Cursor 早期版本已经会把
+                // backend table 落盘,但当时没有 mcp_setup；为已有安装补上新能力。
                 let defaults = Self::default();
+                let cursor_mcp_setup = defaults
+                    .backends
+                    .get("cursor")
+                    .and_then(|backend| backend.mcp_setup.clone());
                 for (k, v) in defaults.backends {
                     c.backends.entry(k).or_insert(v);
+                }
+                if let Some(cursor) = c.backends.get_mut("cursor") {
+                    if cursor.command == "cursor-agent" && cursor.mcp_setup.is_none() {
+                        cursor.mcp_setup = cursor_mcp_setup;
+                    }
                 }
                 c
             }
@@ -407,6 +430,13 @@ mod tests {
             Some(McpSetupSpec::Codex { cli }) => assert_eq!(cli, "codex"),
             other => panic!("codex should use Codex mcp_setup, got {:?}", other),
         }
+        let cursor = cfg.backend("cursor").expect("cursor");
+        match &cursor.mcp_setup {
+            Some(McpSetupSpec::JsonMerge { config_path }) => {
+                assert_eq!(config_path, "~/.cursor/mcp.json")
+            }
+            other => panic!("cursor should use JsonMerge mcp_setup, got {:?}", other),
+        }
     }
 
     /// 回归:2026-06 预置的一批常见 AI CLI 都在默认列表里,且出厂 enabled == None
@@ -414,11 +444,10 @@ mod tests {
     #[test]
     fn default_backends_include_preset_agents() {
         let cfg = Config::default();
-        let expected = [
+        let expected_without_mcp = [
             ("gemini", "gemini"),
             ("opencode", "opencode"),
             ("amp", "amp"),
-            ("cursor", "cursor-agent"),
             ("copilot", "copilot"),
             ("grok", "grok"),
             ("antigravity", "agy"),
@@ -427,7 +456,7 @@ mod tests {
             ("kiro", "kiro-cli"),
             ("droid", "droid"),
         ];
-        for (key, command) in expected {
+        for (key, command) in expected_without_mcp {
             let b = cfg
                 .backend(key)
                 .unwrap_or_else(|| panic!("missing backend {key}"));
@@ -435,7 +464,10 @@ mod tests {
             assert_eq!(b.enabled, None, "{key} should ship with enabled=None");
             assert!(b.mcp_setup.is_none(), "{key} should have no mcp_setup");
         }
-        // 4 内置 + 11 预置 = 15。
+        let cursor = cfg.backend("cursor").expect("cursor");
+        assert_eq!(cursor.command, "cursor-agent");
+        assert_eq!(cursor.enabled, None);
+        // 5 MCP-enabled + 10 other presets = 15。
         assert!(
             cfg.backends.len() >= 15,
             "expected >=15 backends, got {}",
@@ -501,5 +533,67 @@ command = "legacy"
             legacy.mcp_setup.is_none(),
             "missing field should default to None"
         );
+    }
+
+    #[test]
+    fn load_from_hydrates_cursor_mcp_setup_in_legacy_config() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-config-cursor-migration-{}-{unique}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+default_backend = "cursor"
+
+[backends.cursor]
+command = "cursor-agent"
+args = []
+model_flag = "--model"
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load_from(&path);
+        std::fs::remove_file(path).ok();
+        let cursor = cfg.backend("cursor").expect("cursor");
+        assert_eq!(cursor.enabled, Some(true));
+        match &cursor.mcp_setup {
+            Some(McpSetupSpec::JsonMerge { config_path }) => {
+                assert_eq!(config_path, "~/.cursor/mcp.json")
+            }
+            other => panic!("legacy cursor should gain JsonMerge mcp_setup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_does_not_hydrate_repurposed_cursor_backend() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-config-custom-cursor-{}-{unique}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+default_backend = "cursor"
+
+[backends.cursor]
+command = "custom-agent"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load_from(&path);
+        std::fs::remove_file(path).ok();
+        assert!(cfg.backend("cursor").unwrap().mcp_setup.is_none());
     }
 }

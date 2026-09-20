@@ -61,16 +61,12 @@ fn project_slug(cwd: &Path) -> Option<String> {
 /// prompt 里告诉 agent "本次没识别出项目,默认走 shared 池"。
 ///
 /// **未知 backend → 返回空字符串**:kode-memory 的 prompt 设计前提是 backend 是
-/// 一个 LLM agent CLI(codebuddy / claude / claude-internal),它要能理解
-/// `--append-system-prompt` 这种 flag。给非 LLM backend(比如测试用的 `/bin/cat`、
-/// 或用户自己加的 raw shell)注入一个长 prompt 是错的:
-/// - cat 之类的命令不认 flag 会立刻 exit 1
-/// - 即使认,prompt 也无意义
-/// Codex CLI 不支持 `--append-system-prompt`,但 Codex hooks 的 SessionStart
-/// 会复用本模板作为 additional developer context。
+/// 已接入 memory MCP 的 LLM agent CLI。给非 LLM backend(比如测试用的 `/bin/cat`、
+/// 或用户自己加的 raw shell)注入一个长 prompt 是错的。
 ///
-/// 所以这里显式 allowlist 已知 LLM backend,其它一律 return "" 让
-/// `inject_kode_memory_prompt` 的"prompt 空时短路"逻辑接手。
+/// CodeBuddy / Claude 通过 `--append-system-prompt` 注入；Codex 和 Cursor 不支持
+/// 这个 flag,分别由各自的 SessionStart hook 复用本模板作为 additional context。
+/// 所以这里显式 allowlist 已知 LLM backend,其它一律 return ""。
 pub fn build(cwd: &Path, backend_key: &str) -> String {
     if !is_supported_backend(backend_key) {
         return String::new();
@@ -83,22 +79,37 @@ pub fn build(cwd: &Path, backend_key: &str) -> String {
         ),
     };
     let project_path = cwd.to_string_lossy().to_string();
+    let (startup_search, discovery_note) = if backend_key == "cursor" {
+        (
+            format!("memory_search(query=\"{scope}\", scope=\"{scope}\", top_k=20)"),
+            "- Cursor 直接暴露 MCP tools；直接调用 memory_search / memory_propose，不需要 ToolSearch".to_string(),
+        )
+    } else {
+        (
+            format!(
+                "ToolSearch(\"memory_search\")   // 拉 schema\nmemory_search(query=\"{scope}\", scope=\"{scope}\", top_k=20)"
+            ),
+            "- 第一次用 deferred 工具:`ToolSearch(\"memory_search\")` 拉 schema(否则报「找不到工具」)".to_string(),
+        )
+    };
     PROMPT_TEMPLATE
         .replace("{{BACKEND}}", backend_key)
         .replace("{{SCOPE}}", &scope)
         .replace("{{PROJECT_PATH}}", &project_path)
         .replace("{{SCOPE_NOTE}}", &scope_note)
+        .replace("{{STARTUP_SEARCH}}", &startup_search)
+        .replace("{{DISCOVERY_NOTE}}", &discovery_note)
         .trim_start()
         .to_string()
 }
 
 /// kode-memory prompt 模板适用的 LLM agent backend。
 /// CLI 是否注入 `--append-system-prompt` 由 `BackendProfile::supports_append_system_prompt`
-/// 决定;这里只控制 prompt 文本本身(Codex SessionStart hook 仍会复用本模板)。
+/// 决定；这里只控制 prompt 文本本身，Codex/Cursor SessionStart hook 也会复用。
 fn is_supported_backend(backend_key: &str) -> bool {
     matches!(
         backend_key,
-        "codebuddy" | "claude" | "claude-internal" | "codex"
+        "codebuddy" | "claude" | "claude-internal" | "codex" | "cursor"
     )
 }
 
@@ -111,8 +122,7 @@ scope=`{{SCOPE}}`,项目路径=`{{PROJECT_PATH}}`。{{SCOPE_NOTE}}
 
 **收到用户第一条消息之前**,先跑:
 ```
-ToolSearch("memory_search")   // 拉 schema
-memory_search(query="{{SCOPE}}", scope="{{SCOPE}}", top_k=20)
+{{STARTUP_SEARCH}}
 ```
 把返回的 facts 静默加载进上下文 —— 不需要向用户汇报"我在搜记忆"。
 如果返回空,继续正常响应;如果 MCP 不可用,告知用户后继续。
@@ -139,7 +149,7 @@ memory_search(query="{{SCOPE}}", scope="{{SCOPE}}", top_k=20)
 
 - **search**:`memory_search(query=用户原话关键词, scope="{{SCOPE}}")`
 - **propose**:`memory_propose(author="{{BACKEND}}", scope="{{SCOPE}}", title=短英文标题, body=结论+why, tags=[...], confidence≈0.8)`
-- 第一次用 deferred 工具:`ToolSearch("memory_search")` 拉 schema(否则报「找不到工具」)
+{{DISCOVERY_NOTE}}
 - 遇 duplicate:看返回的 candidates → 同名跳过 / 过时 supersede / 词汇撞车 force=true / 不确定问用户
 - 遇 `out_of_energy`:告诉用户,别硬塞
 - 发现矛盾:`memory_propose(supersedes=<id>)` 提议替换,别瞒报
@@ -199,6 +209,16 @@ mod tests {
         let p = build(&PathBuf::from("/tmp/kode"), "claude-internal");
         assert!(p.contains("claude-internal"), "backend not substituted");
         assert!(!p.contains("{{BACKEND}}"), "raw placeholder leaked");
+    }
+
+    #[test]
+    fn template_supports_cursor_session_start_context() {
+        let p = build(&PathBuf::from("/tmp/kode"), "cursor");
+        assert!(p.contains("backend=`cursor`"));
+        assert!(p.contains("project:kode"));
+        assert!(p.contains("memory_search"));
+        assert!(p.contains("Cursor 直接暴露 MCP tools"));
+        assert!(!p.contains("ToolSearch(\"memory_search\")"));
     }
 
     /// build 必须把 cwd 转成 project:<basename> 并替换进模板。
