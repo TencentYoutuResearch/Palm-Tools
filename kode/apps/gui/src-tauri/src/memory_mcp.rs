@@ -392,7 +392,9 @@ fn insert_codex_tool_approval_if_missing(
 /// 流程:
 /// 1. 展开 `~`,确保父目录存在(必要时 mkdir -p)
 /// 2. 读现有文件 → JSON parse(不存在或空文件用 `{}`；语法错误则保留原文件并报错)
-/// 3. 把 `mcpServers.memory = {command, env: {KODE_MEMORY_ROOT: root}, type: "stdio"}` 写进去
+/// 3. 把 `mcpServers.memory` 写进去。Cursor 这类 JSON MCP host 会隔离子进程
+///    环境,不会像 Codex `env_vars` 那样透传 Kode 注入的 `KODE_*`,所以这里把
+///    运行时标记写进固定 env,自动接入后工具可直接出现,不必再让用户改配置。
 /// 4. atomic write(写到 .tmp 再 rename)
 ///
 /// 风险点:用户的工具如果对 JSON 格式有额外要求(比如 codex 用 TOML 而不是 JSON),
@@ -422,7 +424,7 @@ fn merge_into_json_config(config_path: &str, bin: &Path, root: &Path) -> Result<
         "command": bin.display().to_string(),
         "type": "stdio",
         "args": [],
-        "env": { "KODE_MEMORY_ROOT": root.display().to_string() },
+        "env": isolated_json_mcp_env(root),
     });
     let servers = doc
         .as_object_mut()
@@ -732,17 +734,29 @@ pub fn spawn_startup_probe(app: AppHandle) {
 }
 
 fn migrate_existing_runtime_config(spec: &McpSetupSpec) -> Result<(), String> {
-    if !matches!(spec, McpSetupSpec::Codex { .. }) {
-        return Ok(());
+    match spec {
+        McpSetupSpec::Codex { .. } => {
+            let Some(path) = codex_config_path() else {
+                return Ok(());
+            };
+            let expected_binary = resolve_binary();
+            if toml_has_memory_server(&path, expected_binary.as_deref()) {
+                merge_codex_memory_approval_policy(&path)?;
+            }
+            Ok(())
+        }
+        McpSetupSpec::JsonMerge { config_path } => {
+            let path = expand_tilde(config_path);
+            let Some(bin) = resolve_binary() else {
+                return Ok(());
+            };
+            if json_has_memory_server(&path, Some(&bin)) && !json_has_isolated_runtime_env(&path) {
+                merge_into_json_config(config_path, &bin, &resolve_memory_root())?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
-    let Some(path) = codex_config_path() else {
-        return Ok(());
-    };
-    let expected_binary = resolve_binary();
-    if toml_has_memory_server(&path, expected_binary.as_deref()) {
-        merge_codex_memory_approval_policy(&path)?;
-    }
-    Ok(())
 }
 
 // ============== 内部实现 ==============
@@ -854,9 +868,10 @@ fn is_configured_for_spec(spec: &McpSetupSpec) -> bool {
     let candidates = config_check_paths(spec);
     if matches!(spec, McpSetupSpec::JsonMerge { .. }) {
         let expected_binary = resolve_binary();
-        return candidates
-            .iter()
-            .any(|path| json_has_memory_server(path, expected_binary.as_deref()));
+        return candidates.iter().any(|path| {
+            json_has_memory_server(path, expected_binary.as_deref())
+                && json_has_isolated_runtime_env(path)
+        });
     }
     candidates
         .iter()
@@ -891,6 +906,21 @@ fn config_check_paths(spec: &McpSetupSpec) -> Vec<PathBuf> {
     }
 }
 
+/// Cursor JSON MCP 配置支持 `${env:NAME}` 插值。用动态透传而不是固定激活值，
+/// 确保全局注册的 server 只在 Kode 托管 Cursor 进程中暴露 memory tools。
+const JSON_MCP_HOST_ENV: &str = "${env:KODE_HOST}";
+const JSON_MCP_SESSION_ENV: &str = "${env:KODE_SESSION_ID}";
+const JSON_MCP_BACKEND_ENV: &str = "${env:KODE_BACKEND_KEY}";
+
+fn isolated_json_mcp_env(root: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "KODE_MEMORY_ROOT": root.display().to_string(),
+        "KODE_HOST": JSON_MCP_HOST_ENV,
+        "KODE_SESSION_ID": JSON_MCP_SESSION_ENV,
+        "KODE_BACKEND_KEY": JSON_MCP_BACKEND_ENV,
+    })
+}
+
 /// 读 JSON 文件,检查 `mcpServers.memory`。给出 expected_binary 时还要求 command
 /// 精确匹配当前 sidecar，避免旧安装路径或同名第三方 server 阻止自动修复。
 fn json_has_memory_server(p: &Path, expected_binary: Option<&Path>) -> bool {
@@ -912,6 +942,24 @@ fn json_has_memory_server(p: &Path, expected_binary: Option<&Path>) -> bool {
             .and_then(|command| command.as_str())
             .is_some_and(|command| Path::new(command) == expected)
     })
+}
+
+/// Cursor 等 JSON MCP host 不会直接继承父进程 `KODE_*`。配置必须用官方 env
+/// 插值语法动态透传；固定值会让外部启动的 Cursor 也错误暴露 memory tools。
+fn json_has_isolated_runtime_env(p: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(p) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let Some(env) = v.pointer("/mcpServers/memory/env") else {
+        return false;
+    };
+    env.get("KODE_HOST").and_then(|value| value.as_str()) == Some(JSON_MCP_HOST_ENV)
+        && env.get("KODE_SESSION_ID").and_then(|value| value.as_str()) == Some(JSON_MCP_SESSION_ENV)
+        && env.get("KODE_BACKEND_KEY").and_then(|value| value.as_str())
+            == Some(JSON_MCP_BACKEND_ENV)
 }
 
 /// Codex MCP 配置写在 TOML 的 `[mcp_servers.<name>]`。
@@ -1271,6 +1319,28 @@ mod tests {
                 .and_then(|c| c.as_str()),
             Some("/r")
         );
+        assert_eq!(
+            memory
+                .get("env")
+                .and_then(|e| e.get("KODE_HOST"))
+                .and_then(|c| c.as_str()),
+            Some(super::JSON_MCP_HOST_ENV)
+        );
+        assert_eq!(
+            memory
+                .get("env")
+                .and_then(|e| e.get("KODE_SESSION_ID"))
+                .and_then(|c| c.as_str()),
+            Some(super::JSON_MCP_SESSION_ENV)
+        );
+        assert_eq!(
+            memory
+                .get("env")
+                .and_then(|e| e.get("KODE_BACKEND_KEY"))
+                .and_then(|c| c.as_str()),
+            Some(super::JSON_MCP_BACKEND_ENV)
+        );
+        assert!(json_has_isolated_runtime_env(&cfg_path));
 
         // 精确 command 检测应识别刚写入的 sidecar，并拒绝旧路径。
         assert!(json_has_memory_server(&cfg_path, Some(&bin)));
@@ -1285,6 +1355,48 @@ mod tests {
         let bytes2 = fs::read(&cfg_path).unwrap();
         let v2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
         assert_eq!(v, v2, "second write should be idempotent");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn json_merge_repairs_legacy_cursor_env_without_runtime_markers() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("kode-mcp-legacy-env-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let cfg_path = tmp.join("mcp.json");
+        fs::write(
+            &cfg_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": {
+                    "memory": {
+                        "command": "/Applications/kode.app/Contents/MacOS/kode-memory-mcp",
+                        "type": "stdio",
+                        "args": [],
+                        "env": { "KODE_MEMORY_ROOT": "/Users/dev/.kode-memory" }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(json_has_memory_server(
+            &cfg_path,
+            Some(Path::new(
+                "/Applications/kode.app/Contents/MacOS/kode-memory-mcp"
+            ))
+        ));
+        assert!(!json_has_isolated_runtime_env(&cfg_path));
+
+        merge_into_json_config(
+            &cfg_path.display().to_string(),
+            Path::new("/Applications/kode.app/Contents/MacOS/kode-memory-mcp"),
+            Path::new("/Users/dev/.kode-memory"),
+        )
+        .unwrap();
+        assert!(json_has_isolated_runtime_env(&cfg_path));
 
         let _ = fs::remove_dir_all(&tmp);
     }
