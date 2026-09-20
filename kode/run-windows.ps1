@@ -37,10 +37,21 @@ if (-not $SkipSidecars) {
 
 Invoke-Checked 'pnpm.cmd' @('--dir', $guiDir, 'build')
 Invoke-Checked 'cargo.exe' @('build', '--release', '-p', 'kode-gui', '--manifest-path', (Join-Path $workspaceRoot 'Cargo.toml'))
-Invoke-Checked 'pnpm.cmd' @('--dir', $guiDir, 'tauri', 'bundle', '--bundles', 'nsis')
+$bundleArgs = @('--dir', $guiDir, 'tauri', 'bundle', '--bundles', 'nsis')
+$localBundleConfig = $null
+if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+  Write-Warning 'TAURI_SIGNING_PRIVATE_KEY is not set; building an unsigned local installer without updater artifacts.'
+  $localBundleConfig = Join-Path ([System.IO.Path]::GetTempPath()) 'kode-local-bundle-config.json'
+  Set-Content -LiteralPath $localBundleConfig -Value '{"bundle":{"createUpdaterArtifacts":false}}' -Encoding utf8
+  $bundleArgs += @('--config', $localBundleConfig)
+}
+Invoke-Checked 'pnpm.cmd' $bundleArgs
+if ($null -ne $localBundleConfig) {
+  Remove-Item -LiteralPath $localBundleConfig -Force -ErrorAction SilentlyContinue
+}
 
 $installerDir = Join-Path $workspaceRoot 'target\release\bundle\nsis'
-$installer = Get-ChildItem -LiteralPath $installerDir -Filter '*-x64-setup.exe' -File | Select-Object -First 1
+$installer = Get-ChildItem -LiteralPath $installerDir -Filter '*_x64-setup.exe' -File | Select-Object -First 1
 if ($null -ne $installer) {
   Write-Host "`nInstaller generated: $($installer.FullName)" -ForegroundColor Green
 } else {
