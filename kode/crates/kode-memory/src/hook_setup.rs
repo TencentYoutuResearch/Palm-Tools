@@ -50,7 +50,7 @@ pub const STOP_HOOK_PROMPT: &str = r#"你是 kode-memory 的沉淀守门员。ko
 - 用户表达了稳定的偏好（不是一次性的「这次先 X」）
 
 ## 绝对不要拦（命中任一就放行）
-- agent 本轮已经调用过 memory_propose（检查 transcript 里有没有 mcp__memory__memory_propose 工具调用）→ 已经记了，放行
+- transcript 中存在真实的 `mcp__memory__memory_propose` MCP 工具调用 → 已经记了，放行。只有该工具调用才算写入 kode-memory；写入 CodeBuddy file-based memory、CODEBUDDY.md/AGENTS.md/项目文档、通过 Write/Edit 修改文件，或仅在文字中声称/提到 memory_propose，均不算已沉淀
 - 纯一次性指令、闲聊、简单问答、只读探查、跑测试看结果
 - 结论能从代码或 git log 直接看出来（不算"非显而易见"）
 - 本轮没有任何决策/坑/偏好沉淀价值
@@ -904,6 +904,23 @@ mod tests {
     }
 
     // --- Stop hook tests ---
+
+    #[test]
+    fn stop_prompt_only_accepts_real_shared_memory_proposal() {
+        assert!(STOP_HOOK_PROMPT.contains("`mcp__memory__memory_propose` MCP 工具调用"));
+        assert!(STOP_HOOK_PROMPT.contains("只有该工具调用才算写入 kode-memory"));
+        for excluded in [
+            "file-based memory",
+            "CODEBUDDY.md/AGENTS.md/项目文档",
+            "Write/Edit 修改文件",
+            "文字中声称/提到 memory_propose",
+        ] {
+            assert!(
+                STOP_HOOK_PROMPT.contains(excluded),
+                "Stop prompt must exclude {excluded} from persisted kode-memory"
+            );
+        }
+    }
 
     #[test]
     fn inject_stop_into_empty_file_creates_hook() {
