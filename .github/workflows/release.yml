@@ -282,6 +282,12 @@ jobs:
       - name: Install GUI dependencies
         run: pnpm install --frozen-lockfile
         working-directory: kode/apps/gui
+      - name: Build Tauri sidecar binaries
+        # tauri.conf.json 的 externalBin 要求带 target 后缀的真实产物存在,
+        # 否则 tauri-build 直接失败;nsis 打包必须嵌入真 sidecar。
+        shell: bash
+        working-directory: kode
+        run: bash apps/gui/build-sidecar.sh
       - name: Set application version from tag
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh

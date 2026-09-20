@@ -98,6 +98,17 @@ jobs:
       - name: Install GUI dependencies
         run: pnpm install --frozen-lockfile
         working-directory: kode/apps/gui
+      - name: Stage sidecar placeholders for Tauri externalBin check
+        # cargo check 只需要 tauri-build 的存在性校验通过;binaries/ 不入库,
+        # macOS rust job 用 build-sidecar.sh 产真件,这里用占位文件避免整条
+        # cargo+bun 构建链。发布产物由 release.yml 的 windows-app 走真 sidecar。
+        shell: pwsh
+        working-directory: kode/apps/gui/src-tauri
+        run: |
+          New-Item -ItemType Directory -Force binaries | Out-Null
+          foreach ($name in 'kode-memory','kode-memory-mcp','specops') {
+            New-Item -ItemType File -Force "binaries/$name-x86_64-pc-windows-msvc.exe" | Out-Null
+          }
       - name: Check Windows GUI backend
         run: cargo check -p kode-gui
       - name: Check GUI frontend
