@@ -6,7 +6,7 @@
    *   - tab 卡片用 session title 作主标题,backend / model chip 作副标签
    *   - context 占用进度条
    *   - 底部状态栏分 input / output / cached + 精确 cost
-   *   - 持久化:启动时自动尝试恢复上次 tab(banner 询问)
+   *   - 持久化:启动时直接恢复上次 tab
    *   - 多窗口:Cmd+N 开新窗口(独立 AppState,不恢复)
    *
    * Phase 3 mounted xterm 实例保持常驻,避免 LRU evict 丢 scrollback。
@@ -915,8 +915,6 @@
   let locale: LocaleMode = $state('system')
   /** 系统当前是否 dark — 仅 theme=system 时才用,监听 prefers-color-scheme 变化。 */
   let systemPrefersDark = $state(true)
-  /** restore banner */
-  let restorable: PersistedTab[] = $state([])
   /** 侧栏显示模式 — Cmd+B 三态循环 full → compact → hidden → full
    *  - full:232px 会话账本(title / live state / model / token usage)
    *  - compact:52px 窄条,只显示模型缩写 + status dot + unread/attention 标记
@@ -1098,9 +1096,9 @@
       }
       const persisted = await ipc.getPersistedTabs()
       if (persisted && persisted.length > 0) {
-        restorable = persisted
+        await restoreTabs(persisted)
       }
-      // 不自动 spawn —— 等用户在 BackendChooser 里点选,或 Cmd+T,或点 restore
+      // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
     } catch (e) {
       bootError = String(e)
       console.error(e)
@@ -1579,15 +1577,6 @@
     ]
   })
 
-  async function doRestore() {
-    const list = restorable
-    restorable = [] // 先清,避免重复点
-    const ok = await restoreTabs(list)
-    if (ok < list.length) {
-      console.warn(`restore ${ok}/${list.length} succeeded`)
-    }
-  }
-
   // ============ 同步系统窗口标题 ============
   // 标题格式: "<序号>. <active tab title>";没有 active tab 时回落到品牌名。
   // active tab 由 (tabs, activeId) 共同决定 — 任一变化都需要刷新。
@@ -1998,18 +1987,7 @@
         <button class="btn-ghost" onclick={() => (bootError = null)}>关闭提示</button>
       </div>
     {/if}
-    {#if restorable.length > 0 && $tabs.length === 0 && !chooserOpen}
-      <div class="restore-banner">
-        <div class="restore-text">
-          <strong>Restore last session?</strong>
-          <span>{restorable.length} tab{restorable.length === 1 ? '' : 's'} from previous run</span>
-        </div>
-        <div class="restore-actions">
-          <button class="btn-primary" onclick={doRestore}>Restore all</button>
-          <button class="btn-ghost" onclick={() => (restorable = [])}>Dismiss</button>
-        </div>
-      </div>
-    {:else if $tabs.length === 0 || chooserOpen}
+    {#if $tabs.length === 0 || chooserOpen}
       <BackendChooser
         {backends}
         errorMessage={sessionStartError}
@@ -3712,29 +3690,6 @@
     .attention-banner { animation: none; }
   }
 
-  /* restore banner */
-  .restore-banner {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-direction: column;
-    gap: var(--sp-3);
-    padding: var(--sp-4);
-    background:
-      linear-gradient(180deg, transparent, color-mix(in srgb, var(--bg-elevated) 18%, transparent));
-  }
-  .restore-text {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    color: var(--fg-primary);
-  }
-  .restore-text strong { font-size: 16px; font-weight: var(--fw-semi); }
-  .restore-text span { color: var(--fg-secondary); font-size: var(--fs-sm); }
-  .restore-actions { display: flex; gap: var(--sp-2); }
   .btn-primary, .btn-ghost {
     padding: 8px 16px;
     border-radius: var(--rad-lg);
