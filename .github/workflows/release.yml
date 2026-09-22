@@ -297,7 +297,9 @@ jobs:
           $version = $env:RELEASE_VERSION.TrimStart('v')
           $cargo = Join-Path $pwd 'kode/Cargo.toml'
           $text = Get-Content -Raw $cargo
-          $text = [regex]::Replace($text, '(?ms)(\[workspace\.package\]\s.*?^version = ")[^"]+(")', "`$1$version`$2", 1)
+          # Named captures prevent a numeric tag such as 0.2.2 from being
+          # parsed as the `$10` regular-expression backreference.
+          $text = [regex]::Replace($text, '(?ms)(?<prefix>\[workspace\.package\]\s.*?^version = ")[^"]+(?<suffix>")', "`${prefix}$version`${suffix}", 1)
           Set-Content -Path $cargo -Value $text -NoNewline
           foreach ($file in @('kode/apps/gui/package.json', 'kode/apps/gui/src-tauri/tauri.conf.json')) {
             $json = Get-Content -Raw $file | ConvertFrom-Json
