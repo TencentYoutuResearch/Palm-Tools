@@ -70,7 +70,9 @@ jobs:
         working-directory: kode/apps/specops
       - run: pnpm build
         working-directory: kode/apps/specops
-      - if: github.event_name == 'pull_request'
+      # This repository ships SpecOps but is not itself a SpecOps-managed
+      # workspace, so only gate repositories that provide its control file.
+      - if: github.event_name == 'pull_request' && hashFiles('specops.toml') != ''
         run: node kode/apps/specops/dist/cli/main.js gate --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --verify specops
 
   windows:
