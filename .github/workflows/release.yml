@@ -317,11 +317,13 @@ jobs:
           $version = $env:RELEASE_VERSION.TrimStart('v')
           $out = 'release-assets/windows'
           New-Item -ItemType Directory -Force $out | Out-Null
-          Copy-Item "kode/target/release/bundle/nsis/kode_${version}_x64-setup.exe" $out
-          $zip = "kode/target/release/bundle/nsis/kode_${version}_x64-setup.nsis.zip"
-          $sig = "$zip.sig"
-          if (Test-Path $zip) { Copy-Item $zip $out }
-          if (Test-Path $sig) { Copy-Item $sig $out }
+          # Tauri's NSIS updater signs the installer itself, not a .zip wrapper.
+          # Copy both required files strictly so a missing updater signature fails
+          # this build job instead of the later publication job.
+          $installer = "kode/target/release/bundle/nsis/kode_${version}_x64-setup.exe"
+          $signature = "$installer.sig"
+          Copy-Item $installer $out
+          Copy-Item $signature $out
       - uses: actions/upload-artifact@v6
         with:
           name: windows-app
@@ -375,13 +377,13 @@ jobs:
             --rawfile arm_sig "release-assets/macos/$arm_asset.sig" \
             --arg intel_url "$base/$intel_asset" \
             --rawfile intel_sig "release-assets/macos/$intel_asset.sig" \
-            --rawfile win_sig "release-assets/windows/kode_${version}_x64-setup.nsis.zip.sig" \
+            --rawfile win_sig "release-assets/windows/kode_${version}_x64-setup.exe.sig" \
             '{
               version: $version,
               platforms: {
                 "darwin-aarch64": { url: $arm_url, signature: ($arm_sig | rtrimstr("\n")) },
                 "darwin-x86_64": { url: $intel_url, signature: ($intel_sig | rtrimstr("\n")) },
-                "windows-x86_64": { url: ($base + "/kode_" + $version + "_x64-setup.nsis.zip"), signature: ($win_sig | rtrimstr("\n")) }
+                "windows-x86_64": { url: ($base + "/kode_" + $version + "_x64-setup.exe"), signature: ($win_sig | rtrimstr("\n")) }
               }
             }' > release-assets/macos/latest.json
 
