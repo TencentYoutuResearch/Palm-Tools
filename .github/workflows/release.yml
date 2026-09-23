@@ -373,6 +373,7 @@ jobs:
           intel_asset="kode_${version}_x86_64.app.tar.gz"
           jq -n \
             --arg version "$version" \
+            --arg base "$base" \
             --arg arm_url "$base/$arm_asset" \
             --rawfile arm_sig "release-assets/macos/$arm_asset.sig" \
             --arg intel_url "$base/$intel_asset" \
