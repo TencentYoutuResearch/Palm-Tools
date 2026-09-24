@@ -36,8 +36,8 @@ class SessionSendButton extends StatelessWidget {
       child: Tooltip(
         message: label,
         child: SizedBox(
-          width: 48,
-          height: 46,
+          width: 40,
+          height: 40,
           child: FilledButton(
             onPressed: stopping
                 ? null
@@ -53,8 +53,8 @@ class SessionSendButton extends StatelessWidget {
             ),
             child: stopping
                 ? SizedBox(
-                    width: 21,
-                    height: 21,
+                    width: 18,
+                    height: 18,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
                       color: Theme.of(context).colorScheme.primary,
@@ -65,7 +65,7 @@ class SessionSendButton extends StatelessWidget {
                   )
                 : Icon(
                     showStop ? Icons.stop_rounded : Icons.arrow_upward_rounded,
-                    size: 23,
+                    size: 20,
                   ),
           ),
         ),

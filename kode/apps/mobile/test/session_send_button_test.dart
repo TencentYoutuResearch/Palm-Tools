@@ -25,6 +25,7 @@ void main() {
     await tester.tap(find.byType(FilledButton));
     expect(stopped, 1);
     final size = tester.getSize(find.byType(FilledButton));
+    expect(size, const Size(40, 40));
     await show(true, '继续处理');
     expect(find.byType(CircularProgressIndicator), findsNothing);
     await tester.tap(find.byType(FilledButton));

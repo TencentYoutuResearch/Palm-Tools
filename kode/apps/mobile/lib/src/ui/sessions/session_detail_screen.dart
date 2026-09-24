@@ -83,6 +83,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   String? _mode;
   bool _modeBusy = false; // POST /mode in flight
   bool _interrupting = false;
+  bool _permissionMenuOpen = false;
 
   /// 输入框
   final _inputCtrl = TextEditingController();
@@ -1000,124 +1001,134 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
       valueListenable: _inputCtrl,
       builder: (context, value, _) {
         final expanded = _inputFocus.hasFocus;
-        return AnimatedSize(
-          duration: const Duration(milliseconds: 160),
-          curve: Curves.easeOutCubic,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 7, 10, 8),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_listening || _speechError != null)
-                  _VoiceInputRail(
-                    listening: _listening,
-                    error: _speechError,
-                    languageLabel: _speechLanguage.localeLabel,
-                    onDismissError: () => setState(() => _speechError = null),
-                  ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (!expanded) ...[
-                      _ComposerIconButton(
-                        icon: _listening
-                            ? Icons.stop_rounded
-                            : Icons.mic_none_rounded,
-                        label: _listening
-                            ? 'Stop ${_speechLanguage.localeLabel} voice input'
-                            : 'Start ${_speechLanguage.localeLabel} voice input',
-                        hint: _listening
-                            ? null
-                            : 'Long press to switch language',
-                        badge: _speechLanguage.compactLabel,
-                        active: _listening,
-                        onPressed: _toggleSpeech,
-                        onLongPress: _listening ? null : _toggleSpeechLanguage,
-                      ),
-                      const SizedBox(width: 7),
-                    ],
-                    Expanded(
-                      key: const ValueKey('session-composer-input-slot'),
-                      child: TextField(
-                        key: const ValueKey('session-composer-input'),
-                        controller: _inputCtrl,
-                        focusNode: _inputFocus,
-                        onChanged: (text) => ref
-                            .read(sessionDraftProvider.notifier)
-                            .save(widget.sessionId, text),
-                        onTapOutside: (_) => _dismissKeyboard(),
-                        minLines: 1,
-                        maxLines: 4,
-                        keyboardType: TextInputType.multiline,
-                        textInputAction: TextInputAction.newline,
-                        decoration: InputDecoration(
-                          hintText: _listening
-                              ? 'Listening…'
-                              : 'Message $backendLabel…',
-                          filled: false,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          isDense: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 13,
-                            vertical: 12,
-                          ),
-                        ),
-                      ),
+        return TextFieldTapRegion(
+          child: AnimatedSize(
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOutCubic,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 7, 10, 8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_listening || _speechError != null)
+                    _VoiceInputRail(
+                      listening: _listening,
+                      error: _speechError,
+                      languageLabel: _speechLanguage.localeLabel,
+                      onDismissError: () => setState(() => _speechError = null),
                     ),
-                    if (!expanded) ...[
-                      const SizedBox(width: 7),
-                      _composerCommitButton(working, value.text),
-                    ],
-                  ],
-                ),
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 160),
-                  switchInCurve: Curves.easeOut,
-                  switchOutCurve: Curves.easeIn,
-                  transitionBuilder: (child, animation) =>
-                      FadeTransition(opacity: animation, child: child),
-                  child: expanded
-                      ? Padding(
-                          key: const ValueKey('session-composer-controls'),
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Row(
-                            children: [
-                              _ModeChip(
-                                mode: _mode,
-                                busy: _modeBusy,
-                                onPick: _switchMode,
-                                compact: false,
-                              ),
-                              const Spacer(),
-                              _ComposerIconButton(
-                                icon: _listening
-                                    ? Icons.stop_rounded
-                                    : Icons.mic_none_rounded,
-                                label: _listening
-                                    ? 'Stop ${_speechLanguage.localeLabel} voice input'
-                                    : 'Start ${_speechLanguage.localeLabel} voice input',
-                                hint: _listening
-                                    ? null
-                                    : 'Long press to switch language',
-                                badge: _speechLanguage.compactLabel,
-                                active: _listening,
-                                onPressed: _toggleSpeech,
-                                onLongPress: _listening
-                                    ? null
-                                    : _toggleSpeechLanguage,
-                              ),
-                              const SizedBox(width: 7),
-                              _composerCommitButton(working, value.text),
-                            ],
-                          ),
-                        )
-                      : const SizedBox.shrink(
-                          key: ValueKey('session-composer-single-line'),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      if (!expanded) ...[
+                        _ComposerIconButton(
+                          icon: _listening
+                              ? Icons.stop_rounded
+                              : Icons.mic_none_rounded,
+                          label: _listening
+                              ? 'Stop ${_speechLanguage.localeLabel} voice input'
+                              : 'Start ${_speechLanguage.localeLabel} voice input',
+                          hint: _listening
+                              ? null
+                              : 'Long press to switch language',
+                          badge: _speechLanguage.compactLabel,
+                          active: _listening,
+                          onPressed: _toggleSpeech,
+                          onLongPress: _listening
+                              ? null
+                              : _toggleSpeechLanguage,
                         ),
-                ),
-              ],
+                        const SizedBox(width: 7),
+                      ],
+                      Expanded(
+                        key: const ValueKey('session-composer-input-slot'),
+                        child: TextField(
+                          key: const ValueKey('session-composer-input'),
+                          controller: _inputCtrl,
+                          focusNode: _inputFocus,
+                          onChanged: (text) => ref
+                              .read(sessionDraftProvider.notifier)
+                              .save(widget.sessionId, text),
+                          onTapOutside: (_) {
+                            if (!_permissionMenuOpen) _dismissKeyboard();
+                          },
+                          minLines: 1,
+                          maxLines: 4,
+                          keyboardType: TextInputType.multiline,
+                          textInputAction: TextInputAction.newline,
+                          decoration: InputDecoration(
+                            hintText: _listening
+                                ? 'Listening…'
+                                : 'Message $backendLabel…',
+                            filled: false,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 13,
+                              vertical: 12,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (!expanded) ...[
+                        const SizedBox(width: 7),
+                        _composerCommitButton(working, value.text),
+                      ],
+                    ],
+                  ),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 160),
+                    switchInCurve: Curves.easeOut,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, animation) =>
+                        FadeTransition(opacity: animation, child: child),
+                    child: expanded
+                        ? Padding(
+                            key: const ValueKey('session-composer-controls'),
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Row(
+                              children: [
+                                _ModeChip(
+                                  mode: _mode,
+                                  busy: _modeBusy,
+                                  onPick: (mode) {
+                                    _closePermissionMenu();
+                                    _switchMode(mode);
+                                  },
+                                  onOpened: _openPermissionMenu,
+                                  onCanceled: _closePermissionMenu,
+                                ),
+                                const Spacer(),
+                                _ComposerIconButton(
+                                  icon: _listening
+                                      ? Icons.stop_rounded
+                                      : Icons.mic_none_rounded,
+                                  label: _listening
+                                      ? 'Stop ${_speechLanguage.localeLabel} voice input'
+                                      : 'Start ${_speechLanguage.localeLabel} voice input',
+                                  hint: _listening
+                                      ? null
+                                      : 'Long press to switch language',
+                                  badge: _speechLanguage.compactLabel,
+                                  active: _listening,
+                                  onPressed: _toggleSpeech,
+                                  onLongPress: _listening
+                                      ? null
+                                      : _toggleSpeechLanguage,
+                                ),
+                                const SizedBox(width: 7),
+                                _composerCommitButton(working, value.text),
+                              ],
+                            ),
+                          )
+                        : const SizedBox.shrink(
+                            key: ValueKey('session-composer-single-line'),
+                          ),
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -1133,6 +1144,17 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     onSend: _send,
     onStop: _interrupt,
   );
+
+  void _openPermissionMenu() {
+    _permissionMenuOpen = true;
+  }
+
+  void _closePermissionMenu() {
+    _permissionMenuOpen = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _inputFocus.requestFocus();
+    });
+  }
 }
 
 class _ComposerIconButton extends StatelessWidget {
@@ -2279,20 +2301,20 @@ class _TaskCard extends StatelessWidget {
   }
 }
 
-/// AppBar 上的 mode 切换 chip。
-/// - mode=null:显灰色 "—"
-/// - mode=default/acceptEdits/plan/bypassPermissions:用对应颜色 + 简短文字
-/// - 点击弹 4 个选项的菜单,选中调用 onPick(mode)
+/// Composer permission-mode control. The collapsed trigger stays icon-only;
+/// the opened menu carries the icon, label, and explanation.
 class _ModeChip extends StatelessWidget {
   final String? mode;
   final bool busy;
   final ValueChanged<String> onPick;
-  final bool compact;
+  final VoidCallback onOpened;
+  final VoidCallback onCanceled;
   const _ModeChip({
     required this.mode,
     required this.busy,
     required this.onPick,
-    this.compact = true,
+    required this.onOpened,
+    required this.onCanceled,
   });
 
   @override
@@ -2303,32 +2325,48 @@ class _ModeChip extends StatelessWidget {
       initialValue: mode,
       borderRadius: BorderRadius.circular(8),
       enabled: !busy,
+      requestFocus: false,
+      onOpened: onOpened,
+      onCanceled: onCanceled,
       onSelected: onPick,
       itemBuilder: (_) => const [
         PopupMenuItem(
           value: 'default',
-          child: _ModeMenuItem(label: 'Default', sub: '每个工具调用都要批准'),
+          child: _ModeMenuItem(
+            icon: Icons.shield_outlined,
+            label: 'Default',
+            sub: '每个工具调用都要批准',
+          ),
         ),
         PopupMenuItem(
           value: 'acceptEdits',
           child: _ModeMenuItem(
+            icon: Icons.edit_note_rounded,
             label: 'Auto-accept edits',
             sub: '自动批准 file/edit',
           ),
         ),
         PopupMenuItem(
           value: 'plan',
-          child: _ModeMenuItem(label: 'Plan', sub: '只规划不执行'),
+          child: _ModeMenuItem(
+            icon: Icons.account_tree_outlined,
+            label: 'Plan',
+            sub: '只规划不执行',
+          ),
         ),
         PopupMenuItem(
           value: 'bypassPermissions',
-          child: _ModeMenuItem(label: 'Bypass permissions', sub: '⚠️ 全部跳过批准'),
+          child: _ModeMenuItem(
+            icon: Icons.lock_open_rounded,
+            label: 'Bypass permissions',
+            sub: '⚠️ 全部跳过批准',
+          ),
         ),
       ],
       child: Container(
-        height: 44,
-        constraints: BoxConstraints(minWidth: compact ? 52 : 128),
-        padding: const EdgeInsets.symmetric(horizontal: 7),
+        key: const ValueKey('session-permission-menu'),
+        width: 40,
+        height: 40,
         margin: EdgeInsets.zero,
         decoration: BoxDecoration(
           color: Colors.transparent,
@@ -2344,25 +2382,7 @@ class _ModeChip extends StatelessWidget {
                     color: color,
                   ),
                 )
-              : compact
-              ? Icon(
-                  Icons.more_horiz_rounded,
-                  size: 24,
-                  color: Theme.of(context).colorScheme.onSurface,
-                )
-              : Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.tune_rounded, size: 17, color: color),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Permissions: $label',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    const SizedBox(width: 2),
-                    const Icon(Icons.expand_more_rounded, size: 18),
-                  ],
-                ),
+              : Icon(_iconFor(mode), size: 20, color: color),
         ),
       ),
     );
@@ -2381,28 +2401,56 @@ class _ModeChip extends StatelessWidget {
       },
     );
   }
+
+  IconData _iconFor(String? mode) => switch (mode) {
+    'default' => Icons.shield_outlined,
+    'acceptEdits' => Icons.edit_note_rounded,
+    'plan' => Icons.account_tree_outlined,
+    'bypassPermissions' => Icons.lock_open_rounded,
+    _ => Icons.shield_outlined,
+  };
 }
 
 class _ModeMenuItem extends StatelessWidget {
+  final IconData icon;
   final String label;
   final String sub;
-  const _ModeMenuItem({required this.label, required this.sub});
+  const _ModeMenuItem({
+    required this.icon,
+    required this.label,
+    required this.sub,
+  });
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Row(
       children: [
-        Text(
-          label,
-          style: const TextStyle(
-            fontWeight: FontWeight.w700,
-            color: KillLaColors.textPrimary,
+        Icon(icon, size: 19, color: KillLaColors.textMuted),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: KillLaColors.textPrimary,
+                ),
+              ),
+              Text(
+                sub,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: KillLaColors.textMuted,
+                ),
+              ),
+            ],
           ),
-        ),
-        Text(
-          sub,
-          style: const TextStyle(fontSize: 11, color: KillLaColors.textMuted),
         ),
       ],
     );

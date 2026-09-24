@@ -508,9 +508,28 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('session-composer-input')));
     await tester.pumpAndSettle();
-    expect(find.text('Permissions: —'), findsOneWidget);
+    expect(find.textContaining('Permissions:'), findsNothing);
+    expect(find.byIcon(Icons.shield_outlined), findsOneWidget);
     expect(find.byIcon(Icons.mic_none_rounded), findsOneWidget);
     expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('session-permission-menu')));
+    await tester.pumpAndSettle();
+    expect(find.text('Auto-accept edits'), findsOneWidget);
+    expect(find.byIcon(Icons.edit_note_rounded), findsOneWidget);
+    expect(
+      tester
+          .widget<TextField>(
+            find.byKey(const ValueKey('session-composer-input')),
+          )
+          .focusNode!
+          .hasFocus,
+      isTrue,
+    );
+    expect(tester.testTextInput.isVisible, isTrue);
+
+    await tester.tapAt(const Offset(8, 8));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.byIcon(Icons.stop_rounded));
     await tester.pump();
