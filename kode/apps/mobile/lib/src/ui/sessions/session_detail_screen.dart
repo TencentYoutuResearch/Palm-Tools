@@ -82,6 +82,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   /// null = 还不知道(刚连上 / 子进程还在 init);UI 显灰色 chip。
   String? _mode;
   bool _modeBusy = false; // POST /mode in flight
+  bool _interrupting = false;
 
   /// 输入框
   final _inputCtrl = TextEditingController();
@@ -194,11 +195,17 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   void _handleComposerFocus() {
     if (!_inputFocus.hasFocus) {
       _keepBottomPinnedForKeyboard = false;
-      return;
+    } else {
+      _keepBottomPinnedForKeyboard =
+          !_scrollCtrl.hasClients ||
+          _scrollCtrl.position.extentAfter <= _bottomThreshold;
     }
-    _keepBottomPinnedForKeyboard =
-        !_scrollCtrl.hasClients ||
-        _scrollCtrl.position.extentAfter <= _bottomThreshold;
+    // Focus notifications can arrive while EditableText is applying an input
+    // update. Rebuild on the next frame so the draft listener remains
+    // synchronous and the two-line transition never races the IME.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
@@ -554,6 +561,24 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     _dismissKeyboard();
   }
 
+  Future<void> _interrupt() async {
+    if (_interrupting) return;
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    setState(() => _interrupting = true);
+    try {
+      await api.interruptSession(widget.sessionId);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not stop the agent: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _interrupting = false);
+    }
+  }
+
   void _discardOutbound(String itemKey, QueuedSessionMessage message) {
     ref
         .read(sessionMessageQueueProvider.notifier)
@@ -795,18 +820,6 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                       cwd: cwd,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  GlassSurface(
-                    radius: 28,
-                    blur: true,
-                    floating: true,
-                    subtle: true,
-                    child: _ModeChip(
-                      mode: _mode,
-                      busy: _modeBusy,
-                      onPick: _switchMode,
-                    ),
-                  ),
                 ],
               ),
               if (hasHeaderMeta)
@@ -986,75 +999,140 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: _inputCtrl,
       builder: (context, value, _) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(10, 7, 10, 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (_listening || _speechError != null)
-                _VoiceInputRail(
-                  listening: _listening,
-                  error: _speechError,
-                  languageLabel: _speechLanguage.localeLabel,
-                  onDismissError: () => setState(() => _speechError = null),
-                ),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  _ComposerIconButton(
-                    icon: _listening
-                        ? Icons.stop_rounded
-                        : Icons.mic_none_rounded,
-                    label: _listening
-                        ? 'Stop ${_speechLanguage.localeLabel} voice input'
-                        : 'Start ${_speechLanguage.localeLabel} voice input',
-                    hint: _listening ? null : 'Long press to switch language',
-                    badge: _speechLanguage.compactLabel,
-                    active: _listening,
-                    onPressed: _toggleSpeech,
-                    onLongPress: _listening ? null : _toggleSpeechLanguage,
+        final expanded = _inputFocus.hasFocus;
+        return AnimatedSize(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 7, 10, 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_listening || _speechError != null)
+                  _VoiceInputRail(
+                    listening: _listening,
+                    error: _speechError,
+                    languageLabel: _speechLanguage.localeLabel,
+                    onDismissError: () => setState(() => _speechError = null),
                   ),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: TextField(
-                      controller: _inputCtrl,
-                      focusNode: _inputFocus,
-                      onTapOutside: (_) => _dismissKeyboard(),
-                      minLines: 1,
-                      maxLines: 4,
-                      keyboardType: TextInputType.multiline,
-                      textInputAction: TextInputAction.newline,
-                      decoration: InputDecoration(
-                        hintText: _listening
-                            ? 'Listening…'
-                            : 'Message $backendLabel…',
-                        filled: false,
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        isDense: true,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 13,
-                          vertical: 12,
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (!expanded) ...[
+                      _ComposerIconButton(
+                        icon: _listening
+                            ? Icons.stop_rounded
+                            : Icons.mic_none_rounded,
+                        label: _listening
+                            ? 'Stop ${_speechLanguage.localeLabel} voice input'
+                            : 'Start ${_speechLanguage.localeLabel} voice input',
+                        hint: _listening
+                            ? null
+                            : 'Long press to switch language',
+                        badge: _speechLanguage.compactLabel,
+                        active: _listening,
+                        onPressed: _toggleSpeech,
+                        onLongPress: _listening ? null : _toggleSpeechLanguage,
+                      ),
+                      const SizedBox(width: 7),
+                    ],
+                    Expanded(
+                      key: const ValueKey('session-composer-input-slot'),
+                      child: TextField(
+                        key: const ValueKey('session-composer-input'),
+                        controller: _inputCtrl,
+                        focusNode: _inputFocus,
+                        onChanged: (text) => ref
+                            .read(sessionDraftProvider.notifier)
+                            .save(widget.sessionId, text),
+                        onTapOutside: (_) => _dismissKeyboard(),
+                        minLines: 1,
+                        maxLines: 4,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        decoration: InputDecoration(
+                          hintText: _listening
+                              ? 'Listening…'
+                              : 'Message $backendLabel…',
+                          filled: false,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 13,
+                            vertical: 12,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 7),
-                  SessionSendButton(
-                    circular: true,
-                    working: working,
-                    text: value.text,
-                    onSend: _send,
-                  ),
-                ],
-              ),
-            ],
+                    if (!expanded) ...[
+                      const SizedBox(width: 7),
+                      _composerCommitButton(working, value.text),
+                    ],
+                  ],
+                ),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 160),
+                  switchInCurve: Curves.easeOut,
+                  switchOutCurve: Curves.easeIn,
+                  transitionBuilder: (child, animation) =>
+                      FadeTransition(opacity: animation, child: child),
+                  child: expanded
+                      ? Padding(
+                          key: const ValueKey('session-composer-controls'),
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Row(
+                            children: [
+                              _ModeChip(
+                                mode: _mode,
+                                busy: _modeBusy,
+                                onPick: _switchMode,
+                                compact: false,
+                              ),
+                              const Spacer(),
+                              _ComposerIconButton(
+                                icon: _listening
+                                    ? Icons.stop_rounded
+                                    : Icons.mic_none_rounded,
+                                label: _listening
+                                    ? 'Stop ${_speechLanguage.localeLabel} voice input'
+                                    : 'Start ${_speechLanguage.localeLabel} voice input',
+                                hint: _listening
+                                    ? null
+                                    : 'Long press to switch language',
+                                badge: _speechLanguage.compactLabel,
+                                active: _listening,
+                                onPressed: _toggleSpeech,
+                                onLongPress: _listening
+                                    ? null
+                                    : _toggleSpeechLanguage,
+                              ),
+                              const SizedBox(width: 7),
+                              _composerCommitButton(working, value.text),
+                            ],
+                          ),
+                        )
+                      : const SizedBox.shrink(
+                          key: ValueKey('session-composer-single-line'),
+                        ),
+                ),
+              ],
+            ),
           ),
         );
       },
     );
   }
+
+  Widget _composerCommitButton(bool working, String text) => SessionSendButton(
+    circular: true,
+    working: working,
+    stopping: _interrupting,
+    text: text,
+    onSend: _send,
+    onStop: _interrupt,
+  );
 }
 
 class _ComposerIconButton extends StatelessWidget {
@@ -2209,10 +2287,12 @@ class _ModeChip extends StatelessWidget {
   final String? mode;
   final bool busy;
   final ValueChanged<String> onPick;
+  final bool compact;
   const _ModeChip({
     required this.mode,
     required this.busy,
     required this.onPick,
+    this.compact = true,
   });
 
   @override
@@ -2247,7 +2327,7 @@ class _ModeChip extends StatelessWidget {
       ],
       child: Container(
         height: 44,
-        width: 52,
+        constraints: BoxConstraints(minWidth: compact ? 52 : 128),
         padding: const EdgeInsets.symmetric(horizontal: 7),
         margin: EdgeInsets.zero,
         decoration: BoxDecoration(
@@ -2264,10 +2344,24 @@ class _ModeChip extends StatelessWidget {
                     color: color,
                   ),
                 )
-              : Icon(
+              : compact
+              ? Icon(
                   Icons.more_horiz_rounded,
                   size: 24,
                   color: Theme.of(context).colorScheme.onSurface,
+                )
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.tune_rounded, size: 17, color: color),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Permissions: $label',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(width: 2),
+                    const Icon(Icons.expand_more_rounded, size: 18),
+                  ],
                 ),
         ),
       ),
