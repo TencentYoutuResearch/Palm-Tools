@@ -33,6 +33,7 @@
     currentTermTheme,
     type TerminalAppearance,
   } from './terminal_settings'
+  import { terminalFontFamilyStack } from './terminal_font'
   import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
 
   type Props = {
@@ -117,6 +118,9 @@
   let appearance = $state<TerminalAppearance>(initialAppearance)
   let fontSize = $state(initialAppearance.fontSize)
   let fontFamily = $state(initialAppearance.fontFamily)
+  function resolvedFontFamily(value = fontFamily) {
+    return terminalFontFamilyStack(value, FONT_FALLBACK)
+  }
   function adjustFontSize(delta: number) {
     const next = Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, fontSize + delta))
     if (next === fontSize) return
@@ -186,7 +190,7 @@
       container.innerHTML = ''
 
       try {
-        await (document as any).fonts?.load?.(`${fontSize}px "${fontFamily}"`)
+        await (document as any).fonts?.load?.(`${fontSize}px ${resolvedFontFamily()}`)
       } catch {}
       if (containerEls.get(shellId) !== container) return
 
@@ -199,7 +203,7 @@
       if (containerEls.get(shellId) !== container) return
 
       const term = new Terminal({
-        fontFamily: `"${fontFamily}", ${FONT_FALLBACK}`,
+        fontFamily: resolvedFontFamily(),
         fontSize: fontSize,
         cursorBlink: true,
         allowProposedApi: true,
@@ -415,7 +419,7 @@
   function applyAppearance(next = appearance) {
     for (const { term, fitAddon, container } of termInstances.values()) {
       try {
-        term.options.fontFamily = `"${next.fontFamily}", ${FONT_FALLBACK}`
+        term.options.fontFamily = resolvedFontFamily(next.fontFamily)
         term.options.fontSize = next.fontSize
         term.options.theme = buildXtermTheme(isDark, next.themeMode)
         try { term.clearTextureAtlas?.() } catch {}
@@ -749,6 +753,42 @@
   }
   .term-container.active {
     display: block;
+  }
+  /* xterm.css is lazy-loaded after component CSS and defaults the viewport to
+     a platform scrollbar. Keep the shell consistent with the main terminal. */
+  .shell-terminal-panel :global(.xterm .xterm-viewport) {
+    background-color: transparent !important;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--fg-secondary) 38%, transparent) transparent;
+  }
+  .shell-terminal-panel :global(.xterm .xterm-viewport::-webkit-scrollbar) {
+    width: 8px;
+    height: 8px;
+  }
+  .shell-terminal-panel :global(.xterm .xterm-viewport::-webkit-scrollbar-track) {
+    background: transparent;
+  }
+  .shell-terminal-panel :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb) {
+    min-height: 24px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg-secondary) 38%, transparent);
+    background-clip: padding-box;
+  }
+  .shell-terminal-panel :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover) {
+    background: color-mix(in srgb, var(--fg-secondary) 58%, transparent);
+    background-clip: padding-box;
+  }
+  .shell-terminal-panel :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb:active) {
+    background: color-mix(in srgb, var(--fg-secondary) 78%, transparent);
+    background-clip: padding-box;
+  }
+  .shell-terminal-panel :global(.xterm .xterm-viewport::-webkit-scrollbar-corner) {
+    background: transparent;
+  }
+  @media (forced-colors: active) {
+    .shell-terminal-panel :global(.xterm .xterm-viewport) { scrollbar-color: auto; }
+    .shell-terminal-panel :global(.xterm .xterm-viewport::-webkit-scrollbar-thumb) { background: CanvasText; }
   }
   .empty-hint {
     position: absolute;
