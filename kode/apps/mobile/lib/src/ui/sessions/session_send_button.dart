@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
-/// Remote work only occupies the empty composer; a draft always takes priority.
+/// A draft always takes priority over remote work. An empty working composer
+/// exposes a real interrupt affordance instead of a non-actionable spinner.
 class SessionSendButton extends StatelessWidget {
   final bool working;
   final String text;
   final VoidCallback onSend;
+  final VoidCallback onStop;
+  final bool stopping;
   final bool circular;
 
   const SessionSendButton({
@@ -12,17 +15,23 @@ class SessionSendButton extends StatelessWidget {
     required this.working,
     required this.text,
     required this.onSend,
+    required this.onStop,
+    this.stopping = false,
     this.circular = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final canSend = text.trim().isNotEmpty;
-    final showProgress = working && !canSend;
-    final label = showProgress ? 'Session running' : 'Send message';
+    final showStop = working && !canSend;
+    final label = stopping
+        ? 'Stopping agent'
+        : showStop
+        ? 'Stop agent'
+        : 'Send message';
     return Semantics(
       button: true,
-      enabled: canSend,
+      enabled: canSend || (showStop && !stopping),
       label: label,
       child: Tooltip(
         message: label,
@@ -30,7 +39,9 @@ class SessionSendButton extends StatelessWidget {
           width: 48,
           height: 46,
           child: FilledButton(
-            onPressed: canSend ? onSend : null,
+            onPressed: stopping
+                ? null
+                : (canSend ? onSend : (showStop ? onStop : null)),
             style: FilledButton.styleFrom(
               elevation: 0,
               padding: EdgeInsets.zero,
@@ -40,7 +51,7 @@ class SessionSendButton extends StatelessWidget {
                       borderRadius: BorderRadius.circular(13),
                     ),
             ),
-            child: showProgress
+            child: stopping
                 ? SizedBox(
                     width: 21,
                     height: 21,
@@ -52,7 +63,10 @@ class SessionSendButton extends StatelessWidget {
                           : null,
                     ),
                   )
-                : const Icon(Icons.arrow_upward_rounded, size: 23),
+                : Icon(
+                    showStop ? Icons.stop_rounded : Icons.arrow_upward_rounded,
+                    size: 23,
+                  ),
           ),
         ),
       ),
