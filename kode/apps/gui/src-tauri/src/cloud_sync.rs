@@ -722,6 +722,8 @@ impl CloudSyncManager {
                 }
                 None => Err("input command is missing text".into()),
             },
+            "interrupt" => kode_bridge::interrupt_session(&self.inner.ctx, local_session_id)
+                .map_err(|error| error.to_string()),
             "answer" => match payload.get("choice_index").and_then(Value::as_u64) {
                 Some(choice) => {
                     let submit = payload

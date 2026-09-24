@@ -288,6 +288,7 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/sessions/:id", get(get_session))
         .route("/api/v1/sessions/:id/history", get(get_history))
         .route("/api/v1/sessions/:id/input", post(post_input))
+        .route("/api/v1/sessions/:id/interrupt", post(post_interrupt))
         .route("/api/v1/sessions/:id/answer", post(post_answer))
         .route(
             "/api/v1/sessions/:id/plan_response",
@@ -1125,6 +1126,14 @@ async fn post_input(
         "input",
         json!({"text": req.text}),
     )
+}
+
+async fn post_interrupt(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(session_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    dispatch_mobile_command(&state, session_id, &headers, "interrupt", json!({}))
 }
 
 async fn post_answer(

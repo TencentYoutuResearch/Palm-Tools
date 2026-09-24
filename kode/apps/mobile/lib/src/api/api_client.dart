@@ -249,6 +249,16 @@ class ApiClient {
     return resp.data['mode'] as String;
   }
 
+  /// Interrupt the active agent turn. This is deliberately separate from text
+  /// input so an empty composer cannot accidentally send a control character.
+  Future<void> interruptSession(int id) async {
+    final resp = await _dio.post(
+      '/api/v1/sessions/$id/interrupt',
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
+    );
+    _check(resp);
+  }
+
   /// 创建 session。permission_mode 可选,会被 bridge 注入 `--permission-mode <m>`。
   Future<SessionDto> createSessionWithMode({
     required String backendKey,

@@ -679,6 +679,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/api/v1/sessions/:id/history", get(get_history))
         .route("/api/v1/sessions/:id/transcript", get(get_transcript))
         .route("/api/v1/sessions/:id/input", post(post_input))
+        .route("/api/v1/sessions/:id/interrupt", post(post_interrupt))
         .route("/api/v1/sessions/:id/focus", post(post_focus))
         .route("/api/v1/sessions/:id/answer", post(post_answer))
         .route(
@@ -1424,6 +1425,23 @@ async fn post_input(
             return Err(ApiError::BadRequest("text or bytes_b64 required".into()));
         }
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Interrupt is a distinct operation from text input. Writing ETX reaches the
+/// active CLI without accidentally submitting an empty user message.
+pub fn interrupt_session(ctx: &Ctx, id: SessionId) -> Result<(), TextInputError> {
+    let sessions = ctx.sessions.lock();
+    let session = sessions.get(&id).ok_or(TextInputError { session_id: id })?;
+    session.write_input(b"\x03");
+    Ok(())
+}
+
+async fn post_interrupt(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<SessionId>,
+) -> Result<StatusCode, ApiError> {
+    interrupt_session(&ctx, id).map_err(|_| ApiError::NotFound(format!("session {id}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
