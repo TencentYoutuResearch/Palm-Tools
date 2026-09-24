@@ -7,6 +7,7 @@ void main() {
     tester,
   ) async {
     var sent = 0;
+    var stopped = 0;
     Future<void> show(bool working, String text) => tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -14,16 +15,15 @@ void main() {
             working: working,
             text: text,
             onSend: () => sent++,
+            onStop: () => stopped++,
           ),
         ),
       ),
     );
     await show(true, '');
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(
-      tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
-      isNull,
-    );
+    expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
+    await tester.tap(find.byType(FilledButton));
+    expect(stopped, 1);
     final size = tester.getSize(find.byType(FilledButton));
     await show(true, '继续处理');
     expect(find.byType(CircularProgressIndicator), findsNothing);
@@ -31,7 +31,7 @@ void main() {
     expect(sent, 1);
     expect(tester.getSize(find.byType(FilledButton)), size);
     await show(true, '  \n');
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
     await show(false, '');
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(

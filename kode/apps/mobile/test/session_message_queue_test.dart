@@ -11,6 +11,7 @@ import 'package:kode_mobile/src/ui/theme.dart';
 
 class _FakeApiClient extends ApiClient {
   final sent = <String>[];
+  var interrupts = 0;
   List<Envelope> history = const [];
   Future<InputDispatchReceipt> Function()? onSend;
 
@@ -36,6 +37,11 @@ class _FakeApiClient extends ApiClient {
     sent.add(text);
     return onSend?.call() ??
         const InputDispatchReceipt(commandId: 'cmd-test', status: 'dispatched');
+  }
+
+  @override
+  Future<void> interruptSession(int id) async {
+    interrupts++;
   }
 }
 
@@ -462,6 +468,53 @@ void main() {
 
     expect(container.read(sessionDraftProvider).containsKey(7), isFalse);
     expect(api.sent, ['send this draft\n']);
+  });
+
+  testWidgets('focused busy composer exposes permissions, audio, and stop', (
+    tester,
+  ) async {
+    final api = _FakeApiClient();
+    final events = StreamController<Envelope>();
+    addTearDown(events.close);
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(api),
+        eventStreamProvider.overrideWith((ref) => events.stream),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: KillLaTheme.light(),
+          home: const SessionDetailScreen(sessionId: 7),
+        ),
+      ),
+    );
+    await tester.pump();
+    events.add(
+      Envelope(
+        protocolVersion: 'v1',
+        schemaVersion: 1,
+        sessionId: 7,
+        ts: DateTime.now().millisecondsSinceEpoch,
+        type: 'session.status',
+        payload: const {'status': 'busy'},
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('session-composer-input')));
+    await tester.pumpAndSettle();
+    expect(find.text('Permissions: —'), findsOneWidget);
+    expect(find.byIcon(Icons.mic_none_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.stop_rounded));
+    await tester.pump();
+    expect(api.interrupts, 1);
   });
 
   testWidgets('keyboard inset lifts the transcript and composer above it', (
