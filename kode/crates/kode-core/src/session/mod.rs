@@ -1,6 +1,7 @@
 //! Session = 一个 tab 的全部状态:子进程 PTY + vt100 终端模拟 + 元信息。
 
 pub mod backend;
+mod codex_title;
 pub mod cursor_tail;
 pub mod heuristic;
 pub mod jsonl_tail;
@@ -37,6 +38,13 @@ pub struct Session {
     pub parser: vt100::Parser,
     pub state: SessionState,
     pub busy: BusyHeuristic,
+    /// Authoritative backend turn currently in flight. Matching IDs keep a
+    /// delayed completion from an older turn from clearing a newer one.
+    active_turn_id: Option<String>,
+    /// Session UUID whose semantic lifecycle tail has already been started.
+    /// This is separate from `session_id`: restored sessions know their UUID
+    /// before any tail has been attached.
+    semantic_session_id: Option<String>,
     pub cols: u16,
     pub rows: u16,
     /// 权威 retarget 通道:SessionStart hook 给出新 transcript_path 时,
@@ -235,6 +243,8 @@ impl Session {
             busy: BusyHeuristic::new(idle_threshold).with_pty_activity_as_work(
                 !backend::profile_for_key(backend_key).is_some_and(|p| p.has_idle_animation()),
             ),
+            active_turn_id: None,
+            semantic_session_id: None,
             cols,
             rows,
             retarget_tx,
@@ -331,27 +341,75 @@ impl Session {
 
     /// 用户提交了一轮。PTY 之后即使长时间无输出也保持 busy,直到 [`mark_turn_end`]。
     pub fn mark_turn_start(&mut self) {
+        self.mark_turn_start_with_id(None);
+    }
+
+    /// Returns true exactly once for each semantic session binding.
+    pub fn claim_semantic_session(&mut self, session_id: &str) -> bool {
+        if self.semantic_session_id.as_deref() == Some(session_id) {
+            return false;
+        }
+        self.semantic_session_id = Some(session_id.to_string());
+        true
+    }
+
+    /// Optimistic fallback for backends without explicit lifecycle records.
+    /// Codex reports task_started itself, so input and hook activity must not
+    /// manufacture a second lifecycle owner.
+    pub fn mark_turn_start_fallback(&mut self) {
+        let lifecycle_is_authoritative = backend::profile_for_key(&self.backend_key)
+            .is_some_and(|profile| profile.has_authoritative_turn_lifecycle());
+        if !lifecycle_is_authoritative {
+            self.mark_turn_start();
+        }
+    }
+
+    pub fn mark_turn_start_with_id(&mut self, turn_id: Option<&str>) {
         if matches!(self.state.status, Status::Exited(_)) {
             return;
+        }
+        if let Some(turn_id) = turn_id.filter(|id| !id.is_empty()) {
+            self.active_turn_id = Some(turn_id.to_string());
         }
         self.busy.hold_turn();
         self.state.status = Status::Busy;
     }
 
-    /// Stop / turn_finished。下一拍 `tick_status` 若 PTY 也静默则翻 idle。
+    /// Stop / turn_finished。匹配当前 turn 后立即重新计算 idle/busy。
     pub fn mark_turn_end(&mut self) {
+        self.mark_turn_end_with_id(None);
+    }
+
+    pub fn mark_turn_end_with_id(&mut self, turn_id: Option<&str>) -> bool {
+        if matches!(self.state.status, Status::Exited(_)) {
+            return false;
+        }
+        if let (Some(active), Some(finished)) = (
+            self.active_turn_id.as_deref(),
+            turn_id.filter(|id| !id.is_empty()),
+        ) {
+            if active != finished {
+                return false;
+            }
+        }
+        self.active_turn_id = None;
         self.busy.release_turn();
+        self.tick_status();
+        true
     }
 
     pub fn mark_exited(&mut self, code: Option<i32>) {
         self.busy.release_turn();
+        self.active_turn_id = None;
         self.state.status = Status::Exited(code);
         // 释放 PTY,reader/reaper 线程会因 EOF 自行退出
         self.pty = None;
     }
 
     pub fn write_input(&self, bytes: &[u8]) {
-        if looks_like_turn_submit(bytes) {
+        let lifecycle_is_authoritative = backend::profile_for_key(&self.backend_key)
+            .is_some_and(|profile| profile.has_authoritative_turn_lifecycle());
+        if looks_like_turn_submit(bytes) && !lifecycle_is_authoritative {
             self.busy.hold_turn();
         } else if looks_like_turn_cancel(bytes) {
             // Bare Escape is the terminal-level cancel gesture. Some backends
@@ -1305,12 +1363,14 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             command: String::new(),
             args: vec![],
-            session_id: None,
+            session_id: Some("session-a".into()),
             pty: None,
             parser: vt100::Parser::new(24, 80, 0),
             state: SessionState::new("test", "auto"),
             busy: BusyHeuristic::new(Duration::from_secs(1))
                 .with_pty_activity_as_work(!profile.has_idle_animation()),
+            active_turn_id: None,
+            semantic_session_id: None,
             cols: 80,
             rows: 24,
             retarget_tx: None,
@@ -1320,6 +1380,16 @@ mod tests {
         assert_eq!(s.state.status, Status::Idle);
         assert!(!s.state.unread);
         assert!(s.parser.screen().contents().contains("idle animation"));
+        // A restored tab already knows its session UUID, but still needs to
+        // start its semantic lifecycle tail exactly once.
+        assert!(s.claim_semantic_session("session-a"));
+        assert!(!s.claim_semantic_session("session-a"));
+        assert!(s.claim_semantic_session("session-b"));
+        s.write_input(b"\r");
+        s.tick_status();
+        assert_eq!(s.state.status, Status::Idle);
+        s.mark_turn_start_fallback();
+        assert_eq!(s.state.status, Status::Idle);
         s.mark_turn_start();
         s.feed(b"working", false);
         assert_eq!(s.state.status, Status::Busy);
@@ -1329,6 +1399,11 @@ mod tests {
         s.feed(b"next animation frame", false);
         assert_eq!(s.state.status, Status::Idle);
         assert!(!s.state.unread);
+        s.mark_turn_start_with_id(Some("turn-new"));
+        assert!(!s.mark_turn_end_with_id(Some("turn-old")));
+        assert_eq!(s.state.status, Status::Busy);
+        assert!(s.mark_turn_end_with_id(Some("turn-new")));
+        assert_eq!(s.state.status, Status::Idle);
         s.mark_turn_start();
         s.write_input(b"\x1b");
         s.feed(b"cancelled animation", false);

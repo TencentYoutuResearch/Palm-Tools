@@ -501,9 +501,9 @@ pub fn spawn_event_router(ctx: Arc<Ctx>, mut rx: mpsc::UnboundedReceiver<CoreEve
                                 s.state.title = t.clone();
                             }
                             let retarget = if let Some(sid) = &session_uuid {
-                                let changed = s.session_id.as_deref() != Some(sid);
+                                let should_start_semantic = s.claim_semantic_session(sid);
                                 s.session_id = Some(sid.clone());
-                                if changed {
+                                if should_start_semantic {
                                     kode_core::session::jsonl_tail::Backend::from_backend_key(
                                         &s.backend_key,
                                     )
@@ -561,7 +561,7 @@ pub fn spawn_event_router(ctx: Arc<Ctx>, mut rx: mpsc::UnboundedReceiver<CoreEve
                 CoreEvent::TurnHold { id, active } => {
                     if let Some(s) = ctx.sessions.lock().get_mut(&id) {
                         if active {
-                            s.mark_turn_start();
+                            s.mark_turn_start_fallback();
                         } else {
                             s.mark_turn_end();
                         }
@@ -618,12 +618,12 @@ fn spawn_turn_hold_from_bus(ctx: Arc<Ctx>) {
             match rx.recv().await {
                 Ok(env) if env.r#type == "session.turn_started" => {
                     if let Some(s) = ctx.sessions.lock().get_mut(&env.session_id) {
-                        s.mark_turn_start();
+                        s.mark_turn_start_with_id(env.payload["turn_id"].as_str());
                     }
                 }
                 Ok(env) if env.r#type == "session.turn_finished" => {
                     if let Some(s) = ctx.sessions.lock().get_mut(&env.session_id) {
-                        s.mark_turn_end();
+                        s.mark_turn_end_with_id(env.payload["turn_id"].as_str());
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -934,6 +934,9 @@ async fn create_session(
         dto.session_uuid.as_deref(),
         kode_core::session::jsonl_tail::Backend::from_backend_key(&req.backend_key),
     ) {
+        if let Some(session) = ctx.sessions.lock().get_mut(&id) {
+            session.claim_semantic_session(sid);
+        }
         semantic::spawn(
             id,
             backend_kind,
@@ -1329,7 +1332,7 @@ pub async fn submit_text_input(ctx: &Ctx, id: SessionId, text: &str) -> Result<(
         let session = sessions
             .get_mut(&id)
             .ok_or(TextInputError { session_id: id })?;
-        session.mark_turn_start();
+        session.mark_turn_start_fallback();
         if body.is_empty() {
             session.write_input(b"\r");
             None

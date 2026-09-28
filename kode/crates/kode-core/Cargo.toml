@@ -24,3 +24,4 @@ async-trait = "0.1"
 # system prompt 段(给所有 backend 写"你的工具叫 memory_search/propose"指令)。
 # path 依赖,不引网络包。
 kode-memory = { path = "../kode-memory" }
+rusqlite = { version = "0.31", features = ["bundled"] }

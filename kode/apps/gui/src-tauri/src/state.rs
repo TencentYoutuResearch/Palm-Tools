@@ -16,7 +16,7 @@ use kode_core::{
 };
 use parking_lot::Mutex;
 use tauri::{ipc::Channel, AppHandle, Emitter};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::bridge::ctx::BridgeCtx;
 use crate::bridge::events::{BridgeBus, EventEnvelope};
@@ -24,7 +24,7 @@ use crate::bridge::prompt_detect::{self, PermissionMode, PromptState};
 use crate::persistence;
 use crate::transport::{LocalTransport, RemoteTransport};
 
-/// Coalesce 窗口:每 8ms tick 一次,把 PTY 字节合并成大块发出去
+/// Coalesce 窗口:收到 PTY 字节后等待 8ms,再合并成大块发出去
 pub const COALESCE_TICK_MS: u64 = 8;
 
 /// 一个 session 的字节累积 buffer + 订阅 channel
@@ -128,6 +128,7 @@ impl AppState {
 
         let (core_tx, core_rx) = mpsc::unbounded_channel::<CoreEvent>();
         let byte_buffers = Arc::new(Mutex::new(HashMap::new()));
+        let bytes_ready = Arc::new(Notify::new());
         let sessions: Arc<Mutex<HashMap<SessionId, Session>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let bus = Arc::new(BridgeBus::new());
@@ -176,12 +177,13 @@ impl AppState {
             Some(app.clone()),
             core_rx,
             Arc::clone(&byte_buffers),
+            Arc::clone(&bytes_ready),
             Arc::clone(&sessions),
             Arc::clone(&bus),
             Arc::clone(&ctx.prompt_states),
         );
-        // 后台任务:8ms tick 把 buffer 一次性 send 出去
-        spawn_coalesce_loop(Arc::clone(&byte_buffers));
+        // 后台任务:有字节到达才开启 8ms 合并窗口,空闲时不唤醒
+        spawn_coalesce_loop(Arc::clone(&byte_buffers), bytes_ready);
         // 后台任务:每 200ms 扫描每 session 的 vt100 屏幕,识别 PTY-prompt
         spawn_prompt_scan_loop(
             Arc::clone(&sessions),
@@ -255,7 +257,15 @@ pub(crate) fn build_test_ctx(config: Config, token: String) -> Arc<BridgeCtx> {
         memory: None,
     });
 
-    spawn_event_router(None, core_rx, byte_buffers, sessions, bus, prompt_states);
+    spawn_event_router(
+        None,
+        core_rx,
+        byte_buffers,
+        Arc::new(Notify::new()),
+        sessions,
+        bus,
+        prompt_states,
+    );
     ctx
 }
 
@@ -263,6 +273,7 @@ fn spawn_event_router(
     app: Option<AppHandle>,
     mut rx: mpsc::UnboundedReceiver<CoreEvent>,
     byte_buffers: Arc<Mutex<HashMap<SessionId, SessionByteBuffer>>>,
+    bytes_ready: Arc<Notify>,
     sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
     bus: Arc<BridgeBus>,
     prompt_states: Arc<Mutex<HashMap<SessionId, PromptState>>>,
@@ -303,6 +314,7 @@ fn spawn_event_router(
                         let buf = g.entry(id).or_insert_with(SessionByteBuffer::new);
                         buf.pending.extend_from_slice(&bytes);
                     }
+                    bytes_ready.notify_one();
                     // 11.1.4 协议补丁:同时把字节流推 BridgeBus 当 `pty_bytes` 事件,
                     // 远端 WS 客户端(Phase 11 RemoteTransport / 调试用 wscat)能拿到。
                     // 本地 GUI 已通过上面 byte_buffers + Channel 直送,不依赖此事件。
@@ -384,9 +396,9 @@ fn spawn_event_router(
                                 }
 
                                 if let Some(sid) = session_uuid.as_ref() {
-                                    let changed = binding_changed;
+                                    let should_start_semantic = s.claim_semantic_session(sid);
                                     s.session_id = Some(sid.clone());
-                                    if changed {
+                                    if should_start_semantic {
                                         kode_core::session::jsonl_tail::Backend::from_backend_key(
                                             &s.backend_key,
                                         )
@@ -434,7 +446,7 @@ fn spawn_event_router(
                 CoreEvent::TurnHold { id, active } => {
                     if let Some(s) = sessions.lock().get_mut(&id) {
                         if active {
-                            s.mark_turn_start();
+                            s.mark_turn_start_fallback();
                         } else {
                             s.mark_turn_end();
                         }
@@ -577,12 +589,14 @@ fn apply_session_uuid_retarget_from_pty(
     bus.emit(EventEnvelope::new(id, "meta", bus_payload));
 }
 
-fn spawn_coalesce_loop(byte_buffers: Arc<Mutex<HashMap<SessionId, SessionByteBuffer>>>) {
+fn spawn_coalesce_loop(
+    byte_buffers: Arc<Mutex<HashMap<SessionId, SessionByteBuffer>>>,
+    bytes_ready: Arc<Notify>,
+) {
     tauri::async_runtime::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(COALESCE_TICK_MS));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tick.tick().await;
+            bytes_ready.notified().await;
+            tokio::time::sleep(Duration::from_millis(COALESCE_TICK_MS)).await;
             let drained: Vec<(SessionId, Vec<u8>, Channel<Vec<u8>>)> = {
                 let mut g = byte_buffers.lock();
                 g.iter_mut()
@@ -945,7 +959,7 @@ fn spawn_attention_forwarder(
                                     {
                                         return None;
                                     }
-                                    let should_spawn = session.session_id.as_deref() != Some(uuid);
+                                    let should_spawn = session.claim_semantic_session(uuid);
                                     session.session_id = Some(uuid.to_string());
                                     Some((backend, should_spawn))
                                 });
@@ -1062,14 +1076,14 @@ fn spawn_attention_forwarder(
                         }
                         "session.turn_started" => {
                             if let Some(s) = sessions.lock().get_mut(&env.session_id) {
-                                s.mark_turn_start();
+                                s.mark_turn_start_with_id(env.payload["turn_id"].as_str());
                             }
                         }
                         "session.turn_finished" => {
                             {
                                 let mut g = sessions.lock();
                                 if let Some(s) = g.get_mut(&env.session_id) {
-                                    s.mark_turn_end();
+                                    s.mark_turn_end_with_id(env.payload["turn_id"].as_str());
                                 }
                             }
                             let mut payload = env.payload.clone();

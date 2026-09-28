@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use super::codex_title;
 use super::cursor_tail;
 use super::jsonl_tail::{self, Backend};
 use super::SessionId;
@@ -78,6 +79,11 @@ pub trait BackendProfile: Send + Sync {
     fn kind(&self) -> Backend;
     fn usage_key(&self) -> &'static str;
 
+    /// Backend events, rather than terminal keystrokes, own turn state.
+    fn has_authoritative_turn_lifecycle(&self) -> bool {
+        false
+    }
+
     /// Decorative idle redraws must not count as agent work.
     fn has_idle_animation(&self) -> bool {
         false
@@ -131,7 +137,8 @@ pub trait BackendProfile: Send + Sync {
 pub fn profile(kind: Backend) -> &'static dyn BackendProfile {
     match kind {
         Backend::Codebuddy => &CodebuddyProfile,
-        Backend::Claude => &ClaudeProfile,
+        Backend::Claude => &CLAUDE_PROFILE,
+        Backend::Tclaude => &TCLAUDE_PROFILE,
         Backend::Codex => &CodexProfile,
         Backend::Cursor => &CursorProfile,
     }
@@ -144,7 +151,8 @@ pub fn profile_for_key(key: &str) -> Option<&'static dyn BackendProfile> {
 pub fn all_profiles() -> &'static [&'static dyn BackendProfile] {
     static PROFILES: &[&dyn BackendProfile] = &[
         &CodebuddyProfile,
-        &ClaudeProfile,
+        &CLAUDE_PROFILE,
+        &TCLAUDE_PROFILE,
         &CodexProfile,
         &CursorProfile,
     ];
@@ -176,7 +184,9 @@ pub fn bind_hook_conversation(conversation_id: &str, tab_id: SessionId) {
 }
 
 struct CodebuddyProfile;
-struct ClaudeProfile;
+struct ClaudeProfile(Backend);
+static CLAUDE_PROFILE: ClaudeProfile = ClaudeProfile(Backend::Claude);
+static TCLAUDE_PROFILE: ClaudeProfile = ClaudeProfile(Backend::Tclaude);
 struct CodexProfile;
 struct CursorProfile;
 
@@ -208,11 +218,18 @@ impl BackendProfile for CodebuddyProfile {
 }
 
 impl BackendProfile for ClaudeProfile {
+    fn has_idle_animation(&self) -> bool {
+        true
+    }
     fn kind(&self) -> Backend {
-        Backend::Claude
+        self.0
     }
     fn usage_key(&self) -> &'static str {
-        "claude"
+        if self.0 == Backend::Tclaude {
+            "tclaude"
+        } else {
+            "claude"
+        }
     }
     fn supports_session_id_flag(&self) -> bool {
         true
@@ -227,7 +244,11 @@ impl BackendProfile for ClaudeProfile {
         list_slug_jsonl_sessions(self, cwd)
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
-        vec![home.join(".claude/projects")]
+        vec![home.join(if self.0 == Backend::Tclaude {
+            ".tclaude/projects"
+        } else {
+            ".claude/projects"
+        })]
     }
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
         request_file_events(path, self.usage_key(), fallback_ms, parse_claude_request)
@@ -235,6 +256,9 @@ impl BackendProfile for ClaudeProfile {
 }
 
 impl BackendProfile for CodexProfile {
+    fn has_authoritative_turn_lifecycle(&self) -> bool {
+        true
+    }
     fn has_idle_animation(&self) -> bool {
         true
     }
@@ -282,7 +306,8 @@ impl BackendProfile for CodexProfile {
             return Vec::new();
         };
         let mut out = Vec::new();
-        collect_codex_listed(&home.join(".codex/sessions"), cwd, &mut out);
+        let names = codex_title::thread_names();
+        collect_codex_listed(&home.join(".codex/sessions"), cwd, &names, &mut out);
         out
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
@@ -446,7 +471,12 @@ fn list_slug_jsonl_sessions(profile: &dyn BackendProfile, cwd: &Path) -> Vec<Lis
     out
 }
 
-fn collect_codex_listed(dir: &Path, cwd: &Path, out: &mut Vec<ListedSession>) {
+fn collect_codex_listed(
+    dir: &Path,
+    cwd: &Path,
+    names: &std::collections::HashMap<String, String>,
+    out: &mut Vec<ListedSession>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -456,7 +486,7 @@ fn collect_codex_listed(dir: &Path, cwd: &Path, out: &mut Vec<ListedSession>) {
             continue;
         };
         if meta.is_dir() {
-            collect_codex_listed(&path, cwd, out);
+            collect_codex_listed(&path, cwd, names, out);
             continue;
         }
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -469,9 +499,10 @@ fn collect_codex_listed(dir: &Path, cwd: &Path, out: &mut Vec<ListedSession>) {
             continue;
         }
         let snap = transcript_snapshot(&path);
+        let title = names.get(&session_id).cloned().or(snap.title);
         out.push(ListedSession {
             session_id,
-            title: snap.title,
+            title,
             model: snap.model,
             total_tokens: snap.total_tokens,
             last_modified_secs: modified_secs(&path),
@@ -592,7 +623,11 @@ fn extract_user_title_from_line(line: &str) -> Option<String> {
             .or_else(|| v.get("message").and_then(|m| m.get("content")))?,
     )?;
     let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with("C-b") {
+    if trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("C-b")
+        || jsonl_tail::is_command_prefix(trimmed)
+    {
         return None;
     }
     Some(trimmed.chars().take(60).collect())
@@ -607,7 +642,7 @@ fn extract_codex_user_title(line: &str) -> Option<String> {
     {
         return None;
     }
-    let text = json_content_to_text(payload.get("content")?)?;
+    let text = jsonl_tail::extract_codex_title_text(payload.get("content"))?;
     let trimmed = text.trim();
     if trimmed.is_empty()
         || trimmed.starts_with('/')
@@ -944,12 +979,26 @@ mod tests {
     fn registry_covers_known_keys() {
         assert!(profile_for_key("codebuddy").is_some());
         assert!(profile_for_key("claude-internal").is_some());
+        assert!(profile_for_key("tclaude").is_some());
+        assert!(profile_for_key("tclaude").unwrap().has_idle_animation());
+        assert_eq!(profile_for_key("tclaude").unwrap().kind(), Backend::Tclaude);
         assert!(profile_for_key("codex").unwrap().resume_style() == ResumeStyle::Subcommand);
         assert!(!profile_for_key("cursor")
             .unwrap()
             .supports_session_id_flag());
         assert!(profile_for_key("foo").is_none());
-        assert_eq!(all_profiles().len(), 4);
+        assert_eq!(all_profiles().len(), 5);
+    }
+
+    #[test]
+    fn session_list_skips_claude_command_before_prompt() {
+        let command = r#"{"type":"user","message":{"content":"<local-command-caveat>injected"}}"#;
+        let prompt = r#"{"type":"user","message":{"content":"分析这个设计"}}"#;
+        assert_eq!(extract_user_title_from_line(command), None);
+        assert_eq!(
+            extract_user_title_from_line(prompt).as_deref(),
+            Some("分析这个设计")
+        );
     }
 
     #[test]

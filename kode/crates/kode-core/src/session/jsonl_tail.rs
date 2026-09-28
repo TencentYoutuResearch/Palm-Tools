@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 #[cfg(unix)]
@@ -26,6 +26,7 @@ use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+use super::codex_title;
 use crate::event::CoreEvent;
 use crate::session::SessionId;
 
@@ -34,6 +35,7 @@ use crate::session::SessionId;
 pub enum Backend {
     Codebuddy,
     Claude,
+    Tclaude,
     Codex,
     Cursor,
 }
@@ -41,11 +43,21 @@ pub enum Backend {
 impl Backend {
     /// 根据 backend_key 选择 jsonl 解析器。未知后端返回 None(不开 tail)。
     pub fn from_backend_key(key: &str) -> Option<Self> {
-        match key {
+        let normalized = key.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "codebuddy" => Some(Backend::Codebuddy),
             "claude" | "claude-internal" => Some(Backend::Claude),
+            "tclaude" => Some(Backend::Tclaude),
             "codex" => Some(Backend::Codex),
             "cursor" => Some(Backend::Cursor),
+            // Teams commonly wrap a supported CLI with a short prefix (for
+            // example `tclaude`). It still owns the same transcript and turn
+            // lifecycle, so treating it as an unknown raw PTY leaves status
+            // stuck on busy after idle redraws.
+            _ if normalized.ends_with("codebuddy") => Some(Backend::Codebuddy),
+            _ if normalized.ends_with("claude") => Some(Backend::Claude),
+            _ if normalized.ends_with("codex") => Some(Backend::Codex),
+            _ if normalized.ends_with("cursor") => Some(Backend::Cursor),
             _ => None,
         }
     }
@@ -68,16 +80,20 @@ impl Backend {
                         .join(format!("{session_id}.jsonl")),
                 )
             }
-            Backend::Claude => {
+            Backend::Claude | Backend::Tclaude => {
                 // ~/.claude/projects/<slug>/<sid>.jsonl
                 // slug:**前导 dash** + / 换成 -(实测格式:"-Users-foo-bar")
                 let raw = cwd.to_string_lossy();
                 let slug = format!("-{}", raw.trim_start_matches('/').replace('/', "-"));
                 Some(
-                    home.join(".claude")
-                        .join("projects")
-                        .join(slug)
-                        .join(format!("{session_id}.jsonl")),
+                    home.join(if self == Backend::Tclaude {
+                        ".tclaude"
+                    } else {
+                        ".claude"
+                    })
+                    .join("projects")
+                    .join(slug)
+                    .join(format!("{session_id}.jsonl")),
                 )
             }
             Backend::Codex | Backend::Cursor => None,
@@ -105,6 +121,7 @@ impl Backend {
         match self {
             Backend::Codebuddy => contains_pair(".codebuddy", "projects"),
             Backend::Claude => contains_pair(".claude", "projects"),
+            Backend::Tclaude => contains_pair(".tclaude", "projects"),
             Backend::Codex => contains_pair(".codex", "sessions"),
             Backend::Cursor => contains_pair(".cursor", "projects"),
         }
@@ -145,6 +162,7 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
     let projects_root = match backend {
         Backend::Codebuddy => home.join(".codebuddy").join("projects"),
         Backend::Claude => home.join(".claude").join("projects"),
+        Backend::Tclaude => home.join(".tclaude").join("projects"),
         Backend::Codex | Backend::Cursor => return None,
     };
     let filename = format!("{session_id}.jsonl");
@@ -278,6 +296,9 @@ struct TailState {
     /// 后续由 providerData 里的实际模型校正。
     user_pinned_model: Option<String>,
     last_title: Option<String>,
+    /// Codex's generated or manually assigned name from its thread database.
+    codex_name: Option<String>,
+    codex_fallback_title: Option<String>,
     /// 当前 jsonl 行声明的真实 session uuid。codebuddy `/clear` 会换新 session/jsonl,
     /// 必须把它同步回 GUI 持久化,否则 restore 会继续 `--resume` 旧 uuid。
     last_session_uuid: Option<String>,
@@ -299,6 +320,8 @@ impl TailState {
             last_emitted_model: None,
             user_pinned_model: None,
             last_title: None,
+            codex_name: None,
+            codex_fallback_title: None,
             last_session_uuid: None,
             expected_session_uuid: None,
             title_fallback_used: false,
@@ -392,6 +415,7 @@ async fn run(
     // 的 target,在 EOF 轮询里持续重试直到文件出现或 tab 结束。
     let mut pending_retarget_uuid: Option<String> = None;
     let mut pending_retarget_path: Option<PathBuf> = None;
+    let mut last_codex_name_check = Instant::now() - Duration::from_secs(2);
 
     loop {
         // 优先消费权威 retarget 信号(SessionStart hook 给出的 transcript_path):
@@ -446,6 +470,39 @@ async fn run(
             // 真正读到文件末尾(没有重写/截断):标记已追上历史。此后新追加的
             // `change session` 行才被当作实时 in-TUI `/resume` 信号触发 retarget。
             caught_up = true;
+
+            // Codex updates `threads.name` independently of its rollout JSONL.
+            // Poll while idle so a generated name or later rename reaches Kode.
+            if backend == Backend::Codex
+                && last_codex_name_check.elapsed() >= Duration::from_secs(1)
+            {
+                last_codex_name_check = Instant::now();
+                if let Some(sid) = state.last_session_uuid.clone() {
+                    if let Some(name) = codex_title::read_thread_name(&sid) {
+                        if let Some(title) = apply_codex_name(&mut state, name) {
+                            state.last_title = Some(title.clone());
+                            if evt_tx
+                                .send(CoreEvent::JsonlMeta {
+                                    id,
+                                    model: None,
+                                    title: Some(title),
+                                    session_uuid: None,
+                                    tokens_reset: false,
+                                    tokens: None,
+                                    input_tokens: None,
+                                    output_tokens: None,
+                                    cached_tokens: None,
+                                    cost_usd: None,
+                                    context_pct: None,
+                                })
+                                .is_err()
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
 
             if let Some(new_path) = pending_retarget_path.as_ref() {
                 if new_path != &current_path {
@@ -553,7 +610,7 @@ async fn run(
 
         let upd = match backend {
             Backend::Codebuddy => parse_codebuddy_line(line, &mut state),
-            Backend::Claude => parse_claude_line(line, &mut state),
+            Backend::Claude | Backend::Tclaude => parse_claude_line(line, &mut state),
             Backend::Codex => parse_codex_line(line, &mut state),
             Backend::Cursor => LineUpdate::default(),
         };
@@ -1131,7 +1188,7 @@ fn extract_user_text(c: &Option<serde_json::Value>) -> Option<String> {
 /// 跳过 claude code 内嵌的命令型 user message:
 ///   `<local-command-caveat>...` / `<command-name>...` / `<command-message>...`
 ///   `<bash-stdout>...` 等等。简单规则:以 `<` 开头就跳。
-fn is_command_prefix(s: &str) -> bool {
+pub(super) fn is_command_prefix(s: &str) -> bool {
     s.starts_with('<')
 }
 
@@ -1181,6 +1238,9 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
                 state.last_session_uuid = Some(sid.to_string());
                 upd.new_session_uuid = Some(sid.to_string());
             }
+            if let Some(name) = codex_title::read_thread_name(sid) {
+                upd.new_title = apply_codex_name(state, name);
+            }
         }
     }
 
@@ -1219,7 +1279,8 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
         if let Some(text) = extract_codex_title_text(entry.payload.get("content")) {
             let trimmed = text.trim();
             let title: String = trimmed.chars().take(60).collect();
-            if state.last_title.as_deref() != Some(&title) {
+            state.codex_fallback_title = Some(title.clone());
+            if state.codex_name.is_none() && state.last_title.as_deref() != Some(&title) {
                 upd.new_title = Some(title);
             }
             state.title_fallback_used = true;
@@ -1227,6 +1288,14 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
     }
 
     upd
+}
+
+fn apply_codex_name(state: &mut TailState, name: Option<String>) -> Option<String> {
+    if state.codex_name == name {
+        return None;
+    }
+    state.codex_name = name.clone();
+    name.or_else(|| state.codex_fallback_title.clone())
 }
 
 fn is_codex_title_noise(s: &str) -> bool {
@@ -1239,7 +1308,7 @@ fn is_codex_title_noise(s: &str) -> bool {
         || s.starts_with("● DeferExecuteTool(")
 }
 
-fn extract_codex_title_text(v: Option<&serde_json::Value>) -> Option<String> {
+pub(super) fn extract_codex_title_text(v: Option<&serde_json::Value>) -> Option<String> {
     let v = v?;
     if let Some(s) = v.as_str() {
         let trimmed = s.trim();
@@ -1513,6 +1582,15 @@ mod tests {
     }
 
     #[test]
+    fn tclaude_uses_its_own_transcript_root() {
+        let cwd = PathBuf::from("/Users/tester/Projects/example/kode");
+        let path = Backend::Tclaude.session_path(&cwd, "abc").unwrap();
+        assert!(path.ends_with(".tclaude/projects/-Users-tester-Projects-example-kode/abc.jsonl"));
+        assert!(Backend::Tclaude.accepts_transcript_path(&path));
+        assert!(!Backend::Claude.accepts_transcript_path(&path));
+    }
+
+    #[test]
     fn from_key_routes() {
         assert_eq!(
             Backend::from_backend_key("codebuddy"),
@@ -1525,6 +1603,7 @@ mod tests {
         );
         assert_eq!(Backend::from_backend_key("codex"), Some(Backend::Codex));
         assert_eq!(Backend::from_backend_key("cursor"), Some(Backend::Cursor));
+        assert_eq!(Backend::from_backend_key("tclaude"), Some(Backend::Tclaude));
         assert_eq!(Backend::from_backend_key("foo"), None);
     }
 
@@ -2485,6 +2564,32 @@ mod tests {
         let upd = parse_codex_line(line, &mut state);
         assert_eq!(upd.new_title.as_deref(), Some("帮我适配 codex cli backend"));
         assert!(state.title_fallback_used);
+    }
+
+    #[test]
+    fn codex_name_overrides_prompt_and_tracks_renames() {
+        let mut state = TailState::new();
+        let meta = r#"{"type":"session_meta","payload":{"id":"session-without-local-db"}}"#;
+        let prompt = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[Image #1]帮我修复标题"}]}}"#;
+        parse_codex_line(meta, &mut state);
+        let fallback = parse_codex_line(prompt, &mut state).new_title.unwrap();
+        assert_eq!(fallback, "[Image #1]帮我修复标题");
+        assert_eq!(
+            apply_codex_name(&mut state, Some("修复标题显示".into())).as_deref(),
+            Some("修复标题显示")
+        );
+        assert_eq!(
+            apply_codex_name(&mut state, Some("修复标题显示".into())),
+            None
+        );
+        assert_eq!(
+            apply_codex_name(&mut state, Some("同步会话标题".into())).as_deref(),
+            Some("同步会话标题")
+        );
+        assert_eq!(
+            apply_codex_name(&mut state, None).as_deref(),
+            Some(fallback.as_str())
+        );
     }
 
     #[test]

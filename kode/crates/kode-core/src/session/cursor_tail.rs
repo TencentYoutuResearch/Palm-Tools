@@ -19,7 +19,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -106,6 +106,7 @@ async fn run(
     let mut last_title: Option<String> = None;
     let mut last_session_uuid: Option<String> = None;
     let mut last_mtime: Option<SystemTime> = None;
+    let mut last_fallback_check = Instant::now() - Duration::from_secs(2);
 
     loop {
         if evt_tx.is_closed() {
@@ -119,6 +120,7 @@ async fn run(
                     last_title = None;
                     last_session_uuid = None;
                     last_mtime = None;
+                    last_fallback_check = Instant::now() - Duration::from_secs(2);
                     bind_cursor_tab_from_meta_path(id, &current_path);
                 }
             }
@@ -127,8 +129,13 @@ async fn run(
         let mtime = fs::metadata(&current_path)
             .ok()
             .and_then(|m| m.modified().ok());
-        if mtime != last_mtime {
+        // `meta.json` can precede the transcript. Retry an absent title even
+        // when the meta file itself has not changed.
+        let retry_fallback =
+            last_title.is_none() && last_fallback_check.elapsed() >= Duration::from_secs(1);
+        if mtime != last_mtime || retry_fallback {
             last_mtime = mtime;
+            last_fallback_check = Instant::now();
             if let Some(meta) = read_cursor_meta_file(&current_path) {
                 let mut new_title = None;
                 let mut new_session_uuid = None;

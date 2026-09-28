@@ -112,32 +112,81 @@ async fn run(
     let replay_boundary = reader.get_ref().metadata().await?.len();
     reader.seek(SeekFrom::Start(0)).await?;
     let mut buf = String::new();
+    let mut replay_turn = ReplayTurn::default();
+    let mut replay_finished = false;
 
     loop {
         buf.clear();
         let line_start = reader.stream_position().await?;
         let n = reader.read_line(&mut buf).await?;
         if n == 0 {
+            if !replay_finished {
+                if backend == Backend::Codex {
+                    if let Some(start) = replay_turn.take_active_start() {
+                        bus.emit(start);
+                    }
+                }
+                replay_finished = true;
+            }
             sleep(Duration::from_millis(300)).await;
             continue;
+        }
+        let is_replay = line_start < replay_boundary;
+        if !is_replay && !replay_finished {
+            if backend == Backend::Codex {
+                if let Some(start) = replay_turn.take_active_start() {
+                    bus.emit(start);
+                }
+            }
+            replay_finished = true;
         }
         let line = buf.trim();
         if line.is_empty() {
             continue;
         }
-        let is_replay = line_start < replay_boundary;
         for env in parse_line(id, backend, line) {
-            // A resumed transcript is useful for reconstructing conversation
-            // content, but its lifecycle edges describe *past* turns. Replaying
-            // `turn_started` would acquire the local busy hold, while replayed
-            // completion used to be filtered below; the result was a Codex tab
-            // that looked busy forever after restore. Only newly appended edges
-            // may change the live session status.
+            // Replayed content is useful, but completed historical turns must
+            // not drive status or duplicate completion notifications. Codex
+            // alone retains the last unmatched start for live-state recovery.
             if is_replay && is_turn_lifecycle_event(&env.r#type) {
+                if backend == Backend::Codex {
+                    replay_turn.observe(&env);
+                }
                 continue;
             }
             bus.emit(env);
         }
+    }
+}
+
+/// Historical completed turns must stay inert, but an unmatched Codex start
+/// at the replay boundary is the live turn that was already running when the
+/// tail attached (often after session metadata arrived).
+#[derive(Default)]
+struct ReplayTurn {
+    active_start: Option<EventEnvelope>,
+}
+
+impl ReplayTurn {
+    fn observe(&mut self, env: &EventEnvelope) {
+        match env.r#type.as_str() {
+            "session.turn_started" => self.active_start = Some(env.clone()),
+            "session.turn_finished" => {
+                let active_id = self
+                    .active_start
+                    .as_ref()
+                    .and_then(|start| start.payload["turn_id"].as_str());
+                let finished_id = env.payload["turn_id"].as_str();
+                if active_id.is_none() || finished_id.is_none() || active_id == finished_id {
+                    self.active_start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn take_active_start(&mut self) -> Option<EventEnvelope> {
+        self.active_start.take()
     }
 }
 
@@ -149,7 +198,7 @@ fn is_turn_lifecycle_event(event_type: &str) -> bool {
 pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvelope> {
     match backend {
         Backend::Codebuddy => parse_codebuddy(id, line),
-        Backend::Claude => parse_claude(id, line),
+        Backend::Claude | Backend::Tclaude => parse_claude(id, line),
         Backend::Codex => parse_codex(id, line),
         Backend::Cursor => parse_cursor(id, line),
     }
@@ -1398,6 +1447,41 @@ mod tests {
     }
 
     #[test]
+    fn codex_replay_restores_only_an_unfinished_turn() {
+        let start = parse_line(
+            16,
+            Backend::Codex,
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"first"}}"#,
+        );
+        let complete = parse_line(
+            16,
+            Backend::Codex,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"first"}}"#,
+        );
+        let active = parse_line(
+            16,
+            Backend::Codex,
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"second"}}"#,
+        );
+        let mut replay = ReplayTurn::default();
+        replay.observe(&start[0]);
+        replay.observe(&complete[0]);
+        assert!(replay.take_active_start().is_none());
+        replay.observe(&active[0]);
+        replay.observe(&complete[0]);
+        assert_eq!(
+            replay.active_start.as_ref().unwrap().payload["turn_id"],
+            "second",
+            "a stale completion must not clear a newer active turn"
+        );
+        assert_eq!(
+            replay.take_active_start().unwrap().payload["turn_id"],
+            "second"
+        );
+        assert!(replay.take_active_start().is_none());
+    }
+
+    #[test]
     fn codex_response_item_user_message_emits_message() {
         let line = r#"{"timestamp":"2026-08-19T10:53:04.194Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为什么 mobile 详情没有消息"}]}}"#;
         let evs = parse_line(17, Backend::Codex, line);
@@ -1520,6 +1604,69 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<SPECOPS_DOCUMENT>"));
+    }
+
+    #[tokio::test]
+    async fn codex_tail_recovers_active_replay_then_accepts_live_completion() {
+        use tokio::io::AsyncWriteExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "kode-codex-semantic-{}.jsonl",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#;
+        let completed =
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#;
+        let next_start =
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"two"}}"#;
+        let next_complete =
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"two"}}"#;
+        tokio::fs::write(&path, format!("{started}\n{completed}\n{next_start}\n"))
+            .await
+            .unwrap();
+
+        let bus = Arc::new(BridgeBus::new());
+        let task = tokio::spawn(run(43, Backend::Codex, path.clone(), Arc::clone(&bus)));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if bus.history_for(43, 0, 10).iter().any(|event| {
+                    event.r#type == "session.turn_started" && event.payload["turn_id"] == "two"
+                }) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("unfinished Codex turn was not recovered");
+        let events = bus.history_for(43, 0, 10);
+        assert_eq!(events.len(), 1, "completed replay turns must stay inert");
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        file.write_all(format!("{next_complete}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if bus
+                    .history_for(43, 0, 10)
+                    .iter()
+                    .any(|event| event.r#type == "session.turn_finished")
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("live Codex completion was not published");
+
+        task.abort();
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     // ============ ExitPlanMode result 熄灭测试 ============
