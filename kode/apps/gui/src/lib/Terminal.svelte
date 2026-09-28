@@ -31,6 +31,7 @@
     type TerminalAppearance,
   } from './terminal_settings'
   import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
+  import { TerminalOutputBacklog } from './terminal_output_backlog'
   import { installConptyCursorGuard, shouldInstallConptyCursorGuard } from './conpty_cursor'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
@@ -53,8 +54,10 @@
     /// 把 WS 上来的字节灌进 BridgeCtx::core_tx,这边订阅 byte_buffer Channel 一切
     /// 照旧。
     endpointId?: EndpointId
+    /// Consecutive Ctrl+C confirmation closes the owning session directly.
+    onCloseSession: () => void | Promise<void>
   }
-  let { sessionId, visible, isDark = true, endpointId }: Props = $props()
+  let { sessionId, visible, isDark = true, endpointId, onCloseSession }: Props = $props()
 
   let containerEl: HTMLDivElement
   let term: any = null
@@ -62,10 +65,17 @@
   // WKWebView 会限制同一页面可同时持有的 WebGL context 数。所有常驻 tab 都
   // load WebglAddon 时,较早的 context 会被浏览器回收;addon 虽会 fallback 到
   // DOM renderer,但 WKWebView 下该降级路径可能把 true-color 字形画成默认前景色。
-  // 因此只允许当前可见 tab 持有 WebGL,后台 tab 仍持续解析/保存 PTY 字节。
+  // 因此只允许当前可见 tab 持有 WebGL。后台 tab 暂存小批 PTY 字节,
+  // 达到上限才追平 xterm,切回时立即补齐;实例和 scrollback 始终常驻。
   let webglAddon: any = null
   let webglLoadGeneration = 0
   let destroyed = false
+
+  function syncCursorBlink() {
+    if (!term) return
+    const shouldBlink = visible && document.hasFocus() && !document.hidden
+    if (term.options.cursorBlink !== shouldBlink) term.options.cursorBlink = shouldBlink
+  }
 
   // 字体设置:从 localStorage 恢复;所有 Terminal 实例共享同一组设置。
   const initialAppearance = loadTerminalAppearance('pty')
@@ -81,6 +91,11 @@
   let bytesUnsubscribe: (() => Promise<void>) | null = null
   let terminalSettingsUnsubscribe: (() => void) | null = null
   const ansiThemeAdapter = new TerminalAnsiThemeAdapter()
+  const hiddenOutput = new TerminalOutputBacklog()
+  function writeTerminalBytes(bytes: Uint8Array) {
+    const themedBytes = ansiThemeAdapter.transform(bytes)
+    if (themedBytes.length > 0) term.write(themedBytes)
+  }
   let disposeCursorGuard: (() => void) | undefined
   // Cmd 键状态监听器(组件级,以便 onDestroy 时清理)
   let _onCmdDown: ((e: KeyboardEvent) => void) | null = null
@@ -108,8 +123,7 @@
   function confirmConsecutiveCtrlC() {
     ctrlCExitConfirmOpen = false
     ctrlCGuard.reset()
-    writePtyInput('\x03')
-    requestAnimationFrame(() => term?.focus?.())
+    void onCloseSession()
   }
 
   // ── 搜索(Ctrl/Cmd+F)──────────────────────────────────────────
@@ -190,7 +204,7 @@
     term = new Terminal({
       fontFamily,
       fontSize: fontSize,
-      cursorBlink: true,
+      cursorBlink: visible && document.hasFocus() && !document.hidden,
       allowProposedApi: true,
       scrollback: 5000,
       theme: buildXtermTheme(isDark, appearance.themeMode),
@@ -238,6 +252,7 @@
     // 再异步加 WebglAddon。FitAddon 不读 renderer 内部,放 open 前后都行。
     term.open(containerEl)
     if (destroyed || !term) return
+    syncCursorBlink()
     if (shouldInstallConptyCursorGuard(navigator.userAgent, endpointId?.kind === 'remote')) {
       disposeCursorGuard = installConptyCursorGuard(term)
     }
@@ -590,9 +605,16 @@
     //    initialBytes 写完再 start,确保 xterm 看到的字节顺序与 PTY 完全一致。
     const byteSubscription = await ipc.subscribeSessionBytes(sessionId, (bytes) => {
       if (destroyed || !term) return
-      const themedBytes = ansiThemeAdapter.transform(bytes)
-      if (themedBytes.length > 0) term.write(themedBytes)
-      if (visible) queueViewportRepair(false)
+      if (!visible) {
+        const batch = hiddenOutput.push(bytes)
+        if (batch) writeTerminalBytes(batch)
+        return
+      }
+      // A new IPC callback may run before Svelte's visibility effect. Drain
+      // older hidden bytes first even in that ordering.
+      const pending = hiddenOutput.take()
+      if (pending) writeTerminalBytes(pending)
+      writeTerminalBytes(bytes)
     })
     if (destroyed || !term) {
       await byteSubscription.unsubscribe().catch((e) => console.warn('[term] unsubscribe bytes failed', e))
@@ -1125,6 +1147,9 @@
   }
 
   onMount(() => {
+    window.addEventListener('focus', syncCursorBlink)
+    window.addEventListener('blur', syncCursorBlink)
+    document.addEventListener('visibilitychange', syncCursorBlink)
     terminalSettingsUnsubscribe = onTerminalSettingsChanged(({ target, settings }) => {
       if (target !== 'pty') return
       appearance = settings
@@ -1480,6 +1505,10 @@
 
   onDestroy(() => {
     destroyed = true
+    window.removeEventListener('focus', syncCursorBlink)
+    window.removeEventListener('blur', syncCursorBlink)
+    document.removeEventListener('visibilitychange', syncCursorBlink)
+    hiddenOutput.clear()
     disposeCursorGuard?.()
     webglLoadGeneration++
     resizeObserver?.disconnect()
@@ -1551,8 +1580,13 @@
   // 常规切换路径每次执行 —— 来回切 tab 会累积成明显卡顿。已移除;上面两道防线
   // 已能覆盖绝大多数 scroll-area 高度不同步的场景。
   $effect(() => {
+    syncCursorBlink()
     void setWebglActive(visible)
     if (visible) {
+      // Flush before accepting subsequent live chunks. Svelte effects and IPC
+      // callbacks run on the same JS thread, so byte order remains unchanged.
+      const pending = term ? hiddenOutput.take() : null
+      if (pending) writeTerminalBytes(pending)
       try { term?.focus?.() } catch {}
       scheduleResize(true)
       requestAnimationFrame(() => repairViewport(true))
