@@ -77,7 +77,10 @@ Cargo workspace 只包含 Rust crate 和 `apps/gui/src-tauri`。`apps/mobile`、
 
 - codebuddy:`~/.codebuddy/projects/<slug>/<session-id>.jsonl`
 - claude / claude-internal:`~/.claude/projects/<slug>/<session-id>.jsonl`
+- tclaude:`~/.tclaude/projects/<slug>/<session-id>.jsonl`（与 Claude 独立）
 - codex:`~/.codex/sessions/**/rollout-*.jsonl`
+
+Codex 的会话展示名优先读取 `~/.codex/state_5.sqlite` 中对应 `threads.name`，并在运行时同步改名；rollout 首条有效 user prompt 只作为兜底。Cursor 优先 `~/.cursor/chats/**/meta.json` 的 title，未生成时从 agent transcript 取首条有效 prompt。
 
 `crates/kode-core/src/session/jsonl_tail.rs` 负责:
 
@@ -110,7 +113,7 @@ Cargo workspace 只包含 Rust crate 和 `apps/gui/src-tauri`。`apps/mobile`、
 
 - PTY 高频字节不要用 Tauri `emit`;当前设计是前端订阅 IPC `Channel`,后端约 8ms coalesce 一次发送。
 - `CoreEvent::PtyBytes` 走高频 byte channel;`PtyExited` / `JsonlMeta` 等低频事件才 emit / bus。
-- xterm.js 每个 tab 一个实例;后台 tab 仍需持续 feed,切回要零延迟。
+- xterm.js 每个已打开的 tab 保留一个实例和 scrollback,不可因隐藏而卸载。后台 tab 的 PTY 字节按原顺序暂存;达到 256 KiB 上限批量 feed,切回时先追平再处理新字节,避免后台每个 8ms 包都唤醒 xterm。高输出后台会持续按上限批量追平,不能丢字符或无限积压。
 - macOS `.app` 启动时 PATH 会很小,`apps/gui/src-tauri/src/lib.rs` 已用 `fix_path_env::fix()` 修正。不要移到 Builder 之后。
 - macOS 终端类体验需要关闭 `ApplePressAndHoldEnabled`,否则长按不 repeat、快打会吞字符。
 

@@ -77,6 +77,10 @@ export const activeTab = derived([tabs, activeId], ([$tabs, $id]) => {
   return $tabs.find((t) => t.id === $id) ?? null
 })
 
+// The status ticker can emit before spawnSession resolves and the tab enters the store.
+// Keep its latest value so startup restoration does not miss that ready transition.
+const sessionStatuses = new Map<SessionId, SessionStatus>()
+
 export interface NewTabOptions {
   cwd?: string
   resumeSessionId?: string | null
@@ -119,6 +123,7 @@ export async function newTab(
     // 后端返回的 endpoint_id 是权威来源(用户传 null 时后端兜底成 Local)
     endpointId: s.endpoint_id,
     titlePinned: false,
+    status: sessionStatuses.get(s.id) ?? (s.endpoint_id.kind === 'remote' ? 'idle' : 'starting'),
   }
   tabs.update((arr) => arr.some((existing) => existing.id === t.id)
     ? arr.map((existing) => existing.id === t.id ? { ...existing, ...t } : existing)
@@ -132,6 +137,7 @@ export async function newTab(
 export async function closeTab(id: SessionId) {
   const tab = get(tabs).find((t) => t.id === id)
   await ipc.killSession(id, tab?.endpointId ?? null).catch(() => {})
+  sessionStatuses.delete(id)
   clearAppEventsForSession(id)
   tabs.update((arr) => arr.filter((t) => t.id !== id))
   mountedIds.update((arr) => arr.filter((x) => x !== id))
@@ -256,6 +262,7 @@ export async function startEventSubscriptions() {
     if (m.title || m.model || m.session_id) schedulePersist()
   })
   exitUnlisten = await ipc.onSessionExited((m) => {
+    sessionStatuses.delete(m.id)
     // 子进程退出 → tab 直接从列表消失(不展示 exited 状态)。复用 closeTab 的
     // 清理顺序:过滤 tab、清 mountedIds、若是 active 则切到下一个。后端 bridge
     // 仍保留该 session(mark_exited),SpecOps 的 monitor 还能再 poll 一次拿到
@@ -352,6 +359,8 @@ export async function startEventSubscriptions() {
       detail,
       source: tab?.backendKey,
     })
+    // Runtime status has one owner: the Rust session.status ticker. A delayed
+    // turn_finished notification must not overwrite a newer busy status.
     if (!isActive && tab) {
       tabs.update((arr) =>
         arr.map((t) => (t.id === m.id ? { ...t, unread: true } : t)),
@@ -359,6 +368,7 @@ export async function startEventSubscriptions() {
     }
   })
   statusUnlisten = await ipc.onSessionStatus((m) => {
+    sessionStatuses.set(m.id, m.status)
     tabs.update((arr) =>
       arr.map((t) => (t.id === m.id ? { ...t, status: m.status } : t)),
     )
@@ -474,7 +484,10 @@ export function schedulePersist() {
 /// 若 PersistedTab 带 session_id,会走 --resume 让子进程加载历史 + 复用 jsonl(token/ctx 立刻显示)。
 /// 否则降级为普通 spawn(老 v1 持久化文件兜底)。
 /// permission_mode / model 也透传 — bypass 的 tab 重启后仍然 bypass、上次选的 model 重启后仍然生效。
-export async function restoreTabs(persisted: PersistedTab[]): Promise<number> {
+export async function restoreTabs(
+  persisted: PersistedTab[],
+  onRestored?: (tab: TabInfo) => void,
+): Promise<number> {
   // restoring 标记让 schedulePersist 全程跳过 —— 避免「成功 tab 子集」覆盖 state.json
   // 导致失败 tab 的持久化项被永久清掉。结束后按成功与否决定是否补一次 persist。
   restoring = true
@@ -529,6 +542,7 @@ export async function restoreTabs(persisted: PersistedTab[]): Promise<number> {
             arr.map((t) => (t.id === restored.id ? { ...t, avatarId: p.avatar_id! } : t)),
           )
         }
+        onRestored?.(restored)
         ok++
       } catch (e) {
         // 记录失败 tab,让 schedulePersist 合并落盘 —— 不让它从 state.json 永久消失
@@ -546,6 +560,26 @@ export async function restoreTabs(persisted: PersistedTab[]): Promise<number> {
     schedulePersist()
   }
   return ok
+}
+
+/** Wait for every successfully restored local CLI to leave its starting state. */
+export function waitForRestoredTabsReady(ids: SessionId[]): Promise<void> {
+  if (ids.length === 0) return Promise.resolve()
+  return new Promise((resolve) => {
+    const unsubscribe = tabs.subscribe((current) => {
+      const ready = ids.every((id) => {
+        const tab = current.find((item) => item.id === id)
+        return !tab || tab.status === 'idle' || tab.status === 'busy' || tab.status === 'exited'
+      })
+      if (ready) {
+        // writable.subscribe invokes this callback synchronously before assigning unsubscribe.
+        queueMicrotask(() => {
+          unsubscribe()
+          resolve()
+        })
+      }
+    })
+  })
 }
 
 export function renameTab(id: SessionId, title: string) {

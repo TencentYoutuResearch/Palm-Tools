@@ -57,7 +57,7 @@ kode should feel like a compact operations desk built around a terminal: calm in
 - **Locales and language policy:** `en` and `zh-CN` UI strings use the shared i18n package. Owned controls and accessible labels must be localized together.
 - **Usage scene:** Desktop-first, macOS-prioritized, repeated expert use, keyboard-heavy, and information dense.
 - **Register:** Product. Familiarity, speed, and state clarity lead; expressive styling is restrained.
-- **Memorable signature:** Selected work is marked like a ledger entry: a precise rail or check state paired with a persistent decision surface. This is used for consequential review flows, not as decoration on every card.
+- **Memorable signature:** Consequential review work is marked like a ledger entry: a precise rail or check state paired with a persistent decision surface. Ordinary session selection stays quieter.
 - **Restraint:** Terminal, forms, tables, and review copy remain flat, compact, and readable. Motion communicates entry, progress, or changed state only.
 - **Anti-references:** Avoid generic metric-card dashboards, gamer-terminal neon, heavy glassmorphism, soft pastel consumer UI, and oversized marketing typography.
 - **Token ownership/runtime mapping:** This file mirrors the established runtime source of truth in `apps/gui/index.html`. Components consume its CSS variables; this document does not generate code. `pnpm check` and production build are the drift gates.
@@ -90,7 +90,7 @@ The desktop shell is a bounded workbench with resizable navigation, terminal, an
 
 ## Elevation & Depth
 
-Static content is flat by default. Borders and surface tone separate list, detail, and control regions. Shadows are reserved for floating menus, modal drawers, toasts, and decision surfaces that must remain anchored above scrolling content. Modal blur belongs only to the application backdrop.
+Static content is flat by default. Borders and surface tone separate list, detail, and control regions. The active session row alone may use a restrained translucent blur to distinguish it from transparent inactive rows; it has no accent rail, outline, or glow. Shadows are reserved for floating menus, modal drawers, toasts, and decision surfaces that must remain anchored above scrolling content. Modal blur belongs only to the application backdrop.
 
 ## Shapes
 
@@ -108,7 +108,7 @@ Buttons combine emphasis with intent. Safe primary commits may be solid accent/s
 
 ### Navigation and data display
 
-Lists privilege readable content over metadata. Main-session tabs and review records share a quiet ledger-row surface, compact gaps, and one outer current-state treatment instead of floating content on an empty column. Full session rows omit visible sequence markers and separate lifecycle text/dots; `Running`, `Idle`, and equivalent status words stay in the tab's accessible label. Avatar corner dots are reserved for active work, attention, or failure—idle avatars remain clean in both full and compact modes. The current session adds an accent rail while attention remains a compact badge. In compact mode, the outer tab tile alone owns the current-state frame—the avatar remains unframed and the tile does not gain a second glow or elevation layer. Memory-review checkboxes sit inside each record surface: checked rows use a quiet accent wash, while the record shown in detail uses a separate info-toned outline. Secondary source, scope, confidence, and energy data use compact mono labels; confidence and energy never become full-width decorative meters. Bulk selection uses a shared checkbox visual, an exact count, and a persistent decision dock; it never overloads the row-current highlight.
+Lists privilege readable content over metadata. Main-session tabs use transparent inactive rows and a single neutral glass wash for the selected row, with no visible rounded outline or left accent rail; review records retain their separate ledger-row treatment. Full session rows omit visible sequence markers and separate lifecycle text/dots; `Running`, `Idle`, and equivalent status words stay in the tab's accessible label. Avatar corner dots are reserved for active work, attention, or failure—idle avatars remain clean in both full and compact modes. Attention remains a compact badge, never a row highlight. Compact mode uses the same glass selection wash; the avatar stays unframed. The glass token `--bg-tab-glass` lives in `apps/gui/index.html` for dark, system-light, and explicit-light themes and is consumed by `App.svelte`; focus remains a distinct keyboard-only outline. Memory-review checkboxes sit inside each record surface: checked rows use a quiet accent wash, while the record shown in detail uses a separate info-toned outline. Secondary source, scope, confidence, and energy data use compact mono labels; confidence and energy never become full-width decorative meters. Bulk selection uses a shared checkbox visual, an exact count, and a persistent decision dock; it never overloads the row-current highlight.
 
 Mobile session identity stays continuous from the session list into the detail header and assistant messages. Backend artwork carries the visible provider identity, so list rows and the detail header do not repeat a backend name or expose internal numeric session IDs. Backend artwork fills its avatar frame with only a narrow protective inset. The compact detail AppBar pairs artwork and title with the exact working path; a 28px instrument rail directly below retains model, token usage, and context pressure without a separate overview card. The grouped session list lets its folder header own the exact workspace path, while each compact row preserves title, model, tokens, context, attention state, and unread count. Runtime status has one visible expression: only authoritative `busy`/working adds a small corner dot to the backend avatar; starting, idle, and exited show neither a dot nor status copy, and no separate transcript activity row is rendered. Transcripts use one role surface per message, paired with a compact identity marker outside the bubble and a quiet timestamp in the message eyebrow. Assistant identity comes from the actual session backend and reuses the desktop backend artwork with a readable monogram fallback; user and system roles use stable semantic glyphs. The composer rests as one compact input row; focus expands it with a short coordinated transition into a text row plus a controls row. That lower row owns permission mode, Mandarin/English dictation, and the commit control. An empty busy composer exposes Stop; any non-empty draft takes priority and exposes Send. Voice input is short-form dictation: the microphone defaults to Mandarin, carries a compact `中/EN` language marker, and switches language on long press without consuming a separate composer slot; listening has a slim live rail that names the locked language, partial transcription stays editable, and only an explicit commit sends it. A working agent does not block submission: the user message appears immediately in the transcript with a quiet `SENT` receipt in its eyebrow, then becomes `PROCESSED` in place when the canonical CLI user-message event syncs back. Delivery failure stays on that same bubble with Retry and Discard instead of moving into a separate receipt rail. Transport protocol sentinels are rendered as plain technical labels rather than Markdown quote depth. Authored blockquotes remain flat, with a single slim rail and no nested rounded-card treatment.
 
@@ -128,8 +128,10 @@ theme-colored top/bottom scrims fade inward without hard AppBar boundaries.
 `session_glass_layout.dart` measures actual chrome heights to reserve readable
 first/last-message insets, including multiline drafts, voice rails, and safe areas.
 `GlassSurface.floating` uses the existing theme surface at .72/.48 opacity with
-sigma-18 clipped blur; only fixed interactive islands blur. The keyboard lifts
-the composer and bottom fade together. High contrast uses opaque chrome and
+sigma-18 clipped blur; the composer uses a more opaque prominent variant and
+an outer shadow so it stays distinct from transcript messages. Only fixed
+interactive islands blur. The keyboard lifts the composer and bottom fade
+together. High contrast uses opaque chrome and
 reduced motion removes backdrop blur. Desktop is unchanged.
 
 The session list, device list, and pairing form share `GlassAppBar`: an unboxed
@@ -164,6 +166,7 @@ Use `Icon.svelte`, based on Lucide names and rounded monoline strokes. Common si
 ### Motion
 
 Routine feedback uses 120–180ms transitions with the existing cubic-bezier tokens. One coordinated drawer entrance is preferable to scattered animation. All non-essential motion is removed under `prefers-reduced-motion`.
+Sidebar pets animate only while their tile intersects the viewport and the window is visible. Idle pets use a slower ambient cadence. Busy and attention indicators pulse briefly when shown, then hold their semantic color without scheduling continuous repaints.
 
 ### Content and data visualization
 

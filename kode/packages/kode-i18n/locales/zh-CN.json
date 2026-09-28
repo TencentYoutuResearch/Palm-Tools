@@ -1,4 +1,5 @@
 {
+  "app.restoringSessions": { "message": "正在恢复会话…" },
   "settings.updates.ignoreVersion": { "message": "调试：忽略本地版本号" },
   "settings.updates.ignoreVersionHint": { "message": "允许安装当前通道的同版或更低版本，仍验证更新包签名。仅本次运行有效，重启后关闭；测试预发布版需同时开启 Beta。" },
   "settings.updates.noRelease": { "message": "当前通道暂无可用 Release。" },
@@ -419,9 +420,9 @@
   "tab.closeConfirm.message": { "message": "底层 CLI 会话将被终止,此操作无法撤销。" },
   "tab.closeConfirm.confirm": { "message": "关闭" },
   "tab.closeConfirm.cancel": { "message": "取消" },
-  "terminal.ctrlCExitConfirm.title": { "message": "退出当前会话?" },
-  "terminal.ctrlCExitConfirm.message": { "message": "再次发送 Ctrl+C 可能会退出当前 CLI 会话。是否继续?" },
-  "terminal.ctrlCExitConfirm.confirm": { "message": "发送 Ctrl+C" },
+  "terminal.ctrlCExitConfirm.title": { "message": "关闭当前会话?" },
+  "terminal.ctrlCExitConfirm.message": { "message": "连续 Ctrl+C 已被拦截。关闭后会终止底层 CLI 会话,此操作无法撤销。" },
+  "terminal.ctrlCExitConfirm.confirm": { "message": "关闭会话" },
   "terminal.ctrlCExitConfirm.cancel": { "message": "保留会话" },
   "tab.action.newTab": { "message": "新建 tab" },
   "tab.action.newTabTooltip": { "message": "新建 tab (⌘T)" },

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount } from 'svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './avatars'
   import BackendIcon from './BackendIcon.svelte'
 
@@ -22,6 +22,11 @@
   }: Props = $props()
   let frameIndex = $state(0)
   let timer: number | null = null
+  let avatarElement: HTMLElement
+  let inViewport = $state(false)
+  let pageVisible = $state(true)
+  let windowFocused = $state(true)
+  let motionAllowed = $state(true)
 
   // 当前 status 下可用的 fold set，包含两部分:
   // 1) 匹配 avatarId 的 gallery 专用 sets("gallery/panda/running/"→name"gallery/panda")
@@ -64,16 +69,48 @@
 
   onMount(() => {
     loadAvatarLibrary()
-    timer = window.setInterval(tick, 180)
+    const observer = new IntersectionObserver(([entry]) => {
+      inViewport = entry.isIntersecting
+    })
+    observer.observe(avatarElement)
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const updateVisibility = () => { pageVisible = !document.hidden }
+    const updateFocus = () => { windowFocused = document.hasFocus() }
+    const updateMotion = () => { motionAllowed = !motion.matches }
+    updateVisibility()
+    updateFocus()
+    updateMotion()
+    document.addEventListener('visibilitychange', updateVisibility)
+    window.addEventListener('focus', updateFocus)
+    window.addEventListener('blur', updateFocus)
+    motion.addEventListener('change', updateMotion)
+    return () => {
+      observer.disconnect()
+      document.removeEventListener('visibilitychange', updateVisibility)
+      window.removeEventListener('focus', updateFocus)
+      window.removeEventListener('blur', updateFocus)
+      motion.removeEventListener('change', updateMotion)
+    }
   })
 
-  onDestroy(() => {
+  $effect(() => {
     if (timer != null) window.clearInterval(timer)
+    timer = null
+    if (inViewport && pageVisible && windowFocused && motionAllowed && status !== 'idle' && activeSet?.frames.length > 1) {
+      // Idle avatars remain on one frame: periodic image swaps would keep
+      // waking WebKit's layout/compositor while the UI is otherwise still.
+      timer = window.setInterval(tick, 180)
+    }
+    return () => {
+      if (timer != null) window.clearInterval(timer)
+      timer = null
+    }
   })
 
   // activeSet 变化时重置帧序号
   $effect(() => {
     void activeSet
+    void status
     frameIndex = 0
   })
 
@@ -85,31 +122,29 @@
   }
 </script>
 
-{#if activeSet && activeSet.frames.length >= 4}
-  {@const src = activeSet.frames[frameIndex]}
-  {#if src}
-    <span class="avatar-shell" class:compact>
+<span class="avatar-shell" class:compact bind:this={avatarElement}>
+  {#if activeSet && activeSet.frames.length >= 4}
+    {@const src = activeSet.frames[frameIndex]}
+    {#if src}
       <span class="avatar gallery" class:compact title={activeSet.name} aria-label={label}>
         <img src={src} alt="" draggable="false" />
       </span>
       {#if status !== 'idle'}
         <span class="fallback-status {dotClass(status)}" aria-label={status}></span>
       {/if}
-    </span>
-  {/if}
-{:else}
-  <!-- backend icon fallback -->
-  <span class="avatar-shell" class:compact>
+    {/if}
+  {:else}
+    <!-- backend icon fallback -->
     <span class="avatar fallback" class:compact aria-label={label}>
       <span class="fallback-icon-wrap">
-        <BackendIcon {backendKey} size={compact ? 38 : 26} />
+        <BackendIcon {backendKey} size={compact ? 40 : 32} />
       </span>
     </span>
     {#if status !== 'idle'}
       <span class="fallback-status {dotClass(status)}" aria-label={status}></span>
     {/if}
-  </span>
-{/if}
+  {/if}
+</span>
 
 <style>
   .avatar {
@@ -136,13 +171,15 @@
   }
 
   .avatar.fallback {
-    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
   }
   .avatar.fallback.compact {
-    border-radius: 50%;
+    background: transparent;
   }
   .fallback-icon-wrap {
     width: 100%;
@@ -150,8 +187,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
-    border-radius: 50%;
+    overflow: visible;
   }
 
   .avatar-shell {
@@ -178,10 +214,10 @@
     top: -2px;
   }
   .dot-starting { background: var(--fg-tertiary); }
-  .dot-busy      { background: var(--st-busy); animation: busy-glow 1.4s ease-in-out infinite; }
+  .dot-busy      { background: var(--st-busy); animation: busy-glow 1.4s ease-in-out 2; }
   .dot-attention {
     background: var(--st-info);
-    animation: dot-attention-pulse 1.1s ease-in-out infinite;
+    animation: dot-attention-pulse 1.1s ease-in-out 2;
   }
   .dot-exited    { background: var(--st-err); opacity: 0.85; }
   @keyframes busy-glow {

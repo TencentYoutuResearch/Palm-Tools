@@ -1,4 +1,5 @@
 {
+  "app.restoringSessions": { "message": "Restoring sessions…" },
   "settings.updates.ignoreVersion": { "message": "Debug: ignore local version" },
   "settings.updates.ignoreVersionHint": { "message": "Allow reinstalling or downgrading to the latest release on this channel; signatures are still verified. Resets on restart. Enable Beta to test prereleases." },
   "settings.updates.noRelease": { "message": "No release is available on this channel." },
@@ -1458,15 +1459,15 @@
     "description": "Close-tab confirmation dialog cancel button"
   },
   "terminal.ctrlCExitConfirm.title": {
-    "message": "Exit this session?",
+    "message": "Close this session?",
     "description": "Consecutive Ctrl+C confirmation dialog title"
   },
   "terminal.ctrlCExitConfirm.message": {
-    "message": "Sending Ctrl+C again may exit the current CLI session. Continue?",
+    "message": "Consecutive Ctrl+C was blocked. Closing will terminate the underlying CLI session and cannot be undone.",
     "description": "Consecutive Ctrl+C confirmation dialog consequence"
   },
   "terminal.ctrlCExitConfirm.confirm": {
-    "message": "Send Ctrl+C",
+    "message": "Close session",
     "description": "Consecutive Ctrl+C confirmation action"
   },
   "terminal.ctrlCExitConfirm.cancel": {

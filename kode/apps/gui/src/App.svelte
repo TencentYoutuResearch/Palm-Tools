@@ -64,6 +64,7 @@
     startEventSubscriptions,
     stopEventSubscriptions,
     restoreTabs,
+    waitForRestoredTabsReady,
     renameTab,
     reorderTabs,
     duplicateTab,
@@ -100,6 +101,7 @@
 
   let backends: BackendInfo[] = $state([])
   let bootError: string | null = $state(null)
+  let bootLoading = $state(true)
   let sessionStartError: string | null = $state(null)
 
   function friendlySessionStartError(error: unknown): string {
@@ -1120,7 +1122,11 @@
       }
       const persisted = await ipc.getPersistedTabs()
       if (persisted && persisted.length > 0) {
-        await restoreTabs(persisted)
+        const localRestoredIds: SessionId[] = []
+        await restoreTabs(persisted, (tab) => {
+          if (!tab.endpointId || tab.endpointId.kind === 'local') localRestoredIds.push(tab.id)
+        })
+        await waitForRestoredTabsReady(localRestoredIds)
       }
       // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
       try {
@@ -1131,6 +1137,8 @@
     } catch (e) {
       bootError = String(e)
       console.error(e)
+    } finally {
+      bootLoading = false
     }
   })
 
@@ -1295,7 +1303,7 @@
   }
 
   function avatarStatusForTabStatus(status: ReturnType<typeof statusLabel>['cls']): AvatarStatus {
-    if (status === 'idle') return 'idle'
+    if (status === 'idle' || status === 'starting') return 'idle'
     if (status === 'attention') return 'awaiting'
     if (status === 'exited') return 'error'
     return 'running'
@@ -1321,6 +1329,10 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (bootLoading) {
+      e.preventDefault()
+      return
+    }
     if (!import.meta.env.DEV) {
       // F12
       if (e.key === 'F12') { e.preventDefault(); return }
@@ -1813,6 +1825,7 @@
 
 <div
   class="root"
+  inert={bootLoading}
   class:windows={isWindows}
   class:sb-compact={sidebarMode === 'compact'}
   class:sb-hidden={sidebarMode === 'hidden'}
@@ -2054,6 +2067,7 @@
           visible={isActive}
           isDark={theme === 'dark' || (theme === 'system' && systemPrefersDark)}
           endpointId={tab?.endpointId}
+          onCloseSession={() => closeTab(id)}
         />
       </div>
     {/each}
@@ -2215,6 +2229,13 @@
     </span>
   </footer>
 </div>
+
+{#if bootLoading}
+  <div class="startup-overlay" role="status" aria-live="polite" aria-label={tr('app.restoringSessions')}>
+    <div class="startup-indicator" aria-hidden="true"></div>
+    <span>{tr('app.restoringSessions')}</span>
+  </div>
+{/if}
 
 {#if pickerState}
   <AvatarPicker
@@ -2396,6 +2417,35 @@
 {/if}
 
 <style>
+  .startup-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: var(--bg-base);
+    color: var(--fg-secondary);
+    font: var(--fw-med) var(--fs-md) var(--font-ui);
+    cursor: wait;
+  }
+  .startup-indicator {
+    width: 28px;
+    height: 28px;
+    border: 2px solid var(--bd-strong);
+    border-top-color: var(--acc);
+    border-radius: 50%;
+    animation: startup-spin 900ms linear infinite;
+  }
+  @keyframes startup-spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .startup-indicator { animation: none; }
+  }
+
   .root {
     position: relative;
     display: grid;
@@ -2831,7 +2881,6 @@
 
   /* ===== tab item ===== */
   .tab {
-    --tab-mask-base: color-mix(in srgb, var(--bg-elevated) 48%, var(--bg-sidebar));
     position: relative;
     box-sizing: border-box;
     display: flex;
@@ -2842,25 +2891,23 @@
     margin: 0;
     border: 1px solid transparent;
     border-radius: calc(var(--rad-md) + 2px);
-    background: var(--tab-mask-base);
+    background: transparent;
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
-    transition: background var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
+    transition: background var(--t-fast), transform var(--t-fast);
   }
   .tab.status-only {
     gap: 6px;
     padding-block: 5px;
   }
   .tab:hover {
-    background: color-mix(in srgb, var(--bg-tab-hover) 82%, var(--bg-elevated));
-    border-color: color-mix(in srgb, var(--bd-default) 84%, transparent);
+    background: var(--bg-tab-hover);
   }
   .tab.active {
-    --tab-mask-base: color-mix(in srgb, var(--acc) 7%, var(--bg-elevated));
-    background: color-mix(in srgb, var(--acc) 7%, var(--bg-elevated));
-    border-color: color-mix(in srgb, var(--acc) 32%, var(--bd-default));
-    box-shadow: inset 3px 0 0 0 var(--acc);
+    background: var(--bg-tab-glass);
+    backdrop-filter: blur(12px) saturate(120%);
+    -webkit-backdrop-filter: blur(12px) saturate(120%);
   }
   .tab:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
   .tab-rail {
@@ -2949,10 +2996,8 @@
     height: 52px;
   }
   .sidebar.compact .tab.active {
-    /* 与 full 会话 tab 共用同一层级:外层浅色选中面 + 单一边框。 */
-    border-color: color-mix(in srgb, var(--acc) 36%, var(--bd-default));
-    background: color-mix(in srgb, var(--acc) 8%, var(--bg-elevated));
-    box-shadow: none;
+    /* compact 与 full 共用无框的玻璃选中面,头像不再叠加第二层框。 */
+    background: var(--bg-tab-glass);
   }
   .sidebar.compact .tab-rail {
     width: 44px;
@@ -3069,18 +3114,18 @@
   }
   .dot-starting  { background: var(--fg-tertiary); }
   .dot-idle      { background: var(--st-idle); }
-  .dot-busy      { background: var(--st-busy); animation: pulse 1.4s ease-in-out infinite; }
+  .dot-busy      { background: var(--st-busy); animation: pulse 1.4s ease-in-out 2; }
   /* attention dot:默认配色按 ask(警示黄);plan 通过 .tab[data-attention="plan"]
    * 复合选择器覆盖成火焰橙。这样不用改 statusLabel 的返回类型。 */
   .dot-attention {
     background: var(--st-warn);
     box-shadow: 0 0 0 0 rgba(230, 180, 80, 0.75);
-    animation: dot-attention-pulse 1.1s ease-in-out infinite;
+    animation: dot-attention-pulse 1.1s ease-in-out 2;
   }
   .tab[data-attention="plan"] .dot-attention {
     background: var(--st-busy);
     box-shadow: 0 0 0 0 rgba(230, 180, 80, 0.75);
-    animation: dot-attention-pulse-plan 1.1s ease-in-out infinite;
+    animation: dot-attention-pulse-plan 1.1s ease-in-out 2;
   }
   .dot-exited    { background: var(--fg-tertiary); opacity: 0.5; }
   /* 旧的 ok/err alias:保留,避免别处误用 */
@@ -3154,7 +3199,7 @@
     font-weight: 700;
     line-height: 14px;
     text-align: center;
-    animation: badge-pulse 1.1s ease-in-out infinite;
+    animation: badge-pulse 1.1s ease-in-out 2;
   }
   .attention-ask  { background: var(--st-warn); }
   .attention-plan { background: var(--st-busy); }
@@ -3163,7 +3208,7 @@
     50%      { transform: scale(1.18); box-shadow: 0 0 0 5px rgba(230, 180, 80, 0); }
   }
   .tab[data-attention="plan"] .attention-badge {
-    animation: badge-pulse-plan 1.1s ease-in-out infinite;
+    animation: badge-pulse-plan 1.1s ease-in-out 2;
   }
   @keyframes badge-pulse-plan {
     0%, 100% { transform: scale(1);   box-shadow: 0 0 0 0 rgba(230, 180, 80, 0.58); }
@@ -3971,9 +4016,13 @@
     .tab { border-color: ButtonBorder; }
     .tab.active {
       border-color: Highlight;
-      box-shadow: inset 3px 0 0 Highlight;
+      background: Highlight;
+      color: HighlightText;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
     }
-    .sidebar.compact .tab.active { box-shadow: none; }
+    .tab.active .tab-title { color: HighlightText; }
+    .sidebar.compact .tab.active { background: Highlight; }
     .tab:focus-visible { outline-color: Highlight; }
   }
 </style>
