@@ -578,6 +578,18 @@ void main() {
       tester.getBottomLeft(find.byKey(const ValueKey('session-transcript'))).dy,
       lessThanOrEqualTo(544),
     );
+
+    final trigger = find.byKey(const ValueKey('session-permission-menu'));
+    await tester.tap(trigger);
+    await tester.pumpAndSettle();
+    final menuItems = find.byType(PopupMenuItem<String>);
+    expect(menuItems, findsNWidgets(4));
+    expect(
+      tester.getBottomRight(menuItems.last).dy,
+      lessThan(tester.getTopLeft(trigger).dy),
+    );
+    expect(tester.getSize(menuItems.first).width, lessThanOrEqualTo(224));
+    expect(tester.testTextInput.isVisible, isTrue);
   });
 
   testWidgets(

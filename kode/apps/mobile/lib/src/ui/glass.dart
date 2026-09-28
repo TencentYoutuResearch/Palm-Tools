@@ -14,6 +14,7 @@ class GlassSurface extends StatelessWidget {
     this.padding = EdgeInsets.zero,
     this.floating = false,
     this.subtle = false,
+    this.prominent = false,
   });
 
   final Widget child;
@@ -22,6 +23,9 @@ class GlassSurface extends StatelessWidget {
   final EdgeInsetsGeometry padding;
   final bool floating;
   final bool subtle;
+
+  /// A stronger floating surface for the conversation composer.
+  final bool prominent;
 
   @override
   Widget build(BuildContext context) {
@@ -40,10 +44,18 @@ class GlassSurface extends StatelessWidget {
               ? [colors.surface, colors.surface]
               : [
                   colors.surface.withValues(
-                    alpha: subtle ? .38 : (floating ? .72 : (dark ? .88 : .82)),
+                    alpha: subtle
+                        ? .38
+                        : (prominent
+                              ? (dark ? .88 : .94)
+                              : (floating ? .72 : (dark ? .88 : .82))),
                   ),
                   colors.surface.withValues(
-                    alpha: subtle ? .24 : (floating ? .48 : (dark ? .68 : .58)),
+                    alpha: subtle
+                        ? .24
+                        : (prominent
+                              ? (dark ? .72 : .84)
+                              : (floating ? .48 : (dark ? .68 : .58))),
                   ),
                 ],
         ),
@@ -57,29 +69,37 @@ class GlassSurface extends StatelessWidget {
                 ),
           width: .7,
         ),
-        boxShadow: floating && !subtle && !solid
-            ? [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: dark ? .16 : .06),
-                  blurRadius: 20,
-                  offset: const Offset(0, 5),
-                ),
-              ]
-            : null,
       ),
       child: Material(
         type: MaterialType.transparency,
         child: Padding(padding: padding, child: child),
       ),
     );
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
-      child: blur && !solid
-          ? BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-              child: content,
-            )
-          : content,
+    // The shadow must sit outside the blur clip or it gets cut off entirely.
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(radius),
+        boxShadow: floating && !subtle && !solid
+            ? [
+                BoxShadow(
+                  color: Colors.black.withValues(
+                    alpha: prominent ? (dark ? .38 : .20) : (dark ? .20 : .10),
+                  ),
+                  blurRadius: prominent ? 32 : 20,
+                  offset: Offset(0, prominent ? 8 : 5),
+                ),
+              ]
+            : null,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: blur && !solid
+            ? BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                child: content,
+              )
+            : content,
+      ),
     );
   }
 }

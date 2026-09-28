@@ -837,6 +837,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
             radius: 32,
             blur: true,
             floating: true,
+            prominent: true,
             child: _buildInput(
               backendIdentity(backendKey).label,
               working: sessionStatus == 'busy',
@@ -2304,6 +2305,11 @@ class _TaskCard extends StatelessWidget {
 /// Composer permission-mode control. The collapsed trigger stays icon-only;
 /// the opened menu carries the icon, label, and explanation.
 class _ModeChip extends StatelessWidget {
+  static const _menuItemHeight = 48.0;
+  static const _menuVerticalPadding = 4.0;
+  static const _menuGap = 8.0;
+  static const _menuHeight = 4 * _menuItemHeight + 2 * _menuVerticalPadding;
+
   final String? mode;
   final bool busy;
   final ValueChanged<String> onPick;
@@ -2323,6 +2329,16 @@ class _ModeChip extends StatelessWidget {
     return PopupMenuButton<String>(
       tooltip: 'Permission mode: $label',
       initialValue: mode,
+      // Keep the menu above the composer while the software keyboard is open.
+      position: PopupMenuPosition.under,
+      offset: const Offset(0, -(_menuHeight + 40 + _menuGap)),
+      constraints: const BoxConstraints.tightFor(width: 224),
+      menuPadding: const EdgeInsets.symmetric(vertical: _menuVerticalPadding),
+      elevation: 16,
+      shadowColor: Colors.black.withValues(
+        alpha: Theme.of(context).brightness == Brightness.dark ? .58 : .32,
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       borderRadius: BorderRadius.circular(8),
       enabled: !busy,
       requestFocus: false,
@@ -2332,6 +2348,7 @@ class _ModeChip extends StatelessWidget {
       itemBuilder: (_) => const [
         PopupMenuItem(
           value: 'default',
+          height: _menuItemHeight,
           child: _ModeMenuItem(
             icon: Icons.shield_outlined,
             label: 'Default',
@@ -2340,6 +2357,7 @@ class _ModeChip extends StatelessWidget {
         ),
         PopupMenuItem(
           value: 'acceptEdits',
+          height: _menuItemHeight,
           child: _ModeMenuItem(
             icon: Icons.edit_note_rounded,
             label: 'Auto-accept edits',
@@ -2348,6 +2366,7 @@ class _ModeChip extends StatelessWidget {
         ),
         PopupMenuItem(
           value: 'plan',
+          height: _menuItemHeight,
           child: _ModeMenuItem(
             icon: Icons.account_tree_outlined,
             label: 'Plan',
@@ -2356,6 +2375,7 @@ class _ModeChip extends StatelessWidget {
         ),
         PopupMenuItem(
           value: 'bypassPermissions',
+          height: _menuItemHeight,
           child: _ModeMenuItem(
             icon: Icons.lock_open_rounded,
             label: 'Bypass permissions',
