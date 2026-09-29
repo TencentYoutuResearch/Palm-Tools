@@ -2,8 +2,8 @@
 //!
 //! ## 设计
 //!
-//! 1. kode GUI 启动时创建 UDS (`/tmp/kode-hook.sock`,固定路径)
-//! 2. kode spawn codebuddy/claude 子进程时在 env 里注入 `KODE_HOOK_SOCK=/tmp/kode-hook.sock`
+//! 1. kode GUI 启动时创建实例独占的 UDS
+//! 2. kode spawn 子进程时在 env 里注入该实例的 `KODE_HOOK_SOCK`
 //! 3. settings.json 里的 hook command 引用 `$KODE_HOOK_SOCK`(纯静态模板,永不需要因 PID 变化重写)
 //! 4. relay 解析 hook JSON,提取 `session_id` 和 `hook_event_name`,emit 到 BridgeBus
 //!
@@ -52,26 +52,17 @@ pub struct HookRelay {
     listener: UnixListener,
 }
 
-/// 固定 socket 路径。settings.json hook command 引用 `$KODE_HOOK_SOCK` 这个 env 变量,
-/// kode spawn 子进程时注入该变量 = 此路径。固定路径让 settings.json 成为纯静态模板,
-/// 永不需要因 kode 重启/PID 变化而重写。
-pub const HOOK_SOCKET_PATH: &str = "/tmp/kode-hook.sock";
-
 #[cfg(unix)]
 impl HookRelay {
-    /// 创建 HookRelay,绑定固定路径 UDS(`/tmp/kode-hook.sock`)。
-    ///
-    /// 启动时抢占式 unlink 旧 socket(上次异常退出的残留),保证单实例。
-    /// 若另一个 kode 实例正在运行且持有该 socket,bind 会失败 — 调用方收到 Err 后
-    /// 降级为无 HookRelay 运行(hook 功能静默不可用,不阻断启动)。
+    /// Create an instance-owned socket without disturbing any other host.
     pub async fn new() -> Result<Self, String> {
-        let socket_path = PathBuf::from(HOOK_SOCKET_PATH);
-
-        // 抢占式清理:上次异常退出可能残留。若另一个实例还活着,bind 会给出明确错误。
-        if socket_path.exists() {
-            std::fs::remove_file(&socket_path)
-                .map_err(|e| format!("remove old socket {} failed: {e}", socket_path.display()))?;
-        }
+        // Numeric tab IDs are local to one host. A shared socket lets another
+        // host's hooks address our tabs after a restart or concurrent launch.
+        // Use a short path (macOS UDS paths are limited to 104 bytes).
+        let socket_path = PathBuf::from(format!(
+            "/tmp/kode-hook-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
 
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| format!("bind UDS {} failed: {e}", socket_path.display()))?;
@@ -561,6 +552,25 @@ fn peer_cred<T>(_stream: &T) -> Option<(u32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_hosts_keep_their_own_hook_socket() {
+        let first = HookRelay::new().await.unwrap();
+        let second = HookRelay::new().await.unwrap();
+        assert_ne!(first.socket_path(), second.socket_path());
+        let client = UnixStream::connect(first.socket_path()).await.unwrap();
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_secs(1), first.listener.accept())
+                .await
+                .expect("second host stole the first host's socket")
+                .unwrap();
+        drop(client);
+        drop(accepted);
+        drop(second);
+        assert!(first.socket_path().exists());
+        UnixStream::connect(first.socket_path()).await.unwrap();
+    }
 
     #[test]
     fn process_notification_permission_prompt() {

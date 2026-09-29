@@ -7,6 +7,7 @@
 //! - conservatively continuing `Stop` when an explicit memory trigger appears
 //!   but no memory proposal was made.
 
+#[cfg(all(unix, not(test)))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -161,6 +162,13 @@ fn project_scope(cwd: &Path) -> String {
         .unwrap_or_else(|| "shared".to_string())
 }
 
+#[cfg(test)]
+fn relay_to_kode(_input: &str) -> Result<()> {
+    // Unit tests exercise parsing/output, never a developer's live host socket.
+    Ok(())
+}
+
+#[cfg(not(test))]
 fn relay_to_kode(input: &str) -> Result<()> {
     let Ok(sock) = std::env::var("KODE_HOOK_SOCK") else {
         return Ok(());
@@ -200,7 +208,7 @@ fn rewrite_payload(input: &str, tab_id: Option<&str>) -> String {
     payload.to_string()
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(test)))]
 fn write_unix_line(path: &Path, line: &str) -> Result<()> {
     let mut stream = match std::os::unix::net::UnixStream::connect(path) {
         Ok(s) => s,
@@ -211,7 +219,7 @@ fn write_unix_line(path: &Path, line: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(test)))]
 fn write_unix_line(_path: &Path, _line: &str) -> Result<()> {
     Ok(())
 }

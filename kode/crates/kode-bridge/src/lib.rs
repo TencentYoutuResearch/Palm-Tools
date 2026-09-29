@@ -38,7 +38,7 @@ pub mod backend_probe;
 pub mod hook_relay;
 pub mod semantic;
 
-pub use hook_relay::{HookRelay, HOOK_SOCKET_PATH};
+pub use hook_relay::HookRelay;
 
 const DEFAULT_PORT: u16 = 47870;
 
@@ -173,6 +173,7 @@ impl EventEnvelope {
 pub struct BridgeBus {
     tx: broadcast::Sender<EventEnvelope>,
     history: Mutex<HashMap<SessionId, Vec<EventEnvelope>>>,
+    semantic_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
 }
 
 impl BridgeBus {
@@ -181,6 +182,7 @@ impl BridgeBus {
         Self {
             tx,
             history: Mutex::new(HashMap::new()),
+            semantic_tasks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -188,7 +190,18 @@ impl BridgeBus {
         self.tx.subscribe()
     }
 
+    pub(crate) fn replace_semantic_task(&self, id: SessionId, task: tokio::task::AbortHandle) {
+        if let Some(previous) = self.semantic_tasks.lock().insert(id, task) {
+            previous.abort();
+        }
+    }
+
     pub fn emit(&self, env: EventEnvelope) {
+        if env.r#type == "session.exited" {
+            if let Some(task) = self.semantic_tasks.lock().remove(&env.session_id) {
+                task.abort();
+            }
+        }
         if env.r#type != "pty_bytes" && env.r#type != "shell.pty_bytes" {
             let mut h = self.history.lock();
             let list = h.entry(env.session_id).or_default();
@@ -278,7 +291,7 @@ pub async fn run() -> anyhow::Result<()> {
     let config = Config::load();
     let (core_tx, core_rx) = mpsc::unbounded_channel();
 
-    // 创建 HookRelay(UDS /tmp/kode-hook.sock)。bind 失败(另一实例在跑)→ None,
+    // 创建实例独占 HookRelay。bind 失败 → None,
     // 降级为无 hook(turn_finished 等功能静默不可用,不阻断启动)。
     let hook_relay = HookRelay::new().await.ok();
     let hook_relay_socket = hook_relay.as_ref().map(|r| r.socket_path().to_path_buf());
@@ -616,6 +629,28 @@ fn spawn_turn_hold_from_bus(ctx: Arc<Ctx>) {
         let mut rx = ctx.bus.subscribe();
         loop {
             match rx.recv().await {
+                Ok(env) if env.r#type == "session.session_uuid_mapped" => {
+                    // The headless host needs the same explicit binding as the
+                    // desktop host; new Codex sessions never guess by cwd/mtime.
+                    if let Some(session) = ctx.sessions.lock().get(&env.session_id) {
+                        let retargeted = if let Some(path) = env.payload["transcript_path"].as_str()
+                        {
+                            session.retarget_tail(PathBuf::from(path))
+                        } else if let Some(uuid) = env.payload["session_uuid"].as_str() {
+                            session.retarget_tail_to_session_id(uuid)
+                        } else {
+                            false
+                        };
+                        if retargeted {
+                            if let Some(uuid) = env.payload["session_uuid"].as_str() {
+                                kode_core::session::backend::bind_hook_conversation(
+                                    uuid,
+                                    env.session_id,
+                                );
+                            }
+                        }
+                    }
+                }
                 Ok(env) if env.r#type == "session.turn_started" => {
                     if let Some(s) = ctx.sessions.lock().get_mut(&env.session_id) {
                         s.mark_turn_start_with_id(env.payload["turn_id"].as_str());
@@ -934,16 +969,20 @@ async fn create_session(
         dto.session_uuid.as_deref(),
         kode_core::session::jsonl_tail::Backend::from_backend_key(&req.backend_key),
     ) {
-        if let Some(session) = ctx.sessions.lock().get_mut(&id) {
-            session.claim_semantic_session(sid);
+        let claimed = ctx
+            .sessions
+            .lock()
+            .get_mut(&id)
+            .is_some_and(|session| session.claim_semantic_session(sid));
+        if claimed {
+            semantic::spawn(
+                id,
+                backend_kind,
+                cwd.clone(),
+                sid.to_string(),
+                Arc::clone(&ctx.bus),
+            );
         }
-        semantic::spawn(
-            id,
-            backend_kind,
-            cwd.clone(),
-            sid.to_string(),
-            Arc::clone(&ctx.bus),
-        );
     }
     // Headless sessions (e.g. SpecOps auto-review agents) skip session.created
     // so the GUI opens no tab. The session is still fully usable via the HTTP

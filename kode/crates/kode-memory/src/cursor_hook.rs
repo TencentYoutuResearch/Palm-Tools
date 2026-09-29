@@ -12,7 +12,7 @@
 //!   定位项目 cwd，并通过 `additional_context` 注入 kode-memory MCP 使用规则。
 //!
 //! Cursor 给后续 hook 的 env **不会**自动保留 cursor-agent 进程的 `KODE_*`。所以:
-//! - socket 默认 `/tmp/kode-hook.sock`(与 HookRelay 固定路径一致);
+//! - socket 由宿主注入；没有宿主地址时不发送 relay 事件;
 //! - `sessionStart` 向 stdout 回写 `env`,把 sock / tab id 注入后续 hook;
 //! - 有 token 的事件额外落 `~/.kode/usage/cursor.jsonl`,给模型用量面板用。
 
@@ -23,9 +23,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use fs2::FileExt;
 use serde_json::{json, Value};
-
-/// 与 `kode_bridge::hook_relay::HOOK_SOCKET_PATH` 保持一致。
-const DEFAULT_HOOK_SOCK: &str = "/tmp/kode-hook.sock";
 
 /// `kode-memory cursor-hook [event]` 入口。
 pub fn run(event: Option<&str>) -> Result<()> {
@@ -67,7 +64,7 @@ fn hook_sock_path() -> String {
     std::env::var("KODE_HOOK_SOCK")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_HOOK_SOCK.to_string())
+        .unwrap_or_default()
 }
 
 fn rewrite_payload(input: &str, tab_id: Option<&str>, event: Option<&str>) -> String {
@@ -356,7 +353,7 @@ mod tests {
     fn session_start_output_injects_cursor_memory_context() {
         let out = build_session_start_output(Some("42"), Some(Path::new("/Users/test/kode")));
         assert_eq!(out["env"]["KODE_SESSION_ID"], "42");
-        assert_eq!(out["env"]["KODE_HOOK_SOCK"], DEFAULT_HOOK_SOCK);
+        assert_eq!(out["env"]["KODE_HOOK_SOCK"], hook_sock_path());
         let context = out["additional_context"].as_str().unwrap();
         assert!(context.contains("backend=`cursor`"));
         assert!(context.contains("project:kode"));
