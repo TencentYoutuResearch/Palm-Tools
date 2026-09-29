@@ -12,11 +12,11 @@
 //! - 不读 message 正文(对显示无用),但 claude 没有 ai-title 字段,
 //!   所以用第一条非命令前缀的 user message 作 title fallback
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(test)]
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 #[cfg(unix)]
@@ -230,13 +230,11 @@ pub fn spawn(
 }
 
 /// Codex CLI 不支持由外部指定 `--session-id`。优先等 Codex `SessionStart`
-/// hook 带回该 PTY 的 `transcript_path` 做精确绑定；hook 缺失时才按 cwd + mtime
-/// 认领新 rollout 作为降级路径。
-pub fn spawn_latest(
+/// hook 带回该 PTY 的 `transcript_path` 做精确绑定。cwd/mtime 无法证明
+/// 文件属于哪个 PTY；多个同目录会话并行时必须等待权威绑定，不能猜测。
+pub fn spawn_waiting_for_binding(
     id: SessionId,
     backend: Backend,
-    cwd: PathBuf,
-    not_before: SystemTime,
     evt_tx: mpsc::UnboundedSender<CoreEvent>,
     mut retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
 ) {
@@ -245,7 +243,7 @@ pub fn spawn_latest(
             return;
         }
         // Codex can create the rollout file promptly but delay writing the
-        // `session_meta` line with cwd until much later. Keep the claim task
+        // `session_meta` line until much later. Keep the binding task
         // alive for the tab lifetime; it exits when the session/event channel
         // is closed.
         let path = loop {
@@ -254,9 +252,6 @@ pub fn spawn_latest(
                 if let Some(path) = pending {
                     break path;
                 }
-            }
-            if let Some(path) = find_and_claim_codex_session(&cwd, not_before) {
-                break path;
             }
             if evt_tx.is_closed() {
                 return;
@@ -1230,8 +1225,8 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
     if entry.r#type.as_deref() == Some("session_meta") {
         if let Some(sid) = entry
             .payload
-            .get("session_id")
-            .or_else(|| entry.payload.get("id"))
+            .get("id")
+            .or_else(|| entry.payload.get("session_id"))
             .and_then(|v| v.as_str())
         {
             if state.last_session_uuid.as_deref() != Some(sid) {
@@ -1335,39 +1330,6 @@ pub(super) fn extract_codex_title_text(v: Option<&serde_json::Value>) -> Option<
         }
     }
     None
-}
-
-static CLAIMED_CODEX_ROLLOUTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-
-fn claimed_codex_rollouts() -> &'static Mutex<HashSet<PathBuf>> {
-    CLAIMED_CODEX_ROLLOUTS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn find_and_claim_codex_session(cwd: &Path, not_before: SystemTime) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let mut claimed = claimed_codex_rollouts().lock().ok()?;
-    let path = find_codex_session_candidate_under(
-        &home.join(".codex").join("sessions"),
-        cwd,
-        not_before,
-        &claimed,
-    )?;
-    claimed.insert(path.clone());
-    Some(path)
-}
-
-fn find_codex_session_candidate_under(
-    root: &Path,
-    cwd: &Path,
-    not_before: SystemTime,
-    claimed: &HashSet<PathBuf>,
-) -> Option<PathBuf> {
-    let cutoff = not_before
-        .checked_sub(Duration::from_secs(5))
-        .unwrap_or(not_before);
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    collect_codex_sessions(root, cwd, cutoff, claimed, &mut best);
-    best.map(|(_, path)| path)
 }
 
 fn find_codex_session_by_id_under(root: &Path, session_id: &str) -> Option<PathBuf> {
@@ -1487,67 +1449,6 @@ pub fn codex_session_cwd(path: &Path) -> Option<(String, PathBuf)> {
         return Some((sid.to_string(), PathBuf::from(cwd)));
     }
     None
-}
-
-fn collect_codex_sessions(
-    dir: &Path,
-    cwd: &Path,
-    cutoff: SystemTime,
-    claimed: &HashSet<PathBuf>,
-    best: &mut Option<(SystemTime, PathBuf)>,
-) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if meta.is_dir() {
-            collect_codex_sessions(&path, cwd, cutoff, claimed, best);
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        if claimed.contains(&path) {
-            continue;
-        }
-        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        if modified < cutoff {
-            continue;
-        }
-        if !codex_session_meta_matches_cwd(&path, cwd) {
-            continue;
-        }
-        let replace = best
-            .as_ref()
-            .map(|(best_modified, _)| modified < *best_modified)
-            .unwrap_or(true);
-        if replace {
-            *best = Some((modified, path));
-        }
-    }
-}
-
-fn codex_session_meta_matches_cwd(path: &Path, cwd: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(path) else {
-        return false;
-    };
-    for line in text.lines().take(8) {
-        let Ok(entry) = serde_json::from_str::<CodexEntry>(line) else {
-            continue;
-        };
-        if entry.r#type.as_deref() != Some("session_meta") {
-            continue;
-        }
-        let Some(found) = entry.payload.get("cwd").and_then(|v| v.as_str()) else {
-            return false;
-        };
-        return Path::new(found) == cwd;
-    }
-    false
 }
 
 // ============================================================================
@@ -2558,6 +2459,63 @@ mod tests {
     }
 
     #[test]
+    fn codex_metadata_uses_rollout_identity_not_parent_session_id() {
+        let mut state = TailState::new();
+        let line =
+            r#"{"type":"session_meta","payload":{"id":"own-thread","session_id":"parent-thread"}}"#;
+        assert_eq!(
+            parse_codex_line(line, &mut state)
+                .new_session_uuid
+                .as_deref(),
+            Some("own-thread")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_new_tabs_follow_only_their_explicit_hook_binding() {
+        let root = tempfile_dir("kode_codex_binding");
+        let first = root.join("first.jsonl");
+        let second = root.join("second.jsonl");
+        std::fs::write(
+            &first,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"first\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"second\"}}\n",
+        )
+        .unwrap();
+        let (events, mut rx) = mpsc::unbounded_channel();
+        let (bind_first, first_rx) = tokio::sync::watch::channel(None);
+        let (bind_second, second_rx) = tokio::sync::watch::channel(None);
+        spawn_waiting_for_binding(1, Backend::Codex, events.clone(), Some(first_rx));
+        spawn_waiting_for_binding(2, Backend::Codex, events, Some(second_rx));
+        // Deliver bindings in reverse order to reproduce concurrent startup.
+        bind_second.send(Some(second)).unwrap();
+        bind_first.send(Some(first)).unwrap();
+        let mut bindings = std::collections::HashMap::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while bindings.len() < 2 {
+                if let Some(CoreEvent::JsonlMeta {
+                    id,
+                    session_uuid: Some(uuid),
+                    ..
+                }) = rx.recv().await
+                {
+                    bindings.insert(id, uuid);
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(bindings[&1], "first");
+        assert_eq!(bindings[&2], "second");
+        drop(rx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn codex_user_message_becomes_title() {
         let line = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"帮我适配 codex cli backend"}]}}"#;
         let mut state = TailState::new();
@@ -2644,75 +2602,6 @@ mod tests {
         assert!(!Backend::Codex.accepts_transcript_path(codebuddy));
         assert!(Backend::Codex.accepts_transcript_path(codex));
         assert!(!Backend::Codebuddy.accepts_transcript_path(codex));
-    }
-
-    #[test]
-    fn finds_earliest_unclaimed_codex_session_matching_cwd() {
-        let stamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("kode-codex-session-test-{stamp}"));
-        let day = root.join("2026/06/14");
-        std::fs::create_dir_all(&day).unwrap();
-        let cwd = PathBuf::from("/tmp/kode-cwd");
-        let other = day.join("rollout-other.jsonl");
-        std::fs::write(
-            &other,
-            r#"{"type":"session_meta","payload":{"cwd":"/tmp/other"}}"#,
-        )
-        .unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-        let expected = day.join("rollout-match.jsonl");
-        std::fs::write(
-            &expected,
-            r#"{"type":"session_meta","payload":{"cwd":"/tmp/kode-cwd"}}"#,
-        )
-        .unwrap();
-
-        let found = find_codex_session_candidate_under(
-            &root,
-            &cwd,
-            SystemTime::UNIX_EPOCH,
-            &HashSet::new(),
-        );
-        assert_eq!(found.as_deref(), Some(expected.as_path()));
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn codex_session_claim_skips_already_claimed_rollout() {
-        let stamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("kode-codex-session-claim-test-{stamp}"));
-        let day = root.join("2026/07/02");
-        std::fs::create_dir_all(&day).unwrap();
-        let cwd = PathBuf::from("/tmp/kode-cwd");
-
-        let first = day.join("rollout-first.jsonl");
-        std::fs::write(
-            &first,
-            r#"{"type":"session_meta","payload":{"cwd":"/tmp/kode-cwd","session_id":"first"}}"#,
-        )
-        .unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-        let second = day.join("rollout-second.jsonl");
-        std::fs::write(
-            &second,
-            r#"{"type":"session_meta","payload":{"cwd":"/tmp/kode-cwd","session_id":"second"}}"#,
-        )
-        .unwrap();
-
-        let mut claimed = HashSet::new();
-        claimed.insert(first.clone());
-        let found =
-            find_codex_session_candidate_under(&root, &cwd, SystemTime::UNIX_EPOCH, &claimed);
-        assert_eq!(found.as_deref(), Some(second.as_path()));
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
