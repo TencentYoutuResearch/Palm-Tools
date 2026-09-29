@@ -180,13 +180,21 @@ impl SessionTransport for LocalTransport {
             session_uuid.as_deref(),
             kode_core::session::jsonl_tail::Backend::from_backend_key(&spec.backend_key),
         ) {
-            kode_bridge::semantic::spawn(
-                id,
-                backend_kind,
-                cwd_path.clone(),
-                sid.to_string(),
-                Arc::clone(&self.ctx.bus),
-            );
+            let claimed = self
+                .ctx
+                .sessions
+                .lock()
+                .get_mut(&id)
+                .is_some_and(|session| session.claim_semantic_session(sid));
+            if claimed {
+                kode_bridge::semantic::spawn(
+                    id,
+                    backend_kind,
+                    cwd_path.clone(),
+                    sid.to_string(),
+                    Arc::clone(&self.ctx.bus),
+                );
+            }
         }
 
         // Phase 9.1:emit session.created 给 WS 订阅者(远端 client 也能看到本地新开的 tab)

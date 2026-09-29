@@ -48,11 +48,7 @@ pub fn spawn(
             tracing::debug!(?cwd, %session_id, "no cursor transcript path; semantic tail not spawned");
             return;
         };
-        tokio::spawn(async move {
-            if let Err(e) = run(id, backend, path, bus).await {
-                tracing::debug!(error = %e, "cursor semantic tail exited");
-            }
-        });
+        spawn_path(id, backend, path, bus);
         return;
     }
     // 优先 cwd 推算路径;文件不存在时全局扫描(处理 resume 时 cwd 被 override 的情况)
@@ -73,21 +69,19 @@ pub fn spawn(
             }
         }
     };
-    tokio::spawn(async move {
-        if let Err(e) = run(id, backend, path, bus).await {
-            tracing::debug!(error = %e, "semantic tail exited");
-        }
-    });
+    spawn_path(id, backend, path, bus);
 }
 
 /// 用 hook 已验证的权威 transcript 路径启动语义 tail。
 /// Cursor 的 metadata watcher 继续读 meta.json，不能被该路径 retarget。
 pub fn spawn_path(id: SessionId, backend: Backend, path: PathBuf, bus: Arc<BridgeBus>) {
-    tokio::spawn(async move {
-        if let Err(e) = run(id, backend, path, bus).await {
+    let task_bus = Arc::clone(&bus);
+    let task = tokio::spawn(async move {
+        if let Err(e) = run(id, backend, path, task_bus).await {
             tracing::debug!(error = %e, "semantic tail exited");
         }
     });
+    bus.replace_semantic_task(id, task.abort_handle());
 }
 
 async fn run(
@@ -1094,6 +1088,46 @@ pub(crate) fn value_to_preview(v: &Value, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rebinding_stops_events_from_the_previous_transcript() {
+        use tokio::io::AsyncWriteExt;
+        let root =
+            std::env::temp_dir().join(format!("kode-semantic-rebind-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let old = root.join("old.jsonl");
+        let new = root.join("new.jsonl");
+        let start = |turn: &str| {
+            format!("{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\",\"turn_id\":\"{turn}\"}}}}\n")
+        };
+        tokio::fs::write(&old, start("old")).await.unwrap();
+        tokio::fs::write(&new, start("new")).await.unwrap();
+        let bus = Arc::new(BridgeBus::new());
+        let mut rx = bus.subscribe();
+        spawn_path(7, Backend::Codex, old.clone(), Arc::clone(&bus));
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.payload["turn_id"], "old");
+        spawn_path(7, Backend::Codex, new, Arc::clone(&bus));
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.payload["turn_id"], "new");
+        let mut old_file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(old)
+            .await
+            .unwrap();
+        old_file.write_all(start("stale").as_bytes()).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(700), rx.recv())
+            .await
+            .is_err());
+        bus.emit(EventEnvelope::new(7, "session.exited", json!({})));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[test]
     fn codebuddy_user_message_string_content() {
