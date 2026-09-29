@@ -1,6 +1,8 @@
 //! Session = 一个 tab 的全部状态:子进程 PTY + vt100 终端模拟 + 元信息。
 
 pub mod backend;
+mod codex_runtime;
+mod codex_status;
 mod codex_title;
 pub mod cursor_tail;
 pub mod heuristic;
@@ -45,6 +47,8 @@ pub struct Session {
     /// This is separate from `session_id`: restored sessions know their UUID
     /// before any tail has been attached.
     semantic_session_id: Option<String>,
+    busy_recovery: std::sync::Mutex<codex_status::BusyRecovery>,
+    output_revision: u64,
     pub cols: u16,
     pub rows: u16,
     /// 权威 retarget 通道:SessionStart hook 给出新 transcript_path 时,
@@ -122,6 +126,13 @@ impl Session {
             v
         } else {
             backend.args.clone()
+        };
+        let args_with_prompt = if backend::profile_for_key(backend_key)
+            .is_some_and(|p| p.kind() == jsonl_tail::Backend::Codex)
+        {
+            codex_runtime::isolated_args(&backend.command, &args_with_prompt)?
+        } else {
+            args_with_prompt
         };
         let flags_before_resume =
             backend::profile_for_key(backend_key).is_some_and(|p| p.flags_before_resume());
@@ -245,6 +256,8 @@ impl Session {
             ),
             active_turn_id: None,
             semantic_session_id: None,
+            busy_recovery: std::sync::Mutex::default(),
+            output_revision: 0,
             cols,
             rows,
             retarget_tx,
@@ -320,6 +333,7 @@ impl Session {
         self.feed_remnant = remnant;
 
         self.parser.process(complete);
+        self.output_revision = self.output_revision.wrapping_add(1);
         self.busy.touch();
         self.tick_status();
         if !is_active && self.busy.is_busy() {
@@ -331,6 +345,20 @@ impl Session {
     pub fn tick_status(&mut self) {
         if matches!(self.state.status, Status::Exited(_)) {
             return;
+        }
+        // Reconcile a locally cancelled hold against fresh terminal evidence.
+        // No file reads or process polling; the existing tick drives this check.
+        if self.backend_key == "codex"
+            && self.active_turn_id.is_some()
+            && !self.busy.is_turn_held()
+            && self
+                .busy_recovery
+                .lock()
+                .unwrap()
+                .should_check(std::time::Instant::now(), self.output_revision)
+            && codex_status::has_running_footer(&self.parser.screen().contents())
+        {
+            self.busy.hold_turn();
         }
         if self.busy.is_busy() {
             self.state.status = Status::Busy;
@@ -384,10 +412,17 @@ impl Session {
         if matches!(self.state.status, Status::Exited(_)) {
             return false;
         }
-        if let (Some(active), Some(finished)) = (
-            self.active_turn_id.as_deref(),
-            turn_id.filter(|id| !id.is_empty()),
-        ) {
+        let turn_id = turn_id.filter(|id| !id.is_empty());
+        // An unkeyed hook cannot finish a turn owned by the transcript.
+        // In particular, a delayed Stop must not release a newer Codex turn.
+        if self.active_turn_id.is_some()
+            && turn_id.is_none()
+            && backend::profile_for_key(&self.backend_key)
+                .is_some_and(|profile| profile.has_authoritative_turn_lifecycle())
+        {
+            return false;
+        }
+        if let (Some(active), Some(finished)) = (self.active_turn_id.as_deref(), turn_id) {
             if active != finished {
                 return false;
             }
@@ -412,12 +447,12 @@ impl Session {
         if looks_like_turn_submit(bytes) && !lifecycle_is_authoritative {
             self.busy.hold_turn();
         } else if looks_like_turn_cancel(bytes) {
-            // Bare Escape is the terminal-level cancel gesture. Some backends
-            // (notably Codex) return to their composer without writing a
-            // task_complete/turn_aborted transcript event, so the semantic
-            // tail cannot release the local turn hold. Drop only that hold;
-            // any continuing PTY output still keeps the session busy through
-            // the ordinary activity threshold.
+            // Give immediate cancellation feedback, then recover if fresh
+            // output confirms the same turn is still executing.
+            self.busy_recovery
+                .lock()
+                .unwrap()
+                .cancelled(std::time::Instant::now(), self.output_revision);
             self.busy.release_turn();
         }
         if let Some(p) = &self.pty {
@@ -1371,6 +1406,8 @@ mod tests {
                 .with_pty_activity_as_work(!profile.has_idle_animation()),
             active_turn_id: None,
             semantic_session_id: None,
+            busy_recovery: std::sync::Mutex::default(),
+            output_revision: 0,
             cols: 80,
             rows: 24,
             retarget_tx: None,
@@ -1400,12 +1437,29 @@ mod tests {
         assert_eq!(s.state.status, Status::Idle);
         assert!(!s.state.unread);
         s.mark_turn_start_with_id(Some("turn-new"));
+        s.write_input(b"\x1b");
+        s.feed(b"tool continues after question dismissed", false);
+        assert_eq!(s.state.status, Status::Idle);
+        // The grace period and fresh-frame gate are tested independently.
+        s.busy_recovery.lock().unwrap().allow_check_for_test();
+        s.feed(b"\r\n\xe2\x80\xa2 Working (12s \xe2\x80\xa2 esc to interrupt)\r\n\xe2\x80\xba Ask Codex to do anything", false);
+        assert_eq!(s.state.status, Status::Busy);
+        assert!(!s.mark_turn_end_with_id(None));
+        assert!(!s.mark_turn_end_with_id(Some("")));
         assert!(!s.mark_turn_end_with_id(Some("turn-old")));
         assert_eq!(s.state.status, Status::Busy);
         assert!(s.mark_turn_end_with_id(Some("turn-new")));
         assert_eq!(s.state.status, Status::Idle);
-        s.mark_turn_start();
+        // A matching completion owns the state even if a late redraw still
+        // contains the previous running footer.
+        s.busy_recovery.lock().unwrap().allow_check_for_test();
+        s.feed(b"\r\n\xe2\x80\xa2 Working (12s \xe2\x80\xa2 esc to interrupt)\r\n\xe2\x80\xba Ask Codex to do anything", false);
+        assert_eq!(s.state.status, Status::Idle);
+        s.mark_turn_start_with_id(Some("turn-cancelled"));
         s.write_input(b"\x1b");
+        s.tick_status();
+        assert_eq!(s.state.status, Status::Idle);
+        assert!(s.mark_turn_end_with_id(Some("turn-cancelled")));
         s.feed(b"cancelled animation", false);
         assert_eq!(s.state.status, Status::Idle);
         s.mark_exited(Some(0));
