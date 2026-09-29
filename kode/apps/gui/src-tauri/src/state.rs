@@ -737,6 +737,15 @@ fn spawn_prompt_scan_loop(
                 };
 
                 let detected = prompt_detect::detect(&screen);
+                let detected = if prompt_states
+                    .lock()
+                    .get(&id)
+                    .is_some_and(|st| st.turn_finished)
+                {
+                    None
+                } else {
+                    detected
+                };
 
                 // —— 运行期可观测:detect 状态翻转时打一行 INFO,带屏幕底 6 行作为现场。
                 //    平时同状态(都 None / 都 Some)不打,避免 200ms × N session 的刷屏;
@@ -930,9 +939,10 @@ fn spawn_attention_forwarder(
                         }
                         "session.session_uuid_mapped" => {
                             // SessionStart hook 权威绑定:tab(env.session_id)当前真实 session 是
-                            // session_uuid,jsonl 文件是 transcript_path。普通 backend 重定向
-                            // meta+semantic tail;Cursor 的 meta.json watcher 保持不动,只单独启动
-                            // transcript semantic tail。
+                            // session_uuid,jsonl 文件通常是 transcript_path。Codex hook
+                            // 未提供路径时按 UUID 查 rollout,否则新会话会继续显示旧标题。
+                            // 普通 backend 重定向 meta+semantic tail;Cursor 的 meta.json
+                            // watcher 保持不动,只单独启动 transcript semantic tail。
                             let transcript = env.payload["transcript_path"].as_str();
                             let uuid = env.payload["session_uuid"].as_str();
                             let source = env.payload["source"].as_str().unwrap_or("");
@@ -944,10 +954,11 @@ fn spawn_attention_forwarder(
                                 %source,
                                 "session_uuid_mapped received"
                             );
-                            if let Some(path) = transcript {
+                            if transcript.is_some() || uuid.is_some() {
                                 let known = sessions.lock().contains_key(&env.session_id);
-                                let path_buf = std::path::PathBuf::from(path);
+                                let path_buf = transcript.map(std::path::PathBuf::from);
                                 let cursor_semantic = uuid.and_then(|uuid| {
+                                    let path_buf = path_buf.as_ref()?;
                                     let mut locked = sessions.lock();
                                     let session = locked.get_mut(&env.session_id)?;
                                     let backend =
@@ -955,43 +966,79 @@ fn spawn_attention_forwarder(
                                             &session.backend_key,
                                         )?;
                                     if backend != kode_core::session::jsonl_tail::Backend::Cursor
-                                        || !session.accepts_transcript_path(&path_buf)
+                                        || !session.accepts_transcript_path(path_buf)
                                     {
                                         return None;
                                     }
                                     let should_spawn = session.claim_semantic_session(uuid);
                                     session.session_id = Some(uuid.to_string());
-                                    Some((backend, should_spawn))
+                                    Some((backend, should_spawn, path_buf.clone()))
                                 });
-                                let retargeted =
-                                    if let Some((backend, should_spawn)) = cursor_semantic {
-                                        if should_spawn {
-                                            kode_bridge::semantic::spawn_path(
-                                                env.session_id,
-                                                backend,
-                                                path_buf.clone(),
-                                                Arc::clone(&bus),
-                                            );
+                                let retargeted = if let Some((backend, should_spawn, cursor_path)) =
+                                    cursor_semantic
+                                {
+                                    if should_spawn {
+                                        kode_bridge::semantic::spawn_path(
+                                            env.session_id,
+                                            backend,
+                                            cursor_path,
+                                            Arc::clone(&bus),
+                                        );
+                                    }
+                                    Some(true)
+                                } else {
+                                    sessions.lock().get(&env.session_id).map(|s| {
+                                        if let Some(path) = path_buf {
+                                            s.retarget_tail(path)
+                                        } else if let Some(uuid) = uuid {
+                                            s.retarget_tail_to_session_id(uuid)
+                                        } else {
+                                            false
                                         }
-                                        Some(true)
-                                    } else {
-                                        sessions
-                                            .lock()
-                                            .get(&env.session_id)
-                                            .map(|s| s.retarget_tail(path_buf))
-                                    };
+                                    })
+                                };
                                 if retargeted == Some(true) {
                                     if let Some(uuid) = uuid {
                                         kode_core::session::backend::bind_hook_conversation(
                                             uuid,
                                             env.session_id,
                                         );
+                                        // Codex's PTY redraws are decorative: its busy state
+                                        // comes from task_started in the semantic rollout tail.
+                                        // A SessionStart hook can bind the UUID before JsonlMeta
+                                        // arrives, so attach that tail here as well. The claim
+                                        // prevents JsonlMeta from opening a duplicate reader.
+                                        let codex_semantic = {
+                                            let mut locked = sessions.lock();
+                                            locked.get_mut(&env.session_id).and_then(|session| {
+                                                let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(&session.backend_key)?;
+                                                if backend != kode_core::session::jsonl_tail::Backend::Codex {
+                                                    return None;
+                                                }
+                                                let path = kode_core::session::jsonl_tail::resolve_session_path(
+                                                    backend,
+                                                    &session.cwd,
+                                                    uuid,
+                                                )?;
+                                                session.session_id = Some(uuid.to_string());
+                                                session.claim_semantic_session(uuid).then_some((backend, path))
+                                            })
+                                        };
+                                        if let Some((backend, path)) = codex_semantic {
+                                            kode_bridge::semantic::spawn_path(
+                                                env.session_id,
+                                                backend,
+                                                path,
+                                                Arc::clone(&bus),
+                                            );
+                                        }
                                     }
                                 }
                                 tracing::info!(
                                     target: "kode_hook_probe",
                                     id = env.session_id,
-                                    path,
+                                    ?transcript,
+                                    ?uuid,
                                     tab_known = known,
                                     ?retargeted,
                                     "session_uuid_mapped → retarget tail result"
@@ -1006,6 +1053,7 @@ fn spawn_attention_forwarder(
                             let plan_active = {
                                 let mut g = prompt_states.lock();
                                 let st = g.entry(env.session_id).or_default();
+                                st.turn_finished = false;
                                 if !st.plan_active {
                                     st.ask_attention_active = true;
                                 }
@@ -1025,6 +1073,7 @@ fn spawn_attention_forwarder(
                             let plan_active = {
                                 let mut g = prompt_states.lock();
                                 let st = g.entry(env.session_id).or_default();
+                                st.turn_finished = false;
                                 if !st.plan_active {
                                     st.ask_attention_active = true;
                                 }
@@ -1042,6 +1091,7 @@ fn spawn_attention_forwarder(
                             {
                                 let mut g = prompt_states.lock();
                                 if let Some(st) = g.get_mut(&env.session_id) {
+                                    st.turn_finished = false;
                                     st.plan_active = true;
                                 }
                             }
@@ -1075,17 +1125,37 @@ fn spawn_attention_forwarder(
                             );
                         }
                         "session.turn_started" => {
+                            prompt_states
+                                .lock()
+                                .entry(env.session_id)
+                                .or_default()
+                                .turn_finished = false;
                             if let Some(s) = sessions.lock().get_mut(&env.session_id) {
                                 s.mark_turn_start_with_id(env.payload["turn_id"].as_str());
                             }
                         }
                         "session.turn_finished" => {
-                            {
-                                let mut g = sessions.lock();
-                                if let Some(s) = g.get_mut(&env.session_id) {
-                                    s.mark_turn_end_with_id(env.payload["turn_id"].as_str());
-                                }
+                            let accepted = sessions
+                                .lock()
+                                .get_mut(&env.session_id)
+                                .map(|s| s.mark_turn_end_with_id(env.payload["turn_id"].as_str()))
+                                .unwrap_or(true);
+                            if !accepted {
+                                continue;
                             }
+                            {
+                                let mut g = prompt_states.lock();
+                                let st = g.entry(env.session_id).or_default();
+                                st.has_prompt = false;
+                                st.ask_attention_active = false;
+                                st.last_emitted = None;
+                                st.plan_active = false;
+                                st.turn_finished = true;
+                            }
+                            let _ = app.emit(
+                                "session-attention-clear",
+                                serde_json::json!({ "id": env.session_id }),
+                            );
                             let mut payload = env.payload.clone();
                             match payload.as_object_mut() {
                                 Some(obj) => {

@@ -327,6 +327,11 @@ export async function startEventSubscriptions() {
     attentionSince.delete(m.id)
   })
   turnFinishedUnlisten = await ipc.onSessionTurnFinished((m) => {
+    tabs.update((arr) =>
+      arr.map((t) => (t.id === m.id ? { ...t, attention: null } : t)),
+    )
+    clearAppEvents((event) => event.dedupeKey === `attention:${m.id}`)
+    attentionSince.delete(m.id)
     const tab = get(tabs).find((t) => t.id === m.id)
     const isActive = get(activeId) === m.id
     const summary = m.summary?.trim()

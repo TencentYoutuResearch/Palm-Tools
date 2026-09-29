@@ -140,6 +140,9 @@ pub struct PromptState {
     /// plan 活跃时,同一 approval prompt 的 PTY `ask` 不点亮。
     /// 现在也由 HookRelay(PreToolUse) 和 scan_loop backstop 共同维护。
     pub plan_active: bool,
+    /// A completed turn cannot still require an answer. Keep stale terminal frames
+    /// from rediscovering the same prompt until the next turn begins.
+    pub turn_finished: bool,
 }
 
 impl PromptState {

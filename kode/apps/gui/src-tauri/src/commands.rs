@@ -777,6 +777,7 @@ pub fn write_input(
         let was_prompt = {
             let mut g = state.ctx.prompt_states.lock();
             let st = g.entry(id).or_default();
+            st.turn_finished = false;
             let prev = st.has_prompt || st.ask_attention_active;
             if prev {
                 st.has_prompt = false;
