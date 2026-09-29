@@ -233,7 +233,7 @@ pub fn apply_terminal_theme_env(cmd: &mut CommandBuilder, extra_env: &[(String, 
     }
 }
 
-fn resolve_spawn_command(command: &str) -> String {
+pub(crate) fn resolve_spawn_command(command: &str) -> String {
     if command.contains('/') || command.contains('\\') {
         return command.to_string();
     }

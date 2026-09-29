@@ -291,11 +291,9 @@ impl BackendProfile for CodexProfile {
                 Some(req.retarget_rx),
             );
         } else {
-            jsonl_tail::spawn_latest(
+            jsonl_tail::spawn_waiting_for_binding(
                 req.id,
                 Backend::Codex,
-                req.cwd,
-                req.spawn_started_at,
                 req.evt_tx,
                 Some(req.retarget_rx),
             );
