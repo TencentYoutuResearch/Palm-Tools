@@ -36,6 +36,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import { ConsecutiveCtrlCGuard } from './consecutive_ctrl_c_guard'
+  import { installCodexMouseSelection } from './codex_mouse_selection'
 
   /**
    * 健康尺寸下限。低于此值的 cols/rows 一律视为容器还没准备好,
@@ -97,6 +98,7 @@
     if (themedBytes.length > 0) term.write(themedBytes)
   }
   let disposeCursorGuard: (() => void) | undefined
+  let disposeCodexMouseSelection: (() => void) | undefined
   // Cmd 键状态监听器(组件级,以便 onDestroy 时清理)
   let _onCmdDown: ((e: KeyboardEvent) => void) | null = null
   let _onCmdUp: ((e: KeyboardEvent) => void) | null = null
@@ -206,6 +208,10 @@
       fontSize: fontSize,
       cursorBlink: visible && document.hasFocus() && !document.hidden,
       allowProposedApi: true,
+      // Codex and other TUIs can enable mouse reporting, which makes xterm
+      // send ordinary drags to the CLI instead of selecting text. On macOS,
+      // Option+drag should always create a copyable terminal selection.
+      macOptionClickForcesSelection: true,
       scrollback: 5000,
       theme: buildXtermTheme(isDark, appearance.themeMode),
       // 让 xterm 直接吃 UTF-8 二进制(避免 string 路径的 UTF-16 重编码)
@@ -252,6 +258,9 @@
     // 再异步加 WebglAddon。FitAddon 不读 renderer 内部,放 open 前后都行。
     term.open(containerEl)
     if (destroyed || !term) return
+    if (get(tabs).find((tab) => tab.id === sessionId)?.backendKey === 'codex') {
+      disposeCodexMouseSelection = installCodexMouseSelection(containerEl, term)
+    }
     syncCursorBlink()
     if (shouldInstallConptyCursorGuard(navigator.userAgent, endpointId?.kind === 'remote')) {
       disposeCursorGuard = installConptyCursorGuard(term)
@@ -1510,6 +1519,7 @@
     document.removeEventListener('visibilitychange', syncCursorBlink)
     hiddenOutput.clear()
     disposeCursorGuard?.()
+    disposeCodexMouseSelection?.()
     webglLoadGeneration++
     resizeObserver?.disconnect()
     if (resizeTimer != null) clearTimeout(resizeTimer)
