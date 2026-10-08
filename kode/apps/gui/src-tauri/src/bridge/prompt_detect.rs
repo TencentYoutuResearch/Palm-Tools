@@ -102,6 +102,8 @@ pub struct DetectedPrompt {
     pub header: String,
     /// "Do you want to proceed?" / "Do you want to make this edit to foo.rs?"
     pub question: String,
+    /// Action details from the current approval block, never transcript history.
+    pub context: Option<String>,
     pub options: Vec<DetectedOption>,
     /// 屏幕内容稳定 hash:同 prompt 反复扫描时去重用。
     pub dedup_key: String,
@@ -229,6 +231,7 @@ fn detect_box_ui(screen: &str) -> Option<DetectedPrompt> {
     let mut options: Vec<DetectedOption> = Vec::new();
     let mut header_text = String::from("Confirm");
     let mut header_seen = false;
+    let mut context_lines = Vec::new();
 
     for line in inner {
         // 去掉 │ 前缀
@@ -267,7 +270,11 @@ fn detect_box_ui(screen: &str) -> Option<DetectedPrompt> {
             {
                 header_text = t.to_string();
                 header_seen = true;
+                continue;
             }
+        }
+        if header_seen && options.is_empty() && !t.is_empty() {
+            context_lines.push(t);
         }
     }
 
@@ -293,6 +300,7 @@ fn detect_box_ui(screen: &str) -> Option<DetectedPrompt> {
     Some(DetectedPrompt {
         header: header_text,
         question,
+        context: (!context_lines.is_empty()).then(|| context_lines.join("\n")),
         options,
         dedup_key,
     })
@@ -419,10 +427,32 @@ fn detect_ink_select(screen: &str) -> Option<DetectedPrompt> {
 
     // header:取 "Do you want to <verb>" 中 verb 的第一段
     let header = derive_header(&question);
+    // Only include the nearest explicit action block within the prompt region.
+    // Without a recognizable boundary, leave details unknown rather than attach
+    // unrelated earlier output to a permission decision.
+    let context_start = (q_idx.saturating_sub(25)..q_idx).rev().find(|&i| {
+        let line = strip_box_prefix(lines[i]).trim();
+        line == "Bash command"
+            || line.starts_with("Bash(")
+            || line.starts_with("Edit ")
+            || line.starts_with("Write ")
+            || line.starts_with("Create ")
+            || line.starts_with("Fetch ")
+    });
+    let context = context_start.map(|start| {
+        lines[start..q_idx]
+            .iter()
+            .map(|line| strip_box_prefix(line).trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    });
 
     Some(DetectedPrompt {
         header,
         question,
+        context,
         options,
         dedup_key,
     })

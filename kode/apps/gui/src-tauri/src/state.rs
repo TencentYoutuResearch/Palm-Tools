@@ -797,6 +797,7 @@ fn spawn_prompt_scan_loop(
                         let payload = serde_json::json!({
                             "question_id": qid,
                             "question": prompt.question,
+                            "context": prompt.context,
                             "header": prompt.header,
                             "multi_select": false,
                             "options": prompt.options.iter().map(|o| serde_json::json!({
