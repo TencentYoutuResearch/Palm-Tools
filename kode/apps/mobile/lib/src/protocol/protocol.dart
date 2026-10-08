@@ -8,8 +8,12 @@ import 'dart:convert';
 
 /// Bridge expands one AskUserQuestion tool call into ids such as `call-0`,
 /// `call-1`. Mobile groups them into one editable submit panel.
-String askQuestionGroupId(String questionId) =>
-    questionId.replaceFirst(RegExp(r'-\d+$'), '');
+String askQuestionGroupId(String questionId) {
+  // PTY approvals end in a timestamp, not a question index. Each occurrence
+  // represents a separate prompt and must never join a multi-question form.
+  if (questionId.startsWith('pty-')) return questionId;
+  return questionId.replaceFirst(RegExp(r'-\d+$'), '');
+}
 
 /// envelope 外壳。所有 WS / /history 事件都套这个。
 class Envelope {
