@@ -93,12 +93,13 @@ class GlassSurface extends StatelessWidget {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(radius),
-        child: blur && !solid
-            ? BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                child: content,
-              )
-            : content,
+        // Keep the same child hierarchy when accessibility settings change so
+        // focused fields retain their state and platform input connection.
+        child: BackdropFilter(
+          enabled: blur && !solid,
+          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+          child: content,
+        ),
       ),
     );
   }

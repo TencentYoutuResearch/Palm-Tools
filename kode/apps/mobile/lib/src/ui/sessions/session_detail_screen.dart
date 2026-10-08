@@ -903,11 +903,18 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                         ScrollViewKeyboardDismissBehavior.onDrag,
                     padding: padding,
                     itemCount: _items.length,
+                    // History/live events can insert before an active answer,
+                    // and discarding an outbound message shifts later rows.
+                    findChildIndexCallback: (key) =>
+                        key is ValueKey<String> ? _byKey[key.value] : null,
                     itemBuilder: (_, i) {
-                      return _buildItem(
-                        _items[i],
-                        backendKey: backendKey,
-                        outboundMessages: queuedMessages,
+                      return KeyedSubtree(
+                        key: ValueKey(_items[i].key),
+                        child: _buildItem(
+                          _items[i],
+                          backendKey: backendKey,
+                          outboundMessages: queuedMessages,
+                        ),
                       );
                     },
                   ),
@@ -1920,6 +1927,7 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
             final question = payload['question'] as String? ?? '';
             final options = (payload['options'] as List?) ?? const [];
             return Padding(
+              key: ValueKey(id),
               padding: const EdgeInsets.only(bottom: 14),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,

@@ -76,12 +76,16 @@ class _SessionGlassLayoutState extends State<SessionGlassLayout> {
         ),
         if (widget.jumpToLatest != null)
           Positioned(
+            key: const ValueKey('session-jump-to-latest-layer'),
             bottom: _composerHeight + 8,
             left: 0,
             right: 0,
             child: Center(child: widget.jumpToLatest),
           ),
         Positioned(
+          // Keep the input subtree mounted when live transcript updates add or
+          // remove the preceding jump button, preserving its IME connection.
+          key: const ValueKey('session-composer-layer'),
           bottom: 0,
           left: 0,
           right: 0,
