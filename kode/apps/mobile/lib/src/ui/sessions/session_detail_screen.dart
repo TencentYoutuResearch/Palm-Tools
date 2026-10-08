@@ -1881,6 +1881,9 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final multiple = widget.payloads.length > 1;
     final header = widget.payloads.isEmpty
         ? null
         : widget.payloads.first['header'] as String?;
@@ -1891,133 +1894,186 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
 
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: KillLaColors.bgSecondary,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: KillLaColors.borderStrong),
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: colors.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(
-                Icons.help_outline,
-                color: KillLaColors.accent,
-                size: 18,
+              Icon(
+                _submitted ? Icons.check_circle_outline : Icons.help_outline,
+                color: colors.primary,
+                size: 22,
               ),
-              const SizedBox(width: 6),
-              Text(
-                header ?? 'Questions',
-                style: const TextStyle(
-                  color: KillLaColors.accent,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 12,
-                  letterSpacing: .3,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  header ?? 'Questions',
+                  style: TextStyle(
+                    color: colors.onSurface,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                  ),
                 ),
               ),
+              if (multiple)
+                Text(
+                  '${widget.payloads.length} questions',
+                  style: TextStyle(
+                    color: colors.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
+                ),
             ],
           ),
-          const SizedBox(height: 8),
-          const SizedBox(height: 10),
+          const SizedBox(height: 20),
           ...widget.payloads.indexed.map((entry) {
             final (questionIndex, payload) = entry;
             final id = payload['question_id'] as String? ?? 'q_$questionIndex';
             final question = payload['question'] as String? ?? '';
+            final actionContext = (payload['context'] as String?)?.trim();
             final options = (payload['options'] as List?) ?? const [];
             return Padding(
               key: ValueKey(id),
-              padding: const EdgeInsets.only(bottom: 14),
+              padding: const EdgeInsets.only(bottom: 20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '${questionIndex + 1}. $question',
-                    style: const TextStyle(
-                      fontSize: 14,
+                    multiple ? '${questionIndex + 1}. $question' : question,
+                    style: TextStyle(
+                      color: colors.onSurface,
+                      fontSize: 16,
+                      height: 1.4,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
+                  if (actionContext != null && actionContext.isNotEmpty)
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: colors.surfaceContainer,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: colors.outlineVariant),
+                      ),
+                      child: Text(
+                        actionContext,
+                        style: TextStyle(
+                          color: colors.onSurface,
+                          fontFamily: 'Menlo',
+                          fontSize: 12,
+                          height: 1.5,
+                        ),
+                      ),
+                    )
+                  else if (payload['source'] == 'pty_prompt')
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        'Action details were not included in this approval.',
+                        style: TextStyle(color: colors.onSurfaceVariant),
+                      ),
+                    ),
                   ...List.generate(options.length, (i) {
                     final opt = options[i] as Map<String, dynamic>;
                     final label = opt['label'] as String? ?? '?';
                     final desc = opt['description'] as String?;
                     final selected = _selections[id] == i;
                     return Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(9),
-                        onTap: _submitted
-                            ? null
-                            : () => setState(() => _selections[id] = i),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 120),
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 9,
-                          ),
-                          decoration: BoxDecoration(
-                            color: selected
-                                ? KillLaColors.accent.withValues(alpha: .10)
-                                : KillLaColors.bgTertiary,
-                            borderRadius: BorderRadius.circular(9),
-                            border: Border.all(
-                              color: selected
-                                  ? KillLaColors.accent
-                                  : KillLaColors.border,
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Semantics(
+                        checked: selected,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: _submitted || _submitting
+                              ? null
+                              : () => setState(() => _selections[id] = i),
+                          child: AnimatedContainer(
+                            duration: reduceMotion
+                                ? Duration.zero
+                                : const Duration(milliseconds: 120),
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 13,
                             ),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                selected
-                                    ? Icons.radio_button_checked
-                                    : Icons.radio_button_off,
-                                size: 18,
+                            decoration: BoxDecoration(
+                              color: selected
+                                  ? colors.primary.withValues(alpha: .10)
+                                  : colors.surfaceContainer,
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
                                 color: selected
-                                    ? KillLaColors.accent
-                                    : KillLaColors.textMuted,
+                                    ? colors.primary
+                                    : colors.outlineVariant,
                               ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      label,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    if (desc != null)
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(
+                                  selected
+                                      ? Icons.check_circle_rounded
+                                      : Icons.radio_button_off,
+                                  size: 22,
+                                  color: selected
+                                      ? colors.primary
+                                      : colors.onSurfaceVariant,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
                                       Text(
-                                        desc,
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          color: KillLaColors.textSecondary,
+                                        label,
+                                        style: TextStyle(
+                                          color: colors.onSurface,
+                                          fontSize: 14,
+                                          height: 1.45,
+                                          fontWeight: FontWeight.w600,
                                         ),
                                       ),
-                                  ],
+                                      if (desc != null)
+                                        Text(
+                                          desc,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            height: 1.4,
+                                            color: colors.onSurfaceVariant,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
                     );
                   }),
                   TextField(
+                    key: ValueKey('answer-details-$id'),
                     controller: _controller(id),
+                    style: TextStyle(color: colors.onSurface, fontSize: 14),
                     enabled: !_submitted,
                     onTapOutside: (_) =>
                         FocusManager.instance.primaryFocus?.unfocus(),
                     minLines: 1,
                     maxLines: 3,
                     decoration: const InputDecoration(
-                      hintText: 'Optional details or your own answer',
+                      labelText: 'Additional context (optional)',
+                      hintText: 'Add details…',
                       isDense: true,
                     ),
                   ),
@@ -2028,27 +2084,25 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                _error!,
-                style: const TextStyle(color: KillLaColors.danger),
-              ),
+              child: Text(_error!, style: TextStyle(color: colors.error)),
             ),
           const SizedBox(height: 6),
-          Row(
-            children: [
-              FilledButton(
-                onPressed: (!complete || _submitted || _submitting)
-                    ? null
-                    : _submit,
-                child: Text(
-                  _submitted
-                      ? 'Submitted'
-                      : _submitting
-                      ? 'Submitting…'
-                      : 'Submit all answers',
-                ),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: (!complete || _submitted || _submitting)
+                  ? null
+                  : _submit,
+              child: Text(
+                _submitted
+                    ? 'Submitted'
+                    : _submitting
+                    ? 'Submitting…'
+                    : multiple
+                    ? 'Submit all answers'
+                    : 'Submit answer',
               ),
-            ],
+            ),
           ),
         ],
       ),
