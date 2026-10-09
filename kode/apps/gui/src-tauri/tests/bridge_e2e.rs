@@ -454,7 +454,7 @@ async fn history_endpoint_returns_session_events() {
 }
 
 #[tokio::test]
-async fn answer_endpoint_writes_choice_and_submit_to_pty() {
+async fn answer_endpoint_rejects_without_pending_question() {
     let addr = start_server().await;
     let client = reqwest::Client::new();
     let session: Value = client
@@ -476,8 +476,14 @@ async fn answer_endpoint_writes_choice_and_submit_to_pty() {
         .send()
         .await
         .unwrap();
-    // 已实装:首项直接 Enter;其它项用 DownArrow 移动后 Enter。
-    assert_eq!(resp.status(), 204);
+    // A terminal without a pending question must not receive answer keystrokes.
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "bad_request");
+    assert_eq!(
+        body["detail"],
+        "This question is no longer awaiting an answer"
+    );
 
     // 越界 choice_index 应 400
     let resp = client
