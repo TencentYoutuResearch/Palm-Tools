@@ -26,6 +26,7 @@
   import { open } from '@tauri-apps/plugin-dialog'
   import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
   import Terminal from './lib/Terminal.svelte'
+  import StructuredSession from './lib/StructuredSession.svelte'
   import CommandPalette, { type Command } from './lib/CommandPalette.svelte'
   import RenameDialog from './lib/RenameDialog.svelte'
   import ConfirmDialog from './lib/ConfirmDialog.svelte'
@@ -2062,6 +2063,9 @@
       <!-- inert 兜底:visibility:hidden 仍可能被 Tab 键焦点穿透,inert 完全屏蔽
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
+        {#if tab?.transportKind === 'acp'}
+          <StructuredSession sessionId={id} visible={isActive} />
+        {:else}
         <Terminal
           sessionId={id}
           visible={isActive}
@@ -2069,6 +2073,7 @@
           endpointId={tab?.endpointId}
           onCloseSession={() => closeTab(id)}
         />
+        {/if}
       </div>
     {/each}
   </main>

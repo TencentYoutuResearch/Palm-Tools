@@ -20,6 +20,7 @@ import { pushToast } from './toast'
 import { currentTermTheme } from './terminal_settings'
 
 export interface TabInfo {
+  transportKind?: 'acp' | 'pty'
   id: SessionId
   backendKey: string
   title: string
@@ -82,6 +83,7 @@ export const activeTab = derived([tabs, activeId], ([$tabs, $id]) => {
 const sessionStatuses = new Map<SessionId, SessionStatus>()
 
 export interface NewTabOptions {
+  transportKind?: 'acp' | 'pty'
   cwd?: string
   resumeSessionId?: string | null
   permissionMode?: PermissionMode | null
@@ -109,9 +111,11 @@ export async function newTab(
     model ?? null,
     endpointId ?? null,
     currentTermTheme('pty'),
+    opts.transportKind ?? (resumeSessionId ? 'pty' : null),
   )
   const t: TabInfo = {
     id: s.id,
+    transportKind: s.transport_kind,
     backendKey: s.backend_key,
     title: s.title,
     model: s.model,
@@ -176,6 +180,7 @@ export function ensureMounted(id: SessionId) {
 function upsertLocalTabFromDto(dto: {
   id: SessionId
   backend_key?: string
+  transport_kind?: 'acp' | 'pty'
   title?: string
   model?: string
   status?: SessionStatus
@@ -186,6 +191,7 @@ function upsertLocalTabFromDto(dto: {
     if (arr.some((tab) => tab.id === dto.id)) return arr
     return [...arr, {
       id: dto.id,
+      transportKind: dto.transport_kind,
       backendKey: dto.backend_key ?? '',
       title: dto.title ?? '',
       model: dto.model ?? '',
@@ -460,6 +466,7 @@ export function schedulePersist() {
     persistTimer = null
     const liveTabs: PersistedTab[] = get(tabs).map((t) => ({
       backend_key: t.backendKey,
+      transport_kind: t.transportKind,
       title: t.title,
       title_pinned: t.titlePinned ?? false,
       cwd: t.cwd ?? '',
@@ -527,6 +534,7 @@ export async function restoreTabs(
             : ENDPOINT_LOCAL
         const restored = await newTab(p.backend_key, {
           cwd: p.cwd || undefined,
+          transportKind: p.transport_kind ?? 'pty',
           resumeSessionId: p.session_id ?? null,
           permissionMode: mode,
           model: restoredModel,
@@ -645,6 +653,7 @@ export async function duplicateTab(id: SessionId) {
   const model = src.model && src.model !== 'auto' ? sanitizeModelName(src.model) || null : null
   const dup = await newTab(src.backendKey, {
     cwd: src.cwd,
+    transportKind: src.transportKind,
     model,
     permissionMode: src.permissionMode ?? null,
     endpointId: src.endpointId,
@@ -676,6 +685,7 @@ export async function restoreTab(id: SessionId) {
   const model = src.model && src.model !== 'auto' ? sanitizeModelName(src.model) || null : null
   const restored = await newTab(src.backendKey, {
     cwd: src.cwd,
+    transportKind: src.transportKind,
     model,
     permissionMode: src.permissionMode ?? null,
     endpointId: src.endpointId,

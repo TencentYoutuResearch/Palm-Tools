@@ -80,6 +80,7 @@ export function endpointRemote(id: string): EndpointId {
 }
 
 export interface SpawnedSession {
+  transport_kind?: 'acp' | 'pty'
   id: SessionId
   backend_key: string
   model: string
@@ -113,6 +114,7 @@ export interface SessionMeta {
 }
 
 export interface SessionCreatedEvent {
+  transport_kind?: 'acp' | 'pty'
   id: SessionId
   backend_key: string
   title: string
@@ -235,6 +237,7 @@ export interface SessionFocusRequestedEvent {
 }
 
 export interface PersistedTab {
+  transport_kind?: 'acp' | 'pty' | null
   backend_key: string
   title: string
   /// 用户手动重命名过;为 true 时恢复后不让后端 ai title 覆盖。
@@ -282,6 +285,7 @@ export const ipc = {
     endpoint_id?: EndpointId | null,
     /// Kode xterm 当前主题,注入 TERM_THEME/COLORFGBG 给子 CLI。
     term_theme?: 'light' | 'dark' | null,
+    transport_kind?: 'acp' | 'pty' | null,
   ) =>
     invoke<SpawnedSession>('spawn_session', {
       backendKey: backend_key,
@@ -295,6 +299,7 @@ export const ipc = {
       model: model ?? null,
       endpointId: endpoint_id ?? null,
       termTheme: term_theme ?? null,
+      transportKind: transport_kind ?? null,
     }),
   /// 写入 PTY。**按 endpoint 自动分流**:
   ///   - Local → sync command `write_input`(顺序保证,见 commands.rs 注释)
