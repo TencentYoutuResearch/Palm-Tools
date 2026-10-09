@@ -201,9 +201,7 @@ class ApiClient {
   }
 
   /// 协议 §4.6 — 回答 AskUserQuestion。
-  /// **当前 Rust bridge 占位 500**。
-  /// 真实 PTY 编码尚未确定 → 这个方法会因 server 返 500 而抛 ApiException。
-  /// Flutter 显示给用户即可,等 server 端实装后自动 work。
+  /// Wait for the desktop receipt before advancing to the next question.
   Future<void> postAnswer(
     int id,
     String questionId,
@@ -222,10 +220,24 @@ class ApiClient {
       },
     );
     _check(resp);
+    await _waitForActionExecution(id, resp);
+  }
+
+  Future<void> postStructuredResponse(
+    int id,
+    String requestId,
+    Map<String, dynamic> response,
+  ) async {
+    final resp = await _dio.post(
+      '/api/v1/sessions/$id/answer',
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
+      data: {'request_id': requestId, 'response': response},
+    );
+    _check(resp);
+    await _waitForActionExecution(id, resp);
   }
 
   /// 协议 §4.7 — 回应 ExitPlanMode 提议(Accept/Reject)。
-  /// 同样:server 端 500 占位中。
   Future<void> postPlanResponse(int id, String planId, bool accept) async {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/plan_response',
@@ -233,6 +245,45 @@ class ApiClient {
       data: {'plan_id': planId, 'accept': accept},
     );
     _check(resp);
+    await _waitForActionExecution(id, resp);
+  }
+
+  Future<void> _waitForActionExecution(
+    int id,
+    Response<dynamic> response,
+  ) async {
+    final body = response.data;
+    if (body is! Map || body['command_id'] is! String) return;
+    final commandId = body['command_id'] as String;
+    if (body['status'] == 'executed') return;
+    final deadline = DateTime.now().add(const Duration(seconds: 35));
+    while (DateTime.now().isBefore(deadline)) {
+      // History also catches receipts received before the HTTP response or
+      // during a WebSocket reconnect. This only runs while an action is pending.
+      final events = await getHistory(id, fromMs: 0, limit: 2000);
+      for (final event in events.reversed) {
+        if (event.type != 'command.status' ||
+            event.payload['command_id'] != commandId) {
+          continue;
+        }
+        final status = event.payload['status'];
+        if (status == 'executed') return;
+        if (status == 'failed' || status == 'expired') {
+          throw ApiException(
+            409,
+            'action_failed',
+            event.payload['error'] as String? ?? 'Action was not executed.',
+          );
+        }
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    }
+    throw ApiException(
+      408,
+      'action_unconfirmed',
+      'No execution receipt received. Refresh the session before retrying.',
+    );
   }
 
   /// 切换 codebuddy/claude 的 PermissionMode。

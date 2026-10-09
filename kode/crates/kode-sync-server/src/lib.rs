@@ -897,9 +897,18 @@ fn persist_agent_event(
             (envelope, true)
         } else {
             let event_key = event_key(device_id, boot_id, local_session_id, &envelope);
+            let statement = if envelope.kind == "message"
+                && envelope.payload["source"] == "acp"
+                && envelope.payload["id"].is_string()
+            {
+                "INSERT INTO events(device_id, cloud_session_id, event_key, ts, kind, envelope_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(event_key) DO UPDATE SET ts=excluded.ts, envelope_json=excluded.envelope_json
+                 WHERE COALESCE(json_extract(excluded.envelope_json, '$.payload.revision'), 0) > COALESCE(json_extract(events.envelope_json, '$.payload.revision'), 0)"
+            } else {
+                "INSERT OR IGNORE INTO events(device_id, cloud_session_id, event_key, ts, kind, envelope_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)"
+            };
             let inserted = db.execute(
-                "INSERT OR IGNORE INTO events(device_id, cloud_session_id, event_key, ts, kind, envelope_json)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                statement,
                 params![
                     device_id,
                     cloud_id,
@@ -1142,6 +1151,14 @@ async fn post_answer(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if payload.get("response").is_some() {
+        if payload["request_id"].as_str().is_none() || !payload["response"].is_object() {
+            return Err(ApiError::BadRequest(
+                "request_id and structured response are required".into(),
+            ));
+        }
+        return dispatch_mobile_command(&state, session_id, &headers, "answer", payload);
+    }
     let choice = payload
         .get("choice_index")
         .and_then(Value::as_u64)
@@ -1505,6 +1522,13 @@ fn event_key(
     hash.update([0]);
     hash.update(boot_id.as_bytes());
     hash.update(local_session_id.to_le_bytes());
+    if event.kind == "message" && event.payload["source"] == "acp" {
+        if let Some(id) = event.payload["id"].as_str() {
+            hash.update(b"acp-message");
+            hash.update(id.as_bytes());
+            return hex_digest(&hash.finalize());
+        }
+    }
     hash.update(event.ts.to_le_bytes());
     hash.update(event.kind.as_bytes());
     hash.update(event.payload.to_string().as_bytes());
