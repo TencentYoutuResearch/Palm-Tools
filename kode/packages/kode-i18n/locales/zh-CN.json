@@ -1,4 +1,13 @@
 {
+  "filePreview.find": { "message": "在文件中查找…" },
+  "filePreview.findShortcut": { "message": "在文件中查找（Cmd/Ctrl+F）" },
+  "filePreview.clear": { "message": "清空查找" },
+  "filePreview.previous": { "message": "上一处（Shift+Enter）" },
+  "filePreview.next": { "message": "下一处（Enter）" },
+  "filePreview.closeFind": { "message": "关闭查找（Esc）" },
+  "filePreview.noMatches": { "message": "无匹配" },
+  "filePreview.diagramLoading": { "message": "正在渲染 Mermaid 图表…" },
+  "filePreview.diagramError": { "message": "Mermaid 图表无法渲染，请检查下方源码的语法。" },
   "acp.invalidField": { "message": "请检查“{field}”的答案。" },
   "acp.conversation": { "message": "CodeBuddy 会话" },
   "acp.you": { "message": "你" },
