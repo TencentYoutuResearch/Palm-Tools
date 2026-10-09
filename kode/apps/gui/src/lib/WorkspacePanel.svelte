@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { marked, type Token, type Tokens } from 'marked'
+  import { tick } from 'svelte'
+  import { currentLocale, t } from './i18n'
+  import { renderWorkspaceMarkdown, workspaceDiagrams } from './workspace_markdown'
+  import { findPreviewRanges, revealPreviewRange } from './preview_find'
   import hljs from 'highlight.js'
   import Icon from './Icon.svelte'
   import { layoutGitGraph, graphPath, graphContinuationPath, GRAPH_LANE_INSET, GRAPH_LANE_STEP, GRAPH_ROW_HEIGHT } from './git_graph_layout'
@@ -104,6 +107,110 @@
     subtitle: '',
     content: '',
   })
+
+  const previewCopy = $derived.by(() => {
+    $currentLocale
+    return {
+      find: t('filePreview.find'),
+      findShortcut: t('filePreview.findShortcut'),
+      clear: t('filePreview.clear'),
+      previous: t('filePreview.previous'),
+      next: t('filePreview.next'),
+      closeFind: t('filePreview.closeFind'),
+      noMatches: t('filePreview.noMatches'),
+      diagramLoading: t('filePreview.diagramLoading'),
+      diagramError: t('filePreview.diagramError'),
+    }
+  })
+
+  let previewPane: HTMLElement | null = $state(null)
+  let findInput: HTMLInputElement | null = $state(null)
+  let findOpen = $state(false)
+  let findQuery = $state('')
+  let findComposing = $state(false)
+  let findIndex = $state(0)
+  let findCount = $state(0)
+  let diagramRevision = $state(0)
+  let findRanges: Range[] = []
+  let findGeneration = 0
+  let filePreviewGeneration = 0
+  const canFind = $derived((preview.kind === 'file' || preview.kind === 'diff')
+    && !preview.binary && !['image', 'html', 'pdf'].includes(preview.renderKind ?? ''))
+  type HighlightAPI = { highlights: Map<string, unknown> }
+  const highlightAPI = () => (CSS as unknown as HighlightAPI).highlights
+  const HighlightConstructor = () => (window as unknown as { Highlight?: new (...ranges: Range[]) => { add(range: Range): void } }).Highlight
+
+  function clearFindHighlights() {
+    highlightAPI()?.delete('workspace-preview-matches')
+    highlightAPI()?.delete('workspace-preview-current')
+  }
+
+  function selectFindMatch(index: number) {
+    findIndex = findRanges.length ? (index + findRanges.length) % findRanges.length : 0
+    const range = findRanges[findIndex]
+    const Highlight = HighlightConstructor()
+    if (Highlight && highlightAPI()) {
+      const matches = new Highlight()
+      for (const match of findRanges) matches.add(match)
+      highlightAPI().set('workspace-preview-matches', matches)
+      highlightAPI().set('workspace-preview-current', new Highlight(...(range ? [range] : [])))
+    } else {
+      const selection = window.getSelection()
+      if (range || (selection?.anchorNode && previewPane?.contains(selection.anchorNode))) selection?.removeAllRanges()
+      if (range) selection?.addRange(range)
+    }
+    if (range && previewPane) revealPreviewRange(range, previewPane)
+  }
+
+  function diagramsRendered() { diagramRevision++ }
+
+  $effect(() => {
+    const open = findOpen && canFind
+    const query = findComposing ? '' : findQuery
+    // Track rendered content and lazy diagram completion, without mutating the preview DOM.
+    void preview.html
+    void preview.content
+    void diagramRevision
+    const pane = previewPane
+    const generation = ++findGeneration
+    clearFindHighlights()
+    void tick().then(() => {
+      if (generation !== findGeneration) return
+      const root = pane?.querySelector<HTMLElement>('.md-body, .source-preview')
+      findRanges = open && root ? findPreviewRanges(root, query) : []
+      findCount = findRanges.length
+      selectFindMatch(0)
+    })
+    return () => { findGeneration++; clearFindHighlights() }
+  })
+
+  async function openFind() {
+    if (!canFind) return
+    findOpen = true
+    await tick()
+    findInput?.focus()
+    findInput?.select()
+  }
+
+  function closeFind() {
+    findOpen = false
+    clearFindHighlights()
+    const selection = window.getSelection()
+    if (!HighlightConstructor() && selection?.anchorNode && previewPane?.contains(selection.anchorNode)) selection.removeAllRanges()
+    previewPane?.focus({ preventScroll: true })
+  }
+
+  function previewKeydown(event: KeyboardEvent) {
+    if (event.isComposing || findComposing) return
+    const modifier = event.metaKey || event.ctrlKey
+    if (modifier && !event.altKey && event.key.toLowerCase() === 'f' && canFind) {
+      event.preventDefault(); event.stopPropagation(); void openFind()
+    } else if (findOpen && (event.key === 'Enter' || (modifier && event.key.toLowerCase() === 'g'))) {
+      event.preventDefault(); event.stopPropagation(); selectFindMatch(findIndex + (event.shiftKey ? -1 : 1))
+    } else if (findOpen && event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation(); closeFind()
+    }
+  }
 
   /// 文件树(nav-pane)宽度 —— 与 preview-pane 之间可拖拽变宽。
   /// 默认 246px(保持旧值),范围 [180, 480]。持久化到 localStorage。
@@ -542,6 +649,8 @@
 
   async function previewFile(entry: WorkspaceEntry) {
     if (entry.is_dir) return
+    const generation = ++filePreviewGeneration
+    const workspace = workspaceKeyFor(tab)
     contextMenu = null
     preview = {
       kind: 'loading',
@@ -555,6 +664,9 @@
       const data: FilePreview = rid
         ? await endpointIpc.workspacePreviewFile(rid, entry.path)
         : await ipc.workspacePreviewFile(entry.path)
+
+      if (generation !== filePreviewGeneration || workspace !== workspaceKeyFor(tab)
+        || preview.kind !== 'loading' || preview.path !== entry.path) return
 
       // Image files: base64 content rendered as <img>
       if (data.kind === 'image') {
@@ -612,7 +724,7 @@
           html = sandboxedHtml(data.content)
         } else if (isMarkdownFile(data.name)) {
           renderKind = 'markdown'
-          html = renderMarkdown(data.content)
+          html = renderWorkspaceMarkdown(data.content)
         } else {
           const detected = langForFile(data.name)
           if (detected) {
@@ -635,6 +747,8 @@
         path: data.path,
       }
     } catch (e) {
+      if (generation !== filePreviewGeneration || workspace !== workspaceKeyFor(tab)
+        || preview.kind !== 'loading' || preview.path !== entry.path) return
       preview = {
         kind: 'error',
         title: entry.name,
@@ -930,27 +1044,6 @@
     return lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx')
   }
 
-  // marked:渲染 markdown,代码块用 hljs 高亮。默认转义,不开启危险 HTML。
-  function renderMarkdown(src: string): string {
-    const tokens = marked.lexer(src)
-    marked.walkTokens(tokens, (token: Token) => {
-      if (token.type === 'code') {
-        const code = token as Tokens.Code
-        const lang = code.lang?.split(/\s+/)[0]
-        try {
-          const html = lang && hljs.getLanguage(lang)
-            ? hljs.highlight(code.text, { language: lang }).value
-            : hljs.highlightAuto(code.text).value
-          code.escaped = true
-          code.text = `<span class="hljs">${html}</span>`
-        } catch {
-          /* fall back to default escaping */
-        }
-      }
-    })
-    return marked.parser(tokens)
-  }
-
   function renderCode(src: string, lang: string): string {
     try {
       return hljs.highlight(src, { language: lang }).value
@@ -967,11 +1060,16 @@
   }}
 />
 
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions (workspace navigation delegates file-find shortcuts) -->
 <aside
   class="workspace-panel"
   class:nav-resizing={navResizing}
   style="--nav-w:{navWidth}px"
   aria-label="Workspace inspector"
+  onkeydown={(event) => {
+    const target = event.target as HTMLElement
+    if (!target.closest('input, textarea, [contenteditable="true"]')) previewKeydown(event)
+  }}
 >
   <!-- 顶部一排(拉通整个右边栏):Files/Git 靠左,刷新 + inspector 关闭 靠右 -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1024,7 +1122,12 @@
     <div class="panel-body" class:no-preview={preview.kind === 'empty'}>
       <!-- 左:preview(占大)——未打开文件/diff 时不渲染,nav-pane 占满整列 -->
       {#if preview.kind !== 'empty'}
-        <section class="preview-pane" aria-label="Preview" oncontextmenu={openPreviewContextMenu}>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions (scroll region owns file-find keyboard shortcuts) -->
+        <section class="preview-pane" aria-label="Preview" tabindex="-1" bind:this={previewPane}
+          onkeydown={previewKeydown} oncontextmenu={openPreviewContextMenu}
+          onpointerdown={(event) => {
+            if (!(event.target as HTMLElement).closest('button, input, a, iframe')) previewPane?.focus({ preventScroll: true })
+          }}>
         <header>
           <div>
             <strong>{preview.title}</strong>
@@ -1032,11 +1135,35 @@
           </div>
           <div class="preview-actions">
             {#if preview.truncated}<em>truncated</em>{/if}
+            {#if canFind}
+              <button class="tool-btn" title={previewCopy.findShortcut} aria-label={previewCopy.find} onclick={openFind}>
+                <Icon name="search" size={14} />
+              </button>
+            {/if}
             <button class="tool-btn" title="Close preview" aria-label="Close preview" onclick={() => (preview = emptyPreview())}>
               <Icon name="x" size={14} />
             </button>
           </div>
         </header>
+        {#if findOpen && canFind}
+          <div class="preview-find" role="search" aria-label={previewCopy.find}>
+            <div class="preview-find-field">
+              <input bind:this={findInput} bind:value={findQuery} aria-label={previewCopy.find}
+                placeholder={previewCopy.find} autocomplete="off" spellcheck="false"
+                oncompositionstart={() => (findComposing = true)} oncompositionend={() => (findComposing = false)} />
+              {#if findQuery}
+                <button class="tool-btn" aria-label={previewCopy.clear} title={previewCopy.clear}
+                  onclick={() => { findQuery = ''; findInput?.focus() }}><Icon name="x" size={12} /></button>
+              {/if}
+            </div>
+            <span class="find-count" role="status" aria-live="polite">{findQuery ? (findCount ? `${findIndex + 1}/${findCount}` : previewCopy.noMatches) : '0/0'}</span>
+            <button class="tool-btn" disabled={!findCount} aria-label={previewCopy.previous} title={previewCopy.previous}
+              onclick={() => selectFindMatch(findIndex - 1)}><span class="find-prev"><Icon name="chevron-down" size={14} /></span></button>
+            <button class="tool-btn" disabled={!findCount} aria-label={previewCopy.next} title={previewCopy.next}
+              onclick={() => selectFindMatch(findIndex + 1)}><Icon name="chevron-down" size={14} /></button>
+            <button class="tool-btn" aria-label={previewCopy.closeFind} title={previewCopy.closeFind} onclick={closeFind}><Icon name="x" size={14} /></button>
+          </div>
+        {/if}
         {#if preview.kind === 'loading'}
           <p class="muted pad">Loading...</p>
         {:else if preview.kind === 'error'}
@@ -1057,7 +1184,8 @@
           <p class="muted pad">Binary file. Use Open to view it in the system app.</p>
         {:else if preview.kind === 'file' && preview.renderKind === 'markdown'}
           <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-          <div class="md-body" role="document">{@html preview.html}</div>
+          <div class="md-body" role="document" use:workspaceDiagrams={{ html: preview.html ?? '',
+            loading: previewCopy.diagramLoading, error: previewCopy.diagramError, onRendered: diagramsRendered }}>{@html preview.html}</div>
         {:else if preview.kind === 'file' && preview.renderKind === 'code'}
           <div class="source-preview" role="region" aria-label="File source">
             <pre class="line-numbers" aria-hidden="true">{#each preview.content.split('\n') as _, index}<span>{index + 1}</span>{/each}</pre>
@@ -1612,6 +1740,21 @@
     flex-direction: column;
     overflow: hidden;
   }
+  .preview-pane:focus-visible { outline: 1px solid var(--acc); outline-offset: -1px; }
+  .preview-find {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+    padding: 6px 10px; border-bottom: 1px solid var(--bd-muted); background: var(--bg-pre);
+  }
+  .preview-find-field { display: flex; flex: 1 1 120px; min-width: 80px; align-items: center; border: 1px solid var(--bd-muted); border-radius: 4px; background: var(--bg-input); }
+  .preview-find-field:focus-within { border-color: var(--acc); }
+  .preview-find input { width: 100%; min-width: 0; border: 0; outline: 0; padding: 5px 6px; color: var(--fg-primary); background: transparent; font: inherit; font-size: 11px; }
+  .find-count { color: var(--fg-secondary); font-family: var(--font-mono); font-size: 10px; white-space: nowrap; }
+  .find-prev { display: flex; transform: rotate(180deg); }
+  :global(::highlight(workspace-preview-matches)) { background-color: color-mix(in srgb, var(--st-warn) 40%, transparent); color: var(--fg-primary); }
+  :global(::highlight(workspace-preview-current)) { background-color: var(--acc); color: var(--fg-on-accent); }
+  .md-body :global(.mermaid-block) { margin: 12px 0; padding: 10px; border: 1px solid var(--bd-muted); border-radius: 6px; overflow: auto; min-height: 70px; }
+  .md-body :global(.mermaid-block svg) { display: block; max-width: 100%; height: auto; margin: auto; }
+  .md-body :global(.mermaid-error) { color: var(--st-err); }
   .preview-pane header {
     flex: 0 0 auto;
     min-height: 38px;
