@@ -33,6 +33,8 @@ const DEBOUNCE_MS: u64 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedTab {
+    #[serde(default)]
+    pub transport_kind: Option<String>,
     pub backend_key: String,
     pub title: String,
     /// 用户是否手动重命名过 tab。老 state 没有该字段时按 false 处理。
@@ -366,6 +368,7 @@ mod tests {
         let s = PersistedState {
             version: 1,
             tabs: vec![PersistedTab {
+                transport_kind: None,
                 backend_key: "codebuddy".into(),
                 title: "Test".into(),
                 title_pinned: true,

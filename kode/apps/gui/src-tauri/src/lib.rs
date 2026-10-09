@@ -152,6 +152,7 @@ pub fn run() {
             commands::list_avatar_library,
             commands::get_avatar_generation_prompt,
             commands::spawn_session,
+            commands::acp_session_action,
             commands::write_input,
             commands::write_input_remote,
             commands::resize_session,

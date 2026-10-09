@@ -724,16 +724,31 @@ impl CloudSyncManager {
             },
             "interrupt" => kode_bridge::interrupt_session(&self.inner.ctx, local_session_id)
                 .map_err(|error| error.to_string()),
+            "answer" if payload.get("response").is_some() => {
+                match (
+                    self.inner.ctx.acp.get(local_session_id),
+                    payload["request_id"].as_str(),
+                ) {
+                    (Some(client), Some(request_id)) => {
+                        client
+                            .respond(request_id, payload["response"].clone())
+                            .await
+                    }
+                    _ => Err("Structured response requires an ACP session and request_id".into()),
+                }
+            }
             "answer" => match payload.get("choice_index").and_then(Value::as_u64) {
                 Some(choice) => {
                     let submit = payload
                         .get("submit")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    kode_bridge::submit_answer(
+                    kode_bridge::submit_question_answer(
                         &self.inner.ctx,
                         local_session_id,
+                        payload.get("question_id").and_then(Value::as_str),
                         choice as u32,
+                        payload.get("free_text").and_then(Value::as_str),
                         submit,
                     )
                     .await
@@ -741,14 +756,18 @@ impl CloudSyncManager {
                 }
                 None => Err("answer command is missing choice_index".into()),
             },
-            "plan_response" => payload
-                .get("accept")
-                .and_then(Value::as_bool)
-                .ok_or_else(|| "plan response command is missing accept".to_string())
-                .and_then(|accept| {
-                    kode_bridge::submit_plan_response(&self.inner.ctx, local_session_id, accept)
-                        .map_err(|error| error.to_string())
-                }),
+            "plan_response" => match payload.get("accept").and_then(Value::as_bool) {
+                Some(accept) => {
+                    kode_bridge::respond_plan(
+                        &self.inner.ctx,
+                        local_session_id,
+                        payload.get("plan_id").and_then(Value::as_str),
+                        accept,
+                    )
+                    .await
+                }
+                None => Err("plan response command is missing accept".into()),
+            },
             "mode" => match payload.get("mode").and_then(Value::as_str) {
                 Some(mode) => kode_bridge::set_session_permission_mode(
                     &self.inner.ctx,
@@ -895,6 +914,7 @@ fn session_snapshots(ctx: &kode_bridge::Ctx) -> Vec<Value> {
                 "dto": {
                     "id": session.id,
                     "backend_key": session.backend_key,
+                    "transport_kind": if session.args == ["--acp"] { "acp" } else { "pty" },
                     "title": session.state.title,
                     "model": session.state.model,
                     "status": status,

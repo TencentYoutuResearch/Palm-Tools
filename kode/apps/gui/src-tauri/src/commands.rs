@@ -530,6 +530,7 @@ pub fn list_all_backends(state: State<'_, AppState>) -> Vec<BackendListItem> {
 
 #[derive(Debug, Serialize)]
 pub struct SpawnedSession {
+    pub transport_kind: String,
     pub id: SessionId,
     pub backend_key: String,
     pub model: String,
@@ -575,6 +576,7 @@ pub async fn spawn_session(
     endpoint_id: Option<EndpointId>,
     // Kode xterm 当前主题。`light` / `dark`;缺省时回退到持久化 GUI 主题。
     term_theme: Option<String>,
+    transport_kind: Option<String>,
     memory_handle: State<'_, Arc<MemoryHandle>>,
     state: State<'_, AppState>,
 ) -> Result<SpawnedSession, String> {
@@ -602,6 +604,65 @@ pub async fn spawn_session(
 
     let model = sanitize_spawn_model(model);
 
+    let structured = matches!(endpoint_id, EndpointId::Local)
+        && backend_key == "codebuddy"
+        && (transport_kind.as_deref() == Some("acp")
+            || (transport_kind.is_none() && resume_session_id.is_none()));
+    if structured {
+        let mut backend = state
+            .ctx
+            .backend_configs
+            .read()
+            .get(&backend_key)
+            .cloned()
+            .ok_or("Backend not configured")?;
+        let id = state.protocol_ctx.alloc_id();
+        let cwd = cwd_path.as_deref().ok_or("Working directory is required")?;
+        backend.args = kode_core::session::inject_kode_memory_prompt(
+            &backend.args,
+            &backend_key,
+            cwd,
+            crate::persistence::load()
+                .kode_memory_prompt_enabled
+                .unwrap_or(true),
+            memory_context.as_deref(),
+        );
+        let client = kode_bridge::acp::Client::start(
+            Arc::clone(&state.protocol_ctx),
+            id,
+            &backend,
+            cwd,
+            permission_mode.as_deref(),
+            model.as_deref(),
+            resume_session_id.as_deref(),
+        )
+        .await?;
+        let session = kode_core::session::Session::structured(
+            id,
+            &backend_key,
+            &backend.command,
+            cwd,
+            client.session_id(),
+            model
+                .clone()
+                .or(backend.default_model)
+                .unwrap_or_else(|| "auto".into()),
+        );
+        let result = SpawnedSession {
+            transport_kind: "acp".into(),
+            id,
+            backend_key: backend_key.clone(),
+            model: session.state.model.clone(),
+            title: session.state.title.clone(),
+            session_id: session.session_id.clone(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            endpoint_id,
+        };
+        state.ctx.sessions.lock().insert(id, session);
+        state.protocol_ctx.acp.insert(id, client);
+        state.ctx.bus.emit(kode_bridge::EventEnvelope::new(id, "session.created", serde_json::json!({"id":id,"backend_key":backend_key,"title":result.title,"model":result.model,"cwd":result.cwd,"session_uuid":result.session_id,"transport_kind":"acp","status":"idle"})));
+        return Ok(result);
+    }
     let spec = SpawnSpec {
         backend_key: backend_key.clone(),
         cols: cols.unwrap_or(80),
@@ -619,6 +680,7 @@ pub async fn spawn_session(
     let spawned = transport.spawn(spec).await.map_err(String::from)?;
 
     Ok(SpawnedSession {
+        transport_kind: "pty".into(),
         id: spawned.id,
         backend_key: spawned.backend_key,
         model: spawned.model,
@@ -753,6 +815,13 @@ pub fn write_input(
     bytes: Vec<u8>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    if let Some(client) = state.protocol_ctx.acp.get(id) {
+        return if bytes == [3] || bytes == [27] {
+            client.cancel()
+        } else {
+            Err("Use the structured session composer for ACP input".into())
+        };
+    }
     {
         let g = state.ctx.sessions.lock();
         let s = g.get(&id).ok_or_else(|| format!("no session {id}"))?;
@@ -850,6 +919,7 @@ pub async fn kill_session(
     endpoint_id: Option<EndpointId>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    state.protocol_ctx.acp.remove(id);
     let endpoint_id = endpoint_id.unwrap_or(EndpointId::Local);
     let transport = get_transport(&state, &endpoint_id)?;
     transport.kill(id).await.map_err(String::from)
@@ -965,6 +1035,8 @@ fn _ensure_traits() {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PersistedTabDto {
+    #[serde(default)]
+    pub transport_kind: Option<String>,
     pub backend_key: String,
     pub title: String,
     #[serde(default)]
@@ -1011,6 +1083,7 @@ pub fn get_persisted_tabs() -> Vec<PersistedTabDto> {
         s.tabs
             .into_iter()
             .map(|t| PersistedTabDto {
+                transport_kind: t.transport_kind,
                 backend_key: t.backend_key,
                 title: t.title,
                 title_pinned: t.title_pinned,
@@ -1032,6 +1105,7 @@ pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Resu
     persisted.tabs = dedupe_persisted_tabs(tabs)
         .into_iter()
         .map(|t| crate::persistence::PersistedTab {
+            transport_kind: t.transport_kind,
             backend_key: t.backend_key,
             title: t.title,
             title_pinned: t.title_pinned,
@@ -1045,6 +1119,46 @@ pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Resu
         .collect();
     state.persist.request_save(persisted);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn acp_session_action(
+    id: SessionId,
+    action: String,
+    payload: serde_json::Value,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let client = state
+        .protocol_ctx
+        .acp
+        .get(id)
+        .ok_or("ACP session unavailable")?;
+    match action.as_str() {
+        "history" => Ok(
+            serde_json::to_value(state.protocol_ctx.bus.history_for(id, 0, 2000))
+                .map_err(|e| e.to_string())?,
+        ),
+        "input" => {
+            client.prompt(payload["text"].as_str().ok_or("Text required")?.into())?;
+            Ok(serde_json::Value::Null)
+        }
+        "respond" => {
+            client
+                .respond(
+                    payload["request_id"]
+                        .as_str()
+                        .ok_or("Request id required")?,
+                    payload["response"].clone(),
+                )
+                .await?;
+            Ok(serde_json::Value::Null)
+        }
+        "interrupt" => {
+            client.cancel()?;
+            Ok(serde_json::Value::Null)
+        }
+        _ => Err("Unknown ACP session action".into()),
+    }
 }
 
 // ============ Theme(全局 UI 主题持久化)============

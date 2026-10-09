@@ -160,6 +160,7 @@ impl AppState {
             memory: memory_handle,
         });
         let protocol_ctx = Arc::new(kode_bridge::Ctx {
+            acp: Arc::new(kode_bridge::acp::Registry::default()),
             config: ctx.config.clone(),
             sessions: Arc::clone(&ctx.sessions),
             core_tx: ctx.core_tx.clone(),
@@ -913,6 +914,13 @@ fn spawn_attention_forwarder(
                             let _ = app.emit("memory-pending-remote", env.payload.clone());
                         }
                         continue;
+                    }
+                    let structured = sessions
+                        .lock()
+                        .get(&env.session_id)
+                        .is_some_and(|session| session.args == ["--acp"]);
+                    if structured {
+                        let _ = app.emit("acp-session-event", &env);
                     }
                     match env.r#type.as_str() {
                         "session.created" => {

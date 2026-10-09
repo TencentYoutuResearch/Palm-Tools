@@ -807,6 +807,9 @@ impl SessionTransport for RemoteTransport {
             .map_err(|e| TransportError::Internal(format!("ssh tunnel: {e}")))?;
         let url = RemoteConfig::rest_url_for(&base, "/api/v1/sessions");
         let mut body = serde_json::Map::new();
+        // The remote GUI currently renders a terminal. Do not silently create
+        // an ACP connection whose input contract it cannot own.
+        body.insert("transport".into(), Value::String("pty".into()));
         body.insert(
             "backend_key".into(),
             Value::String(spec.backend_key.clone()),
