@@ -109,6 +109,7 @@ async fn mobile_text_input_submits_with_a_separate_carriage_return() {
     let session = create_session(
         axum::Extension(Arc::clone(&ctx)),
         axum::Json(CreateSessionReq {
+            transport: Some("pty".to_string()),
             backend_key: "capture".to_string(),
             cwd: Some(
                 std::env::current_dir()
@@ -350,6 +351,7 @@ async fn create_session_emits_session_created_on_bus() {
 
     // 模拟 SpecOps 通过 HTTP API 调用 create_session
     let req = CreateSessionReq {
+        transport: Some("pty".to_string()),
         backend_key: "codebuddy".to_string(),
         cwd: Some(
             std::env::current_dir()
@@ -396,6 +398,7 @@ async fn focus_session_emits_focus_requested_on_bus() {
     let token = "test-token-focus-session".to_string();
     let ctx = build_test_ctx(config, token);
     let req = CreateSessionReq {
+        transport: Some("pty".to_string()),
         backend_key: "codebuddy".to_string(),
         cwd: Some(
             std::env::current_dir()
