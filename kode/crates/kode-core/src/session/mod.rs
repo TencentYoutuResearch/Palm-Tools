@@ -265,6 +265,40 @@ impl Session {
         })
     }
 
+    /// Metadata and transcript holder for a structured agent connection. No PTY
+    /// or transcript tail is started: ACP is the sole lifecycle authority.
+    pub fn structured(
+        id: SessionId,
+        backend_key: &str,
+        command: &str,
+        cwd: &Path,
+        session_id: String,
+        model: String,
+    ) -> Self {
+        let mut state = SessionState::new(format!("tab · {backend_key}"), model);
+        state.status = Status::Idle;
+        Self {
+            id,
+            backend_key: backend_key.into(),
+            cwd: cwd.into(),
+            command: command.into(),
+            args: vec!["--acp".into()],
+            session_id: Some(session_id),
+            pty: None,
+            parser: vt100::Parser::new(24, 80, 1000),
+            state,
+            busy: BusyHeuristic::new(Duration::from_secs(60)),
+            active_turn_id: None,
+            semantic_session_id: None,
+            busy_recovery: std::sync::Mutex::default(),
+            output_revision: 0,
+            cols: 80,
+            rows: 24,
+            retarget_tx: None,
+            feed_remnant: Vec::new(),
+        }
+    }
+
     /// 权威 retarget:SessionStart hook 给出新 session 的 jsonl/rollout 路径
     /// (transcript_path),通过它通知本 session 的 tail 切过去。
     /// 返回 false 表示本 session 不支持 tail retarget 或 tail 已退出。
@@ -815,7 +849,7 @@ fn inject_model_flag(
 /// 简单透传。如果将来加了不支持的 backend(eg. raw shell),那个 backend 的 args
 /// 不应被 kode 自动注入,改 BackendConfig 加 `kode_memory_prompt_supported: bool`
 /// 字段拦下即可。
-fn inject_kode_memory_prompt(
+pub fn inject_kode_memory_prompt(
     args: &[String],
     backend_key: &str,
     cwd: &std::path::Path,
