@@ -11,7 +11,9 @@ import 'dart:convert';
 String askQuestionGroupId(String questionId) {
   // PTY approvals end in a timestamp, not a question index. Each occurrence
   // represents a separate prompt and must never join a multi-question form.
-  if (questionId.startsWith('pty-')) return questionId;
+  if (questionId.startsWith('pty-') || questionId.startsWith('acp-')) {
+    return questionId;
+  }
   return questionId.replaceFirst(RegExp(r'-\d+$'), '');
 }
 

@@ -155,6 +155,7 @@ class SessionUnreadCountNotifier extends Notifier<Map<int, int>> {
           return;
         }
         if (envelope.type != 'message' ||
+            envelope.payload['streaming'] == true ||
             envelope.payload['role'] == 'user' ||
             envelope.sessionId == _viewedSessionId) {
           return;

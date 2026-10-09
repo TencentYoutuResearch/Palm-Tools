@@ -13,6 +13,7 @@
 library;
 
 import 'dart:async';
+import 'acp_form_card.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -373,6 +374,21 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
           );
         }
         break;
+      case 'interaction.resolved':
+        final requestId = env.payload['request_id'];
+        for (var i = 0; i < _items.length; i++) {
+          final item = _items[i];
+          if (item.payload['request_id'] == requestId ||
+              item.payload['plan_id'] == requestId) {
+            _items[i] = _Item(
+              key: item.key,
+              type: item.type,
+              ts: item.ts,
+              payload: {...item.payload, 'resolved': true},
+            );
+          }
+        }
+        break;
       case 'ask_user_question':
         // payload.question_id 唯一(bridge 形如 "tooluse_xxx-0",含 question 序号),
         // **不能**用 ts:bridge 一行 jsonl 多事件同毫秒 emit,ts 会冲突
@@ -527,6 +543,14 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   }
 
   Future<void> _send() async {
+    if (ref.read(sessionAttentionProvider)[widget.sessionId] != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Answer the pending question or plan before sending.'),
+        ),
+      );
+      return;
+    }
     if (_listening) await _stopListening();
     final text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
@@ -963,11 +987,21 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
       case 'tool_use':
         return _ToolUseCard(payload: item.payload);
       case 'ask_user_question':
+        if (item.payload['source'] == 'acp_form' ||
+            item.payload['source'] == 'acp_questions') {
+          return AcpFormCard(
+            sessionId: widget.sessionId,
+            payload: item.payload,
+          );
+        }
         final group = _askGroupFor(item);
         // Only the first event renders the grouped card; later members remain
         // in the event list for history/dedup but do not duplicate the UI.
         if (group.first.key != item.key) return const SizedBox.shrink();
         return _AskQuestionsCard(
+          key: ValueKey(
+            'question-card-${item.payload['request_id'] ?? item.payload['question_id']}',
+          ),
           sessionId: widget.sessionId,
           payloads: group.map((entry) => entry.payload).toList(),
         );
@@ -1856,28 +1890,20 @@ class _ToolUseCardState extends State<_ToolUseCard> {
 class _AskQuestionsCard extends ConsumerStatefulWidget {
   final int sessionId;
   final List<Map<String, dynamic>> payloads;
-  const _AskQuestionsCard({required this.sessionId, required this.payloads});
+  const _AskQuestionsCard({
+    super.key,
+    required this.sessionId,
+    required this.payloads,
+  });
   @override
   ConsumerState<_AskQuestionsCard> createState() => _AskQuestionsCardState();
 }
 
 class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
   final Map<String, int> _selections = {};
-  final Map<String, TextEditingController> _details = {};
   bool _submitted = false;
   bool _submitting = false;
   String? _error;
-
-  TextEditingController _controller(String id) =>
-      _details.putIfAbsent(id, TextEditingController.new);
-
-  @override
-  void dispose() {
-    for (final controller in _details.values) {
-      controller.dispose();
-    }
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1993,7 +2019,12 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
                         checked: selected,
                         child: InkWell(
                           borderRadius: BorderRadius.circular(14),
-                          onTap: _submitted || _submitting
+                          onTap:
+                              _submitted ||
+                                  _submitting ||
+                                  widget.payloads.any(
+                                    (p) => p['resolved'] == true,
+                                  )
                               ? null
                               : () => setState(() => _selections[id] = i),
                           child: AnimatedContainer(
@@ -2062,21 +2093,6 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
                       ),
                     );
                   }),
-                  TextField(
-                    key: ValueKey('answer-details-$id'),
-                    controller: _controller(id),
-                    style: TextStyle(color: colors.onSurface, fontSize: 14),
-                    enabled: !_submitted,
-                    onTapOutside: (_) =>
-                        FocusManager.instance.primaryFocus?.unfocus(),
-                    minLines: 1,
-                    maxLines: 3,
-                    decoration: const InputDecoration(
-                      labelText: 'Additional context (optional)',
-                      hintText: 'Add details…',
-                      isDense: true,
-                    ),
-                  ),
                 ],
               ),
             );
@@ -2090,7 +2106,11 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
           SizedBox(
             width: double.infinity,
             child: FilledButton(
-              onPressed: (!complete || _submitted || _submitting)
+              onPressed:
+                  (!complete ||
+                      _submitted ||
+                      _submitting ||
+                      widget.payloads.any((p) => p['resolved'] == true))
                   ? null
                   : _submit,
               child: Text(
@@ -2110,7 +2130,11 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
   }
 
   Future<void> _submit() async {
-    if (_submitting || _submitted) return;
+    if (_submitting ||
+        _submitted ||
+        widget.payloads.any((p) => p['resolved'] == true)) {
+      return;
+    }
     final api = ref.read(apiClientProvider);
     if (api == null) return;
     setState(() {
@@ -2118,45 +2142,36 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
       _error = null;
     });
     try {
-      final supplemental = <String>[];
       for (final entry in widget.payloads.indexed) {
         final (index, payload) = entry;
         final qid = payload['question_id'] as String? ?? 'q_$index';
         final selected = _selections[qid];
         if (selected == null) return;
-        final options = (payload['options'] as List?) ?? const [];
-        final label = selected < options.length
-            ? (options[selected] as Map<String, dynamic>)['label'] as String? ??
-                  'option ${selected + 1}'
-            : 'option ${selected + 1}';
-        final details = _controller(qid).text.trim();
-        await api.postAnswer(
-          widget.sessionId,
-          qid,
-          selected,
-          submit: index == widget.payloads.length - 1,
-        );
-        if (details.isNotEmpty) {
-          supplemental.add(
-            '- ${payload['question'] ?? qid}\n  Selected: $label\n  User details: $details',
+        if (payload['source'] == 'acp_permission') {
+          final options = payload['options'] as List;
+          final option = options[selected] as Map;
+          await api.postStructuredResponse(
+            widget.sessionId,
+            payload['request_id'] as String,
+            {'optionId': option['option_id']},
+          );
+        } else {
+          await api.postAnswer(
+            widget.sessionId,
+            qid,
+            selected,
+            submit: index == widget.payloads.length - 1,
           );
         }
       }
-      if (supplemental.isNotEmpty) {
-        await api.sendInputText(
-          widget.sessionId,
-          'Additional context for my AskUserQuestion answers:\n\n${supplemental.join('\n\n')}\n',
-        );
+      if (!widget.payloads.any((p) => '${p['source']}'.startsWith('acp'))) {
+        ref
+            .read(sessionAttentionProvider.notifier)
+            .clearOptimistic(widget.sessionId);
       }
-      // 乐观清 attention — server 的 scan_loop 在 ~200-400ms 后才会推 attention_cleared,
-      // 这一段时间避免 list 上仍闪烁让用户困惑。如果 server 没真清掉(子进程又弹了
-      // 新 prompt),下一次扫描会自动重新点亮。
-      ref
-          .read(sessionAttentionProvider.notifier)
-          .clearOptimistic(widget.sessionId);
-      setState(() => _submitted = true);
+      if (mounted) setState(() => _submitted = true);
     } catch (e) {
-      setState(() => _error = '$e');
+      if (mounted) setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
@@ -2173,6 +2188,7 @@ class _PlanCard extends ConsumerStatefulWidget {
 
 class _PlanCardState extends ConsumerState<_PlanCard> {
   bool? _accepted;
+  bool _submitting = false;
   String? _error;
 
   @override
@@ -2256,12 +2272,22 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
           Row(
             children: [
               FilledButton(
-                onPressed: _accepted != null ? null : () => _respond(true),
+                onPressed:
+                    _accepted != null ||
+                        _submitting ||
+                        widget.payload['resolved'] == true
+                    ? null
+                    : () => _respond(true),
                 child: Text(_accepted == true ? '✓ ACCEPTED' : 'ACCEPT'),
               ),
               const SizedBox(width: 8),
               OutlinedButton(
-                onPressed: _accepted != null ? null : () => _respond(false),
+                onPressed:
+                    _accepted != null ||
+                        _submitting ||
+                        widget.payload['resolved'] == true
+                    ? null
+                    : () => _respond(false),
                 child: Text(_accepted == false ? '✗ REJECTED' : 'REJECT'),
               ),
             ],
@@ -2272,18 +2298,30 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
   }
 
   Future<void> _respond(bool accept) async {
+    if (_submitting ||
+        _accepted != null ||
+        widget.payload['resolved'] == true) {
+      return;
+    }
     final api = ref.read(apiClientProvider);
     if (api == null) return;
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
     try {
       final pid = widget.payload['plan_id'] as String? ?? '?';
       await api.postPlanResponse(widget.sessionId, pid, accept);
-      // 乐观清 attention(server scan_loop 也会推 attention_cleared 兜底)
-      ref
-          .read(sessionAttentionProvider.notifier)
-          .clearOptimistic(widget.sessionId);
-      setState(() => _accepted = accept);
+      if (widget.payload['source'] != 'acp') {
+        ref
+            .read(sessionAttentionProvider.notifier)
+            .clearOptimistic(widget.sessionId);
+      }
+      if (mounted) setState(() => _accepted = accept);
     } catch (e) {
-      setState(() => _error = '$e');
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _submitting = false);
     }
   }
 }
