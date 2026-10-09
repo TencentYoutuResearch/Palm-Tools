@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
+pub mod acp;
 pub mod backend_probe;
 pub mod hook_relay;
 pub mod semantic;
@@ -44,6 +45,7 @@ const DEFAULT_PORT: u16 = 47870;
 
 #[derive(Clone)]
 pub struct Ctx {
+    pub acp: Arc<acp::Registry>,
     pub config: Config,
     pub sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
     pub core_tx: mpsc::UnboundedSender<CoreEvent>,
@@ -205,7 +207,20 @@ impl BridgeBus {
         if env.r#type != "pty_bytes" && env.r#type != "shell.pty_bytes" {
             let mut h = self.history.lock();
             let list = h.entry(env.session_id).or_default();
-            if env.r#type == "meta" {
+            if env.r#type == "message"
+                && env.payload["source"] == "acp"
+                && env.payload["id"].is_string()
+            {
+                // ACP broadcasts incremental text but retains one message per
+                // stable id, so a long response cannot evict pending requests.
+                if let Some(index) = list.iter().position(|item| {
+                    item.r#type == "message" && item.payload["id"] == env.payload["id"]
+                }) {
+                    list[index] = env.clone();
+                } else {
+                    list.push(env.clone());
+                }
+            } else if env.r#type == "meta" {
                 // Metadata is state, not timeline content. Long restored Codex
                 // sessions can replay thousands of token_count records; keeping
                 // every one evicts all message events from this 1000-item ring,
@@ -297,6 +312,7 @@ pub async fn run() -> anyhow::Result<()> {
     let hook_relay_socket = hook_relay.as_ref().map(|r| r.socket_path().to_path_buf());
 
     let ctx = Arc::new(Ctx {
+        acp: Arc::new(acp::Registry::default()),
         config,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         core_tx,
@@ -407,6 +423,7 @@ fn build_session_env(
 pub fn build_test_ctx(config: Config, token: String) -> Arc<Ctx> {
     let (core_tx, core_rx) = mpsc::unbounded_channel();
     let ctx = Arc::new(Ctx {
+        acp: Arc::new(acp::Registry::default()),
         config,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         core_tx,
@@ -824,6 +841,7 @@ impl IntoResponse for ApiError {
 
 #[derive(Serialize)]
 struct SessionDto {
+    transport_kind: &'static str,
     id: SessionId,
     backend_key: String,
     title: String,
@@ -855,6 +873,7 @@ fn status_label(s: CoreStatus) -> &'static str {
 
 fn session_to_dto(s: &Session) -> SessionDto {
     SessionDto {
+        transport_kind: if s.args == ["--acp"] { "acp" } else { "pty" },
         id: s.id,
         backend_key: s.backend_key.clone(),
         title: s.state.title.clone(),
@@ -880,6 +899,7 @@ async fn list_sessions(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
 
 #[derive(Deserialize)]
 struct CreateSessionReq {
+    transport: Option<String>,
     backend_key: String,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -930,6 +950,64 @@ async fn create_session(
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("/"));
+    let use_acp = req.transport.as_deref() == Some("acp")
+        || (req.transport.is_none()
+            && req.backend_key == "codebuddy"
+            && req.resume_session_uuid.is_none()
+            && !req.headless);
+    if use_acp {
+        if req.backend_key != "codebuddy" || req.resume_session_uuid.is_some() {
+            return Err(ApiError::BadRequest(
+                "ACP creation currently supports new CodeBuddy sessions only".into(),
+            ));
+        }
+        backend.args = kode_core::session::inject_kode_memory_prompt(
+            &backend.args,
+            &req.backend_key,
+            &cwd,
+            true,
+            req.memory_context.as_deref(),
+        );
+        let client = acp::Client::start(
+            Arc::clone(&ctx),
+            id,
+            &backend,
+            &cwd,
+            req.permission_mode.as_deref(),
+            req.model.as_deref(),
+            None,
+        )
+        .await
+        .map_err(ApiError::BadRequest)?;
+        let session = Session::structured(
+            id,
+            &req.backend_key,
+            &backend.command,
+            &cwd,
+            client.session_id(),
+            req.model
+                .clone()
+                .or(backend.default_model.clone())
+                .unwrap_or_else(|| "auto".into()),
+        );
+        let dto = session_to_dto(&session);
+        ctx.sessions.lock().insert(id, session);
+        ctx.acp.insert(id, client.clone());
+        if !req.headless {
+            ctx.bus.emit(EventEnvelope::new(
+                id,
+                "session.created",
+                serde_json::to_value(&dto).unwrap_or_default(),
+            ));
+        }
+        if let Some(prompt) = req.prompt {
+            client.prompt(prompt).map_err(ApiError::BadRequest)?;
+        }
+        return Ok(Json(dto));
+    }
+    if req.transport.as_deref().is_some_and(|value| value != "pty") {
+        return Err(ApiError::BadRequest("Unknown session transport".into()));
+    }
     let model = sanitize_requested_model(req.model.as_deref());
     let extra_env = build_session_env(&ctx, id, &req.backend_key, req.term_theme.as_deref());
     let mut session = Session::new(
@@ -1073,6 +1151,7 @@ async fn kill_session(
     Extension(ctx): Extension<Arc<Ctx>>,
     Path(id): Path<SessionId>,
 ) -> Result<StatusCode, ApiError> {
+    ctx.acp.remove(id);
     let s = ctx.sessions.lock().remove(&id);
     let Some(s) = s else {
         return Err(ApiError::NotFound(format!("session {id}")));
@@ -1348,10 +1427,14 @@ fn text_input_body(text: &str) -> &str {
 #[derive(Debug)]
 pub struct TextInputError {
     pub session_id: SessionId,
+    pub reason: Option<&'static str>,
 }
 
 impl std::fmt::Display for TextInputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(reason) = self.reason {
+            return write!(f, "{reason}");
+        }
         write!(f, "session {} not found", self.session_id)
     }
 }
@@ -1365,12 +1448,25 @@ impl std::error::Error for TextInputError {}
 /// composer without submitting it. Cloud command routing calls this same path
 /// so direct-bridge and centralized mobile input remain behaviorally identical.
 pub async fn submit_text_input(ctx: &Ctx, id: SessionId, text: &str) -> Result<(), TextInputError> {
+    if pending_interaction(ctx, id).is_some() {
+        return Err(TextInputError {
+            session_id: id,
+            reason: Some("Resolve the pending question or plan before sending a message"),
+        });
+    }
+    if let Some(client) = ctx.acp.get(id) {
+        return client.prompt(text.into()).map_err(|_| TextInputError {
+            session_id: id,
+            reason: Some("ACP input failed; refresh session state"),
+        });
+    }
     let body = text_input_body(text);
     let enter_writer = {
         let mut sessions = ctx.sessions.lock();
-        let session = sessions
-            .get_mut(&id)
-            .ok_or(TextInputError { session_id: id })?;
+        let session = sessions.get_mut(&id).ok_or(TextInputError {
+            session_id: id,
+            reason: None,
+        })?;
         session.mark_turn_start_fallback();
         if body.is_empty() {
             session.write_input(b"\r");
@@ -1408,15 +1504,24 @@ fn write_text_input_enter(
     tracing::debug!(session = id, "bridge input write enter");
     let mut writer = writer.lock().map_err(|error| {
         tracing::warn!(?error, session = id, "bridge input writer poisoned");
-        TextInputError { session_id: id }
+        TextInputError {
+            session_id: id,
+            reason: None,
+        }
     })?;
     writer.write_all(b"\r").map_err(|error| {
         tracing::warn!(?error, session = id, "bridge input enter failed");
-        TextInputError { session_id: id }
+        TextInputError {
+            session_id: id,
+            reason: None,
+        }
     })?;
     writer.flush().map_err(|error| {
         tracing::warn!(?error, session = id, "bridge input enter flush failed");
-        TextInputError { session_id: id }
+        TextInputError {
+            session_id: id,
+            reason: None,
+        }
     })
 }
 
@@ -1446,6 +1551,11 @@ async fn post_input(
     Path(id): Path<SessionId>,
     Json(req): Json<InputReq>,
 ) -> Result<StatusCode, ApiError> {
+    if req.bytes_b64.is_some() && ctx.acp.get(id).is_some() {
+        return Err(ApiError::BadRequest(
+            "ACP sessions accept structured text input only".into(),
+        ));
+    }
     match (req.bytes_b64, req.text) {
         // 原始字节路径用于控制键和高级序列，保持完全透传。
         (Some(b64), _) => {
@@ -1461,7 +1571,10 @@ async fn post_input(
         (None, Some(text)) => {
             submit_text_input(&ctx, id, &text)
                 .await
-                .map_err(|_| ApiError::NotFound(format!("session {id}")))?;
+                .map_err(|error| match error.reason {
+                    Some(_) => ApiError::BadRequest(error.to_string()),
+                    None => ApiError::NotFound(format!("session {id}")),
+                })?;
         }
         (None, None) => {
             return Err(ApiError::BadRequest("text or bytes_b64 required".into()));
@@ -1473,8 +1586,17 @@ async fn post_input(
 /// Interrupt is a distinct operation from text input. Writing ETX reaches the
 /// active CLI without accidentally submitting an empty user message.
 pub fn interrupt_session(ctx: &Ctx, id: SessionId) -> Result<(), TextInputError> {
+    if let Some(client) = ctx.acp.get(id) {
+        return client.cancel().map_err(|_| TextInputError {
+            session_id: id,
+            reason: Some("ACP cancellation failed"),
+        });
+    }
     let sessions = ctx.sessions.lock();
-    let session = sessions.get(&id).ok_or(TextInputError { session_id: id })?;
+    let session = sessions.get(&id).ok_or(TextInputError {
+        session_id: id,
+        reason: None,
+    })?;
     session.write_input(b"\x03");
     Ok(())
 }
@@ -1489,8 +1611,11 @@ async fn post_interrupt(
 
 #[derive(Deserialize)]
 struct AnswerReq {
+    request_id: Option<String>,
+    response: Option<Value>,
     #[serde(default)]
     question_id: Option<String>,
+    #[serde(default)]
     choice_index: u32,
     #[serde(default)]
     free_text: Option<String>,
@@ -1503,17 +1628,32 @@ async fn post_answer(
     Path(id): Path<SessionId>,
     Json(req): Json<AnswerReq>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = req.question_id;
-    let _ = req.free_text;
     if req.choice_index > 8 {
         return Err(ApiError::BadRequest(format!(
             "choice_index out of range: {} (max 8)",
             req.choice_index
         )));
     }
-    submit_answer(&ctx, id, req.choice_index, req.submit)
-        .await
-        .map_err(|_| ApiError::NotFound(format!("session {id}")))?;
+    if let (Some(request_id), Some(response)) = (req.request_id.as_deref(), req.response.as_ref()) {
+        let client = ctx.acp.get(id).ok_or_else(|| {
+            ApiError::BadRequest("Structured response requires an ACP session".into())
+        })?;
+        client
+            .respond(request_id, response.clone())
+            .await
+            .map_err(ApiError::BadRequest)?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    submit_question_answer(
+        &ctx,
+        id,
+        req.question_id.as_deref(),
+        req.choice_index,
+        req.free_text.as_deref(),
+        req.submit,
+    )
+    .await
+    .map_err(ApiError::BadRequest)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1526,33 +1666,195 @@ fn answer_input(choice_index: u32) -> Vec<u8> {
     input
 }
 
+/// Latest actionable interaction. A cleared interaction must not receive keys
+/// from a stale mobile card or a delayed normal message.
+fn pending_interaction(ctx: &Ctx, id: SessionId) -> Option<EventEnvelope> {
+    ctx.bus
+        .history_for(id, 0, usize::MAX)
+        .into_iter()
+        .rev()
+        .find(|event| {
+            matches!(
+                event.r#type.as_str(),
+                "ask_user_question" | "plan_proposed" | "session.attention_cleared"
+            )
+        })
+        .filter(|event| event.r#type != "session.attention_cleared")
+}
+
+fn question_group(id: &str) -> &str {
+    if id.starts_with("pty-") {
+        return id;
+    }
+    match id.rsplit_once('-') {
+        Some((group, index)) if index.parse::<usize>().is_ok() => group,
+        _ => id,
+    }
+}
+
+fn screen_contains_text(screen: &str, text: &str) -> bool {
+    let compact = |value: &str| {
+        value
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    !text.is_empty() && compact(screen).contains(&compact(text))
+}
+
+fn write_interaction_input(ctx: &Ctx, id: SessionId, input: &[u8]) -> Result<(), String> {
+    let sessions = ctx.sessions.lock();
+    let session = sessions
+        .get(&id)
+        .ok_or_else(|| format!("session {id} not found"))?;
+    let writer = session
+        .pty
+        .as_ref()
+        .ok_or_else(|| format!("session {id} has no terminal"))?;
+    let mut writer = writer.writer.lock().map_err(|error| error.to_string())?;
+    writer
+        .write_all(input)
+        .and_then(|_| writer.flush())
+        .map_err(|error| error.to_string())
+}
+
+async fn interaction_key(ctx: &Ctx, id: SessionId, input: &[u8]) -> Result<(), String> {
+    write_interaction_input(ctx, id, input)?;
+    // Ink commits cursor state between input events. Sending arrows and Enter in
+    // one read uses the previous render's cursor and selects the wrong option.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    Ok(())
+}
+
 pub async fn submit_answer(
     ctx: &Ctx,
     id: SessionId,
     choice_index: u32,
     submit: bool,
-) -> Result<(), TextInputError> {
-    if choice_index > 8 {
-        return Err(TextInputError { session_id: id });
+) -> Result<(), String> {
+    submit_question_answer(ctx, id, None, choice_index, None, submit).await
+}
+
+pub async fn submit_question_answer(
+    ctx: &Ctx,
+    id: SessionId,
+    question_id: Option<&str>,
+    choice_index: u32,
+    free_text: Option<&str>,
+    submit: bool,
+) -> Result<(), String> {
+    if let Some(client) = ctx.acp.get(id) {
+        return client
+            .answer_choice(
+                question_id.ok_or("Question id is required")?,
+                choice_index,
+                free_text,
+                submit,
+            )
+            .await;
     }
-    let input = answer_input(choice_index);
-    {
-        let sessions = ctx.sessions.lock();
-        let session = sessions.get(&id).ok_or(TextInputError { session_id: id })?;
-        // AskPanel handles arrows plus Enter rather than number shortcuts.
-        session.write_input(&input);
+    if free_text.is_some_and(|text| !text.trim().is_empty()) {
+        return Err("Terminal questions cannot combine a selected option with text; create an ACP session for structured answers".into());
     }
-    if submit {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let sessions = ctx.sessions.lock();
-        let session = sessions.get(&id).ok_or(TextInputError { session_id: id })?;
-        session.write_input(b"\r");
+    let pending = pending_interaction(ctx, id)
+        .filter(|event| event.r#type == "ask_user_question")
+        .ok_or("This question is no longer awaiting an answer")?;
+    let active_id = pending.payload["question_id"]
+        .as_str()
+        .ok_or("Question id missing")?;
+    let qid = question_id.unwrap_or(active_id);
+    if question_group(qid) != question_group(active_id) {
+        return Err("This question has been replaced by another prompt".into());
     }
-    ctx.bus.emit(EventEnvelope::new(
-        id,
-        "session.attention_cleared",
-        json!({ "reason": "user_answered_via_api" }),
-    ));
+    let question = ctx
+        .bus
+        .history_for(id, 0, usize::MAX)
+        .into_iter()
+        .rev()
+        .find(|event| {
+            event.r#type == "ask_user_question"
+                && event.payload["question_id"].as_str() == Some(qid)
+        })
+        .ok_or("Question details unavailable")?;
+    let options = question.payload["options"]
+        .as_array()
+        .ok_or("Question options missing")?;
+    let option = options
+        .get(choice_index as usize)
+        .filter(|_| choice_index <= 8)
+        .ok_or("Selected option is out of range")?;
+    let details = free_text.map(str::trim).filter(|text| !text.is_empty());
+    if question.payload["source"] == "pty_prompt" {
+        if details.is_some() {
+            return Err("This approval does not support additional text".into());
+        }
+        // SelectInput accepts an absolute numbered shortcut; no extra Enter.
+        let value = option["value"]
+            .as_str()
+            .ok_or("Approval shortcut missing")?;
+        if value.len() != 1 || !matches!(value.as_bytes()[0], b'1'..=b'9') {
+            return Err("Invalid approval shortcut".into());
+        }
+        write_interaction_input(ctx, id, value.as_bytes())?;
+    } else {
+        if question.payload["multi_select"] == true {
+            return Err("Multiple-choice answers are not supported by this input path".into());
+        }
+        let screen = ctx
+            .sessions
+            .lock()
+            .get(&id)
+            .ok_or("Session not found")?
+            .screen_text();
+        let prompt_text = question.payload["question"].as_str().unwrap_or("");
+        if !screen.contains("Enter to select")
+            || screen.contains("Review your answers")
+            || !screen_contains_text(&screen, prompt_text)
+        {
+            return Err(
+                "The terminal is not displaying this question; refresh before answering".into(),
+            );
+        }
+        // AskPanel clamps at zero. Reset its cursor before choosing, rather than
+        // moving relative to whatever a previous desktop interaction selected.
+        for _ in 0..16 {
+            interaction_key(ctx, id, b"\x1b[A").await?;
+        }
+        let input = answer_input(choice_index);
+        for key in input.chunks(3) {
+            interaction_key(ctx, id, key).await?;
+        }
+        if submit {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let screen = ctx
+                    .sessions
+                    .lock()
+                    .get(&id)
+                    .ok_or("Session not found")?
+                    .screen_text();
+                if screen.contains("Review your answers") {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(
+                        "The answer review did not appear; no final confirmation was sent".into(),
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // Review is a SelectInput: choose Submit explicitly, independent
+            // of the current cursor, and never append a second Enter.
+            interaction_key(ctx, id, b"1").await?;
+        }
+    }
+    if submit || question.payload["source"] == "pty_prompt" {
+        ctx.bus.emit(EventEnvelope::new(
+            id,
+            "session.attention_cleared",
+            json!({ "reason": "user_answered_via_api" }),
+        ));
+    }
     Ok(())
 }
 
@@ -1568,20 +1870,68 @@ async fn post_plan_response(
     Path(id): Path<SessionId>,
     Json(req): Json<PlanResponseReq>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = req.plan_id;
-    submit_plan_response(&ctx, id, req.accept)
-        .map_err(|_| ApiError::NotFound(format!("session {id}")))?;
+    respond_plan(&ctx, id, req.plan_id.as_deref(), req.accept)
+        .await
+        .map_err(ApiError::BadRequest)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub fn submit_plan_response(ctx: &Ctx, id: SessionId, accept: bool) -> Result<(), TextInputError> {
-    // accept=true → '1'（接受计划）, accept=false → '2'（拒绝/继续规划）
-    // codebuddy ExitPlanMode 后弹出的选择题，标准按键为数字 1/2
-    let digit: u8 = if accept { b'1' } else { b'2' };
-    let g = ctx.sessions.lock();
-    let s = g.get(&id).ok_or(TextInputError { session_id: id })?;
-    s.write_input(&[digit]);
-    drop(g);
+pub async fn respond_plan(
+    ctx: &Ctx,
+    id: SessionId,
+    plan_id: Option<&str>,
+    accept: bool,
+) -> Result<(), String> {
+    if let Some(client) = ctx.acp.get(id) {
+        return client
+            .respond(
+                plan_id.ok_or("Plan id is required")?,
+                json!({"decision": if accept { "allow" } else { "deny" }}),
+            )
+            .await;
+    }
+    submit_plan_response_for(ctx, id, plan_id, accept)
+}
+
+pub fn submit_plan_response(ctx: &Ctx, id: SessionId, accept: bool) -> Result<(), String> {
+    submit_plan_response_for(ctx, id, None, accept)
+}
+
+pub fn submit_plan_response_for(
+    ctx: &Ctx,
+    id: SessionId,
+    plan_id: Option<&str>,
+    accept: bool,
+) -> Result<(), String> {
+    let pending = ctx
+        .bus
+        .history_for(id, 0, usize::MAX)
+        .into_iter()
+        .rev()
+        .find(|event| {
+            event.r#type == "plan_proposed"
+                || event.r#type == "session.attention_cleared"
+                || (event.r#type == "ask_user_question" && event.payload["source"] != "pty_prompt")
+        })
+        .filter(|event| event.r#type == "plan_proposed")
+        .ok_or("This plan is no longer awaiting confirmation")?;
+    if plan_id.is_some() && pending.payload["plan_id"].as_str() != plan_id {
+        return Err("This plan has been replaced by another proposal".into());
+    }
+    let screen = ctx
+        .sessions
+        .lock()
+        .get(&id)
+        .ok_or("Session not found")?
+        .screen_text();
+    if !screen.contains("Ready to code?") && !screen.contains("Would you like to proceed?") {
+        return Err(
+            "The terminal is not displaying plan confirmation; refresh before responding".into(),
+        );
+    }
+    // The second item may be another approval mode in some CLI versions.
+    // Escape is the explicit rejection shortcut, independent of item ordering.
+    write_interaction_input(ctx, id, if accept { b"1" } else { b"\x1b" })?;
     ctx.bus.emit(EventEnvelope::new(
         id,
         "session.attention_cleared",
@@ -1665,6 +2015,11 @@ pub async fn set_session_permission_mode(
     id: SessionId,
     mode: &str,
 ) -> Result<(String, u32), String> {
+    if let Some(client) = ctx.acp.get(id) {
+        client.set_mode(mode).await?;
+        return Ok((mode.to_string(), 0));
+    }
+
     let target = PermissionMode::from_str(mode).ok_or_else(|| format!("invalid mode: {mode}"))?;
     const SHIFT_TAB: &[u8] = b"\x1b[Z";
 
