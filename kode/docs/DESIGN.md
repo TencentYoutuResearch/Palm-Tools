@@ -178,3 +178,7 @@ Copy is direct and operational: “Approve selected,” “Reject selected,” a
 - **Do:** Separate current-row focus, batch selection, semantic intent, and async status.
 - **Don't:** Add screen-local colors, toasts, checkbox treatments, or scrollbar themes when a canonical owner exists.
 - **Don't:** Use glow, gradients, or pills as generic decoration; every emphasized surface must encode state or ownership.
+
+## Structured agent conversations
+
+New local CodeBuddy conversations use the existing application color tokens and a persistent composer below the transcript. Structured forms share one owner per platform: `StructuredSession.svelte` on desktop and `acp_form_card.dart` on mobile. Incoming output uses event subscriptions and updates message content without replacing focused field ancestors; no idle polling is needed. Questions present the agent, request message, field labels, typed options, and explicit submit/decline/cancel actions. Custom answers replace an option; they are never appended to an option label. Submitted, cancelled, superseded, or disconnected interactions become read-only.

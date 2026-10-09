@@ -41,7 +41,7 @@ Billing, payment, regulated copy, and end-user permission policy are not part of
 | Toast | `apps/gui/src/lib/ToastHost.svelte` + `toast.ts` | This contract | info / success / warning / error | live region + browser |
 | CRUD | `memoryIpc` and `MemoryPanel.svelte` | memory design spec | local / remote source | unit/typecheck + full review flow |
 | Plugin Inventory | `plugins.rs`, `pluginIpc`, and `PluginPanel.svelte` | This contract | Codex / Claude / Cursor / CodeBuddy | Rust unit tests + Svelte check |
-| Form | Cloud relay form in `PairingDialog.svelte`; authoritative validation in `cloud_deploy.rs` / `cloud_sync.rs` | Cloud sync protocol + this contract | SSH deployment / existing service | Svelte check + Rust tests + WebView |
+| Form | Cloud relay form in `PairingDialog.svelte`; ACP form in `StructuredSession.svelte` / `acp_form_card.dart`; authoritative validation in `cloud_deploy.rs` / `cloud_sync.rs` / `acp.rs` | Cloud sync protocol + this contract | SSH deployment / existing service / structured agent request | Svelte check + Dart analysis + Rust checks + WebView |
 | Select/Listbox | Native `<select>` for the small saved-backend switcher | This contract | platform-owned popup accepted | keyboard + WebView open state |
 | Terminal Theme | `terminal_settings.ts` + `terminal_ansi_theme.ts` plus spawn-time `TERM_THEME` / `COLORFGBG`; consumed by `Terminal.svelte`, `ShellTerminalPanel.svelte`, and the PTY spawn layer | `docs/DESIGN.md` + this contract | dark / light / follow app | foreground-preservation/background-mapping unit tests + env regression + Svelte check + dark/light WebView |
 | Application Update | `app_updates.rs` selects GitHub channels; `app_updates.ts` owns shared state for `UpdateSettings.svelte` and `UpdateButton.svelte`; Tauri verifies signed packages | This contract + GitHub release workflow + `RELEASE-SIGNING.md` | macOS aarch64 / x86_64 | Svelte check + channel/race/retry tests + signed release smoke test |
@@ -187,3 +187,13 @@ layout and keyboard regression coverage lives in Flutter widget tests.
 - CRUD full-flow evidence: Memory review interaction tests and manual local/remote review flow.
 - Memory relation flow: review shows suggested relations before approval; approved local facts expose one unified relation list (symmetric related/contradicts, directional supersedes), support add/remove in place, and relation traversal is recorded as usage feedback. Remote facts remain read-only until the remote detail/update protocol carries the same graph contract.
 - Failure-path evidence: Partial-source and partial-batch failure states in `MemoryPanel.svelte`.
+
+## ACP interaction ownership
+
+- Connection/request owner: `crates/kode-bridge/src/acp.rs`; one process and connection per structured session. Desktop and mobile delegate to this same owner.
+- New local CodeBuddy sessions use ACP. Existing PTY sessions and the current remote desktop terminal transport retain the restricted terminal path. Persist the transport kind; restoration must use the original transport and fail explicitly when ACP loading is unavailable.
+- Standard permissions return the original JSON-RPC id and validated `optionId`. Form elicitations return `action` and a typed `content` object. Only form mode is advertised; unsupported schemas fail with Invalid params.
+- CodeBuddy's native question/plan extension is resolved through its native RPC, without sending fabricated chat messages. Submit every question in one object. Select an option or provide a custom answer as alternatives.
+- `interaction.resolved` retires that request across clients. Session attention clears only when every pending request is retired. Input focus stays mounted while output arrives.
+- Desktop owner: `StructuredSession.svelte`; mobile owner: `acp_form_card.dart`. Use native selects, normal keyboard navigation, existing theme tokens, inline delivery errors, and stable request/field keys.
+- Static verification: Rust cargo check, Svelte check, Dart analyze. Real backend and device interaction verification remains separate.
