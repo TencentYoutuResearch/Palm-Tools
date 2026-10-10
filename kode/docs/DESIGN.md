@@ -182,3 +182,7 @@ Copy is direct and operational: “Approve selected,” “Reject selected,” a
 ## Structured agent conversations
 
 New local CodeBuddy conversations use the existing application color tokens and a persistent composer below the transcript. Structured forms share one owner per platform: `StructuredSession.svelte` on desktop and `acp_form_card.dart` on mobile. Incoming output uses event subscriptions and updates message content without replacing focused field ancestors; no idle polling is needed. Questions present the agent, request message, field labels, typed options, and explicit submit/decline/cancel actions. Custom answers replace an option; they are never appended to an option label. Submitted, cancelled, superseded, or disconnected interactions become read-only.
+
+## Workspace Markdown and find
+
+File previews keep the existing compact header and theme-token typography. The search icon opens a bounded, wrapping find strip immediately below the header; match position and previous/next/close actions remain outside the content scroller. Mermaid diagrams use a flat bordered region with horizontal overflow, theme-aware labels, and source fallback on failure. Search highlights use warning/accent tokens with the existing on-accent foreground. No additional cards, global shortcuts, or idle timers are added.

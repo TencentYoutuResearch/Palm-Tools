@@ -197,3 +197,12 @@ layout and keyboard regression coverage lives in Flutter widget tests.
 - `interaction.resolved` retires that request across clients. Session attention clears only when every pending request is retired. Input focus stays mounted while output arrives.
 - Desktop owner: `StructuredSession.svelte`; mobile owner: `acp_form_card.dart`. Use native selects, normal keyboard navigation, existing theme tokens, inline delivery errors, and stable request/field keys.
 - Static verification: Rust cargo check, Svelte check, Dart analyze. Real backend and device interaction verification remains separate.
+
+## Workspace document preview
+
+- `WorkspacePanel.svelte` owns desktop file/diff previews; `workspace_markdown.ts` owns sanitized Markdown and lazy Mermaid rendering. Mermaid is loaded only for fenced `mermaid` blocks, follows explicit/system themes, uses strict security, and preserves escaped source plus an inline error when rendering fails. Raw Markdown HTML is displayed as text; external images are not loaded. HTML files retain their sandboxed preview.
+- The preview toolbar opens local content search. Cmd/Ctrl+F applies while the preview owns focus; Enter/Cmd/Ctrl+G advances, Shift reverses, and Escape restores preview focus. Search is case insensitive and literal, includes rendered Markdown/diagram labels and code/diff text, excludes line-number gutters, shows position/count or no matches, and has an immediate clear action. Chinese composition suppresses navigation until committed. Queries stay transient in this panel and are not persisted or shared in URLs.
+- `preview_find.ts` owns text ranges and scroll reveal. CSS Highlights preserves markup and selections where supported; older WebKit selects the active occurrence. Images, sandboxed HTML, PDF, and binary previews do not expose this content-search control. Truncated files search only the displayed portion, with the existing truncation indicator retained.
+- Async file loading and diagram rendering discard stale results after switching files/workspaces or disposing the preview. No idle polling is introduced.
+
+- Desktop Mermaid styles reuse the runtime application style nonce during measurement and display. Generated CSS travels separately from SVG markup and is inserted as live HTML style nodes, because nonce values are hidden during HTML serialization. The application CSP remains unchanged; diagram CSS strips imports and external URL references. Browser verification must include nonce-based CSP, not only an unrestricted development page.

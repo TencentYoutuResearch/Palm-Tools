@@ -1,4 +1,13 @@
 {
+  "filePreview.find": { "message": "Find in file…" },
+  "filePreview.findShortcut": { "message": "Find in file (Cmd/Ctrl+F)" },
+  "filePreview.clear": { "message": "Clear search" },
+  "filePreview.previous": { "message": "Previous match (Shift+Enter)" },
+  "filePreview.next": { "message": "Next match (Enter)" },
+  "filePreview.closeFind": { "message": "Close search (Esc)" },
+  "filePreview.noMatches": { "message": "No matches" },
+  "filePreview.diagramLoading": { "message": "Rendering Mermaid diagram…" },
+  "filePreview.diagramError": { "message": "Unable to render Mermaid diagram. Check the syntax below." },
   "acp.invalidField": { "message": "Check the answer for {field}." },
   "acp.conversation": { "message": "CodeBuddy conversation" },
   "acp.you": { "message": "You" },

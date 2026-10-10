@@ -476,13 +476,14 @@ async fn answer_endpoint_rejects_missing_question_and_invalid_choice() {
         .send()
         .await
         .unwrap();
-    // No actionable question exists: stale mobile cards must not send keys to the PTY.
+    // A terminal without a pending question must not receive answer keystrokes.
     assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["detail"]
-        .as_str()
-        .unwrap()
-        .contains("no longer awaiting an answer"));
+    assert_eq!(body["error"], "bad_request");
+    assert_eq!(
+        body["detail"],
+        "This question is no longer awaiting an answer"
+    );
 
     // 越界 choice_index 应 400
     let resp = client
