@@ -1,5 +1,9 @@
 type Key = Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'shiftKey' | 'altKey' | 'metaKey' | 'isComposing'>
 
+export function isRemoteClipboardPaste(e: Key): boolean {
+  return e.key.toLowerCase() === 'v' && !e.isComposing && !e.altKey && e.ctrlKey !== e.metaKey
+}
+
 export function windowsClipboardAction(e: Key, userAgent: string): 'copy' | 'paste' | null {
   if (!/Windows/i.test(userAgent) || e.isComposing || !e.ctrlKey || e.altKey || e.metaKey) return null
   const key = e.key.toLowerCase()

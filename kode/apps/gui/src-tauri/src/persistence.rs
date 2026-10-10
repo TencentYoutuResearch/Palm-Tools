@@ -160,6 +160,27 @@ pub struct PersistedEndpoint {
     /// devcloud 等非标环境填实际端口(如 36000)。
     #[serde(default)]
     pub ssh_port: u16,
+    #[serde(default = "default_attachment_dir")]
+    pub ssh_attachment_dir: String,
+}
+
+pub(crate) fn default_attachment_dir() -> String {
+    "/tmp/kode-attachments".into()
+}
+
+pub(crate) fn validate_attachment_dir(value: &str) -> Result<String, String> {
+    let value = if value.is_empty() {
+        default_attachment_dir()
+    } else {
+        value.to_string()
+    };
+    if !value.starts_with('/')
+        || value.chars().any(char::is_control)
+        || value.split('/').any(|part| part == "..")
+    {
+        return Err("Attachment directory must be an absolute POSIX path without '..' or control characters".into());
+    }
+    Ok(format!("/{}", value.trim_matches('/')))
 }
 
 /// Browse 面板上次离开时的 filter 状态。前端 `BrowseFilterState` 镜像。
@@ -488,10 +509,12 @@ mod tests {
             ssh_host: "user@remote".into(),
             ssh_remote_port: 9870,
             ssh_port: 36000,
+            ssh_attachment_dir: "/tmp/custom uploads".into(),
         };
         let txt = serde_json::to_string(&ep).unwrap();
         let back: PersistedEndpoint = serde_json::from_str(&txt).unwrap();
         assert_eq!(back, ep);
+        assert_eq!(back.ssh_attachment_dir, "/tmp/custom uploads");
         assert_eq!(back.ssh_host, "user@remote");
         assert_eq!(back.ssh_remote_port, 9870);
         assert_eq!(back.ssh_port, 36000);
@@ -577,6 +600,23 @@ mod tests {
         push_cwd_history(&mut s, "local", "");
         push_cwd_history(&mut s, "local", "   ");
         assert!(get_cwd_history(&s, "local").is_empty());
+    }
+
+    #[test]
+    fn attachment_directory_defaults_and_validation() {
+        let ep: PersistedEndpoint = serde_json::from_value(serde_json::json!({
+            "id":"test", "base_url":"http://localhost", "token":"test"
+        }))
+        .unwrap();
+        assert_eq!(ep.ssh_attachment_dir, "/tmp/kode-attachments");
+        assert_eq!(validate_attachment_dir("").unwrap(), ep.ssh_attachment_dir);
+        assert_eq!(
+            validate_attachment_dir("/tmp/uploads 中文 ' /").unwrap(),
+            "/tmp/uploads 中文 ' "
+        );
+        for invalid in ["relative", "~/tmp", "/tmp/../home", "/tmp/bad\npath"] {
+            assert!(validate_attachment_dir(invalid).is_err());
+        }
     }
 
     #[test]

@@ -374,7 +374,7 @@ case "$CMD" in
     cargo check --workspace --all-targets
     hdr "Svelte / TypeScript check"
     ensure_node_modules
-    (cd "$GUI_DIR" && pnpm check) || true
+    (cd "$GUI_DIR" && pnpm check)
     hdr "cargo test --workspace -- --test-threads=1"
     cargo test --workspace -- --test-threads=1
     info "全部通过"

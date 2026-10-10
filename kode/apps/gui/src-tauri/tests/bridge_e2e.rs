@@ -454,7 +454,7 @@ async fn history_endpoint_returns_session_events() {
 }
 
 #[tokio::test]
-async fn answer_endpoint_rejects_without_pending_question() {
+async fn answer_endpoint_rejects_missing_question_and_invalid_choice() {
     let addr = start_server().await;
     let client = reqwest::Client::new();
     let session: Value = client

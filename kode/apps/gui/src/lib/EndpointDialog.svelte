@@ -38,6 +38,9 @@
   let formSshHost = $state('')
   let formSshPort = $state('22')        // SSH 服务端口(ssh -p),默认 22
   let formSshRemotePort = $state('9870') // kode-server 端口(隧道 -L)
+  let formAttachmentDir = $state('/tmp/kode-attachments')
+  let attachmentDrafts = $state<Record<string, string>>({})
+  let savingAttachmentId = $state<string | null>(null)
   // ssh_host 下拉候选:已配 endpoint 的 ssh_host 去重(非空)
   let sshHostOptions = $derived.by(() => {
     const seen = new Set<string>()
@@ -78,6 +81,7 @@
     try {
       endpoints = await endpointIpc.list()
       nameDrafts = Object.fromEntries(endpoints.map((e) => [e.id, e.display_name || e.id]))
+      attachmentDrafts = Object.fromEntries(endpoints.map((e) => [e.id, e.ssh_attachment_dir]))
       loadError = ''
     } catch (e) {
       loadError = String(e)
@@ -202,6 +206,7 @@
         connMode === 'ssh' ? formSshHost.trim() : '',
         connMode === 'ssh' ? sshPortNum() : 0,
         connMode === 'ssh' ? sshRemotePortNum() : 0,
+        connMode === 'ssh' ? formAttachmentDir : '/tmp/kode-attachments',
       )
       // 清表单 + 刷新
       formId = ''
@@ -211,6 +216,7 @@
       formSshHost = ''
       formSshPort = '22'
       formSshRemotePort = '9870'
+      formAttachmentDir = '/tmp/kode-attachments'
       connMode = 'direct'
       testResult = null
       await refresh()
@@ -247,6 +253,21 @@
       nameDrafts = { ...nameDrafts, [id]: ep.display_name || ep.id }
     } finally {
       savingNameId = null
+    }
+  }
+
+  async function saveAttachmentDir(ep: EndpointSummary) {
+    const next = attachmentDrafts[ep.id] || '/tmp/kode-attachments'
+    if (next === ep.ssh_attachment_dir) return
+    savingAttachmentId = ep.id
+    try {
+      await endpointIpc.updateAttachmentDir(ep.id, next)
+      await refresh()
+      window.dispatchEvent(new CustomEvent('kode:endpoints-changed'))
+    } catch (error) {
+      loadError = tr('endpoint.error.updateAttachmentDirFailed', { error: String(error) })
+    } finally {
+      savingAttachmentId = null
     }
   }
 
@@ -308,6 +329,24 @@
                 }}
               />
               <code class="muted">{ep.base_url}</code>
+              {#if ep.ssh_host}
+                <label class="attachment-dir">
+                  <span class="lbl">{tr('endpoint.form.attachmentDirLabel')}</span>
+                  <input
+                    type="text"
+                    value={attachmentDrafts[ep.id] ?? ep.ssh_attachment_dir}
+                    placeholder="/tmp/kode-attachments"
+                    spellcheck="false"
+                    disabled={savingAttachmentId === ep.id}
+                    oninput={(e) => { attachmentDrafts = { ...attachmentDrafts, [ep.id]: e.currentTarget.value } }}
+                    onblur={() => saveAttachmentDir(ep)}
+                    onkeydown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() }
+                    }}
+                  />
+                </label>
+              {/if}
               {#if pendingDeleteId === ep.id}
                 <button class="danger" onclick={() => doRemove(ep.id)}>{tr('endpoint.action.confirmRemove')}</button>
                 <button class="ghost" onclick={() => (pendingDeleteId = null)}>{tr('memory.common.cancel')}</button>
@@ -407,6 +446,11 @@
             />
           </label>
         </div>
+        <label>
+          <span class="lbl">{tr('endpoint.form.attachmentDirLabel')}</span>
+          <input type="text" bind:value={formAttachmentDir} placeholder="/tmp/kode-attachments" spellcheck="false" autocomplete="off" />
+          <span class="hint">{tr('endpoint.form.attachmentDirHint')}</span>
+        </label>
       {/if}
       <label>
         <span class="lbl">{tr('endpoint.form.tokenLabel')}</span>
@@ -535,8 +579,16 @@
     flex-direction: column;
     gap: var(--sp-2);
   }
+  .attachment-dir {
+    flex: 1 0 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    order: 1;
+  }
   .list li {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-2);
     padding: var(--sp-2);

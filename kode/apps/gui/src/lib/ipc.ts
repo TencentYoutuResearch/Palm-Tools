@@ -453,12 +453,32 @@ export const ipc = {
 
   /// 读系统剪贴板文本(Rust 侧,绕过 WKWebView 权限弹窗)。
   readClipboard: () => invoke<string>('read_clipboard'),
+  uploadRemoteAttachments: (endpointId: string, paths: string[]) =>
+    invoke<string[]>('upload_remote_attachments', { endpointId, paths }),
+  pasteRemoteClipboard: async (endpointId: string, onUploadStarted?: () => void) => {
+    const channel = new Channel<null>()
+    let settled = false
+    channel.onmessage = () => { if (!settled) onUploadStarted?.() }
+    try {
+      return await invoke<RemoteClipboardPayload>('paste_remote_clipboard', {
+        endpointId, onUploadStarted: channel,
+      })
+    } finally {
+      settled = true
+      channel.onmessage = () => {}
+    }
+  },
 
   /// 列出某个工作目录下指定 backend 的所有历史 session。
   /// 返回按 mtime 降序排列的 session 摘要列表。
   listSessionsForCwd: (backendKey: string, cwd: string) =>
     invoke<SessionSummary[]>('list_sessions_for_cwd', { backendKey, cwd }),
 }
+
+export type RemoteClipboardPayload =
+  | { kind: 'text'; text: string }
+  | { kind: 'attachments'; paths: string[] }
+  | { kind: 'empty' }
 
 /// session 摘要(Rust `commands::SessionSummary` 镜像)。
 export interface SessionSummary {
@@ -614,6 +634,7 @@ export interface EndpointSummary {
   ssh_port: number
   /** 远端 server 端口(默认 9870) */
   ssh_remote_port: number
+  ssh_attachment_dir: string
 }
 
 /// 后端 `endpoints::RemoteBackendInfo` 镜像 — server 端某个 backend 的概要。
@@ -660,15 +681,18 @@ export const endpointIpc = {
     ssh_host: string = '',
     ssh_port: number = 0,
     ssh_remote_port: number = 0,
+    ssh_attachment_dir: string = '/tmp/kode-attachments',
   ) =>
     invoke<EndpointSummary>('endpoint_add', {
-      req: { id, display_name, base_url, token, ssh_host, ssh_port, ssh_remote_port },
+      req: { id, display_name, base_url, token, ssh_host, ssh_port, ssh_remote_port, ssh_attachment_dir },
     }),
   /** 删除 + 停 WS */
   remove: (id: string) => invoke<void>('endpoint_remove', { id }),
   /** 修改 endpoint 的 UI 显示名 */
   updateDisplayName: (id: string, display_name: string) =>
     invoke<void>('endpoint_update_display_name', { id, displayName: display_name }),
+  updateAttachmentDir: (id: string, attachmentDir: string) =>
+    invoke<void>('endpoint_update_attachment_dir', { id, attachmentDir }),
   /** 不写盘只测连接 — Dialog 上的「Test」按钮。SSH 模式会先起临时隧道。 */
   testConnection: (
     base_url: string,

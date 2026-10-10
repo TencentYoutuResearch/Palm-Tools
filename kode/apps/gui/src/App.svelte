@@ -54,6 +54,7 @@
   import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
   import { absoluteDroppedFilePaths, absoluteOsDroppedPaths } from './lib/file_drop'
+  import { insertRemoteAttachments, RemoteDropGuard, withRemoteUpload } from './lib/remote_attachments'
   import {
     tabs,
     activeId,
@@ -702,7 +703,26 @@
   function insertDroppedPaths(paths: string[], source: 'internal' | 'external') {
     const tab = $activeTab
     if (!tab || paths.length === 0) return
-    if (source === 'external' && tab.endpointId?.kind === 'remote') return
+    if (source === 'external' && tab.endpointId?.kind === 'remote') {
+      const target = { ...tab.endpointId }
+      const id = tab.id
+      const key = `${id}:${target.id}:${paths.join('\0')}`
+      const targetExists = () => $tabs.some(candidate => candidate.id === id && candidate.endpointId?.kind === 'remote'
+        && candidate.endpointId.id === target.id && candidate.exited == null)
+      void remoteDropGuard.run(key, () => withRemoteUpload(id, targetExists, async start => {
+        start()
+        const inserted = await insertRemoteAttachments(
+          () => ipc.uploadRemoteAttachments(target.id, paths),
+          targetExists,
+          text => ipc.writeInput(id, new TextEncoder().encode(text), target),
+        )
+        if (inserted) {
+          pushToast({ severity: 'success', title: t('attachments.added'), durationMs: 1800 })
+          if ($activeTab?.id === id) focusTerminal()
+        }
+      })).catch(error => pushToast({ severity: 'error', title: t('attachments.error.title'), detail: String(error) }))
+      return
+    }
     if (source === 'external') {
       const key = `${tab.id}:${paths.join('\0')}`
       const now = Date.now()
@@ -1151,6 +1171,7 @@
   let fileDropUnlisten: (() => void) | null = null
   /** 文件正在拖入窗口(用于终端区高亮提示) */
   let dragOver = $state(false)
+  const remoteDropGuard = new RemoteDropGuard()
   let lastExternalDropKey = ''
   let lastExternalDropAt = 0
 
