@@ -454,7 +454,7 @@ async fn history_endpoint_returns_session_events() {
 }
 
 #[tokio::test]
-async fn answer_endpoint_writes_choice_and_submit_to_pty() {
+async fn answer_endpoint_rejects_missing_question_and_invalid_choice() {
     let addr = start_server().await;
     let client = reqwest::Client::new();
     let session: Value = client
@@ -476,8 +476,13 @@ async fn answer_endpoint_writes_choice_and_submit_to_pty() {
         .send()
         .await
         .unwrap();
-    // 已实装:首项直接 Enter;其它项用 DownArrow 移动后 Enter。
-    assert_eq!(resp.status(), 204);
+    // No actionable question exists: stale mobile cards must not send keys to the PTY.
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["detail"]
+        .as_str()
+        .unwrap()
+        .contains("no longer awaiting an answer"));
 
     // 越界 choice_index 应 400
     let resp = client
