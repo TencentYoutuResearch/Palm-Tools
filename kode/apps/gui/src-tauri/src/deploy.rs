@@ -334,7 +334,7 @@ pub(crate) fn run_ssh(ssh_host: &str, ssh_port: u16, cmd_str: &str) -> Result<St
     run_and_capture(cmd, "ssh")
 }
 
-fn run_and_capture(mut cmd: Command, label: &str) -> Result<String, String> {
+pub(crate) fn run_and_capture(mut cmd: Command, label: &str) -> Result<String, String> {
     let out = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -429,6 +429,7 @@ fn upsert_endpoint(
         }
         let id = existing.id.clone();
         let persisted_display_name = existing.display_name.clone();
+        let ssh_attachment_dir = existing.ssh_attachment_dir.clone();
         persisted.endpoints = Some(endpoints);
         persistence::save_sync(&persisted).map_err(|e| format!("persist failed: {e}"))?;
         // 重新注册 transport(用新 token)
@@ -442,6 +443,7 @@ fn upsert_endpoint(
                 ssh_host: ssh_host.to_string(),
                 ssh_port,
                 ssh_remote_port: remote_port,
+                ssh_attachment_dir,
             },
         );
         return Ok((id, false));
@@ -470,6 +472,7 @@ fn upsert_endpoint(
         ssh_host: ssh_host.to_string(),
         ssh_port,
         ssh_remote_port: remote_port,
+        ssh_attachment_dir: persistence::default_attachment_dir(),
     };
     endpoints.push(new_entry.clone());
     persisted.endpoints = Some(endpoints);

@@ -47,6 +47,8 @@ pub struct EndpointSummary {
     /// 远端 server 端口(默认 9870)
     #[serde(default)]
     pub ssh_remote_port: u16,
+    #[serde(default = "persistence::default_attachment_dir")]
+    pub ssh_attachment_dir: String,
 }
 
 /// 列出所有已配置的远端 endpoint。前端 UI 用来渲染列表 + BackendChooser 分组。
@@ -78,6 +80,7 @@ pub fn endpoint_list(state: State<'_, AppState>) -> Vec<EndpointSummary> {
             ssh_host: e.ssh_host,
             ssh_port: e.ssh_port,
             ssh_remote_port: e.ssh_remote_port,
+            ssh_attachment_dir: e.ssh_attachment_dir,
         })
         .collect()
 }
@@ -98,6 +101,8 @@ pub struct EndpointAddReq {
     /// SSH 模式下远端 server 端口。0 → 默认 9870。
     #[serde(default)]
     pub ssh_remote_port: u16,
+    #[serde(default = "persistence::default_attachment_dir")]
+    pub ssh_attachment_dir: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,6 +328,7 @@ pub async fn endpoint_add(
     // SSH 模式校验:ssh_host 非空时,base_url 应是远端视角地址(默认 127.0.0.1:9870)。
     let ssh_host = req.ssh_host.trim().to_string();
     let is_ssh = !ssh_host.is_empty();
+    let ssh_attachment_dir = persistence::validate_attachment_dir(&req.ssh_attachment_dir)?;
 
     // 1. 测试连接 — 失败直接挡,不留半成品。SSH 模式会先起临时隧道。
     let test = endpoint_test_connection(
@@ -355,6 +361,7 @@ pub async fn endpoint_add(
         ssh_host: ssh_host.clone(),
         ssh_port: req.ssh_port,
         ssh_remote_port: req.ssh_remote_port,
+        ssh_attachment_dir: ssh_attachment_dir.clone(),
     };
     endpoints.push(new_entry.clone());
     persisted.endpoints = Some(endpoints);
@@ -375,6 +382,7 @@ pub async fn endpoint_add(
         ssh_host: ssh_host,
         ssh_port: req.ssh_port,
         ssh_remote_port: req.ssh_remote_port,
+        ssh_attachment_dir,
     })
 }
 
@@ -429,6 +437,22 @@ pub fn endpoint_update_display_name(id: String, display_name: String) -> Result<
     ep.display_name = display_name.trim().to_string();
     persistence::save_sync(&persisted).map_err(|e| format!("persist failed: {e}"))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn endpoint_update_attachment_dir(id: String, attachment_dir: String) -> Result<(), String> {
+    let dir = persistence::validate_attachment_dir(&attachment_dir)?;
+    let mut persisted = persistence::load();
+    let ep = persisted
+        .endpoints
+        .as_mut()
+        .and_then(|eps| eps.iter_mut().find(|ep| ep.id == id))
+        .ok_or_else(|| format!("endpoint '{id}' not found"))?;
+    if ep.ssh_host.is_empty() {
+        return Err("Attachment uploads require an SSH connection".into());
+    }
+    ep.ssh_attachment_dir = dir;
+    persistence::save_sync(&persisted).map_err(|e| format!("persist failed: {e}"))
 }
 
 /// 把一个 PersistedEndpoint 注册成活的 RemoteTransport,放进 transports map,启 WS。
@@ -1040,6 +1064,7 @@ mod tests {
             ssh_host: String::new(),
             ssh_port: 0,
             ssh_remote_port: 0,
+            ssh_attachment_dir: persistence::default_attachment_dir(),
         };
         assert_eq!(ep_summary.id, id);
         assert!(!ep_summary.connected);

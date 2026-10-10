@@ -14,7 +14,7 @@
     "test:terminal-output": "node --experimental-strip-types --test tests/terminal_output_backlog.test.ts",
     "test:terminal-settings": "node --experimental-strip-types --test tests/terminal_settings.test.ts",
     "test:terminal-mouse": "node --experimental-strip-types --test tests/codex_mouse_selection.test.ts",
-    "test:session-input": "node --experimental-strip-types --test tests/consecutive_ctrl_c_guard.test.ts tests/conpty_cursor.test.ts tests/terminal_clipboard.test.ts",
+    "test:session-input": "node --experimental-strip-types --test tests/consecutive_ctrl_c_guard.test.ts tests/conpty_cursor.test.ts tests/terminal_clipboard.test.ts tests/remote_attachments.test.ts",
     "test:file-drop": "node --experimental-strip-types --test tests/file_drop.test.ts",
     "tauri": "tauri"
   },

@@ -12,6 +12,7 @@
 //!    PtyBytes 走 channel(高频),PtyExited / JsonlMeta 走低频 emit(便宜)。
 
 mod app_updates;
+mod attachments;
 mod backend_admin;
 mod bridge;
 mod cloud_deploy;
@@ -195,6 +196,8 @@ pub fn run() {
             commands::memory_browse_state_set,
             workspace::open_path,
             commands::read_clipboard,
+            attachments::upload_remote_attachments,
+            attachments::paste_remote_clipboard,
             screenshot::capture_window_screenshot,
             screenshot::capture_interactive_screenshot,
             screenshot::copy_screenshot_crop,
@@ -255,6 +258,7 @@ pub fn run() {
             endpoints::endpoint_add,
             endpoints::endpoint_remove,
             endpoints::endpoint_update_display_name,
+            endpoints::endpoint_update_attachment_dir,
             endpoints::endpoint_test_connection,
             // Phase 11.5 BackendChooser 拉远端 backends + 远端 cwd 浏览
             endpoints::endpoint_get_remote_backends,

@@ -16,7 +16,9 @@
    *   - 字节流走 Channel<Uint8Array>,直接 term.write(Uint8Array)
    */
   import { onMount, onDestroy } from 'svelte'
-  import { handleWindowsClipboard } from './terminal_clipboard'
+  import { handleWindowsClipboard, isRemoteClipboardPaste } from './terminal_clipboard'
+  import { remoteAttachmentReferences, remoteUploadCounts, withRemoteUpload, clearRemoteUploads } from './remote_attachments'
+  import { pushToast } from './toast'
   import { get } from 'svelte/store'
   import { ipc, type SessionId, type EndpointId } from './ipc'
   import { tabs } from './sessions'
@@ -71,6 +73,11 @@
   let webglAddon: any = null
   let webglLoadGeneration = 0
   let destroyed = false
+  let uploadCount = $derived($remoteUploadCounts[sessionId] ?? 0)
+  let uploadLabel = $derived.by(() => {
+    void $currentLocale
+    return uploadCount > 1 ? t('attachments.uploadingMultiple', { count: uploadCount }) : t('attachments.uploading')
+  })
 
   function syncCursorBlink() {
     if (!term) return
@@ -515,6 +522,30 @@
       }
 
       // ── (B) 剪贴板操作 ──────────────────────────────────────────────
+      if (endpointId?.kind === 'remote' && isRemoteClipboardPaste(e)) {
+        e.preventDefault()
+        e.stopPropagation()
+        const targetId = sessionId
+        const targetEndpoint = { ...endpointId }
+        const targetExists = () => !destroyed && get(tabs).some(tab => tab.id === targetId
+          && tab.endpointId?.kind === 'remote' && tab.endpointId.id === targetEndpoint.id
+          && tab.exited == null)
+        void withRemoteUpload(targetId, targetExists, async start => {
+          const payload = await ipc.pasteRemoteClipboard(targetEndpoint.id, start)
+          if (!targetExists() || payload.kind === 'empty') return
+          if (payload.kind === 'text' && /Windows/i.test(navigator.userAgent)) {
+            term.paste(payload.text)
+            return
+          }
+          const text = payload.kind === 'attachments' ? remoteAttachmentReferences(payload.paths) : payload.text
+          if (!text) return
+          await ipc.writeInput(targetId, new TextEncoder().encode(text), targetEndpoint)
+          if (payload.kind === 'attachments') {
+            pushToast({ severity: 'success', title: tr('attachments.added'), durationMs: 1800 })
+          }
+        }).catch(error => pushToast({ severity: 'error', title: tr('attachments.error.title'), detail: String(error) }))
+        return
+      }
       if (handleWindowsClipboard(e, term, ipc.readClipboard)) return
       // Cmd+C:有选区 → 复制;无选区 → 仍 preventDefault(避免 WKWebView undo-focus)
       if (e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'c') {
@@ -1514,6 +1545,7 @@
 
   onDestroy(() => {
     destroyed = true
+    clearRemoteUploads(sessionId)
     window.removeEventListener('focus', syncCursorBlink)
     window.removeEventListener('blur', syncCursorBlink)
     document.removeEventListener('visibilitychange', syncCursorBlink)
@@ -1609,6 +1641,14 @@
   class:cmd-held={cmdHeld}
   bind:this={containerEl}
 >
+  <div class="upload-status-region" role="status" aria-live="polite" aria-atomic="true">
+    {#if visible && uploadCount > 0}
+      <div class="upload-status">
+        <span class="upload-spinner" aria-hidden="true"></span>
+        <span>{uploadLabel}</span>
+      </div>
+    {/if}
+  </div>
   {#if searchOpen}
     <div class="term-search" role="search">
       <input
@@ -1725,6 +1765,42 @@
   .term-host :global(.xterm-underline-1) {
     text-decoration: underline;
     text-decoration-color: inherit;
+  }
+
+  .upload-status-region {
+    position: absolute;
+    right: var(--sp-3);
+    bottom: var(--sp-3);
+    z-index: 10;
+    pointer-events: none;
+    max-width: calc(100% - 2 * var(--sp-3));
+  }
+  .upload-status {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-sm);
+    background: var(--bg-elevated);
+    color: var(--fg-primary);
+    box-shadow: var(--sh-md);
+    font: var(--fs-sm) var(--font-ui);
+    animation: upload-enter var(--t-base) ease-out;
+  }
+  .upload-spinner {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    border: 2px solid var(--bd-default);
+    border-top-color: var(--acc);
+    border-radius: 50%;
+    animation: upload-spin 900ms linear infinite;
+  }
+  @keyframes upload-spin { to { transform: rotate(360deg); } }
+  @keyframes upload-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    .upload-status, .upload-spinner { animation: none; }
   }
 
   /* ── 搜索栏 overlay ───────────────────────────────────────────

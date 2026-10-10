@@ -997,6 +997,13 @@
     "message": "/ key / agent, with no public exposure required.",
     "description": "SSH tunnel hint after ssh config"
   },
+  "endpoint.form.attachmentDirLabel": { "message": "SSH attachment directory" },
+  "endpoint.form.attachmentDirHint": { "message": "Absolute path on the SSH server. Pasted and dropped attachments are uploaded here without sending the prompt." },
+  "endpoint.error.updateAttachmentDirFailed": { "message": "Failed to save attachment directory: {error}" },
+  "attachments.error.title": { "message": "Attachment not added" },
+  "attachments.uploading": { "message": "Uploading attachments…" },
+  "attachments.uploadingMultiple": { "message": "Uploading attachments ({count} tasks)…" },
+  "attachments.added": { "message": "Attachments added · not sent" },
   "endpoint.form.sshHostLabel": {
     "message": "SSH host (user@remote or ~/.ssh/config alias)",
     "description": "SSH host field label"
