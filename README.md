@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
-  <a href="#install"><img src="https://img.shields.io/badge/Platform-macOS-lightgrey.svg" alt="Platform: macOS" /></a>
+  <a href="#install"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-lightgrey.svg" alt="Platform: macOS | Windows" /></a>
   <a href="https://v2.tauri.app"><img src="https://img.shields.io/badge/Built%20with-Tauri%202-red.svg" alt="Built with Tauri 2" /></a>
 </p>
 
@@ -113,7 +113,7 @@ SSH-tunneled remote tabs come built-in: `ssh -N -L` brings a no-public-IP devclo
 - **PTY byte path is coalesced in Rust (~8ms) and pushed through a Tauri v2 Channel — not `emit`.** Each tab is one xterm.js instance; background tabs keep feeding, switching back is zero-latency.
 - **Backend definitions are data-driven.** Defaults live in `kode/crates/kode-core/src/config.rs`; override per-backend in `~/.config/kode/config.toml`. No `if key == "codebuddy"` branches in business logic.
 - **Status bar reads from CLI jsonl files, not PTY scraping.** `codebuddy` / `claude` / `codex` each write their own metadata; kode tails them.
-- **Cross-platform core.** `kode-core`, `kode-bridge`, `kode-memory` are pure Rust. The desktop GUI is Tauri 2 on macOS; mobile is Flutter (iOS + Android).
+- **Cross-platform core.** `kode-core`, `kode-bridge`, `kode-memory` are pure Rust. The desktop GUI is Tauri 2 on macOS and Windows; mobile is Flutter (iOS + Android).
 
 ## Install
 
