@@ -119,6 +119,16 @@ impl SessionTransport for LocalTransport {
         // environment. Tag the owning backend so a nested CodeBuddy spawned
         // inside a Codex tab cannot report metadata as that Codex tab.
         extra_env.push(("KODE_BACKEND_KEY".to_string(), spec.backend_key.clone()));
+        if kode_core::session::jsonl_tail::Backend::from_backend_key(&spec.backend_key)
+            == Some(kode_core::session::jsonl_tail::Backend::Tcodex)
+        {
+            if let Some(home) = dirs::home_dir() {
+                extra_env.push((
+                    "CODEX_HOME".to_string(),
+                    home.join(".tcodex").display().to_string(),
+                ));
+            }
+        }
         extra_env.push((
             "KODE_MEMORY_ROOT".to_string(),
             crate::memory::resolve_memory_root().display().to_string(),

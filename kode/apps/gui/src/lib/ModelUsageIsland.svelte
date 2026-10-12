@@ -8,7 +8,7 @@
   import Icon from './Icon.svelte'
   import BackendIcon from './BackendIcon.svelte'
   import { modelMonitorIpc, modelUsageIpc, type ModelMonitorLayout, type ModelUsagePeriod, type ModelUsageSnapshot } from './ipc'
-  import { formatTokens } from './model_alias'
+  import { compactModelName, formatTokens } from './model_alias'
 
   const periods: { id: ModelUsagePeriod; label: string }[] = [
     { id: 'today', label: 'Today' },
@@ -60,7 +60,7 @@
     for (const row of snapshot?.rows ?? []) {
       totals.set(row.backend, (totals.get(row.backend) ?? 0) + row.total_tokens)
     }
-    return ['codex', 'claude', 'codebuddy']
+    return ['codex', 'tcodex', 'claude', 'tclaude', 'codebuddy', 'cursor']
       .map((backend) => ({ backend, tokens: totals.get(backend) ?? 0 }))
       .filter((item) => item.tokens > 0)
   })
@@ -343,7 +343,10 @@
   function backendLabel(backend: string): string {
     if (backend === 'codebuddy') return 'CodeBuddy'
     if (backend === 'claude') return 'Claude'
+    if (backend === 'tclaude') return 'TClaude'
     if (backend === 'codex') return 'Codex'
+    if (backend === 'tcodex') return 'TCodex'
+    if (backend === 'cursor') return 'Cursor'
     return backend
   }
 
@@ -529,7 +532,7 @@
             <div class="model-row">
               <span class="backend-icon"><BackendIcon backendKey={row.backend} size={17} /></span>
               <span class="model-copy">
-                <span class="model-name"><strong>{row.model}</strong><small>{backendLabel(row.backend)}</small></span>
+                <span class="model-name" title={row.model}><strong>{compactModelName(row.model)}</strong><small>{backendLabel(row.backend)}</small></span>
                 <span class="usage-track"><i style={`width:${Math.max(2, row.total_tokens / maxTokens * 100)}%`}></i></span>
                 <span class="token-detail">
                   {formatTokens(row.input_tokens)} in · {formatTokens(row.output_tokens)} out

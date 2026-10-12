@@ -2155,7 +2155,7 @@
         <span class="status-dot dot-{s.cls}"></span>
         <span class="status-text">{s.text}</span>
         <span class="dot-sep">·</span>
-        <span class="model">{shortModelName($activeTab.model)}</span>
+        <span class="model">{compactModelName($activeTab.model)}</span>
 
         {#if $activeTab.inputTokens != null}
           <span class="dot-sep">·</span>

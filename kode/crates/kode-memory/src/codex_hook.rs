@@ -176,13 +176,17 @@ fn relay_to_kode(input: &str) -> Result<()> {
     if sock.is_empty() {
         return Ok(());
     }
-    if std::env::var("KODE_BACKEND_KEY").is_ok_and(|backend| backend != "codex") {
+    if std::env::var("KODE_BACKEND_KEY").is_ok_and(|backend| !supports_backend_key(&backend)) {
         return Ok(());
     }
 
     let tab_id = std::env::var("KODE_SESSION_ID").ok();
     let rewritten = rewrite_payload(input, tab_id.as_deref());
     write_unix_line(Path::new(&sock), &rewritten)
+}
+
+fn supports_backend_key(backend: &str) -> bool {
+    backend == "codex" || backend.ends_with("codex")
 }
 
 /// 把 Codex hook payload 改写成 GUI relay 可路由的形式。
@@ -227,6 +231,13 @@ fn write_unix_line(_path: &Path, _line: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_codex_family_backend_keys() {
+        assert!(supports_backend_key("codex"));
+        assert!(supports_backend_key("tcodex"));
+        assert!(!supports_backend_key("tclaude"));
+    }
 
     #[test]
     fn session_start_returns_additional_context() {

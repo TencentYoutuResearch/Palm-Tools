@@ -71,12 +71,17 @@ pub fn target_settings() -> Vec<(&'static str, PathBuf)> {
     vec![
         ("codebuddy", home.join(".codebuddy").join("settings.json")),
         ("claude", home.join(".claude").join("settings.json")),
+        ("tclaude", home.join(".tclaude").join("settings.json")),
     ]
 }
 
 /// Codex user-level hooks.json 路径。
 pub fn codex_hooks_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".codex").join("hooks.json"))
+}
+
+pub fn tcodex_hooks_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".tcodex").join("hooks.json"))
 }
 
 // ============================================================================
@@ -1249,6 +1254,15 @@ mod tests {
         }
         assert_eq!(hooks["PermissionRequest"][0]["matcher"], "*");
         assert!(is_codex_hook_configured(tmp.path()));
+    }
+
+    #[test]
+    fn target_settings_include_tclaude_and_tcodex_has_separate_hooks_path() {
+        let targets = target_settings();
+        assert!(targets.iter().any(|(name, path)| {
+            *name == "tclaude" && path.ends_with(".tclaude/settings.json")
+        }));
+        assert!(tcodex_hooks_path().unwrap().ends_with(".tcodex/hooks.json"));
     }
 
     #[test]

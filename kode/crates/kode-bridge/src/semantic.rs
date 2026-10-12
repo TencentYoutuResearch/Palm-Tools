@@ -115,7 +115,7 @@ async fn run(
         let n = reader.read_line(&mut buf).await?;
         if n == 0 {
             if !replay_finished {
-                if backend == Backend::Codex {
+                if backend.is_codex() {
                     if let Some(start) = replay_turn.take_active_start() {
                         bus.emit(start);
                     }
@@ -127,7 +127,7 @@ async fn run(
         }
         let is_replay = line_start < replay_boundary;
         if !is_replay && !replay_finished {
-            if backend == Backend::Codex {
+            if backend.is_codex() {
                 if let Some(start) = replay_turn.take_active_start() {
                     bus.emit(start);
                 }
@@ -143,7 +143,7 @@ async fn run(
             // not drive status or duplicate completion notifications. Codex
             // alone retains the last unmatched start for live-state recovery.
             if is_replay && is_turn_lifecycle_event(&env.r#type) {
-                if backend == Backend::Codex {
+                if backend.is_codex() {
                     replay_turn.observe(&env);
                 }
                 continue;
@@ -193,7 +193,7 @@ pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvel
     match backend {
         Backend::Codebuddy => parse_codebuddy(id, line),
         Backend::Claude | Backend::Tclaude => parse_claude(id, line),
-        Backend::Codex => parse_codex(id, line),
+        Backend::Codex | Backend::Tcodex => parse_codex(id, line),
         Backend::Cursor => parse_cursor(id, line),
     }
 }
@@ -1470,6 +1470,24 @@ mod tests {
         );
         assert_eq!(abort[0].r#type, "session.turn_finished");
         assert_eq!(abort[0].payload["status"], "cancelled");
+    }
+
+    #[test]
+    fn tcodex_start_and_complete_drive_turn_status() {
+        let start = parse_line(
+            23,
+            Backend::Tcodex,
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn_1"}}"#,
+        );
+        assert_eq!(start[0].r#type, "session.turn_started");
+
+        let finish = parse_line(
+            23,
+            Backend::Tcodex,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn_1"}}"#,
+        );
+        assert_eq!(finish[0].r#type, "session.turn_finished");
+        assert_eq!(finish[0].payload["status"], "completed");
     }
 
     #[test]

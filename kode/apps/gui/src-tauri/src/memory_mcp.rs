@@ -615,6 +615,12 @@ pub fn install_managed_hooks(app_state: &AppState) {
             tracing::warn!("codex hook inject failed: {e}");
         }
     }
+    if let Some(path) = kode_memory::hook_setup::tcodex_hooks_path() {
+        let cmd = kode_memory::hook_setup::build_codex_hook_command();
+        if let Err(e) = kode_memory::hook_setup::inject_codex_hooks(&path, &cmd) {
+            tracing::warn!("tcodex hook inject failed: {e}");
+        }
+    }
 
     if let Some(path) = kode_memory::hook_setup::cursor_hooks_path() {
         if let Err(e) = kode_memory::hook_setup::inject_cursor_hooks(&path) {

@@ -37,7 +37,7 @@ fn relay_to_kode(input: &str) -> Result<()> {
         return Ok(());
     }
     if let Ok(backend) = std::env::var("KODE_BACKEND_KEY") {
-        if !matches!(backend.as_str(), "codebuddy" | "claude" | "claude-internal") {
+        if !supports_backend_key(&backend) {
             return Ok(());
         }
     }
@@ -45,6 +45,10 @@ fn relay_to_kode(input: &str) -> Result<()> {
     let tab_id = std::env::var("KODE_SESSION_ID").ok();
     let rewritten = rewrite_payload(input, tab_id.as_deref());
     write_unix_line(Path::new(&sock), &rewritten)
+}
+
+fn supports_backend_key(backend: &str) -> bool {
+    backend.ends_with("codebuddy") || matches!(backend, "claude" | "claude-internal" | "tclaude")
 }
 
 /// 把原始 hook JSON 改写为 relay 可路由的形式(纯函数,供测试)。
@@ -105,6 +109,14 @@ mod tests {
         assert_eq!(v["source"], "resume");
         assert_eq!(v["model"], "opus");
         assert_eq!(v["hook_event_name"], "SessionStart");
+    }
+
+    #[test]
+    fn accepts_claude_family_backend_hook_events() {
+        assert!(supports_backend_key("claude"));
+        assert!(supports_backend_key("claude-internal"));
+        assert!(supports_backend_key("tclaude"));
+        assert!(!supports_backend_key("tcodex"));
     }
 
     #[test]

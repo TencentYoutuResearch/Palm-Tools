@@ -139,7 +139,8 @@ pub fn profile(kind: Backend) -> &'static dyn BackendProfile {
         Backend::Codebuddy => &CodebuddyProfile,
         Backend::Claude => &CLAUDE_PROFILE,
         Backend::Tclaude => &TCLAUDE_PROFILE,
-        Backend::Codex => &CodexProfile,
+        Backend::Codex => &CODEX_PROFILE,
+        Backend::Tcodex => &TCODEX_PROFILE,
         Backend::Cursor => &CursorProfile,
     }
 }
@@ -153,7 +154,8 @@ pub fn all_profiles() -> &'static [&'static dyn BackendProfile] {
         &CodebuddyProfile,
         &CLAUDE_PROFILE,
         &TCLAUDE_PROFILE,
-        &CodexProfile,
+        &CODEX_PROFILE,
+        &TCODEX_PROFILE,
         &CursorProfile,
     ];
     PROFILES
@@ -187,7 +189,9 @@ struct CodebuddyProfile;
 struct ClaudeProfile(Backend);
 static CLAUDE_PROFILE: ClaudeProfile = ClaudeProfile(Backend::Claude);
 static TCLAUDE_PROFILE: ClaudeProfile = ClaudeProfile(Backend::Tclaude);
-struct CodexProfile;
+struct CodexProfile(Backend);
+static CODEX_PROFILE: CodexProfile = CodexProfile(Backend::Codex);
+static TCODEX_PROFILE: CodexProfile = CodexProfile(Backend::Tcodex);
 struct CursorProfile;
 
 impl BackendProfile for CodebuddyProfile {
@@ -263,10 +267,14 @@ impl BackendProfile for CodexProfile {
         true
     }
     fn kind(&self) -> Backend {
-        Backend::Codex
+        self.0
     }
     fn usage_key(&self) -> &'static str {
-        "codex"
+        if self.0 == Backend::Tcodex {
+            "tcodex"
+        } else {
+            "codex"
+        }
     }
     fn persist_title_to_transcript(&self) -> bool {
         false
@@ -281,38 +289,35 @@ impl BackendProfile for CodexProfile {
         if let Some(path) = req
             .resume_session_id
             .as_deref()
-            .and_then(jsonl_tail::find_codex_session_by_id)
+            .and_then(|sid| jsonl_tail::find_codex_session_by_id(self.0, sid))
         {
-            jsonl_tail::spawn(
-                req.id,
-                Backend::Codex,
-                path,
-                req.evt_tx,
-                Some(req.retarget_rx),
-            );
+            jsonl_tail::spawn(req.id, self.0, path, req.evt_tx, Some(req.retarget_rx));
         } else {
             jsonl_tail::spawn_waiting_for_binding(
                 req.id,
-                Backend::Codex,
+                self.0,
                 req.evt_tx,
                 Some(req.retarget_rx),
             );
         }
     }
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = jsonl_tail::codex_home(self.0) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        let names = codex_title::thread_names();
-        collect_codex_listed(&home.join(".codex/sessions"), cwd, &names, &mut out);
+        let names = codex_title::thread_names(&home.join("state_5.sqlite"));
+        collect_codex_listed(&home.join("sessions"), cwd, &names, &mut out);
         out
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
-        vec![home.join(".codex/sessions")]
+        let _ = home;
+        jsonl_tail::codex_home(self.0)
+            .map(|codex_home| vec![codex_home.join("sessions")])
+            .unwrap_or_default()
     }
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
-        codex_file_events(path, fallback_ms)
+        codex_file_events(path, self.usage_key(), fallback_ms)
     }
 }
 
@@ -823,7 +828,7 @@ pub(crate) fn parse_cursor_request(value: &Value) -> Option<(String, UsageBucket
     ))
 }
 
-fn codex_file_events(path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
+fn codex_file_events(path: &Path, backend: &str, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
     let mut events = Vec::new();
     let mut model = String::from("unknown");
     let mut previous = UsageBucket::default();
@@ -863,7 +868,7 @@ fn codex_file_events(path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
         };
         if delta.total > 0 {
             events.push(UsageEvent {
-                backend: "codex".to_string(),
+                backend: backend.to_string(),
                 model: model.clone(),
                 timestamp_ms: event_timestamp_ms(value).or(fallback_ms),
                 usage: UsageBucket {
@@ -980,12 +985,17 @@ mod tests {
         assert!(profile_for_key("tclaude").is_some());
         assert!(profile_for_key("tclaude").unwrap().has_idle_animation());
         assert_eq!(profile_for_key("tclaude").unwrap().kind(), Backend::Tclaude);
+        assert_eq!(profile_for_key("tcodex").unwrap().kind(), Backend::Tcodex);
+        assert!(profile_for_key("tcodex")
+            .unwrap()
+            .has_authoritative_turn_lifecycle());
+        assert!(profile_for_key("tcodex").unwrap().has_idle_animation());
         assert!(profile_for_key("codex").unwrap().resume_style() == ResumeStyle::Subcommand);
         assert!(!profile_for_key("cursor")
             .unwrap()
             .supports_session_id_flag());
         assert!(profile_for_key("foo").is_none());
-        assert_eq!(all_profiles().len(), 5);
+        assert_eq!(all_profiles().len(), 6);
     }
 
     #[test]
@@ -1107,5 +1117,32 @@ mod tests {
             (delta.input, delta.output, delta.cached, delta.total),
             (60, 15, 30, 75)
         );
+    }
+
+    #[test]
+    fn tcodex_usage_keeps_its_backend_identity() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-backend-tcodex-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-codex\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":80,\"output_tokens\":20,\"total_tokens\":100}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let events = TCODEX_PROFILE.parse_usage_file(&path, None);
+        fs::remove_file(&path).ok();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].backend, "tcodex");
+        assert_eq!(events[0].model, "gpt-5.6-codex");
+        assert_eq!(events[0].usage.total, 100);
     }
 }

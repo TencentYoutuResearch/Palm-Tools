@@ -127,13 +127,12 @@ impl Session {
         } else {
             backend.args.clone()
         };
-        let args_with_prompt = if backend::profile_for_key(backend_key)
-            .is_some_and(|p| p.kind() == jsonl_tail::Backend::Codex)
-        {
-            codex_runtime::isolated_args(&backend.command, &args_with_prompt)?
-        } else {
-            args_with_prompt
-        };
+        let args_with_prompt =
+            if backend::profile_for_key(backend_key).is_some_and(|p| p.kind().is_codex()) {
+                codex_runtime::isolated_args(&backend.command, &args_with_prompt)?
+            } else {
+                args_with_prompt
+            };
         let flags_before_resume =
             backend::profile_for_key(backend_key).is_some_and(|p| p.flags_before_resume());
         let (final_args_pre_prompt, session_id) = if let Some(sid) = resume_session_id {
@@ -382,7 +381,8 @@ impl Session {
         }
         // Reconcile a locally cancelled hold against fresh terminal evidence.
         // No file reads or process polling; the existing tick drives this check.
-        if self.backend_key == "codex"
+        if backend::profile_for_key(&self.backend_key)
+            .is_some_and(|profile| profile.kind().is_codex())
             && self.active_turn_id.is_some()
             && !self.busy.is_turn_held()
             && self
@@ -1499,6 +1499,44 @@ mod tests {
         s.mark_exited(Some(0));
         s.feed(b"late frame", false);
         assert_eq!(s.state.status, Status::Exited(Some(0)));
+    }
+
+    #[test]
+    fn tcodex_cancel_recovers_busy_from_running_footer() {
+        let profile = backend::profile_for_key("tcodex").unwrap();
+        let mut s = Session {
+            id: 1,
+            backend_key: "tcodex".into(),
+            cwd: PathBuf::from("/tmp"),
+            command: String::new(),
+            args: vec![],
+            session_id: Some("session-a".into()),
+            pty: None,
+            parser: vt100::Parser::new(24, 80, 0),
+            state: SessionState::new("test", "auto"),
+            busy: BusyHeuristic::new(Duration::from_secs(1))
+                .with_pty_activity_as_work(!profile.has_idle_animation()),
+            active_turn_id: None,
+            semantic_session_id: None,
+            busy_recovery: std::sync::Mutex::default(),
+            output_revision: 0,
+            cols: 80,
+            rows: 24,
+            retarget_tx: None,
+            feed_remnant: vec![],
+        };
+
+        s.mark_turn_start_with_id(Some("turn-1"));
+        s.write_input(b"\x1b");
+        s.tick_status();
+        assert_eq!(s.state.status, Status::Idle);
+
+        s.busy_recovery.lock().unwrap().allow_check_for_test();
+        s.feed(
+            b"\r\n\xe2\x80\xa2 Working (12s \xe2\x80\xa2 esc to interrupt)\r\n\xe2\x80\xba Ask Codex to do anything",
+            false,
+        );
+        assert_eq!(s.state.status, Status::Busy);
     }
 
     #[test]

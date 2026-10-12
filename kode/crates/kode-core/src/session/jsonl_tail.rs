@@ -3,14 +3,13 @@
 //! 状态栏的 model / title / tokens 不靠解析 PTY 输出:
 //! - codebuddy:`~/.codebuddy/projects/<slug>/<sid>.jsonl`
 //! - claude:`~/.claude/projects/<slug>/<sid>.jsonl`
-//! - codex:`~/.codex/sessions/**/rollout-*.jsonl`
+//! - codex / tcodex:`~/.{t,}codex/sessions/**/rollout-*.jsonl`
 //! - cursor:`~/.cursor/chats/<hash>/<chatId>/meta.json`(title);token 走 hook
 //!
 //! 设计:
 //! - 启动一个 tokio task 持续 tail 该文件
 //! - 文件可能在子进程启动后几秒才创建,所以 open 失败就等
-//! - 不读 message 正文(对显示无用),但 claude 没有 ai-title 字段,
-//!   所以用第一条非命令前缀的 user message 作 title fallback
+//! - Claude 优先采用 ai-title；缺失时用第一条非命令前缀的 user message 作 title fallback
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,10 +36,15 @@ pub enum Backend {
     Claude,
     Tclaude,
     Codex,
+    Tcodex,
     Cursor,
 }
 
 impl Backend {
+    pub fn is_codex(self) -> bool {
+        matches!(self, Backend::Codex | Backend::Tcodex)
+    }
+
     /// 根据 backend_key 选择 jsonl 解析器。未知后端返回 None(不开 tail)。
     pub fn from_backend_key(key: &str) -> Option<Self> {
         let normalized = key.trim().to_ascii_lowercase();
@@ -49,6 +53,7 @@ impl Backend {
             "claude" | "claude-internal" => Some(Backend::Claude),
             "tclaude" => Some(Backend::Tclaude),
             "codex" => Some(Backend::Codex),
+            "tcodex" => Some(Backend::Tcodex),
             "cursor" => Some(Backend::Cursor),
             // Teams commonly wrap a supported CLI with a short prefix (for
             // example `tclaude`). It still owns the same transcript and turn
@@ -56,6 +61,7 @@ impl Backend {
             // stuck on busy after idle redraws.
             _ if normalized.ends_with("codebuddy") => Some(Backend::Codebuddy),
             _ if normalized.ends_with("claude") => Some(Backend::Claude),
+            _ if normalized.ends_with("tcodex") => Some(Backend::Tcodex),
             _ if normalized.ends_with("codex") => Some(Backend::Codex),
             _ if normalized.ends_with("cursor") => Some(Backend::Cursor),
             _ => None,
@@ -96,7 +102,7 @@ impl Backend {
                     .join(format!("{session_id}.jsonl")),
                 )
             }
-            Backend::Codex | Backend::Cursor => None,
+            Backend::Codex | Backend::Tcodex | Backend::Cursor => None,
         }
     }
 
@@ -123,6 +129,7 @@ impl Backend {
             Backend::Claude => contains_pair(".claude", "projects"),
             Backend::Tclaude => contains_pair(".tclaude", "projects"),
             Backend::Codex => contains_pair(".codex", "sessions"),
+            Backend::Tcodex => contains_pair(".tcodex", "sessions"),
             Backend::Cursor => contains_pair(".cursor", "projects"),
         }
     }
@@ -139,8 +146,8 @@ pub fn session_path_for(backend_key: &str, cwd: &Path, session_id: &str) -> Opti
 ///
 /// 优先返回 cwd 推算的路径(若存在),回退到全局搜索结果,都没找到返回 None。
 pub fn resolve_session_path(backend: Backend, cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    if backend == Backend::Codex {
-        return find_codex_session_by_id(session_id);
+    if backend.is_codex() {
+        return find_codex_session_by_id(backend, session_id);
     }
     if backend == Backend::Cursor {
         return crate::session::cursor_tail::find_cursor_session_by_id(session_id);
@@ -163,7 +170,7 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
         Backend::Codebuddy => home.join(".codebuddy").join("projects"),
         Backend::Claude => home.join(".claude").join("projects"),
         Backend::Tclaude => home.join(".tclaude").join("projects"),
-        Backend::Codex | Backend::Cursor => return None,
+        Backend::Codex | Backend::Tcodex | Backend::Cursor => return None,
     };
     let filename = format!("{session_id}.jsonl");
     let entries = fs::read_dir(&projects_root).ok()?;
@@ -181,9 +188,22 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
 }
 
 /// 在 `~/.codex/sessions/**` 中按 Codex session uuid 找 rollout jsonl。
-pub fn find_codex_session_by_id(session_id: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    find_codex_session_by_id_under(&home.join(".codex").join("sessions"), session_id)
+pub fn codex_home(backend: Backend) -> Option<PathBuf> {
+    if backend == Backend::Tcodex {
+        return dirs::home_dir().map(|home| home.join(".tcodex"));
+    }
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    dirs::home_dir().map(|home| home.join(".codex"))
+}
+
+pub fn codex_state_path(backend: Backend) -> Option<PathBuf> {
+    codex_home(backend).map(|home| home.join("state_5.sqlite"))
+}
+
+pub fn find_codex_session_by_id(backend: Backend, session_id: &str) -> Option<PathBuf> {
+    find_codex_session_by_id_under(&codex_home(backend)?.join("sessions"), session_id)
 }
 
 /// 兼容旧 API 名(只用于 codebuddy);新代码请用 `Backend::session_path` 或 `session_path_for`。
@@ -239,7 +259,7 @@ pub fn spawn_waiting_for_binding(
     mut retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
 ) {
     tokio::spawn(async move {
-        if backend != Backend::Codex {
+        if !backend.is_codex() {
             return;
         }
         // Codex can create the rollout file promptly but delay writing the
@@ -468,13 +488,14 @@ async fn run(
 
             // Codex updates `threads.name` independently of its rollout JSONL.
             // Poll while idle so a generated name or later rename reaches Kode.
-            if backend == Backend::Codex
-                && last_codex_name_check.elapsed() >= Duration::from_secs(1)
-            {
+            if backend.is_codex() && last_codex_name_check.elapsed() >= Duration::from_secs(1) {
                 last_codex_name_check = Instant::now();
                 if let Some(sid) = state.last_session_uuid.clone() {
-                    if let Some(name) = codex_title::read_thread_name(&sid) {
-                        if let Some(title) = apply_codex_name(&mut state, name) {
+                    if let Some(name) = codex_state_path(backend)
+                        .and_then(|path| codex_title::read_thread_name(&path, &sid))
+                        .flatten()
+                    {
+                        if let Some(title) = apply_codex_name(&mut state, Some(name)) {
                             state.last_title = Some(title.clone());
                             if evt_tx
                                 .send(CoreEvent::JsonlMeta {
@@ -606,7 +627,9 @@ async fn run(
         let upd = match backend {
             Backend::Codebuddy => parse_codebuddy_line(line, &mut state),
             Backend::Claude | Backend::Tclaude => parse_claude_line(line, &mut state),
-            Backend::Codex => parse_codex_line(line, &mut state),
+            Backend::Codex | Backend::Tcodex => {
+                parse_codex_line_for_backend(line, &mut state, backend)
+            }
             Backend::Cursor => LineUpdate::default(),
         };
 
@@ -755,10 +778,12 @@ fn same_file(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
 }
 
 fn session_id_from_path(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| is_uuid_like(s))
-        .map(String::from)
+    let stem = path.file_stem()?.to_str()?;
+    if is_uuid_like(stem) {
+        return Some(stem.to_string());
+    }
+    let sid = stem.get(stem.len().saturating_sub(36)..)?;
+    is_uuid_like(sid).then(|| sid.to_string())
 }
 
 fn is_uuid_like(s: &str) -> bool {
@@ -1077,6 +1102,8 @@ fn extract_cb_content_text(c: &Option<serde_json::Value>) -> Option<String> {
 struct ClEntry {
     #[serde(rename = "type")]
     r#type: Option<String>,
+    #[serde(rename = "aiTitle")]
+    ai_title: Option<String>,
     message: Option<ClMessage>,
 }
 
@@ -1105,6 +1132,17 @@ fn parse_claude_line(line: &str, state: &mut TailState) -> LineUpdate {
     };
 
     let ty = entry.r#type.as_deref();
+    if ty == Some("ai-title") {
+        if let Some(title) = entry.ai_title.filter(|title| !title.trim().is_empty()) {
+            let title: String = title.trim().chars().take(60).collect();
+            if state.last_title.as_deref() != Some(&title) {
+                upd.new_title = Some(title.clone());
+                state.last_title = Some(title);
+            }
+            state.title_fallback_used = true;
+        }
+        return upd;
+    }
     let Some(msg) = entry.message else {
         return upd;
     };
@@ -1213,7 +1251,12 @@ struct CodexUsage {
     total_tokens: Option<u64>,
 }
 
+#[cfg(test)]
 fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
+    parse_codex_line_for_backend(line, state, Backend::Codex)
+}
+
+fn parse_codex_line_for_backend(line: &str, state: &mut TailState, backend: Backend) -> LineUpdate {
     let mut upd = LineUpdate::default();
     let entry: CodexEntry = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -1233,8 +1276,11 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
                 state.last_session_uuid = Some(sid.to_string());
                 upd.new_session_uuid = Some(sid.to_string());
             }
-            if let Some(name) = codex_title::read_thread_name(sid) {
-                upd.new_title = apply_codex_name(state, name);
+            if let Some(name) = codex_state_path(backend)
+                .and_then(|path| codex_title::read_thread_name(&path, sid))
+                .flatten()
+            {
+                upd.new_title = apply_codex_name(state, Some(name));
             }
         }
     }
@@ -1505,7 +1551,31 @@ mod tests {
         assert_eq!(Backend::from_backend_key("codex"), Some(Backend::Codex));
         assert_eq!(Backend::from_backend_key("cursor"), Some(Backend::Cursor));
         assert_eq!(Backend::from_backend_key("tclaude"), Some(Backend::Tclaude));
+        assert_eq!(Backend::from_backend_key("tcodex"), Some(Backend::Tcodex));
         assert_eq!(Backend::from_backend_key("foo"), None);
+    }
+
+    #[test]
+    fn tcodex_transcript_paths_are_backend_scoped() {
+        let path = Path::new("/Users/tester/.tcodex/sessions/2026/10/10/rollout-session.jsonl");
+        assert!(Backend::Tcodex.accepts_transcript_path(path));
+        assert!(!Backend::Codex.accepts_transcript_path(path));
+    }
+
+    #[test]
+    fn tcodex_uses_its_own_home() {
+        assert!(codex_home(Backend::Tcodex).unwrap().ends_with(".tcodex"));
+    }
+
+    #[test]
+    fn codex_rollout_filename_contains_session_uuid() {
+        assert_eq!(
+            session_id_from_path(Path::new(
+                "/tmp/.tcodex/sessions/2026/10/10/rollout-2026-10-10T14-44-35-01a1248e-6aee-7e72-89fd-1828565075b2.jsonl"
+            ))
+            .as_deref(),
+            Some("01a1248e-6aee-7e72-89fd-1828565075b2")
+        );
     }
 
     #[test]
@@ -1518,6 +1588,7 @@ mod tests {
     fn codex_session_path_is_discovered_not_session_id_based() {
         let p = PathBuf::from("/Users/tester/Projects/example/kode");
         assert!(Backend::Codex.session_path(&p, "abc").is_none());
+        assert!(Backend::Tcodex.session_path(&p, "abc").is_none());
     }
 
     #[test]
@@ -2720,6 +2791,30 @@ mod tests {
         let line2 = r#"{"type":"user","message":{"content":"second prompt"}}"#;
         let upd2 = parse_claude_line(line2, &mut state);
         assert!(upd2.new_title.is_none());
+    }
+
+    #[test]
+    fn claude_ai_title_overrides_and_updates_user_fallback() {
+        let mut state = TailState::new();
+        let user = r#"{"type":"user","message":{"content":"first prompt"}}"#;
+        assert_eq!(
+            parse_claude_line(user, &mut state).new_title.as_deref(),
+            Some("first prompt")
+        );
+
+        let generated = r#"{"type":"ai-title","aiTitle":"Generated title"}"#;
+        assert_eq!(
+            parse_claude_line(generated, &mut state)
+                .new_title
+                .as_deref(),
+            Some("Generated title")
+        );
+
+        let renamed = r#"{"type":"ai-title","aiTitle":"Renamed title"}"#;
+        assert_eq!(
+            parse_claude_line(renamed, &mut state).new_title.as_deref(),
+            Some("Renamed title")
+        );
     }
 
     #[test]

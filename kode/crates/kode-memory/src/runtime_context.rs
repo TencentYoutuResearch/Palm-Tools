@@ -30,7 +30,19 @@ fn is_active_values(
         return false;
     };
     let _ = session_id;
-    expected_backend.is_none_or(|expected| expected == backend_key)
+    expected_backend.is_none_or(|expected| backend_matches(expected, backend_key))
+}
+
+fn backend_matches(expected: &str, actual: &str) -> bool {
+    if expected == actual {
+        return true;
+    }
+    match expected {
+        "codex" => actual.ends_with("codex"),
+        "claude" => matches!(actual, "claude" | "claude-internal" | "tclaude"),
+        "codebuddy" => actual.ends_with("codebuddy"),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -58,6 +70,18 @@ mod tests {
             Some("42"),
             Some("claude"),
             Some("codex")
+        ));
+        assert!(is_active_values(
+            Some("1"),
+            Some("42"),
+            Some("tcodex"),
+            Some("codex")
+        ));
+        assert!(is_active_values(
+            Some("1"),
+            Some("42"),
+            Some("tclaude"),
+            Some("claude")
         ));
         assert!(is_active_values(
             Some("1"),
