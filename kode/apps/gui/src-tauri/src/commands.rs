@@ -604,10 +604,8 @@ pub async fn spawn_session(
 
     let model = sanitize_spawn_model(model);
 
-    let structured = matches!(endpoint_id, EndpointId::Local)
-        && backend_key == "codebuddy"
-        && (transport_kind.as_deref() == Some("acp")
-            || (transport_kind.is_none() && resume_session_id.is_none()));
+    let structured =
+        uses_structured_transport(&endpoint_id, &backend_key, transport_kind.as_deref());
     if structured {
         let mut backend = state
             .ctx
@@ -689,6 +687,17 @@ pub async fn spawn_session(
         cwd: spawned.cwd,
         endpoint_id,
     })
+}
+
+fn uses_structured_transport(
+    endpoint_id: &EndpointId,
+    backend_key: &str,
+    transport_kind: Option<&str>,
+) -> bool {
+    // ACP is opt-in; ordinary new tabs retain the PTY metadata and input path.
+    matches!(endpoint_id, EndpointId::Local)
+        && backend_key == "codebuddy"
+        && transport_kind == Some("acp")
 }
 
 fn sanitize_spawn_model(model: Option<String>) -> Option<String> {
@@ -1637,6 +1646,40 @@ fn persist_paths(state: &AppState) {
         .clone()
         .map(|p| p.to_string_lossy().into_owned());
     state.persist.request_save(s);
+}
+
+#[cfg(test)]
+mod session_transport_tests {
+    use super::uses_structured_transport;
+    use kode_core::EndpointId;
+
+    #[test]
+    fn new_codebuddy_tabs_default_to_pty() {
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            None
+        ));
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            Some("pty")
+        ));
+    }
+
+    #[test]
+    fn codebuddy_acp_remains_explicitly_available() {
+        assert!(uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            Some("acp")
+        ));
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codex",
+            Some("acp")
+        ));
+    }
 }
 
 #[cfg(test)]

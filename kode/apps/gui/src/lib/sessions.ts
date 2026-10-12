@@ -111,7 +111,7 @@ export async function newTab(
     model ?? null,
     endpointId ?? null,
     currentTermTheme('pty'),
-    opts.transportKind ?? (resumeSessionId ? 'pty' : null),
+    opts.transportKind ?? 'pty',
   )
   const t: TabInfo = {
     id: s.id,
