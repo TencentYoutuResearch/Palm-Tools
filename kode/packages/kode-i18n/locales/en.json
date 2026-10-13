@@ -1,4 +1,6 @@
 {
+  "workspace.moreCommits": { "message": "More" },
+  "workspace.moreCommitsError": { "message": "Unable to load more commits. Try again." },
   "filePreview.find": { "message": "Find in file…" },
   "filePreview.findShortcut": { "message": "Find in file (Cmd/Ctrl+F)" },
   "filePreview.clear": { "message": "Clear search" },

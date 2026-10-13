@@ -826,6 +826,7 @@ pub async fn endpoint_workspace_snapshot(
     id: String,
     cwd: String,
     show_hidden: Option<bool>,
+    commit_limit: Option<usize>,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceSnapshot, String> {
     let transport = lookup_remote_transport(&state, &id)?;
@@ -868,8 +869,9 @@ pub async fn endpoint_workspace_snapshot(
         });
     }
     // git 端点 best-effort:失败 → 降级为非 repo,不让整个 snapshot 失败
+    let commit_limit = commit_limit.unwrap_or(80).to_string();
     let git: WorkspaceGitSummary = match transport
-        .rest_get("/api/v1/git/status", &[("cwd", cwd.as_str())])
+        .rest_get("/api/v1/git/status", &[("cwd", cwd.as_str()), ("commit_limit", commit_limit.as_str())])
         .await
     {
         Ok(git_resp) => {

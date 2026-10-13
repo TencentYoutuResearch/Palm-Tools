@@ -105,9 +105,10 @@ pub struct GitCommitDetail {
 pub async fn workspace_snapshot(
     cwd: String,
     show_hidden: Option<bool>,
+    commit_limit: Option<usize>,
 ) -> Result<WorkspaceSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        workspace_snapshot_sync(&cwd, show_hidden.unwrap_or(true))
+        workspace_snapshot_sync(&cwd, show_hidden.unwrap_or(true), commit_limit.unwrap_or(80))
     })
     .await
     .map_err(|e| format!("workspace snapshot task failed: {e}"))?
@@ -183,7 +184,7 @@ pub fn open_path(path: String) -> Result<(), String> {
     open_path_sync(&path)
 }
 
-fn workspace_snapshot_sync(cwd: &str, show_hidden: bool) -> Result<WorkspaceSnapshot, String> {
+fn workspace_snapshot_sync(cwd: &str, show_hidden: bool, commit_limit: usize) -> Result<WorkspaceSnapshot, String> {
     let path = absolute_path(cwd)?;
     let exists = path.is_dir();
     let entries = if exists {
@@ -192,7 +193,7 @@ fn workspace_snapshot_sync(cwd: &str, show_hidden: bool) -> Result<WorkspaceSnap
         Vec::new()
     };
     let git = if exists {
-        read_git_summary(&path)
+        read_git_summary(&path, commit_limit)
     } else {
         WorkspaceGitSummary::default()
     };
@@ -536,7 +537,7 @@ fn image_mime_for_ext(ext: &str) -> Option<String> {
     }
 }
 
-fn read_git_summary(path: &Path) -> WorkspaceGitSummary {
+fn read_git_summary(path: &Path, commit_limit: usize) -> WorkspaceGitSummary {
     let Some(root) = run_git(path, &["rev-parse", "--show-toplevel"]) else {
         return WorkspaceGitSummary::default();
     };
@@ -548,7 +549,7 @@ fn read_git_summary(path: &Path) -> WorkspaceGitSummary {
         branch,
         short_head,
         branches: read_git_branches(path),
-        commits: read_git_commits(path),
+        commits: read_git_commits(path, commit_limit),
         ..Default::default()
     };
 
@@ -602,14 +603,14 @@ fn parse_git_branches(output: &str) -> Vec<GitBranchInfo> {
     branches
 }
 
-fn read_git_commits(path: &Path) -> Vec<GitCommitInfo> {
+fn read_git_commits(path: &Path, limit: usize) -> Vec<GitCommitInfo> {
     let Some(output) = run_git(
         path,
         &[
             "log",
             "--all",
             "-n",
-            "80",
+            &limit.max(1).to_string(),
             "--date=unix",
             "--decorate=full",
             "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s%x1f%P%x1f%D",

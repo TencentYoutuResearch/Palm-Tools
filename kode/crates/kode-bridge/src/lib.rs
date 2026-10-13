@@ -2652,6 +2652,7 @@ async fn fs_preview(Query(q): Query<FsPreviewQuery>) -> Result<Json<WsFilePrevie
 #[derive(Deserialize)]
 struct GitStatusQuery {
     cwd: String,
+    commit_limit: Option<usize>,
 }
 
 /// `GET /api/v1/git/status?cwd=<abs>` — git 仓库摘要(best-effort)。
@@ -2661,7 +2662,7 @@ async fn git_status(Query(q): Query<GitStatusQuery>) -> Result<Json<WsGitSummary
     if !path.is_absolute() {
         return Err(ApiError::BadRequest("cwd must be absolute".into()));
     }
-    Ok(Json(read_git_summary_best_effort(path)))
+    Ok(Json(read_git_summary_best_effort(path, q.commit_limit.unwrap_or(80))))
 }
 
 /// `GET /api/v1/git/diff?cwd=<abs>&path=<rel>&bucket=<staged|modified|untracked|conflict>`
@@ -2837,7 +2838,7 @@ async fn git_commit_file_diff(
 
 // ===== bridge 端 git 辅助(对齐 workspace.rs:211-404,best-effort 降级)=====
 
-fn read_git_summary_best_effort(path: &std::path::Path) -> WsGitSummary {
+fn read_git_summary_best_effort(path: &std::path::Path, commit_limit: usize) -> WsGitSummary {
     // git 不在 → 直接返回 default(is_repo=false),不崩
     if run_git(path, &["--version"]).is_none() {
         return WsGitSummary::default();
@@ -2853,7 +2854,7 @@ fn read_git_summary_best_effort(path: &std::path::Path) -> WsGitSummary {
         branch,
         short_head,
         branches: read_git_branches(path),
-        commits: read_git_commits(path),
+        commits: read_git_commits(path, commit_limit),
         ..Default::default()
     };
     if let Some(status) = run_git(path, &["status", "--porcelain=v1", "--branch"]) {
@@ -2906,14 +2907,14 @@ fn parse_git_branches(output: &str) -> Vec<WsGitBranchInfo> {
     branches
 }
 
-fn read_git_commits(path: &std::path::Path) -> Vec<WsGitCommitInfo> {
+fn read_git_commits(path: &std::path::Path, limit: usize) -> Vec<WsGitCommitInfo> {
     let Some(output) = run_git(
         path,
         &[
             "log",
             "--all",
             "-n",
-            "80",
+            &limit.max(1).to_string(),
             "--date=unix",
             "--decorate=full",
             "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s%x1f%P%x1f%D",

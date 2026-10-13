@@ -1,4 +1,6 @@
 {
+  "workspace.moreCommits": { "message": "更多" },
+  "workspace.moreCommitsError": { "message": "无法加载更多提交，请重试。" },
   "filePreview.find": { "message": "在文件中查找…" },
   "filePreview.findShortcut": { "message": "在文件中查找（Cmd/Ctrl+F）" },
   "filePreview.clear": { "message": "清空查找" },

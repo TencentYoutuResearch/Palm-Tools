@@ -86,6 +86,15 @@
   let fileHits = $state<WorkspaceEntry[]>([])
   let fileSearchLoading = $state(false)
   let fileSearchError: string | null = $state(null)
+  const COMMIT_PAGE_SIZE = 15
+  let commitLimit = $state(COMMIT_PAGE_SIZE)
+  let loadingMoreCommits = $state(false)
+  let moreCommitsError = $state('')
+  let commitRequest = 0
+  const moreCommitsLabel = $derived.by(() => {
+    $currentLocale
+    return t('workspace.moreCommits')
+  })
   let snapshot: WorkspaceSnapshot | null = $state(null)
   let error: string | null = $state(null)
   let loading = $state(false)
@@ -280,6 +289,12 @@
 
   $effect(() => {
     const currentWorkspaceKey = workspaceKeyFor(tab)
+    if (prevWorkspaceKey !== currentWorkspaceKey) {
+      commitLimit = COMMIT_PAGE_SIZE
+      commitRequest++
+      loadingMoreCommits = false
+      moreCommitsError = ''
+    }
     // 1. 离开旧 workspace:保存当前视图状态(此时 $state 还是旧 workspace 的值)
     if (prevWorkspaceKey != null && prevWorkspaceKey !== currentWorkspaceKey) {
       panelStateCache.set(prevWorkspaceKey, {
@@ -459,23 +474,52 @@
 
   async function refresh() {
     if (!cwd) return
+    const request = ++commitRequest
+    const workspaceKey = workspaceKeyFor(tab)
+    loadingMoreCommits = false
     loading = true
     error = null
     try {
       const rid = remoteId()
-      snapshot = rid
-        ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden)
-        : await ipc.workspaceSnapshot(cwd, showHidden)
-      loadedWorkspaceKey = workspaceKeyFor(tab) ?? ''
+      const next = rid
+        ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden, commitLimit + 1)
+        : await ipc.workspaceSnapshot(cwd, showHidden, commitLimit + 1)
+      if (request !== commitRequest || workspaceKey !== workspaceKeyFor(tab)) return
+      snapshot = next
+      loadedWorkspaceKey = workspaceKey ?? ''
       if (!selectedPath && snapshot.entries.length > 0) {
         selectedPath = snapshot.entries[0].path
       }
     } catch (e) {
+      if (request !== commitRequest || workspaceKey !== workspaceKeyFor(tab)) return
       snapshot = null
       error = String(e)
       loadedWorkspaceKey = workspaceKeyFor(tab) ?? ''
     } finally {
       loading = false
+    }
+  }
+
+  async function loadMoreCommits() {
+    if (loadingMoreCommits || loading || !cwd) return
+    const request = ++commitRequest
+    const workspaceKey = workspaceKeyFor(tab)
+    const nextLimit = commitLimit + COMMIT_PAGE_SIZE
+    loadingMoreCommits = true
+    moreCommitsError = ''
+    try {
+      const rid = remoteId()
+      const next = rid
+        ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden, nextLimit + 1)
+        : await ipc.workspaceSnapshot(cwd, showHidden, nextLimit + 1)
+      if (request !== commitRequest || workspaceKey !== workspaceKeyFor(tab)) return
+      if (!next.git.is_repo) throw new Error(t('workspace.moreCommitsError'))
+      snapshot = next
+      commitLimit = nextLimit
+    } catch (e) {
+      if (request === commitRequest) moreCommitsError = String(e)
+    } finally {
+      if (request === commitRequest) loadingMoreCommits = false
     }
   }
 
@@ -928,7 +972,7 @@
   }
 
   function commitsForFilter(): GitCommitInfo[] {
-    const all = snapshot?.git.commits ?? []
+    const all = (snapshot?.git.commits ?? []).slice(0, commitLimit)
     const tokens = workspaceQueryTokens(filterQuery)
     if (tokens.length === 0) return all
     return all.filter((c) => {
@@ -1095,7 +1139,7 @@
       >
         <Icon name={showHidden ? 'eye' : 'eye-off'} size={14} />
       </button>
-      <button class="tool-btn" title="Refresh" aria-label="Refresh workspace" onclick={refresh} disabled={loading || !cwd}>
+      <button class="tool-btn" title="Refresh" aria-label="Refresh workspace" onclick={refresh} disabled={loading || loadingMoreCommits || !cwd}>
         <Icon name="refresh-cw" size={14} />
       </button>
       {#if onToggleTerminal}
@@ -1383,6 +1427,12 @@
                     </div>
                   {/each}
                 {/if}
+                {#if (snapshot.git.commits?.length ?? 0) > commitLimit}
+                  <button class="more-commits" onclick={loadMoreCommits} disabled={loadingMoreCommits || loading} aria-busy={loadingMoreCommits}>
+                    {moreCommitsLabel}
+                  </button>
+                {/if}
+                {#if moreCommitsError}<p class="strip-msg error" role="alert">{moreCommitsError}</p>{/if}
               </div>
             {:else if snapshot}
               <p class="muted pad">Not a Git repository</p>
@@ -2458,6 +2508,11 @@
   :global(.hljs-emphasis) { font-style: italic; }
   :global(.hljs-strong) { font-weight: var(--fw-semi); }
   .error-text { color: var(--st-err); white-space: pre-wrap; }
+  .more-commits { width: 100%; padding: 8px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-secondary); cursor: pointer; }
+  .more-commits:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-primary); }
+  .more-commits:active:not(:disabled) { background: var(--bg-hover); }
+  .more-commits:focus-visible { outline: 1px solid var(--acc); outline-offset: -1px; }
+  .more-commits:disabled { opacity: 0.5; cursor: default; }
   .pad { padding: 10px; }
   .muted, .error {
     margin: 0;
