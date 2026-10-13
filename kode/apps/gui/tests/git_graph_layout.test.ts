@@ -39,3 +39,32 @@ test('independent tips do not gain invented connections', () => {
   assert.equal(rows[1].segments.some((s) => s.kind === 'through' && s.color === rows[1].color), false)
   assert.equal(rows[2].lane, 0)
 })
+
+test('working tree connects to HEAD past an unrelated newer tip', () => {
+  const rows = layoutGitGraph([
+    { hash: 'working-tree', parents: ['head'] },
+    { hash: 'other-tip', parents: ['base'] },
+    { hash: 'head', parents: ['base'] },
+    { hash: 'base', parents: [] },
+  ])
+  assert.equal(rows[1].lane, 1)
+  assert.equal(rows[2].lane, 0)
+  assert.deepEqual(rows[0].bottom, rows[1].top)
+  assert.deepEqual(rows[1].bottom, rows[2].top)
+  assert.equal(graphContinuationPath(rows[1], 0), 'M 11 26 L 11 52')
+})
+
+test('expanded merge rails retain every outgoing lane until the next row', () => {
+  const rows = layoutGitGraph([
+    { hash: 'working-tree', parents: ['merge'] },
+    { hash: 'merge', parents: ['main', 'feature'] },
+    { hash: 'main', parents: ['base'] },
+    { hash: 'feature', parents: ['base'] },
+    { hash: 'base', parents: [] },
+  ])
+  for (let i = 0; i < rows.length - 1; i++) {
+    assert.deepEqual(rows[i].bottom, rows[i + 1].top)
+  }
+  assert.equal(rows[1].bottom.length, 2)
+  assert.deepEqual(rows.at(-1)?.bottom, [])
+})

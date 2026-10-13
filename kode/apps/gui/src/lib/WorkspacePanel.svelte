@@ -5,7 +5,7 @@
   import { findPreviewRanges, revealPreviewRange } from './preview_find'
   import hljs from 'highlight.js'
   import Icon from './Icon.svelte'
-  import { layoutGitGraph, graphPath, graphContinuationPath, GRAPH_LANE_INSET, GRAPH_LANE_STEP, GRAPH_ROW_HEIGHT } from './git_graph_layout'
+  import { type GraphRow, layoutGitGraph, graphPath, graphContinuationPath, GRAPH_LANE_INSET, GRAPH_LANE_STEP, GRAPH_ROW_HEIGHT } from './git_graph_layout'
   import {
     ipc,
     endpointIpc,
@@ -1097,6 +1097,29 @@
   }
 </script>
 
+{#snippet graphRail(graph: GraphRow, merge = false, working = false)}
+  <span class="graph-rail" style={`width:${graph.width * GRAPH_LANE_STEP + 6}px`}>
+                          <svg class="graph-svg" width={graph.width * GRAPH_LANE_STEP + 6} height={GRAPH_ROW_HEIGHT} viewBox={`0 0 ${graph.width * GRAPH_LANE_STEP + 6} ${GRAPH_ROW_HEIGHT}`} preserveAspectRatio="none" aria-hidden="true">
+                            {#each graph.segments as segment}
+                              <path d={graphPath(segment)} class={`graph-line lane-${segment.color % 6}`} />
+                            {/each}
+                            {#each graph.bottom as _, column}
+                              {@const continuation = graphContinuationPath(graph, column)}
+                              {#if continuation}<path d={continuation} class={`graph-line lane-${graph.bottom[column] % 6}`} />{/if}
+                            {/each}
+                          </svg>
+                          <span class={`graph-commit-node lane-${graph.color % 6}`} class:merge={merge} class:working={working} style={`left:${GRAPH_LANE_INSET + graph.lane * GRAPH_LANE_STEP}px`}></span>
+                        </span>
+{/snippet}
+
+{#snippet expandedRail(graph: GraphRow)}
+  <div class="expanded-rail" style={`width:${graph.width * GRAPH_LANE_STEP + 6}px`} aria-hidden="true">
+    {#each graph.bottom as color, column}
+      <span class={`expanded-line lane-${color % 6}`} style={`left:${GRAPH_LANE_INSET + column * GRAPH_LANE_STEP}px`}></span>
+    {/each}
+  </div>
+{/snippet}
+
 <svelte:window
   onclick={() => { contextMenu = null; previewContextMenu = null }}
   onkeydown={(e) => {
@@ -1317,9 +1340,13 @@
               </div>
               {@const dirtyChanges = visibleDirtyChanges()}
               {@const commits = commitsForFilter()}
-              {@const graphRows = layoutGitGraph(commits)}
+              {@const showWorkingTree = gitDirtyCount > 0 && dirtyChanges.length > 0}
+              {@const head = (snapshot.git.commits ?? []).find((commit) => commit.decorations?.includes('HEAD'))}
+              {@const graphRows = layoutGitGraph(showWorkingTree
+                ? [{ hash: 'working-tree', parents: head ? [head.hash] : [] }, ...commits]
+                : commits)}
               <div class="git-graph" aria-label="Git graph">
-                {#if gitDirtyCount > 0 && dirtyChanges.length > 0}
+                {#if showWorkingTree}
                   <div class="graph-block">
                     <button
                       class="graph-row working-tree-row"
@@ -1328,7 +1355,7 @@
                       title="Toggle working tree changes"
                       onclick={toggleWorkingTree}
                     >
-                      <span class="graph-rail"><span class="graph-node working"></span></span>
+                      {@render graphRail(graphRows[0], false, true)}
                       <span class="graph-content working-tree-card">
                         <span class="graph-main">
                           <strong>Working tree</strong>
@@ -1338,11 +1365,14 @@
                       </span>
                     </button>
                     {#if expandedGraphKey === 'working'}
-                      <div class="graph-expanded working-expanded">
+                      <div class="graph-expansion">
+                        {@render expandedRail(graphRows[0])}
+                        <div class="graph-expanded working-expanded">
                         {@render graphChangeGroup('Conflicts', 'conflict', changesFor('conflict'))}
                         {@render graphChangeGroup('Staged', 'staged', changesFor('staged'))}
                         {@render graphChangeGroup('Modified', 'modified', changesFor('modified'))}
                         {@render graphChangeGroup('Untracked', 'untracked', changesFor('untracked'))}
+                        </div>
                       </div>
                     {/if}
                   </div>
@@ -1354,7 +1384,7 @@
                   <p class="muted pad">No commits</p>
                 {:else}
                   {#each commits as commit, index (commit.hash)}
-                    {@const graph = graphRows[index]}
+                    {@const graph = graphRows[index + (showWorkingTree ? 1 : 0)]}
                     <div class="graph-block">
                       <button
                         class="graph-row commit-graph-row"
@@ -1363,18 +1393,7 @@
                         title={`${commit.hash} ${commit.subject}`}
                         onclick={() => toggleCommit(commit)}
                       >
-                        <span class="graph-rail" style={`width:${graph.width * GRAPH_LANE_STEP + 6}px`}>
-                          <svg class="graph-svg" width={graph.width * GRAPH_LANE_STEP + 6} height={GRAPH_ROW_HEIGHT} viewBox={`0 0 ${graph.width * GRAPH_LANE_STEP + 6} ${GRAPH_ROW_HEIGHT}`} preserveAspectRatio="none" aria-hidden="true">
-                            {#each graph.segments as segment}
-                              <path d={graphPath(segment)} class={`graph-line lane-${segment.color % 6}`} />
-                            {/each}
-                            {#each graph.bottom as _, column}
-                              {@const continuation = graphContinuationPath(graph, column)}
-                              {#if continuation}<path d={continuation} class={`graph-line lane-${graph.bottom[column] % 6}`} />{/if}
-                            {/each}
-                          </svg>
-                          <span class={`graph-commit-node lane-${graph.color % 6}`} class:merge={(commit.parents ?? []).length > 1} style={`left:${GRAPH_LANE_INSET + graph.lane * GRAPH_LANE_STEP}px`}></span>
-                        </span>
+                        {@render graphRail(graph, (commit.parents ?? []).length > 1)}
                         <span class="graph-content">
                           <span class="graph-main">
                             <strong>{commit.subject || '(no subject)'}</strong>
@@ -1394,13 +1413,15 @@
                       </button>
                       {#if expandedGraphKey === `commit:${commit.hash}`}
                         {@const detail = commitDetails[commit.hash]}
-                        <div class="graph-expanded commit-detail">
+                        <div class="graph-expansion">
+                          {@render expandedRail(graph)}
+                          <div class="graph-expanded commit-detail">
                           {#if loadingCommitDetails.has(commit.hash)}
                             <p class="muted">Loading commit details...</p>
                           {:else if commitDetailErrors[commit.hash]}
                             <p class="strip-msg error">{commitDetailErrors[commit.hash]}</p>
                           {:else if detail}
-                            {#if detail.message}
+                            {#if detail.message.trim() !== commit.subject.trim()}
                               <pre class="commit-message">{detail.message}</pre>
                             {/if}
                             {#if detail.files.length > 0}
@@ -1414,7 +1435,7 @@
                                   >
                                     <span class="status-tag commit-file">{file.status.slice(0, 1)}</span>
                                     <span>{basename(file.path)}</span>
-                                    <em>{file.path}</em>
+                                    <em>{file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : ''}</em>
                                   </button>
                                 {/each}
                               </div>
@@ -1422,6 +1443,7 @@
                               <p class="muted">No changed files</p>
                             {/if}
                           {/if}
+                          </div>
                         </div>
                       {/if}
                     </div>
@@ -2001,34 +2023,7 @@
     justify-content: center;
     min-height: 100%;
   }
-  .working-tree-row .graph-rail { width: 22px; }
-  .working-tree-row .graph-rail::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 2px;
-    background: color-mix(in srgb, var(--fg-primary) 13%, transparent);
-  }
-  .graph-node {
-    position: relative;
-    z-index: 1;
-    width: 10px;
-    height: 10px;
-    margin-top: 18px;
-    border: 2px solid var(--acc);
-    border-radius: 999px;
-    background: var(--bg-sidebar);
-    box-shadow: 0 0 0 2px var(--bg-sidebar);
-  }
-  .graph-node.merge { border-color: var(--st-warn); }
-  .graph-node.working {
-    width: 12px;
-    height: 12px;
-    margin-top: 13px;
-    background: var(--acc);
-  }
-  .graph-svg { display: block; height: 100%; min-height: 52px; overflow: visible; }
+  .graph-svg { position: absolute; inset: 0; display: block; height: 100%; overflow: visible; }
   .graph-line { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
   .graph-commit-node {
     position: absolute;
@@ -2041,6 +2036,7 @@
     border-radius: 50%;
     background: var(--bg-sidebar);
   }
+  .graph-commit-node.working { width: 12px; height: 12px; background: currentColor; }
   .graph-commit-node.merge { width: 11px; height: 11px; }
   .lane-0 { color: var(--acc); }
   .lane-1 { color: var(--st-info); }
@@ -2102,12 +2098,26 @@
     border-radius: 8px;
     background: color-mix(in srgb, var(--acc) 7%, transparent);
   }
+  .graph-expansion {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 7px;
+    padding-right: 7px;
+  }
+  .expanded-rail { position: relative; align-self: stretch; }
+  .expanded-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    transform: translateX(-50%);
+    background: currentColor;
+  }
   .graph-expanded {
-    margin: 0 7px 8px 35px;
-    padding: 8px 9px;
-    border: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--fg-primary) 4%, transparent);
+    min-width: 0;
+    margin: 0 0 8px;
+    padding: 4px 0 8px;
+    border-bottom: 1px solid var(--bd-muted);
   }
   .commit-detail {
     display: flex;
