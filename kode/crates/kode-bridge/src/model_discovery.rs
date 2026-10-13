@@ -272,9 +272,9 @@ async fn discover_claude(backend: &str, command: &str) -> Result<ModelDiscoveryR
 
 pub async fn discover_models(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
     match backend {
-        "codex" => discover_codex(backend, command).await,
+        "codex" | "tcodex" => discover_codex(backend, command).await,
         "codebuddy" => discover_codebuddy(backend, command).await,
-        "claude" | "claude-internal" => discover_claude(backend, command).await,
+        "claude" | "claude-internal" | "tclaude" => discover_claude(backend, command).await,
         _ => Err(format!("model discovery is not supported for {backend}")),
     }
 }
@@ -282,6 +282,20 @@ pub async fn discover_models(backend: &str, command: &str) -> Result<ModelDiscov
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn t_cli_model_discovery_routes_to_compatible_protocols() {
+        // Capability probes use local fixtures, never an installed AI CLI.
+        let claude = discover_models("tclaude", "/bin/echo").await.unwrap();
+        assert_eq!(claude.backend, "tclaude");
+        assert_eq!(claude.source, "claude-capability");
+        let missing = std::env::temp_dir().join(format!("missing-tcodex-{}", uuid::Uuid::new_v4()));
+        let codex = discover_models("tcodex", missing.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(codex.starts_with("cannot start"));
+        assert!(!codex.contains("not supported"));
+    }
 
     #[test]
     fn parses_codex_model_list() {
