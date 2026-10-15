@@ -141,6 +141,13 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: 'New session',
+            icon: const Icon(Icons.add),
+            onPressed: endpoint == null
+                ? null
+                : () => context.push('/sessions/new'),
+          ),
+          IconButton(
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh),
             onPressed: () => ref.read(sessionsProvider.notifier).refresh(),
@@ -679,8 +686,14 @@ class _EmptyView extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             const Text(
-              'Start one from the desktop GUI; it will show up here.',
+              'Create a session on your connected desktop.',
               style: TextStyle(fontSize: 12, color: KillLaColors.textMuted),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () => context.push('/sessions/new'),
+              icon: const Icon(Icons.add),
+              label: const Text('New session'),
             ),
           ],
         ),
