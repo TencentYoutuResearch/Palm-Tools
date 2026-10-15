@@ -1028,12 +1028,20 @@
    * 用自定义 MIME 类型 `application/x-kode-file`,与 Finder 的 OS 级拖拽
    * (Tauri onDragDropEvent, dragDropEnabled:true)互不干扰。
    */
-  function onTreeDragStart(e: DragEvent, entry: WorkspaceEntry) {
+  function onTreeDragStart(e: DragEvent, entry: Pick<WorkspaceEntry, 'path'>) {
     if (!e.dataTransfer) return
     const rid = remoteId()
     e.dataTransfer.setData('application/x-kode-file', JSON.stringify({ path: entry.path, endpointId: rid }))
     e.dataTransfer.setData('text/plain', entry.path)
     e.dataTransfer.effectAllowed = 'copy'
+  }
+
+  function onGitFileDragStart(e: DragEvent, path: string) {
+    const root = snapshot?.git.root || cwd
+    const absolute = /^(?:\/|[A-Za-z]:[\\/])/.test(path)
+      ? path
+      : `${root.replace(/[\\/]$/, '')}/${path}`
+    onTreeDragStart(e, { path: absolute })
   }
 
   function formatBytes(size: number): string {
@@ -1431,6 +1439,8 @@
                                     class="commit-file-row"
                                     class:selected={selectedGitKey === `commit-file:${commit.hash}:${file.path}`}
                                     title={file.path}
+                                    draggable="true"
+                                    ondragstart={(e) => onGitFileDragStart(e, file.path)}
                                     onclick={() => previewCommitFile(commit, file)}
                                   >
                                     <span class="status-tag commit-file">{file.status.slice(0, 1)}</span>
@@ -1585,6 +1595,8 @@
           class="change-row"
           class:selected={selectedGitKey === `${change.bucket}:${change.path}`}
           title={change.path}
+          draggable="true"
+          ondragstart={(e) => onGitFileDragStart(e, change.path)}
           onclick={() => previewGit(change)}
         >
           <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>
@@ -1605,6 +1617,8 @@
           class="graph-change-row"
           class:selected={selectedGitKey === `${change.bucket}:${change.path}`}
           title={change.path}
+          draggable="true"
+          ondragstart={(e) => onGitFileDragStart(e, change.path)}
           onclick={() => previewGit(change)}
         >
           <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>

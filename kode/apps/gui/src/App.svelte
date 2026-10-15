@@ -743,10 +743,15 @@
     dragOver = true
   }
   function onMainDragLeave(e: DragEvent) {
-    if (e.currentTarget === e.target) dragOver = false
+    const bounds = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    if (e.clientX <= bounds.left || e.clientX >= bounds.right
+      || e.clientY <= bounds.top || e.clientY >= bounds.bottom) dragOver = false
   }
   function onOverlayDrop(e: DragEvent) {
+    const types = e.dataTransfer?.types ?? []
+    if (!types.includes('application/x-kode-file') && !types.includes('Files')) return
     e.preventDefault()
+    e.stopPropagation()
     dragOver = false
     const dt = e.dataTransfer
     if (!dt) return
@@ -760,7 +765,8 @@
         const { path, endpointId } = JSON.parse(raw) as { path: string; endpointId: string | null }
         const tabEp = tab.endpointId?.kind === 'remote' ? tab.endpointId.id : null
         if (endpointId !== tabEp) return
-        insertDroppedPaths([path], 'internal')
+        if (typeof path !== 'string' || !path) return
+        void insertWorkspaceReference(`@${path.replace(/[\u0000-\u001f\u007f]/g, ' ')} `)
       } catch {}
       return
     }
@@ -1843,7 +1849,7 @@
   </div>
 {/snippet}
 
-<svelte:window onkeydown={onKey} oncontextmenu={onContextMenu} onmessage={onSpecOpsMessage} onclick={onGlobalClick} />
+<svelte:window ondragend={() => { dragOver = false }} onkeydown={onKey} oncontextmenu={onContextMenu} onmessage={onSpecOpsMessage} onclick={onGlobalClick} />
 
 <div
   class="root"
@@ -1959,11 +1965,11 @@
     </div>
   </aside>
 
-  <main class="main" class:drag-over={dragOver} ondragover={onMainDragOver} ondragleave={onMainDragLeave}>
+  <main class="main" class:drag-over={dragOver} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
     <!-- 拖拽中覆盖终端区:捕获 drop 事件,防止 xterm.js 消费 -->
     {#if dragOver}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="drag-overlay" ondragover={(e) => e.preventDefault()} ondrop={onOverlayDrop} ondragleave={() => { dragOver = false }}></div>
+      <div class="drag-overlay" ondragover={(e) => e.preventDefault()}></div>
     {/if}
     <!-- 浮在终端区顶部的单条标题栏(与左侧红绿灯条同高 44px,同一水平线):
          hidden 时左侧补红绿灯 + 新建;中间居中蓝色标题/副标题;右侧 inspector 开关。 -->
