@@ -17,6 +17,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 
 import '../protocol/protocol.dart';
+import '../protocol/session_setup.dart';
 import 'gateway_session.dart';
 
 class ApiException implements Exception {
@@ -132,20 +133,69 @@ class ApiClient {
     return SessionDto.fromJson(resp.data as Map<String, dynamic>);
   }
 
-  Future<SessionDto> createSession({
-    required String backendKey,
-    String? cwd,
-    String? resumeSessionUuid,
+  static String newRequestId() => _idempotencyKey();
+
+  Future<BackendCatalogue> listBackends() async {
+    final resp = await _get('/api/v1/backends');
+    _check(resp);
+    return BackendCatalogue.fromJson(resp.data as Map<String, dynamic>);
+  }
+
+  Future<ModelCatalogue> listModels(String backendKey) async {
+    final resp = await _get(
+      '/api/v1/backends/${Uri.encodeComponent(backendKey)}/models',
+      options: Options(receiveTimeout: const Duration(seconds: 60)),
+    );
+    _check(resp);
+    return ModelCatalogue.fromJson(resp.data as Map<String, dynamic>);
+  }
+
+  Future<DirectoryListing> listDirectories({
+    String? path,
+    bool showHidden = false,
   }) async {
-    final resp = await _dio.post(
-      '/api/v1/sessions',
-      data: {
-        'backend_key': backendKey,
-        'cwd': ?cwd,
-        'resume_session_uuid': ?resumeSessionUuid,
+    final resp = await _get(
+      '/api/v1/fs/list',
+      queryParameters: {
+        if (path != null && path.isNotEmpty) 'path': path,
+        'show_hidden': showHidden,
       },
     );
     _check(resp);
+    return DirectoryListing.fromJson(resp.data as Map<String, dynamic>);
+  }
+
+  Future<SessionDto> createSession({
+    required String backendKey,
+    String? cwd,
+    String? model,
+    String? resumeSessionUuid,
+    String? permissionMode,
+    String? requestId,
+  }) async {
+    final resp = await _dio.post(
+      '/api/v1/sessions',
+      options: Options(
+        receiveTimeout: const Duration(seconds: 60),
+        headers: {'Idempotency-Key': requestId ?? _idempotencyKey()},
+      ),
+      data: {
+        'backend_key': backendKey,
+        'cwd': ?cwd,
+        'model': ?model,
+        'resume_session_uuid': ?resumeSessionUuid,
+        'permission_mode': ?permissionMode,
+      },
+    );
+    _check(resp);
+    if (resp.statusCode == 202) {
+      throw ApiException(
+        202,
+        'creation_unconfirmed',
+        resp.data['detail'] as String? ??
+            'Creation is still pending. Check again.',
+      );
+    }
     return SessionDto.fromJson(resp.data as Map<String, dynamic>);
   }
 
@@ -191,11 +241,20 @@ class ApiClient {
   Future<Response<dynamic>> _get(
     String path, {
     Map<String, dynamic>? queryParameters,
+    Options? options,
   }) async {
-    var response = await _dio.get(path, queryParameters: queryParameters);
+    var response = await _dio.get(
+      path,
+      queryParameters: queryParameters,
+      options: options,
+    );
     if (_gateway.isAioForbidden(response)) {
       await _gateway.ensureReady(refresh: true);
-      response = await _dio.get(path, queryParameters: queryParameters);
+      response = await _dio.get(
+        path,
+        queryParameters: queryParameters,
+        options: options,
+      );
     }
     return response;
   }
@@ -286,6 +345,17 @@ class ApiClient {
     );
   }
 
+  /// Change this session model and wait for the desktop execution receipt.
+  Future<void> setModel(int id, String model) async {
+    final resp = await _dio.post(
+      '/api/v1/sessions/$id/model',
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
+      data: {'model': model},
+    );
+    _check(resp);
+    await _waitForActionExecution(id, resp);
+  }
+
   /// 切换 codebuddy/claude 的 PermissionMode。
   /// mode ∈ {default, acceptEdits, bypassPermissions, plan}。
   /// bridge 通过发 Shift+Tab(`\x1b[Z`)字节给 PTY 触发 cycle,直到屏幕识别到目标 mode。
@@ -316,19 +386,14 @@ class ApiClient {
     String? cwd,
     String? resumeSessionUuid,
     String? permissionMode,
-  }) async {
-    final resp = await _dio.post(
-      '/api/v1/sessions',
-      data: {
-        'backend_key': backendKey,
-        'cwd': ?cwd,
-        'resume_session_uuid': ?resumeSessionUuid,
-        'permission_mode': ?permissionMode,
-      },
-    );
-    _check(resp);
-    return SessionDto.fromJson(resp.data as Map<String, dynamic>);
-  }
+    String? model,
+  }) => createSession(
+    backendKey: backendKey,
+    cwd: cwd,
+    resumeSessionUuid: resumeSessionUuid,
+    permissionMode: permissionMode,
+    model: model,
+  );
 
   /// 用户名密码换 JWT。Rust bridge 不实现 /login,此方法保留给未来 auth 扩展。
   Future<String> login(String username, String password) async {
