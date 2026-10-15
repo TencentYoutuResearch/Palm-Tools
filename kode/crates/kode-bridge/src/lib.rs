@@ -37,6 +37,7 @@ use tokio::sync::{broadcast, mpsc};
 pub mod acp;
 pub mod backend_probe;
 pub mod hook_relay;
+pub mod mobile_setup;
 pub mod semantic;
 
 pub use hook_relay::HookRelay;
@@ -739,6 +740,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
             post(post_plan_response),
         )
         .route("/api/v1/sessions/:id/mode", post(post_mode))
+        .route("/api/v1/sessions/:id/model", post(post_model))
         .route("/api/v1/sessions/:id/resize", post(post_resize))
         .route("/api/v1/shells", post(shell_spawn))
         .route("/api/v1/shells/:id", delete(shell_kill))
@@ -2010,6 +2012,41 @@ async fn post_mode(
     Ok(Json(ModeResp { mode, cycles }))
 }
 
+#[derive(Deserialize)]
+struct ModelReq {
+    model: String,
+}
+
+async fn post_model(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<SessionId>,
+    Json(req): Json<ModelReq>,
+) -> Result<Json<Value>, ApiError> {
+    set_session_model(&ctx, id, &req.model).await.map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"model":req.model})))
+}
+
+fn session_model_matches(requested: &str, actual: &str) -> bool {
+    if requested.eq_ignore_ascii_case(actual) { return true; }
+    let actual = actual.to_ascii_lowercase();
+    matches!(requested, "sonnet" | "opus" | "haiku")
+        && actual.starts_with("claude-")
+        && actual.split('-').any(|part| part == requested)
+}
+
+pub async fn set_session_model(ctx: &Ctx, id: SessionId, model: &str) -> Result<(), String> {
+    if model.is_empty() || model.len() > 200 || !model.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.:/[]".contains(&c)) {
+        return Err("Invalid model id".into());
+    }
+    if pending_interaction(ctx, id).is_some() {
+        return Err("Resolve the pending question or plan before switching models".into());
+    }
+    if let Some(client) = ctx.acp.get(id) {
+        return client.set_model(model).await;
+    }
+    model_switch::set_pty_model(ctx, id, model).await
+}
+
 pub async fn set_session_permission_mode(
     ctx: &Ctx,
     id: SessionId,
@@ -2472,12 +2509,14 @@ async fn fs_list(Query(q): Query<FsListQuery>) -> Result<Json<Value>, ApiError> 
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
+    let truncated = entries.len() > 160;
     entries.truncate(160);
     let parent = canonical.parent().map(|p| p.to_string_lossy().to_string());
     Ok(Json(json!({
         "path": canonical.to_string_lossy(),
         "parent": parent,
         "entries": entries,
+        "truncated": truncated,
     })))
 }
 
@@ -3562,6 +3601,7 @@ async fn memory_recent(
 }
 
 pub mod model_discovery;
+mod model_switch;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
