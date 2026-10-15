@@ -258,6 +258,11 @@ export function compactModelName(raw: string): string {
   }
 
   // --- DeepSeek ---
+  if (lower.startsWith('deepseek/deepseek-')) {
+    const model = lower.slice('deepseek/deepseek-'.length)
+    if (model === 'flash') return 'DS Flash'
+    return compactModelName(`deepseek-${model}`)
+  }
   if (lower.startsWith('deepseek')) {
     // deepseek-v4-pro-ioa → DS v4p
     const rest = lower.slice(9).replace(/^[-.]+/, '') // "v4-pro-ioa"
