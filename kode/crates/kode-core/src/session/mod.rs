@@ -526,6 +526,87 @@ impl Session {
         self.parser.screen().contents()
     }
 
+    /// Inspect the active input row, never a stale prompt higher in scrollback.
+    pub fn has_empty_model_command_prompt(&self) -> bool {
+        let screen = self.parser.screen();
+        let Some((row, col)) = self.model_command_prompt_position() else {
+            return false;
+        };
+        let line = screen
+            .rows(0, screen.size().1)
+            .nth(row as usize)
+            .unwrap_or_default();
+        if col > 4 {
+            return false;
+        }
+        let prefix = screen.rows(0, col).nth(row as usize).unwrap_or_default();
+        if !matches!(prefix.trim(), "❯" | "›" | ">" | "→") {
+            return false;
+        }
+        if matches!(line.trim(), "❯" | "›" | ">" | "→") {
+            return true;
+        }
+        if self.backend_key == "cursor"
+            && !matches!(
+                line.trim().strip_prefix("→ ").map(str::trim),
+                Some(
+                    "Plan, search, build anything"
+                        | "Add a follow-up"
+                        | "Add a follow-up — /plan to review and build"
+                )
+            )
+        {
+            return false;
+        }
+        // Native CLIs draw a dim placeholder at the insertion point. It is not
+        // a desktop draft. Inspect attributes, so a real draft with the cursor
+        // moved to Home is still rejected (even if its text equals a hint).
+        let mut hint = false;
+        for column in col..screen.size().1 {
+            let Some(cell) = screen.cell(row, column) else {
+                continue;
+            };
+            if cell.contents().trim().is_empty() {
+                continue;
+            }
+            // Cursor's software caret renders the first placeholder character
+            // at full brightness. The remaining hint must still be dim.
+            if self.backend_key == "cursor" && column == col {
+                continue;
+            }
+            if !cell.dim() {
+                return false;
+            }
+            hint = true;
+        }
+        hint
+    }
+
+    /// Cursor renders its own caret and parks the hardware cursor below the
+    /// footer. Other backends keep the hardware cursor in the composer.
+    pub fn model_command_prompt_position(&self) -> Option<(u16, u16)> {
+        let screen = self.parser.screen();
+        if self.backend_key != "cursor" {
+            return Some(screen.cursor_position());
+        }
+        let rows: Vec<_> = screen.rows(0, screen.size().1).collect();
+        let row = rows
+            .iter()
+            .rposition(|line| line.trim_start().starts_with("→ "))?;
+        // Only the bottom composer immediately above the native footer counts.
+        // Picker rows also start with →; their footer has navigation hints.
+        let footer = rows
+            .iter()
+            .skip(row + 1)
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if footer.len() != 2 || !footer[1].contains('·') {
+            return None;
+        }
+        let prefix = rows[row].chars().take_while(|c| c.is_whitespace()).count() + 2;
+        Some((row as u16, prefix as u16))
+    }
+
     /// vt100 当前屏幕的 ANSI 快照,**附带 DEC private mode 重放序列**。
     ///
     /// 背景:GUI 端 tab 切换走 LRU,非缓存 tab 的 xterm 实例会被 dispose,切回时
@@ -1422,6 +1503,61 @@ mod tests {
     }
 
     // ============== Session::feed UTF-8 拼接 ==============
+
+    #[test]
+    fn model_switch_requires_empty_active_prompt() {
+        let mut session = Session::structured(
+            1,
+            "codebuddy",
+            "codebuddy",
+            Path::new("/tmp"),
+            "test".into(),
+            "old".into(),
+        );
+        session.parser.process("❯ ".as_bytes());
+        assert!(session.has_empty_model_command_prompt());
+        session.parser.process(b"unfinished draft");
+        assert!(!session.has_empty_model_command_prompt());
+        session.parser.process("\r\n❯ ".as_bytes());
+        assert!(session.has_empty_model_command_prompt());
+        session.parser.process(b"\r\nSelect an option");
+        assert!(!session.has_empty_model_command_prompt());
+    }
+
+    #[test]
+    fn model_switch_accepts_native_placeholders_but_not_drafts_at_home() {
+        for (backend, prompt, placeholder) in [
+            ("codex", "›", "Ask Codex to do anything"),
+            ("tcodex", "›", "Find a bug in @filename"),
+            ("cursor", "→", "Add a follow-up"),
+            ("tclaude", "❯", "Try writing a test"),
+        ] {
+            let mut session = Session::structured(
+                1,
+                backend,
+                backend,
+                Path::new("/tmp"),
+                "test".into(),
+                "old".into(),
+            );
+            let tail = if backend == "cursor" {
+                "\r\n\r\nGrok 4.7 High\r\n/tmp · main\r\n"
+            } else {
+                "\r\x1b[2C"
+            };
+            session
+                .parser
+                .process(format!("{prompt} \x1b[2m{placeholder}\x1b[0m{tail}").as_bytes());
+            assert!(session.has_empty_model_command_prompt(), "{backend}");
+            session
+                .parser
+                .process(format!("\x1b[2J\x1b[H{prompt} {placeholder}{tail}").as_bytes());
+            assert!(
+                !session.has_empty_model_command_prompt(),
+                "real draft: {backend}"
+            );
+        }
+    }
 
     #[test]
     fn codex_idle_redraw_preserves_idle_and_unread() {
