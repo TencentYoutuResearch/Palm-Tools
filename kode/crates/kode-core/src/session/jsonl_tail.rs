@@ -381,6 +381,50 @@ impl LineUpdate {
     }
 }
 
+async fn wait_for_transcript(
+    current_path: &mut PathBuf,
+    evt_tx: &mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: &mut Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+) -> std::io::Result<Option<File>> {
+    loop {
+        if evt_tx.is_closed()
+            || retarget_rx
+                .as_ref()
+                .is_some_and(|rx| rx.has_changed().is_err())
+        {
+            return Ok(None);
+        }
+        if let Some(rx) = retarget_rx.as_mut() {
+            if let Some(path) = rx.borrow_and_update().clone() {
+                *current_path = path;
+            }
+        }
+        match File::open(&*current_path).await {
+            Ok(file) => return Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        // Wrapped CLIs may not create the transcript until their first request.
+        // The session's binding sender, not a startup timeout, owns this wait.
+        if let Some(rx) = retarget_rx.as_mut() {
+            tokio::select! {
+                _ = evt_tx.closed() => return Ok(None),
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return Ok(None);
+                    }
+                }
+                _ = sleep(Duration::from_millis(500)) => {}
+            }
+        } else {
+            tokio::select! {
+                _ = evt_tx.closed() => return Ok(None),
+                _ = sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+}
+
 async fn run(
     id: SessionId,
     backend: Backend,
@@ -390,20 +434,8 @@ async fn run(
 ) -> std::io::Result<()> {
     let mut current_path = path.to_path_buf();
 
-    // 1. 等文件出现(最长 30 秒)
-    let mut attempts = 0;
-    let file = loop {
-        match File::open(&current_path).await {
-            Ok(f) => break f,
-            Err(_) if attempts < 60 => {
-                attempts += 1;
-                sleep(Duration::from_millis(500)).await;
-            }
-            Err(e) => return Err(e),
-        }
-        if evt_tx.is_closed() {
-            return Ok(());
-        }
+    let Some(file) = wait_for_transcript(&mut current_path, evt_tx, &mut retarget_rx).await? else {
+        return Ok(());
     };
 
     let mut reader = BufReader::new(file);
@@ -433,6 +465,13 @@ async fn run(
     let mut last_codex_name_check = Instant::now() - Duration::from_secs(2);
 
     loop {
+        if evt_tx.is_closed()
+            || retarget_rx
+                .as_ref()
+                .is_some_and(|rx| rx.has_changed().is_err())
+        {
+            return Ok(());
+        }
         // 优先消费权威 retarget 信号(SessionStart hook 给出的 transcript_path):
         // codebuddy `/resume` `/clear` 在进程内切换 session 时,hook 会发新文件路径,
         // 据此把 tail 精确切到正确文件(取代历史靠 mtime 猜"最新 /clear 文件"的盲扫)。
@@ -1506,6 +1545,80 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[tokio::test]
+    async fn tclaude_delayed_transcript_reports_model_after_old_startup_deadline() {
+        let root = tempfile_dir("kode_tclaude_delayed");
+        let path = root.join("11111111-1111-4111-8111-111111111111.jsonl");
+        let (events, mut rx) = mpsc::unbounded_channel();
+        let (binding_tx, binding_rx) = tokio::sync::watch::channel(None);
+        let task_path = path.clone();
+        let task = tokio::spawn(async move {
+            run(71, Backend::Tclaude, &task_path, &events, Some(binding_rx)).await
+        });
+        // No real CLI is invoked. Exceed the former 30-second retry deadline.
+        sleep(Duration::from_secs(31)).await;
+        assert!(!task.is_finished());
+        fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"deepseek/deepseek-flash\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n",
+        ).unwrap();
+        let model = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(CoreEvent::JsonlMeta {
+                    model: Some(model), ..
+                }) = rx.recv().await
+                {
+                    break model;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(model, "deepseek/deepseek-flash");
+        drop(binding_tx);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn transcript_wait_stops_on_session_close_and_accepts_exact_rebinding() {
+        let root = tempfile_dir("kode_transcript_wait");
+        let missing = root.join("missing.jsonl");
+        let target = root.join("bound.jsonl");
+        fs::write(&target, "").unwrap();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let (binding_tx, binding_rx) = tokio::sync::watch::channel(None);
+        let mut path = missing.clone();
+        let mut binding = Some(binding_rx);
+        binding_tx.send(Some(target.clone())).unwrap();
+        assert!(wait_for_transcript(&mut path, &events, &mut binding)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(path, target);
+        let (binding_tx, binding_rx) = tokio::sync::watch::channel(None);
+        let mut binding = Some(binding_rx);
+        drop(binding_tx);
+        assert!(
+            wait_for_transcript(&mut missing.clone(), &events, &mut binding)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (events, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        assert!(
+            wait_for_transcript(&mut missing.clone(), &events, &mut None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn codebuddy_slug_strips_leading_slash_and_replaces_seps() {
         let p = PathBuf::from("/Users/tester/Projects/example/kode");

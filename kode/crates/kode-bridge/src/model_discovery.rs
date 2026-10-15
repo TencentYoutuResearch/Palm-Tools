@@ -399,6 +399,20 @@ async fn discover_cursor(backend: &str, command: &str) -> Result<ModelDiscoveryR
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn t_cli_model_discovery_routes_to_compatible_protocols() {
+        // Capability probes use local fixtures, never an installed AI CLI.
+        // tclaude requires its account catalogue, not upstream aliases.
+        let claude = discover_models("tclaude", "/bin/echo").await.unwrap_err();
+        assert!(claude.contains("did not report its available models"));
+        let missing = std::env::temp_dir().join(format!("missing-tcodex-{}", uuid::Uuid::new_v4()));
+        let codex = discover_models("tcodex", missing.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(codex.starts_with("cannot start"));
+        assert!(!codex.contains("not supported"));
+    }
+
     #[test]
     fn cursor_catalogue_preserves_variants_and_default() {
         let models = parse_cursor_models("Available models\n\nauto - Auto (default)\ngrok-4.7-high-fast - Grok 4.7 High Fast (current)\nTip: use --model <id> to switch.");
