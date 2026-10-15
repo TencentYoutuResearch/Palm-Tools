@@ -14,6 +14,7 @@ library;
 
 import 'dart:async';
 import 'acp_form_card.dart';
+import 'session_model_sheet.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -82,6 +83,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   /// 当前 PermissionMode(server 推 session.mode_changed 事件 → 这里更新)。
   /// null = 还不知道(刚连上 / 子进程还在 init);UI 显灰色 chip。
   String? _mode;
+  bool _modelBusy = false;
   bool _modeBusy = false; // POST /mode in flight
   bool _interrupting = false;
   bool _permissionMenuOpen = false;
@@ -325,7 +327,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     _lastTs = env.ts > _lastTs ? env.ts : _lastTs;
     switch (env.type) {
       case 'meta':
-        _meta = {..._meta, ...env.payload};
+        _meta = {
+          ..._meta,
+          for (final entry in env.payload.entries)
+            if (entry.value != null) entry.key: entry.value,
+        };
         break;
       case 'message':
         final messageId = env.payload['id'] as String?;
@@ -543,6 +549,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   }
 
   Future<void> _send() async {
+    if (_modelBusy) return;
     if (ref.read(sessionAttentionProvider)[widget.sessionId] != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -732,6 +739,42 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
       );
   }
 
+  Future<void> _chooseModel(String backendKey, String currentModel) async {
+    if (_modelBusy) return;
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    setState(() => _modelBusy = true);
+    try {
+      final selected = await showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => SessionModelSheet(
+          currentModel: currentModel,
+          load: () => api.listModels(backendKey),
+        ),
+      );
+      if (!mounted ||
+          selected == null ||
+          selected == currentModel ||
+          !identical(api, ref.read(apiClientProvider))) {
+        return;
+      }
+      await api.setModel(widget.sessionId, selected);
+      if (!mounted || !identical(api, ref.read(apiClientProvider))) return;
+      // Model metadata arrives from the desktop; never replace it with an alias.
+      ref.invalidate(sessionsProvider);
+    } catch (error) {
+      if (mounted && identical(api, ref.read(apiClientProvider))) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Model switch failed: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _modelBusy = false);
+    }
+  }
+
   Future<void> _switchMode(String desired) async {
     if (_modeBusy) return;
     if (_mode == desired) return;
@@ -783,7 +826,6 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
         (queues) => queues[widget.sessionId] ?? const [],
       ),
     );
-    final hasHeaderMeta = model.isNotEmpty || tokens > 0 || ctxPct != null;
     // 当前 session 是否仍需用户操作(prompt 还没解除)
     final attentionKind = ref.watch(
       sessionAttentionProvider.select((m) => m[widget.sessionId]),
@@ -847,12 +889,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                   ),
                 ],
               ),
-              if (hasHeaderMeta)
-                _SessionHeaderMeta(
-                  model: model,
-                  tokens: tokens,
-                  contextPct: ctxPct,
-                ),
+              _SessionHeaderMeta(tokens: tokens, contextPct: ctxPct),
               if (attentionKind != null) _AttentionBanner(kind: attentionKind),
             ],
           ),
@@ -865,6 +902,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
             child: _buildInput(
               backendIdentity(backendKey).label,
               working: sessionStatus == 'busy',
+              model: model,
+              onModelTap: sessionStatus == 'idle' && !_modelBusy
+                  ? () => _chooseModel(backendKey, model)
+                  : null,
             ),
           ),
           jumpToLatest: _showScrollToBottom
@@ -1038,7 +1079,12 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     }).toList();
   }
 
-  Widget _buildInput(String backendLabel, {required bool working}) {
+  Widget _buildInput(
+    String backendLabel, {
+    required bool working,
+    required String model,
+    VoidCallback? onModelTap,
+  }) {
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: _inputCtrl,
       builder: (context, value, _) {
@@ -1142,7 +1188,51 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                                   onOpened: _openPermissionMenu,
                                   onCanceled: _closePermissionMenu,
                                 ),
-                                const Spacer(),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Tooltip(
+                                    message: model.isEmpty
+                                        ? 'Choose model'
+                                        : model,
+                                    child: TextButton(
+                                      key: const ValueKey(
+                                        'session-composer-model',
+                                      ),
+                                      onPressed: onModelTap,
+                                      style: TextButton.styleFrom(
+                                        minimumSize: const Size(0, 44),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              model.isEmpty ? 'Model' : model,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 4),
+                                          if (_modelBusy)
+                                            const SizedBox(
+                                              width: 14,
+                                              height: 14,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          else
+                                            const Icon(
+                                              Icons.expand_more_rounded,
+                                              size: 16,
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
                                 _ComposerIconButton(
                                   icon: _listening
                                       ? Icons.stop_rounded
@@ -1407,15 +1497,10 @@ class _SessionHeaderTitle extends StatelessWidget {
 }
 
 class _SessionHeaderMeta extends StatelessWidget {
-  final String model;
   final int tokens;
   final double? contextPct;
 
-  const _SessionHeaderMeta({
-    required this.model,
-    required this.tokens,
-    required this.contextPct,
-  });
+  const _SessionHeaderMeta({required this.tokens, required this.contextPct});
 
   @override
   Widget build(BuildContext context) {
@@ -1427,22 +1512,13 @@ class _SessionHeaderMeta extends StatelessWidget {
         : contextPct! >= 50
         ? KillLaColors.warning
         : colors.onSurfaceVariant;
+    if (tokens <= 0 && contextPct == null) return const SizedBox.shrink();
     return Container(
       height: 28,
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(12, 0, 10, 0),
       child: Row(
         children: [
-          if (model.isNotEmpty)
-            Expanded(
-              flex: 3,
-              child: _HeaderMetaValue(
-                icon: Icons.memory_rounded,
-                text: model,
-                tooltip: model,
-                color: KillLaColors.warning,
-              ),
-            ),
           if (tokens > 0) ...[
             const SizedBox(width: 10),
             _HeaderMetaValue(
@@ -1468,13 +1544,11 @@ class _SessionHeaderMeta extends StatelessWidget {
 class _HeaderMetaValue extends StatelessWidget {
   final IconData icon;
   final String text;
-  final String? tooltip;
   final Color color;
 
   const _HeaderMetaValue({
     required this.icon,
     required this.text,
-    this.tooltip,
     required this.color,
   });
 
@@ -1500,9 +1574,7 @@ class _HeaderMetaValue extends StatelessWidget {
         ),
       ],
     );
-    return tooltip == null
-        ? content
-        : Tooltip(message: tooltip!, child: content);
+    return content;
   }
 }
 
