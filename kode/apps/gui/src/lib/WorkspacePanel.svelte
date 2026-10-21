@@ -1,5 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte'
+  import RenameDialog from './RenameDialog.svelte'
+  import ConfirmDialog from './ConfirmDialog.svelte'
+  import { pushToast } from './toast'
+  import { workspaceFiles, type WorkspaceFileEdit } from './ipc'
+  import { workspaceDropTarget } from './workspace_drop'
+  import { open } from '@tauri-apps/plugin-dialog'
   import { currentLocale, t } from './i18n'
   import { renderWorkspaceMarkdown, workspaceDiagrams } from './workspace_markdown'
   import { findPreviewRanges, revealPreviewRange } from './preview_find'
@@ -116,6 +122,113 @@
     subtitle: '',
     content: '',
   })
+
+  const fileLabels = $derived.by(() => {
+    $currentLocale
+    return Object.fromEntries(['newFile', 'newFolder', 'importFiles', 'importFolders', 'rename', 'delete', 'cancel', 'copySelection', 'copied', 'failed', 'done', 'busy', 'nameHint', 'nameError', 'dropHint', 'more', 'differentEndpoint'].map(key => [key, t(`workspace.files.${key}`)]))
+  })
+  let fileBusy = $state(false)
+  let fileError = $state('')
+  let nameDialog = $state<{ request: WorkspaceFileEdit; endpoint: string | null; title: string; initial: string; key: string | null } | null>(null)
+  let deleteDialog = $state<{ request: WorkspaceFileEdit; endpoint: string | null; key: string | null } | null>(null)
+  let nameError = $state('')
+  let selectedText = $state('')
+
+  $effect(() => {
+    workspaceKeyFor(tab)
+    nameDialog = null; deleteDialog = null; fileError = ''; selectedText = ''
+  })
+
+  function targetDirectory(entry?: WorkspaceEntry | null) {
+    return entry?.is_dir ? entry.path : entry ? entry.path.replace(/[\\/][^\\/]+$/, '') : cwd
+  }
+  function beginEdit(action: 'new_file' | 'new_folder' | 'rename', entry?: WorkspaceEntry | null) {
+    if (fileBusy || !cwd) return
+    contextMenu = null
+    nameError = ''
+    nameDialog = {
+      request: { root: cwd, action, path: action === 'rename' ? entry!.path : targetDirectory(entry) },
+      endpoint: remoteId(), key: workspaceKeyFor(tab),
+      title: action === 'rename' ? fileLabels.rename : action === 'new_file' ? fileLabels.newFile : fileLabels.newFolder,
+      initial: action === 'rename' ? entry!.name : '',
+    }
+  }
+  async function performEdit(request: WorkspaceFileEdit, endpoint: string | null, key: string | null) {
+    fileBusy = true; fileError = ''
+    try {
+      const paths = await workspaceFiles.edit(request, endpoint)
+      if (key !== workspaceKeyFor(tab)) return
+      ++filePreviewGeneration
+      if (request.action === 'delete' || request.action === 'rename') {
+        preview = emptyPreview()
+        expandedPaths = new Set([...expandedPaths].filter(p => p !== request.path && !p.startsWith(request.path + '/')))
+      }
+      childrenByPath = {}
+      filterQuery = ''
+      selectedPath = paths[0] ?? ''
+      await refresh()
+      await refreshExpanded()
+      pushToast({ severity: 'success', title: fileLabels.done })
+    } catch (e) {
+      if (key === workspaceKeyFor(tab)) fileError = String(e)
+      pushToast({ severity: 'error', title: fileLabels.failed, detail: String(e) })
+      throw e
+    } finally { fileBusy = false }
+  }
+  async function submitName(name: string) {
+    const dialog = nameDialog
+    if (!dialog || fileBusy) return
+    if (!name.trim() || name === '.' || name === '..' || /[\\/:\x00-\x1f]/.test(name)) { nameError = fileLabels.nameError; return }
+    try {
+      await performEdit({ ...dialog.request, name }, dialog.endpoint, dialog.key)
+      if (nameDialog === dialog) nameDialog = null
+    } catch (e) { if (nameDialog === dialog) nameError = String(e) }
+  }
+  function beginDelete(entry: WorkspaceEntry) {
+    if (fileBusy) return
+    contextMenu = null
+    deleteDialog = { request: { root: cwd, path: entry.path, action: 'delete' }, endpoint: remoteId(), key: workspaceKeyFor(tab) }
+  }
+  async function importPaths(paths: string[], directory = cwd, external = true) {
+    if (fileBusy || !paths.length) return
+    const endpoint = remoteId(), key = workspaceKeyFor(tab), root = cwd
+    fileBusy = true; fileError = ''
+    try {
+      const sources = endpoint && external ? await ipc.uploadRemoteAttachments(endpoint, paths) : paths
+      await performEdit({ root, path: directory, action: 'import', sources }, endpoint, key)
+    } catch (e) { if (key === workspaceKeyFor(tab)) fileError = String(e) }
+    finally { fileBusy = false }
+  }
+  async function chooseImport(directory: boolean) {
+    const key = workspaceKeyFor(tab), target = cwd
+    try {
+      const paths = await open({ multiple: true, directory })
+      if (paths && key === workspaceKeyFor(tab)) await importPaths(Array.isArray(paths) ? paths : [paths], target)
+    } catch (e) {
+      if (key === workspaceKeyFor(tab)) fileError = String(e)
+    }
+  }
+  function htmlDrop(event: DragEvent) {
+    event.preventDefault(); event.stopPropagation()
+    const raw = event.dataTransfer?.getData('application/x-kode-file')
+    if (!raw) return
+    try {
+      const source = JSON.parse(raw)
+      if (source.endpointId !== remoteId()) { fileError = fileLabels.differentEndpoint; return }
+      const target = (event.target as HTMLElement).closest<HTMLElement>('[data-drop-directory]')?.dataset.dropDirectory ?? cwd
+      void importPaths([source.path], target, false)
+    } catch (e) { fileError = String(e) }
+  }
+  function updateSelection() {
+    const selection = window.getSelection()
+    selectedText = selection && previewPane?.contains(selection.anchorNode) && previewPane?.contains(selection.focusNode) ? selection.toString() : ''
+  }
+  async function copyText(text: string) {
+    if (!text) return
+    try { await workspaceFiles.copyText(text); pushToast({ severity: 'success', title: fileLabels.copied }) }
+    catch (e) { pushToast({ severity: 'error', title: fileLabels.failed, detail: String(e) }) }
+    previewContextMenu = null
+  }
 
   const previewCopy = $derived.by(() => {
     $currentLocale
@@ -585,6 +698,7 @@
   async function refreshExpanded() {
     const rid = remoteId()
     const paths = [...expandedPaths]
+    const workspace = workspaceKeyFor(tab)
     if (paths.length === 0) return
     await Promise.all(
       paths.map(async (p) => {
@@ -592,7 +706,7 @@
           const children = rid
             ? await endpointIpc.workspaceListDir(rid, p, showHidden)
             : await ipc.workspaceListDir(p, showHidden)
-          childrenByPath = { ...childrenByPath, [p]: children }
+          if (workspace === workspaceKeyFor(tab)) childrenByPath = { ...childrenByPath, [p]: children }
         } catch {
           /* 单个目录失败时保留旧 children,不阻塞其它目录 */
         }
@@ -626,7 +740,7 @@
     selectedPath = entry.path
     contextMenu = {
       x: Math.min(event.clientX, window.innerWidth - 218),
-      y: Math.min(event.clientY, window.innerHeight - 142),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 310)),
       entry,
     }
   }
@@ -650,7 +764,7 @@
     const selection = window.getSelection()
     const selectedText = selection && selection.rangeCount > 0
       && root.contains(selection.anchorNode) && root.contains(selection.focusNode)
-      ? selection.toString().trim()
+      ? selection.toString()
       : ''
     const anchorLine = selectedText
       ? lineFromSelectionPoint(root, selection?.anchorNode ?? null, selection?.anchorOffset ?? 0)
@@ -662,7 +776,7 @@
     event.stopPropagation()
     previewContextMenu = {
       x: Math.min(event.clientX, window.innerWidth - 218),
-      y: Math.min(event.clientY, window.innerHeight - (selectedText ? 82 : 46)),
+      y: Math.min(event.clientY, window.innerHeight - (selectedText ? 120 : 46)),
       path: preview.path,
       selection: selectedText,
       startLine: anchorLine == null || focusLine == null ? null : Math.min(anchorLine, focusLine),
@@ -1128,6 +1242,8 @@
   </div>
 {/snippet}
 
+<svelte:document onselectionchange={updateSelection} />
+
 <svelte:window
   onclick={() => { contextMenu = null; previewContextMenu = null }}
   onkeydown={(e) => {
@@ -1142,6 +1258,12 @@
   style="--nav-w:{navWidth}px"
   aria-label="Workspace inspector"
   onkeydown={(event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+      const selection = window.getSelection()
+      if (selection?.toString() && (event.currentTarget as HTMLElement).contains(selection.anchorNode)) {
+        event.preventDefault(); event.stopPropagation(); void copyText(selection.toString()); return
+      }
+    }
     const target = event.target as HTMLElement
     if (!target.closest('input, textarea, [contenteditable="true"]')) previewKeydown(event)
   }}
@@ -1209,6 +1331,10 @@
             {#if preview.subtitle}<span>{preview.subtitle}</span>{/if}
           </div>
           <div class="preview-actions">
+            {#if selectedText}
+              <button class="tool-btn" title={fileLabels.copySelection} aria-label={fileLabels.copySelection}
+                onpointerdown={(e) => e.preventDefault()} onclick={() => copyText(selectedText)}><Icon name="copy" size={14} /></button>
+            {/if}
             {#if preview.truncated}<em>truncated</em>{/if}
             {#if canFind}
               <button class="tool-btn" title={previewCopy.findShortcut} aria-label={previewCopy.find} onclick={openFind}>
@@ -1315,7 +1441,20 @@
         {/if}
 
         {#if activePanel === 'files'}
-          <section class="list-pane" aria-label="Files">
+          <div class="file-toolbar">
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.newFile} aria-label={fileLabels.newFile} onclick={() => beginEdit('new_file')}><Icon name="file-text" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.newFolder} aria-label={fileLabels.newFolder} onclick={() => beginEdit('new_folder')}><Icon name="folder" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.importFiles} aria-label={fileLabels.importFiles} onclick={() => chooseImport(false)}><Icon name="plus" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.importFolders} aria-label={fileLabels.importFolders} onclick={() => chooseImport(true)}><Icon name="folder-open" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !findEntryByPath(selectedPath)} title={fileLabels.more} aria-label={fileLabels.more} onclick={(e) => { const entry = findEntryByPath(selectedPath); if (entry) openContextMenu(e, entry) }}><Icon name="pencil" size={14} /></button>
+          </div>
+          {#if fileBusy || fileError}<p class="strip-msg" class:error={!!fileError} role="status">{fileError || fileLabels.busy}</p>{/if}
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <section class="list-pane" aria-label="Files" data-workspace-files data-drop-directory={cwd}
+            title={fileLabels.dropHint} aria-busy={fileBusy}
+            use:workspaceDropTarget={(drop) => { void importPaths(drop.paths, drop.directory) }}
+            ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy' }}
+            ondrop={htmlDrop}>
             {#if snapshot && snapshot.entries.length === 0 && !filterQuery.trim()}
               <p class="muted pad">No files</p>
             {:else if snapshot && filterQuery.trim()}
@@ -1399,12 +1538,12 @@
                         class:selected={selectedGitKey === `commit:${commit.hash}`}
                         aria-expanded={expandedGraphKey === `commit:${commit.hash}`}
                         title={`${commit.hash} ${commit.subject}`}
-                        onclick={() => toggleCommit(commit)}
+                        onclick={(event) => { if (!(event.target as HTMLElement).closest('.selectable-title') && !window.getSelection()?.toString()) toggleCommit(commit) }}
                       >
                         {@render graphRail(graph, (commit.parents ?? []).length > 1)}
                         <span class="graph-content">
                           <span class="graph-main">
-                            <strong>{commit.subject || '(no subject)'}</strong>
+                            <strong class="selectable-title">{commit.subject || '(no subject)'}</strong>
                           </span>
                           {#if (commit.decorations ?? []).length > 0}
                             <span class="ref-chips">
@@ -1500,6 +1639,10 @@
           <Icon name="external-link" size={13} /> Open with app
         </button>
       {/if}
+      <button role="menuitem" disabled={fileBusy} onclick={() => beginEdit('new_file', contextMenu!.entry)}><Icon name="file-text" size={13} />{fileLabels.newFile}</button>
+      <button role="menuitem" disabled={fileBusy} onclick={() => beginEdit('new_folder', contextMenu!.entry)}><Icon name="folder" size={13} />{fileLabels.newFolder}</button>
+      <button role="menuitem" disabled={fileBusy} onclick={() => beginEdit('rename', contextMenu!.entry)}><Icon name="pencil" size={13} />{fileLabels.rename}</button>
+      <button role="menuitem" class="danger-action" disabled={fileBusy} onclick={() => beginDelete(contextMenu!.entry)}><Icon name="trash-2" size={13} />{fileLabels.delete}</button>
       {#if onReference}
         <button role="menuitem" onclick={() => referencePath(contextMenu!.entry.path)}>
           <Icon name="link" size={13} /> Add reference to conversation
@@ -1518,6 +1661,7 @@
       onkeydown={(e) => e.stopPropagation()}
     >
       {#if previewContextMenu.selection}
+        <button role="menuitem" onclick={() => copyText(previewContextMenu!.selection)}><Icon name="copy" size={13} />{fileLabels.copySelection}</button>
         <button role="menuitem" onclick={referencePreviewSelection}>
           <Icon name="link" size={13} /> Ask about selection
         </button>
@@ -1528,6 +1672,15 @@
     </div>
   {/if}
 </aside>
+{#if nameDialog}
+  <RenameDialog initial={nameDialog.initial} title={nameDialog.title} submitLabel={nameDialog.title} cancelLabel={fileLabels.cancel} hint={fileLabels.nameHint} busy={fileBusy} error={nameError}
+    onSubmit={submitName} onClose={() => { if (!fileBusy) nameDialog = null }} />
+{/if}
+{#if deleteDialog}
+  <ConfirmDialog title={fileLabels.delete} message={t('workspace.files.deleteMessage', { path: deleteDialog.request.path })}
+    confirmLabel={fileLabels.delete} cancelLabel={fileLabels.cancel} danger
+    onClose={() => (deleteDialog = null)} onConfirm={() => { const target = deleteDialog!; deleteDialog = null; void performEdit(target.request, target.endpoint, target.key).catch(() => {}) }} />
+{/if}
 
 {#snippet searchHits(entries: WorkspaceEntry[])}
   <div class="tree-group">
@@ -1536,6 +1689,7 @@
         class="tree-row search-row"
         class:selected={selectedPath === entry.path}
         title={entry.path}
+        data-drop-directory={entry.is_dir ? entry.path : undefined}
         draggable="true"
         onclick={() => onEntryClick(entry)}
         oncontextmenu={(e) => openContextMenu(e, entry)}
@@ -1560,6 +1714,7 @@
         class:selected={selectedPath === entry.path}
         style={`--depth:${depth}`}
         title={entry.path}
+        data-drop-directory={entry.is_dir ? entry.path : undefined}
         draggable="true"
         onclick={() => onEntryClick(entry)}
         oncontextmenu={(e) => openContextMenu(e, entry)}
@@ -1631,6 +1786,12 @@
 {/snippet}
 
 <style>
+  .context-menu .danger-action { color: var(--st-err); border-top: 1px solid var(--bd-default); }
+  .file-toolbar { display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--bd-default); }
+  :global(.workspace-drop-active) { outline: 2px solid var(--acc); outline-offset: -2px; background: var(--acc-soft) !important; }
+  .selectable-title { user-select: text; -webkit-user-select: text; cursor: text; }
+  .context-menu { max-height: calc(100vh - 24px); overflow-y: auto; }
+
   .workspace-panel {
     height: 100%;
     min-height: 0;

@@ -45,6 +45,8 @@
     backends: BackendInfo[]
     /** Human-readable, recoverable start failure. Keep the chooser mounted so the user can retry. */
     errorMessage?: string | null
+    workspaceCwd?: string
+    workspaceEndpoint?: EndpointId
     /// 提交回调。
     /// quick-pick(1..9 数字键)时 cwd 仍是预填的默认,permissionMode = 'default',model = undefined。
     onSubmit: (opts: {
@@ -59,7 +61,13 @@
       resumeSessionId?: string
     }) => void | Promise<void>
   }
-  let { backends, onSubmit, errorMessage = null }: Props = $props()
+  let { backends, onSubmit, errorMessage = null, workspaceCwd, workspaceEndpoint }: Props = $props()
+
+  function workspacePathFor(ep: EndpointId): string | undefined {
+    const target = workspaceEndpoint ?? ENDPOINT_LOCAL
+    return ep.kind === target.kind && (ep.kind === 'local' || (target.kind === 'remote' && ep.id === target.id))
+      ? workspaceCwd : undefined
+  }
 
   type Phase = 'list' | 'configure'
   let phase: Phase = $state('list')
@@ -237,12 +245,17 @@
     try {
       const cfg = await ipc.getPathsConfig()
       defaultCwd = cfg.session_cwd ?? ''
-      cwd = defaultCwd
+      if (phase === 'list') cwd = workspaceCwd ?? defaultCwd
     } catch (e) {
       console.warn('getPathsConfig failed:', e)
     }
     // 拉远端 endpoints — 没有 endpoint 也没事,UI 这块不渲染。
     await refreshEndpoints()
+    if (workspaceEndpoint?.kind === 'remote') {
+      const targetId = workspaceEndpoint.id
+      const target = endpoints.find((ep) => ep.id === targetId)
+      if (target) await toggleEndpoint(target)
+    }
     endpointRefreshHandler = () => {
       void refreshEndpoints()
     }
@@ -265,7 +278,9 @@
 
     // 先同步给一个兜底值(Local 全局默认 cwd / Remote 协议返回的 default_cwd),
     // 避免输入框在异步查询期间闪一下上个 backend 遗留的 cwd。
-    cwd = ep.kind === 'local' ? defaultCwd : (initialCwd?.trim() ?? '')
+    const workspacePath = workspacePathFor(ep)
+    cwd = workspacePath ?? (ep.kind === 'local' ? defaultCwd : (initialCwd?.trim() ?? ''))
+    if (workspacePath !== undefined) return
 
     // cwd 预填优先级:该 endpoint bucket 最近用过的目录 > 上面的兜底值。
     // 历史按 bucket 隔离(本地 vs 各远端各自一份),跟 $effect 拉取下拉候选
@@ -299,6 +314,10 @@
 
   function quickStart(b: BackendInfo) {
     if (submitting) return
+    if (workspaceCwd !== undefined) {
+      void pickBackend(b, ENDPOINT_LOCAL)
+      return
+    }
     // 1..9 数字键直接启动:用全局默认 cwd / default mode / 不指定 model,跳过 Configure
     // **只对本地 backend 有效** — 远端 backend 没快捷键(也不预填 cwd)
     void submitOnce({
@@ -442,7 +461,7 @@
 
   function handleKey(e: KeyboardEvent) {
     if (phase === 'list') {
-      if (submitting) return
+      if (submitting || (workspaceCwd !== undefined && workspaceEndpoint?.kind === 'remote')) return
       // 数字键 1..9 quick pick — 仅对**本地 backends** 启用
       if (/^[1-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const i = Number(e.key) - 1
@@ -504,7 +523,11 @@
       </div>
       <p class="hint">
         {#if phase === 'list'}
+          {#if workspaceCwd !== undefined}
+            Choose a backend and model for <code>{workspaceCwd}</code>
+          {:else}
           Choose a backend, or press <kbd>1..9</kbd> to start with defaults
+          {/if}
         {:else if selectedEndpoint.kind === 'remote'}
           Set <strong>remote</strong> working directory (absolute path on the server) and start
         {:else}
@@ -523,6 +546,7 @@
 
     {#if phase === 'list'}
       <!-- ======================== Local backends ======================== -->
+      {#if workspaceCwd === undefined || workspaceEndpoint?.kind !== 'remote'}
       <h2 class="section">Local</h2>
       {#if backends.length === 0}
         <div class="empty">
@@ -554,10 +578,11 @@
       {/if}
 
       <!-- ======================== Remote endpoints ======================== -->
-      {#if endpoints.length > 0}
+      {/if}
+      {#if endpoints.length > 0 && (workspaceCwd === undefined || workspaceEndpoint?.kind === 'remote')}
         <h2 class="section">Remote</h2>
         <ul class="endpoints">
-          {#each endpoints as ep (ep.id)}
+          {#each endpoints.filter((ep) => workspaceCwd === undefined || (workspaceEndpoint?.kind === 'remote' && ep.id === workspaceEndpoint.id)) as ep (ep.id)}
             {@const st = remoteStates[ep.id]}
             <li class="endpoint">
               <button class="endpoint-row" onclick={() => toggleEndpoint(ep)}>

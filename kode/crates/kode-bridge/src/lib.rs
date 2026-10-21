@@ -752,6 +752,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/api/v1/model-usage", get(get_model_usage))
         .route("/api/v1/backends/:key/models", get(list_backend_models))
         .route("/api/v1/fs/list", get(fs_list))
+        .route("/api/v1/fs/edit", post(fs_edit))
         .route("/api/v1/fs/preview", get(fs_preview))
         .route("/api/v1/git/status", get(git_status))
         .route("/api/v1/git/diff", get(git_diff))
@@ -2803,6 +2804,7 @@ async fn git_commit_diff(
             "--no-pager",
             "show",
             "--format=fuller",
+            "--diff-merges=first-parent",
             "--stat",
             "--patch",
             "--no-ext-diff",
@@ -2840,6 +2842,7 @@ async fn git_commit_detail(
             "--no-pager",
             "show",
             "--format=%B%x1e",
+            "--diff-merges=first-parent",
             "--name-status",
             "--no-renames",
             commit,
@@ -2878,6 +2881,7 @@ async fn git_commit_file_diff(
             "--no-pager",
             "show",
             "--format=",
+            "--diff-merges=first-parent",
             "--patch",
             "--no-ext-diff",
             "--find-renames",
@@ -3625,3 +3629,9 @@ mod model_switch;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+async fn fs_edit(Json(request): Json<kode_core::workspace_files::FileEdit>) -> Result<Json<Vec<String>>, ApiError> {
+    tokio::task::spawn_blocking(move || kode_core::workspace_files::edit(request))
+        .await.map_err(|e| ApiError::BadRequest(e.to_string()))?
+        .map(Json).map_err(ApiError::BadRequest)
+}

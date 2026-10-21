@@ -1102,3 +1102,10 @@ mod tests {
         ));
     }
 }
+
+#[tauri::command]
+pub async fn endpoint_workspace_edit(id: String, request: kode_core::workspace_files::FileEdit, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let transport = lookup_remote_transport(&state, &id)?;
+    let result = transport.rest_post("/api/v1/fs/edit", serde_json::to_value(request).map_err(|e| e.to_string())?).await.map_err(|e| e.to_string())?;
+    serde_json::from_value(result).map_err(|e| e.to_string())
+}

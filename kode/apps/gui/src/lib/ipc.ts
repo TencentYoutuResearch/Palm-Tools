@@ -1351,3 +1351,17 @@ export const pluginIpc = {
 }
 export type ScreenshotDraft = { pngBase64: string; width: number; height: number }
 export type ScreenshotCrop = { x: number; y: number; width: number; height: number }
+
+export type WorkspaceFileEdit = {
+  root: string
+  path: string
+  action: 'new_file' | 'new_folder' | 'rename' | 'delete' | 'import'
+  name?: string
+  sources?: string[]
+}
+export const workspaceFiles = {
+  edit: (request: WorkspaceFileEdit, id?: string | null) => id
+    ? invoke<string[]>('endpoint_workspace_edit', { id, request })
+    : invoke<string[]>('workspace_edit', { request }),
+  copyText: (text: string) => invoke<void>('workspace_copy_text', { text }),
+}

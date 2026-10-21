@@ -314,6 +314,37 @@ impl RemoteTransport {
         })
     }
 
+    pub async fn rest_post(&self, path: &str, body: Value) -> Result<Value, RestError> {
+        let base = self.ensure_tunnel().await.map_err(|e| RestError {
+            status: None,
+            message: format!("ssh tunnel: {e}"),
+        })?;
+        let url = RemoteConfig::rest_url_for(&base, path);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.cfg.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| RestError {
+                status: None,
+                message: format!("rest_post {path}: {e}"),
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(RestError {
+                status: Some(status.as_u16()),
+                message: detail,
+            });
+        }
+        resp.json::<Value>().await.map_err(|e| RestError {
+            status: None,
+            message: format!("decode {path}: {e}"),
+        })
+    }
+
     pub async fn shell_spawn(&self, cwd: String, cols: u16, rows: u16) -> Result<u32, String> {
         let base = self.ensure_tunnel().await?;
         let url = RemoteConfig::rest_url_for(&base, "/api/v1/shells");

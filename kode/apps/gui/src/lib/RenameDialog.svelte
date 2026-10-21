@@ -5,14 +5,21 @@
    */
   import { onMount } from 'svelte'
   import { outsidePressClose } from './outside_close'
+  import { modalFocus } from './modal_focus'
 
   type Props = {
     initial: string
+    submitLabel?: string
+    cancelLabel?: string
+    title?: string
+    hint?: string
+    busy?: boolean
+    error?: string
     onSubmit: (next: string) => void
     onClose: () => void
   }
 
-  let { initial, onSubmit, onClose }: Props = $props()
+  let { initial, title = 'Rename tab', submitLabel = 'Save', cancelLabel = 'Cancel', hint = '↵ save · esc cancel', busy = false, error = '', onSubmit, onClose }: Props = $props()
 
   let value = $state('')
   $effect(() => { value = initial })
@@ -24,6 +31,7 @@
   })
 
   function onKey(e: KeyboardEvent) {
+    if (e.isComposing || busy) return
     if (e.key === 'Escape') {
       e.preventDefault()
       onClose()
@@ -36,25 +44,36 @@
   }
 </script>
 
-<div class="backdrop" use:outsidePressClose={{ onClose }} role="presentation">
-  <div class="dlg" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-    <div class="label">Rename tab</div>
+<div class="backdrop" use:outsidePressClose={{ onClose, disabled: busy }} role="presentation">
+  <div class="dlg" use:modalFocus onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
+    <label class="label" for="rename-value">{title}</label>
     <input
+      id="rename-value"
+      disabled={busy}
+      aria-invalid={!!error}
+      aria-describedby="rename-feedback"
       bind:this={inputEl}
       bind:value
       onkeydown={onKey}
       spellcheck="false"
       autocomplete="off"
     />
-    <div class="hint">
-      <kbd>↵</kbd> save
-      <span class="sep">·</span>
-      <kbd>esc</kbd> cancel
+    <div class="hint" id="rename-feedback" role="status">{error || hint}
+    </div>
+    <div class="actions">
+      <button disabled={busy} onclick={onClose}>{cancelLabel}</button>
+      <button disabled={busy || !value.trim()} onclick={() => onSubmit(value.trim())}>{submitLabel}</button>
     </div>
   </div>
 </div>
 
 <style>
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .actions button { border: 1px solid var(--bd-default); border-radius: var(--rad-md); padding: 6px 12px; background: var(--bg-input); color: var(--fg-primary); cursor: pointer; }
+  .actions button:hover { background: var(--bg-tab-hover); }
+  .actions button:focus-visible { outline: 2px solid var(--acc); }
+  .actions button:disabled { opacity: .5; cursor: default; }
+
   .backdrop {
     position: fixed;
     inset: 0;
@@ -88,6 +107,7 @@
     to { transform: translateY(0); opacity: 1; }
   }
   .label {
+    display: block;
     font-size: var(--fs-sm);
     color: var(--fg-secondary);
     margin-bottom: var(--sp-2);
@@ -111,26 +131,12 @@
     box-shadow: 0 0 0 3px var(--acc-soft);
   }
   .hint {
+    overflow-wrap: anywhere;
     margin-top: var(--sp-3);
     font-size: var(--fs-xs);
     color: var(--fg-tertiary);
     display: flex;
     align-items: center;
     gap: var(--sp-1);
-  }
-  .hint .sep { margin: 0 var(--sp-1); }
-  kbd {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    border-radius: 3px;
-    background: var(--bg-tab-hover);
-    color: var(--fg-secondary);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    border: 1px solid var(--bd-default);
   }
 </style>

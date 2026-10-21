@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { routeWorkspaceNativeDrop } from './lib/workspace_drop'
   /**
    * 主窗口:左侧栏(tab 列表) + 右侧 PTY 区 + 底部状态栏。
    *
@@ -128,6 +129,7 @@
   let renameOpen = $state(false)
   /** 显式弹出后端选择器(Cmd+T 触发,或主区域为空时常驻) */
   let chooserOpen = $state(false)
+  let chooserWorkspace = $state<WsGroup | null>(null)
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
   /** Phase 11.4 远端 endpoint 配置面板 */
@@ -497,6 +499,12 @@
     toggleCollapse(groupId)
   }
 
+  function createWorkspaceSession(group: WsGroup) {
+    chooserWorkspace = group
+    sessionStartError = null
+    chooserOpen = true
+  }
+
   /**
    * 切到某 tab 时,若其所在 workspace 被折叠,自动展开 —— active tab 永远可见。
    *
@@ -783,7 +791,8 @@
       'external',
     )
   }
-  function onNativeFileDrop(event: { payload: { type: string; paths?: string[] } }) {
+  function onNativeFileDrop(event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) {
+    if (routeWorkspaceNativeDrop(event.payload)) { dragOver = false; return }
     if (event.payload.type === 'enter' || event.payload.type === 'over') {
       dragOver = true
       return
@@ -1414,6 +1423,7 @@
     } else if (k === 't' || k === 'T') {
       e.preventDefault()
       sessionStartError = null
+      chooserWorkspace = null
       chooserOpen = true
     } else if (k === 'w' || k === 'W') {
       const id = $activeId
@@ -1875,7 +1885,7 @@
         class="icon-btn"
         title={tr('tab.action.newTabTooltip')}
         aria-label={tr('tab.action.newTab')}
-        onclick={() => { sessionStartError = null; chooserOpen = true }}
+        onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
       >
         <Icon name="plus" size={16} />
       </button>
@@ -1910,6 +1920,7 @@
           {#each wsShadows as group, gi (group.id)}
             <div class="ws-group" class:dragging={dragging} data-cwd={group.cwd} data-group-id={group.id}>
               {#if useGroupedLayout}
+                <div class="ws-group-heading">
                 <button
                   type="button"
                   class="ws-group-header"
@@ -1936,8 +1947,18 @@
                       <span class="ws-path">{group.pathHint}</span>
                     {/if}
                   </span>
-                  <span class="ws-count">{group.tabs.length}</span>
                 </button>
+                <button
+                  type="button"
+                  class="ws-create-session"
+                  title={`${tr('tab.action.newTab')} · ${group.fullPath || group.name}`}
+                  aria-label={`${tr('tab.action.newTab')} · ${group.fullPath || group.name}`}
+                  onclick={(event) => { event.stopPropagation(); void createWorkspaceSession(group) }}
+                >
+                  <span class="ws-count">{group.tabs.length}</span>
+                  <span class="ws-create-icon"><Icon name="plus" size={14} /></span>
+                </button>
+                </div>
               {:else if wsGrouped && gi > 0}
                 <!-- compact 多 workspace:组间细分隔线 -->
                 <div class="ws-group-separator" aria-hidden="true"></div>
@@ -1982,7 +2003,7 @@
           class="icon-btn hidden-fallback-add"
           title={tr('tab.action.newTabTooltip')}
           aria-label={tr('tab.action.newTab')}
-          onclick={() => { sessionStartError = null; chooserOpen = true }}
+          onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
         >
           <Icon name="plus" size={16} />
         </button>
@@ -2062,8 +2083,11 @@
       </div>
     {/if}
     {#if $tabs.length === 0 || chooserOpen}
+      {#key chooserWorkspace}
       <BackendChooser
         {backends}
+        workspaceCwd={chooserWorkspace?.tabs[0]?.cwd}
+        workspaceEndpoint={chooserWorkspace?.tabs[0]?.endpointId}
         errorMessage={sessionStartError}
         onSubmit={async (opts) => {
           try {
@@ -2083,6 +2107,7 @@
           }
         }}
       />
+      {/key}
     {/if}
     {#each $mountedIds as id (id)}
       {@const isActive = id === $activeId && !chooserOpen}
@@ -2800,13 +2825,17 @@
   }
 
   /* ===== workspace 分组 header ===== */
+  .ws-group-heading {
+    position: relative;
+    margin: 8px 1px 3px;
+  }
   .ws-group-header {
     display: flex;
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 6px 7px;
-    margin: 8px 1px 3px;
+    padding: 6px 39px 6px 7px;
+    margin: 0;
     border: 1px solid transparent;
     border-radius: var(--rad-md);
     background: transparent;
@@ -2882,7 +2911,36 @@
     font-weight: 500;
     line-height: 12px;
   }
-  .ws-group-header .ws-count {
+  .ws-create-session {
+    position: absolute;
+    right: 7px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
+    min-width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: var(--fg-secondary);
+    cursor: pointer;
+  }
+  .ws-create-session > span { grid-area: 1 / 1; }
+  .ws-create-icon { display: inline-flex; opacity: 0; }
+  .ws-group-heading:hover .ws-create-icon,
+  .ws-group-heading:focus-within .ws-create-icon { opacity: 1; }
+  .ws-group-heading:hover .ws-count,
+  .ws-group-heading:focus-within .ws-count { opacity: 0; }
+  .ws-create-session:hover { background: var(--bg-tab-hover); color: var(--fg-primary); }
+  .ws-create-session:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .ws-create-session:disabled { cursor: wait; opacity: 0.5; }
+  @media (hover: none) {
+    .ws-create-session .ws-create-icon { opacity: 1; }
+    .ws-create-session .ws-count { opacity: 0; }
+  }
+  .ws-create-session .ws-count {
     flex-shrink: 0;
     min-width: 16px;
     height: 16px;

@@ -172,6 +172,98 @@ fn create_session_sanitizes_requested_model() {
     assert_eq!(sanitize_requested_model(None), None);
 }
 
+#[tokio::test]
+async fn git_commit_views_include_clean_merge_changes() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-b", "fixture-main"]);
+    std::fs::write(root.join("base.txt"), "base\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "root"]);
+    let initial = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-b", "fixture-topic"]);
+    std::fs::write(root.join("topic.txt"), "topic change\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "topic"]);
+    let ordinary = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "fixture-main"]);
+    std::fs::write(root.join("main.txt"), "main change\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "main"]);
+    git(&["merge", "--no-ff", "fixture-topic", "-m", "merge topic"]);
+    let merged = git(&["rev-parse", "HEAD"]);
+    // A clean merge has no combined diff, but does change the first parent's tree.
+    assert!(git(&[
+        "show",
+        "--format=",
+        "--name-status",
+        "--diff-merges=combined",
+        &merged
+    ])
+    .is_empty());
+    git(&["config", "diff.merges", "combined"]);
+    let cwd = root.to_str().unwrap();
+    for (commit, file, added) in [
+        (initial.as_str(), "base.txt", "+base"),
+        (ordinary.as_str(), "topic.txt", "+topic change"),
+        (merged.as_str(), "topic.txt", "+topic change"),
+    ] {
+        let detail = git_commit_detail(Query(GitCommitDiffQuery {
+            cwd: cwd.into(),
+            commit: commit.into(),
+        }))
+        .await
+        .unwrap()
+        .0;
+        let full = git_commit_diff(Query(GitCommitDiffQuery {
+            cwd: cwd.into(),
+            commit: commit.into(),
+        }))
+        .await
+        .unwrap()
+        .0;
+        let single = git_commit_file_diff(Query(GitCommitFileDiffQuery {
+            cwd: cwd.into(),
+            commit: commit.into(),
+            path: file.into(),
+        }))
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(detail.files.len(), 1, "commit {commit}");
+        assert_eq!(detail.files[0].path, file);
+        assert_eq!(detail.files[0].status, "A");
+        assert!(full.content.contains(added), "{}", full.content);
+        assert!(single.content.contains(added), "{}", single.content);
+        assert!(!full.content.contains("diff --cc"));
+        assert!(!single.content.contains("diff --cc"));
+    }
+}
+
 #[test]
 fn git_history_helpers_parse_summary_additions() {
     let branches = parse_git_branches(

@@ -1738,5 +1738,59 @@
   "pairing.deploy.step.Done": { "message": "Create QR code" },
   "pairing.deploy.existingTitle": { "message": "Existing sync service" },
   "pairing.deploy.existingHint": { "message": "Enter its public HTTPS URL. A successful connection is saved as a switchable backend and immediately creates a QR code." },
-  "pairing.deploy.connectExisting": { "message": "Connect and create QR code" }
+  "pairing.deploy.connectExisting": { "message": "Connect and create QR code" },
+  "workspace.files.newFile": {
+    "message": "New file"
+  },
+  "workspace.files.newFolder": {
+    "message": "New folder"
+  },
+  "workspace.files.importFiles": {
+    "message": "Import files…"
+  },
+  "workspace.files.importFolders": {
+    "message": "Import folders…"
+  },
+  "workspace.files.rename": {
+    "message": "Rename"
+  },
+  "workspace.files.delete": {
+    "message": "Delete"
+  },
+  "workspace.files.cancel": {
+    "message": "Cancel"
+  },
+  "workspace.files.copySelection": {
+    "message": "Copy selection"
+  },
+  "workspace.files.copied": {
+    "message": "Copied to clipboard"
+  },
+  "workspace.files.failed": {
+    "message": "File operation failed"
+  },
+  "workspace.files.done": {
+    "message": "Files updated"
+  },
+  "workspace.files.busy": {
+    "message": "Updating files…"
+  },
+  "workspace.files.deleteMessage": {
+    "message": "Permanently delete {path}? Folders and their contents will be removed. This cannot be undone."
+  },
+  "workspace.files.nameHint": {
+    "message": "Enter a name. Enter to save · Esc to cancel"
+  },
+  "workspace.files.nameError": {
+    "message": "Enter a name without / or \\ path separators."
+  },
+  "workspace.files.dropHint": {
+    "message": "Drop files or folders here to copy into this directory"
+  },
+  "workspace.files.more": {
+    "message": "File actions"
+  },
+  "workspace.files.differentEndpoint": {
+    "message": "Copy between different endpoints is not supported."
+  }
 }
