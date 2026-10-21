@@ -1,4 +1,4 @@
-export type WorkspaceDrop = { paths: string[]; directory?: string }
+export type WorkspaceDrop = { paths: string[]; directory?: string; external?: boolean; endpointId?: string | null }
 export function workspaceDropTarget(node: HTMLElement, receive: (drop: WorkspaceDrop) => void) {
   const listener = (event: Event) => receive((event as CustomEvent<WorkspaceDrop>).detail)
   node.addEventListener('workspace-files-drop', listener)

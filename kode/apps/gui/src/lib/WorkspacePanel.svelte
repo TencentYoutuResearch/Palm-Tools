@@ -4,7 +4,8 @@
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { pushToast } from './toast'
   import { workspaceFiles, type WorkspaceFileEdit } from './ipc'
-  import { workspaceDropTarget } from './workspace_drop'
+  import { workspaceDropTarget, type WorkspaceDrop } from './workspace_drop'
+  import { workspaceFileDrag } from './workspace_drag'
   import { open } from '@tauri-apps/plugin-dialog'
   import { currentLocale, t } from './i18n'
   import { renderWorkspaceMarkdown, workspaceDiagrams } from './workspace_markdown'
@@ -1136,26 +1137,19 @@
     return formatBytes(entry.size ?? 0)
   }
 
-  /**
-   * 文件树行拖拽:把 path + endpointId 写进 dataTransfer,终端区 .main 的
-   * HTML5 drop handler 读取后注入 @<path> 到 active tab。
-   * 用自定义 MIME 类型 `application/x-kode-file`,与 Finder 的 OS 级拖拽
-   * (Tauri onDragDropEvent, dragDropEnabled:true)互不干扰。
-   */
-  function onTreeDragStart(e: DragEvent, entry: Pick<WorkspaceEntry, 'path'>) {
-    if (!e.dataTransfer) return
-    const rid = remoteId()
-    e.dataTransfer.setData('application/x-kode-file', JSON.stringify({ path: entry.path, endpointId: rid }))
-    e.dataTransfer.setData('text/plain', entry.path)
-    e.dataTransfer.effectAllowed = 'copy'
-  }
-
-  function onGitFileDragStart(e: DragEvent, path: string) {
+  function gitFileReference(path: string) {
     const root = snapshot?.git.root || cwd
     const absolute = /^(?:\/|[A-Za-z]:[\\/])/.test(path)
-      ? path
-      : `${root.replace(/[\\/]$/, '')}/${path}`
-    onTreeDragStart(e, { path: absolute })
+      ? path : `${root.replace(/[\\/]$/, '')}/${path}`
+    return { path: absolute, endpointId: remoteId() }
+  }
+
+  function receiveFileDrop(drop: WorkspaceDrop) {
+    if (drop.external === false && drop.endpointId !== remoteId()) {
+      fileError = fileLabels.differentEndpoint
+      return
+    }
+    void importPaths(drop.paths, drop.directory, drop.external !== false)
   }
 
   function formatBytes(size: number): string {
@@ -1452,7 +1446,7 @@
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <section class="list-pane" aria-label="Files" data-workspace-files data-drop-directory={cwd}
             title={fileLabels.dropHint} aria-busy={fileBusy}
-            use:workspaceDropTarget={(drop) => { void importPaths(drop.paths, drop.directory) }}
+            use:workspaceDropTarget={receiveFileDrop}
             ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy' }}
             ondrop={htmlDrop}>
             {#if snapshot && snapshot.entries.length === 0 && !filterQuery.trim()}
@@ -1578,8 +1572,8 @@
                                     class="commit-file-row"
                                     class:selected={selectedGitKey === `commit-file:${commit.hash}:${file.path}`}
                                     title={file.path}
-                                    draggable="true"
-                                    ondragstart={(e) => onGitFileDragStart(e, file.path)}
+                                    draggable="false"
+                                    use:workspaceFileDrag={gitFileReference(file.path)}
                                     onclick={() => previewCommitFile(commit, file)}
                                   >
                                     <span class="status-tag commit-file">{file.status.slice(0, 1)}</span>
@@ -1690,10 +1684,10 @@
         class:selected={selectedPath === entry.path}
         title={entry.path}
         data-drop-directory={entry.is_dir ? entry.path : undefined}
-        draggable="true"
+        draggable="false"
         onclick={() => onEntryClick(entry)}
         oncontextmenu={(e) => openContextMenu(e, entry)}
-        ondragstart={(e) => onTreeDragStart(e, entry)}
+        use:workspaceFileDrag={{ path: entry.path, endpointId: remoteId() }}
       >
         <span class="twisty"></span>
         <span class="file-icon">
@@ -1715,10 +1709,10 @@
         style={`--depth:${depth}`}
         title={entry.path}
         data-drop-directory={entry.is_dir ? entry.path : undefined}
-        draggable="true"
+        draggable="false"
         onclick={() => onEntryClick(entry)}
         oncontextmenu={(e) => openContextMenu(e, entry)}
-        ondragstart={(e) => onTreeDragStart(e, entry)}
+        use:workspaceFileDrag={{ path: entry.path, endpointId: remoteId() }}
       >
         <span class="twisty">
           {#if entry.is_dir}
@@ -1750,8 +1744,8 @@
           class="change-row"
           class:selected={selectedGitKey === `${change.bucket}:${change.path}`}
           title={change.path}
-          draggable="true"
-          ondragstart={(e) => onGitFileDragStart(e, change.path)}
+          draggable="false"
+          use:workspaceFileDrag={gitFileReference(change.path)}
           onclick={() => previewGit(change)}
         >
           <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>
@@ -1772,8 +1766,8 @@
           class="graph-change-row"
           class:selected={selectedGitKey === `${change.bucket}:${change.path}`}
           title={change.path}
-          draggable="true"
-          ondragstart={(e) => onGitFileDragStart(e, change.path)}
+          draggable="false"
+          use:workspaceFileDrag={gitFileReference(change.path)}
           onclick={() => previewGit(change)}
         >
           <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>
