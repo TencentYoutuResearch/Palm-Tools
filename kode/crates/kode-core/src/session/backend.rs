@@ -291,13 +291,21 @@ impl BackendProfile for CodexProfile {
             .as_deref()
             .and_then(|sid| jsonl_tail::find_codex_session_by_id(self.0, sid))
         {
-            jsonl_tail::spawn(req.id, self.0, path, req.evt_tx, Some(req.retarget_rx));
+            jsonl_tail::spawn_with_replay_policy(
+                req.id,
+                self.0,
+                path,
+                req.evt_tx,
+                Some(req.retarget_rx),
+                true,
+            );
         } else {
-            jsonl_tail::spawn_waiting_for_binding(
+            jsonl_tail::spawn_waiting_for_binding_with_replay_policy(
                 req.id,
                 self.0,
                 req.evt_tx,
                 Some(req.retarget_rx),
+                req.resume_session_id.is_some(),
             );
         }
     }
@@ -431,12 +439,13 @@ fn spawn_sid_jsonl_tail(profile: &dyn BackendProfile, req: MetaTailRequest) {
     let Some(path) = path else {
         return;
     };
-    jsonl_tail::spawn(
+    jsonl_tail::spawn_with_replay_policy(
         req.id,
         profile.kind(),
         path,
         req.evt_tx,
         Some(req.retarget_rx),
+        req.resume_session_id.is_some(),
     );
 }
 

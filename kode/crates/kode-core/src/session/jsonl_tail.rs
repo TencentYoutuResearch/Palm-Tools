@@ -242,8 +242,29 @@ pub fn spawn(
     evt_tx: mpsc::UnboundedSender<CoreEvent>,
     retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
 ) {
+    let suppress = path.is_file();
+    spawn_with_replay_policy(id, backend, path, evt_tx, retarget_rx, suppress);
+}
+
+pub fn spawn_with_replay_policy(
+    id: SessionId,
+    backend: Backend,
+    path: PathBuf,
+    evt_tx: mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+    suppress_initial_models: bool,
+) {
     tokio::spawn(async move {
-        if let Err(e) = run(id, backend, &path, &evt_tx, retarget_rx).await {
+        if let Err(e) = run_with_replay_policy(
+            id,
+            backend,
+            &path,
+            &evt_tx,
+            retarget_rx,
+            suppress_initial_models,
+        )
+        .await
+        {
             tracing::debug!(?path, error = %e, "jsonl tail exited");
         }
     });
@@ -256,7 +277,17 @@ pub fn spawn_waiting_for_binding(
     id: SessionId,
     backend: Backend,
     evt_tx: mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+) {
+    spawn_waiting_for_binding_with_replay_policy(id, backend, evt_tx, retarget_rx, false);
+}
+
+pub fn spawn_waiting_for_binding_with_replay_policy(
+    id: SessionId,
+    backend: Backend,
+    evt_tx: mpsc::UnboundedSender<CoreEvent>,
     mut retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+    suppress_initial_models: bool,
 ) {
     tokio::spawn(async move {
         if !backend.is_codex() {
@@ -290,7 +321,16 @@ pub fn spawn_waiting_for_binding(
             }
         };
         tracing::debug!(?path, "codex jsonl session claimed");
-        if let Err(e) = run(id, backend, &path, &evt_tx, retarget_rx).await {
+        if let Err(e) = run_with_replay_policy(
+            id,
+            backend,
+            &path,
+            &evt_tx,
+            retarget_rx,
+            suppress_initial_models,
+        )
+        .await
+        {
             tracing::debug!(?path, error = %e, "codex jsonl tail exited");
         }
     });
@@ -425,12 +465,33 @@ async fn wait_for_transcript(
     }
 }
 
+#[cfg(test)]
 async fn run(
     id: SessionId,
     backend: Backend,
     path: &Path,
     evt_tx: &mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+) -> std::io::Result<()> {
+    let suppress_initial_models = path.is_file();
+    run_with_replay_policy(
+        id,
+        backend,
+        path,
+        evt_tx,
+        retarget_rx,
+        suppress_initial_models,
+    )
+    .await
+}
+
+async fn run_with_replay_policy(
+    id: SessionId,
+    backend: Backend,
+    path: &Path,
+    evt_tx: &mpsc::UnboundedSender<CoreEvent>,
     mut retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+    suppress_initial_models: bool,
 ) -> std::io::Result<()> {
     let mut current_path = path.to_path_buf();
 
@@ -441,6 +502,7 @@ async fn run(
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(0)).await?;
     let mut replay_boundary = reader.get_ref().metadata().await?.len();
+    let mut suppress_replayed_model = suppress_initial_models;
 
     let mut buf = String::new();
     let mut state = TailState::new();
@@ -486,6 +548,7 @@ async fn run(
                         replay_boundary = reader.get_ref().metadata().await?.len();
                         current_path = new_path;
                         state = TailState::new();
+                        suppress_replayed_model = false;
                         state.expected_session_uuid = session_id_from_path(&current_path);
                         caught_up = false;
                         pending_retarget_uuid = None;
@@ -515,6 +578,7 @@ async fn run(
                     reader.seek(SeekFrom::Start(0)).await?;
                     replay_boundary = reader.get_ref().metadata().await?.len();
                     state = TailState::new();
+                    suppress_replayed_model = false;
                     state.expected_session_uuid = session_id_from_path(&current_path);
                     caught_up = false;
                     continue;
@@ -567,6 +631,7 @@ async fn run(
                         replay_boundary = reader.get_ref().metadata().await?.len();
                         current_path = new_path.clone();
                         state = TailState::new();
+                        suppress_replayed_model = false;
                         state.expected_session_uuid = session_id_from_path(&current_path);
                         caught_up = false;
                         pending_retarget_uuid = None;
@@ -607,6 +672,7 @@ async fn run(
                             replay_boundary = reader.get_ref().metadata().await?.len();
                             current_path = new_path;
                             state = TailState::new();
+                            suppress_replayed_model = false;
                             state.expected_session_uuid = session_id_from_path(&current_path);
                             caught_up = false;
                             pending_retarget_path = None;
@@ -663,7 +729,8 @@ async fn run(
             continue;
         }
 
-        let upd = match backend {
+        let previous_emitted_model = state.last_emitted_model.clone();
+        let mut upd = match backend {
             Backend::Codebuddy => parse_codebuddy_line(line, &mut state),
             Backend::Claude | Backend::Tclaude => parse_claude_line(line, &mut state),
             Backend::Codex | Backend::Tcodex => {
@@ -671,6 +738,19 @@ async fn run(
             }
             Backend::Cursor => LineUpdate::default(),
         };
+        // Historical requests belong to this conversation, but not to the
+        // newly spawned CLI's selected model. Keep their usage and identity.
+        // A line appended while replay is in progress is still a live request.
+        if suppress_replayed_model && line_start < replay_boundary {
+            if let Some(model) = upd.new_model.as_ref() {
+                state.last_model = Some(model.clone());
+            }
+            upd.new_model = None;
+            state.last_emitted_model = previous_emitted_model;
+            state.user_pinned_model = None;
+        } else if let Some(model) = upd.new_model.as_ref() {
+            state.last_emitted_model = Some(model.clone());
+        }
 
         // 自驱动 retarget:源文件里读到 `change session <target>`(in-TUI `/resume`)。
         // 仅在 caught_up(已追上文件末尾)或这行是本次打开文件后新追加的情况下生效 ——
@@ -692,6 +772,7 @@ async fn run(
                         replay_boundary = reader.get_ref().metadata().await?.len();
                         current_path = new_path;
                         state = TailState::new();
+                        suppress_replayed_model = false;
                         state.expected_session_uuid = session_id_from_path(&current_path);
                         caught_up = false;
                         pending_retarget_uuid = None;
@@ -1188,7 +1269,7 @@ fn parse_claude_line(line: &str, state: &mut TailState) -> LineUpdate {
 
     if ty == Some("assistant") {
         if let Some(m) = msg.model {
-            if state.last_model.as_deref() != Some(&m) {
+            if state.last_emitted_model.as_deref() != Some(&m) {
                 upd.new_model = Some(m);
             }
         }
@@ -1326,7 +1407,7 @@ fn parse_codex_line_for_backend(line: &str, state: &mut TailState, backend: Back
 
     if entry.r#type.as_deref() == Some("turn_context") {
         if let Some(model) = entry.payload.get("model").and_then(|v| v.as_str()) {
-            if state.last_model.as_deref() != Some(model) {
+            if state.last_emitted_model.as_deref() != Some(model) {
                 upd.new_model = Some(model.to_string());
             }
         }
@@ -1544,6 +1625,7 @@ pub fn codex_session_cwd(path: &Path) -> Option<(String, PathBuf)> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
     async fn tclaude_delayed_transcript_reports_model_after_old_startup_deadline() {
@@ -2596,8 +2678,8 @@ mod tests {
             "should read the source session's own title; titles: {titles:?}"
         );
         assert!(
-            models.iter().any(|m| m == "Claude-Sonnet-4.6-1M"),
-            "should read the source session's own model; models: {models:?}"
+            models.is_empty(),
+            "startup replay must not replace the selected model: {models:?}"
         );
     }
 
@@ -2935,6 +3017,84 @@ mod tests {
         let mut state = TailState::new();
         let upd = parse_claude_line("not json", &mut state);
         assert!(!upd.changed());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tclaude_replay_keeps_selected_model_until_new_request() {
+        let path = tempfile_path("kode_tclaude_model_replay.jsonl");
+        std::fs::write(&path, "{\"type\":\"assistant\",\"message\":{\"model\":\"old-model\",\"usage\":{\"input_tokens\":7}}}\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn(301, Backend::Tclaude, path.clone(), tx, None);
+        let historical = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            historical,
+            CoreEvent::JsonlMeta {
+                model: None,
+                input_tokens: Some(7),
+                ..
+            }
+        ));
+        tokio::fs::OpenOptions::new().append(true).open(&path).await.unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"model\":\"new-model\",\"usage\":{\"input_tokens\":3}}}\n")
+            .await.unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(live, CoreEvent::JsonlMeta { model: Some(ref m), .. } if m == "new-model")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tcodex_replay_preserves_identity_and_usage_without_historical_model() {
+        let path = tempfile_path("kode_tcodex_model_replay.jsonl");
+        std::fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"test-id\"}}\n{\"type\":\"turn_context\",\"payload\":{\"model\":\"old-model\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":17}}}}\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn(302, Backend::Tcodex, path.clone(), tx, None);
+        let mut model = None;
+        let mut identity = None;
+        let mut usage = None;
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let CoreEvent::JsonlMeta {
+                model: next,
+                session_uuid,
+                tokens,
+                ..
+            } = event
+            {
+                model = model.or(next);
+                identity = identity.or(session_uuid);
+                usage = usage.or(tokens);
+            }
+        }
+        assert!(model.is_none());
+        assert_eq!(identity.as_deref(), Some("test-id"));
+        assert_eq!(usage, Some(17));
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap()
+            .write_all(b"{\"type\":\"turn_context\",\"payload\":{\"model\":\"live-model\"}}\n")
+            .await
+            .unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(live, CoreEvent::JsonlMeta { model: Some(ref m), .. } if m == "live-model")
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     /// 端到端:在临时 jsonl 文件里追加几行,验证 tail 任务正确发出 JsonlMeta(codebuddy 路径)

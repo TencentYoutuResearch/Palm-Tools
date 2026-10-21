@@ -38,6 +38,7 @@ pub mod acp;
 pub mod backend_probe;
 pub mod hook_relay;
 pub mod mobile_setup;
+pub mod model_usage;
 pub mod semantic;
 
 pub use hook_relay::HookRelay;
@@ -748,6 +749,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/api/v1/shells/:id/resize", post(shell_resize))
         .route("/api/v1/shells/:id/snapshot", get(shell_snapshot))
         .route("/api/v1/backends", get(list_backends))
+        .route("/api/v1/model-usage", get(get_model_usage))
         .route("/api/v1/backends/:key/models", get(list_backend_models))
         .route("/api/v1/fs/list", get(fs_list))
         .route("/api/v1/fs/preview", get(fs_preview))
@@ -767,6 +769,27 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .merge(protected)
         .layer(Extension(ctx))
+}
+
+async fn get_model_usage(
+    Query(query): Query<model_usage::ModelUsageQuery>,
+) -> Result<Json<model_usage::ModelUsageSnapshot>, ApiError> {
+    let period = model_usage::normalize_period(&query.period)
+        .map_err(ApiError::BadRequest)?
+        .to_string();
+    if query
+        .timezone_offset_minutes
+        .is_some_and(|offset| !(-1439..=1439).contains(&offset))
+    {
+        return Err(ApiError::BadRequest("invalid timezone offset".into()));
+    }
+    let snapshot = tokio::task::spawn_blocking(move || {
+        model_usage::collect_snapshot(&period, query.since_ms, query.timezone_offset_minutes)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("usage task failed: {error}")))?
+    .map_err(ApiError::Internal)?;
+    Ok(Json(snapshot))
 }
 
 async fn auth_layer(
@@ -1033,9 +1056,6 @@ async fn create_session(
     .map_err(|e| ApiError::Internal(format!("spawn failed: {e}")))?;
     let resume_meta = resume_meta_snapshot(&req.backend_key, &cwd, session.session_id.as_deref());
     if let Some(meta) = &resume_meta {
-        if let Some(model) = &meta.model {
-            session.state.model = model.clone();
-        }
         if let Some(title) = &meta.title {
             session.state.title = title.clone();
         }
