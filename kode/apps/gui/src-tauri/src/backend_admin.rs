@@ -57,6 +57,20 @@ const KNOWN_CANDIDATES: &[KnownBackend] = &[
         suggested_setup_cli: "codex",
         suggested_json_path: None,
     },
+    KnownBackend {
+        key: "tcodex",
+        command: "tcodex",
+        suggested_setup_style: "codex",
+        suggested_setup_cli: "tcodex",
+        suggested_json_path: None,
+    },
+    KnownBackend {
+        key: "tclaude",
+        command: "tclaude",
+        suggested_setup_style: "claude",
+        suggested_setup_cli: "tclaude",
+        suggested_json_path: None,
+    },
     // 2026-06:预置一批常见 AI CLI(参考 kooky)。大多数没有已知 MCP 配置入口；
     // Cursor 是例外,使用官方全局 ~/.cursor/mcp.json。
     KnownBackend {
@@ -261,7 +275,7 @@ impl BackendSaveRequest {
     #[allow(dead_code)]
     fn into_backend_config(self) -> Result<BackendConfig, String> {
         let spec = self.build_spec()?;
-        Ok(BackendConfig {
+        let mut backend = BackendConfig {
             command: self.command,
             args: self.args,
             default_model: self.default_model,
@@ -269,7 +283,9 @@ impl BackendSaveRequest {
             permission_mode_flag: self.permission_mode_flag,
             mcp_setup: spec,
             enabled: self.enabled,
-        })
+        };
+        backend.hydrate_permission_flag();
+        Ok(backend)
     }
 }
 
@@ -682,6 +698,23 @@ mod tests {
         assert_eq!(cursor.suggested_setup_style, "json-merge");
         assert_eq!(cursor.suggested_setup_cli, "");
         assert_eq!(cursor.suggested_json_path, Some("~/.cursor/mcp.json"));
+    }
+
+    #[test]
+    fn t_wrapper_candidates_use_their_cli_families() {
+        let tcodex = KNOWN_CANDIDATES
+            .iter()
+            .find(|candidate| candidate.key == "tcodex")
+            .expect("tcodex candidate");
+        assert_eq!(tcodex.suggested_setup_style, "codex");
+        assert_eq!(tcodex.suggested_setup_cli, "tcodex");
+
+        let tclaude = KNOWN_CANDIDATES
+            .iter()
+            .find(|candidate| candidate.key == "tclaude")
+            .expect("tclaude candidate");
+        assert_eq!(tclaude.suggested_setup_style, "claude");
+        assert_eq!(tclaude.suggested_setup_cli, "tclaude");
     }
 
     #[cfg(windows)]
