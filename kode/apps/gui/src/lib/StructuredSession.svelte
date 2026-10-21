@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import { invoke } from '@tauri-apps/api/core'
   import { listen, type UnlistenFn } from '@tauri-apps/api/event'
   import { currentLocale, t } from './i18n'
@@ -7,6 +7,17 @@
   type Event = { type: string; ts: number; payload: Record<string, any> }
   let { sessionId, visible }: { sessionId: number; visible: boolean } = $props()
   let events: Event[] = $state([]), draft = $state(''), sending = $state(false), error = $state('')
+  let composer: HTMLTextAreaElement | undefined = $state()
+  export function insertReference(text: string) {
+    if (exited || !text) return
+    const start = composer?.selectionStart ?? draft.length
+    const end = composer?.selectionEnd ?? start
+    draft = draft.slice(0, start) + text + draft.slice(end)
+    void tick().then(() => {
+      composer?.focus()
+      composer?.setSelectionRange(start + text.length, start + text.length)
+    })
+  }
   let answered: string[] = $state([])
   let values: Record<string, Record<string, any>> = $state({})
   let custom: Record<string, boolean> = $state({})
@@ -130,7 +141,7 @@
     {/each}
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-  <form novalidate class="composer" onsubmit={(e) => {e.preventDefault(); void send()}}><textarea class="resize-none" bind:value={draft} aria-label={tr('acp.message')} placeholder={tr('acp.message')} disabled={exited}></textarea>
+  <form novalidate class="composer" onsubmit={(e) => {e.preventDefault(); void send()}}><textarea class="resize-none" bind:this={composer} bind:value={draft} aria-label={tr('acp.message')} placeholder={tr('acp.message')} disabled={exited}></textarea>
     <button type="submit" disabled={sending || busy || exited || !draft.trim()}>{tr('acp.send')}</button>{#if busy}<button type="button" disabled={sending} onclick={() => void act('interrupt',{})}>{tr('acp.stop')}</button>{/if}</form>
 </section>
 <style>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { routeWorkspaceNativeDrop } from './lib/workspace_drop'
+  import { workspaceReferenceTarget, type WorkspaceReference } from './lib/workspace_drag'
   /**
    * 主窗口:左侧栏(tab 列表) + 右侧 PTY 区 + 底部状态栏。
    *
@@ -704,7 +705,8 @@
    *
    * 外部(Finder / Explorer / VS Code)走 Tauri `onDragDropEvent`:WKWebView 的
    * HTML5 `File.path` / `text/uri-list` 经常是空的,只有原生事件带绝对路径。
-   * 内部 WorkspacePanel 文件树仍走 HTML5 自定义 MIME,与 OS 级拖拽互不干扰。
+   * 内部 WorkspacePanel 文件树使用 workspace_drag 指针事件，不依赖原生拖拽。
+   * HTML5 自定义 MIME handler 保留用于兼容其它内部来源。
    *
    * xterm.js 会消费终端区的 HTML5 drop,所以拖拽中渲染 overlay 覆盖终端。
    */
@@ -743,6 +745,16 @@
       .then(() => focusTerminal())
       .catch((err) => console.warn(`${source} drag-drop failed:`, err))
   }
+  function receiveWorkspaceReference(reference: WorkspaceReference) {
+    const tab = $activeTab
+    if (!tab || chooserOpen || tab.exited != null) return
+    const endpoint = tab.endpointId?.kind === 'remote' ? tab.endpointId.id : null
+    if (reference.endpointId !== endpoint) {
+      pushToast({ severity: 'error', title: t('workspace.files.differentEndpoint') })
+      return
+    }
+    void insertWorkspaceReference(`@${reference.path.replace(/[\u0000-\u001f\u007f]/g, ' ')} `)
+  }
   function onMainDragOver(e: DragEvent) {
     const types = e.dataTransfer?.types ?? []
     if (!types.includes('application/x-kode-file') && !types.includes('Files')) return
@@ -771,10 +783,8 @@
     if (raw) {
       try {
         const { path, endpointId } = JSON.parse(raw) as { path: string; endpointId: string | null }
-        const tabEp = tab.endpointId?.kind === 'remote' ? tab.endpointId.id : null
-        if (endpointId !== tabEp) return
         if (typeof path !== 'string' || !path) return
-        void insertWorkspaceReference(`@${path.replace(/[\u0000-\u001f\u007f]/g, ' ')} `)
+        receiveWorkspaceReference({ path, endpointId })
       } catch {}
       return
     }
@@ -807,11 +817,13 @@
   }
   /** 拖拽完成后 focus 到终端,让用户直接继续打字 */
   function focusTerminal() {
-    const el = document.querySelector<HTMLTextAreaElement>('.main .xterm-helper-textarea')
+    const el = document.querySelector<HTMLTextAreaElement>('.main .term-wrapper.visible .xterm-helper-textarea')
     el?.focus()
   }
 
-  /** Insert workspace context into the active CLI composer without submitting it. */
+  const structuredSessions: Record<number, StructuredSession | undefined> = {}
+
+  /** Insert workspace context into the active composer without submitting it. */
   async function insertWorkspaceReference(text: string) {
     const tab = $activeTab
     if (!tab || !text) return
@@ -821,6 +833,10 @@
       const safe = text
         .replace(/\r\n?/g, '\n')
         .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+      if (tab.transportKind === 'acp') {
+        structuredSessions[tab.id]?.insertReference(safe)
+        return
+      }
       const input = safe.includes('\n') ? `\x1b[200~${safe}\x1b[201~` : safe
       await ipc.writeInput(tab.id, new TextEncoder().encode(input), tab.endpointId)
       focusTerminal()
@@ -1986,7 +2002,7 @@
     </div>
   </aside>
 
-  <main class="main" class:drag-over={dragOver} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
+  <main class="main" class:drag-over={dragOver} data-workspace-reference-target use:workspaceReferenceTarget={{ hover: (active) => { dragOver = active }, drop: receiveWorkspaceReference }} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
     <!-- 拖拽中覆盖终端区:捕获 drop 事件,防止 xterm.js 消费 -->
     {#if dragOver}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2116,7 +2132,7 @@
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
         {#if tab?.transportKind === 'acp'}
-          <StructuredSession sessionId={id} visible={isActive} />
+          <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} />
         {:else}
         <Terminal
           sessionId={id}
