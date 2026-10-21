@@ -288,10 +288,7 @@ fn apply_resume_meta_snapshot(
         return;
     };
 
-    let (title, model, total_tokens) = crate::commands::extract_session_meta(&path);
-    if let Some(model) = model {
-        session.state.model = model;
-    }
+    let (title, _, total_tokens) = crate::commands::extract_session_meta(&path);
     if let Some(title) = title {
         if !session.state.title_pinned {
             session.state.title = title;

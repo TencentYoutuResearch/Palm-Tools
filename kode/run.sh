@@ -132,6 +132,28 @@ ensure_sync_server_bundle() {
   fi
 }
 
+ensure_remote_bridge_bundle() {
+  local bridge_resource="$TAURI_DIR/resources/kode-remote-memory-bridge-linux-musl.tar.gz"
+  local stale=0
+  if [ ! -s "$bridge_resource" ]; then
+    stale=1
+  elif find "$ROOT_DIR/crates/kode-bridge" "$ROOT_DIR/crates/kode-core" \
+      "$ROOT_DIR/crates/kode-memory" "$ROOT_DIR/Cargo.toml" "$ROOT_DIR/Cargo.lock" \
+      "$ROOT_DIR/deploy/build-remote-memory-bridge.sh" \
+      "$ROOT_DIR/deploy/remote-memory-bridge-builder-musl.Dockerfile" \
+      -type f -newer "$bridge_resource" -print -quit | grep -q .; then
+    stale=1
+  fi
+  if [ "$stale" -eq 0 ]; then
+    info "远端 bridge 内置资源已是最新"
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 \
+    || error "缺少 Docker,无法构建 SSH 远端 bridge；安装 Docker 后重试"
+  info "构建并嵌入 x86_64 Linux remote bridge"
+  bash "$ROOT_DIR/deploy/build-remote-memory-bridge.sh" --musl
+}
+
 # 全局初始化,避免 set -u 下 ${TAURI_RESOURCE_ARGS[@]} 报 unbound
 TAURI_RESOURCE_ARGS=()
 
@@ -277,6 +299,7 @@ case "$CMD" in
     ensure_node_modules
     validate_updater_signing_key
     ensure_sync_server_bundle
+    ensure_remote_bridge_bundle
     APP_PATH="$ROOT_DIR/target/release/bundle/macos/kode.app"
     DMG_DIR="$ROOT_DIR/target/release/bundle/dmg"
     # 避免打包中途失败后误装上一次遗留的 DMG。

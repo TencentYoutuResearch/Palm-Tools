@@ -176,6 +176,7 @@ export interface ModelUsageTotals {
 }
 
 export interface ModelUsageRow extends ModelUsageTotals {
+  source: string
   backend: 'codex' | 'claude' | 'codebuddy' | string
   model: string
   requests: number
@@ -187,6 +188,7 @@ export interface ModelUsageSnapshot {
   rows: ModelUsageRow[]
   totals: ModelUsageTotals
   daily: { date: string; total_tokens: number }[]
+  warnings: string[]
 }
 
 export const modelUsageIpc = {

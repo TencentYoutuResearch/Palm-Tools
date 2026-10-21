@@ -163,7 +163,9 @@
     editing = newRequest({
       key: d.suggested_key,
       command: d.command,
-      permission_mode_flag: d.suggested_key === 'codex' ? '--ask-for-approval' : '--permission-mode',
+      permission_mode_flag: d.suggested_key === 'codex' || d.suggested_key === 'tcodex'
+        ? '--ask-for-approval'
+        : '--permission-mode',
       setup_style: d.suggested_setup_style,
       setup_cli: d.suggested_setup_cli,
       setup_json_path: d.suggested_json_path ?? '',

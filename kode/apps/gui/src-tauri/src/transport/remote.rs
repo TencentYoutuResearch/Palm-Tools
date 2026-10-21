@@ -112,6 +112,12 @@ pub struct SshSpec {
 }
 
 impl RemoteConfig {
+    fn usage_host_key(&self) -> String {
+        match &self.ssh {
+            Some(ssh) => format!("ssh:{}:{}:{}", ssh.host, ssh.ssh_port, ssh.remote_port),
+            None => format!("url:{}", self.base_url.trim_end_matches('/')),
+        }
+    }
     /// 从给定 base url 拼 WS url。`base` 由 caller 解析(直连 = `base_url`;
     /// SSH 模式 = 隧道 rewrite 后的本地 url)。
     fn ws_url_for(&self, base: &str) -> String {
@@ -182,6 +188,9 @@ pub struct RemoteTransport {
 }
 
 impl RemoteTransport {
+    pub fn usage_host_key(&self) -> String {
+        self.cfg.usage_host_key()
+    }
     pub fn new(
         cfg: RemoteConfig,
         core_tx: mpsc::UnboundedSender<CoreEvent>,

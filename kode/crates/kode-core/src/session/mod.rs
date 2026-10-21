@@ -1235,6 +1235,30 @@ mod tests {
     }
 
     #[test]
+    fn t_wrappers_inject_bypass_for_new_and_resumed_sessions() {
+        let cfg = crate::config::Config::default();
+        for (key, expected) in [
+            ("tcodex", vec!["--dangerously-bypass-approvals-and-sandbox"]),
+            ("tclaude", vec!["--permission-mode", "bypassPermissions"]),
+        ] {
+            let backend = cfg.backend(key).unwrap();
+            let args = inject_permission_mode_flag(
+                &[],
+                backend.permission_mode_flag.as_deref(),
+                Some("bypass"),
+            );
+            assert_eq!(args, expected, "{key} new session");
+            let resumed = inject_resume_flag(key, &args, "abc");
+            assert_eq!(
+                &resumed[..args.len()],
+                args.as_slice(),
+                "{key} restore preserves bypass"
+            );
+            assert_eq!(resumed.last().map(String::as_str), Some("abc"));
+        }
+    }
+
+    #[test]
     fn inject_permission_mode_skips_default_and_none() {
         // default / None / "" 三态都不注入(子进程默认行为本身就是 default)
         let base = vec!["--model".into(), "opus".into()];
