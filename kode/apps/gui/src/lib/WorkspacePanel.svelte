@@ -1,6 +1,5 @@
 <script lang="ts">
   import { tick } from 'svelte'
-  import RenameDialog from './RenameDialog.svelte'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { pushToast } from './toast'
   import { workspaceFiles, type WorkspaceFileEdit } from './ipc'
@@ -130,29 +129,57 @@
   })
   let fileBusy = $state(false)
   let fileError = $state('')
-  let nameDialog = $state<{ request: WorkspaceFileEdit; endpoint: string | null; title: string; initial: string; key: string | null } | null>(null)
+  let inlineEdit = $state<{ request: WorkspaceFileEdit; endpoint: string | null; title: string; isDir: boolean; key: string | null } | null>(null)
+  let editName = $state('')
   let deleteDialog = $state<{ request: WorkspaceFileEdit; endpoint: string | null; key: string | null } | null>(null)
   let nameError = $state('')
   let selectedText = $state('')
 
   $effect(() => {
     workspaceKeyFor(tab)
-    nameDialog = null; deleteDialog = null; fileError = ''; selectedText = ''
+    inlineEdit = null; deleteDialog = null; fileError = ''; selectedText = ''
   })
 
   function targetDirectory(entry?: WorkspaceEntry | null) {
     return entry?.is_dir ? entry.path : entry ? entry.path.replace(/[\\/][^\\/]+$/, '') : cwd
   }
-  function beginEdit(action: 'new_file' | 'new_folder' | 'rename', entry?: WorkspaceEntry | null) {
+  async function beginEdit(action: 'new_file' | 'new_folder' | 'rename', entry?: WorkspaceEntry | null) {
     if (fileBusy || !cwd) return
     contextMenu = null
     nameError = ''
-    nameDialog = {
+    editName = action === 'rename' ? entry!.name : ''
+    const edit = {
       request: { root: cwd, action, path: action === 'rename' ? entry!.path : targetDirectory(entry) },
       endpoint: remoteId(), key: workspaceKeyFor(tab),
       title: action === 'rename' ? fileLabels.rename : action === 'new_file' ? fileLabels.newFile : fileLabels.newFolder,
-      initial: action === 'rename' ? entry!.name : '',
+      isDir: action === 'new_folder' || (action === 'rename' && !!entry?.is_dir),
     }
+    inlineEdit = edit
+    if (action !== 'rename') {
+      filterQuery = ''
+      const paths = new Set(expandedPaths)
+      let parent = edit.request.path
+      while (parent && parent !== cwd) {
+        paths.add(parent)
+        const next = parent.replace(/[\\/][^\\/]+$/, '')
+        if (next === parent) break
+        parent = next
+      }
+      expandedPaths = paths
+      await refreshExpanded()
+    }
+  }
+  function focusNameInput(node: HTMLInputElement) {
+    void tick().then(() => {
+      if (!node.isConnected) return
+      node.focus()
+      const dot = node.value.lastIndexOf('.')
+      node.setSelectionRange(0, inlineEdit?.isDir || dot <= 0 ? node.value.length : dot)
+      node.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    })
+  }
+  function cancelInlineEdit() {
+    if (!fileBusy) { inlineEdit = null; nameError = '' }
   }
   async function performEdit(request: WorkspaceFileEdit, endpoint: string | null, key: string | null) {
     fileBusy = true; fileError = ''
@@ -177,17 +204,22 @@
     } finally { fileBusy = false }
   }
   async function submitName(name: string) {
-    const dialog = nameDialog
+    const dialog = inlineEdit
     if (!dialog || fileBusy) return
     if (!name.trim() || name === '.' || name === '..' || /[\\/:\x00-\x1f]/.test(name)) { nameError = fileLabels.nameError; return }
+    if (dialog.request.action === 'rename' && name === dialog.request.path.split(/[\\/]/).pop()) {
+      cancelInlineEdit()
+      return
+    }
     try {
       await performEdit({ ...dialog.request, name }, dialog.endpoint, dialog.key)
-      if (nameDialog === dialog) nameDialog = null
-    } catch (e) { if (nameDialog === dialog) nameError = String(e) }
+      if (inlineEdit === dialog) inlineEdit = null
+    } catch (e) { if (inlineEdit === dialog) nameError = String(e) }
   }
   function beginDelete(entry: WorkspaceEntry) {
     if (fileBusy) return
     contextMenu = null
+    cancelInlineEdit()
     deleteDialog = { request: { root: cwd, path: entry.path, action: 'delete' }, endpoint: remoteId(), key: workspaceKeyFor(tab) }
   }
   async function importPaths(paths: string[], directory = cwd, external = true) {
@@ -1449,7 +1481,7 @@
             use:workspaceDropTarget={receiveFileDrop}
             ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy' }}
             ondrop={htmlDrop}>
-            {#if snapshot && snapshot.entries.length === 0 && !filterQuery.trim()}
+            {#if snapshot && snapshot.entries.length === 0 && !filterQuery.trim() && !inlineEdit}
               <p class="muted pad">No files</p>
             {:else if snapshot && filterQuery.trim()}
               {#if fileSearchLoading && fileHits.length === 0}
@@ -1462,7 +1494,7 @@
                 {@render searchHits(fileHits)}
               {/if}
             {:else if snapshot}
-              {@render tree(snapshot.entries, 0)}
+              {@render tree(snapshot.entries, 0, cwd)}
             {/if}
           </section>
         {:else}
@@ -1666,10 +1698,6 @@
     </div>
   {/if}
 </aside>
-{#if nameDialog}
-  <RenameDialog initial={nameDialog.initial} title={nameDialog.title} submitLabel={nameDialog.title} cancelLabel={fileLabels.cancel} hint={fileLabels.nameHint} busy={fileBusy} error={nameError}
-    onSubmit={submitName} onClose={() => { if (!fileBusy) nameDialog = null }} />
-{/if}
 {#if deleteDialog}
   <ConfirmDialog title={fileLabels.delete} message={t('workspace.files.deleteMessage', { path: deleteDialog.request.path })}
     confirmLabel={fileLabels.delete} cancelLabel={fileLabels.cancel} danger
@@ -1679,6 +1707,9 @@
 {#snippet searchHits(entries: WorkspaceEntry[])}
   <div class="tree-group">
     {#each entries as entry (entry.path)}
+      {#if inlineEdit?.request.action === 'rename' && inlineEdit.request.path === entry.path}
+        {@render nameEditor(0)}
+      {:else}
       <button
         class="tree-row search-row"
         class:selected={selectedPath === entry.path}
@@ -1696,13 +1727,45 @@
         <span class="file-name">{entry.name}{entry.is_symlink ? ' @' : ''}</span>
         <span class="file-meta">{searchHitDir(entry.path)}</span>
       </button>
+      {/if}
     {/each}
   </div>
 {/snippet}
 
-{#snippet tree(entries: WorkspaceEntry[], depth: number)}
+{#snippet nameEditor(depth: number)}
+  {#if inlineEdit}
+    <form class="tree-row inline-name-row" style={`--depth:${depth}`} aria-label={inlineEdit.title}
+      onsubmit={(event) => { event.preventDefault(); void submitName(editName) }}>
+      <span class="twisty"></span>
+      <span class="file-icon"><Icon name={inlineEdit.isDir ? 'folder' : 'file-text'} size={14} /></span>
+      <input class="inline-name-input" bind:value={editName} use:focusNameInput
+        aria-label={inlineEdit.title} aria-invalid={!!nameError} aria-describedby={nameError ? 'workspace-name-error' : undefined}
+        placeholder={inlineEdit.title} title={fileLabels.nameHint} readonly={fileBusy}
+        spellcheck="false" autocomplete="off"
+        oninput={() => { nameError = '' }}
+        onkeydown={(event) => {
+          event.stopPropagation()
+          if (event.isComposing) { if (event.key === 'Enter') event.preventDefault(); return }
+          if (event.key === 'Escape') { event.preventDefault(); cancelInlineEdit() }
+        }} />
+      <span class="inline-name-actions">
+        <button type="submit" class="tool-btn" disabled={fileBusy} title={inlineEdit.title} aria-label={inlineEdit.title}><Icon name="check" size={12} /></button>
+        <button type="button" class="tool-btn" disabled={fileBusy} title={fileLabels.cancel} aria-label={fileLabels.cancel} onclick={cancelInlineEdit}><Icon name="x" size={12} /></button>
+      </span>
+      {#if nameError}<span id="workspace-name-error" class="inline-name-error" role="alert">{nameError}</span>{/if}
+    </form>
+  {/if}
+{/snippet}
+
+{#snippet tree(entries: WorkspaceEntry[], depth: number, parent: string)}
   <div class="tree-group">
+    {#if inlineEdit && inlineEdit.request.action !== 'rename' && inlineEdit.request.path === parent}
+      {@render nameEditor(depth)}
+    {/if}
     {#each entries as entry (entry.path)}
+      {#if inlineEdit?.request.action === 'rename' && inlineEdit.request.path === entry.path}
+        {@render nameEditor(depth)}
+      {:else}
       <button
         class="tree-row"
         class:selected={selectedPath === entry.path}
@@ -1725,8 +1788,9 @@
         <span class="file-name">{entry.name}{entry.is_symlink ? ' @' : ''}</span>
         <span class="file-meta">{loadingPaths.has(entry.path) ? '...' : formatSize(entry)}</span>
       </button>
+      {/if}
       {#if entry.is_dir && expandedPaths.has(entry.path)}
-        {@render tree(childrenByPath[entry.path] ?? [], depth + 1)}
+        {@render tree(childrenByPath[entry.path] ?? [], depth + 1, entry.path)}
       {/if}
     {/each}
   </div>
@@ -2066,6 +2130,21 @@
     grid-template-rows: auto auto;
     padding-block: 4px;
   }
+  .inline-name-row { margin: 0; }
+  .inline-name-input {
+    min-width: 100px;
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--acc);
+    border-radius: 3px;
+    padding: 2px 4px;
+    background: var(--bg-primary);
+    color: var(--fg-primary);
+    font: inherit;
+  }
+  .inline-name-input[aria-invalid="true"] { border-color: var(--st-error, #e06c75); }
+  .inline-name-actions { display: flex; align-items: center; }
+  .inline-name-error { grid-column: 3 / -1; max-width: 260px; white-space: normal; overflow-wrap: anywhere; color: var(--st-error, #e06c75); }
   .search-row .twisty,
   .search-row .file-icon,
   .search-row .file-name {
