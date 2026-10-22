@@ -64,11 +64,11 @@ test('maps every low indexed ANSI background to semantic surface slots', () => {
 test('maps reverse-video input surfaces and their reset to theme-owned backgrounds', () => {
   assert.equal(
     transform('\x1b[7mreverse input\x1b[27mnormal'),
-    '\x1b[27;48;5;17mreverse input\x1b[27;49mnormal',
+    '\x1b[27;48;5;24mreverse input\x1b[27;49mnormal',
   )
   assert.equal(
     rewriteSgrBackgrounds('1;38;2;41;209;119;7;4'),
-    '1;38;2;41;209;119;27;48;5;17;4',
+    '1;38;2;41;209;119;27;48;5;24;4',
   )
   assert.equal(rewriteSgrBackgrounds('27'), '27')
 })
@@ -77,7 +77,7 @@ test('only clears a background synthesized from reverse video', () => {
   const adapter = new TerminalAnsiThemeAdapter()
   const reverse = decoder.decode(adapter.transform(encoder.encode('\x1b[7mreverse')))
   const reverseReset = decoder.decode(adapter.transform(encoder.encode('\x1b[27mnormal')))
-  assert.equal(reverse + reverseReset, '\x1b[27;48;5;17mreverse\x1b[27;49mnormal')
+  assert.equal(reverse + reverseReset, '\x1b[27;48;5;24mreverse\x1b[27;49mnormal')
 
   const explicit = new TerminalAnsiThemeAdapter()
   assert.equal(
@@ -119,17 +119,19 @@ test('does not inspect CSI-looking bytes inside OSC payloads', () => {
 test('dark and light palettes keep the same semantic slot ordering', () => {
   const dark = terminalSurfacePalette(true)
   const light = terminalSurfacePalette(false)
-  assert.equal(dark.length, 8)
-  assert.equal(light.length, 8)
+  assert.equal(dark.length, 9)
+  assert.equal(light.length, 9)
   assert.notDeepEqual(dark, light)
   assert.equal(dark[0], '#1A1D1B')
   assert.equal(dark[1], '#2B302D')
   assert.equal(dark[2], '#3A2024')
   assert.equal(dark[3], '#173A27')
+  assert.equal(dark[8], '#5F6B62')
   assert.equal(light[0], '#ECEDE8')
   assert.equal(light[1], '#D9DDD6')
   assert.equal(light[2], '#FF6B6B')
   assert.equal(light[3], '#71D47D')
+  assert.equal(light[8], '#B4BBB2')
 })
 
 test('Unicode block glyphs cannot disable subsequent input background adaptation', () => {
