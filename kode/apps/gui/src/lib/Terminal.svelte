@@ -39,6 +39,7 @@
   import { currentLocale, t } from './i18n'
   import { ConsecutiveCtrlCGuard } from './consecutive_ctrl_c_guard'
   import { installCodexMouseSelection } from './codex_mouse_selection'
+  import { terminalScrollSensitivity, terminalWheelDelta } from './terminal_scroll'
 
   /**
    * 健康尺寸下限。低于此值的 cols/rows 一律视为容器还没准备好,
@@ -915,14 +916,12 @@
           : term.rows > 0
             ? viewportEl.clientHeight / term.rows
             : 16
-      const pixelDelta =
-        e.deltaMode === WheelEvent.DOM_DELTA_LINE
-          ? e.deltaY * rowHeight
-          : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
-            ? e.deltaY * viewportEl.clientHeight
-            : e.deltaY
-      const sensitivity = Number((term.options as any).scrollSensitivity ?? 1)
-      const delta = pixelDelta * sensitivity
+      const backendKey = get(tabs).find((tab) => tab.id === sessionId)?.backendKey ?? ''
+      // Only accelerate viewport history; leave CLI mouse reporting at native speed.
+      const delta = terminalWheelDelta(e, rowHeight, viewportEl.clientHeight, {
+        ...term.options,
+        scrollSensitivity: (term.options.scrollSensitivity ?? 1) * terminalScrollSensitivity(backendKey),
+      })
       if (delta === 0) return
 
       const maxScrollTop = Math.max(0, viewportEl.scrollHeight - viewportEl.clientHeight)
