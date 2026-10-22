@@ -3,6 +3,74 @@ use std::path::PathBuf;
 use super::*;
 
 #[test]
+fn git_status_preserves_literal_paths_and_rename_records() {
+    let mut summary = WsGitSummary::default();
+    parse_git_status(
+        "## main...origin/main [ahead 2, behind 1]\0?? docs/SDK 升级指引（v1.3 → v1.4）.zh.md\0??  spaced \"name\"\\\t\n -> file \0R  new -> name.md\0old name.md\0C  copy.md\0source.md\0 M modified.md\0UU conflict.md\0",
+        &mut summary,
+        "sub/",
+    );
+    assert_eq!(summary.ahead, 2);
+    assert_eq!(summary.behind, 1);
+    assert_eq!(summary.untracked, 2);
+    assert_eq!(summary.staged, 2);
+    assert_eq!(summary.modified, 1);
+    assert_eq!(summary.conflicts, 1);
+    let paths: Vec<_> = summary
+        .changes
+        .iter()
+        .map(|change| change.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "sub/docs/SDK 升级指引（v1.3 → v1.4）.zh.md",
+            "sub/ spaced \"name\"\\\t\n -> file ",
+            "sub/new -> name.md",
+            "sub/copy.md",
+            "sub/modified.md",
+            "sub/conflict.md",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn git_untracked_preview_handles_special_paths_and_missing_files() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().canonicalize().unwrap();
+    run_git_raw(&root, &["init"]).unwrap();
+    let names = [
+        "SDK 升级指引（v1.3 → v1.4）.zh.md",
+        " spaced \"name\"\\\t\n -> file ",
+    ];
+    for name in names {
+        std::fs::write(root.join(name), "preview content\n").unwrap();
+    }
+    let summary = read_git_summary_best_effort(&root, 1);
+    assert_eq!(summary.untracked, 2);
+    for name in names {
+        let change = summary
+            .changes
+            .iter()
+            .find(|change| change.path == name)
+            .unwrap();
+        let preview = git_diff(Query(GitDiffQuery {
+            cwd: root.to_str().unwrap().into(),
+            path: change.path.clone(),
+            bucket: change.bucket.clone(),
+        }))
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(preview.path, name);
+        assert!(preview.content.contains("+preview content"));
+    }
+    assert!(run_diff_no_index(&root.join("missing.md")).is_err());
+    std::fs::write(root.join("empty.md"), "").unwrap();
+    assert!(run_diff_no_index(&root.join("empty.md")).is_ok());
+}
+
+#[test]
 fn bridge_history_coalesces_meta_without_evicting_messages() {
     let bus = BridgeBus::new();
     let mut live = bus.subscribe();

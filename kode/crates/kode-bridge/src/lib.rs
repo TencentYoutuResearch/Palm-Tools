@@ -2743,7 +2743,7 @@ async fn git_diff(Query(q): Query<GitDiffQuery>) -> Result<Json<WsGitDiffPreview
     let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
         .ok_or_else(|| ApiError::BadRequest("not a Git repository".into()))?;
     let root_path = PathBuf::from(&root);
-    let rel = q.path.trim();
+    let rel = q.path.as_str();
     if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
         return Err(ApiError::BadRequest(
             "git path must be a repository-relative path".into(),
@@ -2920,7 +2920,7 @@ fn read_git_summary_best_effort(path: &std::path::Path, commit_limit: usize) -> 
         commits: read_git_commits(path, commit_limit),
         ..Default::default()
     };
-    if let Some(status) = run_git(path, &["status", "--porcelain=v1", "--branch"]) {
+    if let Ok(status) = run_git_raw(path, &["status", "--porcelain=v1", "--branch", "-z"]) {
         parse_git_status(&status, &mut summary, "");
     }
     // porcelain v1 把 submodule 折叠成单个 M 条目,内部文件不可见。
@@ -3119,14 +3119,15 @@ fn collect_submodule_changes(root: &std::path::Path, summary: &mut WsGitSummary)
         if !sub_abs.is_dir() {
             continue;
         }
-        if let Some(sub_status) = run_git(&sub_abs, &["status", "--porcelain=v1", "--branch"]) {
+        if let Ok(sub_status) = run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"]) {
             parse_git_status(&sub_status, summary, &format!("{sub_path}/"));
         }
     }
 }
 
 fn parse_git_status(status: &str, summary: &mut WsGitSummary, prefix: &str) {
-    for line in status.lines() {
+    let mut records = status.split('\0');
+    while let Some(line) = records.next() {
         if let Some(branch_line) = line.strip_prefix("## ") {
             parse_git_ahead_behind(branch_line, summary);
             continue;
@@ -3135,12 +3136,12 @@ fn parse_git_status(status: &str, summary: &mut WsGitSummary, prefix: &str) {
             continue;
         }
         let xy = &line[..2];
-        let raw_path = line[3..].trim();
-        let path = raw_path
-            .rsplit_once(" -> ")
-            .map(|(_, to)| to)
-            .unwrap_or(raw_path)
-            .to_string();
+        // With -z, paths are literal and renames/copies put the destination first,
+        // followed by a separate source-path record.
+        let path = line[3..].to_string();
+        if xy.contains(['R', 'C']) {
+            records.next();
+        }
         // submodule 聚合时,prefix = "<sub_path>/" —— 把子模块内部路径前缀成
         // superproject 视角的完整路径,前端点击时才能拿对路径去 diff。
         let path = if prefix.is_empty() {
@@ -3286,8 +3287,10 @@ fn run_diff_no_index(path: &std::path::Path) -> Result<String, ApiError> {
         .arg(path)
         .output()
         .map_err(|e| ApiError::Internal(format!("git diff failed: {e}")))?;
-    // git diff --no-index 对有差异的输入返 exit code 1,这是正常的
-    if !output.status.success() && output.status.code() != Some(1) {
+    // Exit 1 can also mean an inaccessible input; do not discard its diagnostic.
+    if !output.status.success()
+        && (output.status.code() != Some(1) || !output.stderr.is_empty())
+    {
         return Err(ApiError::Internal(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));

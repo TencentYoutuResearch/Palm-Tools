@@ -108,7 +108,11 @@ pub async fn workspace_snapshot(
     commit_limit: Option<usize>,
 ) -> Result<WorkspaceSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        workspace_snapshot_sync(&cwd, show_hidden.unwrap_or(true), commit_limit.unwrap_or(80))
+        workspace_snapshot_sync(
+            &cwd,
+            show_hidden.unwrap_or(true),
+            commit_limit.unwrap_or(80),
+        )
     })
     .await
     .map_err(|e| format!("workspace snapshot task failed: {e}"))?
@@ -184,7 +188,11 @@ pub fn open_path(path: String) -> Result<(), String> {
     open_path_sync(&path)
 }
 
-fn workspace_snapshot_sync(cwd: &str, show_hidden: bool, commit_limit: usize) -> Result<WorkspaceSnapshot, String> {
+fn workspace_snapshot_sync(
+    cwd: &str,
+    show_hidden: bool,
+    commit_limit: usize,
+) -> Result<WorkspaceSnapshot, String> {
     let path = absolute_path(cwd)?;
     let exists = path.is_dir();
     let entries = if exists {
@@ -553,7 +561,7 @@ fn read_git_summary(path: &Path, commit_limit: usize) -> WorkspaceGitSummary {
         ..Default::default()
     };
 
-    if let Some(status) = run_git(path, &["status", "--porcelain=v1", "--branch"]) {
+    if let Ok(status) = run_git_raw(path, &["status", "--porcelain=v1", "--branch", "-z"]) {
         parse_git_status(&status, &mut summary, "");
     }
     // porcelain v1 把 submodule 折叠成单个 M 条目,内部文件不可见。
@@ -722,14 +730,15 @@ fn collect_submodule_changes(root: &Path, summary: &mut WorkspaceGitSummary) {
         if !sub_abs.is_dir() {
             continue;
         }
-        if let Some(sub_status) = run_git(&sub_abs, &["status", "--porcelain=v1", "--branch"]) {
+        if let Ok(sub_status) = run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"]) {
             parse_git_status(&sub_status, summary, &format!("{sub_path}/"));
         }
     }
 }
 
 fn parse_git_status(status: &str, summary: &mut WorkspaceGitSummary, prefix: &str) {
-    for line in status.lines() {
+    let mut records = status.split('\0');
+    while let Some(line) = records.next() {
         if let Some(branch_line) = line.strip_prefix("## ") {
             parse_git_ahead_behind(branch_line, summary);
             continue;
@@ -738,12 +747,12 @@ fn parse_git_status(status: &str, summary: &mut WorkspaceGitSummary, prefix: &st
             continue;
         }
         let xy = &line[..2];
-        let raw_path = line[3..].trim();
-        let path = raw_path
-            .rsplit_once(" -> ")
-            .map(|(_, to)| to)
-            .unwrap_or(raw_path)
-            .to_string();
+        // With -z, paths are literal and renames/copies put the destination first,
+        // followed by a separate source-path record.
+        let path = line[3..].to_string();
+        if xy.contains(['R', 'C']) {
+            records.next();
+        }
         // submodule 聚合时,prefix = "<sub_path>/" —— 把子模块内部路径前缀成
         // superproject 视角的完整路径,前端点击时才能拿对路径去 diff。
         let path = if prefix.is_empty() {
@@ -835,7 +844,7 @@ fn git_diff_sync(cwd: &str, path: &str, bucket: &str) -> Result<GitDiffPreview, 
     let root = run_git(&cwd, &["rev-parse", "--show-toplevel"])
         .ok_or_else(|| "not a Git repository".to_string())?;
     let root_path = PathBuf::from(&root);
-    let rel = path.trim();
+    let rel = path;
     if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
         return Err("git path must be a repository-relative path".into());
     }
@@ -1057,7 +1066,10 @@ fn run_diff_no_index(path: &Path) -> Result<String, String> {
         .arg(path)
         .output()
         .map_err(|e| format!("git diff failed: {e}"))?;
-    if !output.status.success() && output.status.code() != Some(1) {
+    // Exit 1 can also mean an inaccessible input; do not discard its diagnostic.
+    if !output.status.success()
+        && (output.status.code() != Some(1) || !output.stderr.is_empty())
+    {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1126,6 +1138,67 @@ fn open_path_sync(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_status_preserves_literal_paths_and_rename_records() {
+        let mut summary = WorkspaceGitSummary::default();
+        parse_git_status(
+            "## main...origin/main [ahead 2, behind 1]\0?? docs/SDK 升级指引（v1.3 → v1.4）.zh.md\0??  spaced \"name\"\\\t\n -> file \0R  new -> name.md\0old name.md\0C  copy.md\0source.md\0 M modified.md\0UU conflict.md\0",
+            &mut summary,
+            "sub/",
+        );
+        assert_eq!(summary.ahead, 2);
+        assert_eq!(summary.behind, 1);
+        assert_eq!(summary.untracked, 2);
+        assert_eq!(summary.staged, 2);
+        assert_eq!(summary.modified, 1);
+        assert_eq!(summary.conflicts, 1);
+        let paths: Vec<_> = summary
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "sub/docs/SDK 升级指引（v1.3 → v1.4）.zh.md",
+                "sub/ spaced \"name\"\\\t\n -> file ",
+                "sub/new -> name.md",
+                "sub/copy.md",
+                "sub/modified.md",
+                "sub/conflict.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn git_untracked_preview_handles_special_paths_and_missing_files() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path().canonicalize().unwrap();
+        run_git_raw(&root, &["init"]).unwrap();
+        let names = [
+            "SDK 升级指引（v1.3 → v1.4）.zh.md",
+            " spaced \"name\"\\\t\n -> file ",
+        ];
+        for name in names {
+            std::fs::write(root.join(name), "preview content\n").unwrap();
+        }
+        let summary = read_git_summary(&root, 1);
+        assert_eq!(summary.untracked, 2);
+        for name in names {
+            let change = summary
+                .changes
+                .iter()
+                .find(|change| change.path == name)
+                .unwrap();
+            let preview = git_diff_sync(root.to_str().unwrap(), &change.path, &change.bucket).unwrap();
+            assert_eq!(preview.path, name);
+            assert!(preview.content.contains("+preview content"));
+        }
+        assert!(run_diff_no_index(&root.join("missing.md")).is_err());
+        std::fs::write(root.join("empty.md"), "").unwrap();
+        assert!(run_diff_no_index(&root.join("empty.md")).is_ok());
+    }
 
     #[test]
     fn parses_git_branches_and_skips_remote_head_alias() {
