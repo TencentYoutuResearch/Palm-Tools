@@ -7,7 +7,7 @@
 //!
 //! | Hook Event | 用途 |
 //! |-----------|------|
-//! | `Stop` | ① `type:"command"` 转发 hook_relay emit `turn_finished` ② `type:"prompt"` kode-memory 守门员 |
+//! | `Stop` | `type:"command"` 转发 hook_relay emit `turn_finished` |
 //! | `Notification` (permission_prompt) | 即时通知 kode GUI 有权限请求 |
 //! | `UserPromptSubmit` | 用户回车提交后即时清除 attention |
 //! | `PreToolUse` (*) | 实时获取 permission_mode |
@@ -27,6 +27,12 @@
 //!    - claude：`~/.claude/settings.json`
 //!    两者 hook JSON 格式完全相同。
 //!    - Codex：`~/.codex/hooks.json`，只注入 `type:"command"` hooks。
+//!
+//! 4. **全局只装 command hook**：全局 settings 会被本机所有 CodeBuddy/Claude 进程加载
+//!    (包括 kode 之外的,如 Maestro 节点 Agent)。command hook 在没有 `KODE_HOOK_SOCK`
+//!    时直接退出,天然只作用于 kode 会话;prompt 型 kode-memory 守门员没有这种范围判断,
+//!    因此不写进全局 settings,而是由 kode spawn 时通过 `--settings` 只挂到自己的会话上
+//!    (见 [`session_settings_json`])。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,6 +73,38 @@ pub const STOP_HOOK_PROMPT: &str = r#"你是 kode-memory 的沉淀守门员。ko
 - 不要代码围栏（不要 ```json），不要任何解释、理由、分析或前后缀文字
 - ok 为 true 时只输出 {"ok": true}，不要附带 reason"#;
 
+/// 守门员 prompt 的稳定特征片段,用来识别历史版本(内容不同)遗留在全局 settings 里的条目。
+const STOP_HOOK_PROMPT_MARKER: &str = "kode-memory 的沉淀守门员";
+
+/// kode spawn CodeBuddy/Claude 会话时通过 `--settings <json>` 追加的会话级 settings。
+///
+/// 只包含 prompt 型 Stop 守门员:它要求 agent 调 memory MCP,只在 kode 注入了
+/// kode-memory 指令的会话里才有意义,不能装进全局 settings(见模块文档第 4 点)。
+/// CLI 会把 `--settings` 的 hooks 与 user/project settings 的 hooks 合并执行。
+pub fn session_settings_json() -> String {
+    serde_json::json!({
+        "hooks": {
+            "Stop": [{
+                "hooks": [{
+                    "type": "prompt",
+                    "timeout": 30,
+                    "continueOnBlock": true,
+                    "prompt": STOP_HOOK_PROMPT
+                }]
+            }]
+        }
+    })
+    .to_string()
+}
+
+fn is_stop_gatekeeper_hook(hook: &serde_json::Value) -> bool {
+    hook.get("type").and_then(|t| t.as_str()) == Some("prompt")
+        && hook
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| p.contains(STOP_HOOK_PROMPT_MARKER))
+}
+
 /// 需要注入 hook 的 backend 列表，返回 `(label, settings_path)` 对。
 /// 路径不存在也返回（inject 函数会在写入时创建）。
 pub fn target_settings() -> Vec<(&'static str, PathBuf)> {
@@ -93,12 +131,9 @@ pub fn tcodex_hooks_path() -> Option<PathBuf> {
 // Stop hook
 // ============================================================================
 
-/// 检查 `path` 对应的 settings.json 里是否已有**可驱动主 agent 继续执行**的
-/// kode Stop prompt hook。
-///
-/// 只看 `_kode_managed: true` 不够：早期版本没有写 `continueOnBlock`，
-/// CodeBuddy 即使让守门员返回 `{ "ok": false }` 也会直接结束当前轮次，不会把
-/// reason 注入主 agent。因此这种旧配置必须视为未配置，等待启动注入逻辑升级。
+/// 检查 `path` 对应的全局 settings.json 里 kode 管理的 Stop hook 是否已是当前形态:
+/// 有 `_kode_managed` 的 command 条目,且全局 Stop 数组里没有任何守门员 prompt 残留。
+/// 旧版本把守门员写进全局,会拦截 kode 之外的 CLI 进程,这种配置视为未配置。
 pub fn is_stop_hook_configured(path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -106,29 +141,30 @@ pub fn is_stop_hook_configured(path: &Path) -> bool {
     let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return false;
     };
-    doc.get("hooks")
+    let Some(entries) = doc
+        .get("hooks")
         .and_then(|hooks| hooks.get("Stop"))
         .and_then(|stop| stop.as_array())
-        .and_then(|entries| {
-            entries.iter().find(|entry| {
-                entry
-                    .get("_kode_managed")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false)
-            })
-        })
-        .and_then(|entry| entry.get("hooks"))
-        .and_then(|hooks| hooks.as_array())
-        .is_some_and(|hooks| {
-            hooks.iter().any(|hook| {
-                hook.get("type").and_then(|value| value.as_str()) == Some("prompt")
-                    && hook.get("prompt").and_then(|value| value.as_str()) == Some(STOP_HOOK_PROMPT)
-                    && hook
-                        .get("continueOnBlock")
-                        .and_then(|value| value.as_bool())
-                        == Some(true)
-            })
-        })
+    else {
+        return false;
+    };
+    let entry_hooks = |entry: &serde_json::Value| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let has_gatekeeper = entries
+        .iter()
+        .any(|entry| entry_hooks(entry).iter().any(is_stop_gatekeeper_hook));
+    let has_managed_command = entries.iter().any(|entry| {
+        is_kode_managed_entry(entry)
+            && entry_hooks(entry)
+                .iter()
+                .any(|h| h.get("type").and_then(|t| t.as_str()) == Some("command"))
+    });
+    has_managed_command && !has_gatekeeper
 }
 
 /// 注入或更新 kode 管理的 Stop hook（幂等）。
@@ -139,41 +175,33 @@ pub fn is_stop_hook_configured(path: &Path) -> bool {
 ///    必须设置 `continueOnBlock:true`，否则 `{ok:false}` 只阻止 stop，却不会把
 ///    reason 注入主 agent 继续调用 `memory_propose`。
 ///
-/// 两者并列执行：command 先跑（即时通知 GUI turn 结束），prompt 后跑（可能拦截让 agent 续跑沉淀）。
+/// 全局只写 command hook（即时通知 GUI turn 结束）；prompt 守门员走 [`session_settings_json`]。
 ///
 /// 流程：
 /// 1. 读现有 JSON（不存在或为空 → 用 `{}`，保留其他字段）
-/// 2. 清理 `hooks.Stop` 数组里"内容等于 STOP_HOOK_PROMPT 但无 `_kode_managed` 标记"
-///    的僵尸条目（早期版本注入的历史遗留，会导致守门员 prompt 双倍执行）
-/// 3. 在 `hooks.Stop` 数组里找 `_kode_managed: true` 的项 → 整体更新；找不到 → 追加
+/// 2. 清理 `hooks.Stop` 数组里无 `_kode_managed` 标记的守门员僵尸条目
+///    （早期版本注入的历史遗留，会导致守门员 prompt 多次执行）
+/// 3. 在 `hooks.Stop` 数组里找 `_kode_managed: true` 的项 → 整体更新（顺带去掉旧版写入的
+///    守门员 prompt）；找不到 → 追加
 /// 4. Atomic write：写 tmp 文件 → rename
 pub fn inject_stop_hook(path: &Path, relay_command: &str) -> Result<(), String> {
-    // 先清理早期版本遗留的无标记僵尸条目(内容等于 STOP_HOOK_PROMPT 但无 _kode_managed)。
-    // 旧版本注入时没有 _kode_managed 字段,后来加标记后 inject_hook_entry 的去重逻辑
-    // 找不到带标记的条目就追加新条目,导致 Stop hook 双条目 → 守门员 prompt 双倍执行。
+    // 先清理早期版本遗留的无标记守门员条目。旧版本注入时没有 _kode_managed 字段,
+    // 后来加标记后 inject_hook_entry 找不到带标记的条目就追加新条目,导致守门员多次执行。
     purge_unmarked_stop_hook_zombies(path)?;
 
     let kode_entry = serde_json::json!({
         "_kode_managed": true,
-        "hooks": [
-            {
-                "type": "command",
-                "timeout": 5,
-                "command": relay_command
-            },
-            {
-                "type": "prompt",
-                "timeout": 30,
-                "continueOnBlock": true,
-                "prompt": STOP_HOOK_PROMPT
-            }
-        ]
+        "hooks": [{
+            "type": "command",
+            "timeout": 5,
+            "command": relay_command
+        }]
     });
 
     inject_hook_entry(path, "Stop", &kode_entry)
 }
 
-/// 清理 `hooks.Stop` 里内容等于 STOP_HOOK_PROMPT 但无 `_kode_managed` 标记的历史遗留条目。
+/// 清理 `hooks.Stop` 里含守门员 prompt(任意历史版本)但无 `_kode_managed` 标记的遗留条目。
 fn purge_unmarked_stop_hook_zombies(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -206,17 +234,12 @@ fn purge_unmarked_stop_hook_zombies(path: &Path) -> Result<(), String> {
         if is_managed {
             return true;
         }
-        // 无标记 + 任一 prompt 子 hook 等于 STOP_HOOK_PROMPT → 这是僵尸,移除。
+        // 无标记 + 任一子 hook 是守门员 prompt → 这是僵尸,移除。
         // kode 注入的条目是 [command, prompt] 组合,不能只看 first()。
         let zombie_prompt = entry
             .get("hooks")
             .and_then(|h| h.as_array())
-            .is_some_and(|arr| {
-                arr.iter().any(|h| {
-                    h.get("type").and_then(|t| t.as_str()) == Some("prompt")
-                        && h.get("prompt").and_then(|p| p.as_str()) == Some(STOP_HOOK_PROMPT)
-                })
-            });
+            .is_some_and(|arr| arr.iter().any(is_stop_gatekeeper_hook));
         !zombie_prompt
     });
 
@@ -1004,13 +1027,11 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
         let entry = &doc["hooks"]["Stop"][0];
-        // hooks 数组里有两个子 hook:command(relay) + prompt(守门员)
+        // 全局只保留 command(relay);旧的 prompt 守门员被移除
         let hooks = entry["hooks"].as_array().unwrap();
-        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0]["type"], "command");
         assert_eq!(hooks[0]["command"], "echo relay");
-        assert_eq!(hooks[1]["type"], "prompt");
-        assert_eq!(hooks[1]["prompt"].as_str().unwrap(), STOP_HOOK_PROMPT);
         let count = doc["hooks"]["Stop"]
             .as_array()
             .unwrap()
@@ -1053,6 +1074,35 @@ mod tests {
                 .unwrap_or(false),
             "remaining entry must have _kode_managed:true"
         );
+    }
+
+    fn content_has_gatekeeper(doc: &serde_json::Value) -> bool {
+        doc.to_string().contains(STOP_HOOK_PROMPT_MARKER)
+    }
+
+    /// 无标记、只有旧版守门员 prompt(无 command)的条目同样被清掉。
+    #[test]
+    fn inject_stop_purges_unmarked_old_version_gatekeeper() {
+        let initial = serde_json::json!({
+            "hooks": { "Stop": [
+                {"hooks": [{"type": "prompt", "prompt": "你是 kode-memory 的沉淀守门员。旧版本……"}]}
+            ] }
+        });
+        let tmp = write_tmp(&initial.to_string());
+        inject_stop_hook(tmp.path(), "echo relay").unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+        assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert!(!content_has_gatekeeper(&doc));
+    }
+
+    #[test]
+    fn session_settings_carry_gatekeeper_prompt_hook() {
+        let v: serde_json::Value = serde_json::from_str(&session_settings_json()).unwrap();
+        let hook = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(hook["type"], "prompt");
+        assert_eq!(hook["continueOnBlock"], true);
+        assert_eq!(hook["prompt"].as_str().unwrap(), STOP_HOOK_PROMPT);
     }
 
     fn kode_stop_pair(command: &str, prompt: &str) -> serde_json::Value {
@@ -1098,10 +1148,8 @@ mod tests {
             .collect();
         assert_eq!(kode.len(), 1, "only one kode entry should remain: {arr:?}");
         assert_eq!(kode[0]["_kode_managed"], true);
-        assert_eq!(
-            kode[0]["hooks"][1]["prompt"].as_str().unwrap(),
-            STOP_HOOK_PROMPT
-        );
+        assert_eq!(kode[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(kode[0]["hooks"][0]["command"], app_cmd);
         assert!(arr.iter().any(|e| e["hooks"][0]["command"] == "my-stop.sh"));
         assert!(arr
             .iter()
@@ -1130,10 +1178,7 @@ mod tests {
         let arr = doc["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["_kode_managed"], true);
-        assert_eq!(
-            arr[0]["hooks"][1]["prompt"].as_str().unwrap(),
-            STOP_HOOK_PROMPT
-        );
+        assert!(!content_has_gatekeeper(&doc));
         assert!(is_stop_hook_configured(tmp.path()));
     }
 
@@ -1175,6 +1220,7 @@ mod tests {
     #[test]
     fn stop_prompt_requires_bare_json_output() {
         assert!(STOP_HOOK_PROMPT.contains("只输出一行裸 JSON"));
+        assert!(STOP_HOOK_PROMPT.contains(STOP_HOOK_PROMPT_MARKER));
         assert!(STOP_HOOK_PROMPT.contains("不要代码围栏"));
         assert!(STOP_HOOK_PROMPT.contains(r#"ok 为 true 时只输出 {"ok": true}"#));
     }
@@ -1228,13 +1274,11 @@ mod tests {
         let tmp = write_tmp("{}");
         inject_stop_hook(tmp.path(), "echo relay").unwrap();
         assert!(is_stop_hook_configured(tmp.path()));
-        let content = std::fs::read_to_string(tmp.path()).unwrap();
-        let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][1]["continueOnBlock"], true);
     }
 
+    /// 旧版把守门员写进全局 settings → 视为未配置,等待启动注入把它移走。
     #[test]
-    fn stop_hook_without_continue_on_block_is_not_configured() {
+    fn global_stop_gatekeeper_is_not_configured() {
         let stale = serde_json::json!({
             "hooks": {
                 "Stop": [{

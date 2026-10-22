@@ -925,6 +925,13 @@ fn inject_model_flag(
 /// 否则在末尾追加 `--append-system-prompt <prompt>` 两个 args。codebuddy / claude /
 /// claude-internal 都支持这个 flag(2026-06-06 实测 codebuddy --help)。
 ///
+/// CodeBuddy 会话同时追加 `--settings <json>` 挂上 kode-memory Stop 守门员(用户 args
+/// 已含 `--settings` 时不追加)。守门员要求 agent 调 memory MCP,只在注入了本段指令的
+/// kode 会话里有意义,所以不写进全局 settings,避免拦截 kode 之外的 CLI 进程。
+/// Claude 系(claude/tclaude/claude-internal)不挂:Claude Code 要求 prompt hook 输出
+/// 纯 JSON,模型常带围栏/解释导致 `JSON validation failed`,且拦截时会把整段 prompt
+/// 当标签显示成 "Stop hook error"。CodeBuddy 对两者都宽容。
+///
 /// 这里**不**校验 backend.command 是否真支持这个 flag —— 校验放在 BackendConfig 层
 /// 的实现也行,但当前出厂三个 backend 都支持 --append-system-prompt,所以零校验
 /// 简单透传。如果将来加了不支持的 backend(eg. raw shell),那个 backend 的 args
@@ -964,6 +971,14 @@ pub fn inject_kode_memory_prompt(
     let mut new_args = args.to_vec();
     new_args.push("--append-system-prompt".into());
     new_args.push(full);
+    if backend_key == "codebuddy"
+        && !args
+            .iter()
+            .any(|a| a == "--settings" || a.starts_with("--settings="))
+    {
+        new_args.push("--settings".into());
+        new_args.push(kode_memory::hook_setup::session_settings_json());
+    }
     new_args
 }
 
@@ -1307,14 +1322,41 @@ mod tests {
     fn inject_kode_memory_prompt_appends_when_enabled() {
         let cwd = std::path::PathBuf::from("/tmp");
         let out = inject_kode_memory_prompt(&[], "codebuddy", &cwd, true, None);
-        // 至少 2 个 args:flag + prompt 内容
-        assert_eq!(out.len(), 2);
+        // flag + prompt 内容 + --settings + 会话级守门员 settings
+        assert_eq!(out.len(), 4);
         assert_eq!(out[0], "--append-system-prompt");
         // prompt 内容必须包含 <kode-memory> 标签(prompt::build 的契约)
         assert!(
             out[1].contains("<kode-memory>"),
             "appended prompt must include <kode-memory> marker"
         );
+        assert_eq!(out[2], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&out[3]).unwrap();
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["prompt"],
+            kode_memory::hook_setup::STOP_HOOK_PROMPT
+        );
+    }
+
+    #[test]
+    fn inject_kode_memory_prompt_respects_user_settings_flag() {
+        let cwd = std::path::PathBuf::from("/tmp");
+        let already = vec!["--settings".to_string(), "/my/settings.json".to_string()];
+        let out = inject_kode_memory_prompt(&already, "codebuddy", &cwd, true, None);
+        assert_eq!(out.iter().filter(|a| *a == "--settings").count(), 1);
+        assert_eq!(out[1], "/my/settings.json");
+        assert!(out.contains(&"--append-system-prompt".to_string()));
+    }
+
+    /// tclaude 注入 memory 指令,但不挂 prompt 守门员(Claude Code 对 prompt hook 输出
+    /// 校验严格,且拦截会显示成 Stop hook error)。
+    #[test]
+    fn inject_kode_memory_prompt_covers_tclaude_without_gatekeeper() {
+        let cwd = std::path::PathBuf::from("/tmp");
+        let out = inject_kode_memory_prompt(&[], "tclaude", &cwd, true, None);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "--append-system-prompt");
+        assert!(!out.contains(&"--settings".to_string()));
     }
 
     #[test]

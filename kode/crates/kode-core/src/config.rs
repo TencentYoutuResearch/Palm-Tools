@@ -321,19 +321,20 @@ impl Config {
         };
         match toml::from_str::<Config>(&txt) {
             Ok(mut c) => {
-                // 合并默认 backends(用户没写也能用)。Cursor 早期版本已经会把
-                // backend table 落盘,但当时没有 mcp_setup；为已有安装补上新能力。
+                // 合并默认 backends(用户没写也能用)。早期版本已经把 cursor/tclaude/tcodex
+                // 等 backend table 落盘,但当时没有 mcp_setup；命令未被改过时为已有安装
+                // 补上新能力,否则这些 backend 永远接不上 memory MCP。
                 let defaults = Self::default();
-                let cursor_mcp_setup = defaults
-                    .backends
-                    .get("cursor")
-                    .and_then(|backend| backend.mcp_setup.clone());
                 for (k, v) in defaults.backends {
-                    c.backends.entry(k).or_insert(v);
-                }
-                if let Some(cursor) = c.backends.get_mut("cursor") {
-                    if cursor.command == "cursor-agent" && cursor.mcp_setup.is_none() {
-                        cursor.mcp_setup = cursor_mcp_setup;
+                    match c.backends.get_mut(&k) {
+                        Some(existing) => {
+                            if existing.mcp_setup.is_none() && existing.command == v.command {
+                                existing.mcp_setup = v.mcp_setup;
+                            }
+                        }
+                        None => {
+                            c.backends.insert(k, v);
+                        }
                     }
                 }
                 hydrate_known_permission_flags(&mut c.backends);
@@ -646,6 +647,48 @@ enabled = true
                 assert_eq!(config_path, "~/.cursor/mcp.json")
             }
             other => panic!("legacy cursor should gain JsonMerge mcp_setup, got {other:?}"),
+        }
+    }
+
+    /// 早期落盘的 tclaude/tcodex table 没有 mcp_setup → 加载时补上,否则 kode 不会给
+    /// 它们配 memory MCP,而守门员又要求调用 memory_propose。
+    #[test]
+    fn load_from_hydrates_tclaude_and_tcodex_mcp_setup_in_legacy_config() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-config-tclaude-migration-{}-{unique}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[backends.tclaude]
+command = "tclaude"
+args = []
+model_flag = "--model"
+enabled = true
+
+[backends.tcodex]
+command = "tcodex"
+args = []
+model_flag = "--model"
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load_from(&path);
+        std::fs::remove_file(path).ok();
+        match &cfg.backend("tclaude").unwrap().mcp_setup {
+            Some(McpSetupSpec::Claude { cli }) => assert_eq!(cli, "tclaude"),
+            other => panic!("legacy tclaude should gain Claude mcp_setup, got {other:?}"),
+        }
+        match &cfg.backend("tcodex").unwrap().mcp_setup {
+            Some(McpSetupSpec::Codex { cli }) => assert_eq!(cli, "tcodex"),
+            other => panic!("legacy tcodex should gain Codex mcp_setup, got {other:?}"),
         }
     }
 

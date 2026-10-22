@@ -109,7 +109,7 @@ pub fn build(cwd: &Path, backend_key: &str) -> String {
 fn is_supported_backend(backend_key: &str) -> bool {
     matches!(
         backend_key,
-        "codebuddy" | "claude" | "claude-internal" | "codex" | "cursor"
+        "codebuddy" | "claude" | "claude-internal" | "tclaude" | "codex" | "tcodex" | "cursor"
     )
 }
 

@@ -228,6 +228,11 @@ fn run_claude_style(cli: &str, bin: &Path, root: &Path) -> Result<(), String> {
         return Err(format!("{cli} CLI not found in PATH"));
     }
     let env_arg = format!("KODE_MEMORY_ROOT={}", root.display());
+    // claude 系 `mcp add` 遇到同名条目会拒绝("already exists")而不是覆盖;
+    // 走到这里说明现有条目缺失或指向旧 kode-memory-mcp,先移除再添加。
+    let _ = Command::new(cli)
+        .args(["mcp", "remove", "-s", "user", MCP_SERVER_NAME])
+        .output();
     let output = Command::new(cli)
         .args([
             "mcp",
@@ -879,10 +884,37 @@ fn is_configured_for_spec(spec: &McpSetupSpec) -> bool {
                 && json_has_isolated_runtime_env(path)
         });
     }
-    candidates
-        .iter()
-        .any(|path| json_has_memory_server(path, None))
+    // CodeBuddy / Claude 的 user-scope 配置同样可能遗留旧 checkout 的 kode-memory-mcp
+    // 路径。旧二进制没有 KODE_HOST 运行时门控,会让 kode 之外的 CLI(如 Maestro 节点)
+    // 也暴露 memory tools,所以指向别的 kode-memory-mcp 时视为未配置、触发重配。
+    // 指向非 kode-memory-mcp 的同名 server 属于用户自定义,保持视为已配置、不覆盖。
+    let expected_binary = resolve_binary();
+    candidates.iter().any(|path| {
+        json_has_memory_server(path, None)
+            && !json_memory_server_is_stale_kode_binary(path, expected_binary.as_deref())
+    })
 }
+
+/// `mcpServers.memory.command` 指向一个 `kode-memory-mcp`,但不是本次运行解析出的 sidecar。
+fn json_memory_server_is_stale_kode_binary(p: &Path, expected_binary: Option<&Path>) -> bool {
+    let Some(expected) = expected_binary else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(p) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    v.pointer(&format!("/mcpServers/{MCP_SERVER_NAME}/command"))
+        .and_then(|command| command.as_str())
+        .is_some_and(|command| {
+            let command = Path::new(command);
+            command.file_name().and_then(|name| name.to_str()) == Some(BINARY_NAME)
+                && command != expected
+        })
+}
+
 
 /// 给定 spec,返回**所有候选**的 user-scope 配置文件路径(顺序:新版优先,老版兜底)。
 fn config_check_paths(spec: &McpSetupSpec) -> Vec<PathBuf> {
@@ -1251,6 +1283,44 @@ mod tests {
 
     /// `is_configured_for_spec(Claude)` 应该读 `~/.<cli>/.claude.json`,cli 名作子目录。
     /// 用同一个 spec 但不同 cli 字段(`claude` vs `claude-internal`)读不同的文件,
+    /// 关键回归:CodeBuddy 的 memory 条目指向旧 checkout 的 kode-memory-mcp(没有 KODE_HOST
+    /// 门控)时必须视为未配置,让启动 setup 改写成当前 sidecar;第三方同名 server 不动。
+    #[test]
+    fn stale_kode_memory_binary_detected_but_foreign_server_kept() {
+        let dir = std::env::temp_dir().join(format!("kode-mcp-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mcp.json");
+        let expected = Path::new("/Applications/kode.app/Contents/MacOS/kode-memory-mcp");
+
+        std::fs::write(
+            &path,
+            br#"{"mcpServers":{"memory":{"command":"/old/kode/target/debug/kode-memory-mcp"}}}"#,
+        )
+        .unwrap();
+        assert!(json_memory_server_is_stale_kode_binary(
+            &path,
+            Some(expected)
+        ));
+
+        std::fs::write(
+            &path,
+            br#"{"mcpServers":{"memory":{"command":"/Applications/kode.app/Contents/MacOS/kode-memory-mcp"}}}"#,
+        )
+        .unwrap();
+        assert!(!json_memory_server_is_stale_kode_binary(
+            &path,
+            Some(expected)
+        ));
+
+        std::fs::write(&path, br#"{"mcpServers":{"memory":{"command":"npx"}}}"#).unwrap();
+        assert!(!json_memory_server_is_stale_kode_binary(
+            &path,
+            Some(expected)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 两者互相隔离,各自的「已配置/未配置」状态独立。
     #[test]
     fn is_configured_for_spec_claude_uses_cli_named_subdir() {
