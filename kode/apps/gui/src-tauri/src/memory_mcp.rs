@@ -860,7 +860,7 @@ fn spec_style_label(spec: &McpSetupSpec) -> &'static str {
 ///
 /// 不同 spec 的 user-scope 配置文件路径不一样:
 /// - `Codebuddy` → `~/.codebuddy/mcp.json`(v2.x)/ `~/.codebuddy.json`(legacy)
-/// - `Claude { cli: "claude" }` → `~/.claude/.claude.json`
+/// - `Claude { cli: "claude" }` → `~/.claude.json` (or CLAUDE_CONFIG_DIR/.claude.json)
 /// - `Claude { cli: "claude-internal" }` → `~/.claude-internal/.claude.json`
 /// - `Claude { cli: <其他> }` → 启发式:试 `~/.<cli>/.claude.json`
 /// - `Codex` → `~/.codex/config.toml`
@@ -915,7 +915,6 @@ fn json_memory_server_is_stale_kode_binary(p: &Path, expected_binary: Option<&Pa
         })
 }
 
-
 /// 给定 spec,返回**所有候选**的 user-scope 配置文件路径(顺序:新版优先,老版兜底)。
 fn config_check_paths(spec: &McpSetupSpec) -> Vec<PathBuf> {
     if matches!(spec, McpSetupSpec::Codex { .. }) {
@@ -934,13 +933,24 @@ fn config_check_paths(spec: &McpSetupSpec) -> Vec<PathBuf> {
             ]
         }
         McpSetupSpec::Claude { cli } => {
-            // claude family 的 user-scope 配置在 ~/.<cli>/.claude.json
-            // 例:cli="claude" → ~/.claude/.claude.json
-            //     cli="claude-internal" → ~/.claude-internal/.claude.json
-            vec![home.join(format!(".{cli}")).join(".claude.json")]
+            if Path::new(cli).file_stem().and_then(|name| name.to_str()) == Some("claude") {
+                let config_dir =
+                    std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty());
+                vec![claude_user_config_path(&home, config_dir.as_deref())]
+            } else {
+                // Wrapper CLIs retain their isolated configuration directories.
+                vec![home.join(format!(".{cli}")).join(".claude.json")]
+            }
         }
         McpSetupSpec::Codex { .. } => unreachable!("handled above"),
         McpSetupSpec::JsonMerge { config_path } => vec![expand_tilde(config_path)],
+    }
+}
+
+fn claude_user_config_path(home: &Path, config_dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    match config_dir {
+        Some(dir) => PathBuf::from(dir).join(".claude.json"),
+        None => home.join(".claude.json"),
     }
 }
 
@@ -1281,8 +1291,9 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// `is_configured_for_spec(Claude)` 应该读 `~/.<cli>/.claude.json`,cli 名作子目录。
+    /// Standard Claude uses ~/.claude.json; wrappers retain isolated directories.
     /// 用同一个 spec 但不同 cli 字段(`claude` vs `claude-internal`)读不同的文件,
+    /// 两者互相隔离,各自的「已配置/未配置」状态独立。
     /// 关键回归:CodeBuddy 的 memory 条目指向旧 checkout 的 kode-memory-mcp(没有 KODE_HOST
     /// 门控)时必须视为未配置,让启动 setup 改写成当前 sidecar;第三方同名 server 不动。
     #[test]
@@ -1321,9 +1332,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 两者互相隔离,各自的「已配置/未配置」状态独立。
     #[test]
-    fn is_configured_for_spec_claude_uses_cli_named_subdir() {
+    fn is_configured_for_spec_claude_uses_effective_user_config() {
         use std::env;
         use std::fs;
         let tmp = env::temp_dir().join(format!("kode-mcp-claude-{}", std::process::id()));
@@ -1341,10 +1351,14 @@ mod tests {
             cli: "claude-internal".into(),
         };
 
-        // 写 ~/.claude/.claude.json → 只 claude_spec 命中,internal 不动
+        let old_config_dir = env::var_os("CLAUDE_CONFIG_DIR");
+        env::remove_var("CLAUDE_CONFIG_DIR");
+        // A stale file in ~/.claude must not suppress automatic setup.
         let claude_dir = tmp.join(".claude");
         fs::create_dir_all(&claude_dir).unwrap();
         fs::write(claude_dir.join(".claude.json"), payload).unwrap();
+        assert!(!is_configured_for_spec(&claude_spec));
+        fs::write(tmp.join(".claude.json"), payload).unwrap();
         assert!(is_configured_for_spec(&claude_spec));
         assert!(!is_configured_for_spec(&internal_spec));
 
@@ -1353,6 +1367,15 @@ mod tests {
         fs::create_dir_all(&internal_dir).unwrap();
         fs::write(internal_dir.join(".claude.json"), payload).unwrap();
         assert!(is_configured_for_spec(&internal_spec));
+        env::set_var("CLAUDE_CONFIG_DIR", tmp.join("custom"));
+        assert!(!is_configured_for_spec(&claude_spec));
+        fs::create_dir_all(tmp.join("custom")).unwrap();
+        fs::write(tmp.join("custom/.claude.json"), payload).unwrap();
+        assert!(is_configured_for_spec(&claude_spec));
+        match old_config_dir {
+            Some(value) => env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
 
         match old_home {
             Some(h) => env::set_var("HOME", h),
