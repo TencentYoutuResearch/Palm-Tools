@@ -1842,14 +1842,24 @@
         </button>
         <button
           role="menuitem"
-          onclick={(e) => { e.stopPropagation(); duplicateTab(t.id); closeMenu() }}
+          onclick={(e) => {
+            e.stopPropagation()
+            void duplicateTab(t.id).catch(error =>
+              pushToast({ severity: 'error', title: tr('tab.menu.duplicate'), detail: String(error) }))
+            closeMenu()
+          }}
         >
           <Icon name="copy" size={13} /> {tr('tab.menu.duplicate')}
         </button>
         {#if t.sessionId}
           <button
             role="menuitem"
-            onclick={(e) => { e.stopPropagation(); restoreTab(t.id); closeMenu() }}
+            onclick={(e) => {
+              e.stopPropagation()
+              void restoreTab(t.id).catch(error =>
+                pushToast({ severity: 'error', title: tr('tab.menu.restore'), detail: String(error) }))
+              closeMenu()
+            }}
           >
             <Icon name="refresh-cw" size={13} /> {tr('tab.menu.restore')}
           </button>

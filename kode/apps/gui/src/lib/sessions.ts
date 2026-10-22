@@ -1,6 +1,7 @@
 import { writable, get, derived } from 'svelte/store'
 import {
   ipc,
+  endpointIpc,
   ENDPOINT_LOCAL,
   endpointRemote,
   type EndpointId,
@@ -11,6 +12,7 @@ import {
   type PermissionMode,
 } from './ipc'
 import { sanitizeModelName } from './model_alias'
+import { resolveSessionLaunchModel } from './session_launch_model'
 import {
   addOrUpdateAppEvent,
   clearAppEvents,
@@ -103,6 +105,11 @@ export async function newTab(
   opts: NewTabOptions = {},
 ): Promise<TabInfo> {
   const { cwd, resumeSessionId, permissionMode, model, endpointId } = opts
+  const launchModel = await resolveSessionLaunchModel(backendKey, model, () =>
+    endpointId?.kind === 'remote'
+      ? endpointIpc.discoverBackendModels(endpointId.id, backendKey)
+      : ipc.discoverBackendModels(backendKey),
+  )
   const s: SpawnedSession = await ipc.spawnSession(
     backendKey,
     80,
@@ -110,7 +117,7 @@ export async function newTab(
     cwd,
     resumeSessionId ?? null,
     permissionMode ?? null,
-    model ?? null,
+    launchModel,
     endpointId ?? null,
     currentTermTheme('pty'),
     opts.transportKind ?? 'pty',
