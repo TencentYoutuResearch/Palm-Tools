@@ -810,7 +810,9 @@ impl CloudSyncManager {
                 None => Err("plan response command is missing accept".into()),
             },
             "model" => match payload.get("model").and_then(Value::as_str) {
-                Some(model) => kode_bridge::set_session_model(&self.inner.ctx, local_session_id, model).await,
+                Some(model) => {
+                    kode_bridge::set_session_model(&self.inner.ctx, local_session_id, model).await
+                }
                 None => Err("model command is missing model".into()),
             },
             "mode" => match payload.get("mode").and_then(Value::as_str) {
