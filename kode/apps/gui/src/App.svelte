@@ -27,6 +27,7 @@
   } from '@tauri-apps/api/window'
   import { open } from '@tauri-apps/plugin-dialog'
   import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
+  import StartupProgress from './lib/StartupProgress.svelte'
   import Terminal from './lib/Terminal.svelte'
   import StructuredSession from './lib/StructuredSession.svelte'
   import CommandPalette, { type Command } from './lib/CommandPalette.svelte'
@@ -106,6 +107,18 @@
   let backends: BackendInfo[] = $state([])
   let bootError: string | null = $state(null)
   let bootLoading = $state(true)
+  let bootStep = $state(0)
+  let bootSessionProgress = $state('')
+  let bootWaitingIds: SessionId[] = $state([])
+  let bootWaitingTabs = $derived($tabs.filter((tab) => bootWaitingIds.includes(tab.id) && (tab.status === 'starting')))
+  let bootDetail = $derived(bootStep === 7 && bootWaitingTabs.length
+    ? tr('app.startup.waiting', { count: bootWaitingTabs.length, names: bootWaitingTabs.map((tab) => tab.title || tab.backendKey).join(' · ') })
+    : bootSessionProgress)
+  const bootSteps = ['preferences', 'shortcuts', 'events', 'backends', 'connections', 'memory', 'sessions', 'ready']
+  function advanceBoot(step: number) {
+    bootStep = step
+    bootSessionProgress = ''
+  }
   let sessionStartError: string | null = $state(null)
 
   function friendlySessionStartError(error: unknown): string {
@@ -1106,6 +1119,7 @@
       mql = window.matchMedia('(prefers-color-scheme: dark)')
       systemPrefersDark = mql.matches
       mql.addEventListener('change', onSystemThemeChange)
+      advanceBoot(1)
       await syncScreenshotShortcutRegistration()
       screenshotSettingsUnlisten = onScreenshotSettingsChanged((detail) => {
         screenshotSettings = detail
@@ -1120,7 +1134,9 @@
       }
 
       void loadAvatarLibrary()
+      advanceBoot(2)
       await startEventSubscriptions()
+      advanceBoot(3)
       backends = await ipc.listBackends()
       // 订阅 backend 开关/增删变更 — SettingsPanel 写盘后 Rust 端 emit `backends-changed`,
       // 这里重新拉一次让 BackendChooser 立刻看到最新列表(无需重启 GUI)。
@@ -1132,12 +1148,14 @@
           console.warn('refresh backends on changed:', e)
         }
       })
+      advanceBoot(4)
       // Phase 11.6:启动时拉 endpoints 列表(用于状态栏连接指示)
       try {
         endpoints = await endpointIpc.list()
       } catch {
         // 没有 endpoint 也不影响启动
       }
+      advanceBoot(5)
       // M4 memory:订阅 pending 数变化(后端 1.5s 轮询 + review/propose 后即时 emit)
       try {
         memoryUnlisten = await memoryIpc.onPendingCount((n) => {
@@ -1172,12 +1190,19 @@
       } catch {
         // 无持久化或失败 — 静默,Browse 自带空默认
       }
+      advanceBoot(6)
       const persisted = await ipc.getPersistedTabs()
       if (persisted && persisted.length > 0) {
         const localRestoredIds: SessionId[] = []
         await restoreTabs(persisted, (tab) => {
           if (!tab.endpointId || tab.endpointId.kind === 'local') localRestoredIds.push(tab.id)
+        }, (progress) => {
+          bootSessionProgress = tr('app.startup.sessionProgress', {
+            current: progress.current, total: progress.total, name: progress.name,
+          })
         })
+        bootWaitingIds = localRestoredIds
+        advanceBoot(7)
         await waitForRestoredTabsReady(localRestoredIds)
       }
       // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
@@ -2304,9 +2329,10 @@
 </div>
 
 {#if bootLoading}
-  <div class="startup-overlay" role="status" aria-live="polite" aria-label={tr('app.restoringSessions')}>
+  <div class="startup-overlay">
     <div class="startup-indicator" aria-hidden="true"></div>
-    <span>{tr('app.restoringSessions')}</span>
+    <span role="status">{tr('app.restoringSessions')}</span>
+    <StartupProgress steps={bootSteps} current={bootStep} detail={bootDetail} />
   </div>
 {/if}
 

@@ -192,3 +192,7 @@ New local CodeBuddy conversations use the existing application color tokens and 
 ## Workspace Markdown and find
 
 File previews keep the existing compact header and theme-token typography. The search icon opens a bounded, wrapping find strip immediately below the header; match position and previous/next/close actions remain outside the content scroller. Mermaid diagrams use a flat bordered region with horizontal overflow, theme-aware labels, and source fallback on failure. Search highlights use warning/accent tokens with the existing on-accent foreground. No additional cards, global shortcuts, or idle timers are added.
+
+## Startup progress instrument
+
+The startup panel uses the existing accent and surface tokens with a segmented progress rail, monospaced stage numbers and a quiet luminous active row. Newest stages appear first; a five-row viewport fades at the bottom when older stages remain scrollable. Session detail sits above the history to keep row geometry stable. No ambient animation is added.

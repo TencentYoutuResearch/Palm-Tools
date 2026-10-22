@@ -454,6 +454,7 @@ export function schedulePersist() {
 export async function restoreTabs(
   persisted: PersistedTab[],
   onRestored?: (tab: TabInfo) => void,
+  onProgress?: (progress: { current: number; total: number; name: string }) => void,
 ): Promise<number> {
   // restoring 标记让 schedulePersist 全程跳过 —— 避免「成功 tab 子集」覆盖 state.json
   // 导致失败 tab 的持久化项被永久清掉。结束后按成功与否决定是否补一次 persist。
@@ -462,7 +463,8 @@ export async function restoreTabs(
   const list = dedupePersistedTabs(persisted)
   let ok = 0
   try {
-    for (const p of list) {
+    for (const [index, p] of list.entries()) {
+      onProgress?.({ current: index + 1, total: list.length, name: p.title || p.backend_key })
       try {
         // permission_mode 在持久化字段里是 "default" | "bypass" | null;
         // 收窄到 PermissionMode 类型(字符串校验,其它值降级 null)。
