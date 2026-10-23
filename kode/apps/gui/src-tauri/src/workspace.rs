@@ -730,7 +730,9 @@ fn collect_submodule_changes(root: &Path, summary: &mut WorkspaceGitSummary) {
         if !sub_abs.is_dir() {
             continue;
         }
-        if let Ok(sub_status) = run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"]) {
+        if let Ok(sub_status) =
+            run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"])
+        {
             parse_git_status(&sub_status, summary, &format!("{sub_path}/"));
         }
     }
@@ -1067,9 +1069,7 @@ fn run_diff_no_index(path: &Path) -> Result<String, String> {
         .output()
         .map_err(|e| format!("git diff failed: {e}"))?;
     // Exit 1 can also mean an inaccessible input; do not discard its diagnostic.
-    if !output.status.success()
-        && (output.status.code() != Some(1) || !output.stderr.is_empty())
-    {
+    if !output.status.success() && (output.status.code() != Some(1) || !output.stderr.is_empty()) {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1191,7 +1191,8 @@ mod tests {
                 .iter()
                 .find(|change| change.path == name)
                 .unwrap();
-            let preview = git_diff_sync(root.to_str().unwrap(), &change.path, &change.bucket).unwrap();
+            let preview =
+                git_diff_sync(root.to_str().unwrap(), &change.path, &change.bucket).unwrap();
             assert_eq!(preview.path, name);
             assert!(preview.content.contains("+preview content"));
         }

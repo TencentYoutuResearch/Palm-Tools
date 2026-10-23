@@ -511,9 +511,11 @@ mod tests {
         let event = UsageEvent {
             backend: "tclaude".into(),
             model: "test-model".into(),
-            timestamp_ms: Some(chrono::DateTime::parse_from_rfc3339("2026-10-20T17:00:00Z")
-                .unwrap()
-                .timestamp_millis()),
+            timestamp_ms: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-20T17:00:00Z")
+                    .unwrap()
+                    .timestamp_millis(),
+            ),
             usage: UsageBucket {
                 total: 7,
                 ..UsageBucket::default()

@@ -2049,12 +2049,16 @@ async fn post_model(
     Path(id): Path<SessionId>,
     Json(req): Json<ModelReq>,
 ) -> Result<Json<Value>, ApiError> {
-    set_session_model(&ctx, id, &req.model).await.map_err(ApiError::BadRequest)?;
+    set_session_model(&ctx, id, &req.model)
+        .await
+        .map_err(ApiError::BadRequest)?;
     Ok(Json(json!({"model":req.model})))
 }
 
 fn session_model_matches(requested: &str, actual: &str) -> bool {
-    if requested.eq_ignore_ascii_case(actual) { return true; }
+    if requested.eq_ignore_ascii_case(actual) {
+        return true;
+    }
     let actual = actual.to_ascii_lowercase();
     matches!(requested, "sonnet" | "opus" | "haiku")
         && actual.starts_with("claude-")
@@ -2062,7 +2066,12 @@ fn session_model_matches(requested: &str, actual: &str) -> bool {
 }
 
 pub async fn set_session_model(ctx: &Ctx, id: SessionId, model: &str) -> Result<(), String> {
-    if model.is_empty() || model.len() > 200 || !model.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.:/[]".contains(&c)) {
+    if model.is_empty()
+        || model.len() > 200
+        || !model
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.:/[]".contains(&c))
+    {
         return Err("Invalid model id".into());
     }
     if pending_interaction(ctx, id).is_some() {
@@ -2733,7 +2742,10 @@ async fn git_status(Query(q): Query<GitStatusQuery>) -> Result<Json<WsGitSummary
     if !path.is_absolute() {
         return Err(ApiError::BadRequest("cwd must be absolute".into()));
     }
-    Ok(Json(read_git_summary_best_effort(path, q.commit_limit.unwrap_or(80))))
+    Ok(Json(read_git_summary_best_effort(
+        path,
+        q.commit_limit.unwrap_or(80),
+    )))
 }
 
 /// `GET /api/v1/git/diff?cwd=<abs>&path=<rel>&bucket=<staged|modified|untracked|conflict>`
@@ -3130,7 +3142,9 @@ fn collect_submodule_changes(root: &std::path::Path, summary: &mut WsGitSummary)
         if !sub_abs.is_dir() {
             continue;
         }
-        if let Ok(sub_status) = run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"]) {
+        if let Ok(sub_status) =
+            run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"])
+        {
             parse_git_status(&sub_status, summary, &format!("{sub_path}/"));
         }
     }
@@ -3299,9 +3313,7 @@ fn run_diff_no_index(path: &std::path::Path) -> Result<String, ApiError> {
         .output()
         .map_err(|e| ApiError::Internal(format!("git diff failed: {e}")))?;
     // Exit 1 can also mean an inaccessible input; do not discard its diagnostic.
-    if !output.status.success()
-        && (output.status.code() != Some(1) || !output.stderr.is_empty())
-    {
+    if !output.status.success() && (output.status.code() != Some(1) || !output.stderr.is_empty()) {
         return Err(ApiError::Internal(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
@@ -3644,8 +3656,12 @@ mod model_switch;
 #[path = "lib_tests.rs"]
 mod tests;
 
-async fn fs_edit(Json(request): Json<kode_core::workspace_files::FileEdit>) -> Result<Json<Vec<String>>, ApiError> {
+async fn fs_edit(
+    Json(request): Json<kode_core::workspace_files::FileEdit>,
+) -> Result<Json<Vec<String>>, ApiError> {
     tokio::task::spawn_blocking(move || kode_core::workspace_files::edit(request))
-        .await.map_err(|e| ApiError::BadRequest(e.to_string()))?
-        .map(Json).map_err(ApiError::BadRequest)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?
+        .map(Json)
+        .map_err(ApiError::BadRequest)
 }
