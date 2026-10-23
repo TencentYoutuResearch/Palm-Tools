@@ -79,6 +79,15 @@ pub fn run() {
     disable_apple_press_and_hold();
 
     tauri::Builder::default()
+        // Must be the first plugin. A second GUI process would otherwise restore
+        // and persist its own tab list into the same state.json.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -179,6 +188,9 @@ pub fn run() {
             commands::set_config_path,
             commands::get_home_dir,
             workspace::workspace_snapshot,
+            workspace::workspace_edit,
+            workspace::workspace_copy_text,
+            endpoints::endpoint_workspace_edit,
             workspace::workspace_list_dir,
             workspace::workspace_search,
             workspace::workspace_preview_file,

@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * CLI/model token 灵动岛。数据来自 Rust 对本地历史 JSONL 的聚合，和 tab 生命周期无关。
+   * CLI/model token 灵动岛。聚合本机与已连接 bridge 的历史。
    */
   import { onMount, onDestroy } from 'svelte'
   import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window'
@@ -8,7 +8,7 @@
   import Icon from './Icon.svelte'
   import BackendIcon from './BackendIcon.svelte'
   import { modelMonitorIpc, modelUsageIpc, type ModelMonitorLayout, type ModelUsagePeriod, type ModelUsageSnapshot } from './ipc'
-  import { formatTokens } from './model_alias'
+  import { compactModelName, formatTokens } from './model_alias'
 
   const periods: { id: ModelUsagePeriod; label: string }[] = [
     { id: 'today', label: 'Today' },
@@ -60,7 +60,7 @@
     for (const row of snapshot?.rows ?? []) {
       totals.set(row.backend, (totals.get(row.backend) ?? 0) + row.total_tokens)
     }
-    return ['codex', 'claude', 'codebuddy']
+    return ['codex', 'tcodex', 'claude', 'tclaude', 'codebuddy', 'cursor']
       .map((backend) => ({ backend, tokens: totals.get(backend) ?? 0 }))
       .filter((item) => item.tokens > 0)
   })
@@ -343,7 +343,10 @@
   function backendLabel(backend: string): string {
     if (backend === 'codebuddy') return 'CodeBuddy'
     if (backend === 'claude') return 'Claude'
+    if (backend === 'tclaude') return 'TClaude'
     if (backend === 'codex') return 'Codex'
+    if (backend === 'tcodex') return 'TCodex'
+    if (backend === 'cursor') return 'Cursor'
     return backend
   }
 
@@ -450,7 +453,7 @@
     >
       <header class="panel-header">
         <div>
-          <span class="eyebrow">LOCAL CLI USAGE</span>
+          <span class="eyebrow">LOCAL + REMOTE CLI USAGE</span>
           <h2>Model traffic</h2>
         </div>
         <button class="refresh" type="button" title="Refresh usage" aria-label="Refresh usage" onclick={() => refresh()}>
@@ -475,6 +478,9 @@
       {:else if !snapshot && loading}
         <div class="state-message">Reading CLI histories…</div>
       {:else if snapshot}
+        {#each snapshot.warnings ?? [] as warning}
+          <div class="state-message error"><Icon name="alert-triangle" size={14} />{warning}</div>
+        {/each}
         <div class="totals">
           <div class="total-primary">
             <span>Total tokens</span>
@@ -525,11 +531,11 @@
           <span>{snapshot.rows.length} models</span>
         </div>
         <div class="model-list" class:loading aria-busy={loading}>
-          {#each snapshot.rows as row (`${row.backend}:${row.model}`)}
+          {#each snapshot.rows as row (`${row.source}:${row.backend}:${row.model}`)}
             <div class="model-row">
               <span class="backend-icon"><BackendIcon backendKey={row.backend} size={17} /></span>
               <span class="model-copy">
-                <span class="model-name"><strong>{row.model}</strong><small>{backendLabel(row.backend)}</small></span>
+                <span class="model-name" title={row.model}><strong>{compactModelName(row.model)}</strong><small>{backendLabel(row.backend)} · {row.source === 'local' ? 'This Mac' : row.source}</small></span>
                 <span class="usage-track"><i style={`width:${Math.max(2, row.total_tokens / maxTokens * 100)}%`}></i></span>
                 <span class="token-detail">
                   {formatTokens(row.input_tokens)} in · {formatTokens(row.output_tokens)} out
@@ -545,7 +551,7 @@
 
         <footer class="panel-footer">
           <span>{snapshot.scanned_files} history files scanned</span>
-          <span>Codex · Claude · CodeBuddy</span>
+          <span>Local + connected endpoints</span>
         </footer>
       {/if}
     </section>
@@ -643,8 +649,8 @@
   .backend-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: var(--bg-chip); }
   .model-copy { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .model-name { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
-  .model-name strong { overflow: hidden; color: var(--fg-primary); font: 600 11px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-  .model-name small { flex: 0 0 auto; color: var(--fg-tertiary); font-size: 9px; }
+  .model-name strong { min-width: 0; overflow: hidden; color: var(--fg-primary); font: 600 11px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .model-name small { min-width: 0; max-width: 44%; overflow: hidden; color: var(--fg-tertiary); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
   .usage-track { height: 2px; overflow: hidden; border-radius: 2px; background: var(--bd-muted); }
   .usage-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--st-info), var(--st-tokens)); }
   .token-detail { overflow: hidden; color: var(--fg-tertiary); font: 8px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }

@@ -141,6 +141,13 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: 'New session',
+            icon: const Icon(Icons.add),
+            onPressed: endpoint == null
+                ? null
+                : () => context.push('/sessions/new'),
+          ),
+          IconButton(
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh),
             onPressed: () => ref.read(sessionsProvider.notifier).refresh(),
@@ -437,10 +444,99 @@ class _SessionTile extends ConsumerWidget {
       ),
     );
 
-    if (kind == null) return tile;
+    final row = kind == null ? tile : _AttentionWrap(kind: kind, child: tile);
+    return Dismissible(
+      key: ValueKey('session-${s.id}'),
+      direction: DismissDirection.endToStart,
+      confirmDismiss: (_) => _confirmDelete(context, s),
+      background: const SizedBox.shrink(),
+      secondaryBackground: const _DeleteBackground(),
+      onDismissed: (_) {
+        final messenger = ScaffoldMessenger.of(context);
+        final notifier = ref.read(sessionsProvider.notifier);
+        notifier.removeLocal(s.id);
+        unawaited(() async {
+          try {
+            await notifier.delete(s.id);
+          } catch (error) {
+            // Let the dismissed row leave the tree before inserting it again.
+            // Restoring on the same frame reuses the dismissed Dismissible.
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              notifier.restore(s);
+              messenger.showSnackBar(
+                SnackBar(content: Text(_deleteFailure(error))),
+              );
+            });
+          }
+        }());
+      },
+      child: row,
+    );
+  }
+}
 
-    // 需要用户操作 — 整张卡片用呼吸高亮包一层
-    return _AttentionWrap(kind: kind, child: tile);
+Future<bool> _confirmDelete(BuildContext context, SessionDto session) async {
+  final title = session.title.trim().isEmpty
+      ? 'This session'
+      : session.title.trim();
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Delete session?'),
+      content: Text(
+        '$title will be stopped on the desktop. This cannot be undone.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+          ),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
+}
+
+String _deleteFailure(Object error) {
+  if (error is ApiException && error.detail.trim().isNotEmpty) {
+    return error.detail.trim();
+  }
+  return 'Could not delete this session.';
+}
+
+class _DeleteBackground extends StatelessWidget {
+  const _DeleteBackground();
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      alignment: Alignment.centerRight,
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      color: colors.error,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Icon(Icons.delete_outline, color: colors.onError),
+          const SizedBox(width: 8),
+          Text(
+            'Delete',
+            style: TextStyle(
+              color: colors.onError,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -679,8 +775,14 @@ class _EmptyView extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             const Text(
-              'Start one from the desktop GUI; it will show up here.',
+              'Create a session on your connected desktop.',
               style: TextStyle(fontSize: 12, color: KillLaColors.textMuted),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () => context.push('/sessions/new'),
+              icon: const Icon(Icons.add),
+              label: const Text('New session'),
             ),
           ],
         ),

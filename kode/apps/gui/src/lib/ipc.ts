@@ -176,6 +176,7 @@ export interface ModelUsageTotals {
 }
 
 export interface ModelUsageRow extends ModelUsageTotals {
+  source: string
   backend: 'codex' | 'claude' | 'codebuddy' | string
   model: string
   requests: number
@@ -187,6 +188,7 @@ export interface ModelUsageSnapshot {
   rows: ModelUsageRow[]
   totals: ModelUsageTotals
   daily: { date: string; total_tokens: number }[]
+  warnings: string[]
 }
 
 export const modelUsageIpc = {
@@ -423,8 +425,8 @@ export const ipc = {
 
   /// 读取本地工作目录的文件列表和 Git 摘要。仅用于 Local tab。
   /// showHidden 省略时后端默认 true(保留本地显示 dotfiles 的旧行为)。
-  workspaceSnapshot: (cwd: string, showHidden?: boolean) =>
-    invoke<WorkspaceSnapshot>('workspace_snapshot', { cwd, showHidden: showHidden ?? null }),
+  workspaceSnapshot: (cwd: string, showHidden?: boolean, commitLimit?: number) =>
+    invoke<WorkspaceSnapshot>('workspace_snapshot', { cwd, showHidden: showHidden ?? null, commitLimit: commitLimit ?? null }),
   workspaceListDir: (path: string, showHidden?: boolean) =>
     invoke<WorkspaceEntry[]>('workspace_list_dir', { path, showHidden: showHidden ?? null }),
   workspaceSearch: (cwd: string, query: string, showHidden?: boolean) =>
@@ -469,16 +471,22 @@ export const ipc = {
     }
   },
 
-  /// 列出某个工作目录下指定 backend 的所有历史 session。
-  /// 返回按 mtime 降序排列的 session 摘要列表。
-  listSessionsForCwd: (backendKey: string, cwd: string) =>
-    invoke<SessionSummary[]>('list_sessions_for_cwd', { backendKey, cwd }),
+  /// 分页列出某个工作目录下指定 backend 的历史 session(按 mtime 降序)。
+  /// 后端只解析本页 transcript;`has_more` 为 true 时可继续用下一个 offset 拉取。
+  listSessionsForCwd: (backendKey: string, cwd: string, offset: number, limit: number) =>
+    invoke<SessionPage>('list_sessions_for_cwd', { backendKey, cwd, offset, limit }),
 }
 
 export type RemoteClipboardPayload =
   | { kind: 'text'; text: string }
   | { kind: 'attachments'; paths: string[] }
   | { kind: 'empty' }
+
+/// 一页 session 摘要(Rust `commands::SessionPage` 镜像)。
+export interface SessionPage {
+  sessions: SessionSummary[]
+  has_more: boolean
+}
 
 /// session 摘要(Rust `commands::SessionSummary` 镜像)。
 export interface SessionSummary {
@@ -720,17 +728,19 @@ export const endpointIpc = {
       path,
       showHidden: show_hidden,
     }),
-  /** 拉远端 endpoint 上某 cwd/backend 的历史 session 列表 */
-  listSessionsForCwd: (id: string, backendKey: string, cwd: string) =>
-    invoke<SessionSummary[]>('endpoint_list_sessions_for_cwd', {
+  /** 分页拉远端 endpoint 上某 cwd/backend 的历史 session 列表 */
+  listSessionsForCwd: (id: string, backendKey: string, cwd: string, offset: number, limit: number) =>
+    invoke<SessionPage>('endpoint_list_sessions_for_cwd', {
       id,
       backendKey,
       cwd,
+      offset,
+      limit,
     }),
   /** 远端 tab WorkspacePanel:列文件 + git 摘要(对齐 ipc.workspaceSnapshot)。
    *  showHidden 省略时后端默认 false(保留远端隐藏 dotfiles 的旧行为)。 */
-  workspaceSnapshot: (id: string, cwd: string, showHidden?: boolean) =>
-    invoke<WorkspaceSnapshot>('endpoint_workspace_snapshot', { id, cwd, showHidden: showHidden ?? null }),
+  workspaceSnapshot: (id: string, cwd: string, showHidden?: boolean, commitLimit?: number) =>
+    invoke<WorkspaceSnapshot>('endpoint_workspace_snapshot', { id, cwd, showHidden: showHidden ?? null, commitLimit: commitLimit ?? null }),
   /** 远端 tab:展开目录(对齐 ipc.workspaceListDir) */
   workspaceListDir: (id: string, path: string, showHidden?: boolean) =>
     invoke<WorkspaceEntry[]>('endpoint_workspace_list_dir', { id, path, showHidden: showHidden ?? null }),
@@ -1349,3 +1359,17 @@ export const pluginIpc = {
 }
 export type ScreenshotDraft = { pngBase64: string; width: number; height: number }
 export type ScreenshotCrop = { x: number; y: number; width: number; height: number }
+
+export type WorkspaceFileEdit = {
+  root: string
+  path: string
+  action: 'new_file' | 'new_folder' | 'rename' | 'delete' | 'import'
+  name?: string
+  sources?: string[]
+}
+export const workspaceFiles = {
+  edit: (request: WorkspaceFileEdit, id?: string | null) => id
+    ? invoke<string[]>('endpoint_workspace_edit', { id, request })
+    : invoke<string[]>('workspace_edit', { request }),
+  copyText: (text: string) => invoke<void>('workspace_copy_text', { text }),
+}

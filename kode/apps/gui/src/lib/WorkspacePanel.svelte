@@ -1,11 +1,17 @@
 <script lang="ts">
   import { tick } from 'svelte'
+  import ConfirmDialog from './ConfirmDialog.svelte'
+  import { pushToast } from './toast'
+  import { workspaceFiles, type WorkspaceFileEdit } from './ipc'
+  import { workspaceDropTarget, type WorkspaceDrop } from './workspace_drop'
+  import { workspaceFileDrag } from './workspace_drag'
+  import { open } from '@tauri-apps/plugin-dialog'
   import { currentLocale, t } from './i18n'
   import { renderWorkspaceMarkdown, workspaceDiagrams } from './workspace_markdown'
   import { findPreviewRanges, revealPreviewRange } from './preview_find'
   import hljs from 'highlight.js'
   import Icon from './Icon.svelte'
-  import { layoutGitGraph, graphPath, graphContinuationPath, GRAPH_LANE_INSET, GRAPH_LANE_STEP, GRAPH_ROW_HEIGHT } from './git_graph_layout'
+  import { type GraphRow, layoutGitGraph, graphPath, graphContinuationPath, GRAPH_LANE_INSET, GRAPH_LANE_STEP, GRAPH_ROW_HEIGHT } from './git_graph_layout'
   import {
     ipc,
     endpointIpc,
@@ -86,6 +92,15 @@
   let fileHits = $state<WorkspaceEntry[]>([])
   let fileSearchLoading = $state(false)
   let fileSearchError: string | null = $state(null)
+  const COMMIT_PAGE_SIZE = 15
+  let commitLimit = $state(COMMIT_PAGE_SIZE)
+  let loadingMoreCommits = $state(false)
+  let moreCommitsError = $state('')
+  let commitRequest = 0
+  const moreCommitsLabel = $derived.by(() => {
+    $currentLocale
+    return t('workspace.moreCommits')
+  })
   let snapshot: WorkspaceSnapshot | null = $state(null)
   let error: string | null = $state(null)
   let loading = $state(false)
@@ -107,6 +122,146 @@
     subtitle: '',
     content: '',
   })
+
+  const fileLabels = $derived.by(() => {
+    $currentLocale
+    return Object.fromEntries(['newFile', 'newFolder', 'importFiles', 'importFolders', 'rename', 'delete', 'cancel', 'copySelection', 'copied', 'failed', 'done', 'busy', 'nameHint', 'nameError', 'dropHint', 'more', 'differentEndpoint'].map(key => [key, t(`workspace.files.${key}`)]))
+  })
+  let fileBusy = $state(false)
+  let fileError = $state('')
+  let inlineEdit = $state<{ request: WorkspaceFileEdit; endpoint: string | null; title: string; isDir: boolean; key: string | null } | null>(null)
+  let editName = $state('')
+  let deleteDialog = $state<{ request: WorkspaceFileEdit; endpoint: string | null; key: string | null } | null>(null)
+  let nameError = $state('')
+  let selectedText = $state('')
+
+  $effect(() => {
+    workspaceKeyFor(tab)
+    inlineEdit = null; deleteDialog = null; fileError = ''; selectedText = ''
+  })
+
+  function targetDirectory(entry?: WorkspaceEntry | null) {
+    return entry?.is_dir ? entry.path : entry ? entry.path.replace(/[\\/][^\\/]+$/, '') : cwd
+  }
+  async function beginEdit(action: 'new_file' | 'new_folder' | 'rename', entry?: WorkspaceEntry | null) {
+    if (fileBusy || !cwd) return
+    contextMenu = null
+    nameError = ''
+    editName = action === 'rename' ? entry!.name : ''
+    const edit = {
+      request: { root: cwd, action, path: action === 'rename' ? entry!.path : targetDirectory(entry) },
+      endpoint: remoteId(), key: workspaceKeyFor(tab),
+      title: action === 'rename' ? fileLabels.rename : action === 'new_file' ? fileLabels.newFile : fileLabels.newFolder,
+      isDir: action === 'new_folder' || (action === 'rename' && !!entry?.is_dir),
+    }
+    inlineEdit = edit
+    if (action !== 'rename') {
+      filterQuery = ''
+      const paths = new Set(expandedPaths)
+      let parent = edit.request.path
+      while (parent && parent !== cwd) {
+        paths.add(parent)
+        const next = parent.replace(/[\\/][^\\/]+$/, '')
+        if (next === parent) break
+        parent = next
+      }
+      expandedPaths = paths
+      await refreshExpanded()
+    }
+  }
+  function focusNameInput(node: HTMLInputElement) {
+    void tick().then(() => {
+      if (!node.isConnected) return
+      node.focus()
+      const dot = node.value.lastIndexOf('.')
+      node.setSelectionRange(0, inlineEdit?.isDir || dot <= 0 ? node.value.length : dot)
+      node.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    })
+  }
+  function cancelInlineEdit() {
+    if (!fileBusy) { inlineEdit = null; nameError = '' }
+  }
+  async function performEdit(request: WorkspaceFileEdit, endpoint: string | null, key: string | null) {
+    fileBusy = true; fileError = ''
+    try {
+      const paths = await workspaceFiles.edit(request, endpoint)
+      if (key !== workspaceKeyFor(tab)) return
+      ++filePreviewGeneration
+      if (request.action === 'delete' || request.action === 'rename') {
+        preview = emptyPreview()
+        expandedPaths = new Set([...expandedPaths].filter(p => p !== request.path && !p.startsWith(request.path + '/')))
+      }
+      childrenByPath = {}
+      filterQuery = ''
+      selectedPath = paths[0] ?? ''
+      await refresh()
+      await refreshExpanded()
+      pushToast({ severity: 'success', title: fileLabels.done })
+    } catch (e) {
+      if (key === workspaceKeyFor(tab)) fileError = String(e)
+      pushToast({ severity: 'error', title: fileLabels.failed, detail: String(e) })
+      throw e
+    } finally { fileBusy = false }
+  }
+  async function submitName(name: string) {
+    const dialog = inlineEdit
+    if (!dialog || fileBusy) return
+    if (!name.trim() || name === '.' || name === '..' || /[\\/:\x00-\x1f]/.test(name)) { nameError = fileLabels.nameError; return }
+    if (dialog.request.action === 'rename' && name === dialog.request.path.split(/[\\/]/).pop()) {
+      cancelInlineEdit()
+      return
+    }
+    try {
+      await performEdit({ ...dialog.request, name }, dialog.endpoint, dialog.key)
+      if (inlineEdit === dialog) inlineEdit = null
+    } catch (e) { if (inlineEdit === dialog) nameError = String(e) }
+  }
+  function beginDelete(entry: WorkspaceEntry) {
+    if (fileBusy) return
+    contextMenu = null
+    cancelInlineEdit()
+    deleteDialog = { request: { root: cwd, path: entry.path, action: 'delete' }, endpoint: remoteId(), key: workspaceKeyFor(tab) }
+  }
+  async function importPaths(paths: string[], directory = cwd, external = true) {
+    if (fileBusy || !paths.length) return
+    const endpoint = remoteId(), key = workspaceKeyFor(tab), root = cwd
+    fileBusy = true; fileError = ''
+    try {
+      const sources = endpoint && external ? await ipc.uploadRemoteAttachments(endpoint, paths) : paths
+      await performEdit({ root, path: directory, action: 'import', sources }, endpoint, key)
+    } catch (e) { if (key === workspaceKeyFor(tab)) fileError = String(e) }
+    finally { fileBusy = false }
+  }
+  async function chooseImport(directory: boolean) {
+    const key = workspaceKeyFor(tab), target = cwd
+    try {
+      const paths = await open({ multiple: true, directory })
+      if (paths && key === workspaceKeyFor(tab)) await importPaths(Array.isArray(paths) ? paths : [paths], target)
+    } catch (e) {
+      if (key === workspaceKeyFor(tab)) fileError = String(e)
+    }
+  }
+  function htmlDrop(event: DragEvent) {
+    event.preventDefault(); event.stopPropagation()
+    const raw = event.dataTransfer?.getData('application/x-kode-file')
+    if (!raw) return
+    try {
+      const source = JSON.parse(raw)
+      if (source.endpointId !== remoteId()) { fileError = fileLabels.differentEndpoint; return }
+      const target = (event.target as HTMLElement).closest<HTMLElement>('[data-drop-directory]')?.dataset.dropDirectory ?? cwd
+      void importPaths([source.path], target, false)
+    } catch (e) { fileError = String(e) }
+  }
+  function updateSelection() {
+    const selection = window.getSelection()
+    selectedText = selection && previewPane?.contains(selection.anchorNode) && previewPane?.contains(selection.focusNode) ? selection.toString() : ''
+  }
+  async function copyText(text: string) {
+    if (!text) return
+    try { await workspaceFiles.copyText(text); pushToast({ severity: 'success', title: fileLabels.copied }) }
+    catch (e) { pushToast({ severity: 'error', title: fileLabels.failed, detail: String(e) }) }
+    previewContextMenu = null
+  }
 
   const previewCopy = $derived.by(() => {
     $currentLocale
@@ -280,6 +435,12 @@
 
   $effect(() => {
     const currentWorkspaceKey = workspaceKeyFor(tab)
+    if (prevWorkspaceKey !== currentWorkspaceKey) {
+      commitLimit = COMMIT_PAGE_SIZE
+      commitRequest++
+      loadingMoreCommits = false
+      moreCommitsError = ''
+    }
     // 1. 离开旧 workspace:保存当前视图状态(此时 $state 还是旧 workspace 的值)
     if (prevWorkspaceKey != null && prevWorkspaceKey !== currentWorkspaceKey) {
       panelStateCache.set(prevWorkspaceKey, {
@@ -459,23 +620,52 @@
 
   async function refresh() {
     if (!cwd) return
+    const request = ++commitRequest
+    const workspaceKey = workspaceKeyFor(tab)
+    loadingMoreCommits = false
     loading = true
     error = null
     try {
       const rid = remoteId()
-      snapshot = rid
-        ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden)
-        : await ipc.workspaceSnapshot(cwd, showHidden)
-      loadedWorkspaceKey = workspaceKeyFor(tab) ?? ''
+      const next = rid
+        ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden, commitLimit + 1)
+        : await ipc.workspaceSnapshot(cwd, showHidden, commitLimit + 1)
+      if (request !== commitRequest || workspaceKey !== workspaceKeyFor(tab)) return
+      snapshot = next
+      loadedWorkspaceKey = workspaceKey ?? ''
       if (!selectedPath && snapshot.entries.length > 0) {
         selectedPath = snapshot.entries[0].path
       }
     } catch (e) {
+      if (request !== commitRequest || workspaceKey !== workspaceKeyFor(tab)) return
       snapshot = null
       error = String(e)
       loadedWorkspaceKey = workspaceKeyFor(tab) ?? ''
     } finally {
       loading = false
+    }
+  }
+
+  async function loadMoreCommits() {
+    if (loadingMoreCommits || loading || !cwd) return
+    const request = ++commitRequest
+    const workspaceKey = workspaceKeyFor(tab)
+    const nextLimit = commitLimit + COMMIT_PAGE_SIZE
+    loadingMoreCommits = true
+    moreCommitsError = ''
+    try {
+      const rid = remoteId()
+      const next = rid
+        ? await endpointIpc.workspaceSnapshot(rid, cwd, showHidden, nextLimit + 1)
+        : await ipc.workspaceSnapshot(cwd, showHidden, nextLimit + 1)
+      if (request !== commitRequest || workspaceKey !== workspaceKeyFor(tab)) return
+      if (!next.git.is_repo) throw new Error(t('workspace.moreCommitsError'))
+      snapshot = next
+      commitLimit = nextLimit
+    } catch (e) {
+      if (request === commitRequest) moreCommitsError = String(e)
+    } finally {
+      if (request === commitRequest) loadingMoreCommits = false
     }
   }
 
@@ -541,6 +731,7 @@
   async function refreshExpanded() {
     const rid = remoteId()
     const paths = [...expandedPaths]
+    const workspace = workspaceKeyFor(tab)
     if (paths.length === 0) return
     await Promise.all(
       paths.map(async (p) => {
@@ -548,7 +739,7 @@
           const children = rid
             ? await endpointIpc.workspaceListDir(rid, p, showHidden)
             : await ipc.workspaceListDir(p, showHidden)
-          childrenByPath = { ...childrenByPath, [p]: children }
+          if (workspace === workspaceKeyFor(tab)) childrenByPath = { ...childrenByPath, [p]: children }
         } catch {
           /* 单个目录失败时保留旧 children,不阻塞其它目录 */
         }
@@ -582,7 +773,7 @@
     selectedPath = entry.path
     contextMenu = {
       x: Math.min(event.clientX, window.innerWidth - 218),
-      y: Math.min(event.clientY, window.innerHeight - 142),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 310)),
       entry,
     }
   }
@@ -606,7 +797,7 @@
     const selection = window.getSelection()
     const selectedText = selection && selection.rangeCount > 0
       && root.contains(selection.anchorNode) && root.contains(selection.focusNode)
-      ? selection.toString().trim()
+      ? selection.toString()
       : ''
     const anchorLine = selectedText
       ? lineFromSelectionPoint(root, selection?.anchorNode ?? null, selection?.anchorOffset ?? 0)
@@ -618,7 +809,7 @@
     event.stopPropagation()
     previewContextMenu = {
       x: Math.min(event.clientX, window.innerWidth - 218),
-      y: Math.min(event.clientY, window.innerHeight - (selectedText ? 82 : 46)),
+      y: Math.min(event.clientY, window.innerHeight - (selectedText ? 120 : 46)),
       path: preview.path,
       selection: selectedText,
       startLine: anchorLine == null || focusLine == null ? null : Math.min(anchorLine, focusLine),
@@ -928,7 +1119,7 @@
   }
 
   function commitsForFilter(): GitCommitInfo[] {
-    const all = snapshot?.git.commits ?? []
+    const all = (snapshot?.git.commits ?? []).slice(0, commitLimit)
     const tokens = workspaceQueryTokens(filterQuery)
     if (tokens.length === 0) return all
     return all.filter((c) => {
@@ -978,18 +1169,19 @@
     return formatBytes(entry.size ?? 0)
   }
 
-  /**
-   * 文件树行拖拽:把 path + endpointId 写进 dataTransfer,终端区 .main 的
-   * HTML5 drop handler 读取后注入 @<path> 到 active tab。
-   * 用自定义 MIME 类型 `application/x-kode-file`,与 Finder 的 OS 级拖拽
-   * (Tauri onDragDropEvent, dragDropEnabled:true)互不干扰。
-   */
-  function onTreeDragStart(e: DragEvent, entry: WorkspaceEntry) {
-    if (!e.dataTransfer) return
-    const rid = remoteId()
-    e.dataTransfer.setData('application/x-kode-file', JSON.stringify({ path: entry.path, endpointId: rid }))
-    e.dataTransfer.setData('text/plain', entry.path)
-    e.dataTransfer.effectAllowed = 'copy'
+  function gitFileReference(path: string) {
+    const root = snapshot?.git.root || cwd
+    const absolute = /^(?:\/|[A-Za-z]:[\\/])/.test(path)
+      ? path : `${root.replace(/[\\/]$/, '')}/${path}`
+    return { path: absolute, endpointId: remoteId() }
+  }
+
+  function receiveFileDrop(drop: WorkspaceDrop) {
+    if (drop.external === false && drop.endpointId !== remoteId()) {
+      fileError = fileLabels.differentEndpoint
+      return
+    }
+    void importPaths(drop.paths, drop.directory, drop.external !== false)
   }
 
   function formatBytes(size: number): string {
@@ -1053,6 +1245,31 @@
   }
 </script>
 
+{#snippet graphRail(graph: GraphRow, merge = false, working = false)}
+  <span class="graph-rail" style={`width:${graph.width * GRAPH_LANE_STEP + 6}px`}>
+                          <svg class="graph-svg" width={graph.width * GRAPH_LANE_STEP + 6} height={GRAPH_ROW_HEIGHT} viewBox={`0 0 ${graph.width * GRAPH_LANE_STEP + 6} ${GRAPH_ROW_HEIGHT}`} preserveAspectRatio="none" aria-hidden="true">
+                            {#each graph.segments as segment}
+                              <path d={graphPath(segment)} class={`graph-line lane-${segment.color % 6}`} />
+                            {/each}
+                            {#each graph.bottom as _, column}
+                              {@const continuation = graphContinuationPath(graph, column)}
+                              {#if continuation}<path d={continuation} class={`graph-line lane-${graph.bottom[column] % 6}`} />{/if}
+                            {/each}
+                          </svg>
+                          <span class={`graph-commit-node lane-${graph.color % 6}`} class:merge={merge} class:working={working} style={`left:${GRAPH_LANE_INSET + graph.lane * GRAPH_LANE_STEP}px`}></span>
+                        </span>
+{/snippet}
+
+{#snippet expandedRail(graph: GraphRow)}
+  <div class="expanded-rail" style={`width:${graph.width * GRAPH_LANE_STEP + 6}px`} aria-hidden="true">
+    {#each graph.bottom as color, column}
+      <span class={`expanded-line lane-${color % 6}`} style={`left:${GRAPH_LANE_INSET + column * GRAPH_LANE_STEP}px`}></span>
+    {/each}
+  </div>
+{/snippet}
+
+<svelte:document onselectionchange={updateSelection} />
+
 <svelte:window
   onclick={() => { contextMenu = null; previewContextMenu = null }}
   onkeydown={(e) => {
@@ -1067,6 +1284,12 @@
   style="--nav-w:{navWidth}px"
   aria-label="Workspace inspector"
   onkeydown={(event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+      const selection = window.getSelection()
+      if (selection?.toString() && (event.currentTarget as HTMLElement).contains(selection.anchorNode)) {
+        event.preventDefault(); event.stopPropagation(); void copyText(selection.toString()); return
+      }
+    }
     const target = event.target as HTMLElement
     if (!target.closest('input, textarea, [contenteditable="true"]')) previewKeydown(event)
   }}
@@ -1095,7 +1318,7 @@
       >
         <Icon name={showHidden ? 'eye' : 'eye-off'} size={14} />
       </button>
-      <button class="tool-btn" title="Refresh" aria-label="Refresh workspace" onclick={refresh} disabled={loading || !cwd}>
+      <button class="tool-btn" title="Refresh" aria-label="Refresh workspace" onclick={refresh} disabled={loading || loadingMoreCommits || !cwd}>
         <Icon name="refresh-cw" size={14} />
       </button>
       {#if onToggleTerminal}
@@ -1134,6 +1357,10 @@
             {#if preview.subtitle}<span>{preview.subtitle}</span>{/if}
           </div>
           <div class="preview-actions">
+            {#if selectedText}
+              <button class="tool-btn" title={fileLabels.copySelection} aria-label={fileLabels.copySelection}
+                onpointerdown={(e) => e.preventDefault()} onclick={() => copyText(selectedText)}><Icon name="copy" size={14} /></button>
+            {/if}
             {#if preview.truncated}<em>truncated</em>{/if}
             {#if canFind}
               <button class="tool-btn" title={previewCopy.findShortcut} aria-label={previewCopy.find} onclick={openFind}>
@@ -1240,8 +1467,21 @@
         {/if}
 
         {#if activePanel === 'files'}
-          <section class="list-pane" aria-label="Files">
-            {#if snapshot && snapshot.entries.length === 0 && !filterQuery.trim()}
+          <div class="file-toolbar">
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.newFile} aria-label={fileLabels.newFile} onclick={() => beginEdit('new_file')}><Icon name="file-text" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.newFolder} aria-label={fileLabels.newFolder} onclick={() => beginEdit('new_folder')}><Icon name="folder" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.importFiles} aria-label={fileLabels.importFiles} onclick={() => chooseImport(false)}><Icon name="plus" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !cwd} title={fileLabels.importFolders} aria-label={fileLabels.importFolders} onclick={() => chooseImport(true)}><Icon name="folder-open" size={14} /></button>
+            <button class="tool-btn" disabled={fileBusy || !findEntryByPath(selectedPath)} title={fileLabels.more} aria-label={fileLabels.more} onclick={(e) => { const entry = findEntryByPath(selectedPath); if (entry) openContextMenu(e, entry) }}><Icon name="pencil" size={14} /></button>
+          </div>
+          {#if fileBusy || fileError}<p class="strip-msg" class:error={!!fileError} role="status">{fileError || fileLabels.busy}</p>{/if}
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <section class="list-pane" aria-label="Files" data-workspace-files data-drop-directory={cwd}
+            title={fileLabels.dropHint} aria-busy={fileBusy}
+            use:workspaceDropTarget={receiveFileDrop}
+            ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy' }}
+            ondrop={htmlDrop}>
+            {#if snapshot && snapshot.entries.length === 0 && !filterQuery.trim() && !inlineEdit}
               <p class="muted pad">No files</p>
             {:else if snapshot && filterQuery.trim()}
               {#if fileSearchLoading && fileHits.length === 0}
@@ -1254,7 +1494,7 @@
                 {@render searchHits(fileHits)}
               {/if}
             {:else if snapshot}
-              {@render tree(snapshot.entries, 0)}
+              {@render tree(snapshot.entries, 0, cwd)}
             {/if}
           </section>
         {:else}
@@ -1273,9 +1513,13 @@
               </div>
               {@const dirtyChanges = visibleDirtyChanges()}
               {@const commits = commitsForFilter()}
-              {@const graphRows = layoutGitGraph(commits)}
+              {@const showWorkingTree = gitDirtyCount > 0 && dirtyChanges.length > 0}
+              {@const head = (snapshot.git.commits ?? []).find((commit) => commit.decorations?.includes('HEAD'))}
+              {@const graphRows = layoutGitGraph(showWorkingTree
+                ? [{ hash: 'working-tree', parents: head ? [head.hash] : [] }, ...commits]
+                : commits)}
               <div class="git-graph" aria-label="Git graph">
-                {#if gitDirtyCount > 0 && dirtyChanges.length > 0}
+                {#if showWorkingTree}
                   <div class="graph-block">
                     <button
                       class="graph-row working-tree-row"
@@ -1284,7 +1528,7 @@
                       title="Toggle working tree changes"
                       onclick={toggleWorkingTree}
                     >
-                      <span class="graph-rail"><span class="graph-node working"></span></span>
+                      {@render graphRail(graphRows[0], false, true)}
                       <span class="graph-content working-tree-card">
                         <span class="graph-main">
                           <strong>Working tree</strong>
@@ -1294,11 +1538,14 @@
                       </span>
                     </button>
                     {#if expandedGraphKey === 'working'}
-                      <div class="graph-expanded working-expanded">
+                      <div class="graph-expansion">
+                        {@render expandedRail(graphRows[0])}
+                        <div class="graph-expanded working-expanded">
                         {@render graphChangeGroup('Conflicts', 'conflict', changesFor('conflict'))}
                         {@render graphChangeGroup('Staged', 'staged', changesFor('staged'))}
                         {@render graphChangeGroup('Modified', 'modified', changesFor('modified'))}
                         {@render graphChangeGroup('Untracked', 'untracked', changesFor('untracked'))}
+                        </div>
                       </div>
                     {/if}
                   </div>
@@ -1310,30 +1557,19 @@
                   <p class="muted pad">No commits</p>
                 {:else}
                   {#each commits as commit, index (commit.hash)}
-                    {@const graph = graphRows[index]}
+                    {@const graph = graphRows[index + (showWorkingTree ? 1 : 0)]}
                     <div class="graph-block">
                       <button
                         class="graph-row commit-graph-row"
                         class:selected={selectedGitKey === `commit:${commit.hash}`}
                         aria-expanded={expandedGraphKey === `commit:${commit.hash}`}
                         title={`${commit.hash} ${commit.subject}`}
-                        onclick={() => toggleCommit(commit)}
+                        onclick={(event) => { if (!(event.target as HTMLElement).closest('.selectable-title') && !window.getSelection()?.toString()) toggleCommit(commit) }}
                       >
-                        <span class="graph-rail" style={`width:${graph.width * GRAPH_LANE_STEP + 6}px`}>
-                          <svg class="graph-svg" width={graph.width * GRAPH_LANE_STEP + 6} height={GRAPH_ROW_HEIGHT} viewBox={`0 0 ${graph.width * GRAPH_LANE_STEP + 6} ${GRAPH_ROW_HEIGHT}`} preserveAspectRatio="none" aria-hidden="true">
-                            {#each graph.segments as segment}
-                              <path d={graphPath(segment)} class={`graph-line lane-${segment.color % 6}`} />
-                            {/each}
-                            {#each graph.bottom as _, column}
-                              {@const continuation = graphContinuationPath(graph, column)}
-                              {#if continuation}<path d={continuation} class={`graph-line lane-${graph.bottom[column] % 6}`} />{/if}
-                            {/each}
-                          </svg>
-                          <span class={`graph-commit-node lane-${graph.color % 6}`} class:merge={(commit.parents ?? []).length > 1} style={`left:${GRAPH_LANE_INSET + graph.lane * GRAPH_LANE_STEP}px`}></span>
-                        </span>
+                        {@render graphRail(graph, (commit.parents ?? []).length > 1)}
                         <span class="graph-content">
                           <span class="graph-main">
-                            <strong>{commit.subject || '(no subject)'}</strong>
+                            <strong class="selectable-title">{commit.subject || '(no subject)'}</strong>
                           </span>
                           {#if (commit.decorations ?? []).length > 0}
                             <span class="ref-chips">
@@ -1350,13 +1586,15 @@
                       </button>
                       {#if expandedGraphKey === `commit:${commit.hash}`}
                         {@const detail = commitDetails[commit.hash]}
-                        <div class="graph-expanded commit-detail">
+                        <div class="graph-expansion">
+                          {@render expandedRail(graph)}
+                          <div class="graph-expanded commit-detail">
                           {#if loadingCommitDetails.has(commit.hash)}
                             <p class="muted">Loading commit details...</p>
                           {:else if commitDetailErrors[commit.hash]}
                             <p class="strip-msg error">{commitDetailErrors[commit.hash]}</p>
                           {:else if detail}
-                            {#if detail.message}
+                            {#if detail.message.trim() !== commit.subject.trim()}
                               <pre class="commit-message">{detail.message}</pre>
                             {/if}
                             {#if detail.files.length > 0}
@@ -1366,11 +1604,13 @@
                                     class="commit-file-row"
                                     class:selected={selectedGitKey === `commit-file:${commit.hash}:${file.path}`}
                                     title={file.path}
+                                    draggable="false"
+                                    use:workspaceFileDrag={gitFileReference(file.path)}
                                     onclick={() => previewCommitFile(commit, file)}
                                   >
                                     <span class="status-tag commit-file">{file.status.slice(0, 1)}</span>
                                     <span>{basename(file.path)}</span>
-                                    <em>{file.path}</em>
+                                    <em>{file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : ''}</em>
                                   </button>
                                 {/each}
                               </div>
@@ -1378,11 +1618,18 @@
                               <p class="muted">No changed files</p>
                             {/if}
                           {/if}
+                          </div>
                         </div>
                       {/if}
                     </div>
                   {/each}
                 {/if}
+                {#if (snapshot.git.commits?.length ?? 0) > commitLimit}
+                  <button class="more-commits" onclick={loadMoreCommits} disabled={loadingMoreCommits || loading} aria-busy={loadingMoreCommits}>
+                    {moreCommitsLabel}
+                  </button>
+                {/if}
+                {#if moreCommitsError}<p class="strip-msg error" role="alert">{moreCommitsError}</p>{/if}
               </div>
             {:else if snapshot}
               <p class="muted pad">Not a Git repository</p>
@@ -1418,6 +1665,10 @@
           <Icon name="external-link" size={13} /> Open with app
         </button>
       {/if}
+      <button role="menuitem" disabled={fileBusy} onclick={() => beginEdit('new_file', contextMenu!.entry)}><Icon name="file-text" size={13} />{fileLabels.newFile}</button>
+      <button role="menuitem" disabled={fileBusy} onclick={() => beginEdit('new_folder', contextMenu!.entry)}><Icon name="folder" size={13} />{fileLabels.newFolder}</button>
+      <button role="menuitem" disabled={fileBusy} onclick={() => beginEdit('rename', contextMenu!.entry)}><Icon name="pencil" size={13} />{fileLabels.rename}</button>
+      <button role="menuitem" class="danger-action" disabled={fileBusy} onclick={() => beginDelete(contextMenu!.entry)}><Icon name="trash-2" size={13} />{fileLabels.delete}</button>
       {#if onReference}
         <button role="menuitem" onclick={() => referencePath(contextMenu!.entry.path)}>
           <Icon name="link" size={13} /> Add reference to conversation
@@ -1436,6 +1687,7 @@
       onkeydown={(e) => e.stopPropagation()}
     >
       {#if previewContextMenu.selection}
+        <button role="menuitem" onclick={() => copyText(previewContextMenu!.selection)}><Icon name="copy" size={13} />{fileLabels.copySelection}</button>
         <button role="menuitem" onclick={referencePreviewSelection}>
           <Icon name="link" size={13} /> Ask about selection
         </button>
@@ -1446,18 +1698,27 @@
     </div>
   {/if}
 </aside>
+{#if deleteDialog}
+  <ConfirmDialog title={fileLabels.delete} message={t('workspace.files.deleteMessage', { path: deleteDialog.request.path })}
+    confirmLabel={fileLabels.delete} cancelLabel={fileLabels.cancel} danger
+    onClose={() => (deleteDialog = null)} onConfirm={() => { const target = deleteDialog!; deleteDialog = null; void performEdit(target.request, target.endpoint, target.key).catch(() => {}) }} />
+{/if}
 
 {#snippet searchHits(entries: WorkspaceEntry[])}
   <div class="tree-group">
     {#each entries as entry (entry.path)}
+      {#if inlineEdit?.request.action === 'rename' && inlineEdit.request.path === entry.path}
+        {@render nameEditor(0)}
+      {:else}
       <button
         class="tree-row search-row"
         class:selected={selectedPath === entry.path}
         title={entry.path}
-        draggable="true"
+        data-drop-directory={entry.is_dir ? entry.path : undefined}
+        draggable="false"
         onclick={() => onEntryClick(entry)}
         oncontextmenu={(e) => openContextMenu(e, entry)}
-        ondragstart={(e) => onTreeDragStart(e, entry)}
+        use:workspaceFileDrag={{ path: entry.path, endpointId: remoteId() }}
       >
         <span class="twisty"></span>
         <span class="file-icon">
@@ -1466,22 +1727,55 @@
         <span class="file-name">{entry.name}{entry.is_symlink ? ' @' : ''}</span>
         <span class="file-meta">{searchHitDir(entry.path)}</span>
       </button>
+      {/if}
     {/each}
   </div>
 {/snippet}
 
-{#snippet tree(entries: WorkspaceEntry[], depth: number)}
+{#snippet nameEditor(depth: number)}
+  {#if inlineEdit}
+    <form class="tree-row inline-name-row" style={`--depth:${depth}`} aria-label={inlineEdit.title}
+      onsubmit={(event) => { event.preventDefault(); void submitName(editName) }}>
+      <span class="twisty"></span>
+      <span class="file-icon"><Icon name={inlineEdit.isDir ? 'folder' : 'file-text'} size={14} /></span>
+      <input class="inline-name-input" bind:value={editName} use:focusNameInput
+        aria-label={inlineEdit.title} aria-invalid={!!nameError} aria-describedby={nameError ? 'workspace-name-error' : undefined}
+        placeholder={inlineEdit.title} title={fileLabels.nameHint} readonly={fileBusy}
+        spellcheck="false" autocomplete="off"
+        oninput={() => { nameError = '' }}
+        onkeydown={(event) => {
+          event.stopPropagation()
+          if (event.isComposing) { if (event.key === 'Enter') event.preventDefault(); return }
+          if (event.key === 'Escape') { event.preventDefault(); cancelInlineEdit() }
+        }} />
+      <span class="inline-name-actions">
+        <button type="submit" class="tool-btn" disabled={fileBusy} title={inlineEdit.title} aria-label={inlineEdit.title}><Icon name="check" size={12} /></button>
+        <button type="button" class="tool-btn" disabled={fileBusy} title={fileLabels.cancel} aria-label={fileLabels.cancel} onclick={cancelInlineEdit}><Icon name="x" size={12} /></button>
+      </span>
+      {#if nameError}<span id="workspace-name-error" class="inline-name-error" role="alert">{nameError}</span>{/if}
+    </form>
+  {/if}
+{/snippet}
+
+{#snippet tree(entries: WorkspaceEntry[], depth: number, parent: string)}
   <div class="tree-group">
+    {#if inlineEdit && inlineEdit.request.action !== 'rename' && inlineEdit.request.path === parent}
+      {@render nameEditor(depth)}
+    {/if}
     {#each entries as entry (entry.path)}
+      {#if inlineEdit?.request.action === 'rename' && inlineEdit.request.path === entry.path}
+        {@render nameEditor(depth)}
+      {:else}
       <button
         class="tree-row"
         class:selected={selectedPath === entry.path}
         style={`--depth:${depth}`}
         title={entry.path}
-        draggable="true"
+        data-drop-directory={entry.is_dir ? entry.path : undefined}
+        draggable="false"
         onclick={() => onEntryClick(entry)}
         oncontextmenu={(e) => openContextMenu(e, entry)}
-        ondragstart={(e) => onTreeDragStart(e, entry)}
+        use:workspaceFileDrag={{ path: entry.path, endpointId: remoteId() }}
       >
         <span class="twisty">
           {#if entry.is_dir}
@@ -1494,8 +1788,9 @@
         <span class="file-name">{entry.name}{entry.is_symlink ? ' @' : ''}</span>
         <span class="file-meta">{loadingPaths.has(entry.path) ? '...' : formatSize(entry)}</span>
       </button>
+      {/if}
       {#if entry.is_dir && expandedPaths.has(entry.path)}
-        {@render tree(childrenByPath[entry.path] ?? [], depth + 1)}
+        {@render tree(childrenByPath[entry.path] ?? [], depth + 1, entry.path)}
       {/if}
     {/each}
   </div>
@@ -1513,6 +1808,8 @@
           class="change-row"
           class:selected={selectedGitKey === `${change.bucket}:${change.path}`}
           title={change.path}
+          draggable="false"
+          use:workspaceFileDrag={gitFileReference(change.path)}
           onclick={() => previewGit(change)}
         >
           <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>
@@ -1533,6 +1830,8 @@
           class="graph-change-row"
           class:selected={selectedGitKey === `${change.bucket}:${change.path}`}
           title={change.path}
+          draggable="false"
+          use:workspaceFileDrag={gitFileReference(change.path)}
           onclick={() => previewGit(change)}
         >
           <span class="status-tag {change.bucket}">{change.status.slice(0, 1).toUpperCase()}</span>
@@ -1545,6 +1844,12 @@
 {/snippet}
 
 <style>
+  .context-menu .danger-action { color: var(--st-err); border-top: 1px solid var(--bd-default); }
+  .file-toolbar { display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--bd-default); }
+  :global(.workspace-drop-active) { outline: 2px solid var(--acc); outline-offset: -2px; background: var(--acc-soft) !important; }
+  .selectable-title { user-select: text; -webkit-user-select: text; cursor: text; }
+  .context-menu { max-height: calc(100vh - 24px); overflow-y: auto; }
+
   .workspace-panel {
     height: 100%;
     min-height: 0;
@@ -1825,6 +2130,21 @@
     grid-template-rows: auto auto;
     padding-block: 4px;
   }
+  .inline-name-row { margin: 0; }
+  .inline-name-input {
+    min-width: 100px;
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--acc);
+    border-radius: 3px;
+    padding: 2px 4px;
+    background: var(--bg-primary);
+    color: var(--fg-primary);
+    font: inherit;
+  }
+  .inline-name-input[aria-invalid="true"] { border-color: var(--st-error, #e06c75); }
+  .inline-name-actions { display: flex; align-items: center; }
+  .inline-name-error { grid-column: 3 / -1; max-width: 260px; white-space: normal; overflow-wrap: anywhere; color: var(--st-error, #e06c75); }
   .search-row .twisty,
   .search-row .file-icon,
   .search-row .file-name {
@@ -1951,34 +2271,7 @@
     justify-content: center;
     min-height: 100%;
   }
-  .working-tree-row .graph-rail { width: 22px; }
-  .working-tree-row .graph-rail::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 2px;
-    background: color-mix(in srgb, var(--fg-primary) 13%, transparent);
-  }
-  .graph-node {
-    position: relative;
-    z-index: 1;
-    width: 10px;
-    height: 10px;
-    margin-top: 18px;
-    border: 2px solid var(--acc);
-    border-radius: 999px;
-    background: var(--bg-sidebar);
-    box-shadow: 0 0 0 2px var(--bg-sidebar);
-  }
-  .graph-node.merge { border-color: var(--st-warn); }
-  .graph-node.working {
-    width: 12px;
-    height: 12px;
-    margin-top: 13px;
-    background: var(--acc);
-  }
-  .graph-svg { display: block; height: 100%; min-height: 52px; overflow: visible; }
+  .graph-svg { position: absolute; inset: 0; display: block; height: 100%; overflow: visible; }
   .graph-line { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
   .graph-commit-node {
     position: absolute;
@@ -1991,6 +2284,7 @@
     border-radius: 50%;
     background: var(--bg-sidebar);
   }
+  .graph-commit-node.working { width: 12px; height: 12px; background: currentColor; }
   .graph-commit-node.merge { width: 11px; height: 11px; }
   .lane-0 { color: var(--acc); }
   .lane-1 { color: var(--st-info); }
@@ -2052,12 +2346,26 @@
     border-radius: 8px;
     background: color-mix(in srgb, var(--acc) 7%, transparent);
   }
+  .graph-expansion {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 7px;
+    padding-right: 7px;
+  }
+  .expanded-rail { position: relative; align-self: stretch; }
+  .expanded-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    transform: translateX(-50%);
+    background: currentColor;
+  }
   .graph-expanded {
-    margin: 0 7px 8px 35px;
-    padding: 8px 9px;
-    border: 1px solid color-mix(in srgb, var(--fg-primary) 8%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--fg-primary) 4%, transparent);
+    min-width: 0;
+    margin: 0 0 8px;
+    padding: 4px 0 8px;
+    border-bottom: 1px solid var(--bd-muted);
   }
   .commit-detail {
     display: flex;
@@ -2458,6 +2766,11 @@
   :global(.hljs-emphasis) { font-style: italic; }
   :global(.hljs-strong) { font-weight: var(--fw-semi); }
   .error-text { color: var(--st-err); white-space: pre-wrap; }
+  .more-commits { width: 100%; padding: 8px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-secondary); cursor: pointer; }
+  .more-commits:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-primary); }
+  .more-commits:active:not(:disabled) { background: var(--bg-hover); }
+  .more-commits:focus-visible { outline: 1px solid var(--acc); outline-offset: -1px; }
+  .more-commits:disabled { opacity: 0.5; cursor: default; }
   .pad { padding: 10px; }
   .muted, .error {
     margin: 0;

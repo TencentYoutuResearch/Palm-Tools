@@ -7,7 +7,7 @@
 //!
 //! | Hook Event | 用途 |
 //! |-----------|------|
-//! | `Stop` | ① `type:"command"` 转发 hook_relay emit `turn_finished` ② `type:"prompt"` kode-memory 守门员 |
+//! | `Stop` | 全局 command relay；守门员仅在 Kode 会话 settings 中注册 |
 //! | `Notification` (permission_prompt) | 即时通知 kode GUI 有权限请求 |
 //! | `UserPromptSubmit` | 用户回车提交后即时清除 attention |
 //! | `PreToolUse` | 禁用；启动时只清理遗留 kode 条目 |
@@ -67,7 +67,28 @@ pub const STOP_HOOK_PROMPT: &str = r#"你是 kode-memory 的沉淀守门员。ko
 - 没有值得沉淀的：{"ok": true}
 - 确实有且 agent 没记、且已确认 MCP 可用：{"ok": false, "reason": "本轮产生了值得沉淀进 kode-memory 的内容：<一句话说清是什么>。请用 memory_search 查重后调 memory_propose 写入(author 用当前 backend，scope 用 project:<当前项目名>，body 含结论+why)。若工具不可用、已有等价 fact 或返回 out_of_energy，则无需写入，直接结束，不要反复查找工具。"}
 
-保守判断：绝大多数轮次都应返回 {"ok": true}。只有明确命中"应当沉淀"且 agent 确实没写时才返回 ok:false。"#;
+保守判断：绝大多数轮次都应返回 {"ok": true}。只有明确命中"应当沉淀"且 agent 确实没写时才返回 ok:false。
+
+## 输出格式硬约束
+- 只输出一行裸 JSON，不要代码围栏，不要任何解释或前后缀文字
+- ok 为 true 时只输出 {"ok": true}，不要附带 reason"#;
+
+/// The prompt gatekeeper must never affect agents launched outside Kode.
+pub fn session_settings_json() -> String {
+    serde_json::json!({
+        "hooks": {"Stop": [{"hooks": [{
+            "type": "prompt",
+            "timeout": 30,
+            "continueOnBlock": true,
+            "prompt": STOP_HOOK_PROMPT
+        }]}]}
+    })
+    .to_string()
+}
+
+pub fn tcodex_hooks_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".tcodex/hooks.json"))
+}
 
 /// 需要注入 hook 的 backend 列表，返回 `(label, settings_path)` 对。
 /// 路径不存在也返回（inject 函数会在写入时创建）。
@@ -122,29 +143,24 @@ pub fn is_stop_hook_configured(path: &Path) -> bool {
     let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return false;
     };
-    doc.get("hooks")
+    let Some(entries) = doc.get("hooks")
         .and_then(|hooks| hooks.get("Stop"))
         .and_then(|stop| stop.as_array())
-        .and_then(|entries| {
-            entries.iter().find(|entry| {
-                entry
-                    .get("_kode_managed")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false)
-            })
+    else {
+        return false;
+    };
+    let has_prompt = entries.iter().any(|entry| {
+        entry["hooks"].as_array().is_some_and(|hooks| {
+            hooks.iter().any(|hook| hook["type"] == "prompt" && is_kode_handler(hook))
         })
-        .and_then(|entry| entry.get("hooks"))
-        .and_then(|hooks| hooks.as_array())
-        .is_some_and(|hooks| {
-            hooks.iter().any(|hook| {
-                hook.get("type").and_then(|value| value.as_str()) == Some("prompt")
-                    && hook.get("prompt").and_then(|value| value.as_str()) == Some(STOP_HOOK_PROMPT)
-                    && hook
-                        .get("continueOnBlock")
-                        .and_then(|value| value.as_bool())
-                        == Some(true)
+    });
+    let has_command = entries.iter().any(|entry| {
+        entry["_kode_managed"] == true
+            && entry["hooks"].as_array().is_some_and(|hooks| {
+                hooks.iter().any(|hook| hook["type"] == "command")
             })
-        })
+    });
+    has_command && !has_prompt
 }
 
 /// 注入或更新 kode 管理的 Stop hook（幂等）。
@@ -170,12 +186,6 @@ pub fn inject_stop_hook(path: &Path, relay_command: &str) -> Result<(), String> 
                 "type": "command",
                 "timeout": 5,
                 "command": relay_command
-            },
-            {
-                "type": "prompt",
-                "timeout": 30,
-                "continueOnBlock": true,
-                "prompt": STOP_HOOK_PROMPT
             }
         ]
     });
@@ -328,6 +338,13 @@ pub fn repair_existing_hooks(path: &Path) -> Result<(), String> {
         };
         if handlers.iter().any(is_kode_handler) {
             handlers.retain(is_kode_handler);
+        }
+        if event == "Stop" {
+            handlers.retain(|hook| hook["type"] != "prompt");
+            if handlers.is_empty() {
+                replace_kode_entries(entries, None);
+                continue;
+            }
         }
         for hook in handlers.iter_mut() {
             if hook["prompt"]
@@ -1123,11 +1140,13 @@ mod tests {
         let entry = &doc["hooks"]["Stop"][0];
         // hooks 数组里有两个子 hook:command(relay) + prompt(守门员)
         let hooks = entry["hooks"].as_array().unwrap();
-        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0]["type"], "command");
         assert_eq!(hooks[0]["command"], "echo relay");
-        assert_eq!(hooks[1]["type"], "prompt");
-        assert_eq!(hooks[1]["prompt"].as_str().unwrap(), STOP_HOOK_PROMPT);
+        let settings: serde_json::Value =
+            serde_json::from_str(&session_settings_json()).unwrap();
+        assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["type"], "prompt");
+        assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["prompt"], STOP_HOOK_PROMPT);
         let count = doc["hooks"]["Stop"]
             .as_array()
             .unwrap()
@@ -1223,7 +1242,7 @@ mod tests {
         assert!(is_stop_hook_configured(tmp.path()));
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][1]["continueOnBlock"], true);
+        assert_eq!(doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -1546,10 +1565,7 @@ mod tests {
             initial["hooks"]["Notification"]
         );
         assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            doc["hooks"]["Stop"][0]["hooks"][1]["prompt"],
-            STOP_HOOK_PROMPT
-        );
+        assert_eq!(doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(), 1);
         assert_eq!(doc["hooks"]["Stop"][1]["hooks"][0]["command"], "user-stop");
         let empty = write_tmp(r#"{"model":"keep"}"#);
         repair_existing_hooks(empty.path()).unwrap();

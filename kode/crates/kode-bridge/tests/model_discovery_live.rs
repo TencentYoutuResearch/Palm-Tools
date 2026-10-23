@@ -20,3 +20,20 @@ async fn discovers_installed_codebuddy_models() {
     assert!(!result.models.is_empty());
     eprintln!("CodeBuddy: {} models", result.models.len());
 }
+
+#[tokio::test]
+#[ignore = "requires installed and authenticated Cursor/tcodex/tclaude CLIs"]
+async fn discovers_installed_wrapped_and_cursor_models() {
+    for (backend, command) in [
+        ("cursor", "cursor-agent"),
+        ("tcodex", "tcodex"),
+        ("tclaude", "tclaude"),
+    ] {
+        let result = kode_bridge::model_discovery::discover_models(backend, command)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: {error}"));
+        assert_eq!(result.backend, backend);
+        assert!(!result.models.is_empty(), "{backend}");
+        eprintln!("{backend}: {} models", result.models.len());
+    }
+}

@@ -490,6 +490,9 @@ impl CloudSyncManager {
             status.state = "waiting_for_pairing".into();
             status.last_error = None;
         }
+        let mut setup_tasks = futures_util::stream::FuturesUnordered::<
+            tokio::task::JoinHandle<(String, u16, Value)>,
+        >::new();
         let mut sync_enabled = false;
         let mut snapshotted_session_ids = HashSet::new();
         let mut events = self.inner.ctx.bus.subscribe();
@@ -502,6 +505,14 @@ impl CloudSyncManager {
                 return Ok(());
             }
             tokio::select! {
+                Some(result) = setup_tasks.next(), if !setup_tasks.is_empty() => {
+                    let (request_id, status, body) = result
+                        .map_err(|error| format!("Desktop setup task failed: {error}"))?;
+                    send_json(&mut socket, &json!({
+                        "type": "setup.result", "request_id": request_id,
+                        "boot_id": self.inner.boot_id, "status": status, "body": body,
+                    })).await?;
+                }
                 inbound = socket.next() => {
                     let Some(inbound) = inbound else { return Err("server closed the WebSocket".into()); };
                     let inbound = inbound.map_err(|error| format!("WebSocket receive failed: {error}"))?;
@@ -545,6 +556,36 @@ impl CloudSyncManager {
                                         payload,
                                         expires_at,
                                     ).await?;
+                                }
+                                ServerFrame::SetupRequest { request_id, kind, payload, expires_at } => {
+                                    if !sync_enabled || expires_at <= now_ms() || setup_tasks.len() >= 8 {
+                                        send_json(&mut socket, &json!({
+                                            "type":"setup.result", "request_id": request_id,
+                                            "boot_id":self.inner.boot_id, "status":409,
+                                            "body":{"error":"setup_unavailable", "detail":"Desktop is unavailable or busy; retry shortly"},
+                                        })).await?;
+                                        continue;
+                                    }
+                                    // Persist acceptance before spawning. An interrupted create is
+                                    // uncertain and must never be replayed after a reconnect.
+                                    if kind == "create_session" {
+                                        let seen = self.inner.config.lock().active_backend()
+                                            .is_some_and(|backend| backend.command_receipts.iter().any(|r| r.id == request_id));
+                                        if seen {
+                                            send_json(&mut socket, &json!({
+                                                "type":"setup.result", "request_id":request_id,
+                                                "boot_id":self.inner.boot_id, "status":504,
+                                                "body":{"error":"creation_unconfirmed", "detail":"Creation was already accepted; inspect the session list"},
+                                            })).await?;
+                                            continue;
+                                        }
+                                        self.record_command(&request_id, "accepted")?;
+                                    }
+                                    let ctx = Arc::clone(&self.inner.ctx);
+                                    setup_tasks.push(tokio::spawn(async move {
+                                        let (status, body) = kode_bridge::mobile_setup::execute(ctx, &kind, payload).await;
+                                        (request_id, status, body)
+                                    }));
                                 }
                                 ServerFrame::Pong => {}
                             }
@@ -724,6 +765,7 @@ impl CloudSyncManager {
             },
             "interrupt" => kode_bridge::interrupt_session(&self.inner.ctx, local_session_id)
                 .map_err(|error| error.to_string()),
+            "delete" => kode_bridge::delete_session(&self.inner.ctx, local_session_id),
             "answer" if payload.get("response").is_some() => {
                 match (
                     self.inner.ctx.acp.get(local_session_id),
@@ -767,6 +809,12 @@ impl CloudSyncManager {
                     .await
                 }
                 None => Err("plan response command is missing accept".into()),
+            },
+            "model" => match payload.get("model").and_then(Value::as_str) {
+                Some(model) => {
+                    kode_bridge::set_session_model(&self.inner.ctx, local_session_id, model).await
+                }
+                None => Err("model command is missing model".into()),
             },
             "mode" => match payload.get("mode").and_then(Value::as_str) {
                 Some(mode) => kode_bridge::set_session_permission_mode(
@@ -858,6 +906,13 @@ enum ServerFrame {
     BindingChanged {
         sync_enabled: bool,
         binding_count: u64,
+    },
+    #[serde(rename = "setup.request")]
+    SetupRequest {
+        request_id: String,
+        kind: String,
+        payload: Value,
+        expires_at: u64,
     },
     #[serde(rename = "command")]
     Command {

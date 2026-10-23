@@ -211,7 +211,7 @@ export function backendChip(key: string): { label: string; cls: string; tint: st
  * 超短模型名 —— 给 tab chip 这种宽度极度受限的场景。
  *
  * 基于 shortModelName() 的输出再做一次品牌缩写,
- * 目标 ~5-8 字符。未知模型直接退回到 shortModelName()。
+ * 目标 ~5-8 字符。未知模型保留简称并截到 18 字符。
  *
  * 输入示例:
  *   "claude-opus-4.7-1m"           → "Opus 4.7"
@@ -258,6 +258,11 @@ export function compactModelName(raw: string): string {
   }
 
   // --- DeepSeek ---
+  if (lower.startsWith('deepseek/deepseek-')) {
+    const model = lower.slice('deepseek/deepseek-'.length)
+    if (model === 'flash') return 'DS Flash'
+    return compactModelName(`deepseek-${model}`)
+  }
   if (lower.startsWith('deepseek')) {
     // deepseek-v4-pro-ioa → DS v4p
     const rest = lower.slice(9).replace(/^[-.]+/, '') // "v4-pro-ioa"
@@ -322,8 +327,13 @@ export function compactModelName(raw: string): string {
     return 'HY'
   }
 
-  // Fallback: return shortModelName as-is
-  return s
+  if (lower.startsWith('grok-')) {
+    const version = lower.match(/grok-(\d+(?:\.\d+)?)/)?.[1]
+    return version ? `Grok ${version}` : 'Grok'
+  }
+
+  // Provider-specific Cursor names can include long routing/deployment IDs.
+  return s.length > 18 ? `${s.slice(0, 17)}…` : s
 }
 
 /**

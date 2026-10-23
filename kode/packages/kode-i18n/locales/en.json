@@ -1,4 +1,6 @@
 {
+  "workspace.moreCommits": { "message": "More" },
+  "workspace.moreCommitsError": { "message": "Unable to load more commits. Try again." },
   "filePreview.find": { "message": "Find in file…" },
   "filePreview.findShortcut": { "message": "Find in file (Cmd/Ctrl+F)" },
   "filePreview.clear": { "message": "Clear search" },
@@ -27,6 +29,20 @@
   "acp.message": { "message": "Message CodeBuddy…" },
   "acp.send": { "message": "Send" },
   "acp.stop": { "message": "Stop" },
+  "app.startup.waiting": { "message": "Waiting for {count} sessions · {names}" },
+  "app.startup.title": { "message": "Startup progress" },
+  "app.startup.preferences": { "message": "Loading preferences" },
+  "app.startup.shortcuts": { "message": "Setting up shortcuts" },
+  "app.startup.events": { "message": "Connecting session events" },
+  "app.startup.backends": { "message": "Loading backends" },
+  "app.startup.connections": { "message": "Loading connections" },
+  "app.startup.memory": { "message": "Loading memory settings" },
+  "app.startup.sessions": { "message": "Restoring saved sessions" },
+  "app.startup.ready": { "message": "Waiting for sessions to become ready" },
+  "app.startup.sessionProgress": { "message": "Restoring {current}/{total} · {name}" },
+  "app.startup.processed": { "message": "Processed" },
+  "app.startup.active": { "message": "In progress" },
+  "app.startup.scrollHint": { "message": "Scroll to review progress" },
   "app.restoringSessions": { "message": "Restoring sessions…" },
   "settings.updates.ignoreVersion": { "message": "Debug: ignore local version" },
   "settings.updates.ignoreVersionHint": { "message": "Allow reinstalling or downgrading to the latest release on this channel; signatures are still verified. Resets on restart. Enable Beta to test prereleases." },
@@ -1736,5 +1752,59 @@
   "pairing.deploy.step.Done": { "message": "Create QR code" },
   "pairing.deploy.existingTitle": { "message": "Existing sync service" },
   "pairing.deploy.existingHint": { "message": "Enter its public HTTPS URL. A successful connection is saved as a switchable backend and immediately creates a QR code." },
-  "pairing.deploy.connectExisting": { "message": "Connect and create QR code" }
+  "pairing.deploy.connectExisting": { "message": "Connect and create QR code" },
+  "workspace.files.newFile": {
+    "message": "New file"
+  },
+  "workspace.files.newFolder": {
+    "message": "New folder"
+  },
+  "workspace.files.importFiles": {
+    "message": "Import files…"
+  },
+  "workspace.files.importFolders": {
+    "message": "Import folders…"
+  },
+  "workspace.files.rename": {
+    "message": "Rename"
+  },
+  "workspace.files.delete": {
+    "message": "Delete"
+  },
+  "workspace.files.cancel": {
+    "message": "Cancel"
+  },
+  "workspace.files.copySelection": {
+    "message": "Copy selection"
+  },
+  "workspace.files.copied": {
+    "message": "Copied to clipboard"
+  },
+  "workspace.files.failed": {
+    "message": "File operation failed"
+  },
+  "workspace.files.done": {
+    "message": "Files updated"
+  },
+  "workspace.files.busy": {
+    "message": "Updating files…"
+  },
+  "workspace.files.deleteMessage": {
+    "message": "Permanently delete {path}? Folders and their contents will be removed. This cannot be undone."
+  },
+  "workspace.files.nameHint": {
+    "message": "Enter a name. Enter to save · Esc to cancel"
+  },
+  "workspace.files.nameError": {
+    "message": "Enter a name without / or \\ path separators."
+  },
+  "workspace.files.dropHint": {
+    "message": "Drop files or folders here to copy into this directory"
+  },
+  "workspace.files.more": {
+    "message": "File actions"
+  },
+  "workspace.files.differentEndpoint": {
+    "message": "Copy between different endpoints is not supported."
+  }
 }

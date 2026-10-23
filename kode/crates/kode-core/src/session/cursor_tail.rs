@@ -106,6 +106,8 @@ async fn run(
     let mut last_title: Option<String> = None;
     let mut last_session_uuid: Option<String> = None;
     let mut last_mtime: Option<SystemTime> = None;
+    let mut transcript_path = cursor_transcript_path_from_meta(&current_path);
+    let mut last_transcript_mtime: Option<SystemTime> = None;
     let mut last_fallback_check = Instant::now() - Duration::from_secs(2);
 
     loop {
@@ -120,21 +122,33 @@ async fn run(
                     last_title = None;
                     last_session_uuid = None;
                     last_mtime = None;
+                    transcript_path = cursor_transcript_path_from_meta(&current_path);
+                    last_transcript_mtime = None;
                     last_fallback_check = Instant::now() - Duration::from_secs(2);
                     bind_cursor_tab_from_meta_path(id, &current_path);
                 }
             }
         }
 
+        let discovered_transcript_path = cursor_transcript_path_from_meta(&current_path);
+        if discovered_transcript_path != transcript_path {
+            transcript_path = discovered_transcript_path;
+            last_transcript_mtime = None;
+        }
         let mtime = fs::metadata(&current_path)
             .ok()
             .and_then(|m| m.modified().ok());
-        // `meta.json` can precede the transcript. Retry an absent title even
-        // when the meta file itself has not changed.
+        let transcript_mtime = transcript_path
+            .as_deref()
+            .and_then(|path| fs::metadata(path).ok())
+            .and_then(|m| m.modified().ok());
+        // Cursor may append its generated title after the first-message
+        // fallback has already been read from the transcript.
         let retry_fallback =
             last_title.is_none() && last_fallback_check.elapsed() >= Duration::from_secs(1);
-        if mtime != last_mtime || retry_fallback {
+        if mtime != last_mtime || transcript_mtime != last_transcript_mtime || retry_fallback {
             last_mtime = mtime;
+            last_transcript_mtime = transcript_mtime;
             last_fallback_check = Instant::now();
             if let Some(meta) = read_cursor_meta_file(&current_path) {
                 let mut new_title = None;
@@ -277,7 +291,7 @@ fn find_cursor_session_candidate_under(
         }
         let replace = best
             .as_ref()
-            .map(|(best_modified, _)| meta.last_modified < *best_modified)
+            .map(|(best_modified, _)| meta.last_modified > *best_modified)
             .unwrap_or(true);
         if replace {
             best = Some((meta.last_modified, meta.path));
@@ -340,13 +354,12 @@ pub fn read_cursor_meta_file(path: &Path) -> Option<CursorChatMeta> {
         .ok()
         .and_then(|m| m.modified().ok())
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    let mut title = parsed
+    let meta_title = parsed
         .title
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    if title.is_none() {
-        title = extract_cursor_user_title(path, &session_id);
-    }
+    let (generated_title, prompt_fallback) = extract_cursor_titles(path, &session_id);
+    let title = generated_title.or(meta_title).or(prompt_fallback);
     Some(CursorChatMeta {
         session_id,
         title,
@@ -382,14 +395,31 @@ fn canonicalize_or_owned(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn extract_cursor_user_title(meta_path: &Path, session_id: &str) -> Option<String> {
-    let chat_cwd = {
-        let text = fs::read_to_string(meta_path).ok()?;
-        let parsed: CursorMetaFile = serde_json::from_str(&text).ok()?;
-        parsed.cwd.map(PathBuf::from)?
+fn extract_cursor_titles(meta_path: &Path, session_id: &str) -> (Option<String>, Option<String>) {
+    let Some(transcript_id) = meta_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+    else {
+        return (None, None);
     };
-    let transcript = cursor_transcript_path(&chat_cwd, session_id)?;
-    extract_user_title_from_transcript(&transcript)
+    if transcript_id != session_id {
+        return (None, None);
+    }
+    let Some(transcript) = cursor_transcript_path_from_meta(meta_path) else {
+        return (None, None);
+    };
+    extract_cursor_titles_from_transcript(&transcript)
+}
+
+fn cursor_transcript_path_from_meta(meta_path: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(meta_path).ok()?;
+    let parsed: CursorMetaFile = serde_json::from_str(&text).ok()?;
+    let session_id = meta_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())?;
+    cursor_transcript_path(Path::new(parsed.cwd.as_deref()?), session_id)
 }
 
 /// Cursor's semantic conversation log is separate from `chats/**/meta.json`.
@@ -411,18 +441,39 @@ pub fn cursor_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     )
 }
 
-fn extract_user_title_from_transcript(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
+fn extract_cursor_titles_from_transcript(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(file) = fs::File::open(path) else {
+        return (None, None);
+    };
+    let mut first_user_title = None;
+    let mut generated_title = None;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if let Some(title) = cursor_user_title_from_line(&line) {
-            return Some(title);
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|kind| kind.as_str()) == Some("ai-title") {
+            if let Some(title) = value
+                .get("aiTitle")
+                .and_then(|title| title.as_str())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
+                generated_title = Some(title.chars().take(60).collect());
+            }
+        } else if first_user_title.is_none() {
+            first_user_title = cursor_user_title_from_value(&value);
         }
     }
-    None
+    (generated_title, first_user_title)
 }
 
+#[cfg(test)]
 fn cursor_user_title_from_line(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    cursor_user_title_from_value(&v)
+}
+
+fn cursor_user_title_from_value(v: &serde_json::Value) -> Option<String> {
     if v.get("role").and_then(|r| r.as_str()) != Some("user") {
         return None;
     }
@@ -535,10 +586,10 @@ mod tests {
         let root = temp_root("claim");
         let cwd = "/tmp/kode-cursor-claim";
         let old = write_chat(&root, "hash", "old", Some("Old"), cwd);
+        std::thread::sleep(Duration::from_millis(20));
         let expected = write_chat(&root, "hash", "new", Some("New"), cwd);
         write_chat(&root, "hash", "other", Some("Other"), "/tmp/other");
-        let mut claimed = HashSet::new();
-        claimed.insert(canonicalize_or_owned(&old));
+        let claimed = HashSet::new();
         let found = find_cursor_session_candidate_under(
             &root,
             Path::new(cwd),
@@ -546,6 +597,7 @@ mod tests {
             &claimed,
         );
         assert_eq!(found.as_deref(), Some(expected.as_path()));
+        assert_ne!(found.as_deref(), Some(old.as_path()));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -556,6 +608,32 @@ mod tests {
             cursor_user_title_from_line(line).as_deref(),
             Some("你看看cursor 为啥没有显示记录统计token以及更新title")
         );
+    }
+
+    #[test]
+    fn generated_title_overrides_user_prompt_fallback() {
+        let root = temp_root("title");
+        let transcript = root.join("chat.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>first prompt</user_query>"}]}}"#,
+                "\n",
+                r#"{"type":"ai-title","aiTitle":"Generated title"}"#,
+                "\n",
+                r#"{"type":"ai-title","aiTitle":"Renamed title"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            extract_cursor_titles_from_transcript(&transcript)
+                .0
+                .as_deref(),
+            Some("Renamed title")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

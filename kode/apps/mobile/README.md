@@ -29,6 +29,15 @@ flutter run
 flutter analyze
 ```
 
+## 手机创建 session
+
+在 session 列表右上角点 **+ / New session**，选择桌面已启用的 backend、模型和工作目录。
+模型可用 backend 默认值、动态模型列表或自定义 ID（backend 支持时）；目录支持手输绝对路径、最近目录和远端目录浏览。
+创建成功直接进入新会话，权限沿用桌面默认行为。路径始终属于所选桌面，不是手机本地路径。
+
+此功能需要同时更新 Flutter App、桌面 GUI 和 `kode-sync-server`。
+桌面必须在线；创建超时会保留请求并显示 **Check creation result**，重复查询不会再次创建。
+
 ## 配对流程
 
 1. 桌面 kode GUI:`Cmd+P` → "Show Pairing QR…"

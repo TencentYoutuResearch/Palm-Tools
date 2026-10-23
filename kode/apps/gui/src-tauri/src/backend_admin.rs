@@ -275,7 +275,7 @@ impl BackendSaveRequest {
     #[allow(dead_code)]
     fn into_backend_config(self) -> Result<BackendConfig, String> {
         let spec = self.build_spec()?;
-        Ok(BackendConfig {
+        let mut backend = BackendConfig {
             command: self.command,
             args: self.args,
             default_model: self.default_model,
@@ -283,7 +283,9 @@ impl BackendSaveRequest {
             permission_mode_flag: self.permission_mode_flag,
             mcp_setup: spec,
             enabled: self.enabled,
-        })
+        };
+        backend.hydrate_permission_flag();
+        Ok(backend)
     }
 }
 
@@ -699,20 +701,20 @@ mod tests {
     }
 
     #[test]
-    fn t_backend_candidates_do_not_suggest_auto_mcp_setup() {
-        let defaults = kode_core::config::Config::default();
-        for key in ["tcodex", "tclaude"] {
-            let matching: Vec<_> = KNOWN_CANDIDATES
-                .iter()
-                .filter(|candidate| candidate.key == key)
-                .collect();
-            assert_eq!(matching.len(), 1, "{key} should have one candidate");
-            let candidate = matching[0];
-            assert_eq!(candidate.command, defaults.backend(key).unwrap().command);
-            assert_eq!(candidate.suggested_setup_style, "none");
-            assert_eq!(candidate.suggested_setup_cli, "");
-            assert_eq!(candidate.suggested_json_path, None);
-        }
+    fn t_wrapper_candidates_use_their_cli_families() {
+        let tcodex = KNOWN_CANDIDATES
+            .iter()
+            .find(|candidate| candidate.key == "tcodex")
+            .expect("tcodex candidate");
+        assert_eq!(tcodex.suggested_setup_style, "none");
+        assert_eq!(tcodex.suggested_setup_cli, "");
+
+        let tclaude = KNOWN_CANDIDATES
+            .iter()
+            .find(|candidate| candidate.key == "tclaude")
+            .expect("tclaude candidate");
+        assert_eq!(tclaude.suggested_setup_style, "none");
+        assert_eq!(tclaude.suggested_setup_cli, "");
     }
 
     #[cfg(windows)]

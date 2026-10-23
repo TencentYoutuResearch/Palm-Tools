@@ -233,7 +233,10 @@ async fn discover_codebuddy(backend: &str, command: &str) -> Result<ModelDiscove
 async fn discover_claude(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
     let output = timeout(
         Duration::from_secs(5),
-        Command::new(command).arg("--help").output(),
+        Command::new(command)
+            .arg("--help")
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     .map_err(|_| "Claude capability check timed out".to_string())?
@@ -274,9 +277,122 @@ pub async fn discover_models(backend: &str, command: &str) -> Result<ModelDiscov
     match backend {
         "codex" | "tcodex" => discover_codex(backend, command).await,
         "codebuddy" => discover_codebuddy(backend, command).await,
-        "claude" | "claude-internal" | "tclaude" => discover_claude(backend, command).await,
+        "claude" | "claude-internal" => discover_claude(backend, command).await,
+        "tclaude" => discover_tclaude(command).await,
+        "cursor" => discover_cursor(backend, command).await,
         _ => Err(format!("model discovery is not supported for {backend}")),
     }
+}
+
+async fn discover_tclaude(command: &str) -> Result<ModelDiscoveryResult, String> {
+    // The wrapper validates model ids before forwarding --help, and reports
+    // its account-specific catalogue. Upstream aliases (opus/sonnet) are not
+    // accepted by this wrapper, so returning Claude's aliases is incorrect.
+    let output = timeout(
+        Duration::from_secs(10),
+        Command::new(command)
+            .args(["--model", "kode-model-discovery", "--", "--help"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "tclaude model discovery timed out".to_string())?
+    .map_err(|e| e.to_string())?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let models = parse_tclaude_models(&text);
+    if models.is_empty() {
+        return Err("tclaude did not report its available models; check its desktop login".into());
+    }
+    Ok(ModelDiscoveryResult {
+        backend: "tclaude".into(),
+        source: "tclaude-model-validation".into(),
+        version: None,
+        custom_allowed: false,
+        models,
+        warning: None,
+    })
+}
+
+fn parse_tclaude_models(text: &str) -> Vec<DiscoveredModel> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("Available models: "))
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:/[]".contains(&b))
+        })
+        .map(|id| DiscoveredModel {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            is_default: false,
+        })
+        .collect()
+}
+
+fn parse_cursor_models(text: &str) -> Vec<DiscoveredModel> {
+    text.lines()
+        .filter_map(|line| {
+            let (id, label) = line.trim().split_once(" - ")?;
+            if id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))
+            {
+                return None;
+            }
+            let is_default =
+                label.ends_with(" (default)") || label.ends_with(" (current, default)");
+            let label = [" (current, default)", " (default)", " (current)"]
+                .iter()
+                .find_map(|suffix| label.strip_suffix(suffix))
+                .unwrap_or(label);
+            Some(DiscoveredModel {
+                id: id.into(),
+                label: label.into(),
+                description: None,
+                is_default,
+            })
+        })
+        .collect()
+}
+
+async fn discover_cursor(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
+    let output = timeout(
+        Duration::from_secs(20),
+        Command::new(command)
+            .arg("--list-models")
+            .env("NO_COLOR", "1")
+            .env("FORCE_COLOR", "0")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Cursor model discovery timed out".to_string())?
+    .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Cursor could not load models; check its desktop login".into());
+    }
+    let models = parse_cursor_models(&String::from_utf8_lossy(&output.stdout));
+    if models.is_empty() {
+        return Err("Cursor returned no models".into());
+    }
+    Ok(ModelDiscoveryResult {
+        backend: backend.into(),
+        source: "cursor-cli".into(),
+        version: None,
+        custom_allowed: true,
+        models,
+        warning: None,
+    })
 }
 
 #[cfg(test)]
@@ -286,15 +402,30 @@ mod tests {
     #[tokio::test]
     async fn t_cli_model_discovery_routes_to_compatible_protocols() {
         // Capability probes use local fixtures, never an installed AI CLI.
-        let claude = discover_models("tclaude", "/bin/echo").await.unwrap();
-        assert_eq!(claude.backend, "tclaude");
-        assert_eq!(claude.source, "claude-capability");
+        // tclaude requires its account catalogue, not upstream aliases.
+        let claude = discover_models("tclaude", "/bin/echo").await.unwrap_err();
+        assert!(claude.contains("did not report its available models"));
         let missing = std::env::temp_dir().join(format!("missing-tcodex-{}", uuid::Uuid::new_v4()));
         let codex = discover_models("tcodex", missing.to_str().unwrap())
             .await
             .unwrap_err();
         assert!(codex.starts_with("cannot start"));
         assert!(!codex.contains("not supported"));
+    }
+
+    #[test]
+    fn cursor_catalogue_preserves_variants_and_default() {
+        let models = parse_cursor_models("Available models\n\nauto - Auto (default)\ngrok-4.7-high-fast - Grok 4.7 High Fast (current)\nTip: use --model <id> to switch.");
+        assert_eq!(models.len(), 2);
+        assert!(models[0].is_default);
+        assert_eq!(models[1].label, "Grok 4.7 High Fast");
+    }
+
+    #[test]
+    fn tclaude_uses_full_account_model_ids() {
+        let models = parse_tclaude_models("model invalid is not available.\nAvailable models: claude-sonnet-5-5[1m], claude-opus-5-5[1m], opusplan\n");
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "claude-sonnet-5-5[1m]");
     }
 
     #[test]

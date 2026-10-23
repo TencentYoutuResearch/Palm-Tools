@@ -3,14 +3,13 @@
 //! 状态栏的 model / title / tokens 不靠解析 PTY 输出:
 //! - codebuddy:`~/.codebuddy/projects/<slug>/<sid>.jsonl`
 //! - claude:`~/.claude/projects/<slug>/<sid>.jsonl`
-//! - codex:`~/.codex/sessions/**/rollout-*.jsonl`
+//! - codex / tcodex:`~/.{t,}codex/sessions/**/rollout-*.jsonl`
 //! - cursor:`~/.cursor/chats/<hash>/<chatId>/meta.json`(title);token 走 hook
 //!
 //! 设计:
 //! - 启动一个 tokio task 持续 tail 该文件
 //! - 文件可能在子进程启动后几秒才创建,所以 open 失败就等
-//! - 不读 message 正文(对显示无用),但 claude 没有 ai-title 字段,
-//!   所以用第一条非命令前缀的 user message 作 title fallback
+//! - Claude 优先采用 ai-title；缺失时用第一条非命令前缀的 user message 作 title fallback
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,6 +41,10 @@ pub enum Backend {
 }
 
 impl Backend {
+    pub fn is_codex(self) -> bool {
+        matches!(self, Backend::Codex | Backend::Tcodex)
+    }
+
     /// 根据 backend_key 选择 jsonl 解析器。未知后端返回 None(不开 tail)。
     pub fn from_backend_key(key: &str) -> Option<Self> {
         let normalized = key.trim().to_ascii_lowercase();
@@ -58,22 +61,11 @@ impl Backend {
             // stuck on busy after idle redraws.
             _ if normalized.ends_with("codebuddy") => Some(Backend::Codebuddy),
             _ if normalized.ends_with("claude") => Some(Backend::Claude),
+            _ if normalized.ends_with("tcodex") => Some(Backend::Tcodex),
             _ if normalized.ends_with("codex") => Some(Backend::Codex),
             _ if normalized.ends_with("cursor") => Some(Backend::Cursor),
             _ => None,
         }
-    }
-
-    pub fn is_codex_family(self) -> bool {
-        matches!(self, Backend::Codex | Backend::Tcodex)
-    }
-
-    pub fn codex_home(self, home: &Path) -> PathBuf {
-        home.join(if self == Backend::Tcodex {
-            ".tcodex"
-        } else {
-            ".codex"
-        })
     }
 
     /// 这个 backend 写 jsonl 到哪个文件路径。
@@ -154,7 +146,7 @@ pub fn session_path_for(backend_key: &str, cwd: &Path, session_id: &str) -> Opti
 ///
 /// 优先返回 cwd 推算的路径(若存在),回退到全局搜索结果,都没找到返回 None。
 pub fn resolve_session_path(backend: Backend, cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    if backend.is_codex_family() {
+    if backend.is_codex() {
         return find_codex_session_by_id(backend, session_id);
     }
     if backend == Backend::Cursor {
@@ -195,10 +187,23 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
     None
 }
 
-/// 在对应 Codex family 的独立 sessions 根下按 UUID 找 rollout jsonl。
+/// 在 `~/.codex/sessions/**` 中按 Codex session uuid 找 rollout jsonl。
+pub fn codex_home(backend: Backend) -> Option<PathBuf> {
+    if backend == Backend::Tcodex {
+        return dirs::home_dir().map(|home| home.join(".tcodex"));
+    }
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    dirs::home_dir().map(|home| home.join(".codex"))
+}
+
+pub fn codex_state_path(backend: Backend) -> Option<PathBuf> {
+    codex_home(backend).map(|home| home.join("state_5.sqlite"))
+}
+
 pub fn find_codex_session_by_id(backend: Backend, session_id: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    find_codex_session_by_id_under(&backend.codex_home(&home).join("sessions"), session_id)
+    find_codex_session_by_id_under(&codex_home(backend)?.join("sessions"), session_id)
 }
 
 /// 兼容旧 API 名(只用于 codebuddy);新代码请用 `Backend::session_path` 或 `session_path_for`。
@@ -237,8 +242,29 @@ pub fn spawn(
     evt_tx: mpsc::UnboundedSender<CoreEvent>,
     retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
 ) {
+    let suppress = path.is_file();
+    spawn_with_replay_policy(id, backend, path, evt_tx, retarget_rx, suppress);
+}
+
+pub fn spawn_with_replay_policy(
+    id: SessionId,
+    backend: Backend,
+    path: PathBuf,
+    evt_tx: mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+    suppress_initial_models: bool,
+) {
     tokio::spawn(async move {
-        if let Err(e) = run(id, backend, &path, &evt_tx, retarget_rx).await {
+        if let Err(e) = run_with_replay_policy(
+            id,
+            backend,
+            &path,
+            &evt_tx,
+            retarget_rx,
+            suppress_initial_models,
+        )
+        .await
+        {
             tracing::debug!(?path, error = %e, "jsonl tail exited");
         }
     });
@@ -251,10 +277,20 @@ pub fn spawn_waiting_for_binding(
     id: SessionId,
     backend: Backend,
     evt_tx: mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+) {
+    spawn_waiting_for_binding_with_replay_policy(id, backend, evt_tx, retarget_rx, false);
+}
+
+pub fn spawn_waiting_for_binding_with_replay_policy(
+    id: SessionId,
+    backend: Backend,
+    evt_tx: mpsc::UnboundedSender<CoreEvent>,
     mut retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+    suppress_initial_models: bool,
 ) {
     tokio::spawn(async move {
-        if !backend.is_codex_family() {
+        if !backend.is_codex() {
             return;
         }
         // Codex can create the rollout file promptly but delay writing the
@@ -285,7 +321,16 @@ pub fn spawn_waiting_for_binding(
             }
         };
         tracing::debug!(?path, "codex jsonl session claimed");
-        if let Err(e) = run(id, backend, &path, &evt_tx, retarget_rx).await {
+        if let Err(e) = run_with_replay_policy(
+            id,
+            backend,
+            &path,
+            &evt_tx,
+            retarget_rx,
+            suppress_initial_models,
+        )
+        .await
+        {
             tracing::debug!(?path, error = %e, "codex jsonl tail exited");
         }
     });
@@ -376,34 +421,88 @@ impl LineUpdate {
     }
 }
 
+async fn wait_for_transcript(
+    current_path: &mut PathBuf,
+    evt_tx: &mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: &mut Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+) -> std::io::Result<Option<File>> {
+    loop {
+        if evt_tx.is_closed()
+            || retarget_rx
+                .as_ref()
+                .is_some_and(|rx| rx.has_changed().is_err())
+        {
+            return Ok(None);
+        }
+        if let Some(rx) = retarget_rx.as_mut() {
+            if let Some(path) = rx.borrow_and_update().clone() {
+                *current_path = path;
+            }
+        }
+        match File::open(&*current_path).await {
+            Ok(file) => return Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        // Wrapped CLIs may not create the transcript until their first request.
+        // The session's binding sender, not a startup timeout, owns this wait.
+        if let Some(rx) = retarget_rx.as_mut() {
+            tokio::select! {
+                _ = evt_tx.closed() => return Ok(None),
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return Ok(None);
+                    }
+                }
+                _ = sleep(Duration::from_millis(500)) => {}
+            }
+        } else {
+            tokio::select! {
+                _ = evt_tx.closed() => return Ok(None),
+                _ = sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 async fn run(
     id: SessionId,
     backend: Backend,
     path: &Path,
     evt_tx: &mpsc::UnboundedSender<CoreEvent>,
+    retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+) -> std::io::Result<()> {
+    let suppress_initial_models = path.is_file();
+    run_with_replay_policy(
+        id,
+        backend,
+        path,
+        evt_tx,
+        retarget_rx,
+        suppress_initial_models,
+    )
+    .await
+}
+
+async fn run_with_replay_policy(
+    id: SessionId,
+    backend: Backend,
+    path: &Path,
+    evt_tx: &mpsc::UnboundedSender<CoreEvent>,
     mut retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
+    suppress_initial_models: bool,
 ) -> std::io::Result<()> {
     let mut current_path = path.to_path_buf();
 
-    // 1. 等文件出现(最长 30 秒)
-    let mut attempts = 0;
-    let file = loop {
-        match File::open(&current_path).await {
-            Ok(f) => break f,
-            Err(_) if attempts < 60 => {
-                attempts += 1;
-                sleep(Duration::from_millis(500)).await;
-            }
-            Err(e) => return Err(e),
-        }
-        if evt_tx.is_closed() {
-            return Ok(());
-        }
+    let Some(file) = wait_for_transcript(&mut current_path, evt_tx, &mut retarget_rx).await? else {
+        return Ok(());
     };
 
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(0)).await?;
     let mut replay_boundary = reader.get_ref().metadata().await?.len();
+    let mut suppress_replayed_model = suppress_initial_models;
 
     let mut buf = String::new();
     let mut state = TailState::new();
@@ -428,6 +527,13 @@ async fn run(
     let mut last_codex_name_check = Instant::now() - Duration::from_secs(2);
 
     loop {
+        if evt_tx.is_closed()
+            || retarget_rx
+                .as_ref()
+                .is_some_and(|rx| rx.has_changed().is_err())
+        {
+            return Ok(());
+        }
         // 优先消费权威 retarget 信号(SessionStart hook 给出的 transcript_path):
         // codebuddy `/resume` `/clear` 在进程内切换 session 时,hook 会发新文件路径,
         // 据此把 tail 精确切到正确文件(取代历史靠 mtime 猜"最新 /clear 文件"的盲扫)。
@@ -442,6 +548,7 @@ async fn run(
                         replay_boundary = reader.get_ref().metadata().await?.len();
                         current_path = new_path;
                         state = TailState::new();
+                        suppress_replayed_model = false;
                         state.expected_session_uuid = session_id_from_path(&current_path);
                         caught_up = false;
                         pending_retarget_uuid = None;
@@ -471,6 +578,7 @@ async fn run(
                     reader.seek(SeekFrom::Start(0)).await?;
                     replay_boundary = reader.get_ref().metadata().await?.len();
                     state = TailState::new();
+                    suppress_replayed_model = false;
                     state.expected_session_uuid = session_id_from_path(&current_path);
                     caught_up = false;
                     continue;
@@ -483,13 +591,14 @@ async fn run(
 
             // Codex updates `threads.name` independently of its rollout JSONL.
             // Poll while idle so a generated name or later rename reaches Kode.
-            if backend.is_codex_family()
-                && last_codex_name_check.elapsed() >= Duration::from_secs(1)
-            {
+            if backend.is_codex() && last_codex_name_check.elapsed() >= Duration::from_secs(1) {
                 last_codex_name_check = Instant::now();
                 if let Some(sid) = state.last_session_uuid.clone() {
-                    if let Some(name) = codex_title::read_thread_name(backend, &sid) {
-                        if let Some(title) = apply_codex_name(&mut state, name) {
+                    if let Some(name) = codex_state_path(backend)
+                        .and_then(|path| codex_title::read_thread_name(&path, &sid))
+                        .flatten()
+                    {
+                        if let Some(title) = apply_codex_name(&mut state, Some(name)) {
                             state.last_title = Some(title.clone());
                             if evt_tx
                                 .send(CoreEvent::JsonlMeta {
@@ -522,6 +631,7 @@ async fn run(
                         replay_boundary = reader.get_ref().metadata().await?.len();
                         current_path = new_path.clone();
                         state = TailState::new();
+                        suppress_replayed_model = false;
                         state.expected_session_uuid = session_id_from_path(&current_path);
                         caught_up = false;
                         pending_retarget_uuid = None;
@@ -562,6 +672,7 @@ async fn run(
                             replay_boundary = reader.get_ref().metadata().await?.len();
                             current_path = new_path;
                             state = TailState::new();
+                            suppress_replayed_model = false;
                             state.expected_session_uuid = session_id_from_path(&current_path);
                             caught_up = false;
                             pending_retarget_path = None;
@@ -618,12 +729,28 @@ async fn run(
             continue;
         }
 
-        let upd = match backend {
+        let previous_emitted_model = state.last_emitted_model.clone();
+        let mut upd = match backend {
             Backend::Codebuddy => parse_codebuddy_line(line, &mut state),
             Backend::Claude | Backend::Tclaude => parse_claude_line(line, &mut state),
-            Backend::Codex | Backend::Tcodex => parse_codex_line(backend, line, &mut state),
+            Backend::Codex | Backend::Tcodex => {
+                parse_codex_line_for_backend(line, &mut state, backend)
+            }
             Backend::Cursor => LineUpdate::default(),
         };
+        // Historical requests belong to this conversation, but not to the
+        // newly spawned CLI's selected model. Keep their usage and identity.
+        // A line appended while replay is in progress is still a live request.
+        if suppress_replayed_model && line_start < replay_boundary {
+            if let Some(model) = upd.new_model.as_ref() {
+                state.last_model = Some(model.clone());
+            }
+            upd.new_model = None;
+            state.last_emitted_model = previous_emitted_model;
+            state.user_pinned_model = None;
+        } else if let Some(model) = upd.new_model.as_ref() {
+            state.last_emitted_model = Some(model.clone());
+        }
 
         // 自驱动 retarget:源文件里读到 `change session <target>`(in-TUI `/resume`)。
         // 仅在 caught_up(已追上文件末尾)或这行是本次打开文件后新追加的情况下生效 ——
@@ -645,6 +772,7 @@ async fn run(
                         replay_boundary = reader.get_ref().metadata().await?.len();
                         current_path = new_path;
                         state = TailState::new();
+                        suppress_replayed_model = false;
                         state.expected_session_uuid = session_id_from_path(&current_path);
                         caught_up = false;
                         pending_retarget_uuid = None;
@@ -770,10 +898,12 @@ fn same_file(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
 }
 
 fn session_id_from_path(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| is_uuid_like(s))
-        .map(String::from)
+    let stem = path.file_stem()?.to_str()?;
+    if is_uuid_like(stem) {
+        return Some(stem.to_string());
+    }
+    let sid = stem.get(stem.len().saturating_sub(36)..)?;
+    is_uuid_like(sid).then(|| sid.to_string())
 }
 
 fn is_uuid_like(s: &str) -> bool {
@@ -1092,6 +1222,8 @@ fn extract_cb_content_text(c: &Option<serde_json::Value>) -> Option<String> {
 struct ClEntry {
     #[serde(rename = "type")]
     r#type: Option<String>,
+    #[serde(rename = "aiTitle")]
+    ai_title: Option<String>,
     message: Option<ClMessage>,
 }
 
@@ -1120,13 +1252,24 @@ fn parse_claude_line(line: &str, state: &mut TailState) -> LineUpdate {
     };
 
     let ty = entry.r#type.as_deref();
+    if ty == Some("ai-title") {
+        if let Some(title) = entry.ai_title.filter(|title| !title.trim().is_empty()) {
+            let title: String = title.trim().chars().take(60).collect();
+            if state.last_title.as_deref() != Some(&title) {
+                upd.new_title = Some(title.clone());
+                state.last_title = Some(title);
+            }
+            state.title_fallback_used = true;
+        }
+        return upd;
+    }
     let Some(msg) = entry.message else {
         return upd;
     };
 
     if ty == Some("assistant") {
         if let Some(m) = msg.model {
-            if state.last_model.as_deref() != Some(&m) {
+            if state.last_emitted_model.as_deref() != Some(&m) {
                 upd.new_model = Some(m);
             }
         }
@@ -1228,7 +1371,12 @@ struct CodexUsage {
     total_tokens: Option<u64>,
 }
 
-fn parse_codex_line(backend: Backend, line: &str, state: &mut TailState) -> LineUpdate {
+#[cfg(test)]
+fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
+    parse_codex_line_for_backend(line, state, Backend::Codex)
+}
+
+fn parse_codex_line_for_backend(line: &str, state: &mut TailState, backend: Backend) -> LineUpdate {
     let mut upd = LineUpdate::default();
     let entry: CodexEntry = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -1248,15 +1396,18 @@ fn parse_codex_line(backend: Backend, line: &str, state: &mut TailState) -> Line
                 state.last_session_uuid = Some(sid.to_string());
                 upd.new_session_uuid = Some(sid.to_string());
             }
-            if let Some(name) = codex_title::read_thread_name(backend, sid) {
-                upd.new_title = apply_codex_name(state, name);
+            if let Some(name) = codex_state_path(backend)
+                .and_then(|path| codex_title::read_thread_name(&path, sid))
+                .flatten()
+            {
+                upd.new_title = apply_codex_name(state, Some(name));
             }
         }
     }
 
     if entry.r#type.as_deref() == Some("turn_context") {
         if let Some(model) = entry.payload.get("model").and_then(|v| v.as_str()) {
-            if state.last_model.as_deref() != Some(model) {
+            if state.last_emitted_model.as_deref() != Some(model) {
                 upd.new_model = Some(model.to_string());
             }
         }
@@ -1474,7 +1625,82 @@ pub fn codex_session_cwd(path: &Path) -> Option<(String, PathBuf)> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tokio::io::AsyncWriteExt;
 
+    #[tokio::test]
+    async fn tclaude_delayed_transcript_reports_model_after_old_startup_deadline() {
+        let root = tempfile_dir("kode_tclaude_delayed");
+        let path = root.join("11111111-1111-4111-8111-111111111111.jsonl");
+        let (events, mut rx) = mpsc::unbounded_channel();
+        let (binding_tx, binding_rx) = tokio::sync::watch::channel(None);
+        let task_path = path.clone();
+        let task = tokio::spawn(async move {
+            run(71, Backend::Tclaude, &task_path, &events, Some(binding_rx)).await
+        });
+        // No real CLI is invoked. Exceed the former 30-second retry deadline.
+        sleep(Duration::from_secs(31)).await;
+        assert!(!task.is_finished());
+        fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"deepseek/deepseek-flash\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n",
+        ).unwrap();
+        let model = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(CoreEvent::JsonlMeta {
+                    model: Some(model), ..
+                }) = rx.recv().await
+                {
+                    break model;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(model, "deepseek/deepseek-flash");
+        drop(binding_tx);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn transcript_wait_stops_on_session_close_and_accepts_exact_rebinding() {
+        let root = tempfile_dir("kode_transcript_wait");
+        let missing = root.join("missing.jsonl");
+        let target = root.join("bound.jsonl");
+        fs::write(&target, "").unwrap();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let (binding_tx, binding_rx) = tokio::sync::watch::channel(None);
+        let mut path = missing.clone();
+        let mut binding = Some(binding_rx);
+        binding_tx.send(Some(target.clone())).unwrap();
+        assert!(wait_for_transcript(&mut path, &events, &mut binding)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(path, target);
+        let (binding_tx, binding_rx) = tokio::sync::watch::channel(None);
+        let mut binding = Some(binding_rx);
+        drop(binding_tx);
+        assert!(
+            wait_for_transcript(&mut missing.clone(), &events, &mut binding)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (events, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        assert!(
+            wait_for_transcript(&mut missing.clone(), &events, &mut None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn codebuddy_slug_strips_leading_slash_and_replaces_seps() {
         let p = PathBuf::from("/Users/tester/Projects/example/kode");
@@ -1520,23 +1746,31 @@ mod tests {
         assert_eq!(Backend::from_backend_key("codex"), Some(Backend::Codex));
         assert_eq!(Backend::from_backend_key("cursor"), Some(Backend::Cursor));
         assert_eq!(Backend::from_backend_key("tclaude"), Some(Backend::Tclaude));
-        // tcodex shares the Codex protocol but owns a separate transcript root.
         assert_eq!(Backend::from_backend_key("tcodex"), Some(Backend::Tcodex));
-        assert_eq!(Backend::from_backend_key("TCODEX"), Some(Backend::Tcodex));
         assert_eq!(Backend::from_backend_key("foo"), None);
     }
 
     #[test]
-    fn tcodex_paths_are_isolated_from_codex_and_claude() {
-        let home = Path::new("/tmp/example-home");
-        let tcodex = home.join(".tcodex/sessions/2026/rollout-thread.jsonl");
-        let codex = home.join(".codex/sessions/2026/rollout-thread.jsonl");
-        assert_eq!(Backend::Tcodex.codex_home(home), home.join(".tcodex"));
-        assert!(Backend::Tcodex.is_codex_family());
-        assert!(Backend::Tcodex.accepts_transcript_path(&tcodex));
-        assert!(!Backend::Tcodex.accepts_transcript_path(&codex));
-        assert!(!Backend::Codex.accepts_transcript_path(&tcodex));
-        assert!(!Backend::Tclaude.accepts_transcript_path(&tcodex));
+    fn tcodex_transcript_paths_are_backend_scoped() {
+        let path = Path::new("/Users/tester/.tcodex/sessions/2026/10/10/rollout-session.jsonl");
+        assert!(Backend::Tcodex.accepts_transcript_path(path));
+        assert!(!Backend::Codex.accepts_transcript_path(path));
+    }
+
+    #[test]
+    fn tcodex_uses_its_own_home() {
+        assert!(codex_home(Backend::Tcodex).unwrap().ends_with(".tcodex"));
+    }
+
+    #[test]
+    fn codex_rollout_filename_contains_session_uuid() {
+        assert_eq!(
+            session_id_from_path(Path::new(
+                "/tmp/.tcodex/sessions/2026/10/10/rollout-2026-10-10T14-44-35-01a1248e-6aee-7e72-89fd-1828565075b2.jsonl"
+            ))
+            .as_deref(),
+            Some("01a1248e-6aee-7e72-89fd-1828565075b2")
+        );
     }
 
     #[test]
@@ -1549,6 +1783,7 @@ mod tests {
     fn codex_session_path_is_discovered_not_session_id_based() {
         let p = PathBuf::from("/Users/tester/Projects/example/kode");
         assert!(Backend::Codex.session_path(&p, "abc").is_none());
+        assert!(Backend::Tcodex.session_path(&p, "abc").is_none());
     }
 
     #[test]
@@ -2443,8 +2678,8 @@ mod tests {
             "should read the source session's own title; titles: {titles:?}"
         );
         assert!(
-            models.iter().any(|m| m == "Claude-Sonnet-4.6-1M"),
-            "should read the source session's own model; models: {models:?}"
+            models.is_empty(),
+            "startup replay must not replace the selected model: {models:?}"
         );
     }
 
@@ -2466,11 +2701,11 @@ mod tests {
     fn parses_codex_turn_context_and_token_count() {
         let mut state = TailState::new();
         let model_line = r#"{"timestamp":"2026-06-14T08:16:30Z","type":"turn_context","payload":{"cwd":"/tmp/p","model":"gpt-5.5"}}"#;
-        let upd = parse_codex_line(Backend::Codex, model_line, &mut state);
+        let upd = parse_codex_line(model_line, &mut state);
         assert_eq!(upd.new_model.as_deref(), Some("gpt-5.5"));
 
         let token_line = r#"{"timestamp":"2026-06-14T08:16:40Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9999999,"cached_input_tokens":8888888,"output_tokens":7777,"reasoning_output_tokens":255,"total_tokens":10007776},"last_token_usage":{"input_tokens":20767,"cached_input_tokens":11136,"output_tokens":463,"reasoning_output_tokens":255,"total_tokens":21230},"model_context_window":258400}}}"#;
-        let upd = parse_codex_line(Backend::Codex, token_line, &mut state);
+        let upd = parse_codex_line(token_line, &mut state);
         assert_eq!(upd.new_total, Some(10007776));
         assert_eq!(upd.new_input, Some(9999999));
         assert_eq!(upd.new_output, Some(7777));
@@ -2482,7 +2717,7 @@ mod tests {
     fn codex_session_meta_reports_session_uuid() {
         let mut state = TailState::new();
         let line = r#"{"type":"session_meta","payload":{"session_id":"019f1ca5-47a9-72f3-a0be-86a8f37fb67a","cwd":"/tmp/p"}}"#;
-        let upd = parse_codex_line(Backend::Codex, line, &mut state);
+        let upd = parse_codex_line(line, &mut state);
         assert_eq!(
             upd.new_session_uuid.as_deref(),
             Some("019f1ca5-47a9-72f3-a0be-86a8f37fb67a")
@@ -2495,7 +2730,7 @@ mod tests {
         let line =
             r#"{"type":"session_meta","payload":{"id":"own-thread","session_id":"parent-thread"}}"#;
         assert_eq!(
-            parse_codex_line(Backend::Codex, line, &mut state)
+            parse_codex_line(line, &mut state)
                 .new_session_uuid
                 .as_deref(),
             Some("own-thread")
@@ -2546,90 +2781,11 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn tcodex_binding_populates_actual_uuid_model_and_tokens() {
-        let root = tempfile_dir("kode_tcodex_binding");
-        let dir = Backend::Tcodex.codex_home(&root).join("sessions");
-        std::fs::create_dir_all(&dir).unwrap();
-        let (events, mut rx) = mpsc::unbounded_channel();
-        let mut binders = Vec::new();
-        for (id, model) in [(41, "gpt-first"), (42, "gpt-second")] {
-            let path = dir.join(format!("rollout-thread-{id}.jsonl"));
-            let transcript = format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-{id}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"{model}\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{{\"total_tokens\":123,\"input_tokens\":100,\"output_tokens\":23}}}}}}}}\n");
-            std::fs::write(&path, transcript).unwrap();
-            let (tx, binding) = tokio::sync::watch::channel(None);
-            spawn_waiting_for_binding(id, Backend::Tcodex, events.clone(), Some(binding));
-            binders.push((tx, path));
-        }
-        // Neither tab may claim a same-cwd file until its own hook arrives.
-        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
-            .await
-            .is_err());
-        for (tx, path) in binders.iter().rev() {
-            tx.send(Some(path.clone())).unwrap();
-        }
-        let mut actual: std::collections::HashMap<
-            u64,
-            (Option<String>, Option<String>, Option<u64>),
-        > = std::collections::HashMap::new();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let Some(CoreEvent::JsonlMeta {
-                    id,
-                    session_uuid,
-                    model,
-                    tokens,
-                    ..
-                }) = rx.recv().await
-                {
-                    let entry = actual.entry(id).or_default();
-                    if session_uuid.is_some() {
-                        entry.0 = session_uuid;
-                    }
-                    if model.is_some() {
-                        entry.1 = model;
-                    }
-                    if tokens.is_some() {
-                        entry.2 = tokens;
-                    }
-                }
-                if actual.len() == 2
-                    && actual.values().all(|(uuid, model, tokens)| {
-                        uuid.is_some() && model.is_some() && tokens.is_some()
-                    })
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            actual[&41],
-            (
-                Some("thread-41".into()),
-                Some("gpt-first".into()),
-                Some(123)
-            )
-        );
-        assert_eq!(
-            actual[&42],
-            (
-                Some("thread-42".into()),
-                Some("gpt-second".into()),
-                Some(123)
-            )
-        );
-        drop(rx);
-        drop(binders);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn codex_user_message_becomes_title() {
         let line = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"帮我适配 codex cli backend"}]}}"#;
         let mut state = TailState::new();
-        let upd = parse_codex_line(Backend::Codex, line, &mut state);
+        let upd = parse_codex_line(line, &mut state);
         assert_eq!(upd.new_title.as_deref(), Some("帮我适配 codex cli backend"));
         assert!(state.title_fallback_used);
     }
@@ -2639,10 +2795,8 @@ mod tests {
         let mut state = TailState::new();
         let meta = r#"{"type":"session_meta","payload":{"id":"session-without-local-db"}}"#;
         let prompt = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[Image #1]帮我修复标题"}]}}"#;
-        parse_codex_line(Backend::Codex, meta, &mut state);
-        let fallback = parse_codex_line(Backend::Codex, prompt, &mut state)
-            .new_title
-            .unwrap();
+        parse_codex_line(meta, &mut state);
+        let fallback = parse_codex_line(prompt, &mut state).new_title.unwrap();
         assert_eq!(fallback, "[Image #1]帮我修复标题");
         assert_eq!(
             apply_codex_name(&mut state, Some("修复标题显示".into())).as_deref(),
@@ -2666,7 +2820,7 @@ mod tests {
     fn codex_title_skips_image_markup_before_user_text() {
         let line = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/example.png\">"},{"type":"input_image","image_url":"data:image/png;base64,abc"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"你看看为啥这个tab显示不正常"}]}}"#;
         let mut state = TailState::new();
-        let upd = parse_codex_line(Backend::Codex, line, &mut state);
+        let upd = parse_codex_line(line, &mut state);
         assert_eq!(
             upd.new_title.as_deref(),
             Some("你看看为啥这个tab显示不正常")
@@ -2678,12 +2832,12 @@ mod tests {
     fn codex_title_skips_injected_startup_context() {
         let mut state = TailState::new();
         let noise = r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/p\n\n<INSTRUCTIONS>...</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>...</environment_context>"}]}}"##;
-        let upd = parse_codex_line(Backend::Codex, noise, &mut state);
+        let upd = parse_codex_line(noise, &mut state);
         assert!(upd.new_title.is_none());
         assert!(!state.title_fallback_used);
 
         let real = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为啥当前title还是没有更新，codex的tab"}]}}"#;
-        let upd = parse_codex_line(Backend::Codex, real, &mut state);
+        let upd = parse_codex_line(real, &mut state);
         assert_eq!(
             upd.new_title.as_deref(),
             Some("为啥当前title还是没有更新，codex的tab")
@@ -2695,12 +2849,12 @@ mod tests {
     fn codex_title_skips_deferred_tool_output() {
         let mut state = TailState::new();
         let noise = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"● DeferExecuteTool(mcp__memory__memory_search)\n╭────────────"}]}}"#;
-        let upd = parse_codex_line(Backend::Codex, noise, &mut state);
+        let upd = parse_codex_line(noise, &mut state);
         assert!(upd.new_title.is_none());
         assert!(!state.title_fallback_used);
 
         let real = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为什么codex有三个tab"}]}}"#;
-        let upd = parse_codex_line(Backend::Codex, real, &mut state);
+        let upd = parse_codex_line(real, &mut state);
         assert_eq!(upd.new_title.as_deref(), Some("为什么codex有三个tab"));
         assert!(state.title_fallback_used);
     }
@@ -2835,10 +2989,112 @@ mod tests {
     }
 
     #[test]
+    fn claude_ai_title_overrides_and_updates_user_fallback() {
+        let mut state = TailState::new();
+        let user = r#"{"type":"user","message":{"content":"first prompt"}}"#;
+        assert_eq!(
+            parse_claude_line(user, &mut state).new_title.as_deref(),
+            Some("first prompt")
+        );
+
+        let generated = r#"{"type":"ai-title","aiTitle":"Generated title"}"#;
+        assert_eq!(
+            parse_claude_line(generated, &mut state)
+                .new_title
+                .as_deref(),
+            Some("Generated title")
+        );
+
+        let renamed = r#"{"type":"ai-title","aiTitle":"Renamed title"}"#;
+        assert_eq!(
+            parse_claude_line(renamed, &mut state).new_title.as_deref(),
+            Some("Renamed title")
+        );
+    }
+
+    #[test]
     fn malformed_claude_line_doesnt_panic() {
         let mut state = TailState::new();
         let upd = parse_claude_line("not json", &mut state);
         assert!(!upd.changed());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tclaude_replay_keeps_selected_model_until_new_request() {
+        let path = tempfile_path("kode_tclaude_model_replay.jsonl");
+        std::fs::write(&path, "{\"type\":\"assistant\",\"message\":{\"model\":\"old-model\",\"usage\":{\"input_tokens\":7}}}\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn(301, Backend::Tclaude, path.clone(), tx, None);
+        let historical = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            historical,
+            CoreEvent::JsonlMeta {
+                model: None,
+                input_tokens: Some(7),
+                ..
+            }
+        ));
+        tokio::fs::OpenOptions::new().append(true).open(&path).await.unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"model\":\"new-model\",\"usage\":{\"input_tokens\":3}}}\n")
+            .await.unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(live, CoreEvent::JsonlMeta { model: Some(ref m), .. } if m == "new-model")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tcodex_replay_preserves_identity_and_usage_without_historical_model() {
+        let path = tempfile_path("kode_tcodex_model_replay.jsonl");
+        std::fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"test-id\"}}\n{\"type\":\"turn_context\",\"payload\":{\"model\":\"old-model\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":17}}}}\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn(302, Backend::Tcodex, path.clone(), tx, None);
+        let mut model = None;
+        let mut identity = None;
+        let mut usage = None;
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let CoreEvent::JsonlMeta {
+                model: next,
+                session_uuid,
+                tokens,
+                ..
+            } = event
+            {
+                model = model.or(next);
+                identity = identity.or(session_uuid);
+                usage = usage.or(tokens);
+            }
+        }
+        assert!(model.is_none());
+        assert_eq!(identity.as_deref(), Some("test-id"));
+        assert_eq!(usage, Some(17));
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap()
+            .write_all(b"{\"type\":\"turn_context\",\"payload\":{\"model\":\"live-model\"}}\n")
+            .await
+            .unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(live, CoreEvent::JsonlMeta { model: Some(ref m), .. } if m == "live-model")
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     /// 端到端:在临时 jsonl 文件里追加几行,验证 tail 任务正确发出 JsonlMeta(codebuddy 路径)

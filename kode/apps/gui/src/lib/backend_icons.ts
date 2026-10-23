@@ -7,10 +7,13 @@ export type BackendIconProfile = {
 
 const ICONS: Record<string, Omit<BackendIconProfile, 'fallback'>> = {
   codebuddy: { asset: 'codebuddy', tint: null, monochrome: false },
+  tcodebuddy: { asset: 'codebuddy', tint: null, monochrome: false },
   claude: { asset: 'claudecode', tint: '#D97757', monochrome: false },
+  tclaude: { asset: 'claudecode', tint: '#D97757', monochrome: false },
   'claude-code': { asset: 'claudecode', tint: '#D97757', monochrome: false },
   claudecode: { asset: 'claudecode', tint: '#D97757', monochrome: false },
   codex: { asset: 'codex', tint: '#7A9DFF', monochrome: false },
+  tcodex: { asset: 'codex', tint: '#7A9DFF', monochrome: false },
   gemini: { asset: 'gemini', tint: '#3186FF', monochrome: false },
   opencode: { asset: 'opencode', tint: '#B0B0B0', monochrome: true },
   amp: { asset: 'amp', tint: '#E8B168', monochrome: false },

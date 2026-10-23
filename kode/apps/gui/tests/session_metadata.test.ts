@@ -25,6 +25,27 @@ const assertNoUsage = (value: TabInfo) => {
   for (const field of Object.keys(usage)) assert.equal(field in value, false, field)
 }
 
+test('tclaude actual response model replaces auto before and after stale spawn DTO', () => {
+  for (const metaFirst of [false, true]) {
+    const pending = new SessionMetadataBuffer()
+    const dto = tab({ backendKey: 'tclaude', sessionId: uuid })
+    let tabs: TabInfo[] = metaFirst ? [] : upsertSessionTab([], dto, pending)
+    tabs = pending.receive(tabs, { id: 1, model: 'deepseek/deepseek-flash' })
+    tabs = upsertSessionTab(tabs, dto, pending, true)
+    assert.equal(tabs[0].model, 'deepseek/deepseek-flash')
+    assert.equal(sessionTabToPersisted(tabs[0]).model, 'deepseek/deepseek-flash')
+  }
+})
+
+test('spawn snapshot fills an early created auto placeholder with the transcript model', () => {
+  const pending = new SessionMetadataBuffer()
+  const early = tab({ backendKey: 'tclaude', sessionId: uuid })
+  const tabs = upsertSessionTab([early], {
+    ...early, model: 'deepseek/deepseek-flash',
+  }, pending, true)
+  assert.equal(tabs[0].model, 'deepseek/deepseek-flash')
+})
+
 test('UUID before model and partial usage survives insertion and persistence', () => {
   const pending = new SessionMetadataBuffer()
   let tabs: TabInfo[] = []

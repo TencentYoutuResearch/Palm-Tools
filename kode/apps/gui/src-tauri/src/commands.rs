@@ -604,10 +604,8 @@ pub async fn spawn_session(
 
     let model = sanitize_spawn_model(model);
 
-    let structured = matches!(endpoint_id, EndpointId::Local)
-        && backend_key == "codebuddy"
-        && (transport_kind.as_deref() == Some("acp")
-            || (transport_kind.is_none() && resume_session_id.is_none()));
+    let structured =
+        uses_structured_transport(&endpoint_id, &backend_key, transport_kind.as_deref());
     if structured {
         let mut backend = state
             .ctx
@@ -689,6 +687,17 @@ pub async fn spawn_session(
         cwd: spawned.cwd,
         endpoint_id,
     })
+}
+
+fn uses_structured_transport(
+    endpoint_id: &EndpointId,
+    backend_key: &str,
+    transport_kind: Option<&str>,
+) -> bool {
+    // ACP is opt-in; ordinary new tabs retain the PTY metadata and input path.
+    matches!(endpoint_id, EndpointId::Local)
+        && backend_key == "codebuddy"
+        && transport_kind == Some("acp")
 }
 
 fn sanitize_spawn_model(model: Option<String>) -> Option<String> {
@@ -1562,22 +1571,37 @@ pub struct SessionSummary {
     pub last_modified_secs: u64,
 }
 
+/// 一页历史 session。`has_more` 为 true 时前端显示 "More" 继续加载。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPage {
+    pub sessions: Vec<SessionSummary>,
+    pub has_more: bool,
+}
+
+/// 新建 tab 时列出 cwd 下的历史 session,按最近修改倒序分页。
+/// 只解析当前页的 transcript:目录里 session 很多时首屏也只读 `limit` 个文件。
 #[tauri::command]
 pub fn list_sessions_for_cwd(
     backend_key: String,
     cwd: String,
-) -> Result<Vec<SessionSummary>, String> {
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<SessionPage, String> {
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_absolute() {
         return Err("cwd must be an absolute path".into());
     }
 
     let Some(profile) = kode_core::session::backend::profile_for_key(&backend_key) else {
-        return Ok(Vec::new());
+        return Ok(SessionPage {
+            sessions: Vec::new(),
+            has_more: false,
+        });
     };
     let pinned_titles = crate::persistence::load().session_titles;
-    let mut sessions: Vec<SessionSummary> = profile
-        .list_sessions(cwd_path)
+    let (page, has_more) =
+        profile.list_sessions_page(cwd_path, offset.unwrap_or(0), limit.unwrap_or(usize::MAX));
+    let mut sessions: Vec<SessionSummary> = page
         .into_iter()
         .map(|s| SessionSummary {
             session_id: s.session_id.clone(),
@@ -1590,7 +1614,7 @@ pub fn list_sessions_for_cwd(
 
     dedupe_session_summaries(&mut sessions);
 
-    Ok(sessions)
+    Ok(SessionPage { sessions, has_more })
 }
 
 /// 按最新修改时间保留每个逻辑 session 的一个 rollout。
@@ -1637,6 +1661,40 @@ fn persist_paths(state: &AppState) {
         .clone()
         .map(|p| p.to_string_lossy().into_owned());
     state.persist.request_save(s);
+}
+
+#[cfg(test)]
+mod session_transport_tests {
+    use super::uses_structured_transport;
+    use kode_core::EndpointId;
+
+    #[test]
+    fn new_codebuddy_tabs_default_to_pty() {
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            None
+        ));
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            Some("pty")
+        ));
+    }
+
+    #[test]
+    fn codebuddy_acp_remains_explicitly_available() {
+        assert!(uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            Some("acp")
+        ));
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codex",
+            Some("acp")
+        ));
+    }
 }
 
 #[cfg(test)]

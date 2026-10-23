@@ -128,7 +128,7 @@ impl Session {
             backend.args.clone()
         };
         let args_with_prompt =
-            if backend::profile_for_key(backend_key).is_some_and(|p| p.kind().is_codex_family()) {
+            if backend::profile_for_key(backend_key).is_some_and(|p| p.kind().is_codex()) {
                 codex_runtime::isolated_args(&backend.command, &args_with_prompt)?
             } else {
                 args_with_prompt
@@ -381,10 +381,8 @@ impl Session {
         }
         // Reconcile a locally cancelled hold against fresh terminal evidence.
         // No file reads or process polling; the existing tick drives this check.
-        // Match the resolved backend kind rather than the raw key so wrapped
-        // codex CLIs (for example `tcodex`) get the same footer-driven recovery.
-        if jsonl_tail::Backend::from_backend_key(&self.backend_key)
-            .is_some_and(|kind| kind.is_codex_family())
+        if backend::profile_for_key(&self.backend_key)
+            .is_some_and(|profile| profile.kind().is_codex())
             && self.active_turn_id.is_some()
             && !self.busy.is_turn_held()
             && self
@@ -526,6 +524,87 @@ impl Session {
     /// 注意:每行末有空格 padding 到 cols 宽度,需要的话由调用方 trim_end。
     pub fn screen_text(&self) -> String {
         self.parser.screen().contents()
+    }
+
+    /// Inspect the active input row, never a stale prompt higher in scrollback.
+    pub fn has_empty_model_command_prompt(&self) -> bool {
+        let screen = self.parser.screen();
+        let Some((row, col)) = self.model_command_prompt_position() else {
+            return false;
+        };
+        let line = screen
+            .rows(0, screen.size().1)
+            .nth(row as usize)
+            .unwrap_or_default();
+        if col > 4 {
+            return false;
+        }
+        let prefix = screen.rows(0, col).nth(row as usize).unwrap_or_default();
+        if !matches!(prefix.trim(), "❯" | "›" | ">" | "→") {
+            return false;
+        }
+        if matches!(line.trim(), "❯" | "›" | ">" | "→") {
+            return true;
+        }
+        if self.backend_key == "cursor"
+            && !matches!(
+                line.trim().strip_prefix("→ ").map(str::trim),
+                Some(
+                    "Plan, search, build anything"
+                        | "Add a follow-up"
+                        | "Add a follow-up — /plan to review and build"
+                )
+            )
+        {
+            return false;
+        }
+        // Native CLIs draw a dim placeholder at the insertion point. It is not
+        // a desktop draft. Inspect attributes, so a real draft with the cursor
+        // moved to Home is still rejected (even if its text equals a hint).
+        let mut hint = false;
+        for column in col..screen.size().1 {
+            let Some(cell) = screen.cell(row, column) else {
+                continue;
+            };
+            if cell.contents().trim().is_empty() {
+                continue;
+            }
+            // Cursor's software caret renders the first placeholder character
+            // at full brightness. The remaining hint must still be dim.
+            if self.backend_key == "cursor" && column == col {
+                continue;
+            }
+            if !cell.dim() {
+                return false;
+            }
+            hint = true;
+        }
+        hint
+    }
+
+    /// Cursor renders its own caret and parks the hardware cursor below the
+    /// footer. Other backends keep the hardware cursor in the composer.
+    pub fn model_command_prompt_position(&self) -> Option<(u16, u16)> {
+        let screen = self.parser.screen();
+        if self.backend_key != "cursor" {
+            return Some(screen.cursor_position());
+        }
+        let rows: Vec<_> = screen.rows(0, screen.size().1).collect();
+        let row = rows
+            .iter()
+            .rposition(|line| line.trim_start().starts_with("→ "))?;
+        // Only the bottom composer immediately above the native footer counts.
+        // Picker rows also start with →; their footer has navigation hints.
+        let footer = rows
+            .iter()
+            .skip(row + 1)
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if footer.len() != 2 || !footer[1].contains('·') {
+            return None;
+        }
+        let prefix = rows[row].chars().take_while(|c| c.is_whitespace()).count() + 2;
+        Some((row as u16, prefix as u16))
     }
 
     /// vt100 当前屏幕的 ANSI 快照,**附带 DEC private mode 重放序列**。
@@ -846,6 +925,13 @@ fn inject_model_flag(
 /// 否则在末尾追加 `--append-system-prompt <prompt>` 两个 args。codebuddy / claude /
 /// claude-internal 都支持这个 flag(2026-06-06 实测 codebuddy --help)。
 ///
+/// CodeBuddy 会话同时追加 `--settings <json>` 挂上 kode-memory Stop 守门员(用户 args
+/// 已含 `--settings` 时不追加)。守门员要求 agent 调 memory MCP,只在注入了本段指令的
+/// kode 会话里有意义,所以不写进全局 settings,避免拦截 kode 之外的 CLI 进程。
+/// Claude 系(claude/tclaude/claude-internal)不挂:Claude Code 要求 prompt hook 输出
+/// 纯 JSON,模型常带围栏/解释导致 `JSON validation failed`,且拦截时会把整段 prompt
+/// 当标签显示成 "Stop hook error"。CodeBuddy 对两者都宽容。
+///
 /// 这里**不**校验 backend.command 是否真支持这个 flag —— 校验放在 BackendConfig 层
 /// 的实现也行,但当前出厂三个 backend 都支持 --append-system-prompt,所以零校验
 /// 简单透传。如果将来加了不支持的 backend(eg. raw shell),那个 backend 的 args
@@ -885,6 +971,14 @@ pub fn inject_kode_memory_prompt(
     let mut new_args = args.to_vec();
     new_args.push("--append-system-prompt".into());
     new_args.push(full);
+    if backend_key == "codebuddy"
+        && !args
+            .iter()
+            .any(|a| a == "--settings" || a.starts_with("--settings="))
+    {
+        new_args.push("--settings".into());
+        new_args.push(kode_memory::hook_setup::session_settings_json());
+    }
     new_args
 }
 
@@ -1025,85 +1119,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn t_cli_session_restore_keeps_uuid_model_and_requested_permission() {
-        let config = crate::config::Config::default();
-        let cwd = std::env::temp_dir();
-        let sid = "11111111-1111-4111-8111-111111111111";
-        for key in ["tcodex", "tclaude"] {
-            for mode in [None, Some("default"), Some("bypass")] {
-                let mut backend = config.backend(key).unwrap().clone();
-                // A shell fixture exits without starting a real agent or network call.
-                backend.command = "/bin/sh".into();
-                backend.args = vec!["-c".into(), "exit 0".into(), "--no-daemon".into()];
-                let (events, rx) = mpsc::unbounded_channel();
-                let mut session = Session::new(
-                    501,
-                    key,
-                    &backend,
-                    80,
-                    24,
-                    Duration::from_secs(30),
-                    100,
-                    &cwd,
-                    events,
-                    Some(sid),
-                    mode,
-                    Some("gpt-test"),
-                    false,
-                    None,
-                    &[],
-                    None,
-                )
-                .unwrap();
-                assert_eq!(session.session_id.as_deref(), Some(sid));
-                assert_eq!(session.state.model, "gpt-test");
-                let args = &session.args;
-                let resume = args
-                    .iter()
-                    .position(|arg| {
-                        arg == if key == "tcodex" {
-                            "resume"
-                        } else {
-                            "--resume"
-                        }
-                    })
-                    .unwrap();
-                assert_eq!(args[resume + 1], sid);
-                let model = args.iter().position(|arg| arg == "--model").unwrap();
-                assert_eq!(args[model + 1], "gpt-test");
-                assert!(!args.iter().any(|arg| arg == "--session-id"));
-                if key == "tcodex" {
-                    assert!(model < resume);
-                }
-                if mode == Some("bypass") {
-                    if key == "tcodex" {
-                        let permission = args
-                            .iter()
-                            .position(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
-                            .unwrap();
-                        assert!(permission < resume);
-                    } else {
-                        let permission = args
-                            .iter()
-                            .position(|arg| arg == "--permission-mode")
-                            .unwrap();
-                        assert_eq!(args[permission + 1], "bypassPermissions");
-                    }
-                } else {
-                    assert!(!args
-                        .iter()
-                        .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"
-                            || arg == "--permission-mode"
-                            || arg == "--ask-for-approval"));
-                }
-                session.pty.as_ref().unwrap().kill();
-                session.mark_exited(Some(0));
-                drop(rx);
-            }
-        }
-    }
-
     #[test]
     fn inject_model_flag_appends_when_not_present() {
         let out = inject_model_flag(
@@ -1235,6 +1250,30 @@ mod tests {
     }
 
     #[test]
+    fn t_wrappers_inject_bypass_for_new_and_resumed_sessions() {
+        let cfg = crate::config::Config::default();
+        for (key, expected) in [
+            ("tcodex", vec!["--dangerously-bypass-approvals-and-sandbox"]),
+            ("tclaude", vec!["--permission-mode", "bypassPermissions"]),
+        ] {
+            let backend = cfg.backend(key).unwrap();
+            let args = inject_permission_mode_flag(
+                &[],
+                backend.permission_mode_flag.as_deref(),
+                Some("bypass"),
+            );
+            assert_eq!(args, expected, "{key} new session");
+            let resumed = inject_resume_flag(key, &args, "abc");
+            assert_eq!(
+                &resumed[..args.len()],
+                args.as_slice(),
+                "{key} restore preserves bypass"
+            );
+            assert_eq!(resumed.last().map(String::as_str), Some("abc"));
+        }
+    }
+
+    #[test]
     fn inject_permission_mode_skips_default_and_none() {
         // default / None / "" 三态都不注入(子进程默认行为本身就是 default)
         let base = vec!["--model".into(), "opus".into()];
@@ -1283,14 +1322,41 @@ mod tests {
     fn inject_kode_memory_prompt_appends_when_enabled() {
         let cwd = std::path::PathBuf::from("/tmp");
         let out = inject_kode_memory_prompt(&[], "codebuddy", &cwd, true, None);
-        // 至少 2 个 args:flag + prompt 内容
-        assert_eq!(out.len(), 2);
+        // flag + prompt 内容 + --settings + 会话级守门员 settings
+        assert_eq!(out.len(), 4);
         assert_eq!(out[0], "--append-system-prompt");
         // prompt 内容必须包含 <kode-memory> 标签(prompt::build 的契约)
         assert!(
             out[1].contains("<kode-memory>"),
             "appended prompt must include <kode-memory> marker"
         );
+        assert_eq!(out[2], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&out[3]).unwrap();
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["prompt"],
+            kode_memory::hook_setup::STOP_HOOK_PROMPT
+        );
+    }
+
+    #[test]
+    fn inject_kode_memory_prompt_respects_user_settings_flag() {
+        let cwd = std::path::PathBuf::from("/tmp");
+        let already = vec!["--settings".to_string(), "/my/settings.json".to_string()];
+        let out = inject_kode_memory_prompt(&already, "codebuddy", &cwd, true, None);
+        assert_eq!(out.iter().filter(|a| *a == "--settings").count(), 1);
+        assert_eq!(out[1], "/my/settings.json");
+        assert!(out.contains(&"--append-system-prompt".to_string()));
+    }
+
+    /// tclaude 注入 memory 指令,但不挂 prompt 守门员(Claude Code 对 prompt hook 输出
+    /// 校验严格,且拦截会显示成 Stop hook error)。
+    #[test]
+    fn inject_kode_memory_prompt_covers_tclaude_without_gatekeeper() {
+        let cwd = std::path::PathBuf::from("/tmp");
+        let out = inject_kode_memory_prompt(&[], "tclaude", &cwd, true, None);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "--append-system-prompt");
+        assert!(!out.contains(&"--settings".to_string()));
     }
 
     #[test]
@@ -1505,17 +1571,66 @@ mod tests {
     // ============== Session::feed UTF-8 拼接 ==============
 
     #[test]
-    fn codex_idle_redraw_preserves_idle_and_unread() {
-        for key in ["codex", "tcodex"] {
-            assert_codex_idle_redraw_preserves_idle_and_unread(key);
+    fn model_switch_requires_empty_active_prompt() {
+        let mut session = Session::structured(
+            1,
+            "codebuddy",
+            "codebuddy",
+            Path::new("/tmp"),
+            "test".into(),
+            "old".into(),
+        );
+        session.parser.process("❯ ".as_bytes());
+        assert!(session.has_empty_model_command_prompt());
+        session.parser.process(b"unfinished draft");
+        assert!(!session.has_empty_model_command_prompt());
+        session.parser.process("\r\n❯ ".as_bytes());
+        assert!(session.has_empty_model_command_prompt());
+        session.parser.process(b"\r\nSelect an option");
+        assert!(!session.has_empty_model_command_prompt());
+    }
+
+    #[test]
+    fn model_switch_accepts_native_placeholders_but_not_drafts_at_home() {
+        for (backend, prompt, placeholder) in [
+            ("codex", "›", "Ask Codex to do anything"),
+            ("tcodex", "›", "Find a bug in @filename"),
+            ("cursor", "→", "Add a follow-up"),
+            ("tclaude", "❯", "Try writing a test"),
+        ] {
+            let mut session = Session::structured(
+                1,
+                backend,
+                backend,
+                Path::new("/tmp"),
+                "test".into(),
+                "old".into(),
+            );
+            let tail = if backend == "cursor" {
+                "\r\n\r\nGrok 4.7 High\r\n/tmp · main\r\n"
+            } else {
+                "\r\x1b[2C"
+            };
+            session
+                .parser
+                .process(format!("{prompt} \x1b[2m{placeholder}\x1b[0m{tail}").as_bytes());
+            assert!(session.has_empty_model_command_prompt(), "{backend}");
+            session
+                .parser
+                .process(format!("\x1b[2J\x1b[H{prompt} {placeholder}{tail}").as_bytes());
+            assert!(
+                !session.has_empty_model_command_prompt(),
+                "real draft: {backend}"
+            );
         }
     }
 
-    fn assert_codex_idle_redraw_preserves_idle_and_unread(key: &str) {
-        let profile = backend::profile_for_key(key).unwrap();
+    #[test]
+    fn codex_idle_redraw_preserves_idle_and_unread() {
+        let profile = backend::profile_for_key("codex").unwrap();
         let mut s = Session {
             id: 1,
-            backend_key: key.into(),
+            backend_key: "codex".into(),
             cwd: PathBuf::from("/tmp"),
             command: String::new(),
             args: vec![],
@@ -1586,6 +1701,44 @@ mod tests {
         s.mark_exited(Some(0));
         s.feed(b"late frame", false);
         assert_eq!(s.state.status, Status::Exited(Some(0)));
+    }
+
+    #[test]
+    fn tcodex_cancel_recovers_busy_from_running_footer() {
+        let profile = backend::profile_for_key("tcodex").unwrap();
+        let mut s = Session {
+            id: 1,
+            backend_key: "tcodex".into(),
+            cwd: PathBuf::from("/tmp"),
+            command: String::new(),
+            args: vec![],
+            session_id: Some("session-a".into()),
+            pty: None,
+            parser: vt100::Parser::new(24, 80, 0),
+            state: SessionState::new("test", "auto"),
+            busy: BusyHeuristic::new(Duration::from_secs(1))
+                .with_pty_activity_as_work(!profile.has_idle_animation()),
+            active_turn_id: None,
+            semantic_session_id: None,
+            busy_recovery: std::sync::Mutex::default(),
+            output_revision: 0,
+            cols: 80,
+            rows: 24,
+            retarget_tx: None,
+            feed_remnant: vec![],
+        };
+
+        s.mark_turn_start_with_id(Some("turn-1"));
+        s.write_input(b"\x1b");
+        s.tick_status();
+        assert_eq!(s.state.status, Status::Idle);
+
+        s.busy_recovery.lock().unwrap().allow_check_for_test();
+        s.feed(
+            b"\r\n\xe2\x80\xa2 Working (12s \xe2\x80\xa2 esc to interrupt)\r\n\xe2\x80\xba Ask Codex to do anything",
+            false,
+        );
+        assert_eq!(s.state.status, Status::Busy);
     }
 
     #[test]

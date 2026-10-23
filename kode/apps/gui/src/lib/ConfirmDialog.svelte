@@ -7,6 +7,7 @@
    */
   import { onMount } from 'svelte'
   import { outsidePressClose } from './outside_close'
+  import { modalFocus } from './modal_focus'
 
   type Props = {
     title: string
@@ -47,6 +48,8 @@
 <div class="backdrop" use:outsidePressClose={{ onClose }} role="presentation">
   <div
     class="dlg"
+    use:modalFocus
+    aria-label={title}
     onclick={(e) => e.stopPropagation()}
     onkeydown={onKey}
     role="dialog"
@@ -107,6 +110,7 @@
     color: var(--fg-primary);
   }
   .msg {
+    overflow-wrap: anywhere;
     margin-top: var(--sp-2);
     font-size: var(--fs-sm);
     color: var(--fg-secondary);
