@@ -118,6 +118,22 @@ pub trait BackendProfile: Send + Sync {
 
     fn spawn_tail(&self, req: MetaTailRequest);
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession>;
+    /// 按最近修改时间倒序、按 session_id 去重后取 `[offset, offset+limit)` 一页。
+    /// 第二个返回值表示后面是否还有。默认实现全量列出再切片；jsonl 型 backend
+    /// 覆盖为只解析本页文件，避免新建 tab 时把目录下所有 transcript 都读一遍。
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let mut all = self.list_sessions(cwd);
+        all.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
+        let mut seen = std::collections::HashSet::new();
+        all.retain(|s| seen.insert(s.session_id.clone()));
+        let has_more = all.len() > offset.saturating_add(limit);
+        (all.into_iter().skip(offset).take(limit).collect(), has_more)
+    }
 
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf>;
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent>;
@@ -213,6 +229,18 @@ impl BackendProfile for CodebuddyProfile {
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
         list_slug_jsonl_sessions(self, cwd)
     }
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let (page, has_more) = page_candidates(slug_jsonl_candidates(self, cwd), offset, limit);
+        (
+            page.into_iter().map(|c| c.into_listed(None)).collect(),
+            has_more,
+        )
+    }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
         vec![home.join(".codebuddy/projects")]
     }
@@ -246,6 +274,18 @@ impl BackendProfile for ClaudeProfile {
     }
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
         list_slug_jsonl_sessions(self, cwd)
+    }
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let (page, has_more) = page_candidates(slug_jsonl_candidates(self, cwd), offset, limit);
+        (
+            page.into_iter().map(|c| c.into_listed(None)).collect(),
+            has_more,
+        )
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
         vec![home.join(if self.0 == Backend::Tclaude {
@@ -313,10 +353,41 @@ impl BackendProfile for CodexProfile {
         let Some(home) = jsonl_tail::codex_home(self.0) else {
             return Vec::new();
         };
-        let mut out = Vec::new();
         let names = codex_title::thread_names(&home.join("state_5.sqlite"));
-        collect_codex_listed(&home.join("sessions"), cwd, &names, &mut out);
-        out
+        let mut candidates = Vec::new();
+        collect_codex_candidates(&home.join("sessions"), cwd, &mut candidates);
+        candidates
+            .into_iter()
+            .map(|c| {
+                let title = names.get(&c.session_id).cloned();
+                c.into_listed(title)
+            })
+            .collect()
+    }
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let Some(home) = jsonl_tail::codex_home(self.0) else {
+            return (Vec::new(), false);
+        };
+        let mut candidates = Vec::new();
+        collect_codex_candidates(&home.join("sessions"), cwd, &mut candidates);
+        let (page, has_more) = page_candidates(candidates, offset, limit);
+        if page.is_empty() {
+            return (Vec::new(), has_more);
+        }
+        let names = codex_title::thread_names(&home.join("state_5.sqlite"));
+        let page = page
+            .into_iter()
+            .map(|c| {
+                let title = names.get(&c.session_id).cloned();
+                c.into_listed(title)
+            })
+            .collect();
+        (page, has_more)
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
         let _ = home;
@@ -449,7 +520,53 @@ fn spawn_sid_jsonl_tail(profile: &dyn BackendProfile, req: MetaTailRequest) {
     );
 }
 
+/// 列 session 时的廉价候选：只读目录项与 mtime（Codex 额外读首行 session_meta），
+/// 不解析 transcript。真正的 title/model/tokens 由 [`SessionCandidate::into_listed`]
+/// 按需解析。
+struct SessionCandidate {
+    session_id: String,
+    path: PathBuf,
+    last_modified_secs: u64,
+}
+
+impl SessionCandidate {
+    fn into_listed(self, title_override: Option<String>) -> ListedSession {
+        let snap = transcript_snapshot(&self.path);
+        ListedSession {
+            session_id: self.session_id,
+            title: title_override.or(snap.title),
+            model: snap.model,
+            total_tokens: snap.total_tokens,
+            last_modified_secs: self.last_modified_secs,
+        }
+    }
+}
+
+/// 最近修改优先，同一 session_id 只保留最新的一份（Codex resume 会产生多个 rollout），
+/// 再切出一页。
+fn page_candidates(
+    mut candidates: Vec<SessionCandidate>,
+    offset: usize,
+    limit: usize,
+) -> (Vec<SessionCandidate>, bool) {
+    candidates.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert(c.session_id.clone()));
+    let has_more = candidates.len() > offset.saturating_add(limit);
+    (
+        candidates.into_iter().skip(offset).take(limit).collect(),
+        has_more,
+    )
+}
+
 fn list_slug_jsonl_sessions(profile: &dyn BackendProfile, cwd: &Path) -> Vec<ListedSession> {
+    slug_jsonl_candidates(profile, cwd)
+        .into_iter()
+        .map(|c| c.into_listed(None))
+        .collect()
+}
+
+fn slug_jsonl_candidates(profile: &dyn BackendProfile, cwd: &Path) -> Vec<SessionCandidate> {
     let Some(probe) = profile.session_path(cwd, "__probe__") else {
         return Vec::new();
     };
@@ -471,24 +588,17 @@ fn list_slug_jsonl_sessions(profile: &dyn BackendProfile, cwd: &Path) -> Vec<Lis
         if session_id.is_empty() {
             continue;
         }
-        let snap = transcript_snapshot(&path);
-        out.push(ListedSession {
+        let last_modified_secs = modified_secs(&path);
+        out.push(SessionCandidate {
             session_id,
-            title: snap.title,
-            model: snap.model,
-            total_tokens: snap.total_tokens,
-            last_modified_secs: modified_secs(&path),
+            path,
+            last_modified_secs,
         });
     }
     out
 }
 
-fn collect_codex_listed(
-    dir: &Path,
-    cwd: &Path,
-    names: &std::collections::HashMap<String, String>,
-    out: &mut Vec<ListedSession>,
-) {
+fn collect_codex_candidates(dir: &Path, cwd: &Path, out: &mut Vec<SessionCandidate>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -498,7 +608,7 @@ fn collect_codex_listed(
             continue;
         };
         if meta.is_dir() {
-            collect_codex_listed(&path, cwd, names, out);
+            collect_codex_candidates(&path, cwd, out);
             continue;
         }
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -510,14 +620,11 @@ fn collect_codex_listed(
         if session_cwd != cwd {
             continue;
         }
-        let snap = transcript_snapshot(&path);
-        let title = names.get(&session_id).cloned().or(snap.title);
-        out.push(ListedSession {
+        let last_modified_secs = modified_secs(&path);
+        out.push(SessionCandidate {
             session_id,
-            title,
-            model: snap.model,
-            total_tokens: snap.total_tokens,
-            last_modified_secs: modified_secs(&path),
+            path,
+            last_modified_secs,
         });
     }
 }
@@ -986,6 +1093,26 @@ fn json_u64(doc: &Value, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_candidates_sorts_dedupes_and_slices() {
+        let c = |id: &str, t: u64| SessionCandidate {
+            session_id: id.into(),
+            path: PathBuf::from(format!("/nonexistent/{id}-{t}.jsonl")),
+            last_modified_secs: t,
+        };
+        let all = vec![c("a", 1), c("b", 5), c("a", 9), c("c", 3), c("d", 7)];
+        // 去重后倒序: a(9) d(7) b(5) c(3)
+        let (page, more) = page_candidates(all, 0, 2);
+        let ids: Vec<_> = page.iter().map(|c| c.session_id.as_str()).collect();
+        assert_eq!(ids, ["a", "d"]);
+        assert_eq!(page[0].last_modified_secs, 9);
+        assert!(more);
+        let all = vec![c("a", 1), c("b", 5), c("c", 3)];
+        let (page, more) = page_candidates(all, 2, 2);
+        assert_eq!(page.len(), 1);
+        assert!(!more);
+    }
 
     #[test]
     fn registry_covers_known_keys() {
