@@ -507,7 +507,6 @@ struct ClEntry {
 struct ClMessage {
     role: Option<String>,
     content: Option<Value>,
-    stop_reason: Option<String>,
 }
 
 fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
@@ -528,7 +527,6 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
         return vec![];
     };
     let role = msg.role.as_deref().unwrap_or(ty).to_string();
-    let stop_reason = msg.stop_reason.as_deref().map(str::to_string);
 
     let mut out: Vec<EventEnvelope> = Vec::new();
     let mut tool_call_ids: Vec<Value> = Vec::new();
@@ -728,15 +726,8 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
         let env = EventEnvelope::new(id, "message", payload.take());
         out.insert(0, env);
     }
-    if role == "assistant" && stop_reason.as_deref() == Some("end_turn") {
-        out.push(turn_finished_event(
-            id,
-            "completed",
-            (!merged.is_empty()).then_some(merged.as_str()),
-            None,
-            None,
-        ));
-    }
+    // A model response can finish before Stop hooks run or continue the agent.
+    // Only the hook lifecycle may release the running turn.
 
     out
 }
@@ -1257,15 +1248,17 @@ mod tests {
     }
 
     #[test]
-    fn claude_end_turn_emits_turn_finished() {
+    fn claude_end_turn_does_not_finish_agent_before_stop_hooks() {
         let line = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[
             {"type":"text","text":"all set"}
         ]}}"#;
         let evs = parse_line(3, Backend::Claude, line);
-        assert_eq!(evs.len(), 2);
+        assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].r#type, "message");
-        assert_eq!(evs[1].r#type, "session.turn_finished");
-        assert_eq!(evs[1].payload["summary"], "all set");
+        let evs = parse_line(3, Backend::Tclaude, line);
+        assert!(evs
+            .iter()
+            .all(|event| event.r#type != "session.turn_finished"));
     }
 
     #[test]

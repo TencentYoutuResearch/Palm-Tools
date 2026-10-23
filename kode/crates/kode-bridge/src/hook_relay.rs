@@ -420,6 +420,7 @@ fn process_hook_json_inner(
                     "summary": null,
                     "duration_ms": null,
                     "turn_id": null,
+                    "lifecycle_applied": core_tx.is_some(),
                 }),
             ));
             bus.emit(EventEnvelope::new(
@@ -680,11 +681,45 @@ mod tests {
         assert_eq!(env1.r#type, "session.turn_finished");
         assert_eq!(env1.session_id, 42);
         assert_eq!(env1.payload["status"], "completed");
+        assert_eq!(env1.payload["lifecycle_applied"], true);
 
         let env2 = rx.try_recv().expect("should receive attention_cleared");
         assert_eq!(env2.r#type, "session.attention_cleared");
         assert_eq!(env2.session_id, 42);
         assert_eq!(env2.payload["reason"], "hook_Stop");
+    }
+
+    #[test]
+    fn stop_and_next_submit_have_one_ordered_lifecycle_owner() {
+        let bus = Arc::new(BridgeBus::new());
+        let mut events = bus.subscribe();
+        let (tx, mut core) = tokio::sync::mpsc::unbounded_channel();
+        for event in ["Stop", "UserPromptSubmit"] {
+            process_hook_json_with_core_tx(
+                &serde_json::json!({"session_id":"42", "hook_event_name":event}).to_string(),
+                &bus,
+                &tx,
+            );
+        }
+        assert!(matches!(
+            core.try_recv().unwrap(),
+            CoreEvent::TurnHold {
+                id: 42,
+                active: false
+            }
+        ));
+        assert!(matches!(
+            core.try_recv().unwrap(),
+            CoreEvent::TurnHold {
+                id: 42,
+                active: true
+            }
+        ));
+        let completion = events.try_recv().unwrap();
+        assert_eq!(completion.r#type, "session.turn_finished");
+        // Even if the bus consumer lags behind the next submit, it must not
+        // apply this completion again after the core consumer held the new turn.
+        assert_eq!(completion.payload["lifecycle_applied"], true);
     }
 
     #[test]
