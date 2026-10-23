@@ -331,6 +331,17 @@ impl Config {
                             }
                             if matches!(k.as_str(), "tcodex" | "tclaude")
                                 && existing.permission_mode_flag.is_none()
+                                && !existing.args.iter().any(|arg| {
+                                    matches!(
+                                        arg.split('=').next().unwrap_or(arg),
+                                        "--permission-mode"
+                                            | "--ask-for-approval"
+                                            | "-a"
+                                            | "--dangerously-bypass-approvals-and-sandbox"
+                                            | "--dangerously-skip-permissions"
+                                            | "--allow-dangerously-skip-permissions"
+                                    )
+                                })
                             {
                                 existing.permission_mode_flag = v.permission_mode_flag.clone();
                             }
@@ -409,6 +420,39 @@ impl BackendConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t_wrapper_flag_hydration_preserves_custom_values_and_config_bytes() {
+        let file = std::env::temp_dir().join(format!("kode-flags-{}.toml", uuid::Uuid::new_v4()));
+        let txt = r#"# User-owned config must not be rewritten.
+[backends.tcodex]
+command = "/custom/wrapper"
+args = ["--ask-for-approval", "on-request"]
+default_model = "custom-model"
+enabled = false
+[backends.tclaude]
+command = "/custom/claude-wrapper"
+model_flag = ""
+permission_mode_flag = "--custom-permission"
+"#;
+        std::fs::write(&file, txt).unwrap();
+        let cfg = Config::load_from(&file);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), txt);
+        std::fs::remove_file(file).unwrap();
+        let codex = cfg.backend("tcodex").unwrap();
+        assert_eq!(codex.model_flag.as_deref(), Some("--model"));
+        assert!(codex.permission_mode_flag.is_none());
+        assert_eq!(codex.default_model.as_deref(), Some("custom-model"));
+        assert_eq!(codex.enabled, Some(false));
+        assert!(codex.mcp_setup.is_none());
+        let claude = cfg.backend("tclaude").unwrap();
+        assert_eq!(claude.model_flag.as_deref(), Some(""));
+        assert_eq!(
+            claude.permission_mode_flag.as_deref(),
+            Some("--custom-permission")
+        );
+        assert!(claude.mcp_setup.is_none());
+    }
 
     /// 回归:codebuddy 默认不能带任何 positional 参数,否则会被当作初始 prompt 发给 LLM
     #[test]
@@ -656,10 +700,9 @@ enabled = true
         }
     }
 
-    /// 早期落盘的 tclaude/tcodex table 没有 mcp_setup → 加载时补上,否则 kode 不会给
-    /// 它们配 memory MCP,而守门员又要求调用 memory_propose。
+    /// Tencent wrappers keep MCP setup opt-in, including legacy configurations.
     #[test]
-    fn load_from_hydrates_tclaude_and_tcodex_mcp_setup_in_legacy_config() {
+    fn load_from_keeps_tclaude_and_tcodex_mcp_setup_opt_in() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -688,13 +731,9 @@ enabled = true
 
         let cfg = Config::load_from(&path);
         std::fs::remove_file(path).ok();
-        match &cfg.backend("tclaude").unwrap().mcp_setup {
-            Some(McpSetupSpec::Claude { cli }) => assert_eq!(cli, "tclaude"),
-            other => panic!("legacy tclaude should gain Claude mcp_setup, got {other:?}"),
-        }
-        match &cfg.backend("tcodex").unwrap().mcp_setup {
-            Some(McpSetupSpec::Codex { cli }) => assert_eq!(cli, "tcodex"),
-            other => panic!("legacy tcodex should gain Codex mcp_setup, got {other:?}"),
+        for key in ["tcodex", "tclaude"] {
+            assert!(cfg.backend(key).unwrap().mcp_setup.is_none());
+            assert!(Config::default().backend(key).unwrap().mcp_setup.is_none());
         }
     }
 

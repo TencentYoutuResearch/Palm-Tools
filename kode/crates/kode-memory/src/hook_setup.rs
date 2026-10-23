@@ -130,12 +130,7 @@ fn codex_hook_targets_in(home: &Path) -> Vec<(&'static str, PathBuf)> {
 // Stop hook
 // ============================================================================
 
-/// 检查 `path` 对应的 settings.json 里是否已有**可驱动主 agent 继续执行**的
-/// kode Stop prompt hook。
-///
-/// 只看 `_kode_managed: true` 不够：早期版本没有写 `continueOnBlock`，
-/// CodeBuddy 即使让守门员返回 `{ "ok": false }` 也会直接结束当前轮次，不会把
-/// reason 注入主 agent。因此这种旧配置必须视为未配置，等待启动注入逻辑升级。
+/// A configured global Stop hook contains a managed command and no Kode prompt.
 pub fn is_stop_hook_configured(path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -143,7 +138,8 @@ pub fn is_stop_hook_configured(path: &Path) -> bool {
     let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return false;
     };
-    let Some(entries) = doc.get("hooks")
+    let Some(entries) = doc
+        .get("hooks")
         .and_then(|hooks| hooks.get("Stop"))
         .and_then(|stop| stop.as_array())
     else {
@@ -151,27 +147,23 @@ pub fn is_stop_hook_configured(path: &Path) -> bool {
     };
     let has_prompt = entries.iter().any(|entry| {
         entry["hooks"].as_array().is_some_and(|hooks| {
-            hooks.iter().any(|hook| hook["type"] == "prompt" && is_kode_handler(hook))
+            hooks
+                .iter()
+                .any(|hook| hook["type"] == "prompt" && is_kode_handler(hook))
         })
     });
     let has_command = entries.iter().any(|entry| {
         entry["_kode_managed"] == true
-            && entry["hooks"].as_array().is_some_and(|hooks| {
-                hooks.iter().any(|hook| hook["type"] == "command")
-            })
+            && entry["hooks"]
+                .as_array()
+                .is_some_and(|hooks| hooks.iter().any(|hook| hook["type"] == "command"))
     });
     has_command && !has_prompt
 }
 
 /// 注入或更新 kode 管理的 Stop hook（幂等）。
 ///
-/// `hooks` 数组里并列两个子 hook：
-/// 1. `type:"command"` → 立即转发给 hook_relay（emit `turn_finished` + `attention_cleared`）
-/// 2. `type:"prompt"` → 守门员 LLM（判断本轮是否需要沉淀进 memory）。
-///    必须设置 `continueOnBlock:true`，否则 `{ok:false}` 只阻止 stop，却不会把
-///    reason 注入主 agent 继续调用 `memory_propose`。
-///
-/// 两者并列执行：command 先跑（即时通知 GUI turn 结束），prompt 后跑（可能拦截让 agent 续跑沉淀）。
+/// Only the command relay is global. The prompt is scoped by session_settings_json.
 ///
 /// 流程：
 /// 1. 读现有 JSON（不存在或为空 → 用 `{}`，保留其他字段）
@@ -579,7 +571,7 @@ fn is_kode_handler(hook: &serde_json::Value) -> bool {
         || hook
             .get("prompt")
             .and_then(|prompt| prompt.as_str())
-            .is_some_and(|prompt| prompt.starts_with("你是 kode-memory 的沉淀守门员。"))
+            .is_some_and(|prompt| prompt.contains("kode-memory 的沉淀守门员"))
         || hook
             .get("statusMessage")
             .or_else(|| hook.get("status_message"))
@@ -914,6 +906,29 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn global_stop_has_no_gatekeeper_and_session_settings_are_prompt_only() {
+        let tmp = write_tmp("{}");
+        inject_stop_hook(tmp.path(), "kode-memory codebuddy-hook").unwrap();
+        let global: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path()).unwrap()).unwrap();
+        assert_eq!(
+            global["hooks"]["Stop"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(global["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
+        let scoped: serde_json::Value = serde_json::from_str(&session_settings_json()).unwrap();
+        assert_eq!(scoped["hooks"]["Stop"][0]["hooks"][0]["type"], "prompt");
+        assert_eq!(
+            scoped["hooks"]["Stop"][0]["hooks"][0]["continueOnBlock"],
+            true
+        );
+        assert!(STOP_HOOK_PROMPT.contains("只输出一行裸 JSON"));
+    }
+
+    #[test]
     fn tencent_hook_targets_use_independent_config_directories() {
         let home = std::path::Path::new("/home/test");
         assert_eq!(
@@ -1143,10 +1158,12 @@ mod tests {
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0]["type"], "command");
         assert_eq!(hooks[0]["command"], "echo relay");
-        let settings: serde_json::Value =
-            serde_json::from_str(&session_settings_json()).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&session_settings_json()).unwrap();
         assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["type"], "prompt");
-        assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["prompt"], STOP_HOOK_PROMPT);
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["prompt"],
+            STOP_HOOK_PROMPT
+        );
         let count = doc["hooks"]["Stop"]
             .as_array()
             .unwrap()
@@ -1242,7 +1259,10 @@ mod tests {
         assert!(is_stop_hook_configured(tmp.path()));
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -1565,7 +1585,10 @@ mod tests {
             initial["hooks"]["Notification"]
         );
         assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        assert_eq!(doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(doc["hooks"]["Stop"][1]["hooks"][0]["command"], "user-stop");
         let empty = write_tmp(r#"{"model":"keep"}"#);
         repair_existing_hooks(empty.path()).unwrap();
