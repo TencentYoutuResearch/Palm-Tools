@@ -1,23 +1,24 @@
 //! kode-memory hook 自动注入。
 //!
-//! 在 kode GUI 启动时（`spawn_startup_probe`）自动把各类 hook 写入
+//! 在 kode GUI 启动时（`install_managed_hooks`）自动把各类 hook 写入
 //! codebuddy 和 claude 的 `settings.json`。
 //!
 //! ## 管理的 Hook 类型
 //!
 //! | Hook Event | 用途 |
 //! |-----------|------|
-//! | `Stop` | `type:"command"` 转发 hook_relay emit `turn_finished` |
+//! | `Stop` | 全局 command relay；守门员仅在 Kode 会话 settings 中注册 |
 //! | `Notification` (permission_prompt) | 即时通知 kode GUI 有权限请求 |
 //! | `UserPromptSubmit` | 用户回车提交后即时清除 attention |
-//! | `PreToolUse` (*) | 实时获取 permission_mode |
+//! | `PreToolUse` | 禁用；启动时只清理遗留 kode 条目 |
 //! | `ConfigChange` | CodeBuddy 切换模型后同步当前 session 的 model |
 //!
 //! ## 设计要点
 //!
 //! 1. **幂等 + 强制更新**：用 `_kode_managed: true` 字段标记 kode 管理的条目。
 //!    每次 kode 启动都找到这个条目并更新（便于升级）。
-//!    用户自定义的其他 hook（无该标记）保留不动。
+//!    同时识别历史 command/prompt，清理丢失标记的重复项。
+//!    用户自定义的其他 hook 保留不动；PreToolUse 永不注册。
 //!
 //! 2. **Merge 写入**：读现有 JSON → 只动对应 hook 数组 → atomic write（tmp → rename）。
 //!    `model`、`trustedDirectories` 等其他字段完全保留。
@@ -27,12 +28,6 @@
 //!    - claude：`~/.claude/settings.json`
 //!    两者 hook JSON 格式完全相同。
 //!    - Codex：`~/.codex/hooks.json`，只注入 `type:"command"` hooks。
-//!
-//! 4. **全局只装 command hook**：全局 settings 会被本机所有 CodeBuddy/Claude 进程加载
-//!    (包括 kode 之外的,如 Maestro 节点 Agent)。command hook 在没有 `KODE_HOOK_SOCK`
-//!    时直接退出,天然只作用于 kode 会话;prompt 型 kode-memory 守门员没有这种范围判断,
-//!    因此不写进全局 settings,而是由 kode spawn 时通过 `--settings` 只挂到自己的会话上
-//!    (见 [`session_settings_json`])。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,6 +42,12 @@ pub const STOP_HOOK_PROMPT: &str = r#"你是 kode-memory 的沉淀守门员。ko
 
 ## 第一优先级：防死循环
 如果输入里 stop_hook_active 为 true，直接返回 {"ok": true}。这表示本轮已经是因为本 hook 而续跑的，绝不能再拦。
+
+## 必要前提：工具确实可用
+只有 transcript 中存在本会话成功的 `memory_search` MCP 工具调用，才可以考虑拦截。
+工具名称出现在注入指令、用户消息、普通文本或 ToolSearch 查询中，不算工具可用的证据。
+如果 MCP 工具不存在、ToolSearch 返回 0 tools、工具调用失败、连接失败或可用性不确定，直接返回 {"ok": true}。
+不要要求主 agent 反复查找不存在的工具，也不要为了记忆阻止用户结束会话。
 
 ## 应当沉淀的内容（命中任一才考虑拦截）
 - 用户拍板了架构/工具链/UI风格/配置/命名的决策（"以后都用 X"、"别再 Y"、"这个项目就这么定"）
@@ -64,45 +65,29 @@ pub const STOP_HOOK_PROMPT: &str = r#"你是 kode-memory 的沉淀守门员。ko
 
 ## 输出
 - 没有值得沉淀的：{"ok": true}
-- 确实有且 agent 没记：{"ok": false, "reason": "本轮产生了值得沉淀进 kode-memory 的内容：<一句话说清是什么>。请先 ToolSearch 加载 memory_propose 与 memory_search，用 memory_search 查重后调 memory_propose 写入(author 用当前 backend，scope 用 project:<当前项目名>，body 含结论+why)。若 memory_search 显示已有等价 fact 或返回 out_of_energy，则无需写入，直接结束即可。"}
+- 确实有且 agent 没记、且已确认 MCP 可用：{"ok": false, "reason": "本轮产生了值得沉淀进 kode-memory 的内容：<一句话说清是什么>。请用 memory_search 查重后调 memory_propose 写入(author 用当前 backend，scope 用 project:<当前项目名>，body 含结论+why)。若工具不可用、已有等价 fact 或返回 out_of_energy，则无需写入，直接结束，不要反复查找工具。"}
 
 保守判断：绝大多数轮次都应返回 {"ok": true}。只有明确命中"应当沉淀"且 agent 确实没写时才返回 ok:false。
 
-## 输出格式硬约束（违反会导致 hook JSON 校验失败）
-- 只输出一行裸 JSON，第一个字符必须是 {，最后一个字符必须是 }
-- 不要代码围栏（不要 ```json），不要任何解释、理由、分析或前后缀文字
+## 输出格式硬约束
+- 只输出一行裸 JSON，不要代码围栏，不要任何解释或前后缀文字
 - ok 为 true 时只输出 {"ok": true}，不要附带 reason"#;
 
-/// 守门员 prompt 的稳定特征片段,用来识别历史版本(内容不同)遗留在全局 settings 里的条目。
-const STOP_HOOK_PROMPT_MARKER: &str = "kode-memory 的沉淀守门员";
-
-/// kode spawn CodeBuddy/Claude 会话时通过 `--settings <json>` 追加的会话级 settings。
-///
-/// 只包含 prompt 型 Stop 守门员:它要求 agent 调 memory MCP,只在 kode 注入了
-/// kode-memory 指令的会话里才有意义,不能装进全局 settings(见模块文档第 4 点)。
-/// CLI 会把 `--settings` 的 hooks 与 user/project settings 的 hooks 合并执行。
+/// The prompt gatekeeper must never affect agents launched outside Kode.
 pub fn session_settings_json() -> String {
     serde_json::json!({
-        "hooks": {
-            "Stop": [{
-                "hooks": [{
-                    "type": "prompt",
-                    "timeout": 30,
-                    "continueOnBlock": true,
-                    "prompt": STOP_HOOK_PROMPT
-                }]
-            }]
-        }
+        "hooks": {"Stop": [{"hooks": [{
+            "type": "prompt",
+            "timeout": 30,
+            "continueOnBlock": true,
+            "prompt": STOP_HOOK_PROMPT
+        }]}]}
     })
     .to_string()
 }
 
-fn is_stop_gatekeeper_hook(hook: &serde_json::Value) -> bool {
-    hook.get("type").and_then(|t| t.as_str()) == Some("prompt")
-        && hook
-            .get("prompt")
-            .and_then(|p| p.as_str())
-            .is_some_and(|p| p.contains(STOP_HOOK_PROMPT_MARKER))
+pub fn tcodex_hooks_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".tcodex/hooks.json"))
 }
 
 /// 需要注入 hook 的 backend 列表，返回 `(label, settings_path)` 对。
@@ -111,6 +96,10 @@ pub fn target_settings() -> Vec<(&'static str, PathBuf)> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
+    target_settings_in(&home)
+}
+
+fn target_settings_in(home: &Path) -> Vec<(&'static str, PathBuf)> {
     vec![
         ("codebuddy", home.join(".codebuddy").join("settings.json")),
         ("claude", home.join(".claude").join("settings.json")),
@@ -123,17 +112,25 @@ pub fn codex_hooks_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".codex").join("hooks.json"))
 }
 
-pub fn tcodex_hooks_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".tcodex").join("hooks.json"))
+/// Codex / Tcodex 的独立 user-level hook targets，供 GUI 和 headless bridge 共用。
+pub fn codex_hook_targets() -> Vec<(&'static str, PathBuf)> {
+    dirs::home_dir()
+        .map(|home| codex_hook_targets_in(&home))
+        .unwrap_or_default()
+}
+
+fn codex_hook_targets_in(home: &Path) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("codex", home.join(".codex").join("hooks.json")),
+        ("tcodex", home.join(".tcodex").join("hooks.json")),
+    ]
 }
 
 // ============================================================================
 // Stop hook
 // ============================================================================
 
-/// 检查 `path` 对应的全局 settings.json 里 kode 管理的 Stop hook 是否已是当前形态:
-/// 有 `_kode_managed` 的 command 条目,且全局 Stop 数组里没有任何守门员 prompt 残留。
-/// 旧版本把守门员写进全局,会拦截 kode 之外的 CLI 进程,这种配置视为未配置。
+/// A configured global Stop hook contains a managed command and no Kode prompt.
 pub fn is_stop_hook_configured(path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -148,113 +145,44 @@ pub fn is_stop_hook_configured(path: &Path) -> bool {
     else {
         return false;
     };
-    let entry_hooks = |entry: &serde_json::Value| {
-        entry
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .cloned()
-            .unwrap_or_default()
-    };
-    let has_gatekeeper = entries
-        .iter()
-        .any(|entry| entry_hooks(entry).iter().any(is_stop_gatekeeper_hook));
-    let has_managed_command = entries.iter().any(|entry| {
-        is_kode_managed_entry(entry)
-            && entry_hooks(entry)
+    let has_prompt = entries.iter().any(|entry| {
+        entry["hooks"].as_array().is_some_and(|hooks| {
+            hooks
                 .iter()
-                .any(|h| h.get("type").and_then(|t| t.as_str()) == Some("command"))
+                .any(|hook| hook["type"] == "prompt" && is_kode_handler(hook))
+        })
     });
-    has_managed_command && !has_gatekeeper
+    let has_command = entries.iter().any(|entry| {
+        entry["_kode_managed"] == true
+            && entry["hooks"]
+                .as_array()
+                .is_some_and(|hooks| hooks.iter().any(|hook| hook["type"] == "command"))
+    });
+    has_command && !has_prompt
 }
 
 /// 注入或更新 kode 管理的 Stop hook（幂等）。
 ///
-/// `hooks` 数组里并列两个子 hook：
-/// 1. `type:"command"` → 立即转发给 hook_relay（emit `turn_finished` + `attention_cleared`）
-/// 2. `type:"prompt"` → 守门员 LLM（判断本轮是否需要沉淀进 memory）。
-///    必须设置 `continueOnBlock:true`，否则 `{ok:false}` 只阻止 stop，却不会把
-///    reason 注入主 agent 继续调用 `memory_propose`。
-///
-/// 全局只写 command hook（即时通知 GUI turn 结束）；prompt 守门员走 [`session_settings_json`]。
+/// Only the command relay is global. The prompt is scoped by session_settings_json.
 ///
 /// 流程：
 /// 1. 读现有 JSON（不存在或为空 → 用 `{}`，保留其他字段）
-/// 2. 清理 `hooks.Stop` 数组里无 `_kode_managed` 标记的守门员僵尸条目
-///    （早期版本注入的历史遗留，会导致守门员 prompt 多次执行）
-/// 3. 在 `hooks.Stop` 数组里找 `_kode_managed: true` 的项 → 整体更新（顺带去掉旧版写入的
-///    守门员 prompt）；找不到 → 追加
+/// 2. 按管理标记、relay command 和历史守门员 prompt 识别所有 kode 条目
+/// 3. 合并为一条新版配置，保留第三方 handler；找不到 → 追加
 /// 4. Atomic write：写 tmp 文件 → rename
 pub fn inject_stop_hook(path: &Path, relay_command: &str) -> Result<(), String> {
-    // 先清理早期版本遗留的无标记守门员条目。旧版本注入时没有 _kode_managed 字段,
-    // 后来加标记后 inject_hook_entry 找不到带标记的条目就追加新条目,导致守门员多次执行。
-    purge_unmarked_stop_hook_zombies(path)?;
-
     let kode_entry = serde_json::json!({
         "_kode_managed": true,
-        "hooks": [{
-            "type": "command",
-            "timeout": 5,
-            "command": relay_command
-        }]
+        "hooks": [
+            {
+                "type": "command",
+                "timeout": 5,
+                "command": relay_command
+            }
+        ]
     });
 
     inject_hook_entry(path, "Stop", &kode_entry)
-}
-
-/// 清理 `hooks.Stop` 里含守门员 prompt(任意历史版本)但无 `_kode_managed` 标记的遗留条目。
-fn purge_unmarked_stop_hook_zombies(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let bytes = std::fs::read(path).map_err(|e| format!("read {} failed: {e}", path.display()))?;
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    let mut doc: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({}));
-
-    let Some(hooks_obj) = doc
-        .as_object_mut()
-        .and_then(|o| o.get_mut("hooks"))
-        .and_then(|v| v.as_object_mut())
-    else {
-        return Ok(());
-    };
-    let Some(stop_arr) = hooks_obj.get_mut("Stop").and_then(|v| v.as_array_mut()) else {
-        return Ok(());
-    };
-
-    let before = stop_arr.len();
-    stop_arr.retain(|entry| {
-        // 保留:有 _kode_managed 标记的(正规条目)或不含匹配 prompt 的用户自定义条目
-        let is_managed = entry
-            .get("_kode_managed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if is_managed {
-            return true;
-        }
-        // 无标记 + 任一子 hook 是守门员 prompt → 这是僵尸,移除。
-        // kode 注入的条目是 [command, prompt] 组合,不能只看 first()。
-        let zombie_prompt = entry
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .is_some_and(|arr| arr.iter().any(is_stop_gatekeeper_hook));
-        !zombie_prompt
-    });
-
-    if stop_arr.len() == before {
-        return Ok(()); // 没有僵尸,不需要写回
-    }
-
-    // 写回
-    let pretty =
-        serde_json::to_string_pretty(&doc).map_err(|e| format!("json serialize failed: {e}"))?;
-    let tmp = path.with_extension("tmp.kode");
-    std::fs::write(&tmp, pretty).map_err(|e| format!("write {} failed: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} → {} failed: {e}", tmp.display(), path.display()))?;
-    Ok(())
 }
 
 // ============================================================================
@@ -336,26 +264,91 @@ pub fn is_session_start_hook_configured(path: &Path) -> bool {
 }
 
 // ============================================================================
-// PreToolUse hook (permission mode tracking)
+// Retired PreToolUse hook
 // ============================================================================
 
-/// 注入 PreToolUse hook，匹配所有工具调用（`*`）。
-///
-/// 每次工具调用前 hook_relay 收到 `permission_mode` 字段，实时更新 sidebar mode 显示。
-///
-/// `relay_command` 是 kode-hook-relay 的 shell 命令（含 socket 路径参数）。
-pub fn inject_pretooluse_hook(path: &Path, relay_command: &str) -> Result<(), String> {
-    let kode_entry = serde_json::json!({
-        "_kode_managed": true,
-        "matcher": "*",
-        "hooks": [{
-            "type": "command",
-            "timeout": 5,
-            "command": relay_command
-        }]
-    });
+/// Never register tool gates. Remove only Kode handlers, retaining other hooks.
+pub fn remove_pretooluse_hooks(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut doc = read_hook_config(path)?;
+    let Some(events) = doc.get_mut("hooks").and_then(|hooks| hooks.as_object_mut()) else {
+        return Ok(());
+    };
+    let Some(entries) = events
+        .get_mut("PreToolUse")
+        .and_then(|event| event.as_array_mut())
+    else {
+        return Ok(());
+    };
+    replace_kode_entries(entries, None);
+    if entries.is_empty() {
+        events.remove("PreToolUse");
+    }
+    write_json_atomic(path, &doc)
+}
 
-    inject_hook_entry(path, "PreToolUse", &kode_entry)
+/// Repair only installed hooks, without restoring events the user removed.
+pub fn repair_existing_hooks(path: &Path) -> Result<(), String> {
+    remove_pretooluse_hooks(path)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut doc = read_hook_config(path)?;
+    let Some(events) = doc.get_mut("hooks").and_then(|hooks| hooks.as_object_mut()) else {
+        return Ok(());
+    };
+    for event in [
+        "Stop",
+        "Notification",
+        "SessionStart",
+        "UserPromptSubmit",
+        "PermissionRequest",
+        "ConfigChange",
+    ] {
+        let Some(entries) = events.get_mut(event).and_then(|event| event.as_array_mut()) else {
+            continue;
+        };
+        let Some(mut replacement) = entries
+            .iter()
+            .find(|entry| {
+                entry["_kode_managed"].as_bool() == Some(true)
+                    || entry["hooks"]
+                        .as_array()
+                        .is_some_and(|hooks| hooks.iter().any(is_kode_handler))
+            })
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(handlers) = replacement
+            .get_mut("hooks")
+            .and_then(|hooks| hooks.as_array_mut())
+        else {
+            continue;
+        };
+        if handlers.iter().any(is_kode_handler) {
+            handlers.retain(is_kode_handler);
+        }
+        if event == "Stop" {
+            handlers.retain(|hook| hook["type"] != "prompt");
+            if handlers.is_empty() {
+                replace_kode_entries(entries, None);
+                continue;
+            }
+        }
+        for hook in handlers.iter_mut() {
+            if hook["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.starts_with("你是 kode-memory 的沉淀守门员。"))
+            {
+                hook["prompt"] = serde_json::json!(STOP_HOOK_PROMPT);
+            }
+        }
+        replace_kode_entries(entries, Some(&replacement));
+    }
+    write_json_atomic(path, &doc)
 }
 
 /// 检查 PreToolUse hook 是否已配置。
@@ -393,6 +386,7 @@ const CODEX_STATUS_PREFIX: &str = "kode-memory";
 /// Claude/CodeBuddy 的 `type:"prompt"` Stop 守门员。这里统一指向
 /// `kode-memory codex-hook`,由该子命令读取 stdin JSON 并按事件分发。
 pub fn inject_codex_hooks(path: &Path, command: &str) -> Result<(), String> {
+    remove_pretooluse_hooks(path)?;
     let specs = [
         CodexHookSpec {
             event: "SessionStart",
@@ -417,12 +411,6 @@ pub fn inject_codex_hooks(path: &Path, command: &str) -> Result<(), String> {
             matcher: None,
             timeout: 5,
             status: "kode-memory: relaying user prompt",
-        },
-        CodexHookSpec {
-            event: "PreToolUse",
-            matcher: Some("*"),
-            timeout: 5,
-            status: "kode-memory: relaying tool use",
         },
     ];
 
@@ -453,17 +441,7 @@ fn inject_codex_hook_entry(path: &Path, spec: CodexHookSpec, command: &str) -> R
         }
     }
 
-    let mut doc: serde_json::Value = if path.exists() {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("read {} failed: {e}", path.display()))?;
-        if bytes.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({}))
-        }
-    } else {
-        serde_json::json!({})
-    };
+    let mut doc = read_hook_config(path)?;
 
     let event_arr = doc
         .as_object_mut()
@@ -488,11 +466,7 @@ fn inject_codex_hook_entry(path: &Path, spec: CodexHookSpec, command: &str) -> R
         entry["matcher"] = serde_json::Value::String(matcher.to_string());
     }
 
-    if let Some(existing) = event_arr.iter_mut().find(|e| is_kode_codex_entry(e)) {
-        *existing = entry;
-    } else {
-        event_arr.push(entry);
-    }
+    replace_kode_entries(event_arr, Some(&entry));
 
     write_json_atomic(path, &doc)
 }
@@ -539,7 +513,8 @@ pub fn is_hook_configured(path: &Path) -> bool {
 ///
 /// - 如果已有同名 event 的 kode 管理条目 → 原地更新
 /// - 如果没有 → 追加到数组
-/// - 用户自定义的条目（无 `_kode_managed`）保留不动
+/// - 按标记、command 和历史 Stop prompt 识别所有 kode 条目并去重
+/// - 用户自定义的 handler 保留，包括与 kode handler 混在同一条目里的情况
 fn inject_hook_entry(
     path: &Path,
     event_name: &str,
@@ -554,17 +529,7 @@ fn inject_hook_entry(
     }
 
     // 读现有 JSON
-    let mut doc: serde_json::Value = if path.exists() {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("read {} failed: {e}", path.display()))?;
-        if bytes.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({}))
-        }
-    } else {
-        serde_json::json!({})
-    };
+    let mut doc = read_hook_config(path)?;
 
     // 取 hooks.<event_name> 数组
     let event_arr = doc
@@ -579,60 +544,83 @@ fn inject_hook_entry(
         .as_array_mut()
         .ok_or_else(|| format!("hooks.{} must be an array", event_name))?;
 
-    // 去重：只保留第一条 kode 管理 entry；删除无标记但 command 指向
-    // `kode-memory ... codebuddy-hook` 的历史遗留条目(含开发构建路径),
-    // 否则每次事件会重复触发 relay / 守门员。
-    let mut seen_managed = false;
-    event_arr.retain(|e| {
-        if is_kode_managed_entry(e) {
-            let keep = !seen_managed;
-            seen_managed = true;
-            keep
-        } else {
-            !is_unmarked_kode_relay_entry(e)
-        }
-    });
+    replace_kode_entries(event_arr, Some(entry));
+    write_json_atomic(path, &doc)
+}
 
-    // 找已有的 kode 管理 entry，有则更新，没有则追加
-    let existing = event_arr.iter_mut().find(|e| is_kode_managed_entry(e));
-
-    if let Some(existing_entry) = existing {
-        *existing_entry = entry.clone();
-    } else {
-        event_arr.push(entry.clone());
+fn read_hook_config(path: &Path) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
     }
-
-    // Atomic write
-    let pretty =
-        serde_json::to_string_pretty(&doc).map_err(|e| format!("json serialize failed: {e}"))?;
-    let tmp = path.with_extension("tmp.kode");
-    std::fs::write(&tmp, pretty).map_err(|e| format!("write {} failed: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} → {} failed: {e}", tmp.display(), path.display()))?;
-
-    Ok(())
+    let bytes = std::fs::read(path).map_err(|e| format!("read {} failed: {e}", path.display()))?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {} failed; leaving it unchanged: {e}", path.display()))
 }
 
-fn is_kode_managed_entry(entry: &serde_json::Value) -> bool {
-    entry
-        .get("_kode_managed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-/// 无 `_kode_managed` 标记，但任一 command 子 hook 指向 `kode-memory ... codebuddy-hook`。
-fn is_unmarked_kode_relay_entry(entry: &serde_json::Value) -> bool {
-    entry
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .is_some_and(|arr| {
-            arr.iter().any(|h| {
-                h.get("type").and_then(|t| t.as_str()) == Some("command")
-                    && h.get("command").and_then(|c| c.as_str()).is_some_and(|c| {
-                        c.contains(HOOK_BINARY_NAME) && c.contains("codebuddy-hook")
-                    })
-            })
+fn is_kode_handler(hook: &serde_json::Value) -> bool {
+    hook.get("command")
+        .and_then(|command| command.as_str())
+        .is_some_and(|command| {
+            (command.contains("kode-memory")
+                && (command.contains("codebuddy-hook") || command.contains("codex-hook")))
+                || command == raw_hook_relay_command()
         })
+        || hook
+            .get("prompt")
+            .and_then(|prompt| prompt.as_str())
+            .is_some_and(|prompt| prompt.contains("kode-memory 的沉淀守门员"))
+        || hook
+            .get("statusMessage")
+            .or_else(|| hook.get("status_message"))
+            .and_then(|status| status.as_str())
+            .is_some_and(|status| status.starts_with(CODEX_STATUS_PREFIX))
+}
+
+fn replace_kode_entries(
+    entries: &mut Vec<serde_json::Value>,
+    replacement: Option<&serde_json::Value>,
+) {
+    let mut inserted = false;
+    let mut retained = Vec::with_capacity(entries.len() + 1);
+    for mut entry in entries.drain(..) {
+        let managed = entry["_kode_managed"].as_bool() == Some(true);
+        let Some(handlers) = entry
+            .get_mut("hooks")
+            .and_then(|hooks| hooks.as_array_mut())
+        else {
+            retained.push(entry);
+            continue;
+        };
+        let identified = handlers.iter().any(is_kode_handler);
+        if !managed && !identified {
+            retained.push(entry);
+            continue;
+        }
+        if !inserted {
+            if let Some(replacement) = replacement {
+                retained.push(replacement.clone());
+            }
+            inserted = true;
+        }
+        // Legacy marked entries may use a relay command we no longer recognize.
+        if managed && !identified {
+            continue;
+        }
+        handlers.retain(|hook| !is_kode_handler(hook));
+        if !handlers.is_empty() {
+            entry.as_object_mut().unwrap().remove("_kode_managed");
+            retained.push(entry);
+        }
+    }
+    if !inserted {
+        if let Some(replacement) = replacement {
+            retained.push(replacement.clone());
+        }
+    }
+    *entries = retained;
 }
 
 /// 在 path 的 settings.json 里找 `hooks.<event_name>` 数组中 `_kode_managed: true` 条目的下标。
@@ -648,10 +636,21 @@ fn find_kode_hook_entry(path: &Path, event_name: &str) -> Option<usize> {
 }
 
 fn write_json_atomic(path: &Path, doc: &serde_json::Value) -> Result<(), String> {
+    if std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|existing| existing == *doc)
+    {
+        return Ok(());
+    }
     let pretty =
         serde_json::to_string_pretty(doc).map_err(|e| format!("json serialize failed: {e}"))?;
     let tmp = path.with_extension("tmp.kode");
     std::fs::write(&tmp, pretty).map_err(|e| format!("write {} failed: {e}", tmp.display()))?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        std::fs::set_permissions(&tmp, metadata.permissions())
+            .map_err(|e| format!("set permissions {} failed: {e}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, path)
         .map_err(|e| format!("rename {} → {} failed: {e}", tmp.display(), path.display()))?;
     Ok(())
@@ -906,6 +905,126 @@ fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn global_stop_has_no_gatekeeper_and_session_settings_are_prompt_only() {
+        let tmp = write_tmp("{}");
+        inject_stop_hook(tmp.path(), "kode-memory codebuddy-hook").unwrap();
+        let global: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path()).unwrap()).unwrap();
+        assert_eq!(
+            global["hooks"]["Stop"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(global["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
+        let scoped: serde_json::Value = serde_json::from_str(&session_settings_json()).unwrap();
+        assert_eq!(scoped["hooks"]["Stop"][0]["hooks"][0]["type"], "prompt");
+        assert_eq!(
+            scoped["hooks"]["Stop"][0]["hooks"][0]["continueOnBlock"],
+            true
+        );
+        assert!(STOP_HOOK_PROMPT.contains("只输出一行裸 JSON"));
+    }
+
+    #[test]
+    fn tencent_hook_targets_use_independent_config_directories() {
+        let home = std::path::Path::new("/home/test");
+        assert_eq!(
+            super::target_settings_in(home),
+            vec![
+                ("codebuddy", home.join(".codebuddy/settings.json")),
+                ("claude", home.join(".claude/settings.json")),
+                ("tclaude", home.join(".tclaude/settings.json")),
+            ]
+        );
+        assert_eq!(
+            super::codex_hook_targets_in(home),
+            vec![
+                ("codex", home.join(".codex/hooks.json")),
+                ("tcodex", home.join(".tcodex/hooks.json")),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_family_install_preserves_each_user_config_and_updates_commands() {
+        let home = tempfile::tempdir().unwrap();
+        let targets = super::codex_hook_targets_in(home.path());
+        for (label, path) in &targets {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let initial = serde_json::json!({
+                "custom": label,
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": format!("{label}-user-stop")}]}]
+                }
+            });
+            std::fs::write(path, initial.to_string()).unwrap();
+            super::inject_codex_hooks(path, "old-helper codex-hook").unwrap();
+            super::inject_codex_hooks(path, "new-helper codex-hook").unwrap();
+        }
+        for (label, path) in targets {
+            let content = std::fs::read_to_string(&path).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(doc["custom"], label);
+            let entries = doc["hooks"]["Stop"].as_array().unwrap();
+            assert_eq!(entries.len(), 2);
+            assert!(entries
+                .iter()
+                .any(|entry| entry["hooks"][0]["command"] == format!("{label}-user-stop")));
+            let managed = entries
+                .iter()
+                .find(|entry| super::is_kode_codex_entry(entry))
+                .unwrap();
+            assert_eq!(managed["hooks"][0]["type"], "command");
+            assert_eq!(managed["hooks"][0]["command"], "new-helper codex-hook");
+            assert_eq!(
+                doc["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+                "new-helper codex-hook"
+            );
+            assert!(super::is_codex_hook_configured(&path));
+        }
+    }
+
+    #[test]
+    fn tclaude_hook_install_preserves_claude_settings_and_user_hooks() {
+        let home = tempfile::tempdir().unwrap();
+        let targets = super::target_settings_in(home.path());
+        let claude = targets
+            .iter()
+            .find(|(label, _)| *label == "claude")
+            .unwrap()
+            .1
+            .clone();
+        let tclaude = targets
+            .iter()
+            .find(|(label, _)| *label == "tclaude")
+            .unwrap()
+            .1
+            .clone();
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(&claude, r#"{"model":"claude-only"}"#).unwrap();
+        std::fs::create_dir_all(tclaude.parent().unwrap()).unwrap();
+        std::fs::write(&tclaude, r#"{"model":"tclaude-only","hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-stop"}]}]}}"#).unwrap();
+        super::inject_stop_hook(&tclaude, "helper codebuddy-hook").unwrap();
+        super::inject_session_start_hook(&tclaude, "helper codebuddy-hook").unwrap();
+        let content = std::fs::read_to_string(&tclaude).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(doc["model"], "tclaude-only");
+        assert!(doc["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["hooks"][0]["command"] == "user-stop"));
+        assert!(super::is_stop_hook_configured(&tclaude));
+        assert!(super::is_session_start_hook_configured(&tclaude));
+        assert_eq!(
+            std::fs::read_to_string(claude).unwrap(),
+            r#"{"model":"claude-only"}"#
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_hook_resolution_and_quoting_preserve_original_behavior() {
@@ -990,6 +1109,13 @@ mod tests {
     }
 
     #[test]
+    fn stop_prompt_requires_confirmed_memory_tools_and_fails_open() {
+        assert!(STOP_HOOK_PROMPT.contains("成功的 `memory_search` MCP 工具调用"));
+        assert!(STOP_HOOK_PROMPT.contains("ToolSearch 返回 0 tools"));
+        assert!(STOP_HOOK_PROMPT.contains("不要反复查找工具"));
+    }
+
+    #[test]
     fn inject_stop_into_empty_file_creates_hook() {
         let tmp = write_tmp("{}");
         inject_stop_hook(tmp.path(), "echo relay").unwrap();
@@ -1027,11 +1153,17 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
         let entry = &doc["hooks"]["Stop"][0];
-        // 全局只保留 command(relay);旧的 prompt 守门员被移除
+        // hooks 数组里有两个子 hook:command(relay) + prompt(守门员)
         let hooks = entry["hooks"].as_array().unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0]["type"], "command");
         assert_eq!(hooks[0]["command"], "echo relay");
+        let settings: serde_json::Value = serde_json::from_str(&session_settings_json()).unwrap();
+        assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["type"], "prompt");
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["prompt"],
+            STOP_HOOK_PROMPT
+        );
         let count = doc["hooks"]["Stop"]
             .as_array()
             .unwrap()
@@ -1074,155 +1206,6 @@ mod tests {
                 .unwrap_or(false),
             "remaining entry must have _kode_managed:true"
         );
-    }
-
-    fn content_has_gatekeeper(doc: &serde_json::Value) -> bool {
-        doc.to_string().contains(STOP_HOOK_PROMPT_MARKER)
-    }
-
-    /// 无标记、只有旧版守门员 prompt(无 command)的条目同样被清掉。
-    #[test]
-    fn inject_stop_purges_unmarked_old_version_gatekeeper() {
-        let initial = serde_json::json!({
-            "hooks": { "Stop": [
-                {"hooks": [{"type": "prompt", "prompt": "你是 kode-memory 的沉淀守门员。旧版本……"}]}
-            ] }
-        });
-        let tmp = write_tmp(&initial.to_string());
-        inject_stop_hook(tmp.path(), "echo relay").unwrap();
-        let doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
-        assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 1);
-        assert!(!content_has_gatekeeper(&doc));
-    }
-
-    #[test]
-    fn session_settings_carry_gatekeeper_prompt_hook() {
-        let v: serde_json::Value = serde_json::from_str(&session_settings_json()).unwrap();
-        let hook = &v["hooks"]["Stop"][0]["hooks"][0];
-        assert_eq!(hook["type"], "prompt");
-        assert_eq!(hook["continueOnBlock"], true);
-        assert_eq!(hook["prompt"].as_str().unwrap(), STOP_HOOK_PROMPT);
-    }
-
-    fn kode_stop_pair(command: &str, prompt: &str) -> serde_json::Value {
-        serde_json::json!({
-            "hooks": [
-                {"type": "command", "timeout": 5, "command": command},
-                {"type": "prompt", "timeout": 30, "continueOnBlock": true, "prompt": prompt}
-            ]
-        })
-    }
-
-    /// 回归:4 个无标记 [command, prompt] 僵尸 + 1 个 managed 条目 → 只剩 1 个 managed,
-    /// 用户自定义条目(command/prompt)保留。
-    #[test]
-    fn inject_stop_purges_unmarked_command_prompt_pairs_and_keeps_user_hooks() {
-        let app_cmd = "'/Applications/kode.app/Contents/MacOS/kode-memory' codebuddy-hook";
-        let dev_cmd = "'/Users/dev/kode/target/debug/kode-memory' codebuddy-hook";
-        let mut managed = kode_stop_pair(app_cmd, "old prompt");
-        managed["_kode_managed"] = serde_json::json!(true);
-        let user_cmd = serde_json::json!({"hooks": [{"type": "command", "command": "my-stop.sh"}]});
-        let user_prompt =
-            serde_json::json!({"hooks": [{"type": "prompt", "prompt": "my own gatekeeper"}]});
-        let initial = serde_json::json!({
-            "hooks": { "Stop": [
-                kode_stop_pair(app_cmd, STOP_HOOK_PROMPT),
-                kode_stop_pair(dev_cmd, STOP_HOOK_PROMPT),
-                user_cmd,
-                kode_stop_pair(app_cmd, "older prompt version"),
-                kode_stop_pair(app_cmd, STOP_HOOK_PROMPT),
-                managed,
-                user_prompt,
-            ] }
-        });
-        let tmp = write_tmp(&initial.to_string());
-        inject_stop_hook(tmp.path(), app_cmd).unwrap();
-        let doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
-        let arr = doc["hooks"]["Stop"].as_array().unwrap();
-        let kode: Vec<_> = arr
-            .iter()
-            .filter(|e| e["hooks"][0]["command"] != "my-stop.sh")
-            .filter(|e| e["hooks"][0]["prompt"] != "my own gatekeeper")
-            .collect();
-        assert_eq!(kode.len(), 1, "only one kode entry should remain: {arr:?}");
-        assert_eq!(kode[0]["_kode_managed"], true);
-        assert_eq!(kode[0]["hooks"].as_array().unwrap().len(), 1);
-        assert_eq!(kode[0]["hooks"][0]["command"], app_cmd);
-        assert!(arr.iter().any(|e| e["hooks"][0]["command"] == "my-stop.sh"));
-        assert!(arr
-            .iter()
-            .any(|e| e["hooks"][0]["prompt"] == "my own gatekeeper"));
-        assert_eq!(arr.len(), 3);
-    }
-
-    #[test]
-    fn inject_stop_with_only_kode_entries_leaves_single_managed() {
-        let cmd = "'/Applications/kode.app/Contents/MacOS/kode-memory' codebuddy-hook";
-        let mut managed = kode_stop_pair(cmd, STOP_HOOK_PROMPT);
-        managed["_kode_managed"] = serde_json::json!(true);
-        let initial = serde_json::json!({
-            "hooks": { "Stop": [
-                kode_stop_pair(cmd, STOP_HOOK_PROMPT),
-                kode_stop_pair(cmd, STOP_HOOK_PROMPT),
-                kode_stop_pair(cmd, STOP_HOOK_PROMPT),
-                kode_stop_pair(cmd, STOP_HOOK_PROMPT),
-                managed,
-            ] }
-        });
-        let tmp = write_tmp(&initial.to_string());
-        inject_stop_hook(tmp.path(), cmd).unwrap();
-        let doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
-        let arr = doc["hooks"]["Stop"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["_kode_managed"], true);
-        assert!(!content_has_gatekeeper(&doc));
-        assert!(is_stop_hook_configured(tmp.path()));
-    }
-
-    /// 其它事件同样去重:无标记的 kode-memory codebuddy-hook 条目与多余 managed 条目被清掉。
-    #[test]
-    fn inject_other_events_dedupe_unmarked_kode_relay_entries() {
-        let cmd = "'/Applications/kode.app/Contents/MacOS/kode-memory' codebuddy-hook";
-        let dev = "'/Users/dev/kode/target/debug/kode-memory' codebuddy-hook";
-        let relay = |c: &str| serde_json::json!({"matcher": "*", "hooks": [{"type": "command", "command": c}]});
-        let mut managed = relay(cmd);
-        managed["_kode_managed"] = serde_json::json!(true);
-        let initial = serde_json::json!({
-            "hooks": {
-                "PreToolUse": [relay(cmd), relay(dev), relay("my-guard.sh"), managed.clone(), managed.clone()],
-                "Notification": [relay(cmd), relay(cmd), managed.clone()],
-                "SessionStart": [relay(dev), managed.clone()],
-                "UserPromptSubmit": [relay(cmd), managed],
-            }
-        });
-        let tmp = write_tmp(&initial.to_string());
-        inject_pretooluse_hook(tmp.path(), cmd).unwrap();
-        inject_notification_hook(tmp.path(), cmd).unwrap();
-        inject_session_start_hook(tmp.path(), cmd).unwrap();
-        inject_user_prompt_submit_hook(tmp.path(), cmd).unwrap();
-        let doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
-        let pre = doc["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 2, "{pre:?}");
-        assert!(pre
-            .iter()
-            .any(|e| e["hooks"][0]["command"] == "my-guard.sh"));
-        for event in ["Notification", "SessionStart", "UserPromptSubmit"] {
-            let arr = doc["hooks"][event].as_array().unwrap();
-            assert_eq!(arr.len(), 1, "{event}: {arr:?}");
-            assert_eq!(arr[0]["_kode_managed"], true);
-        }
-    }
-
-    #[test]
-    fn stop_prompt_requires_bare_json_output() {
-        assert!(STOP_HOOK_PROMPT.contains("只输出一行裸 JSON"));
-        assert!(STOP_HOOK_PROMPT.contains(STOP_HOOK_PROMPT_MARKER));
-        assert!(STOP_HOOK_PROMPT.contains("不要代码围栏"));
-        assert!(STOP_HOOK_PROMPT.contains(r#"ok 为 true 时只输出 {"ok": true}"#));
     }
 
     /// 无标记但 prompt 内容不同的用户自定义 Stop hook 应保留。
@@ -1274,11 +1257,16 @@ mod tests {
         let tmp = write_tmp("{}");
         inject_stop_hook(tmp.path(), "echo relay").unwrap();
         assert!(is_stop_hook_configured(tmp.path()));
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(),
+            1
+        );
     }
 
-    /// 旧版把守门员写进全局 settings → 视为未配置,等待启动注入把它移走。
     #[test]
-    fn global_stop_gatekeeper_is_not_configured() {
+    fn stop_hook_without_continue_on_block_is_not_configured() {
         let stale = serde_json::json!({
             "hooks": {
                 "Stop": [{
@@ -1355,16 +1343,10 @@ mod tests {
     // --- PreToolUse hook tests ---
 
     #[test]
-    fn inject_pretooluse_hook_creates_entry() {
+    fn pretooluse_cleanup_is_noop_on_unconfigured_file() {
         let tmp = write_tmp("{}");
-        inject_pretooluse_hook(tmp.path(), "echo ptool").unwrap();
-        let content = std::fs::read_to_string(tmp.path()).unwrap();
-        let doc: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let arr = doc["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["matcher"], "*");
-        assert_eq!(arr[0]["hooks"][0]["command"], "echo ptool");
-        assert!(arr[0]["_kode_managed"].as_bool().unwrap());
+        remove_pretooluse_hooks(tmp.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "{}");
     }
 
     #[test]
@@ -1387,7 +1369,7 @@ mod tests {
         inject_stop_hook(tmp.path(), "echo relay").unwrap();
         inject_notification_hook(tmp.path(), "echo relay").unwrap();
         inject_user_prompt_submit_hook(tmp.path(), "echo submit").unwrap();
-        inject_pretooluse_hook(tmp.path(), "echo ptool").unwrap();
+        remove_pretooluse_hooks(tmp.path()).unwrap();
         inject_config_change_hook(tmp.path(), "echo config").unwrap();
 
         let content = std::fs::read_to_string(tmp.path()).unwrap();
@@ -1396,7 +1378,7 @@ mod tests {
         assert!(hooks.contains_key("Stop"));
         assert!(hooks.contains_key("Notification"));
         assert!(hooks.contains_key("UserPromptSubmit"));
-        assert!(hooks.contains_key("PreToolUse"));
+        assert!(!hooks.contains_key("PreToolUse"));
         assert!(hooks.contains_key("ConfigChange"));
     }
 
@@ -1444,7 +1426,6 @@ mod tests {
             "Stop",
             "PermissionRequest",
             "UserPromptSubmit",
-            "PreToolUse",
         ] {
             let arr = hooks[event].as_array().unwrap();
             assert_eq!(arr.len(), 1, "{event} should have one managed entry");
@@ -1460,16 +1441,161 @@ mod tests {
                 .starts_with("kode-memory"));
         }
         assert_eq!(hooks["PermissionRequest"][0]["matcher"], "*");
+        assert!(!hooks.contains_key("PreToolUse"));
         assert!(is_codex_hook_configured(tmp.path()));
     }
 
     #[test]
-    fn target_settings_include_tclaude_and_tcodex_has_separate_hooks_path() {
-        let targets = target_settings();
-        assert!(targets.iter().any(|(name, path)| {
-            *name == "tclaude" && path.ends_with(".tclaude/settings.json")
-        }));
-        assert!(tcodex_hooks_path().unwrap().ends_with(".tcodex/hooks.json"));
+    fn pretooluse_cleanup_removes_all_kode_variants_and_preserves_user_handlers() {
+        let user = serde_json::json!({"type":"command","command":"user-tool-gate"});
+        let initial = serde_json::json!({
+            "model":"user-model",
+            "hooks": {
+                "PreToolUse": [
+                    {"_kode_managed":true,"matcher":"*","hooks":[{"command":"old-relay"}]},
+                    {"matcher":"*","hooks":[{"command":"'/Applications/kode.app/Contents/MacOS/kode-memory' codebuddy-hook"}]},
+                    {"matcher":"*","hooks":[{"command":"kode-memory codex-hook","statusMessage":"kode-memory: relaying tool use"}]},
+                    {"matcher":"Bash","hooks":[user]},
+                    {"_kode_managed":true,"matcher":"Edit","hooks":[{"command":"kode-memory codebuddy-hook"},user]}
+                ],
+                "Stop":[{"hooks":[{"command":"user-stop"}]}]
+            }
+        });
+        let tmp = write_tmp(&initial.to_string());
+        remove_pretooluse_hooks(tmp.path()).unwrap();
+        let first = std::fs::read_to_string(tmp.path()).unwrap();
+        remove_pretooluse_hooks(tmp.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), first);
+        let doc: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(doc["model"], initial["model"]);
+        assert_eq!(doc["hooks"]["Stop"], initial["hooks"]["Stop"]);
+        assert_eq!(
+            doc["hooks"]["PreToolUse"],
+            serde_json::json!([
+                {"matcher":"Bash","hooks":[user]},
+                {"matcher":"Edit","hooks":[user]}
+            ])
+        );
+    }
+
+    #[test]
+    fn repeated_startup_deduplicates_markerless_hooks_and_never_readds_tool_gate() {
+        let command = "'/Applications/kode.app/Contents/MacOS/kode-memory' codebuddy-hook";
+        let mut initial = serde_json::json!({"custom":"keep","hooks":{}});
+        for event in [
+            "Stop",
+            "Notification",
+            "UserPromptSubmit",
+            "SessionStart",
+            "PreToolUse",
+        ] {
+            let mut legacy = serde_json::json!({"hooks":[{"type":"command","command":command}]});
+            if event == "Stop" {
+                legacy["hooks"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "type":"prompt", "prompt":"你是 kode-memory 的沉淀守门员。old version"
+                    }));
+            }
+            let mut entries = vec![legacy; 5];
+            entries
+                .push(serde_json::json!({"_kode_managed":true,"hooks":[{"command":"old-relay"}]}));
+            entries.push(serde_json::json!({"hooks":[{"command":"user-hook"}]}));
+            initial["hooks"][event] = serde_json::json!(entries);
+        }
+        let tmp = write_tmp(&initial.to_string());
+        for _ in 0..2 {
+            remove_pretooluse_hooks(tmp.path()).unwrap();
+            inject_stop_hook(tmp.path(), command).unwrap();
+            inject_notification_hook(tmp.path(), command).unwrap();
+            inject_user_prompt_submit_hook(tmp.path(), command).unwrap();
+            inject_session_start_hook(tmp.path(), command).unwrap();
+        }
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+        assert_eq!(doc["custom"], "keep");
+        for event in ["Stop", "Notification", "UserPromptSubmit", "SessionStart"] {
+            let entries = doc["hooks"][event].as_array().unwrap();
+            assert_eq!(entries.len(), 2, "{event}: {entries:?}");
+            assert_eq!(entries[1]["hooks"][0]["command"], "user-hook");
+        }
+        assert_eq!(
+            doc["hooks"]["PreToolUse"],
+            serde_json::json!([
+                {"hooks":[{"command":"user-hook"}]}
+            ])
+        );
+    }
+
+    #[test]
+    fn codex_startup_cleans_legacy_gate_and_duplicate_hooks() {
+        let legacy = serde_json::json!({"hooks":[{"command":"kode-memory codex-hook","statusMessage":"kode-memory: old"}]});
+        let initial =
+            serde_json::json!({"hooks":{"PreToolUse":[legacy,legacy],"Stop":[legacy,legacy]}});
+        let tmp = write_tmp(&initial.to_string());
+        inject_codex_hooks(tmp.path(), "kode-memory codex-hook").unwrap();
+        let first = std::fs::read_to_string(tmp.path()).unwrap();
+        inject_codex_hooks(tmp.path(), "kode-memory codex-hook").unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), first);
+        let doc: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert!(doc["hooks"].get("PreToolUse").is_none());
+        assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hook_migration_preserves_invalid_json() {
+        let tmp = write_tmp("{ invalid json");
+        assert!(remove_pretooluse_hooks(tmp.path())
+            .unwrap_err()
+            .contains("leaving it unchanged"));
+        assert!(inject_stop_hook(tmp.path(), "kode-memory codebuddy-hook").is_err());
+        assert!(inject_codex_hooks(tmp.path(), "kode-memory codex-hook").is_err());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path()).unwrap(),
+            "{ invalid json"
+        );
+    }
+
+    #[test]
+    fn repair_only_updates_existing_hooks_without_restoring_removed_events() {
+        let initial = serde_json::json!({
+            "model":"keep",
+            "hooks":{
+                "PreToolUse":[{"hooks":[{"command":"kode-memory codebuddy-hook"}]}],
+                "Stop":[
+                    {"hooks":[{"command":"kode-memory codebuddy-hook"},{"type":"prompt","prompt":"你是 kode-memory 的沉淀守门员。old"}]},
+                    {"hooks":[{"command":"kode-memory codebuddy-hook"},{"command":"user-stop"}]}
+                ],
+                "Notification":[{"hooks":[{"command":"user-notify"}]}]
+            }
+        });
+        let tmp = write_tmp(&initial.to_string());
+        repair_existing_hooks(tmp.path()).unwrap();
+        let first = std::fs::read_to_string(tmp.path()).unwrap();
+        repair_existing_hooks(tmp.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), first);
+        let doc: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(doc["model"], "keep");
+        assert!(doc["hooks"].get("PreToolUse").is_none());
+        assert!(doc["hooks"].get("SessionStart").is_none());
+        assert!(doc["hooks"].get("UserPromptSubmit").is_none());
+        assert_eq!(
+            doc["hooks"]["Notification"],
+            initial["hooks"]["Notification"]
+        );
+        assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            doc["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(doc["hooks"]["Stop"][1]["hooks"][0]["command"], "user-stop");
+        let empty = write_tmp(r#"{"model":"keep"}"#);
+        repair_existing_hooks(empty.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(empty.path()).unwrap(),
+            r#"{"model":"keep"}"#
+        );
     }
 
     #[test]

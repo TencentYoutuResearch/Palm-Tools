@@ -449,7 +449,7 @@
               </div>
               <div class="field">
                 <label for="be-pflag">Permission flag</label>
-                <input id="be-pflag" type="text" value={editing.permission_mode_flag ?? ''} oninput={(e) => editing && (editing.permission_mode_flag = (e.target as HTMLInputElement).value || null)} placeholder="--permission-mode" spellcheck="false" autocomplete="off" />
+                <input id="be-pflag" type="text" value={editing.permission_mode_flag ?? ''} oninput={(e) => editing && (editing.permission_mode_flag = (e.target as HTMLInputElement).value || null)} placeholder={editing.key === 'codex' || editing.key === 'tcodex' ? '--ask-for-approval' : '--permission-mode'} spellcheck="false" autocomplete="off" />
               </div>
             </div>
 

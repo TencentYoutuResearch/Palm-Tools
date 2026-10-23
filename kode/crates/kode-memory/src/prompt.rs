@@ -212,6 +212,19 @@ mod tests {
     }
 
     #[test]
+    fn template_preserves_tencent_backend_identity() {
+        for backend in ["tclaude", "tcodex"] {
+            let p = build(Path::new("/tmp/kode"), backend);
+            assert!(p.contains(&format!("backend=`{backend}`")));
+            assert!(p.contains(&format!("author=\"{backend}\"")));
+            assert!(p.contains("scope=\"project:kode\""));
+        }
+        for backend in ["custom-codex", "tcustom", "sh"] {
+            assert!(build(Path::new("/tmp/kode"), backend).is_empty());
+        }
+    }
+
+    #[test]
     fn template_supports_cursor_session_start_context() {
         let p = build(&PathBuf::from("/tmp/kode"), "cursor");
         assert!(p.contains("backend=`cursor`"));

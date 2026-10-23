@@ -121,6 +121,108 @@ fn config_with_fake_codebuddy() -> Config {
     config
 }
 
+#[tokio::test]
+async fn tcodex_rollout_events_drive_busy_and_idle_status() {
+    use kode_core::session::{jsonl_tail::Backend, state::Status, Session};
+    use std::io::Write;
+    let root = std::env::temp_dir().join(format!("kode-tcodex-status-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("rollout.jsonl");
+    let mut file = std::fs::File::create(&path).unwrap();
+    // Historical completed turns must not put a restored tab back into busy.
+    writeln!(
+        file,
+        r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"old"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"old"}}}}"#
+    )
+    .unwrap();
+    file.flush().unwrap();
+    let ctx = build_test_ctx(Config::default(), "test-tcodex-status".into());
+    let mut status_events = ctx.bus.subscribe();
+    let session = Session::structured(
+        71,
+        "tcodex",
+        "fixture",
+        std::path::Path::new("/tmp/example-workspace"),
+        "thread".into(),
+        "gpt-test".into(),
+    );
+    ctx.sessions.lock().insert(71, session);
+    semantic::spawn_path(71, Backend::Tcodex, path, Arc::clone(&ctx.bus));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = status_events.recv().await.unwrap();
+            if event.session_id == 71
+                && event.r#type == "session.status"
+                && event.payload["status"] == "idle"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(ctx.sessions.lock()[&71].state.status, Status::Idle);
+    writeln!(
+        file,
+        r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"live"}}}}"#
+    )
+    .unwrap();
+    file.flush().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = status_events.recv().await.unwrap();
+            if event.session_id == 71
+                && event.r#type == "session.status"
+                && event.payload["status"] == "busy"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(ctx.sessions.lock()[&71].state.status, Status::Busy);
+    // Stale completions must not clear a newer live turn.
+    ctx.bus.emit(EventEnvelope::new(
+        71,
+        "session.turn_finished",
+        json!({"turn_id":"old"}),
+    ));
+    writeln!(
+        file,
+        r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"live"}}}}"#
+    )
+    .unwrap();
+    file.flush().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = status_events.recv().await.unwrap();
+            if event.session_id == 71
+                && event.r#type == "session.status"
+                && event.payload["status"] == "idle"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(ctx.sessions.lock()[&71].state.status, Status::Idle);
+    ctx.bus.emit(EventEnvelope::new(
+        71,
+        "session.exited",
+        json!({"exit_code":0}),
+    ));
+    ctx.sessions.lock().remove(&71);
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn answer_input_selects_and_confirms_the_choice() {
     assert_eq!(answer_input(0), b"\r");

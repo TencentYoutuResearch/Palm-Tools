@@ -163,6 +163,9 @@ enum Cmd {
     },
     /// Codex command hook entrypoint. Intended to be called by ~/.codex/hooks.json.
     CodexHook,
+    /// Remove retired PreToolUse hooks and deduplicate installed Kode hooks.
+    /// With no paths, repair existing CodeBuddy/Claude/Tclaude/Codex/Tcodex configs.
+    RepairHooks { paths: Vec<PathBuf> },
     /// CodeBuddy/Claude command hook bridge. Rewrites session_id → KODE_SESSION_ID
     /// and relays to KODE_HOOK_SOCK. Called by ~/.codebuddy|.claude/settings.json hooks.
     CodebuddyHook,
@@ -255,6 +258,25 @@ fn main() -> Result<()> {
             disable,
         } => cmd_sync(&root, init, remote, branch, no_push, enable, disable),
         Cmd::CodexHook => kode_memory::codex_hook::run(),
+        Cmd::RepairHooks { paths } => {
+            let paths = if paths.is_empty() {
+                kode_memory::hook_setup::target_settings()
+                    .into_iter()
+                    .chain(kode_memory::hook_setup::codex_hook_targets())
+                    .map(|(_, path)| path)
+                    .collect()
+            } else {
+                paths
+            };
+            for path in paths {
+                if path.exists() {
+                    kode_memory::hook_setup::repair_existing_hooks(&path)
+                        .map_err(anyhow::Error::msg)?;
+                    println!("Repaired {}", path.display());
+                }
+            }
+            Ok(())
+        }
         Cmd::CodebuddyHook => kode_memory::codebuddy_hook::run(),
         Cmd::CursorHook { event } => kode_memory::cursor_hook::run(event.as_deref()),
     }

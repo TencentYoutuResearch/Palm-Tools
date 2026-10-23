@@ -1113,6 +1113,9 @@ fn spawn_attention_forwarder(
                             {
                                 let mut g = prompt_states.lock();
                                 if let Some(st) = g.get_mut(&env.session_id) {
+                                    if env.payload["reason"] == "hook_user_submitted" {
+                                        st.turn_finished = false;
+                                    }
                                     st.has_prompt = false;
                                     st.ask_attention_active = false;
                                     st.last_emitted = None;
@@ -1144,11 +1147,16 @@ fn spawn_attention_forwarder(
                             }
                         }
                         "session.turn_finished" => {
-                            let accepted = sessions
-                                .lock()
-                                .get_mut(&env.session_id)
-                                .map(|s| s.mark_turn_end_with_id(env.payload["turn_id"].as_str()))
-                                .unwrap_or(true);
+                            // Hook lifecycle already travels through the ordered core queue.
+                            // Reapplying it here can release a newer turn.
+                            let accepted = env.payload["lifecycle_applied"] == true
+                                || sessions
+                                    .lock()
+                                    .get_mut(&env.session_id)
+                                    .map(|s| {
+                                        s.mark_turn_end_with_id(env.payload["turn_id"].as_str())
+                                    })
+                                    .unwrap_or(true);
                             if !accepted {
                                 continue;
                             }
