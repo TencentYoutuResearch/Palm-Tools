@@ -21,8 +21,13 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{json, Value};
 
+const RELAY_BACKENDS: &[&str] = &["codebuddy", "claude", "claude-internal", "tclaude"];
+
 /// `kode-memory codebuddy-hook` 子命令入口。读 stdin JSON,改写后转发到 relay。
 pub fn run() -> Result<()> {
+    if crate::runtime_context::active_backend_for(RELAY_BACKENDS).is_none() {
+        return Ok(());
+    }
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     relay_to_kode(&input)
@@ -36,10 +41,8 @@ fn relay_to_kode(input: &str) -> Result<()> {
     if sock.is_empty() {
         return Ok(());
     }
-    if let Ok(backend) = std::env::var("KODE_BACKEND_KEY") {
-        if !matches!(backend.as_str(), "codebuddy" | "claude" | "claude-internal") {
-            return Ok(());
-        }
+    if crate::runtime_context::active_backend_for(RELAY_BACKENDS).is_none() {
+        return Ok(());
     }
 
     let tab_id = std::env::var("KODE_SESSION_ID").ok();
@@ -93,6 +96,58 @@ fn write_unix_line(_path: &Path, _line: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_backend_allowlist_requires_kode_owned_session() {
+        for backend in ["codebuddy", "claude", "claude-internal", "tclaude"] {
+            assert_eq!(
+                crate::runtime_context::active_backend_for_values(
+                    Some("1"),
+                    Some("42"),
+                    Some(backend),
+                    RELAY_BACKENDS
+                ),
+                Some(backend)
+            );
+            assert!(crate::runtime_context::active_backend_for_values(
+                None,
+                Some("42"),
+                Some(backend),
+                RELAY_BACKENDS
+            )
+            .is_none());
+        }
+        for backend in ["codex", "tcodex", "custom-claude"] {
+            assert!(crate::runtime_context::active_backend_for_values(
+                Some("1"),
+                Some("42"),
+                Some(backend),
+                RELAY_BACKENDS
+            )
+            .is_none());
+        }
+        assert!(crate::runtime_context::active_backend_for_values(
+            Some("1"),
+            Some("42"),
+            None,
+            RELAY_BACKENDS
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rewrites_tclaude_uuid_and_preserves_its_independent_transcript() {
+        let input = r#"{"session_id":"tclaude-uuid","transcript_path":"/home/test/.tclaude/projects/proj/tclaude-uuid.jsonl","hook_event_name":"SessionStart","source":"resume","model":"opus"}"#;
+        let payload: Value = serde_json::from_str(&rewrite_payload(input, Some("43"))).unwrap();
+        assert_eq!(payload["session_id"], "43");
+        assert_eq!(payload["codebuddy_session_uuid"], "tclaude-uuid");
+        assert_eq!(
+            payload["transcript_path"],
+            "/home/test/.tclaude/projects/proj/tclaude-uuid.jsonl"
+        );
+        assert_eq!(payload["source"], "resume");
+        assert_eq!(payload["model"], "opus");
+    }
 
     #[test]
     fn rewrites_session_id_to_tab_id_and_preserves_uuid() {

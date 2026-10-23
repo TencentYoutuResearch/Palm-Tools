@@ -139,7 +139,8 @@ pub fn profile(kind: Backend) -> &'static dyn BackendProfile {
         Backend::Codebuddy => &CodebuddyProfile,
         Backend::Claude => &CLAUDE_PROFILE,
         Backend::Tclaude => &TCLAUDE_PROFILE,
-        Backend::Codex => &CodexProfile,
+        Backend::Codex => &CODEX_PROFILE,
+        Backend::Tcodex => &TCODEX_PROFILE,
         Backend::Cursor => &CursorProfile,
     }
 }
@@ -153,7 +154,8 @@ pub fn all_profiles() -> &'static [&'static dyn BackendProfile] {
         &CodebuddyProfile,
         &CLAUDE_PROFILE,
         &TCLAUDE_PROFILE,
-        &CodexProfile,
+        &CODEX_PROFILE,
+        &TCODEX_PROFILE,
         &CursorProfile,
     ];
     PROFILES
@@ -187,7 +189,9 @@ struct CodebuddyProfile;
 struct ClaudeProfile(Backend);
 static CLAUDE_PROFILE: ClaudeProfile = ClaudeProfile(Backend::Claude);
 static TCLAUDE_PROFILE: ClaudeProfile = ClaudeProfile(Backend::Tclaude);
-struct CodexProfile;
+struct CodexProfile(Backend);
+static CODEX_PROFILE: CodexProfile = CodexProfile(Backend::Codex);
+static TCODEX_PROFILE: CodexProfile = CodexProfile(Backend::Tcodex);
 struct CursorProfile;
 
 impl BackendProfile for CodebuddyProfile {
@@ -263,10 +267,14 @@ impl BackendProfile for CodexProfile {
         true
     }
     fn kind(&self) -> Backend {
-        Backend::Codex
+        self.0
     }
     fn usage_key(&self) -> &'static str {
-        "codex"
+        if self.0 == Backend::Tcodex {
+            "tcodex"
+        } else {
+            "codex"
+        }
     }
     fn persist_title_to_transcript(&self) -> bool {
         false
@@ -281,19 +289,13 @@ impl BackendProfile for CodexProfile {
         if let Some(path) = req
             .resume_session_id
             .as_deref()
-            .and_then(jsonl_tail::find_codex_session_by_id)
+            .and_then(|sid| jsonl_tail::find_codex_session_by_id(self.0, sid))
         {
-            jsonl_tail::spawn(
-                req.id,
-                Backend::Codex,
-                path,
-                req.evt_tx,
-                Some(req.retarget_rx),
-            );
+            jsonl_tail::spawn(req.id, self.0, path, req.evt_tx, Some(req.retarget_rx));
         } else {
             jsonl_tail::spawn_waiting_for_binding(
                 req.id,
-                Backend::Codex,
+                self.0,
                 req.evt_tx,
                 Some(req.retarget_rx),
             );
@@ -304,15 +306,24 @@ impl BackendProfile for CodexProfile {
             return Vec::new();
         };
         let mut out = Vec::new();
-        let names = codex_title::thread_names();
-        collect_codex_listed(&home.join(".codex/sessions"), cwd, &names, &mut out);
+        let names = codex_title::thread_names(self.0);
+        collect_codex_listed(
+            &self.0.codex_home(&home).join("sessions"),
+            cwd,
+            &names,
+            &mut out,
+        );
         out
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
-        vec![home.join(".codex/sessions")]
+        vec![self.0.codex_home(home).join("sessions")]
     }
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
-        codex_file_events(path, fallback_ms)
+        let mut events = codex_file_events(path, fallback_ms);
+        for event in &mut events {
+            event.backend = self.usage_key().into();
+        }
+        events
     }
 }
 
@@ -981,11 +992,89 @@ mod tests {
         assert!(profile_for_key("tclaude").unwrap().has_idle_animation());
         assert_eq!(profile_for_key("tclaude").unwrap().kind(), Backend::Tclaude);
         assert!(profile_for_key("codex").unwrap().resume_style() == ResumeStyle::Subcommand);
+        // tcodex keeps Codex resume syntax but has an isolated storage identity.
+        assert_eq!(profile_for_key("tcodex").unwrap().kind(), Backend::Tcodex);
+        assert_eq!(
+            profile_for_key("tcodex").unwrap().resume_style(),
+            ResumeStyle::Subcommand
+        );
         assert!(!profile_for_key("cursor")
             .unwrap()
             .supports_session_id_flag());
         assert!(profile_for_key("foo").is_none());
-        assert_eq!(all_profiles().len(), 5);
+        assert_eq!(all_profiles().len(), 6);
+    }
+
+    #[test]
+    fn tcodex_resume_lookup_and_history_use_the_separate_root() {
+        let root = std::env::temp_dir().join(format!("kode-tcodex-home-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &root);
+        let sid = "11111111-1111-4111-8111-111111111111";
+        let cwd = Path::new("/tmp/example-workspace");
+        for (kind, model, name) in [
+            (Backend::Codex, "gpt-codex", "Codex title"),
+            (Backend::Tcodex, "gpt-tcodex", "Tcodex title"),
+        ] {
+            let home = kind.codex_home(&root);
+            fs::create_dir_all(home.join("sessions/2026")).unwrap();
+            fs::write(home.join(format!("sessions/2026/rollout-{sid}.jsonl")), format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{sid}\",\"cwd\":\"/tmp/example-workspace\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"{model}\"}}}}\n"
+            )).unwrap();
+            let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT)", [])
+                .unwrap();
+            db.execute(
+                "INSERT INTO threads (id, name) VALUES (?1, ?2)",
+                [sid, name],
+            )
+            .unwrap();
+        }
+        let tcodex = profile_for_key("tcodex").unwrap();
+        let codex = profile_for_key("codex").unwrap();
+        let actual_path = tcodex.find_session_path(cwd, sid);
+        let tcodex_history = tcodex.list_sessions(cwd);
+        let codex_history = codex.list_sessions(cwd);
+        let name = codex_title::read_thread_name(Backend::Tcodex, sid);
+        // Restore HOME before asserting, so failures don't leak into other tests.
+        match old_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(
+            actual_path.unwrap(),
+            root.join(format!(".tcodex/sessions/2026/rollout-{sid}.jsonl"))
+        );
+        assert_eq!(tcodex_history.len(), 1);
+        assert_eq!(tcodex_history[0].session_id, sid);
+        assert_eq!(tcodex_history[0].model.as_deref(), Some("gpt-tcodex"));
+        assert_eq!(tcodex_history[0].title.as_deref(), Some("Tcodex title"));
+        assert_eq!(codex_history[0].title.as_deref(), Some("Codex title"));
+        assert_eq!(name.flatten().as_deref(), Some("Tcodex title"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tcodex_usage_uses_its_own_root_and_backend_label() {
+        let profile = profile_for_key("tcodex").unwrap();
+        assert_eq!(
+            profile.usage_roots(Path::new("/tmp/example-home")),
+            vec![PathBuf::from("/tmp/example-home/.tcodex/sessions")]
+        );
+        let root = std::env::temp_dir().join(format!("kode-tcodex-usage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("rollout.jsonl");
+        fs::write(&file, concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-test"}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":7,"total_tokens":37}}}}"#, "\n"
+        )).unwrap();
+        let events = profile.parse_usage_file(&file, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].backend, "tcodex");
+        assert_eq!(events[0].model, "gpt-test");
+        assert_eq!(events[0].usage.total, 37);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

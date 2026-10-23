@@ -57,6 +57,20 @@ const KNOWN_CANDIDATES: &[KnownBackend] = &[
         suggested_setup_cli: "codex",
         suggested_json_path: None,
     },
+    KnownBackend {
+        key: "tcodex",
+        command: "tcodex",
+        suggested_setup_style: "none",
+        suggested_setup_cli: "",
+        suggested_json_path: None,
+    },
+    KnownBackend {
+        key: "tclaude",
+        command: "tclaude",
+        suggested_setup_style: "none",
+        suggested_setup_cli: "",
+        suggested_json_path: None,
+    },
     // 2026-06:预置一批常见 AI CLI(参考 kooky)。大多数没有已知 MCP 配置入口；
     // Cursor 是例外,使用官方全局 ~/.cursor/mcp.json。
     KnownBackend {
@@ -682,6 +696,23 @@ mod tests {
         assert_eq!(cursor.suggested_setup_style, "json-merge");
         assert_eq!(cursor.suggested_setup_cli, "");
         assert_eq!(cursor.suggested_json_path, Some("~/.cursor/mcp.json"));
+    }
+
+    #[test]
+    fn t_backend_candidates_do_not_suggest_auto_mcp_setup() {
+        let defaults = kode_core::config::Config::default();
+        for key in ["tcodex", "tclaude"] {
+            let matching: Vec<_> = KNOWN_CANDIDATES
+                .iter()
+                .filter(|candidate| candidate.key == key)
+                .collect();
+            assert_eq!(matching.len(), 1, "{key} should have one candidate");
+            let candidate = matching[0];
+            assert_eq!(candidate.command, defaults.backend(key).unwrap().command);
+            assert_eq!(candidate.suggested_setup_style, "none");
+            assert_eq!(candidate.suggested_setup_cli, "");
+            assert_eq!(candidate.suggested_json_path, None);
+        }
     }
 
     #[cfg(windows)]

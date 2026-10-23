@@ -1021,7 +1021,7 @@ fn spawn_attention_forwarder(
                                             let mut locked = sessions.lock();
                                             locked.get_mut(&env.session_id).and_then(|session| {
                                                 let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(&session.backend_key)?;
-                                                if backend != kode_core::session::jsonl_tail::Backend::Codex {
+                                                if !backend.is_codex_family() {
                                                     return None;
                                                 }
                                                 let path = kode_core::session::jsonl_tail::resolve_session_path(

@@ -37,6 +37,7 @@ pub enum Backend {
     Claude,
     Tclaude,
     Codex,
+    Tcodex,
     Cursor,
 }
 
@@ -49,6 +50,7 @@ impl Backend {
             "claude" | "claude-internal" => Some(Backend::Claude),
             "tclaude" => Some(Backend::Tclaude),
             "codex" => Some(Backend::Codex),
+            "tcodex" => Some(Backend::Tcodex),
             "cursor" => Some(Backend::Cursor),
             // Teams commonly wrap a supported CLI with a short prefix (for
             // example `tclaude`). It still owns the same transcript and turn
@@ -60,6 +62,18 @@ impl Backend {
             _ if normalized.ends_with("cursor") => Some(Backend::Cursor),
             _ => None,
         }
+    }
+
+    pub fn is_codex_family(self) -> bool {
+        matches!(self, Backend::Codex | Backend::Tcodex)
+    }
+
+    pub fn codex_home(self, home: &Path) -> PathBuf {
+        home.join(if self == Backend::Tcodex {
+            ".tcodex"
+        } else {
+            ".codex"
+        })
     }
 
     /// 这个 backend 写 jsonl 到哪个文件路径。
@@ -96,7 +110,7 @@ impl Backend {
                     .join(format!("{session_id}.jsonl")),
                 )
             }
-            Backend::Codex | Backend::Cursor => None,
+            Backend::Codex | Backend::Tcodex | Backend::Cursor => None,
         }
     }
 
@@ -123,6 +137,7 @@ impl Backend {
             Backend::Claude => contains_pair(".claude", "projects"),
             Backend::Tclaude => contains_pair(".tclaude", "projects"),
             Backend::Codex => contains_pair(".codex", "sessions"),
+            Backend::Tcodex => contains_pair(".tcodex", "sessions"),
             Backend::Cursor => contains_pair(".cursor", "projects"),
         }
     }
@@ -139,8 +154,8 @@ pub fn session_path_for(backend_key: &str, cwd: &Path, session_id: &str) -> Opti
 ///
 /// 优先返回 cwd 推算的路径(若存在),回退到全局搜索结果,都没找到返回 None。
 pub fn resolve_session_path(backend: Backend, cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    if backend == Backend::Codex {
-        return find_codex_session_by_id(session_id);
+    if backend.is_codex_family() {
+        return find_codex_session_by_id(backend, session_id);
     }
     if backend == Backend::Cursor {
         return crate::session::cursor_tail::find_cursor_session_by_id(session_id);
@@ -163,7 +178,7 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
         Backend::Codebuddy => home.join(".codebuddy").join("projects"),
         Backend::Claude => home.join(".claude").join("projects"),
         Backend::Tclaude => home.join(".tclaude").join("projects"),
-        Backend::Codex | Backend::Cursor => return None,
+        Backend::Codex | Backend::Tcodex | Backend::Cursor => return None,
     };
     let filename = format!("{session_id}.jsonl");
     let entries = fs::read_dir(&projects_root).ok()?;
@@ -180,10 +195,10 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
     None
 }
 
-/// 在 `~/.codex/sessions/**` 中按 Codex session uuid 找 rollout jsonl。
-pub fn find_codex_session_by_id(session_id: &str) -> Option<PathBuf> {
+/// 在对应 Codex family 的独立 sessions 根下按 UUID 找 rollout jsonl。
+pub fn find_codex_session_by_id(backend: Backend, session_id: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    find_codex_session_by_id_under(&home.join(".codex").join("sessions"), session_id)
+    find_codex_session_by_id_under(&backend.codex_home(&home).join("sessions"), session_id)
 }
 
 /// 兼容旧 API 名(只用于 codebuddy);新代码请用 `Backend::session_path` 或 `session_path_for`。
@@ -239,7 +254,7 @@ pub fn spawn_waiting_for_binding(
     mut retarget_rx: Option<tokio::sync::watch::Receiver<Option<PathBuf>>>,
 ) {
     tokio::spawn(async move {
-        if backend != Backend::Codex {
+        if !backend.is_codex_family() {
             return;
         }
         // Codex can create the rollout file promptly but delay writing the
@@ -468,12 +483,12 @@ async fn run(
 
             // Codex updates `threads.name` independently of its rollout JSONL.
             // Poll while idle so a generated name or later rename reaches Kode.
-            if backend == Backend::Codex
+            if backend.is_codex_family()
                 && last_codex_name_check.elapsed() >= Duration::from_secs(1)
             {
                 last_codex_name_check = Instant::now();
                 if let Some(sid) = state.last_session_uuid.clone() {
-                    if let Some(name) = codex_title::read_thread_name(&sid) {
+                    if let Some(name) = codex_title::read_thread_name(backend, &sid) {
                         if let Some(title) = apply_codex_name(&mut state, name) {
                             state.last_title = Some(title.clone());
                             if evt_tx
@@ -606,7 +621,7 @@ async fn run(
         let upd = match backend {
             Backend::Codebuddy => parse_codebuddy_line(line, &mut state),
             Backend::Claude | Backend::Tclaude => parse_claude_line(line, &mut state),
-            Backend::Codex => parse_codex_line(line, &mut state),
+            Backend::Codex | Backend::Tcodex => parse_codex_line(backend, line, &mut state),
             Backend::Cursor => LineUpdate::default(),
         };
 
@@ -1213,7 +1228,7 @@ struct CodexUsage {
     total_tokens: Option<u64>,
 }
 
-fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
+fn parse_codex_line(backend: Backend, line: &str, state: &mut TailState) -> LineUpdate {
     let mut upd = LineUpdate::default();
     let entry: CodexEntry = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -1233,7 +1248,7 @@ fn parse_codex_line(line: &str, state: &mut TailState) -> LineUpdate {
                 state.last_session_uuid = Some(sid.to_string());
                 upd.new_session_uuid = Some(sid.to_string());
             }
-            if let Some(name) = codex_title::read_thread_name(sid) {
+            if let Some(name) = codex_title::read_thread_name(backend, sid) {
                 upd.new_title = apply_codex_name(state, name);
             }
         }
@@ -1505,7 +1520,23 @@ mod tests {
         assert_eq!(Backend::from_backend_key("codex"), Some(Backend::Codex));
         assert_eq!(Backend::from_backend_key("cursor"), Some(Backend::Cursor));
         assert_eq!(Backend::from_backend_key("tclaude"), Some(Backend::Tclaude));
+        // tcodex shares the Codex protocol but owns a separate transcript root.
+        assert_eq!(Backend::from_backend_key("tcodex"), Some(Backend::Tcodex));
+        assert_eq!(Backend::from_backend_key("TCODEX"), Some(Backend::Tcodex));
         assert_eq!(Backend::from_backend_key("foo"), None);
+    }
+
+    #[test]
+    fn tcodex_paths_are_isolated_from_codex_and_claude() {
+        let home = Path::new("/tmp/example-home");
+        let tcodex = home.join(".tcodex/sessions/2026/rollout-thread.jsonl");
+        let codex = home.join(".codex/sessions/2026/rollout-thread.jsonl");
+        assert_eq!(Backend::Tcodex.codex_home(home), home.join(".tcodex"));
+        assert!(Backend::Tcodex.is_codex_family());
+        assert!(Backend::Tcodex.accepts_transcript_path(&tcodex));
+        assert!(!Backend::Tcodex.accepts_transcript_path(&codex));
+        assert!(!Backend::Codex.accepts_transcript_path(&tcodex));
+        assert!(!Backend::Tclaude.accepts_transcript_path(&tcodex));
     }
 
     #[test]
@@ -2435,11 +2466,11 @@ mod tests {
     fn parses_codex_turn_context_and_token_count() {
         let mut state = TailState::new();
         let model_line = r#"{"timestamp":"2026-06-14T08:16:30Z","type":"turn_context","payload":{"cwd":"/tmp/p","model":"gpt-5.5"}}"#;
-        let upd = parse_codex_line(model_line, &mut state);
+        let upd = parse_codex_line(Backend::Codex, model_line, &mut state);
         assert_eq!(upd.new_model.as_deref(), Some("gpt-5.5"));
 
         let token_line = r#"{"timestamp":"2026-06-14T08:16:40Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9999999,"cached_input_tokens":8888888,"output_tokens":7777,"reasoning_output_tokens":255,"total_tokens":10007776},"last_token_usage":{"input_tokens":20767,"cached_input_tokens":11136,"output_tokens":463,"reasoning_output_tokens":255,"total_tokens":21230},"model_context_window":258400}}}"#;
-        let upd = parse_codex_line(token_line, &mut state);
+        let upd = parse_codex_line(Backend::Codex, token_line, &mut state);
         assert_eq!(upd.new_total, Some(10007776));
         assert_eq!(upd.new_input, Some(9999999));
         assert_eq!(upd.new_output, Some(7777));
@@ -2451,7 +2482,7 @@ mod tests {
     fn codex_session_meta_reports_session_uuid() {
         let mut state = TailState::new();
         let line = r#"{"type":"session_meta","payload":{"session_id":"019f1ca5-47a9-72f3-a0be-86a8f37fb67a","cwd":"/tmp/p"}}"#;
-        let upd = parse_codex_line(line, &mut state);
+        let upd = parse_codex_line(Backend::Codex, line, &mut state);
         assert_eq!(
             upd.new_session_uuid.as_deref(),
             Some("019f1ca5-47a9-72f3-a0be-86a8f37fb67a")
@@ -2464,7 +2495,7 @@ mod tests {
         let line =
             r#"{"type":"session_meta","payload":{"id":"own-thread","session_id":"parent-thread"}}"#;
         assert_eq!(
-            parse_codex_line(line, &mut state)
+            parse_codex_line(Backend::Codex, line, &mut state)
                 .new_session_uuid
                 .as_deref(),
             Some("own-thread")
@@ -2515,11 +2546,90 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn tcodex_binding_populates_actual_uuid_model_and_tokens() {
+        let root = tempfile_dir("kode_tcodex_binding");
+        let dir = Backend::Tcodex.codex_home(&root).join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, mut rx) = mpsc::unbounded_channel();
+        let mut binders = Vec::new();
+        for (id, model) in [(41, "gpt-first"), (42, "gpt-second")] {
+            let path = dir.join(format!("rollout-thread-{id}.jsonl"));
+            let transcript = format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-{id}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"{model}\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{{\"total_tokens\":123,\"input_tokens\":100,\"output_tokens\":23}}}}}}}}\n");
+            std::fs::write(&path, transcript).unwrap();
+            let (tx, binding) = tokio::sync::watch::channel(None);
+            spawn_waiting_for_binding(id, Backend::Tcodex, events.clone(), Some(binding));
+            binders.push((tx, path));
+        }
+        // Neither tab may claim a same-cwd file until its own hook arrives.
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err());
+        for (tx, path) in binders.iter().rev() {
+            tx.send(Some(path.clone())).unwrap();
+        }
+        let mut actual: std::collections::HashMap<
+            u64,
+            (Option<String>, Option<String>, Option<u64>),
+        > = std::collections::HashMap::new();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(CoreEvent::JsonlMeta {
+                    id,
+                    session_uuid,
+                    model,
+                    tokens,
+                    ..
+                }) = rx.recv().await
+                {
+                    let entry = actual.entry(id).or_default();
+                    if session_uuid.is_some() {
+                        entry.0 = session_uuid;
+                    }
+                    if model.is_some() {
+                        entry.1 = model;
+                    }
+                    if tokens.is_some() {
+                        entry.2 = tokens;
+                    }
+                }
+                if actual.len() == 2
+                    && actual.values().all(|(uuid, model, tokens)| {
+                        uuid.is_some() && model.is_some() && tokens.is_some()
+                    })
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            actual[&41],
+            (
+                Some("thread-41".into()),
+                Some("gpt-first".into()),
+                Some(123)
+            )
+        );
+        assert_eq!(
+            actual[&42],
+            (
+                Some("thread-42".into()),
+                Some("gpt-second".into()),
+                Some(123)
+            )
+        );
+        drop(rx);
+        drop(binders);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn codex_user_message_becomes_title() {
         let line = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"帮我适配 codex cli backend"}]}}"#;
         let mut state = TailState::new();
-        let upd = parse_codex_line(line, &mut state);
+        let upd = parse_codex_line(Backend::Codex, line, &mut state);
         assert_eq!(upd.new_title.as_deref(), Some("帮我适配 codex cli backend"));
         assert!(state.title_fallback_used);
     }
@@ -2529,8 +2639,10 @@ mod tests {
         let mut state = TailState::new();
         let meta = r#"{"type":"session_meta","payload":{"id":"session-without-local-db"}}"#;
         let prompt = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[Image #1]帮我修复标题"}]}}"#;
-        parse_codex_line(meta, &mut state);
-        let fallback = parse_codex_line(prompt, &mut state).new_title.unwrap();
+        parse_codex_line(Backend::Codex, meta, &mut state);
+        let fallback = parse_codex_line(Backend::Codex, prompt, &mut state)
+            .new_title
+            .unwrap();
         assert_eq!(fallback, "[Image #1]帮我修复标题");
         assert_eq!(
             apply_codex_name(&mut state, Some("修复标题显示".into())).as_deref(),
@@ -2554,7 +2666,7 @@ mod tests {
     fn codex_title_skips_image_markup_before_user_text() {
         let line = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/example.png\">"},{"type":"input_image","image_url":"data:image/png;base64,abc"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"你看看为啥这个tab显示不正常"}]}}"#;
         let mut state = TailState::new();
-        let upd = parse_codex_line(line, &mut state);
+        let upd = parse_codex_line(Backend::Codex, line, &mut state);
         assert_eq!(
             upd.new_title.as_deref(),
             Some("你看看为啥这个tab显示不正常")
@@ -2566,12 +2678,12 @@ mod tests {
     fn codex_title_skips_injected_startup_context() {
         let mut state = TailState::new();
         let noise = r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/p\n\n<INSTRUCTIONS>...</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>...</environment_context>"}]}}"##;
-        let upd = parse_codex_line(noise, &mut state);
+        let upd = parse_codex_line(Backend::Codex, noise, &mut state);
         assert!(upd.new_title.is_none());
         assert!(!state.title_fallback_used);
 
         let real = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为啥当前title还是没有更新，codex的tab"}]}}"#;
-        let upd = parse_codex_line(real, &mut state);
+        let upd = parse_codex_line(Backend::Codex, real, &mut state);
         assert_eq!(
             upd.new_title.as_deref(),
             Some("为啥当前title还是没有更新，codex的tab")
@@ -2583,12 +2695,12 @@ mod tests {
     fn codex_title_skips_deferred_tool_output() {
         let mut state = TailState::new();
         let noise = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"● DeferExecuteTool(mcp__memory__memory_search)\n╭────────────"}]}}"#;
-        let upd = parse_codex_line(noise, &mut state);
+        let upd = parse_codex_line(Backend::Codex, noise, &mut state);
         assert!(upd.new_title.is_none());
         assert!(!state.title_fallback_used);
 
         let real = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为什么codex有三个tab"}]}}"#;
-        let upd = parse_codex_line(real, &mut state);
+        let upd = parse_codex_line(Backend::Codex, real, &mut state);
         assert_eq!(upd.new_title.as_deref(), Some("为什么codex有三个tab"));
         assert!(state.title_fallback_used);
     }

@@ -338,6 +338,14 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 注入 settings.json hook(幂等)。仅当 HookRelay 启用时才有意义 ——
     // 否则 hook command 会引用一个没人监听的 socket,codebuddy/claude hook 静默失败。
+    for (label, path) in kode_memory::hook_setup::target_settings()
+        .into_iter()
+        .chain(kode_memory::hook_setup::codex_hook_targets())
+    {
+        if let Err(e) = kode_memory::hook_setup::remove_pretooluse_hooks(&path) {
+            tracing::warn!(label, error = %e, "pretooluse hook cleanup failed");
+        }
+    }
     if ctx.hook_relay_socket.is_some() {
         inject_hooks_into_settings();
     }
@@ -367,9 +375,6 @@ fn inject_hooks_into_settings() {
         if let Err(e) = kode_memory::hook_setup::inject_user_prompt_submit_hook(&path, &relay_cmd) {
             tracing::warn!(label, error = %e, "user_prompt_submit hook inject failed");
         }
-        if let Err(e) = kode_memory::hook_setup::inject_pretooluse_hook(&path, &relay_cmd) {
-            tracing::warn!(label, error = %e, "pretooluse hook inject failed");
-        }
         if let Err(e) = kode_memory::hook_setup::inject_session_start_hook(&path, &relay_cmd) {
             tracing::warn!(label, error = %e, "session_start hook inject failed");
         }
@@ -379,10 +384,10 @@ fn inject_hooks_into_settings() {
             }
         }
     }
-    if let Some(path) = kode_memory::hook_setup::codex_hooks_path() {
+    for (label, path) in kode_memory::hook_setup::codex_hook_targets() {
         let cmd = kode_memory::hook_setup::build_codex_hook_command();
         if let Err(e) = kode_memory::hook_setup::inject_codex_hooks(&path, &cmd) {
-            tracing::warn!(error = %e, "codex hook inject failed");
+            tracing::warn!(label, error = %e, "codex family hook inject failed");
         }
     }
 }
