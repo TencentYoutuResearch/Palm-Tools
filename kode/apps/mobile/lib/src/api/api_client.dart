@@ -199,9 +199,22 @@ class ApiClient {
     return SessionDto.fromJson(resp.data as Map<String, dynamic>);
   }
 
-  Future<void> deleteSession(int id) async {
-    final resp = await _dio.delete('/api/v1/sessions/$id');
+  /// Stop a session on the desktop. A direct bridge returns 204. The sync
+  /// server returns 202 with a command receipt and later emits `session.exited`.
+  Future<InputDispatchReceipt> deleteSession(int id) async {
+    final resp = await _dio.delete(
+      '/api/v1/sessions/$id',
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
+    );
     _check(resp);
+    final body = resp.data;
+    if (body is Map) {
+      return InputDispatchReceipt(
+        commandId: body['command_id'] as String?,
+        status: body['status'] as String? ?? 'dispatched',
+      );
+    }
+    return const InputDispatchReceipt(commandId: null, status: 'executed');
   }
 
   Future<InputDispatchReceipt> sendInputText(int id, String text) async {
@@ -472,6 +485,9 @@ class WSClient {
 
   Stream<Envelope> get events => _events.stream;
   Stream<WSConnState> get connState => _connState.stream;
+
+  /// Inject one frame in tests. Production traffic only comes from the socket.
+  void debugAddEvent(Envelope envelope) => _events.add(envelope);
 
   void connect() {
     unawaited(_connect());
