@@ -172,7 +172,38 @@
   let sessions = $state<SessionSummary[]>([])
   let sessionsLoading = $state(false)
   let sessionsError = $state('')
+  let sessionsHasMore = $state(false)
+  let sessionsLoadingMore = $state(false)
   let sessionsFetchId = 0 // 递增 id,防止竞态(旧的 fetch 回来后覆盖新结果)
+  /// 首屏只解析最近几条 transcript;"More" 每次再追加一页。
+  const SESSION_PAGE_SIZE = 5
+
+  function fetchSessionPage(offset: number) {
+    const key = selected?.key
+    const dir = cwd.trim()
+    const ep = selectedEndpoint
+    if (!key) return Promise.resolve({ sessions: [], has_more: false })
+    return ep.kind === 'remote'
+      ? endpointIpc.listSessionsForCwd(ep.id, key, dir, offset, SESSION_PAGE_SIZE)
+      : ipc.listSessionsForCwd(key, dir, offset, SESSION_PAGE_SIZE)
+  }
+
+  async function loadMoreSessions() {
+    if (sessionsLoadingMore || !sessionsHasMore) return
+    const fetchId = sessionsFetchId
+    sessionsLoadingMore = true
+    try {
+      const page = await fetchSessionPage(sessions.length)
+      if (fetchId !== sessionsFetchId) return
+      const known = new Set(sessions.map((s) => s.session_id))
+      sessions = [...sessions, ...page.sessions.filter((s) => !known.has(s.session_id))]
+      sessionsHasMore = page.has_more
+    } catch (e) {
+      if (fetchId === sessionsFetchId) sessionsError = String(e)
+    } finally {
+      if (fetchId === sessionsFetchId) sessionsLoadingMore = false
+    }
+  }
 
   /// 当 cwd 变化时(debounce 500ms)查询该目录下的历史 session。
   /// Local 直接扫本机 jsonl;Remote 通过 endpoint 协议扫 server 侧 jsonl。
@@ -181,21 +212,25 @@
     const key = selected?.key
     const ep = selectedEndpoint
     // 只有 configure 阶段 + 有 backend 和绝对 cwd 才查
+    void ep // 依赖:切换 endpoint 时重新拉首页
     if (phase !== 'configure' || !key || !dir || !dir.startsWith('/')) {
+      sessionsFetchId++
       sessions = []
+      sessionsHasMore = false
+      sessionsLoadingMore = false
       sessionsError = ''
       return
     }
     const fetchId = ++sessionsFetchId
     sessionsLoading = true
+    sessionsLoadingMore = false
     sessionsError = ''
     const timer = setTimeout(async () => {
       try {
-        const result = ep.kind === 'remote'
-          ? await endpointIpc.listSessionsForCwd(ep.id, key, dir)
-          : await ipc.listSessionsForCwd(key, dir)
+        const page = await fetchSessionPage(0)
         if (fetchId === sessionsFetchId) {
-          sessions = result
+          sessions = page.sessions
+          sessionsHasMore = page.has_more
           sessionsLoading = false
         }
       } catch (e) {
@@ -738,6 +773,11 @@
                   </li>
                 {/each}
               </ul>
+              {#if sessionsHasMore}
+                <button class="btn sh-more" onclick={loadMoreSessions} disabled={sessionsLoadingMore}>
+                  {sessionsLoadingMore ? 'Loading…' : 'More'}
+                </button>
+              {/if}
             {:else if cwd.trim().startsWith('/')}
               <p class="sh-msg sh-muted">No existing sessions found. Start a new one below.</p>
             {/if}
@@ -1300,6 +1340,11 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     padding: 3px 10px;
+  }
+  .sh-more {
+    width: 100%;
+    font-size: var(--fs-xs);
+    padding: 4px 10px;
   }
 
   .footer {

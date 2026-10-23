@@ -2407,6 +2407,11 @@ async fn list_backend_models(
 struct SessionHistoryQuery {
     backend_key: String,
     cwd: String,
+    /// 分页参数(可选)。老客户端不传 → 返回全部。
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2427,8 +2432,9 @@ async fn list_sessions_history(
     }
     let profile = kode_core::session::backend::profile_for_key(&q.backend_key)
         .ok_or_else(|| ApiError::BadRequest(format!("unsupported backend: {}", q.backend_key)))?;
-    let mut sessions: Vec<SessionSummary> = profile
-        .list_sessions(&cwd)
+    let (page, has_more) =
+        profile.list_sessions_page(&cwd, q.offset.unwrap_or(0), q.limit.unwrap_or(usize::MAX));
+    let sessions: Vec<SessionSummary> = page
         .into_iter()
         .map(|s| SessionSummary {
             session_id: s.session_id,
@@ -2438,8 +2444,7 @@ async fn list_sessions_history(
             last_modified_secs: s.last_modified_secs,
         })
         .collect();
-    sessions.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
-    Ok(Json(json!({ "sessions": sessions })))
+    Ok(Json(json!({ "sessions": sessions, "has_more": has_more })))
 }
 
 #[derive(Deserialize)]

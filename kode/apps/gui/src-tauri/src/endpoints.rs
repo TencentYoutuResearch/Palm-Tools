@@ -725,14 +725,19 @@ pub async fn endpoint_fs_list(
 }
 
 /// 列出远端 endpoint 上某个 cwd/backend 的历史 jsonl sessions。
-/// 协议端点:`GET /api/v1/sessions/history?backend_key=<key>&cwd=<abspath>`。
+/// 协议端点:`GET /api/v1/sessions/history?backend_key=<key>&cwd=<abspath>&offset=&limit=`。
+/// 老 bridge 不认分页参数、也不返回 `has_more`,会给出全部 session:这时在本地切页。
 #[tauri::command]
 pub async fn endpoint_list_sessions_for_cwd(
     id: String,
     backend_key: String,
     cwd: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
     _state: State<'_, AppState>,
-) -> Result<Vec<crate::commands::SessionSummary>, String> {
+) -> Result<crate::commands::SessionPage, String> {
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(usize::MAX);
     let persisted = persistence::load();
     let ep = persisted
         .endpoints
@@ -772,7 +777,12 @@ pub async fn endpoint_list_sessions_for_cwd(
     let resp = http
         .get(format!("{base}/api/v1/sessions/history"))
         .bearer_auth(&ep.token)
-        .query(&[("backend_key", backend_key.as_str()), ("cwd", cwd.as_str())])
+        .query(&[
+            ("backend_key", backend_key.as_str()),
+            ("cwd", cwd.as_str()),
+            ("offset", offset.to_string().as_str()),
+            ("limit", limit.to_string().as_str()),
+        ])
         .send()
         .await
         .map_err(|e| format!("session history request: {e}"))?;
@@ -780,7 +790,10 @@ pub async fn endpoint_list_sessions_for_cwd(
     if !status.is_success() {
         let detail = resp.text().await.unwrap_or_default();
         if session_history_unsupported(status, &detail) {
-            return Ok(Vec::new());
+            return Ok(crate::commands::SessionPage {
+                sessions: Vec::new(),
+                has_more: false,
+            });
         }
         return Err(format!("session history returned {status}: {detail}"));
     }
@@ -788,9 +801,30 @@ pub async fn endpoint_list_sessions_for_cwd(
         .json()
         .await
         .map_err(|e| format!("session history decode: {e}"))?;
+    session_page_from_response(v, offset, limit)
+}
+
+fn session_page_from_response(
+    v: serde_json::Value,
+    offset: usize,
+    limit: usize,
+) -> Result<crate::commands::SessionPage, String> {
+    let server_has_more = v.get("has_more").and_then(|h| h.as_bool());
     let sessions_value = v.get("sessions").cloned().unwrap_or(v);
-    serde_json::from_value::<Vec<crate::commands::SessionSummary>>(sessions_value)
-        .map_err(|e| format!("session history shape: {e}"))
+    let mut sessions =
+        serde_json::from_value::<Vec<crate::commands::SessionSummary>>(sessions_value)
+            .map_err(|e| format!("session history shape: {e}"))?;
+    let has_more = match server_has_more {
+        Some(has_more) => has_more,
+        // 老 bridge:返回的是全量列表,本地排序后切页。
+        None => {
+            sessions.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
+            let has_more = sessions.len() > offset.saturating_add(limit);
+            sessions = sessions.into_iter().skip(offset).take(limit).collect();
+            has_more
+        }
+    };
+    Ok(crate::commands::SessionPage { sessions, has_more })
 }
 
 // ===== Phase 11.x:远端 tab WorkspacePanel 支持(对齐本地 workspace_* 命令)=====
@@ -1056,6 +1090,32 @@ mod tests {
         .await;
         assert!(!r.ok, "should not be ok: {:?}", r);
         assert!(r.detail.contains("/healthz"));
+    }
+
+    #[test]
+    fn session_page_uses_server_has_more_or_slices_old_bridge_list() {
+        let row = |id: &str, t: u64| {
+            serde_json::json!({"session_id": id, "title": null, "model": null,
+                "total_tokens": null, "last_modified_secs": t})
+        };
+        // 新 bridge:直接采用服务端分页结果
+        let page = session_page_from_response(
+            serde_json::json!({"sessions": [row("a", 3)], "has_more": true}),
+            0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(page.sessions.len(), 1);
+        assert!(page.has_more);
+        // 老 bridge:无 has_more,全量 → 本地按时间倒序切页
+        let page = session_page_from_response(
+            serde_json::json!({"sessions": [row("old", 1), row("new", 9), row("mid", 5)]}),
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(page.sessions[0].session_id, "mid");
+        assert!(page.has_more);
     }
 
     #[test]

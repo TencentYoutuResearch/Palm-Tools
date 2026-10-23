@@ -1571,22 +1571,37 @@ pub struct SessionSummary {
     pub last_modified_secs: u64,
 }
 
+/// 一页历史 session。`has_more` 为 true 时前端显示 "More" 继续加载。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPage {
+    pub sessions: Vec<SessionSummary>,
+    pub has_more: bool,
+}
+
+/// 新建 tab 时列出 cwd 下的历史 session,按最近修改倒序分页。
+/// 只解析当前页的 transcript:目录里 session 很多时首屏也只读 `limit` 个文件。
 #[tauri::command]
 pub fn list_sessions_for_cwd(
     backend_key: String,
     cwd: String,
-) -> Result<Vec<SessionSummary>, String> {
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<SessionPage, String> {
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_absolute() {
         return Err("cwd must be an absolute path".into());
     }
 
     let Some(profile) = kode_core::session::backend::profile_for_key(&backend_key) else {
-        return Ok(Vec::new());
+        return Ok(SessionPage {
+            sessions: Vec::new(),
+            has_more: false,
+        });
     };
     let pinned_titles = crate::persistence::load().session_titles;
-    let mut sessions: Vec<SessionSummary> = profile
-        .list_sessions(cwd_path)
+    let (page, has_more) =
+        profile.list_sessions_page(cwd_path, offset.unwrap_or(0), limit.unwrap_or(usize::MAX));
+    let mut sessions: Vec<SessionSummary> = page
         .into_iter()
         .map(|s| SessionSummary {
             session_id: s.session_id.clone(),
@@ -1599,7 +1614,7 @@ pub fn list_sessions_for_cwd(
 
     dedupe_session_summaries(&mut sessions);
 
-    Ok(sessions)
+    Ok(SessionPage { sessions, has_more })
 }
 
 /// 按最新修改时间保留每个逻辑 session 的一个 rollout。

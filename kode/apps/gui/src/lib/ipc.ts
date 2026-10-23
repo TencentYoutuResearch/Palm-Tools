@@ -471,16 +471,22 @@ export const ipc = {
     }
   },
 
-  /// 列出某个工作目录下指定 backend 的所有历史 session。
-  /// 返回按 mtime 降序排列的 session 摘要列表。
-  listSessionsForCwd: (backendKey: string, cwd: string) =>
-    invoke<SessionSummary[]>('list_sessions_for_cwd', { backendKey, cwd }),
+  /// 分页列出某个工作目录下指定 backend 的历史 session(按 mtime 降序)。
+  /// 后端只解析本页 transcript;`has_more` 为 true 时可继续用下一个 offset 拉取。
+  listSessionsForCwd: (backendKey: string, cwd: string, offset: number, limit: number) =>
+    invoke<SessionPage>('list_sessions_for_cwd', { backendKey, cwd, offset, limit }),
 }
 
 export type RemoteClipboardPayload =
   | { kind: 'text'; text: string }
   | { kind: 'attachments'; paths: string[] }
   | { kind: 'empty' }
+
+/// 一页 session 摘要(Rust `commands::SessionPage` 镜像)。
+export interface SessionPage {
+  sessions: SessionSummary[]
+  has_more: boolean
+}
 
 /// session 摘要(Rust `commands::SessionSummary` 镜像)。
 export interface SessionSummary {
@@ -722,12 +728,14 @@ export const endpointIpc = {
       path,
       showHidden: show_hidden,
     }),
-  /** 拉远端 endpoint 上某 cwd/backend 的历史 session 列表 */
-  listSessionsForCwd: (id: string, backendKey: string, cwd: string) =>
-    invoke<SessionSummary[]>('endpoint_list_sessions_for_cwd', {
+  /** 分页拉远端 endpoint 上某 cwd/backend 的历史 session 列表 */
+  listSessionsForCwd: (id: string, backendKey: string, cwd: string, offset: number, limit: number) =>
+    invoke<SessionPage>('endpoint_list_sessions_for_cwd', {
       id,
       backendKey,
       cwd,
+      offset,
+      limit,
     }),
   /** 远端 tab WorkspacePanel:列文件 + git 摘要(对齐 ipc.workspaceSnapshot)。
    *  showHidden 省略时后端默认 false(保留远端隐藏 dotfiles 的旧行为)。 */
