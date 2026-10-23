@@ -765,6 +765,7 @@ impl CloudSyncManager {
             },
             "interrupt" => kode_bridge::interrupt_session(&self.inner.ctx, local_session_id)
                 .map_err(|error| error.to_string()),
+            "delete" => kode_bridge::delete_session(&self.inner.ctx, local_session_id),
             "answer" if payload.get("response").is_some() => {
                 match (
                     self.inner.ctx.acp.get(local_session_id),

@@ -1170,23 +1170,29 @@ async fn get_session(
     Ok(Json(session_to_dto(s)))
 }
 
-async fn kill_session(
-    Extension(ctx): Extension<Arc<Ctx>>,
-    Path(id): Path<SessionId>,
-) -> Result<StatusCode, ApiError> {
+/// Stop a session and publish `session.exited`. Shared by the local DELETE
+/// route and the desktop handler for a mobile delete command.
+pub fn delete_session(ctx: &Ctx, id: SessionId) -> Result<(), String> {
     ctx.acp.remove(id);
-    let s = ctx.sessions.lock().remove(&id);
-    let Some(s) = s else {
-        return Err(ApiError::NotFound(format!("session {id}")));
+    let Some(session) = ctx.sessions.lock().remove(&id) else {
+        return Err(format!("session {id}"));
     };
-    if let Some(p) = &s.pty {
-        p.kill();
+    if let Some(pty) = &session.pty {
+        pty.kill();
     }
     ctx.bus.emit(EventEnvelope::new(
         id,
         "session.exited",
         json!({ "exit_code": null, "reason": "deleted_by_api" }),
     ));
+    Ok(())
+}
+
+async fn kill_session(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<SessionId>,
+) -> Result<StatusCode, ApiError> {
+    delete_session(&ctx, id).map_err(ApiError::NotFound)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

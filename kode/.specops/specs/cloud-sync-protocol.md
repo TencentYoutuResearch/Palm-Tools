@@ -115,6 +115,7 @@ The center intentionally preserves the existing v1 mobile read surface:
 - `GET /api/v1/sessions/:id`
 - `GET /api/v1/sessions/:id/history?from=&limit=`
 - `POST /api/v1/sessions/:id/input`
+- `DELETE /api/v1/sessions/:id`
 - `GET /ws` with the mobile bearer header; access tokens are never accepted in URLs
 
 `POST input` accepts `{ "text": "…" }`, requires `sessions.send`, validates a
@@ -122,6 +123,11 @@ The center intentionally preserves the existing v1 mobile read surface:
 command has been persisted and dispatched to an online desktop. Command state
 is `dispatched → accepted → executed` or `failed/expired`; transitions are also
 published as `command.status` events.
+
+`DELETE /api/v1/sessions/:id` uses the same dispatch rules with command kind
+`delete`. The desktop stops that session and emits `session.exited`, which
+removes it from the mobile list. An offline desktop returns `409` and the
+session stays visible.
 
 
 ## Mobile session creation and desktop catalogues
