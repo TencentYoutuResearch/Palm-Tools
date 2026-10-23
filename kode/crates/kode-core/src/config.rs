@@ -280,9 +280,7 @@ impl Default for Config {
                 default_model: None,
                 model_flag: Some("--model".into()),
                 permission_mode_flag: Some("--ask-for-approval".into()),
-                mcp_setup: Some(McpSetupSpec::Codex {
-                    cli: "tcodex".into(),
-                }),
+                mcp_setup: None,
                 acp: None,
                 enabled: None,
             },
@@ -296,9 +294,7 @@ impl Default for Config {
                 default_model: None,
                 model_flag: Some("--model".into()),
                 permission_mode_flag: Some("--permission-mode".into()),
-                mcp_setup: Some(McpSetupSpec::Claude {
-                    cli: "tclaude".into(),
-                }),
+                mcp_setup: None,
                 acp: None,
                 enabled: None,
             },
@@ -549,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn default_t_backends_have_flags_and_mcp_setup_without_startup_args() {
+    fn default_t_backends_have_flags_with_opt_in_mcp_and_no_startup_args() {
         let cfg = Config::default();
         for (key, permission_flag) in [
             ("tcodex", "--ask-for-approval"),
@@ -568,12 +564,7 @@ mod tests {
                 Some(permission_flag)
             );
             assert_eq!(backend.enabled, None);
-            let expected_mcp = if key == "tcodex" {
-                McpSetupSpec::Codex { cli: key.into() }
-            } else {
-                McpSetupSpec::Claude { cli: key.into() }
-            };
-            assert_eq!(backend.mcp_setup, Some(expected_mcp));
+            assert_eq!(backend.mcp_setup, None);
         }
     }
 
