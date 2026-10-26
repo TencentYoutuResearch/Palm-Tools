@@ -111,8 +111,19 @@ build_specops_dev() {
   (cd "$SPECOPS_DIR" && "${PNPM_CMD[@]}" build)
 }
 
+validate_prebuilt_linux_bundle() {
+  local resource="$1"
+  [ -s "$resource" ] || error "缺少预编译 Linux bundle: $resource"
+  tar -tzf "$resource" >/dev/null || error "无效的预编译 Linux bundle: $resource"
+  info "使用 CI 预编译 Linux bundle: $resource"
+}
+
 ensure_sync_server_bundle() {
   local resource="$TAURI_DIR/resources/kode-sync-server-linux-musl.tar.gz"
+  if [ "${KODE_USE_PREBUILT_LINUX_BUNDLES:-0}" = "1" ]; then
+    validate_prebuilt_linux_bundle "$resource"
+    return 0
+  fi
   local stale=0
   if [ ! -s "$resource" ]; then
     stale=1
@@ -134,6 +145,10 @@ ensure_sync_server_bundle() {
 
 ensure_remote_bridge_bundle() {
   local bridge_resource="$TAURI_DIR/resources/kode-remote-memory-bridge-linux-musl.tar.gz"
+  if [ "${KODE_USE_PREBUILT_LINUX_BUNDLES:-0}" = "1" ]; then
+    validate_prebuilt_linux_bundle "$bridge_resource"
+    return 0
+  fi
   local stale=0
   if [ ! -s "$bridge_resource" ]; then
     stale=1
