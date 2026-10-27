@@ -2,7 +2,7 @@
 window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const React = require('react'), h = React.createElement
   const { useState, useEffect, useSyncExternalStore } = React
-  const { Menu, Modal, Button, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const { Menu, Modal, Button, MarkdownText, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const API = '/api/kode/agents', stores = new Map()
   let stagedAgent, transport
   const fetchHost = (url, options, host) => transport ? transport.fetch(url, options, host) : fetch(url, options)
@@ -474,6 +474,104 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     )
   }
   const textContent = content => (content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n')
+  const internalTags = {
+    subagent_notification: '子 Agent 通知', environment_context: '环境上下文',
+    INSTRUCTIONS: '项目规则', user_instructions: '会话规则', hook_prompt: 'Hook 提示',
+    'system-reminder': '系统提醒', recommended_plugins: '插件上下文',
+    skills_instructions: '技能上下文', skill: '技能上下文', 'app-context': '应用上下文',
+    'kode-memory': '共享记忆', 'kode-memory-context': '记忆上下文',
+    'in-app-browser-context': '浏览器上下文', permissions: '权限上下文',
+    collaboration_mode: '协作模式', turn_aborted: '本轮已中断',
+    send_user_message_question_reply: '问题回复',
+  }
+  const internalOpening = new RegExp(`^[ \\t]*<(${Object.keys(internalTags).join('|')})(?:\\s+[^<>]*)?>`, 'gm')
+  function internalSection(tag, body) {
+    const section = { tag, title: internalTags[tag], body: body.trim(), fields: [] }
+    if (tag === 'subagent_notification') {
+      try {
+        const payload = JSON.parse(body), state = payload.status
+        const statuses = { completed: '已完成', errored: '失败', failed: '失败', error: '失败', interrupted: '已中断', cancelled: '已取消', running: '进行中', pending_init: '等待启动' }
+        const kind = typeof state === 'string' ? state : state && typeof state === 'object' ? Object.keys(statuses).find(key => key in state) : undefined
+        const result = typeof state === 'object' && state ? state[kind] : payload.message ?? payload.result
+        const name = payload.agent_name ?? payload.nickname ?? payload.name
+        section.title = typeof name === 'string' && name.trim() && !/^[0-9a-f-]{20,}$/i.test(name) ? name : '子 Agent'
+        section.status = statuses[kind] ?? '状态通知'
+        section.tone = ['errored', 'failed', 'error'].includes(kind) ? 'error' : 'neutral'
+        section.body = typeof result === 'string' ? result : typeof payload.message === 'string' ? payload.message : ''
+        if (!section.body) section.body = kind === 'running' ? '子 Agent 正在处理任务。' : '子 Agent 状态已更新。'
+      } catch { section.status = '格式未识别'; section.body = '通知格式未识别。' }
+    } else if (tag === 'environment_context') {
+      for (const [key,label] of [['cwd','工作目录'],['shell','Shell'],['current_date','记录日期'],['timezone','时区']]) {
+        const value = new RegExp(`<${key}>([\\s\\S]*?)</${key}>`).exec(body)?.[1]?.trim()
+        if (value) section.fields.push([label,value])
+      }
+      const directory = section.fields.find(([label]) => label === '工作目录')?.[1]
+      section.hint = [directory?.split(/[\\/]/).filter(Boolean).at(-1), section.fields.find(([label]) => label === 'Shell')?.[1]].filter(Boolean).join(' · ')
+    } else if (tag === 'INSTRUCTIONS') section.hint = 'AGENTS.md'
+    else if (tag === 'send_user_message_question_reply') {
+      try {
+        const replies = JSON.parse(body)
+        section.body = Array.isArray(replies) && replies.every(row => typeof row.question === 'string' && typeof row.answer === 'string') ? replies.map(row => `**${row.question}**\n\n${row.answer}`).join('\n\n') : '收到一条问题回复。'
+      } catch { section.body = '问题回复格式未识别。' }
+    }
+    return section
+  }
+  function splitInternalText(text) {
+    // Only known wrappers on their own lines are context. Fenced examples and
+    // ordinary HTML/XML stay verbatim, including mentions of these tag names.
+    const fences = [], fencePattern = /^[ \t]{0,3}(`{3,}|~{3,})[^\n]*(?:\n|$)/gm
+    let fence, match
+    while ((match = fencePattern.exec(text))) {
+      const marker=match[1]
+      if (!fence) fence={ start:match.index, marker }
+      else if (marker[0] === fence.marker[0] && marker.length >= fence.marker.length && /^\s*$/.test(match[0].slice(match[0].indexOf(marker)+marker.length))) { fences.push([fence.start,fencePattern.lastIndex]);fence=undefined }
+    }
+    if (fence) fences.push([fence.start,text.length])
+    const sections=[], parts=[]
+    let offset=0
+    internalOpening.lastIndex=0
+    while ((match=internalOpening.exec(text))) {
+      if (fences.some(([start,end])=>match.index>=start && match.index<end)) continue
+      const tag=match[1], bodyStart=internalOpening.lastIndex
+      const closing=new RegExp(`</${tag}>[ \\t]*(?=\\r?\\n|$)`,'g');closing.lastIndex=bodyStart
+      const end=closing.exec(text)
+      if (!end) continue
+      let start=match.index
+      if (tag==='INSTRUCTIONS') {
+        const heading=/(?:^|\n)# AGENTS\.md instructions for [^\n]+\s*$/.exec(text.slice(offset,start))
+        if (heading) start=offset+heading.index
+      }
+      parts.push(text.slice(offset,start))
+      sections.push(internalSection(tag,text.slice(bodyStart,end.index)))
+      offset=closing.lastIndex;internalOpening.lastIndex=offset
+    }
+    parts.push(text.slice(offset))
+    return { text: sections.length ? parts.join('').trim() : text, sections }
+  }
+  function InternalDisclosure({ section }) {
+    const preview = section.tag === 'subagent_notification' ? section.body.replace(/[#*_`>]/g,'').split('\n').find(line=>line.trim())?.trim() : undefined
+    return h('details', { className:'kode-internal-message', 'data-kode-context':section.tag },
+      h('summary', null, h(section.tag==='subagent_notification' ? IconAgentPresetOutlineRegular : IconGlobeOutlineRegular,{size:14}), h('span',{className:'kode-internal-title'},section.title),
+        section.status && h('span',{className:section.tone==='error'?'kode-error':'kode-secondary'},section.status),
+        (section.hint || preview) && h('span',{className:'kode-internal-hint'},section.hint || preview), h(IconChevronDownOutlineRegular,{size:12,className:'kode-internal-chevron'})),
+      h('div',{className:'kode-internal-body'},
+        section.fields.length ? h('dl',null,...section.fields.map(([label,value])=>h('div',{key:label},h('dt',null,label),h('dd',null,value)))) : h(MarkdownText,{text:section.body})))
+  }
+  function InternalMessageAdapter({ native, ...props }) {
+    const data=props.node?.data
+    if (!data || (props.node.kind==='assistant-step' && data.status!=='settled')) return h(native,props)
+    const field=props.node.kind==='assistant-step'?'blocks':'content'
+    if (!Array.isArray(data[field])) return h(native,props)
+    const sections=[], content=[]
+    for (const block of data[field]) {
+      if ((block.type ?? block.kind)!=='text' || typeof block.text!=='string') {content.push(block);continue}
+      const parsed=splitInternalText(block.text);sections.push(...parsed.sections)
+      if (parsed.text) content.push(parsed.sections.length?{...block,text:parsed.text}:block)
+    }
+    if (!sections.length) return h(native,props)
+    const node={...props.node,data:{...data,[field]:content}}
+    return h('div',{className:'kode-internal-stack'},...sections.map((section,index)=>h(InternalDisclosure,{key:index,section})),content.length>0 && h(native,{...props,node}))
+  }
   function parseRelay(data) {
     if (data.source?.kind !== 'agent-message' || !data.source.senderSessionId?.startsWith('kode:')) return undefined
     const raw = textContent(data.content)
@@ -637,6 +735,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const binding = ctx.sessions.binding(sessionId)
       return { eventSource: binding.eventSource, session: binding.session }
     } }, AgentTrajectory))
+    // Keep each native seat's injections, locale, reasoning/image children and
+    // actions. This also upgrades already imported history without rewriting it.
+    ctx.slots.inject('conversation.chat.node', () => {
+      const adapted=new Map(), kinds=new Set(['user','steering','context','turn-trigger','assistant-step'])
+      const install=()=>{
+        for(const entry of ctx.slots.entries('conversation.chat.node')) {
+          if(!kinds.has(entry.options.key) || entry.component===RelayTrigger || adapted.has(entry))continue
+          const original=entry.component, wrapper=props=>h(InternalMessageAdapter,{...props,native:original})
+          adapted.set(entry,{original,wrapper});entry.component=wrapper
+        }
+      }
+      const unsubscribe=ctx.slots.subscribe('conversation.chat.node',install);install()
+      return()=>{unsubscribe();for(const [entry,{original,wrapper}] of adapted)if(entry.component===wrapper)entry.component=original}
+    })
     // rc.2 has no settings-navigation filter. Adapt the existing registration
     // in place so its store, locale, hooks and child-slot authorizations remain
     // owned by dsh. Restore the component when this plugin is unloaded.
@@ -692,6 +804,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     ctx.effect(() => { const timer = setInterval(() => { if (nameListeners.size && !document.hidden) void refreshNames() }, 10000); return () => clearInterval(timer) }, 'kode.session-names')
     const style = document.createElement('style')
     style.textContent = `
+.kode-internal-stack{display:flex;flex-direction:column;gap:8px;min-width:0}.kode-internal-message{min-width:0;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-turn-trigger-bg,var(--dsw-alias-markdown-code-block));font-size:var(--dsh-content-font-size,14px);color:var(--dsw-alias-label-secondary)}.kode-internal-message>summary{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer;list-style:none;padding:12px 16px;font-size:13px}.kode-internal-message>summary::-webkit-details-marker{display:none}.kode-internal-message>summary:hover{background:var(--dsw-alias-interactive-bg-hover);border-radius:inherit}.kode-internal-title{color:var(--dsw-alias-label-primary);flex-shrink:0}.kode-internal-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary);flex:1}.kode-internal-message>summary>svg{flex-shrink:0}.kode-internal-chevron{margin-left:auto}.kode-internal-message[open]>summary>.kode-internal-chevron{transform:rotate(180deg)}.kode-internal-message summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-internal-body{padding:12px 16px 16px;min-width:0;overflow-wrap:anywhere}.kode-internal-body>dl{margin:0;display:flex;flex-direction:column;gap:6px;font-size:13px}.kode-internal-body>dl>div{display:flex;gap:12px;min-width:0;flex-wrap:wrap}.kode-internal-body dt{min-width:64px;color:var(--dsw-alias-label-tertiary)}.kode-internal-body dd{margin:0;min-width:0;flex:1;overflow-wrap:anywhere}
 .kode-unified-workspaces{flex:1;min-height:0;display:flex;flex-direction:column}.kode-host-progress{padding:12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.kode-navigation-error{position:fixed;bottom:24px;left:50%;padding:12px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-error-primary);z-index:100}
 .kode-agent-trajectory{height:100%;overflow:auto;padding:20px 28px;color:var(--dsw-alias-label-primary)}.kode-trace-toolbar{position:sticky;top:0;background:var(--dsw-alias-bg-base);padding-bottom:16px;z-index:1}.kode-trace-toolbar input{width:100%;max-width:440px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);color:inherit;font:inherit}.kode-trace-event{padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-trace-heading{display:flex;align-items:center;gap:12px;font-size:13px}.kode-trace-heading time{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-trace-heading small{color:var(--dsw-alias-label-secondary)}.kode-trace-event pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.6}.kode-trace-event details{font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-trace-event summary{cursor:pointer;padding:6px 0}.kode-trace-event summary:focus-visible,.kode-trace-toolbar input:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}
 .kode-remote-computer{display:inline-block;flex-shrink:0;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-project-dialog{width:min(580px,calc(100vw - 32px))}.kode-project-source{padding:20px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);display:flex;flex-wrap:wrap;justify-content:center;gap:12px}.kode-project-source>.kode-field{width:100%;margin-bottom:8px}.kode-project-path{width:100%;overflow-wrap:anywhere;text-align:center;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-host-location{gap:6px;padding:0 8px;white-space:nowrap}.kode-workspace-menu{width:min(400px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.kode-workspace-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}.kode-workspace-search input{font:inherit;color:var(--dsw-alias-label-primary);background:transparent;border:0;outline:none;min-width:0;width:100%}.kode-workspace-search:focus-within{box-shadow:inset 0 -2px var(--dsw-focus-ring-color)}.kode-workspace-caption{font-size:12px;color:var(--dsw-alias-label-secondary);padding:10px 12px 4px}.kode-workspace-option{display:flex;flex-direction:column;gap:3px;min-width:0;max-width:310px}.kode-workspace-option>span,.kode-workspace-option small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-workspace-option small{font-size:12px;color:var(--dsw-alias-label-secondary)}
