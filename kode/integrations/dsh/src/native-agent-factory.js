@@ -65,7 +65,7 @@ export class NativeAgentFactory {
       check()
       detachSession = driver.ctx.sessions.enter(session); detachAgent = ctx.agents.enter(driver, options.parentAgent)
       driver.ctx.sessions.announce(session); await ctx.agents.announce(driver, resume ? 'resume' : 'startup', signal); check()
-      published = true; this.live.add(dispose); this.byId.set(id, dispose); driver.start()
+      published = true; this.live.add(dispose); this.byId.set(id, dispose); ctx.kodeAgents.mountCommands?.(driver); driver.start()
       setupDone.resolve()
       return { agent: driver, dispose: async () => { try { await dispose() } finally { await releaseOwner() } } }
     } catch (error) { setupDone.resolve(); try { await dispose() } finally { await releaseOwner() }; throw error }

@@ -109,6 +109,7 @@ export class ProjectHosts {
     if (this.config.backendClient) {
       const catalog = await this.config.backendClient.call('/api/v1/messaging/workbench/catalog')
       this.saved.clear()
+      for (const host of hosts) for (const row of host.sessions ?? []) if (row.savedTab) this.saved.set(row.id, { tab: row.savedTab, hostId: host.id })
       for (const tab of catalog.tabs ?? []) {
         if (!tab.session_id || !tab.cwd) continue
         const endpointId = typeof tab.endpoint_id === 'object' ? tab.endpoint_id?.id : tab.endpoint_id
@@ -148,7 +149,13 @@ export class ProjectHosts {
       }
       if (input.action === 'prepare') { if (input.id !== 'local') await this.connect(input.id); return json(res, 200, { id: input.id, ready: true }) }
       if (input.action === 'host-operation') {
-        if (input.id === 'local') await hostOperation(this.ctx, input)
+        if (input.args?.sessionId?.startsWith('saved:')) {
+          await this.directory(current)
+          const saved = this.saved.get(input.args.sessionId)
+          if (!saved || saved.hostId !== input.id) throw new Error('历史会话不属于此主机，请刷新列表。')
+          input.nativeSession = { backend_key: saved.tab.backend_key, session_id: saved.tab.session_id }
+        }
+        if (input.id === 'local') await hostOperation(this.ctx, input, this.config)
         else { const portal = await this.connect(input.id); const snapshot = await portal.operation(input); this.directoryCache.set(input.id, { ...snapshot, checkedAt: Date.now(), status: 'online' }) }
         return json(res, 200, { ok: true })
       }

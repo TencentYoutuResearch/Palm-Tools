@@ -7,6 +7,17 @@ import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import * as factoryPlugin from '../src/native-agent-factory.js'
 import {buildHistorySeed} from '../src/native-history.js'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import Subprocess from '@deepseek-ai/dsh-subprocess-local'
+import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
+import { AgentRuntimeAdapter } from '../src/agent-runtime.js'
+import { AgentProfiles } from '../src/agent-profiles.js'
+import { mountNativeCommands } from '../src/native-commands.js'
+import { pendingShellContext } from '../src/native-shell.js'
+import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 async function host(adapter) {
   const ctx = new Context(), stored = new Map(), writers = new Map()
@@ -88,6 +99,46 @@ test('native model selection is session-local and does not persist or reload glo
   handle.agent.followup(message('model-test','Hello'));await handle.agent.whenIdle()
   assert.deepEqual(models,['another-model']);assert.ok(h.stored.get(options.sessionId).events.some(event=>event.type==='model/selection'&&event.data.model==='another-model'))
   await h.fiber.dispose()
+})
+
+test('! commands use the shipped workspace shell without inference and persist context for the next native prompt',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'kode-human-shell-')),log=join(root,'wire.jsonl')
+  const h=await host({closeSession:async()=>{}})
+  const processes=await h.ctx.plugin(Subprocess),shell=await h.ctx.plugin(LocalBashExecutor)
+  const profiles=await new AgentProfiles(join(root,'profiles.json')).open([{id:'fixture',name:'Fixture',type:'codex',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:log}}])
+  const adapter=new AgentRuntimeAdapter(h.ctx,profiles,{recordNative:()=>{}})
+  Object.assign(h.ctx.kodeAgents,{profiles,adapter,recordBinding:()=>{}})
+  try{
+    const handle=await h.ctx.agents.create({...options,meta:{cwd:root}}),agent=handle.agent
+    agent.followup(message('user-shell','!pwd'));await agent.whenIdle()
+    const rows=h.stored.get(options.sessionId).events
+    assert.equal(rows.findLast(row=>row.type==='turn/end').data.reason.kind,'completed')
+    assert.ok(rows.find(row=>row.type==='tool/result').data.message.content[0].text.includes(await realpath(root)))
+    assert.equal(adapter.live.size,0,'! must not start a native model process')
+    assert.equal(pendingShellContext(agent.session).length,1)
+    agent.followup(message('followup','Summarize that result'));await agent.whenIdle()
+    const wire=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse),turns=wire.filter(row=>row.method==='turn/start')
+    assert.equal(turns.length,1);assert.match(turns[0].params.input[0].text,/用户在工作区[\s\S]*执行了终端命令：[\s\S]*pwd/)
+    assert.equal(turns[0].params.input.at(-1).text,'Summarize that result');assert.equal(pendingShellContext(agent.session).length,0)
+  }finally{await h.fiber.dispose();await adapter.close();await shell.dispose();await processes.dispose();await rm(root,{recursive:true,force:true})}
+})
+
+test('native slash definitions shadow harness commands only for their Agent and unload with it',async()=>{
+  const received=[],h=await host({async *stream(request){received.push(request);yield{type:'finish',reason:{kind:'stop'}}},closeSession:async()=>{}})
+  const commands=await h.ctx.plugin(CommandRuntime)
+  const global=h.ctx.commands.register({name:'compact',description:'Harness compaction',handler:()=>({kind:'success',text:'global'})})
+  const {agent}=await h.ctx.agents.create(options)
+  const service={commandOwners:new Map(),adapter:{capabilities:async()=>({commands:[{name:'compact',description:'Native compact'},{name:'team:review',description:'Project skill',input:{hint:'task'}}],modes:[]}),listModels:async()=>[{id:'next-model',name:'Friendly model'}]}}
+  try{
+    await mountNativeCommands(agent,service,{id:'fixture',name:'Company Codex',type:'codex',executable:'codex',args:[],env:{}})
+    assert.equal(h.ctx.commands.list(agent).find(row=>row.name==='compact').description,'Native compact')
+    const selected=await h.ctx.commands.execute(agent,'/model Friendly model',[],new AbortController().signal)
+    assert.equal(selected.result.kind,'success');assert.equal(agent.options.model,'next-model')
+    await h.ctx.commands.execute(agent,'/team-review inspect',[],new AbortController().signal);await agent.whenIdle()
+    assert.equal(received[0].messages[0].content[0].text,'/team:review inspect')
+    const other={id:'other'};assert.equal(h.ctx.commands.list(other).find(row=>row.name==='compact').description,'Harness compaction')
+    await h.fiber.dispose();assert.equal(h.ctx.commands.list(agent).find(row=>row.name==='compact').description,'Harness compaction')
+  }finally{await h.fiber.dispose();global();await commands.dispose()}
 })
 
 test('history import is seeded with native timestamps before its driver is published',async()=>{

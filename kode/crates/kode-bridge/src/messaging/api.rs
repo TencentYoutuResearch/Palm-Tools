@@ -167,10 +167,20 @@ async fn workbench_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<
     loop {
         let page=super::workspaces::execute(hub.clone(),super::workspaces::Command::SessionCatalog{offset}).await?;
         for tab in page["tabs"].as_array().into_iter().flatten() {
-            if !tabs.iter().any(|row|(row["endpoint_id"].is_null() || row["endpoint_id"]["kind"]=="local") && row["session_id"]==tab["session_id"] && row["backend_key"]==tab["backend_key"]) {tabs.push(tab.clone());}
+            if let Some(index)=tabs.iter().position(|row|(row["endpoint_id"].is_null() || row["endpoint_id"]["kind"]=="local") && row["session_id"]==tab["session_id"] && row["backend_key"]==tab["backend_key"]) {
+                if let (Some(row),Some(native))=(tabs[index].as_object_mut(),tab.as_object()){row.extend(native.clone());}
+            } else {tabs.push(tab.clone());}
         }
         if let Some(next)=page["next_offset"].as_u64(){offset=next as usize}else{break}
     }
+    let workspace_document=hub.store.document("workspaces")?;
+    let archived=workspace_document.pointer("/value/global/archivedSessionIds").and_then(serde_json::Value::as_array);
+    tabs.retain(|tab| {
+        if !tab["endpoint_id"].is_null() && tab["endpoint_id"]["kind"]!="local" {return true}
+        let native=document.pointer("/value/native_sessions").and_then(serde_json::Value::as_array).and_then(|rows|rows.iter().find(|row|row["session_id"]==tab["session_id"] && row["backend_key"]==tab["backend_key"]));
+        let id=tab["dsh_session_id"].as_str().or_else(||native.and_then(|row|row["dsh_session_id"].as_str()));
+        !id.is_some_and(|id|archived.is_some_and(|rows|rows.iter().any(|row|row.as_str()==Some(id))))
+    });
     let agents = super::agents::catalog(&hub)?;
     let backends = serde_json::to_value(&agents.backends).map_err(anyhow::Error::from)?;
     Ok(Json(serde_json::json!({"node_id":hub.node_id(),"tabs":tabs,"endpoints":state.get("endpoints").cloned().unwrap_or(serde_json::json!([])),"session_titles":state.get("session_titles").cloned().unwrap_or(serde_json::json!({})),"backends":backends,"agent_ids":agents.ids})))

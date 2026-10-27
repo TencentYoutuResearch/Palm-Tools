@@ -5,6 +5,8 @@ import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { AssistantStreamAccumulator, BlockAssembler } from '@deepseek-ai/dsh-llm'
+import { humanInput } from './native-commands.js'
+import { runHumanShell } from './native-shell.js'
 
 export const boundaryProjection = {
   key: 'turnBoundary', stateVersion: 2,
@@ -111,6 +113,13 @@ export class NativeAgentDriver {
         const state = this.ctx.sessionProjections.stateOf(this.session, 'modelSelection')
         const selection = state?.pending ?? state?.next ?? state?.lastUsed ?? this.options
         if (!selection.provider?.startsWith('kode-agent-')) throw new Error('Select an installed Agent before sending a message')
+        const human = messages.length === 1 ? humanInput(messages[0]) : undefined
+        if (human?.startsWith('!')) {
+          this.session.append('step/start', { turn, step }); opened = true
+          for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
+          await runHumanShell(this, human.slice(1), signal)
+          continue
+        }
         const tools = this.ctx.tools.schemas(this)
         const previous = this.session.requestHeader()
         this.session.append('request/header', { header: { config: selection, ...(tools.length ? { tools } : {}) }, reason: previous ? 'resume' : 'initial' })

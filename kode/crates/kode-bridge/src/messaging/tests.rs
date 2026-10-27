@@ -66,6 +66,28 @@ async fn workbench_configuration_is_durable_versioned_and_not_agent_accessible()
     assert_eq!(current, saved);
     assert_eq!(client.get(format!("{}/api/v1/messaging/workbench/documents/arbitrary-file", s.url)).bearer_auth("admin-test").send().await.unwrap().status(), 400);
 }
+
+#[tokio::test]
+async fn archived_legacy_gui_tabs_need_no_adapter_and_are_restorable_without_losing_metadata() {
+    let s=server("cold-archive",vec![]).await;
+    let native_id="session-kode-example";
+    let tab=json!({"backend_key":"removed-claude","session_id":"old-native-thread","cwd":"/srv/project","title":"Original title","endpoint_id":null});
+    let mut native=tab.clone();native["dsh_session_id"]=json!(native_id);native["title"]=json!("Saved metadata title");
+    let index=s.hub.store.document("session-index").unwrap();
+    s.hub.store.save_document("session-index",index["revision"].as_u64().unwrap(),json!({"version":1,"gui":{"tabs":[tab],"endpoints":[]},"native_sessions":[native]})).unwrap();
+    let document=super::workspaces::ensure(&s.hub).unwrap();
+    let mut workspaces=document["value"].clone();workspaces["global"]["archivedSessionIds"]=json!([native_id]);
+    let archived=s.hub.store.save_document("workspaces",document["revision"].as_u64().unwrap(),workspaces.clone()).unwrap();
+    let client=reqwest::Client::new();
+    let catalog:Value=client.get(format!("{}/api/v1/messaging/workbench/catalog",s.url)).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert!(catalog["tabs"].as_array().unwrap().is_empty());
+    workspaces["global"]["archivedSessionIds"]=json!([]);
+    s.hub.store.save_document("workspaces",archived["revision"].as_u64().unwrap(),workspaces).unwrap();
+    let restored:Value=client.get(format!("{}/api/v1/messaging/workbench/catalog",s.url)).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(restored["tabs"][0]["title"],"Saved metadata title");
+    assert_eq!(restored["tabs"][0]["session_id"],"old-native-thread");
+    assert_eq!(s.hub.store.document("session-index").unwrap()["value"]["gui"]["tabs"].as_array().unwrap().len(),1);
+}
 async fn register(s: &Server, id: &str) -> Registration {
     reqwest::Client::new()
         .post(format!("{}/api/v1/messaging/sessions", s.url))

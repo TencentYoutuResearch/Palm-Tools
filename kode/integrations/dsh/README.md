@@ -469,3 +469,13 @@ validates released event relationships and writes a separate, checksummed header
 frame. Restart the Web Host after repair. Original CLI history is never changed.
 
 Native Agent model changes are recorded in the current session without saving dsh global defaults or reloading its session service. The Web transport waits for the owner read endpoint before opening its first subscription; it never retries session creation or prompt submission. Inline file citations split supported line suffixes before entering the existing dsh preview, preserving the owning Host and file policy. Historical tabs whose original Agent profile has been removed are left intact rather than rebound to another installation.
+
+### Native commands and skills
+
+Human `!command` input runs through the selected Host's existing dsh shell in the session workspace without starting a model turn. Output and exit status appear as a tool result; bounded context is durably forwarded with the next ordinary prompt. Peer messages never activate this shortcut.
+
+The existing slash menu contains session-scoped native capabilities, including Claude and CodeBuddy commands/skills received after ACP setup. Namespaced commands also have a hyphenated menu alias because the pinned registry does not accept colons; dispatch retains the native name. `/help`, `/status`, `/model`, `/mode`, and `/shell` are session utilities. Codex additionally maps `/compact`, `/review`, `/mcp`, and `/skills` to app-server methods. Commands requiring a CLI window, login, or a different conversation identity are rejected explicitly. Native control commands never fall through to an ordinary model prompt.
+
+Codex `$skill` completion reads `skills/list` for the current profile and workspace. Selection preserves existing draft references; matching explicit references become native skill inputs containing the discovered name and path. Claude and CodeBuddy skills remain native slash commands. Unique advertised display names and case variants resolve to canonical model IDs; unknown or ambiguous names are rejected.
+
+Saved native tabs can be pinned, renamed, archived, and restored through canonical Kode metadata even if their Agent configuration or adapter is gone. These actions allocate no Agent, import no transcript, and never rewrite CLI logs. Archive state stays in the workspace document; the session index retains the identity a future import would use. Kode's catalog respects that archive state too.

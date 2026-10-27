@@ -19,10 +19,13 @@ async function configureServers(params) {
     await client.listTools()
   }
 }
-app.onRequest('session/new', async ({ params }) => { await record('session/new', params); await configureServers(params); return { sessionId, modes, configOptions } })
+const availableCommands = [{ name: 'fixture-command', description: 'Native fixture command', input: { hint: 'message' } }, { name: 'fixture:skill', description: 'Workspace skill', input: { hint: 'task' } }]
+const announceCommands = client => client.notify('session/update', { sessionId, update: { sessionUpdate: 'available_commands_update', availableCommands } })
+app.onRequest('session/new', async ({ params, client }) => { await record('session/new', params); await configureServers(params); if(process.env.KODE_ACP_LATE_COMMANDS==='1')setTimeout(()=>void announceCommands(client),20);else await announceCommands(client); return { sessionId, modes, configOptions } })
 app.onRequest('session/load', async ({ params, client }) => {
   await record('session/load', params); await configureServers(params)
   await client.notify('session/update', { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAY MUST NOT REAPPEAR' } } })
+  await announceCommands(client)
   return { modes, configOptions }
 })
 app.onRequest('session/set_mode', async ({ params }) => { await record('session/set_mode', params); modes.currentModeId = params.modeId; return {} })

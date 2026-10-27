@@ -17,6 +17,10 @@ async function receive(message) {
   if (method === 'model/list') return result(id, { data: [{ id: 'fixture', model: 'fixture', displayName: 'Fixture' }], nextCursor: null })
   if (method === 'thread/start' || method === 'thread/resume') return result(id, { thread: { id: params.threadId ?? 'same-native-id' } })
   if (method === 'turn/interrupt') { result(id, {}); return }
+  if (method === 'skills/list') return result(id,{data:[{cwd:params.cwds[0],skills:[{name:'fixture-skill',description:'Example workspace skill',path:params.cwds[0]+'/.agents/skills/fixture-skill/SKILL.md',enabled:true}],errors:[]}]})
+  if (method === 'mcpServerStatus/list') return result(id,{data:[{name:'fixture-mcp',authStatus:'notLoggedIn',tools:{example:{}}}],nextCursor:null})
+  if (method === 'thread/compact/start') { const turnId='compact-'+ ++turn,threadId=params.threadId;result(id,{});notify('turn/started',{threadId,turn:{id:turnId}});notify('item/completed',{threadId,turnId,item:{id:'compact',type:'contextCompaction'}});notify('turn/completed',{threadId,turn:{id:turnId,status:'completed'}});return }
+  if (method === 'review/start') { const turnId='review-'+ ++turn,threadId=params.threadId;result(id,{reviewThreadId:threadId,turn:{id:turnId,status:'inProgress'}});notify('item/agentMessage/delta',{threadId,turnId,itemId:'review',delta:'Native review result'});notify('turn/completed',{threadId,turn:{id:turnId,status:'completed'}});return }
   if (method === 'turn/start') {
     const turnId = 'turn-' + ++turn, threadId = params.threadId
     result(id, { turn: { id: turnId, status: 'inProgress' } })

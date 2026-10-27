@@ -1,4 +1,6 @@
 /** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
+import { BackendDocument } from './backend-state.js'
+import { importedSessionId, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
 export const DIRECTORY_PATH = '/api/kode/host-directory'
 export async function hostDirectory(ctx, config = {}) {
   const registry = ctx.get('workspaceRegistry')
@@ -16,10 +18,30 @@ export async function hostDirectory(ctx, config = {}) {
     if (item.blank) return []
     return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running, ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
   })
-  return { archivedSessionIds: [...registry.archivedSessionIds], pinnedSessionIds: [...(registry.pinnedSessionIds ?? [])], hiddenSessionIds, sessions,
+  const result = { archivedSessionIds: [...registry.archivedSessionIds], pinnedSessionIds: [...(registry.pinnedSessionIds ?? [])], hiddenSessionIds, sessions,
     workspaces: registry.list().map(w => ({ id: w.id, title: w.title, path: w.path, sessionIds: [...w.sessionIds], createdAt: w.createdAt, updatedAt: w.updatedAt })) }
+  if (config.backendClient) {
+    const client = config.backendClient
+    const [index, workspaces, node] = await Promise.all([new BackendDocument(client, 'session-index').read(), new BackendDocument(client, 'workspaces').read(), client.call('/api/v1/messaging/node')])
+    if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
+    for (const tab of localSavedTabs(index)) {
+      const adopted = tab.dsh_session_id ?? importedSessionId(tab)
+      if (sessions.some(row => row.id === adopted)) continue
+      const id = savedDirectoryId(node.node_id, tab)
+      sessions.push({ id, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: 0, running: false, nativeThreadId: tab.session_id, savedTab: tab })
+      const workspace = result.workspaces.find(workspace => workspace.path === tab.cwd)
+      if (workspace) workspace.sessionIds.push(id)
+      if (result.archivedSessionIds.includes(adopted)) result.archivedSessionIds.push(id)
+      if (result.pinnedSessionIds.includes(adopted)) result.pinnedSessionIds.push(id)
+    }
+  }
+  return result
 }
-export async function hostOperation(ctx, input) {
+export async function hostOperation(ctx, input, config = {}) {
+  if (input.nativeSession) {
+    if (!config.backendClient) throw new Error('Kode 会话存储尚未就绪。')
+    return savedSessionOperation(config.backendClient, input)
+  }
   const args = input.args ?? {}
   const allowed = { 'rename-workspace': 'rename', 'delete-workspace': 'delete', 'reorder-workspace': 'insertBefore', 'archive-session': 'archiveSession', 'unarchive-session': 'unarchiveSession', 'pin-session': 'pinSession', 'unpin-session': 'unpinSession' }
   if (input.operation === 'rename-session') return ctx.sessionController.rename({ sessionId: args.sessionId, title: args.title })
@@ -40,7 +62,7 @@ export function registerHostDirectory(ctx, config) {
       if (req.method === 'POST') {
         if (!(req.headers['content-type'] ?? '').startsWith('application/json')) return send(415, { error: 'JSON required' })
         let body = ''; for await (const part of req) { body += part; if (Buffer.byteLength(body) > 16384) throw new Error('请求过长。') }
-        await hostOperation(ctx, JSON.parse(body))
+        await hostOperation(ctx, JSON.parse(body), config)
       }
       send(200, await hostDirectory(ctx, config))
     } catch (error) { send(503, { error: error.message }) }

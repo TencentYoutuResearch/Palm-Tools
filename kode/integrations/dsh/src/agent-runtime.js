@@ -6,14 +6,13 @@ import { agentDefaults, builtinProfiles } from './agent-defaults.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { z } from 'zod'
 import { BackendAgentProfiles } from './backend-state.js'
+import { nativeToolDescriptor } from './native-tools.js'
+import { mountNativeCommands } from './native-commands.js'
+import { humanInput, terminalOnlyCommands } from './native-commands.js'
+import { pendingShellContext } from './native-shell.js'
 
 export { profileRoute } from './agent-profiles.js'
-export function nativeToolDescriptor(item) {
-  if(item.type==='commandExecution' && typeof item.command==='string')return{name:'exec_command',args:{cmd:item.command,...(item.cwd?{cwd:item.cwd}:{})}}
-  if(item.type==='fileChange')return{name:'apply_patch',args:{patch:(item.changes??[]).map(change=>change.diff??'').join('\n')}}
-  if(item.type==='webSearch')return{name:'web_search',args:item}
-  return{name:`kode_native_${item.type}`,args:item}
-}
+export { nativeToolDescriptor } from './native-tools.js'
 export class AgentRuntimeAdapter {
   constructor(ctx, profiles, { recordNative = (session, data) => appendPluginRecord(session, 'plugin:kode/native-event', data), resolveProfile = async profile => profile, onThread = async () => {} } = {}) {
     this.ctx = ctx; this.profiles = profiles; this.live = new Map(); this.busy = new Set(); this.catalogs = new Map(); this.positions = new WeakMap(); this.stop = new AbortController(); this.probes = new Set()
@@ -38,22 +37,31 @@ export class AgentRuntimeAdapter {
   async resolveModel(provider, model) { return { provider, id: model, name: model, inputModalities: ['text'] } }
   async prepareCall(provider, model, signal) { return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options) } }
   invalidateModels(provider) { for (const key of this.catalogs.keys()) if (key === provider || key.startsWith(`${provider}:`)) this.catalogs.delete(key) }
-  async listModels(provider, profileOverride) {
+  async capabilities(provider, profileOverride, cwd = process.cwd()) {
     this.stop.signal.throwIfAborted()
     const profile = profileOverride ?? this.profile(provider)
-    const key = `${provider}:${profileRevision(profile)}`
+    const key = `${provider}:${profileRevision(profile)}:${cwd}`
     if (!this.catalogs.has(key)) {
       const task = (async () => {
-        const session = await createNativeSession(await this.resolveProfile(profile), process.cwd())
+        const session = await createNativeSession(await this.resolveProfile(profile), cwd)
         this.probes.add(session)
         try {
           const models = await session.listModels(AbortSignal.any([this.stop.signal, AbortSignal.timeout(45000)]))
-          return models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: ['text'] }))
+          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: ['text'] })), commands: session.commands ?? [], modes: session.state?.modes?.availableModes ?? [] }
         } finally { this.probes.delete(session); await session.close() }
       })().catch(error => { if (this.catalogs.get(key) === task) this.catalogs.delete(key); throw error })
       this.catalogs.set(key, task)
     }
     return this.catalogs.get(key)
+  }
+  async listModels(provider, profile) { return (await this.capabilities(provider, profile)).models }
+  async listCommands(provider, profile) { return (await this.capabilities(provider, profile)).commands }
+  async listSkills(provider, profile, cwd) {
+    if (profile.type !== 'codex' && profile.protocol !== 'codex') return { skills: [], errors: [] }
+    const session = await createNativeSession(await this.resolveProfile(profile), cwd ?? process.cwd())
+    this.probes.add(session)
+    try { return await session.listSkills(AbortSignal.any([this.stop.signal, AbortSignal.timeout(20000)])) }
+    finally { this.probes.delete(session); await session.close() }
   }
   boundary(agent) {
     const observed = this.positions.get(agent.session)
@@ -82,6 +90,11 @@ export class AgentRuntimeAdapter {
     const runtime = await createNativeSession(await this.resolveProfile(binding.profile, agent), agent.session.header.cwd ?? process.cwd(), {
       policy: () => agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session }) ?? { mode: 'read-only' },
       approvalPolicy: () => agent.ctx.get('approval')?.effectivePolicy?.(agent.session) ?? 'ask',
+      mode: () => {
+        const row = agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/native-mode')?.data
+        return row && row.policy === agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })?.mode ? row.mode : undefined
+      },
+      commands: commands => this.onCommands?.(agent, commands),
       tool: async (request, signal) => {
         if (!tools.some(t => t.name === request.tool)) throw new Error('native Agent requested an unadvertised dsh tool')
         const callId = callIdentity(request.turnId, request.callId)
@@ -137,7 +150,11 @@ export class AgentRuntimeAdapter {
       const seen = new Set(binding.seenInputs)
       const messages = options.messages.filter(m => m.role === 'user' && m.id && !seen.has(m.id))
       if (!messages.length) throw new Error('No new user input; refusing to replay a native Agent turn')
-      const input = messages.flatMap(m => m.content.map(c => {
+      const human = messages.length === 1 ? humanInput(messages[0]) : undefined
+      const match = human && /^\/([a-z][a-z0-9_:-]*)(?:\s|$)/.exec(human)
+      const command = match ? { name: match[1], input: human.slice(match[0].length).trim() } : undefined
+      const context = command ? [] : pendingShellContext(agent.session)
+      const input = [...context, ...messages].flatMap(m => m.content.map(c => {
         if (c.type !== 'text') throw new Error('This Agent adapter currently accepts text input only')
         return { type: 'text', text: c.text }
       }))
@@ -145,13 +162,16 @@ export class AgentRuntimeAdapter {
       runtime = this.live.get(agent.id)
       if (runtime?.rpc.closed) { this.live.delete(agent.id); runtime = undefined }
       if (!runtime) { runtime = await this.createRuntime(agent, binding, tools, signal); this.live.set(agent.id, runtime) }
+      const skillNames = messages.flatMap(message => [...(humanInput(message) ?? '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_-]*)\b/g)].map(match => match[1]))
+      if (command && terminalOnlyCommands.has(command.name)) throw new Error(`/${command.name} 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。`)
       // Commit admission before sending. A crash cannot automatically repeat a
       // native turn with potentially irreversible tools; the user may follow up.
       await this.profiles.patchBinding(agent.id, { seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
+      if (context.length) appendPluginRecord(agent.session, 'plugin:kode/shell-context-consumed', { ids: context.map(row => row.id) })
       await agent.ctx.parallel('session/flush', agent.session)
       let text = '', reasoning = '', textIndex, reasoningIndex, nextIndex = 0
       const streamed = new Set(), reasoningChannels=new Map()
-      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, signal })) {
+      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, signal, command, skillNames })) {
         this.recordNative(agent.session, { ...this.boundary(agent), event })
         const { method, params } = event
         if (['item/reasoning/summaryTextDelta','item/reasoning/textDelta'].includes(method) && params.delta) {
@@ -176,7 +196,7 @@ export class AgentRuntimeAdapter {
           if (method === 'item/started' && !runtime.nativeCalls.has(callId)) { this.logCall(agent, callId, descriptor.name, descriptor.args); runtime.nativeCalls.add(callId) }
           if (method === 'item/completed') {
             if (!runtime.nativeCalls.has(callId)) this.logCall(agent, callId, descriptor.name, descriptor.args)
-            this.logResult(agent, callId, [{ type: 'text', text: item.aggregatedOutput ?? JSON.stringify(item) }], ['failed', 'declined'].includes(item.status))
+            this.logResult(agent, callId, [{ type: 'text', text: item.kind || item.input ? JSON.stringify(item) : item.aggregatedOutput ?? JSON.stringify(item) }], ['failed', 'declined'].includes(item.status))
             runtime.nativeCalls.delete(callId)
           }
         }
@@ -238,11 +258,19 @@ export async function installAgentRuntime(ctx, config) {
     else if (routes().length) registration = ctx.llm.registerAdapter(routes(), adapter)
   }
   refresh()
-  const service = { profiles, adapter, refresh,
+  const service = { profiles, adapter, refresh, commandOwners: new Map(),
     get types() { return Object.fromEntries([...runtimes].map(([id, spec]) => [id, { name: spec.name, executable: spec.executable, available: spec.available }])) },
     hasRuntime: type => runtimes.has(type), driver: type => runtimes.get(type)?.driver,
     channelFor: type => runtimes.get(type)?.uiChannel ?? 'native',
-    recordBinding: (agent, profile) => appendPluginRecord(agent.session, 'plugin:kode/agent-binding', { profileId: profile.id, name: profile.name, type: profile.type, uiChannel: runtimes.get(profile.type)?.uiChannel ?? 'native' }),
+    mountCommands: agent => {
+      const selection = agent.options?.provider
+      const profile = profiles.binding(agent.id)?.profile ?? profiles.list().find(row => profileRoute(row.id) === selection)
+      mountNativeCommands(agent, service, profile)
+    },
+    recordBinding: (agent, profile) => {
+      appendPluginRecord(agent.session, 'plugin:kode/agent-binding', { profileId: profile.id, name: profile.name, type: profile.type, uiChannel: runtimes.get(profile.type)?.uiChannel ?? 'native' })
+      mountNativeCommands(agent, service, profile)
+    },
     registerRuntime(type, spec) {
       if (runtimes.has(type)) throw new Error(`Agent runtime already installed: ${type}`)
       runtimes.set(type, spec)
@@ -257,8 +285,9 @@ export async function installAgentRuntime(ctx, config) {
       }
     },
   }
+  adapter.onCommands = (agent, commands) => service.commandOwners.get(agent.id)?.update?.(commands)
   ctx.provide('kodeAgents', service)
-  ctx.on('agent/disposed', ({ agent }) => { void adapter.closeSession(agent.id).catch(error => ctx.logger.warn('Kode Agent cleanup failed: %s', error.message)) })
+  ctx.on('agent/disposed', ({ agent }) => { service.commandOwners.delete(agent.id); void adapter.closeSession(agent.id).catch(error => ctx.logger.warn('Kode Agent cleanup failed: %s', error.message)) })
   ctx.effect(() => async () => { registration?.(); await adapter.close(); await profiles.chain }, 'kode.agent-runtimes')
   return service
 }

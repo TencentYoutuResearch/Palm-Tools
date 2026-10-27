@@ -58,6 +58,13 @@ test('inline native citations split line suffixes before entering the shipped fi
  assert.equal(c.chatShell.children,children);assert.equal(c.chatShell.store,store)
  for(const dispose of c.disposers)dispose();assert.equal(c.chatShell.component,c.native)
 })
+test('ACP operations render nested command input and old completed metadata instead of generic Terminal labels',()=>{
+ const c=client(),render=c.entry('tool.call.toolview','kode_native_commandExecution')
+ const values={title:'Terminal',kind:'execute',input:{command:'git status --short'}}
+ const tree=render({toolName:'kode_native_commandExecution',phase:'result',block:{args:{text:key=>typeof values[key]==='string'?values[key]:undefined,value:key=>typeof values[key]==='object'?values[key]:undefined},content:[{type:'text',text:JSON.stringify({input:{command:'git status --short'},aggregatedOutput:' M app.ts'})}]},useDisclosure:()=>({expanded:true,setExpanded:()=>{}})})
+ const visible=visibleText(tree)
+ assert.match(visible,/执行命令/);assert.match(visible,/git status --short/);assert.match(visible,/ M app.ts/);assert.doesNotMatch(visible,/Agent 操作|Terminal|aggregatedOutput/)
+})
 test('subagent notifications show named status and Markdown without protocol IDs or raw controls',()=>{
   const c=client(),text='<subagent_notification>\n'+JSON.stringify({agent_path:'agent-secret-id',nickname:'评审助手',status:{completed:'**检查完成**\n\n发现两项需要修复的问题。'}})+'\n</subagent_notification>'
   const {node,tree}=internalTree(c,'user',text),before=JSON.stringify(node)
@@ -295,4 +302,16 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
       assert.deepEqual(c.requests.at(-1), { action: 'host-operation', id: foreign, operation, args: { sessionId: 'same' } })
     }
   }
+})
+test('saved legacy tab archive controls work without importing or starting the saved Agent',async()=>{
+ const c=client({current:'local',hosts:[{id:'local',sessions:[{id:'saved:legacy',title:'Removed Agent tab'}],archivedSessionIds:['saved:legacy'],workspaces:[]}]})
+ const archive=()=>null;c.addSlot('sidebar.workspaces.session.menu.item','archive',archive)
+ const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:[],byId:{}}),useWorkspaces:select=>select({items:[],archivedSessionIds:[],pinnedSessionIds:[]})})
+ wrapper.type(wrapper.props);await new Promise(resolve=>setImmediate(resolve))
+ const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
+ assert.ok(native.props.useWorkspaces(state=>state.archivedSessionIds).includes('saved:legacy'))
+ const menu=native.props.renderSlot('sidebar.workspaces.session.menu.item',{sessionId:'saved:legacy'},{hookContext:[true,()=>{}]})
+ menu.children.flat()[0].props.archiveSession('saved:legacy');await new Promise(resolve=>setImmediate(resolve))
+ assert.deepEqual(c.requests[0],{action:'host-operation',id:'local',operation:'archive-session',args:{sessionId:'saved:legacy'}})
+ assert.ok(!c.requests.some(row=>row.action==='import-saved'))
 })

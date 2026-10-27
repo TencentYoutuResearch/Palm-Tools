@@ -2,6 +2,7 @@
 import { AGENT_TYPES } from './agent-profiles.js'
 import { profileRoute } from './agent-runtime.js'
 import { SUPPORTED_AGENT_TYPES } from './native-session.js'
+import { resolveAdvertisedModel } from './model-alias.js'
 const PATH = '/api/kode/agents'
 const json = (res, status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
 export function registerAgentApi(ctx, service) {
@@ -49,8 +50,9 @@ export function registerAgentApi(ctx, service) {
         try { if (profile && available(profile)) models = await modelsFor(profile, catalog) } catch (error) { modelError = error.message }
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })
         const installed = profiles.list().filter(available)
+        const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await ctx.sessionController.list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, currentProfile: profile && available(profile) ? profile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: binding.profile.name, type: binding.profile.type } : null,
-          selectedProfileId, selection, catalog, models, modelError,
+          selectedProfileId, selection, catalog, models, modelError, ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
           canChangeAgent: !agent || (agent.status === 'idle' && !(ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')?.lastTurn > 0)),
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
@@ -82,7 +84,7 @@ export function registerAgentApi(ctx, service) {
         if (!models.length) throw new Error('无法读取此 Agent 的模型，请检查可执行文件和登录状态后重试。')
         const prior = selected(agent)
         model = input.model ?? (prior?.provider === provider && prior.model !== 'default' ? prior.model : undefined) ?? profile.defaultModel ?? models.find(m => m.isDefault)?.id ?? models[0].id
-        if (!models.some(m => m.id === model)) throw new Error('所选模型不在此 Agent 返回的模型列表中，请重新选择。')
+        model = resolveAdvertisedModel(models, model)
       }
       // Verify the route before committing the profile binding; no executable is
       // launched by changing the selector (only bounded model discovery runs).

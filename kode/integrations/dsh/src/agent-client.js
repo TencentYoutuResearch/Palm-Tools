@@ -285,6 +285,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const archivedSessionIds = [...workspaceSource.archivedSessionIds], pinnedSessionIds = [...workspaceSource.pinnedSessionIds]
       for (const host of data.hosts) {
         if (host.id === data.current) {
+          archivedSessionIds.push(...(host.archivedSessionIds ?? [])); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
           const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:'))
           for (const row of saved) { ids.push(row.id); byId[row.id] = { ...row, displayTitle: row.title, retainedBy: {}, blank: false, projectionValues: {} }; routes.set(row.id, { hostId: host.id, id: row.id }) }
           items.push(...workspaceSource.items.map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds.filter(id => id.startsWith('saved:')) ?? [])])] })))
@@ -324,7 +325,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const open = id => { const route = merged.routes.get(id); if (route) void navigate(route.hostId, { sessionId: route.id }); else props.open(id) }
     const mutate = async (id, operation, args) => {
       const route = merged.routes.get(id)
-      if (route.id.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: route.id }); args = { ...args, sessionId: imported.sessionId } }
       await projectCall({ action: 'host-operation', id: route.hostId, operation, args })
       await refreshWorkspaceDirectory()
     }
@@ -474,6 +474,53 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     )
   }
   const textContent = content => (content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n')
+  function CodexSkillPicker({ sessionId, sessions, useInput, inputActions }) {
+    const { data } = useDirectory(sessionId, sessions), input = useInput(state => state)
+    const [catalog, setCatalog] = useState(null), [error, setError] = useState(''), [index, setIndex] = useState(0), [dismissed, setDismissed] = useState(-1)
+    const root = React.useRef(null), selection = inputActions.captureInsertion()
+    const match = input.phase === 'plain' && /(?:^|\s)\$([a-zA-Z0-9_-]*)$/.exec(input.draft.slice(0, selection.end))
+    const enabled = Boolean(match && data?.currentProfile && (data.currentProfile.type === 'codex' || data.currentProfile.protocol === 'codex'))
+    const profileKey = data?.currentProfile?.id
+    useEffect(() => { setCatalog(null); setError('') }, [sessionId, profileKey])
+    useEffect(() => {
+      if (!enabled || catalog) return
+      const stop = new AbortController()
+      fetchHost(`${API}?session_id=${encodeURIComponent(sessionId)}&skills=1`, { credentials: 'same-origin', cache: 'no-store', signal: stop.signal }).then(async response => {
+        const value = await response.json(); if (!response.ok) throw new Error(value.error ?? '技能目录读取失败。')
+        if (!stop.signal.aborted) { setCatalog(value.skills ?? []); if (value.skillErrors?.length) setError('部分技能无法读取，请检查 Agent 的技能配置。') }
+      }).catch(error => { if (!stop.signal.aborted) setError(error.message) })
+      return () => stop.abort()
+    }, [enabled, sessionId, profileKey, catalog])
+    const candidates = (catalog ?? []).filter(skill => `${skill.name} ${skill.description ?? ''}`.toLowerCase().includes((match?.[1] ?? '').toLowerCase())).slice(0, 30)
+    const open = enabled && dismissed !== input.draftRev
+    const pick = skill => {
+      const start = selection.end - match[1].length - 1
+      if (inputActions.insertText(`$${skill.name} `, { start, end: selection.end, draftRev: input.draftRev })) setDismissed(input.draftRev)
+    }
+    useEffect(() => { setIndex(0) }, [match?.[1]])
+    useEffect(() => { root.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }) }, [index])
+    useEffect(() => {
+      if (!open || !root.current) return
+      let region = root.current.parentElement
+      for (let depth = 0; region && depth < 8 && !region.querySelector('[contenteditable="true"]'); depth++) region = region.parentElement
+      if (!region) return
+      const handle = event => {
+        if (event.isComposing || !event.target.closest?.('[contenteditable="true"]') || !region.contains(event.target)) return
+        if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); setDismissed(input.draftRev); return }
+        if (!candidates.length) return
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); event.stopImmediatePropagation(); setIndex(value => (value + (event.key === 'ArrowDown' ? 1 : -1) + candidates.length) % candidates.length) }
+        else if (event.key === 'Tab' || event.key === 'Enter') { event.preventDefault(); event.stopImmediatePropagation(); pick(candidates[index % candidates.length]) }
+      }
+      window.addEventListener('keydown', handle, true)
+      return () => window.removeEventListener('keydown', handle, true)
+    }, [open, input.draftRev, index, candidates.map(skill => skill.name).join('\n')])
+    if (!open) return null
+    return h('div', { ref: root, className: 'kode-skill-menu', role: 'listbox', 'aria-label': 'Codex 技能' },
+      h('div', { className: 'kode-skill-caption' }, 'Codex 技能'), h(Failure, { text: error }),
+      !catalog && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取工作区技能…'),
+      catalog && !candidates.length && h('p', { className: 'kode-config-note' }, '没有匹配的技能'),
+      ...candidates.map((skill, position) => h(Button, { key: skill.path, variant: 'ghost', className: `kode-skill-option${position === index ? ' kode-skill-current' : ''}`, role: 'option', 'aria-selected': position === index, onMouseDown: event => event.preventDefault(), onClick: () => pick(skill) }, h('span', null, `$${skill.name}`), skill.description && h('small', null, skill.description))))
+  }
   function InlineFileChat({native,...props}) {
     const openFile=React.useCallback((path,options)=>{
       if(typeof path!=='string'||/^[a-z][a-z\d+.-]*:\/\//i.test(path))return props.openFile(path,options)
@@ -652,12 +699,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   }
   function NativeOperationTool({toolName,phase,block,useDisclosure}) {
     const {expanded:open,setExpanded:setOpen}=useDisclosure()
-    const command=block.args.text('cmd') || block.args.text('command')
+    let input=block.args.value?.('input') ?? block.args.value?.('rawInput') ?? {}
+    let output=textContent(block.content), result
+    try{result=JSON.parse(output)}catch{}
+    if(typeof input==='string'){try{input=JSON.parse(input)}catch{input={command:input}}}
+    if(!Object.keys(input ?? {}).length)input=result?.input ?? result?.rawInput ?? {}
+    const command=block.args.text('cmd') || block.args.text('command') || input?.command || input?.cmd
     const patch=block.args.text('patch')
     const editing=['apply_patch','kode_native_fileChange'].includes(toolName)
-    const title=editing?'修改文件':command?'执行命令':'Agent 操作'
-    const preview=command || patch || block.args.text('title') || block.args.text('reason')
-    let output=textContent(block.content)
+    const kind=block.args.text('kind'), nativeTitle=block.args.text('title')
+    const title=editing?'修改文件':command||kind==='execute'||/^(terminal|bash)$/i.test(nativeTitle??'')?'执行命令':kind==='read'?'读取文件':kind==='search'?'搜索':nativeTitle||'Agent 操作'
+    const preview=command || block.args.text('path') || input?.file_path || input?.path || patch || (nativeTitle!==title?nativeTitle:undefined) || block.args.text('reason')
+    if(result?.aggregatedOutput!==undefined)output=result.aggregatedOutput
     if(editing){try{const value=JSON.parse(output);if(Array.isArray(value.changes))output=value.changes.map(change=>[change.path,change.diff].filter(Boolean).join('\n')).join('\n\n')}catch{/* A native patch result can also be ordinary text. */}}
     return h('section',{className:'kode-message-tool'},
       h('button',{type:'button',className:'kode-tool-heading','aria-expanded':open,onClick:()=>setOpen(!open)},h(IconAgentPresetOutlineRegular,{size:14}),h('span',null,title),h('span',{className:block.isError?'kode-error':'kode-secondary'},block.isError?'未完成':phase==='result'?'已完成':'运行中'),h(IconChevronDownOutlineRegular,{size:12})),
@@ -759,6 +812,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const binding = ctx.sessions.binding(sessionId)
       return { eventSource: binding.eventSource, session: binding.session }
     } }, AgentTrajectory))
+    ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'kode-native-skills', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, CodexSkillPicker))
     ctx.slots.inject('conversation.view',()=>{
       let source,original,wrapper
       const restore=()=>{if(source&&source.component===wrapper)source.component=original}
@@ -849,6 +903,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-relay{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);padding:12px 16px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-size:13px;min-width:0}.kode-relay-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-relay-heading strong{font-weight:500;overflow-wrap:anywhere;min-width:0;max-width:100%}.kode-relay-heading time{margin-left:auto;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-relay-source{display:flex;align-items:center;gap:10px;margin-top:8px;color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}.kode-relay-preview{margin:8px 0;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.kode-relay summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:12px;padding:4px 0}.kode-relay-body{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;max-height:320px;overflow:auto}.kode-message-tool{min-width:0;font-size:13px;padding:4px 0}.kode-tool-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;background:none;border:0;color:var(--dsw-alias-label-primary);padding:4px 0;font:inherit;text-align:left}.kode-tool-target{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:normal;overflow-wrap:anywhere;line-height:1.6;padding-left:22px}.kode-message-tool>.kode-relay-preview{margin-left:22px;color:var(--dsw-alias-label-secondary)}.kode-tool-detail{padding-left:22px}.kode-relay button:focus-visible,.kode-relay summary:focus-visible,.kode-tool-heading:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-trigger{border-radius:var(--dsw-radius-sm);min-width:0;max-width:240px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:0;align-items:center;gap:4px;padding:0 4px 0 8px;font:inherit;font-size:13px;line-height:20px;display:inline-flex}
 .kode-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-trigger svg{flex:none}.kode-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.kode-trigger:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}.kode-agent-trigger{color:var(--dsw-alias-label-primary)}.kode-chevron-open{transform:rotate(180deg)}
+.kode-skill-menu{max-height:16rem;overflow:auto;width:calc(100% - var(--dsh-composer-side-clearance,16px)*2);max-width:var(--dsh-composer-card-max-width);margin:0 auto 8px;box-sizing:border-box;padding:6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-skill-caption{padding:6px 10px;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-skill-menu .kode-skill-option{display:flex;align-items:flex-start;flex-direction:column;gap:4px;width:100%;text-align:left;padding:8px 10px;background:transparent;border:0;color:inherit}.kode-skill-option:hover,.kode-skill-menu .kode-skill-current{background:var(--dsw-alias-interactive-bg-hover)}.kode-skill-option small{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5;white-space:normal}.kode-skill-option:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:-2px}
 .kode-option{display:flex;align-items:center;justify-content:space-between;gap:24px;min-width:200px}.kode-secondary{color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-menu-note{padding:8px 12px;max-width:260px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .kode-agent-settings{max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}.kode-agent-settings h2{margin:0;font-size:16px;font-weight:500;line-height:24px}.kode-agent-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}.kode-agent-rows{display:flex;flex-direction:column;gap:8px;margin:12px 0 0;padding:0;list-style:none}.kode-agent-row{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);padding:12px 14px;display:flex;flex-direction:column;gap:12px}.kode-agent-row-head{display:flex;align-items:center;gap:10px;min-width:0}.kode-agent-name{font-size:14px;font-weight:500;line-height:22px;overflow-wrap:anywhere;min-width:0}.kode-agent-tag{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);color:var(--dsw-alias-label-secondary);padding:1px 6px;font-size:11px;line-height:16px;flex-shrink:0}.kode-agent-edit{margin-left:auto;flex-shrink:0!important;height:28px!important;padding:0 10px!important;border-radius:var(--dsw-radius-sm)!important;font-size:12px!important;line-height:18px!important}.kode-agent-add{width:100%;min-height:44px!important;border:1px dashed var(--dsw-alias-border-l3)!important;border-radius:var(--dsw-radius-lg)!important;gap:6px!important}.kode-agent-editor{border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);padding:14px 16px;min-width:0}.kode-agent-editor .kode-field{gap:6px;margin-bottom:14px}.kode-agent-editor .kode-field>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-agent-models{min-width:0}.kode-settings-footer{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:14px}
 .kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-advanced summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary);padding:2px 0 14px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}

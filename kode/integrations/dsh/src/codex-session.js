@@ -11,6 +11,12 @@ export class CodexSession {
   constructor(profile, cwd, handlers = {}) {
     this.profile = profile; this.cwd = cwd; this.handlers = handlers
     this.lifetime = new AbortController(); this.requests = new Set()
+    this.commands = [
+      { name: 'compact', description: '使用 Codex 原生上下文压缩' },
+      { name: 'review', description: '审查当前工作区或指定范围', input: { hint: '留空审查未提交修改，或填写审查要求' } },
+      { name: 'mcp', description: '查看 Codex MCP 连接状态' },
+      { name: 'skills', description: '列出此工作区的 Codex 技能' },
+    ]
   }
   connectRpc() {
     this.rpc = new RpcProcess(this.profile, this.cwd)
@@ -82,10 +88,18 @@ export class CodexSession {
     } while (cursor)
     return models
   }
-  async *turn(input, { model, effort, signal } = {}) {
+  async listSkills(signal) {
+    await this.initialize(signal)
+    const response = await this.rpc.request('skills/list', { cwds: [this.cwd], forceReload: true }, { signal })
+    const errors = response.data.flatMap(group => group.errors ?? [])
+    const skills = response.data.flatMap(group => group.skills ?? []).filter(skill => skill.enabled !== false && typeof skill.path === 'string')
+    return { skills, errors }
+  }
+  async *turn(input, { model, effort, signal, command, skillNames = [] } = {}) {
     if (!this.threadId) throw new Error('Agent session has not been opened')
     if (this.active) throw new Error('Agent already has an active turn')
     signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
+    if (command?.name === 'compact') signal = AbortSignal.any([signal, AbortSignal.timeout(180000)])
     const queue = [], active = { signal, done: false, error: undefined, wake: undefined,
       push(message) {
         if (message.params?.threadId && message.params.threadId !== this.threadId) return
@@ -107,14 +121,58 @@ export class CodexSession {
       signal?.throwIfAborted()
       const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
       const sandboxPolicy = policy.mode === 'danger-full-access' ? { type: 'dangerFullAccess' } : policy.mode === 'workspace-write' ? { type: 'workspaceWrite', writableRoots: [policy.workspaceRoot ?? this.cwd] } : { type: 'readOnly' }
-      const result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}) }, { signal })
-      turnId = result.turn.id
+      if (skillNames.length) {
+        const { skills } = await this.listSkills(signal)
+        for (const name of new Set(skillNames)) {
+          const matches = skills.filter(skill => skill.name === name)
+          if (matches.length > 1) throw new Error(`技能 ${name} 对应多个路径，请先处理同名技能。`)
+          if (matches.length === 1) input = [...input, { type: 'skill', name, path: matches[0].path }]
+        }
+      }
+      let result
+      if (command) {
+        if (!this.commands.some(row => row.name === command.name)) throw new Error(`Codex app-server 不支持 /${command.name}，请用 /help 查看此界面支持的命令。`)
+        if (command.name !== 'review' && command.input) throw new Error(`/${command.name} 不接受参数。`)
+        if (command.name === 'mcp' || command.name === 'skills') {
+          const rows = []
+          if (command.name === 'skills') {
+            const response = await this.rpc.request('skills/list', { cwds: [this.cwd] }, { signal })
+            rows.push(...response.data.flatMap(group => (group.skills ?? []).map(skill => `${skill.name} — ${skill.description ?? ''}`)))
+          } else {
+            let cursor
+            do {
+              const response = await this.rpc.request('mcpServerStatus/list', { limit: 100, ...(cursor ? { cursor } : {}) }, { signal })
+              rows.push(...response.data.map(server => `${server.name} — ${server.authStatus ?? '已连接'} · ${Object.keys(server.tools ?? {}).length} 个工具`)); cursor = response.nextCursor
+              if (rows.length > 10000) throw new Error('MCP 状态列表过大。')
+            } while (cursor)
+          }
+          turnId = `command:${randomUUID()}`; active.turnId = turnId; completed = true
+          yield { method: 'item/agentMessage/delta', params: { threadId: this.threadId, turnId, itemId: 'command-result', delta: rows.join('\n') || '暂无可用项目。' } }
+          yield { method: 'turn/completed', params: { threadId: this.threadId, turn: { id: turnId, status: 'completed' } } }
+          return
+        }
+        if (command.name === 'compact') result = await this.rpc.request('thread/compact/start', { threadId: this.threadId }, { signal })
+        else {
+          // ReviewStart has no per-request sandbox fields. Refresh the thread's
+          // configuration first so a changed permission menu also governs review.
+          await this.rpc.request('thread/resume', { threadId: this.threadId, cwd: this.cwd, sandbox: policy.mode, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request' }, { signal })
+          result = await this.rpc.request('review/start', { threadId: this.threadId, delivery: 'inline', target: command.input ? { type: 'custom', instructions: command.input } : { type: 'uncommittedChanges' } }, { signal })
+        }
+      } else result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}) }, { signal })
+      turnId = result.turn?.id; active.turnId = turnId
       if (cancelled) { if (!this.rpc.closed) void this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId }).catch(() => {}); signal.throwIfAborted() }
       while (true) {
         if (!queue.length && !active.done) await new Promise(resolve => { active.wake = resolve })
         if (active.error) throw active.error
         const message = queue.shift()
         if (!message) { if (active.done) break; continue }
+        if (command?.name === 'compact' && message.method === 'turn/started') { turnId = message.params.turn.id; active.turnId = turnId }
+        if (command?.name === 'compact' && (message.method === 'thread/compacted' || message.method === 'item/completed' && message.params.item?.type === 'contextCompaction')) {
+          completed = true
+          yield { method: 'item/agentMessage/delta', params: { threadId: this.threadId, turnId, itemId: 'compact-result', delta: 'Codex 已完成上下文压缩。' } }
+          yield { method: 'turn/completed', params: { threadId: this.threadId, turn: { id: turnId ?? `compact:${randomUUID()}`, status: 'completed' } } }
+          break
+        }
         if (message.params?.turnId && message.params.turnId !== turnId) continue
         if (message.method === 'turn/completed' && message.params.turn.id === turnId) {
           if (message.params.turn.status !== 'completed') throw new Error(message.params.turn.error?.message ?? `Agent turn ${message.params.turn.status}`)
