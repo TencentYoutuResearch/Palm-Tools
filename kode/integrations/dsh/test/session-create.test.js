@@ -6,7 +6,7 @@ function fixture() {
   let state = null, revision = 0, creator, starts = 0
   const permissions = [], client = { call: async (_path, update) => { if (!update) return { value: state && structuredClone(state), revision }; assert.equal(update.expected_revision, revision); state = structuredClone(update.value); return { value: state, revision: ++revision } } }
   const binding = {}, profile = { id: 'worker', name: '远端代码助手', type: 'codex' }
-  const agent = { id: '', session: { header: { cwd: '/example/project' } }, followup: () => { starts++ }, ctx: { sessions: { flush: async () => {} } } }
+  const agent = { id: '', session: { header: { cwd: '/example/project' } },selectModel(){}, followup: () => { starts++ }, ctx: { sessions: { flush: async () => {} } } }
   const services = {
     kodeAgents: { profiles: { list: () => [profile], binding: id => binding[id], bind: async id => binding[id] = { profile } }, hasRuntime: () => true, recordBinding() {}, adapter: { listModels: async () => [{ id: 'real-model', isDefault: true }] } },
     workspaceRegistry: { list: () => [{ id: 'workspace', path: '/example/project', title: '项目' }] },
@@ -37,6 +37,7 @@ test('model-created helper waits for its durable peer assignment and inherits re
 test('Kode declarations select the protocol while preserving custom executable names',()=>{
   assert.deepEqual(backendProfile('team-worker',{command:'/example/tcodex',args:[],mcp_setup:{style:'codex'}}),{id:'kode-team-worker',name:'team-worker',type:'codex',executable:'/example/tcodex',args:[]})
   assert.equal(backendProfile('worker',{command:'worker',enabled:false,mcp_setup:{style:'claude'}}),undefined)
+  assert.equal(backendProfile('company-buddy',{command:'company-cli',mcp_setup:{style:'codebuddy'}}).type,'codebuddy')
 })
 
 test('creation never selects the first of multiple target workspaces',async()=>{

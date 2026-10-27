@@ -7,6 +7,7 @@ export const AGENT_TYPES = Object.freeze({
   dsh: { name: 'DeepSeek Harness', executable: null },
   codex: { name: 'Codex', executable: 'codex' },
   claude: { name: 'Claude Code', executable: 'claude' },
+  codebuddy: { name: 'CodeBuddy', executable: 'codebuddy' },
   cursor: { name: 'Cursor', executable: 'agent' },
   custom: { name: '自定义', executable: '' },
 })

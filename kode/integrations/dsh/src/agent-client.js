@@ -163,7 +163,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           h(SelectField, { label: 'Agent 类型', value: draft.type, options: Object.entries(data?.types ?? {}).map(([value, spec]) => ({ value, label: spec.name })), onChange: type => change({ type, executable: data.types[type].executable ?? '', argsText: '[]', protocol: type === 'custom' ? 'acp' : undefined }) }),
           draft.type !== 'dsh' && field('可执行文件', 'executable', { required: true, placeholder: data?.types[draft.type]?.executable, spellCheck: false }),
           draft.type === 'custom' && h(SelectField, { label: '通信协议', value: draft.protocol ?? 'acp', options: [{ value: 'acp', label: 'ACP' }, { value: 'codex', label: 'Codex app-server' }], onChange: protocol => change({ protocol }) }),
-          h('p', { className: 'kode-config-note' }, '模型从 Agent 自动读取，工作区跟随当前会话。', ['claude', 'cursor', 'custom'].includes(draft.type) && draft.protocol !== 'codex' ? '操作审批已接入；文件隔离范围由 Agent 自身能力决定。' : '访问模式应用于执行沙箱。'),
+          h('p', { className: 'kode-config-note' }, '模型从 Agent 自动读取，工作区跟随当前会话。', ['claude', 'codebuddy','cursor', 'custom'].includes(draft.type) && draft.protocol !== 'codex' ? '操作审批已接入；文件隔离范围由 Agent 自身能力决定。' : '访问模式应用于执行沙箱。'),
           h('details', { className: 'kode-advanced' }, h('summary', null, '高级设置'),
             draft.type !== 'dsh' && field('启动参数（JSON 数组）', 'argsText', { spellCheck: false }),
             draft.type !== 'dsh' && h('label', { className: 'kode-field' }, h('span', null, '环境变量（JSON 对象）'), h('textarea', { rows: 4, spellCheck: false, value: draft.envText, onChange: e => change({ envText: e.target.value }) })),
@@ -474,6 +474,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     )
   }
   const textContent = content => (content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n')
+  function InlineFileChat({native,...props}) {
+    const openFile=React.useCallback((path,options)=>{
+      if(typeof path!=='string'||/^[a-z][a-z\d+.-]*:\/\//i.test(path))return props.openFile(path,options)
+      const match=/^(.*?)(?::([1-9]\d*)(?::[1-9]\d*)?|#L([1-9]\d*)(?:C[1-9]\d*|(?:-L?)[1-9]\d*)?)$/.exec(path)
+      const line=match&&Number(match[2]??match[3])
+      if(!match||!Number.isSafeInteger(line))return props.openFile(path,options)
+      return props.openFile(match[1],{...options,line:options?.line??line})
+    },[props.openFile])
+    return h(native,{...props,openFile})
+  }
   const internalTags = {
     subagent_notification: '子 Agent 通知', environment_context: '环境上下文',
     INSTRUCTIONS: '项目规则', user_instructions: '会话规则', hook_prompt: 'Hook 提示',
@@ -749,6 +759,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const binding = ctx.sessions.binding(sessionId)
       return { eventSource: binding.eventSource, session: binding.session }
     } }, AgentTrajectory))
+    ctx.slots.inject('conversation.view',()=>{
+      let source,original,wrapper
+      const restore=()=>{if(source&&source.component===wrapper)source.component=original}
+      const install=()=>{
+        const entry=ctx.slots.entries('conversation.view').find(entry=>entry.options.id==='chat'&&entry.store)
+        if(!entry||entry===source)return
+        restore();source=entry;original=entry.component
+        const native=original;wrapper=props=>h(InlineFileChat,{...props,native});entry.component=wrapper
+      }
+      const unsubscribe=ctx.slots.subscribe('conversation.view',install);install()
+      return()=>{unsubscribe();restore()}
+    })
     // Keep each native seat's injections, locale, reasoning/image children and
     // actions. This also upgrades already imported history without rewriting it.
     ctx.slots.inject('conversation.chat.node', () => {

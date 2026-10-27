@@ -28,9 +28,11 @@ fn profile(key: &str, config: &BackendConfig) -> Option<Value> {
         "codex" | "tcodex" | "native-codex" | "gateway-codex" => "codex",
         "claude" | "tclaude" | "claude-internal" => "claude",
         "cursor" => "cursor",
+        "codebuddy" => "codebuddy",
         _ => match config.mcp_setup {
             Some(McpSetupSpec::Codex { .. }) => "codex",
             Some(McpSetupSpec::Claude { .. }) => "claude",
+            Some(McpSetupSpec::Codebuddy { .. }) => "codebuddy",
             _ => return None,
         },
     };
@@ -53,11 +55,13 @@ fn backend(profile: &Value, previous: Option<&BackendConfig>) -> Result<BackendC
     let kind = profile["type"].as_str().context("Agent type is missing")?;
     let command = profile["executable"].as_str().unwrap_or(if kind == "dsh" { "dsh" } else { "" });
     if command.is_empty() || command.contains('\0') { bail!("Agent executable is missing or invalid"); }
-    let mut config = previous.cloned().unwrap_or_else(|| kode_core::Config::default().backends["codex"].clone());
+    let defaults = kode_core::Config::default();
+    let mut config = previous.cloned().unwrap_or_else(|| defaults.backends.get(kind).unwrap_or(&defaults.backends["codex"]).clone());
     config.protocol = Some(match kind {
         "codex" => if executable_name(command) == "tcodex" { "tcodex" } else { "codex" },
         "claude" => if executable_name(command) == "tclaude" { "tclaude" } else { "claude" },
         "cursor" => "cursor",
+        "codebuddy" => "codebuddy",
         "custom" if profile["protocol"] == "codex" => "codex",
         "dsh" | "custom" => "raw",
         _ => bail!("unsupported Agent type"),
@@ -90,6 +94,7 @@ fn backend(profile: &Value, previous: Option<&BackendConfig>) -> Result<BackendC
 }
 
 pub(super) fn initialize(hub: &Hub) -> Result<()> {
+    super::codebuddy_registry::adopt_existing(hub)?;
     let row = hub.store.document("agents")?;
     if row.pointer("/value/shared_registry_version") == Some(&json!(1)) {
         publish(hub, &row["value"])?;
@@ -273,6 +278,13 @@ pub(super) fn change(hub: &Hub, command: Change) -> Result<Catalog> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn codebuddy_keeps_its_protocol_and_permission_flags_for_named_profiles(){
+        let defaults=kode_core::Config::default();let item=profile("codebuddy",&defaults.backends["codebuddy"]).unwrap();
+        assert_eq!(item["type"],"codebuddy");let configured=backend(&item,None).unwrap();
+        assert_eq!(configured.protocol.as_deref(),Some("codebuddy"));assert_eq!(configured.permission_mode_flag.as_deref(),Some("--permission-mode"));
+    }
 
     fn host() -> (tempfile::TempDir, Arc<crate::Ctx>, Arc<Hub>) {
         let root=tempfile::tempdir().unwrap();

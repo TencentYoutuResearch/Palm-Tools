@@ -32,7 +32,7 @@ export class AcpSession {
       this.lifetime.signal.throwIfAborted()
       this.process = spawnAgent(process.execPath, [fileURLToPath(import.meta.resolve('@agentclientprotocol/claude-agent-acp/dist/index.js'))], this.cwd, { ...this.profile.env, CLAUDE_CODE_EXECUTABLE: launcher })
     } else {
-      this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' ? ['acp'] : [])], this.cwd, this.profile.env)
+      this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
     }
     const app = client({ name: 'kode-dsh' })
     app.onNotification('session/update', ({ params }) => this.update(params))
@@ -92,7 +92,7 @@ export class AcpSession {
     const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
     if (this.profile.fixedPolicy && (policy.mode !== this.profile.fixedPolicy.mode || (this.handlers.approvalPolicy?.() ?? 'ask') !== this.profile.fixedPolicy.approval)) throw new Error('此 dsh ACP 版本不支持运行中修改权限，请新建会话应用新的权限。')
     const available = this.state.modes?.availableModes ?? []
-    const preferred = policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : ['default', 'agent', 'code']
+    const preferred = policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : policy.mode==='danger-full-access'?['bypassPermissions','fullAccess','yolo','default','agent','code']:['acceptEdits','default','agent','code']
     const mode = preferred.map(id => available.find(m => m.id === id)).find(Boolean)
     if (policy.mode === 'read-only' && !mode && !this.profile.policyManagedByHost) throw new Error('This ACP Agent advertises no read-only mode; choose an Agent with one or explicitly change the session file policy')
     if (mode && this.state.modes.currentModeId !== mode.id) {

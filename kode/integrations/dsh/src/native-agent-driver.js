@@ -61,6 +61,13 @@ export class NativeAgentDriver {
     this.turn = ctx.sessionProjections.stateOf(session, 'turnBoundary')?.lastTurn ?? 0
   }
   setStatus(status) { if (this.status !== status) { this.status = status; this.events.emit('agent/status', { status }) } }
+  selectModel({provider,model,reasoningEffort}) {
+    if(!provider?.startsWith('kode-agent-')||typeof model!=='string'||!model)throw new Error('Select a native Agent model')
+    const selected={provider,model,...(reasoningEffort?{reasoningEffort}:{})}
+    this.session.append('model/selection',selected)
+    this.options={...selected}
+    return{selected}
+  }
   send(message, target, wakeup) { if (this.disposed) throw new Error('Agent runtime has been unplugged'); this.inbox.append(target, message); if (wakeup) { this.parked = false; this.wake() } }
   followup(message) { this.send(message, 'next-turn', true) }
   steer(message) { this.send(message, 'next-step', true) }

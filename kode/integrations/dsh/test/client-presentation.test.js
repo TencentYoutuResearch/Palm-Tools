@@ -10,6 +10,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   const registry = [], openedSections = [], requests = [], native = () => null, disposers = []
   const shell = { options: {}, component: native, locale: 'settings', children: { 'settings.section': { kind: 'list', scope: 'root' } }, store: { create: () => ({ actions: { openSection: id => openedSections.push(id) } }) } }
   const workspaceShell = { options: {}, component: native, store: {}, children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } } }
+  const chatShell={options:{id:'chat'},component:native,store:{},children:{'conversation.chat.flow':{kind:'single',scope:'session'}}}
   const nodeSeats=new Map(['user','steering','context','turn-trigger','assistant-step'].map(key=>[key,{options:{key},component:native,locale:'conversation',children:{images:{kind:'single'}},inject:()=>({hooks:{}})}]))
   const listeners=new Map()
   const react = {
@@ -21,13 +22,13 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   vm.runInNewContext(source, { window: { ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
     setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
   })
-  const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : []), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
+  const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
   const ctx = { sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
     slots: { entries, subscribe: (name,fn) => {const set=listeners.get(name)??new Set();listeners.set(name,set);set.add(fn);return()=>set.delete(fn)}, inject: (_name, callback) => { const result = callback(); if (result?.next) for (const _ of result) {}; if (typeof result === 'function') disposers.push(result) }, register: (options, component) => { registry.push({ options, component });for(const fn of listeners.get(options.name)??[])fn(); return () => {} } },
     inject: (_names, callback) => callback(ctx), effect: callback => { callback() },
   }
   plugin.apply(ctx)
-  return { ctx, native, shell, workspaceShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
+  return { ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
 }
 const relay = (text = 'Please review <script>alert(1)</script>\nsecond line') => ({
   time: 1, source: { kind: 'agent-message', senderSessionId: 'kode:worker.example:session-same-id' },
@@ -46,6 +47,17 @@ function visibleText(node) {
   if(typeof node.type==='function')return visibleText(node.type(node.props))
   return (node.type==='MarkdownText'?node.props.text:'')+' '+visibleText(node.children)
 }
+test('inline native citations split line suffixes before entering the shipped file preview',async()=>{
+ const c=client(),calls=[],children=c.chatShell.children,store=c.chatShell.store
+ const wrapped=c.chatShell.component({openFile:async(path,options)=>calls.push({path,options})}),view=wrapped.type(wrapped.props)
+ for(const [path,expected,line] of [['/srv/project/app.rs:42','/srv/project/app.rs',42],['src/app.ts:12:3','src/app.ts',12],['C:\\project\\app.ts:8','C:\\project\\app.ts',8],['/srv/project/doc.md#L15','/srv/project/doc.md',15]]){
+  await view.props.openFile(path);assert.equal(calls.at(-1).path,expected);assert.equal(calls.at(-1).options.line,line)
+ }
+ const options={line:7};await view.props.openFile('/srv/project/app.rs:42',options);assert.equal(calls.at(-1).options.line,7);assert.deepEqual(options,{line:7})
+ for(const path of ['/srv/project/plain.md','/srv/project/a%20literal.md','https://example.com/page:12']){await view.props.openFile(path);assert.equal(calls.at(-1).path,path)}
+ assert.equal(c.chatShell.children,children);assert.equal(c.chatShell.store,store)
+ for(const dispose of c.disposers)dispose();assert.equal(c.chatShell.component,c.native)
+})
 test('subagent notifications show named status and Markdown without protocol IDs or raw controls',()=>{
   const c=client(),text='<subagent_notification>\n'+JSON.stringify({agent_path:'agent-secret-id',nickname:'评审助手',status:{completed:'**检查完成**\n\n发现两项需要修复的问题。'}})+'\n</subagent_notification>'
   const {node,tree}=internalTree(c,'user',text),before=JSON.stringify(node)

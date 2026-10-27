@@ -78,7 +78,7 @@ export function installSessionCreator(ctx, backend, nodeId) {
       const provider = profileRoute(profile.id), models = await runtime.adapter.listModels(provider, profile)
       const model = profile.defaultModel ?? models.find(row => row.isDefault)?.id ?? models[0]?.id
       if (!model) throw new Error('The selected Agent returned no model')
-      await ctx.get('sessionController').selectModel({ sessionId: agent.id, provider, model })
+      agent.selectModel({provider,model})
       await ctx.get('sessionController').rename({ sessionId: agent.id, title })
       const delegated = Boolean(source || input.requester)
       await update(state => { state.creations[key].stage = delegated ? 'ready' : 'submitting' })

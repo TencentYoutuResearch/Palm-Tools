@@ -1,4 +1,7 @@
 {
+  "settings.agents.protocol": { "message": "Agent 类型" },
+  "settings.agents.automatic": { "message": "沿用原有后端设置" },
+  "settings.agents.raw": { "message": "终端 CLI" },
   "filePreview.find": { "message": "在文件中查找…" },
   "filePreview.findShortcut": { "message": "在文件中查找（Cmd/Ctrl+F）" },
   "filePreview.clear": { "message": "清空查找" },

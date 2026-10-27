@@ -26,7 +26,7 @@ __export(client_source_exports, {
 });
 module.exports = __toCommonJS(client_source_exports);
 
-// node_modules/@deepseek-ai/cosmokit/lib/index.js
+// ../../../../../../../../../private/tmp/kode-dsh-validation/node_modules/@deepseek-ai/cosmokit/lib/index.js
 function isNullable(value) {
   return value === null || value === void 0;
 }
@@ -251,7 +251,7 @@ var Time;
   Time2.template = template;
 })(Time || (Time = {}));
 
-// node_modules/@deepseek-ai/schemastery/lib/index.mjs
+// ../../../../../../../../../private/tmp/kode-dsh-validation/node_modules/@deepseek-ai/schemastery/lib/index.mjs
 var kSchema = Symbol.for("schemastery");
 var kValidationError = Symbol.for("ValidationError");
 globalThis.__schemastery_index__ ??= 0;
@@ -892,7 +892,7 @@ defineMethod("transform", [
   "preserve"
 ], ({ inner }, isInner) => inner.toString(isInner));
 
-// node_modules/@deepseek-ai/dsh-client-connection/lib/client.node.js
+// ../../../../../../../../../private/tmp/kode-dsh-validation/node_modules/@deepseek-ai/dsh-client-connection/lib/client.node.js
 var MAX_TIMER_MS = 2147483647;
 var ConnectionRecoveryConfigSchema = Schema.object({
   backoffBaseMs: Schema.natural().min(1).max(MAX_TIMER_MS).default(500),
@@ -1413,9 +1413,43 @@ function installConnection(ctx, options = {}) {
   ctx.provide("connection", handle);
 }
 
+// packages/transport/readiness.js
+async function waitForSessionService(fetcher, signal, { timeoutMs = 15e3, retryMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!signal.aborted && Date.now() < deadline) {
+    try {
+      const response = await fetcher("/api/kode/project-hosts", { method: "GET", credentials: "same-origin", cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - Date.now()))]) });
+      if (response.ok) return true;
+      if (response.status !== 404 && response.status !== 503) return false;
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      if (!(error instanceof TypeError) && error.name !== "TimeoutError") throw error;
+    }
+    signal.throwIfAborted();
+    await new Promise((resolve2, reject) => {
+      const done = () => {
+        signal.removeEventListener("abort", abort);
+        resolve2();
+      };
+      const timer = setTimeout(done, Math.min(retryMs, Math.max(0, deadline - Date.now())));
+      const abort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
+  signal.throwIfAborted();
+  return false;
+}
+
 // packages/transport/client-source.js
 var inject = [];
-function apply(ctx) {
+async function apply(ctx) {
+  const startup = new AbortController();
+  ctx.effect(() => () => startup.abort(new Error("Host transport unloaded")), "kode.transport-startup");
+  await waitForSessionService(fetch, startup.signal);
   let current = "local", switching = false, revision = 0;
   let navigation;
   const listeners = /* @__PURE__ */ new Set(), publish = () => {

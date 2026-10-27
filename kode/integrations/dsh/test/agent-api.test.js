@@ -13,7 +13,7 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
   const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'native', name: 'dsh', type: 'dsh' }])
   let handler, selection = { provider: 'native-llm', model: 'fixture' }, turns = 0
   const selected = []
-  const agent = { id: 'conversation', status: 'idle', session: {} }
+  const agent = { id: 'conversation', status: 'idle', session: {},selectModel:request=>{selected.push(request);selection={provider:request.provider,model:request.model};return{selected:selection}} }
   const ctx = {
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-test-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : req.headers['x-test-role'] === 'guest' ? { peer: { principal: { kind: 'guest' } } } : { rejection: 401 } },
@@ -22,7 +22,7 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     sessionController: {
       resolveAgent: async () => ({ agent }),
       modelCatalog: async () => ({ default: selection, groups: [{ id: 'native-llm', models: [{ id: 'fixture' }] }, ...profiles.list().filter(p => p.type === 'codex').map(p => ({ id: `kode-agent-${p.id}`, models: [{ id: 'default' }, { id: 'fixture' }] }))] }),
-      selectModel: async request => { selected.push(request); selection = { provider: request.provider, model: request.model }; return { selected: selection } },
+      selectModel: async()=>{throw new Error('Native model selection must not reconfigure dsh defaults')},
     },
   }
   const service = { profiles, adapter: { listModels: async () => [{ id: 'fixture' }] }, refresh() {} }

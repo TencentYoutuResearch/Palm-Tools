@@ -11,7 +11,7 @@ The initial integration targets `@deepseek-ai/dsh@0.2.1-rc.2` and Node >=24.9.0.
 - `@kode/dsh`: registers each active dsh session, installs agent-scoped tools, submits incoming messages as separate follow-up turns, flushes persistence before acknowledging acceptance.
 - `kode-sessions-mcp`: optional stdio MCP entry for other agents, including kode-managed CLI sessions.
 
-Native CLI adapters drive Codex app-server and Claude ACP through the Kode Agent factory, while dsh supplies the conversation shell. Workspace selection and session-message presentation extend dsh UI slots. The bundle enables dsh's existing sandboxed sidebar-browser plugin on Web; files, Git and terminal continue using the shipped dsh implementations. SpecOps rules are outside this integration's scope.
+Native CLI adapters drive Codex app-server and Claude/CodeBuddy ACP through the Kode Agent factory, while dsh supplies the conversation shell. Workspace selection and session-message presentation extend dsh UI slots. The bundle enables dsh's existing sandboxed sidebar-browser plugin on Web; files, Git and terminal continue using the shipped dsh implementations. SpecOps rules are outside this integration's scope.
 
 ## Shared session and workspace storage
 
@@ -198,7 +198,7 @@ The Web **Agent** selector replaces the standard-preset chip on new conversation
 
 Selecting dsh also shows its own preset menu (standard, minimal, PTC and any other presets the Host advertises). It reads and selects presets through dsh's public `agentPresets` Remote API; an external Agent does not show this mode menu. Type and protocol fields inside the configuration dialog use the same native Menu component as the composer.
 
-Four built-in entries (dsh, Codex, Cursor, Claude Code) are separate from user-created entries. Defaults resolve actual executable paths on the executing Host; Cursor tries `agent` and `cursor-agent`, never the Cursor GUI launcher. The custom dialog shows only user-created entries and supports adding, editing and deleting them. “Custom” and “manually added” are one configuration entity, not two registries. The owner-only API accepts `{ action: 'remove', profileId }`; built-ins reject update/delete requests, and removing a custom entry preserves already bound conversation snapshots and model selection. Changing the protocol type resets the argument array so arguments from the previous CLI cannot contaminate discovery.
+Five built-in entries (dsh, Codex, Cursor, Claude Code, CodeBuddy) are separate from user-created entries. Defaults resolve actual executable paths on the executing Host; Cursor tries `agent` and `cursor-agent`, never the Cursor GUI launcher. The custom dialog shows only user-created entries and supports adding, editing and deleting them. “Custom” and “manually added” are one configuration entity, not two registries. The owner-only API accepts `{ action: 'remove', profileId }`; built-ins reject update/delete requests, and removing a custom entry preserves already bound conversation snapshots and model selection. Changing the protocol type resets the argument array so arguments from the previous CLI cannot contaminate discovery.
 
 Models are discovered from the selected executable's protocol and account environment. Selecting an Agent chooses an advertised model (the configured preference, advertised current/default model, or first available model). There is no synthetic “CLI default model” menu entry. Empty or failed discovery is shown explicitly and does not silently switch providers. The model menu can refresh the executable's catalog. Existing conversations retain their Agent; model changes remain within that Agent's catalog.
 
@@ -209,6 +209,7 @@ The runtime choices are implemented as protocol adapters while dsh keeps the con
 | dsh | dsh's native loop | none |
 | codex | Codex app-server | `codex` |
 | claude | [Claude Agent ACP](https://github.com/zed-industries/claude-agent-acp), using the official Claude Agent SDK | `claude` |
+| codebuddy | CodeBuddy native ACP (`--acp`) | `codebuddy` |
 | cursor | [Cursor's native ACP endpoint](https://cursor.com/docs/cli/acp) | `agent` |
 | custom | ACP by default, or explicitly selected Codex app-server | configured by the user |
 
@@ -466,3 +467,5 @@ kernel writer lock, back up its artifacts under `DSH_HOME/migrations`, preserve
 subsequent live events and replace only the derived historical cache. The repair
 validates released event relationships and writes a separate, checksummed header
 frame. Restart the Web Host after repair. Original CLI history is never changed.
+
+Native Agent model changes are recorded in the current session without saving dsh global defaults or reloading its session service. The Web transport waits for the owner read endpoint before opening its first subscription; it never retries session creation or prompt submission. Inline file citations split supported line suffixes before entering the existing dsh preview, preserving the owning Host and file policy. Historical tabs whose original Agent profile has been removed are left intact rather than rebound to another installation.

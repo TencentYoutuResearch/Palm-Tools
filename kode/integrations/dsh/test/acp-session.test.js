@@ -53,7 +53,7 @@ test('ACP cancellation closes the owned process and missing resume capability ne
     await assert.rejects(unsupported.open({ threadId: 'saved' }, []), /cannot restore/)
   } finally { await Promise.all([session.close(), unsupported.close()]); await rm(root, { recursive: true, force: true }) }
 })
-for (const type of ['claude', 'cursor']) test(`installed ${type} supports ACP models, MCP configuration and read-only mode without inference`, { skip: !process.env[`KODE_TEST_${type.toUpperCase()}_EXECUTABLE`] }, async () => {
+for (const type of ['claude', 'cursor','codebuddy']) test(`installed ${type} supports ACP models, MCP configuration and read-only mode without inference`, { skip: !process.env[`KODE_TEST_${type.toUpperCase()}_EXECUTABLE`] }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-native-acp-'))
   const env = type === 'claude' ? { CLAUDE_CONFIG_DIR: root, ANTHROPIC_API_KEY: 'local-protocol-fixture-only', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' } : {}
   const session = new AcpSession({ type, executable: process.env[`KODE_TEST_${type.toUpperCase()}_EXECUTABLE`], args: [], env }, root, {

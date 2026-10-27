@@ -86,7 +86,8 @@ export function registerAgentApi(ctx, service) {
       }
       // Verify the route before committing the profile binding; no executable is
       // launched by changing the selector (only bounded model discovery runs).
-      const selection = await ctx.sessionController.selectModel({ sessionId: agent.id, provider, model })
+      const selection = agent.selectModel({provider,model})
+      await agent.ctx?.parallel?.('session/flush',agent.session)
       await profiles.bind(agent.id, profile.id)
       service.recordBinding?.(agent, profile)
       json(res, 200, selection)

@@ -2,6 +2,7 @@
 //! `KODE_MESSAGING_CONFIG` selects a JSON config; disabled bridges behave as before.
 mod api;
 pub mod agents;
+mod codebuddy_registry;
 mod link;
 pub mod model;
 mod ssh;

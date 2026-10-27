@@ -8,7 +8,7 @@ import { normalizeProfile, profileRevision, profileRoute } from './agent-profile
 const KODE_CODEX_BACKENDS = new Set(['codex', 'native-codex', 'gateway-codex', 'tcodex'])
 export function backendProfile(key, config) {
   const style = config.mcp_setup?.style
-  const type = style === 'codex' ? 'codex' : style === 'claude' ? 'claude' : !style && KODE_CODEX_BACKENDS.has(key.trim().toLowerCase()) ? 'codex' : undefined
+  const type = style === 'codebuddy'||config.protocol==='codebuddy'?'codebuddy':style === 'codex' ? 'codex' : style === 'claude' ? 'claude' : !style && KODE_CODEX_BACKENDS.has(key.trim().toLowerCase()) ? 'codex' : undefined
   if (!type || config.enabled === false) return undefined
   return { id: `kode-${key}`, name: key, type, executable: config.command, args: config.args ?? [], ...(config.default_model ? { defaultModel: config.default_model } : {}) }
 }
@@ -99,7 +99,7 @@ export async function importSavedSession(ctx, client, tab) {
   if (runtime.profiles.bindNative) await runtime.profiles.bindNative(id, profile.id, tab.session_id)
   else { await runtime.profiles.bind(id, profile.id); await runtime.profiles.patchBinding(id, { threadId: tab.session_id }) }
   runtime.recordBinding(agent, profile)
-  await controller.selectModel({ sessionId: id, ...selection })
+  agent.selectModel(selection)
   await controller.rename({ sessionId: id, title: tab.title || '已保存的会话' })
   await agent.ctx.sessions.flush(agent.session)
   await workspace.attachSession(id)

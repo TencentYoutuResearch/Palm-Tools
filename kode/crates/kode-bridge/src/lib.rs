@@ -966,18 +966,18 @@ async fn create_session(
         .unwrap_or_else(|| PathBuf::from("/"));
     let use_acp = req.transport.as_deref() == Some("acp")
         || (req.transport.is_none()
-            && req.backend_key == "codebuddy"
+            && backend.protocol_key(&req.backend_key) == "codebuddy"
             && req.resume_session_uuid.is_none()
             && !req.headless);
     if use_acp {
-        if req.backend_key != "codebuddy" || req.resume_session_uuid.is_some() {
+        if backend.protocol_key(&req.backend_key) != "codebuddy" || req.resume_session_uuid.is_some() {
             return Err(ApiError::BadRequest(
                 "ACP creation currently supports new CodeBuddy sessions only".into(),
             ));
         }
         backend.args = kode_core::session::inject_kode_memory_prompt(
             &backend.args,
-            &req.backend_key,
+            backend.protocol_key(&req.backend_key),
             &cwd,
             true,
             req.memory_context.as_deref(),
@@ -993,7 +993,7 @@ async fn create_session(
         )
         .await
         .map_err(ApiError::BadRequest)?;
-        let session = Session::structured(
+        let mut session = Session::structured(
             id,
             &req.backend_key,
             &backend.command,
@@ -1004,6 +1004,8 @@ async fn create_session(
                 .or(backend.default_model.clone())
                 .unwrap_or_else(|| "auto".into()),
         );
+        session.backend_protocol=backend.protocol_key(&req.backend_key).into();
+        session.launch_config=backend.clone();
         let dto = session_to_dto(&session);
         ctx.sessions.lock().insert(id, session);
         ctx.acp.insert(id, client.clone());

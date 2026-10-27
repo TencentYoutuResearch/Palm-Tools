@@ -163,6 +163,7 @@
 
   function startAddFromDetected(d: DetectedBackend) {
     editing = newRequest({
+      protocol: ['codex', 'tcodex', 'claude', 'tclaude', 'codebuddy','cursor'].includes(d.suggested_key) ? d.suggested_key : null,
       key: d.suggested_key,
       command: d.command,
       permission_mode_flag: d.suggested_key === 'codex' || d.suggested_key === 'tcodex'
@@ -435,6 +436,25 @@
               />
               <p class="hint">TOML section name <code>[backends.&lt;key&gt;]</code>. {isNew ? '' : 'Cannot be changed.'}</p>
             </div>
+
+            <div class="field">
+              <label for="be-protocol">{tr('settings.agents.protocol')}</label>
+              <select id="be-protocol" value={editing.protocol ?? ''} onchange={e => {
+                if (!editing) return
+                editing.protocol = e.currentTarget.value || null
+                editing.permission_mode_flag = ['codex', 'tcodex'].includes(e.currentTarget.value) ? '--ask-for-approval' : ['claude', 'tclaude','codebuddy'].includes(e.currentTarget.value) ? '--permission-mode' : null
+              }}>
+                <option value="">{tr('settings.agents.automatic')}</option>
+                <option value="codex">Codex</option>
+                <option value="tcodex">Tcodex</option>
+                <option value="claude">Claude Code</option>
+                <option value="tclaude">Tclaude</option>
+                <option value="codebuddy">CodeBuddy</option>
+                <option value="cursor">Cursor</option>
+                <option value="raw">{tr('settings.agents.raw')}</option>
+              </select>
+            </div>
+
 
             <div class="field">
               <label for="be-cmd">Command</label>

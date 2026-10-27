@@ -1,4 +1,7 @@
 {
+  "settings.agents.protocol": { "message": "Agent type" },
+  "settings.agents.automatic": { "message": "Use existing backend defaults" },
+  "settings.agents.raw": { "message": "Terminal CLI" },
   "filePreview.find": { "message": "Find in file…" },
   "filePreview.findShortcut": { "message": "Find in file (Cmd/Ctrl+F)" },
   "filePreview.clear": { "message": "Clear search" },

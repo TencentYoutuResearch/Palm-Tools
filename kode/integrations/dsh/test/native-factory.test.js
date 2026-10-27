@@ -78,6 +78,18 @@ test('a driver attached before historical import allocates fresh monotone turn n
   await h.fiber.dispose()
 })
 
+test('native model selection is session-local and does not persist or reload global defaults',async()=>{
+  const models=[],globalDefault={provider:'kode-agent-fixture',model:'fixture'}
+  const h=await host({async *stream(request){models.push(request.model);yield{type:'block-start',index:0,blockType:'text'};yield{type:'text-delta',index:0,text:'Done'};yield{type:'block-end',index:0,block:{type:'text',text:'Done'}};yield{type:'finish',reason:{kind:'stop'}}},closeSession:async()=>{}})
+  h.ctx.provide('agentDefaultModel',{currentSelection:()=>globalDefault,saveSelection:async()=>{throw new Error('Global default must remain unchanged')}})
+  const handle=await h.ctx.agents.create(options)
+  const selected=handle.agent.selectModel({provider:'kode-agent-fixture',model:'another-model'})
+  assert.equal(selected.selected.model,'another-model');assert.equal(globalDefault.model,'fixture')
+  handle.agent.followup(message('model-test','Hello'));await handle.agent.whenIdle()
+  assert.deepEqual(models,['another-model']);assert.ok(h.stored.get(options.sessionId).events.some(event=>event.type==='model/selection'&&event.data.model==='another-model'))
+  await h.fiber.dispose()
+})
+
 test('history import is seeded with native timestamps before its driver is published',async()=>{
   const h=await host({async *stream(){yield{type:'block-start',index:0,blockType:'text'};yield{type:'text-delta',index:0,text:'New answer'};yield{type:'block-end',index:0,block:{type:'text',text:'New answer'}};yield{type:'finish',reason:{kind:'stop'}}},closeSession:async()=>{}})
   const time=Date.parse('2026-01-01T00:00:00Z'),seed=buildHistorySeed({timeline:[{kind:'turn_start',time},{kind:'text',role:'user',text:'Old question',time:time+1000},{kind:'text',role:'agent',text:'Old answer',time:time+20000},{kind:'turn_end',reason:'completed',time:time+30000}]},options.agentOptions)

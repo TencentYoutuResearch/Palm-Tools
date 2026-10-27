@@ -1,6 +1,10 @@
 import { installConnection } from '@deepseek-ai/dsh-client-connection/client'
+import { waitForSessionService } from './readiness.js'
 export const inject = []
-export function apply(ctx) {
+export async function apply(ctx) {
+  const startup=new AbortController()
+  ctx.effect(()=>()=>startup.abort(new Error('Host transport unloaded')),'kode.transport-startup')
+  await waitForSessionService(fetch,startup.signal)
   let current = 'local', switching = false, revision = 0
   let navigation
   const listeners = new Set(), publish = () => { snapshot = { current, switching, revision }; for (const fn of listeners) fn() }

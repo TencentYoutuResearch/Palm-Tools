@@ -609,22 +609,16 @@ pub async fn spawn_session(
     let model = sanitize_spawn_model(model);
 
     let structured = matches!(endpoint_id, EndpointId::Local)
-        && backend_key == "codebuddy"
+        && state.ctx.backend_configs.read().get(&backend_key).is_some_and(|backend|backend.protocol_key(&backend_key)=="codebuddy")
         && (transport_kind.as_deref() == Some("acp")
             || (transport_kind.is_none() && resume_session_id.is_none()));
     if structured {
-        let mut backend = state
-            .ctx
-            .backend_configs
-            .read()
-            .get(&backend_key)
-            .cloned()
-            .ok_or("Backend not configured")?;
+        let mut backend = crate::shared_agents::configuration(&backend_key,resume_session_id.as_deref()).await?;
         let id = state.protocol_ctx.alloc_id();
         let cwd = cwd_path.as_deref().ok_or("Working directory is required")?;
         backend.args = kode_core::session::inject_kode_memory_prompt(
             &backend.args,
-            &backend_key,
+            backend.protocol_key(&backend_key),
             cwd,
             crate::persistence::load()
                 .kode_memory_prompt_enabled
@@ -641,7 +635,7 @@ pub async fn spawn_session(
             resume_session_id.as_deref(),
         )
         .await?;
-        let session = kode_core::session::Session::structured(
+        let mut session = kode_core::session::Session::structured(
             id,
             &backend_key,
             &backend.command,
@@ -649,9 +643,11 @@ pub async fn spawn_session(
             client.session_id(),
             model
                 .clone()
-                .or(backend.default_model)
+                .or(backend.default_model.clone())
                 .unwrap_or_else(|| "auto".into()),
         );
+        session.backend_protocol=backend.protocol_key(&backend_key).into();
+        session.launch_config=backend.clone();
         let result = SpawnedSession {
             transport_kind: "acp".into(),
             id,
