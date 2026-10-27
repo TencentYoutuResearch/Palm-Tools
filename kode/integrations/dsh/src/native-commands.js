@@ -38,14 +38,16 @@ export function humanInput(message) {
 export function enqueueCommand(agent, line) {
   agent.followup({ id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: line }] })
 }
-export function mountNativeCommands(agent, service, profile) {
+export async function mountNativeCommands(agent, service, profile) {
   if (!agent.ctx.inject || !profile || profile.type === 'dsh') return
   const key = profileRevision(profile), previous = service.commandOwners.get(agent.id)
   if (previous?.agent === agent && previous.key === key) return previous.ready.promise
-  previous?.dispose()
-  const owner = { agent, key, dispose: () => {}, ready: Promise.withResolvers() }
+  const owner = { agent, key, ready: Promise.withResolvers() }
+  owner.dispose = async () => { await owner.ready.promise; await owner.fork?.dispose() }
   service.commandOwners.set(agent.id, owner)
-  const dispose = agent.ctx.inject(['commands'], async ctx => {
+  await previous?.dispose()
+  if (service.commandOwners.get(agent.id) !== owner) { owner.ready.resolve(); return }
+  try { owner.fork = agent.ctx.inject(['commands'], async ctx => {
     let capabilities = { commands: [], modes: [] }
     let descriptors, releases = []
     const update = commands => {
@@ -87,8 +89,8 @@ export function mountNativeCommands(agent, service, profile) {
     try { capabilities = await service.adapter.capabilities(profileRoute(profile.id), profile, agent.session.header.cwd); update(capabilities.commands) }
     catch (error) { ctx.logger.warn('Native command discovery failed: %s', error.message) }
     finally { owner.ready.resolve() }
-  })
-  owner.dispose = dispose
+  }) } catch(error) { owner.ready.resolve(); throw error }
+  owner.dispose = () => owner.fork.dispose()
   return owner.ready.promise
 }
 export function modeAllowed(mode, policy) {

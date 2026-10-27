@@ -136,6 +136,11 @@ test('native slash definitions shadow harness commands only for their Agent and 
     assert.equal(selected.result.kind,'success');assert.equal(agent.options.model,'next-model')
     await h.ctx.commands.execute(agent,'/team-review inspect',[],new AbortController().signal);await agent.whenIdle()
     assert.equal(received[0].messages[0].content[0].text,'/team:review inspect')
+    service.adapter.capabilities=async()=>({commands:[{name:'context',description:'Claude context'}],modes:[]})
+    await mountNativeCommands(agent,service,{id:'claude-profile',name:'Claude Code',type:'claude',executable:'claude',args:[],env:{}})
+    assert.ok(h.ctx.commands.list(agent).some(row=>row.name==='context'))
+    assert.ok(!h.ctx.commands.list(agent).some(row=>row.name==='team-review'))
+    assert.equal(h.ctx.commands.list(agent).find(row=>row.name==='compact').description,'Harness compaction')
     const other={id:'other'};assert.equal(h.ctx.commands.list(other).find(row=>row.name==='compact').description,'Harness compaction')
     await h.fiber.dispose();assert.equal(h.ctx.commands.list(agent).find(row=>row.name==='compact').description,'Harness compaction')
   }finally{await h.fiber.dispose();global();await commands.dispose()}

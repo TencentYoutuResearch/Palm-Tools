@@ -265,11 +265,11 @@ export async function installAgentRuntime(ctx, config) {
     mountCommands: agent => {
       const selection = agent.options?.provider
       const profile = profiles.binding(agent.id)?.profile ?? profiles.list().find(row => profileRoute(row.id) === selection)
-      mountNativeCommands(agent, service, profile)
+      void mountNativeCommands(agent, service, profile).catch(error => ctx.logger.warn('Native command mount failed: %s', error.message))
     },
     recordBinding: (agent, profile) => {
       appendPluginRecord(agent.session, 'plugin:kode/agent-binding', { profileId: profile.id, name: profile.name, type: profile.type, uiChannel: runtimes.get(profile.type)?.uiChannel ?? 'native' })
-      mountNativeCommands(agent, service, profile)
+      void mountNativeCommands(agent, service, profile).catch(error => ctx.logger.warn('Native command mount failed: %s', error.message))
     },
     registerRuntime(type, spec) {
       if (runtimes.has(type)) throw new Error(`Agent runtime already installed: ${type}`)
