@@ -441,3 +441,28 @@ dsh Agent sessions into that stream, and does not provide mobile input, interrup
 or approval handling for them. The existing mobile protocol was not changed in
 this workspace change. A common backend session/event/control adapter is still
 required before claiming full desktop/dsh/mobile remote collaboration.
+
+### Native process history
+
+Recent-history imports retain native timestamps, turn boundaries, command/edit
+calls and their results. Imports are seeded before publishing the Agent, so the
+driver allocates its next turn after the imported maximum. Reasoning delta
+variants and native command events use the same canonical chat event flow as
+live text. Only genuine cancellation ends a turn as aborted.
+
+Older text-only caches can be repaired without changing the native CLI thread or
+session address. Stop the dsh Web Host first, leaving its Kode backend running:
+
+```sh
+node scripts/repair-native-history.js \
+  --home /path/to/dsh-home \
+  --url http://127.0.0.1:47870 \
+  --token-file /path/to/admin.token \
+  --runtime-modules /path/to/dsh/node_modules
+```
+
+The default command reports a repair plan. Add `--apply` to acquire each session's
+kernel writer lock, back up its artifacts under `DSH_HOME/migrations`, preserve
+subsequent live events and replace only the derived historical cache. The repair
+validates released event relationships and writes a separate, checksummed header
+frame. Restart the Web Host after repair. Original CLI history is never changed.

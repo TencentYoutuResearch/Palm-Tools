@@ -47,6 +47,25 @@ test('dsh runtime binds profiles, forwards dynamic tools, persists native identi
     assert.ok(records.some(r => r.method === 'thread/resume'))
   } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
+test('native Codex thought deltas and commands are observable before completion',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'kode-native-progress-'))
+ const profiles=await new AgentProfiles(join(root,'profiles.json')).open([{id:'example',name:'Example',type:'codex',executable:process.execPath,args:[fixture]}])
+ const events=[];let started;const running=new Promise(resolve=>started=resolve)
+ const agent={id:'native-progress',session:{header:{cwd:root},append:(type,data)=>{events.push({type,data});if(type==='tool/call')started()}},ctx:{parallel:async()=>{},get:()=>undefined,tools:{execute:async()=>{throw new Error('A native command must not execute through the outer tools')}}}}
+ const ctx={agents:{get:()=>agent},sessionProjections:{stateOf:()=>({lastTurn:1,lastStepBoundary:{kind:'start',step:1}})}}
+ const adapter=new AgentRuntimeAdapter(ctx,profiles,{recordNative:()=>{}})
+ try{
+  const completion=consume(adapter.stream({sessionId:agent.id,provider:profileRoute('example'),model:'fixture',tools:[],messages:[{id:'input',role:'user',content:[{type:'text',text:'NATIVE_TRACE'}]}],signal:AbortSignal.timeout(5000)}))
+  await running;assert.ok(events.some(e=>e.type==='tool/call'));assert.ok(!events.some(e=>e.type==='tool/result'))
+  const chunks=await completion
+  assert.equal(chunks.filter(c=>c.type==='reasoning-delta').map(c=>c.text).join(''),'Inspecting the workspace.')
+  assert.equal(events.filter(e=>e.type==='tool/call').length,1);assert.equal(events.filter(e=>e.type==='tool/result').length,1)
+  assert.equal(events.find(e=>e.type==='tool/call').data.name,'exec_command');assert.equal(JSON.parse(events.find(e=>e.type==='tool/call').data.arguments).cmd,'pwd')
+  assert.deepEqual(Object.keys(JSON.parse(events.find(e=>e.type==='tool/call').data.arguments)),['cmd'])
+  assert.equal(events.find(e=>e.type==='tool/result').data.message.isError,false)
+ }finally{await adapter.close();await rm(root,{recursive:true,force:true})}
+})
+
 test('installed Codex supports concurrent native threads and model discovery without inference', { skip: !process.env.KODE_TEST_CODEX_EXECUTABLE }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-codex-live-'))
   const profile = { executable: process.env.KODE_TEST_CODEX_EXECUTABLE, env: { CODEX_HOME: root } }

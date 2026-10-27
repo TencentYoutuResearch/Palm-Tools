@@ -167,6 +167,18 @@ test('send receipts are historical delivery states, never task completion', () =
     assert.doesNotMatch(JSON.stringify(tree), /任务完成|已完成/)
   }
 })
+test('native command cards describe the command and outcome instead of protocol names and IDs',()=>{
+ const c=client()
+ for(const name of ['exec_command','kode_native_commandExecution']){
+  const render=c.entry('tool.call.toolview',name)
+  const tree=render({toolName:name,phase:'result',block:{args:{text:key=>({command:'pwd',type:'commandExecution',id:'private-item-id'})[key]},content:[{type:'text',text:'/srv/project'}]},useDisclosure:()=>({expanded:true,setExpanded(){}})})
+  assert.match(visibleText(tree),/执行命令[\s\S]*已完成[\s\S]*pwd[\s\S]*\/srv\/project/)
+  assert.doesNotMatch(visibleText(tree),/commandExecution|private-item-id|kode_native|查看原文/)
+ }
+ const render=c.entry('tool.call.toolview','exec_command')
+ const pending=render({toolName:'exec_command',phase:'call',block:{args:{text:key=>key==='cmd'?'git status':undefined}},useDisclosure:()=>({expanded:false,setExpanded(){}})})
+ assert.match(visibleText(pending),/运行中/);assert.doesNotMatch(visibleText(pending),/已完成/)
+})
 
 test('workspace menu reads the bound native source and adopts the picked directory', async () => {
   const c = client(), render = c.entry('conversation.hero.workspace')

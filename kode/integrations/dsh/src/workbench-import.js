@@ -1,6 +1,7 @@
 /** Kode saved CLI sessions: import display history once, retain the original native thread. */
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { BackendDocument } from './backend-state.js'
+import { buildHistorySeed } from './native-history.js'
 import { normalizeProfile, profileRevision, profileRoute } from './agent-profiles.js'
 // These Kode Codex entries do not require an MCP setup declaration. Custom
 // executable names still require an explicit protocol declaration.
@@ -46,8 +47,10 @@ export async function saveNativeTab(client, profiles, agent, title) {
       ?? Object.keys(catalog.backends ?? {}).find(key => key.toLocaleLowerCase() === named.toLocaleLowerCase())
       ?? (matches.length === 1 ? matches[0] : undefined)
     if (!backend) return
-    const row = { backend_key: backend, agent_id: profile.id, title, title_pinned: true, cwd: agent.session.header.cwd, session_id: binding.threadId, dsh_session_id: agent.id, model: agent.session.requestHeader()?.config.model, transport_kind: 'pty', endpoint_id: null }
     const index = state.native_sessions.findIndex(tab => tab.session_id === binding.threadId && tab.backend_key === backend)
+    const saved=(catalog.tabs??[]).find(tab=>tab.session_id===binding.threadId && tab.backend_key===backend)
+    const model=agent.session.requestHeader()?.config.model
+    const row = { backend_key: backend, agent_id: profile.id, title: title?.trim() || saved?.title || state.native_sessions[index]?.title || '未命名会话', title_pinned: true, cwd: agent.session.header.cwd, session_id: binding.threadId, dsh_session_id: agent.id, ...(model?{model}:{}), transport_kind: 'pty', endpoint_id: null }
     if (index >= 0) state.native_sessions[index] = { ...state.native_sessions[index], ...row }; else state.native_sessions.push(row)
     try { await document.write(state); return } catch (error) { if (attempt === 3 || !/configuration changed/.test(error.message)) throw error }
   }
@@ -63,7 +66,7 @@ export async function syncNativeTabs(controller, client, profiles, signal) {
     await saveNativeTab(client, profiles, {
       id: session.sessionId,
       session: { header: { cwd: session.cwd }, requestHeader: () => ({ config: selection ?? {} }) },
-    }, typeof projections?.title === 'string' ? projections.title : '未命名会话')
+    }, typeof projections?.title === 'string' ? projections.title : undefined)
   }
 }
 export async function importSavedSession(ctx, client, tab) {
@@ -77,12 +80,16 @@ export async function importSavedSession(ctx, client, tab) {
     ?? Object.values(runtime.profiles.bindings ?? {}).find(row => row.threadId === tab.session_id && row.profile.id === tab.agent_id)?.profile
   if (!profile) throw new Error(`This saved ${tab.backend_key} session has no installed inline protocol adapter`)
   const doc = new BackendDocument(client, 'session-index'), state = await doc.read() ?? { version: 1 }
-  if (state.imports?.[id]?.formatVersion === 2) {
+  if (state.imports?.[id]?.formatVersion >= 2) {
     await workspace.attachSession(id)
     return { sessionId: id, imported: true, historyWindow: state.imports[id].historyWindow }
   }
   const transcript = await client.call('/api/v1/messaging/workbench/transcript', { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd })
   if (!transcript.available) throw new Error('Native CLI transcript is unavailable on this Host')
+  const selection = { provider: profileRoute(profile.id), model: tab.model ?? profile.defaultModel ?? 'default' }
+  const factory=ctx.get('kodeNativeFactory')
+  if(!factory)throw new Error('Native Agent history importer is unavailable')
+  await factory.importHistory(id,buildHistorySeed(transcript,selection),tab.cwd,selection)
   const previous = await controller.list({})
   let sessionId = previous.items.find(row => row.sessionId === id)?.sessionId
   if (!sessionId) sessionId = (await controller.create({ sessionId: id, workspaceId: workspace.id, agentPreset: 'kode-native' })).sessionId
@@ -92,26 +99,13 @@ export async function importSavedSession(ctx, client, tab) {
   if (runtime.profiles.bindNative) await runtime.profiles.bindNative(id, profile.id, tab.session_id)
   else { await runtime.profiles.bind(id, profile.id); await runtime.profiles.patchBinding(id, { threadId: tab.session_id }) }
   runtime.recordBinding(agent, profile)
-  const selection = { provider: profileRoute(profile.id), model: tab.model ?? profile.defaultModel ?? 'default' }
-  let turn = 0, opened = false
-  const close = () => { if (opened) { agent.session.append('step/end', { turn, step: 1 }); agent.session.append('turn/end', { turn, reason: { kind: 'completed' } }); opened = false } }
-  const begin = () => { turn++; agent.session.append('turn/start', { turn }); agent.session.append('step/start', { turn, step: 1 }); agent.session.append('request/header', { header: { config: selection }, reason: turn === 1 ? 'initial' : 'resume' }); opened = true }
-  // A partial previous import is not replayed. Its immutable thread binding still
-  // permits native resume; the user can inspect the original CLI history.
-  if (!agent.session.snapshotEvents().some(event => event.type === 'turn/start')) {
-    for (const row of transcript.messages.filter(row => row.kind === 'text' && row.text)) {
-      if (row.role === 'user') { close(); begin(); agent.session.append('user/message', { id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: row.text }] }, { surfaceOp: 'append' }) }
-      else { if (!opened) begin(); agent.session.append('assistant/message', { turn, step: 1, message: { id: randomUUID(), role: 'assistant', source: { kind: 'model', ...selection }, content: [{ type: 'text', text: row.text }] }, stream: [] }, { surfaceOp: 'append' }) }
-    }
-    close()
-  }
   await controller.selectModel({ sessionId: id, ...selection })
   await controller.rename({ sessionId: id, title: tab.title || '已保存的会话' })
   await agent.ctx.sessions.flush(agent.session)
   await workspace.attachSession(id)
   for (let attempt=0;attempt<4;attempt++) {
     const latest=await doc.read() ?? {version:1}
-    latest.imports ??= {}; latest.imports[id] = { formatVersion: 2, historyWindow: transcript.history_window, nativeSessionId: tab.session_id, backendKey: tab.backend_key, cwd: tab.cwd }
+    latest.imports ??= {}; latest.imports[id] = { formatVersion: 3, historyWindow: transcript.history_window, nativeSessionId: tab.session_id, backendKey: tab.backend_key, cwd: tab.cwd }
     try {await doc.write(latest);break} catch (error) {if(attempt===3 || !/configuration changed/.test(error.message))throw error}
   }
   return { sessionId: id, imported: true, historyWindow: transcript.history_window }

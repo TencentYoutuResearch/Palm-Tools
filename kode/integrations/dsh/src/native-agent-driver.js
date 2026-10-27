@@ -7,11 +7,11 @@ import { ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { AssistantStreamAccumulator, BlockAssembler } from '@deepseek-ai/dsh-llm'
 
 export const boundaryProjection = {
-  key: 'turnBoundary', stateVersion: 1,
+  key: 'turnBoundary', stateVersion: 2,
   stateSchema: z.object({ openTurnStartSeq: z.number().nullable(), lastStepStartSeq: z.number().nullable(), lastStepBoundary: z.object({ kind: z.enum(['start', 'end']), seq: z.number() }).nullable(), lastTurn: z.number() }),
   init: () => ({ openTurnStartSeq: null, lastStepStartSeq: null, lastStepBoundary: null, lastTurn: 0 }),
   apply: (state, event) => {
-    if (event.type === 'turn/start') return { ...state, openTurnStartSeq: event.seq, lastTurn: event.data.turn }
+    if (event.type === 'turn/start') return { ...state, openTurnStartSeq: event.seq, lastTurn: Math.max(state.lastTurn,event.data.turn) }
     if (event.type === 'turn/end') return { ...state, openTurnStartSeq: null }
     if (event.type === 'step/start') return { ...state, lastStepStartSeq: event.seq, lastStepBoundary: { kind: 'start', seq: event.seq } }
     if (event.type === 'step/end') return { ...state, lastStepBoundary: { kind: 'end', seq: event.seq } }
@@ -90,6 +90,9 @@ export class NativeAgentDriver {
       if (profile) { binding = await this.runtime.profiles.bind(this.id, profile.id); this.runtime.recordBinding(this, profile) }
     }
     while (!signal.aborted && !this.disposed && (this.inbox.nextTurn.length || this.inbox.nextStep.length)) {
+      // A driver may be attached before an owner imports its historical seed.
+      // Allocate from the current log projection, not the constructor snapshot.
+      this.turn = Math.max(this.turn, this.ctx.sessionProjections.stateOf(this.session, 'turnBoundary')?.lastTurn ?? 0)
       const turn = ++this.turn, step = 1
       this.session.append('turn/start', { turn })
       let reason = { kind: 'completed' }, opened = false

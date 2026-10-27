@@ -32,3 +32,9 @@ test('cold-session reconciliation reads summaries without activating any Agent',
   assert.equal(h.state().native_sessions[0].title, 'Cold helper')
   assert.equal(h.state().native_sessions[0].model, 'model-a')
 })
+test('cold reconciliation retains known titles and models when projection caches are rebuilding',async()=>{
+ const h=fixture(),agent={id:'inline-session',session:{header:{cwd:'/srv/project'},requestHeader:()=>({config:{model:'original-model'}})}}
+ await saveNativeTab(h.client,h.profiles,agent,'Original title')
+ await syncNativeTabs({list:async()=>({items:[{sessionId:agent.id,cwd:'/srv/project',projections:{values:{}}}]})},h.client,h.profiles)
+ assert.equal(h.state().native_sessions[0].title,'Original title');assert.equal(h.state().native_sessions[0].model,'original-model')
+})

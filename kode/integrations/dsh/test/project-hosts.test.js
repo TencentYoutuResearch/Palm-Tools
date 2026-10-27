@@ -20,6 +20,15 @@ test('SSH host configuration rejects option injection and non-loopback dsh targe
   assert.equal(validateHost(valid).remote_port, 3080)
   for (const patch of [{ host: '-oProxyCommand=bad' }, { host: 'x\ny' }, { port: 65536 }, { accessUrl: 'http://other.example/?token=x' }, { accessUrl: 'http://127.0.0.1/' }]) assert.throws(() => validateHost({ ...valid, ...patch }))
 })
+test('an unavailable SSH host cannot break the directory when GUI has saved remote sessions',async()=>{
+ const registry={list:()=>[],archivedSessionIds:[],pinnedSessionIds:[]}
+ const ctx={get:key=>key==='workspaceRegistry'?registry:undefined,sessionController:{list:async()=>({items:[]})}}
+ const backendClient={call:async()=>({tabs:[{backend_key:'codex',session_id:'remote-thread',cwd:'/srv/project',title:'Remote helper',endpoint_id:{kind:'remote',id:'remote'}}],endpoints:[{id:'remote',ssh_host:'builder@build.example'}]})}
+ const manager=new ProjectHosts(ctx,{backendClient})
+ manager.hosts=[{id:'build',name:'Build',host:'build.example'}]
+ manager.directoryCache.set('build',{checkedAt:Date.now(),status:'offline',error:'Connection unavailable'})
+ try{const snapshot=await manager.directory();assert.equal(snapshot.hosts[1].status,'offline');assert.equal(snapshot.hosts[1].sessions[0].title,'Remote helper');assert.deepEqual(snapshot.hosts[1].workspaces,[])}finally{await manager.close()}
+})
 test('SSH settings edits retain private credentials, persist changes, and protect the active host', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'kode-ssh-settings-'))
   const file = join(directory, 'hosts.json'), manager = new ProjectHosts({}, { projectHostsFile: file })

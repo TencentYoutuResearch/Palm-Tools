@@ -8,6 +8,25 @@ export class NativeAgentFactory {
   createAgent(owner, options) { return this.track(() => this.attach(owner, options, false)) }
   resume(owner, options) { return this.track(() => this.attach(owner, options, true)) }
   track(start) { if (this.stopping) return Promise.reject(new Error('Agent runtime is unplugged')); const task = start(); this.pending.add(task); return task.finally(() => this.pending.delete(task)) }
+  async importHistory(id,seed,cwd,selection) {
+    const live=this.ctx.agents.get(id)
+    if(live && (live.status!=='idle' || live.inbox.nextTurn.length || live.inbox.nextStep.length))throw new Error('会话正在运行，历史导入将在空闲后重试。')
+    let handle,stored
+    try {handle=await this.ctx.sessionPersistence.open(id,'read');stored=await handle.read()}
+    catch(error){if(error.code!=='ENOENT' && !/not found/i.test(error.message))throw error}
+    finally{await handle?.close()}
+    if(stored?.events.some(event=>event.type==='turn/start'))return
+    if(!stored){await this.ctx.agents.create({sessionId:id,agentOptions:selection,meta:{cwd,agentPreset:'kode-native'},seed});return}
+    // Complete a previous empty import without changing any existing event.
+    await this.byId.get(id)?.()
+    handle=await this.ctx.sessionPersistence.open(id,'write')
+    try{
+      const latest=await handle.read()
+      if(latest.events.some(event=>event.type==='turn/start'))return
+      await handle.append(seed.map((event,index)=>({...event,seq:latest.events.length+index})))
+      await handle.flush()
+    }finally{await handle.close()}
+  }
   async attach(owner, options, resume) {
     const ctx = this.ctx, id = options.resumeSessionId ?? options.sessionId
     let handle, driver, detachSession, detachAgent, releaseOwner, published = false, closing

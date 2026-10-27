@@ -28,6 +28,14 @@ async function receive(message) {
       notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } })
     }
     if (text.includes('WAIT')) return
+    if (text.includes('NATIVE_TRACE')) {
+      notify('item/reasoning/textDelta',{threadId,turnId,itemId:'reasoning',delta:'Inspecting the workspace.'})
+      notify('item/reasoning/summaryTextDelta',{threadId,turnId,itemId:'reasoning',delta:'Duplicate summary must not repeat.'})
+      notify('item/started',{threadId,turnId,item:{type:'commandExecution',id:'native-command',command:'pwd',status:'inProgress'}})
+      const delay=Number(process.env.KODE_FIXTURE_NATIVE_DELAY_MS??25)
+      setTimeout(()=>{notify('item/completed',{threadId,turnId,item:{type:'commandExecution',id:'native-command',command:'pwd',status:'completed',aggregatedOutput:'/srv/project',exitCode:0}});complete()},delay)
+      return
+    }
     const target = text.match(/KODE_TEST_SEND ([A-Za-z0-9_.:-]+)\/([A-Za-z0-9_.:-]+)/)
     if (text.includes('TOOL') || target) {
       dynamic.set('tool-1', complete)

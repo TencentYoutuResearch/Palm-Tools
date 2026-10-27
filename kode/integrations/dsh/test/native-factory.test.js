@@ -6,6 +6,7 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import * as factoryPlugin from '../src/native-agent-factory.js'
+import {buildHistorySeed} from '../src/native-history.js'
 
 async function host(adapter) {
   const ctx = new Context(), stored = new Map(), writers = new Map()
@@ -60,6 +61,32 @@ test('native factory persists actual Agent turns without assembling a dsh system
   assert.equal(h.ctx.agents.list().length, 0)
   assert.equal(h.ctx.sessions.list().length, 0)
   assert.equal(h.writers.size, 0)
+})
+
+test('a driver attached before historical import allocates fresh monotone turn numbers',async()=>{
+  const h=await host({async *stream(){yield{type:'block-start',index:0,blockType:'text'};yield{type:'text-delta',index:0,text:'New answer'};yield{type:'block-end',index:0,block:{type:'text',text:'New answer'}};yield{type:'finish',reason:{kind:'stop'}}},closeSession:async()=>{}})
+  const handle=await h.ctx.agents.create(options),session=handle.agent.session
+  for(let turn=1;turn<=3;turn++){
+    session.append('turn/start',{turn});session.append('step/start',{turn,step:1})
+    session.append('user/message',message(`historical-${turn}`,'Old request'),{surfaceOp:'append'})
+    session.append('assistant/message',{turn,step:1,message:{id:`answer-${turn}`,role:'assistant',source:{kind:'model',...options.agentOptions},content:[{type:'text',text:'Old answer'}]},stream:[]},{surfaceOp:'append'})
+    session.append('step/end',{turn,step:1});session.append('turn/end',{turn,reason:{kind:'completed'}})
+  }
+  handle.agent.followup(message('new-request','Continue'));await handle.agent.whenIdle()
+  assert.deepEqual(h.stored.get(options.sessionId).events.filter(e=>e.type==='turn/start').map(e=>e.data.turn),[1,2,3,4])
+  assert.equal(h.stored.get(options.sessionId).events.at(-1).data.reason.kind,'completed')
+  await h.fiber.dispose()
+})
+
+test('history import is seeded with native timestamps before its driver is published',async()=>{
+  const h=await host({async *stream(){yield{type:'block-start',index:0,blockType:'text'};yield{type:'text-delta',index:0,text:'New answer'};yield{type:'block-end',index:0,block:{type:'text',text:'New answer'}};yield{type:'finish',reason:{kind:'stop'}}},closeSession:async()=>{}})
+  const time=Date.parse('2026-01-01T00:00:00Z'),seed=buildHistorySeed({timeline:[{kind:'turn_start',time},{kind:'text',role:'user',text:'Old question',time:time+1000},{kind:'text',role:'agent',text:'Old answer',time:time+20000},{kind:'turn_end',reason:'completed',time:time+30000}]},options.agentOptions)
+  await h.ctx.kodeNativeFactory.importHistory(options.sessionId,seed,'/tmp',options.agentOptions)
+  const agent=h.ctx.agents.get(options.sessionId);agent.followup(message('next','Continue'));await agent.whenIdle()
+  const rows=h.stored.get(options.sessionId).events
+  assert.equal(rows.find(e=>e.type==='turn/end').time-rows.find(e=>e.type==='turn/start').time,30000)
+  assert.deepEqual(rows.filter(e=>e.type==='turn/start').map(e=>e.data.turn),[1,2])
+  await h.fiber.dispose()
 })
 
 test('unplugging a native runtime cancels and drains a live Agent before releasing storage', async () => {

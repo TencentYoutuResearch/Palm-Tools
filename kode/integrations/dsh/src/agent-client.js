@@ -640,6 +640,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       (relay.content.length > 180 || relay.content.split('\n').length > 3) && h('details', null, h('summary', null, '展开完整消息'), h('p', { className: 'kode-relay-body' }, relay.content)),
     )
   }
+  function NativeOperationTool({toolName,phase,block,useDisclosure}) {
+    const {expanded:open,setExpanded:setOpen}=useDisclosure()
+    const command=block.args.text('cmd') || block.args.text('command')
+    const patch=block.args.text('patch')
+    const editing=['apply_patch','kode_native_fileChange'].includes(toolName)
+    const title=editing?'修改文件':command?'执行命令':'Agent 操作'
+    const preview=command || patch || block.args.text('title') || block.args.text('reason')
+    let output=textContent(block.content)
+    if(editing){try{const value=JSON.parse(output);if(Array.isArray(value.changes))output=value.changes.map(change=>[change.path,change.diff].filter(Boolean).join('\n')).join('\n\n')}catch{/* A native patch result can also be ordinary text. */}}
+    return h('section',{className:'kode-message-tool'},
+      h('button',{type:'button',className:'kode-tool-heading','aria-expanded':open,onClick:()=>setOpen(!open)},h(IconAgentPresetOutlineRegular,{size:14}),h('span',null,title),h('span',{className:block.isError?'kode-error':'kode-secondary'},block.isError?'未完成':phase==='result'?'已完成':'运行中'),h(IconChevronDownOutlineRegular,{size:12})),
+      preview && h('code',{className:open?'kode-native-input':'kode-relay-preview'},preview),
+      open && output && h('pre',{className:'kode-native-output'},output))
+  }
   function RelayTrigger(props) {
     const entries = useSyncExternalStore(fn => props.slots.subscribe('conversation.chat.node', fn), () => props.slots.entries('conversation.chat.node'))
     const nameOf = useNames(props.sessions)
@@ -800,10 +814,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     })
     ctx.slots.inject('tool.call.toolview', function* () {
       for (const key of ['kode_sessions_list', 'kode_sessions_create', 'kode_sessions_send', 'kode_sessions_read', 'kode_sessions_wait']) yield ctx.slots.register({ name: 'tool.call.toolview', key, inject: sessionId => ({ sessions: ctx.sessions, sessionId }) }, MessagingTool)
+      for (const key of ['exec_command','apply_patch','kode_native_commandExecution','kode_native_fileChange','kode_native_operation']) yield ctx.slots.register({name:'tool.call.toolview',key},NativeOperationTool)
     })
     ctx.effect(() => { const timer = setInterval(() => { if (nameListeners.size && !document.hidden) void refreshNames() }, 10000); return () => clearInterval(timer) }, 'kode.session-names')
     const style = document.createElement('style')
     style.textContent = `
+.kode-native-input{display:block;margin:8px 0 8px 22px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-family:var(--ds-font-family-code);font-size:12px}.kode-native-output{padding:12px 0 4px;margin:0 0 0 22px;max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
 .kode-internal-stack{display:flex;flex-direction:column;gap:8px;min-width:0}.kode-internal-message{min-width:0;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-turn-trigger-bg,var(--dsw-alias-markdown-code-block));font-size:var(--dsh-content-font-size,14px);color:var(--dsw-alias-label-secondary)}.kode-internal-message>summary{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer;list-style:none;padding:12px 16px;font-size:13px}.kode-internal-message>summary::-webkit-details-marker{display:none}.kode-internal-message>summary:hover{background:var(--dsw-alias-interactive-bg-hover);border-radius:inherit}.kode-internal-title{color:var(--dsw-alias-label-primary);flex-shrink:0}.kode-internal-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary);flex:1}.kode-internal-message>summary>svg{flex-shrink:0}.kode-internal-chevron{margin-left:auto}.kode-internal-message[open]>summary>.kode-internal-chevron{transform:rotate(180deg)}.kode-internal-message summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-internal-body{padding:12px 16px 16px;min-width:0;overflow-wrap:anywhere}.kode-internal-body>dl{margin:0;display:flex;flex-direction:column;gap:6px;font-size:13px}.kode-internal-body>dl>div{display:flex;gap:12px;min-width:0;flex-wrap:wrap}.kode-internal-body dt{min-width:64px;color:var(--dsw-alias-label-tertiary)}.kode-internal-body dd{margin:0;min-width:0;flex:1;overflow-wrap:anywhere}
 .kode-unified-workspaces{flex:1;min-height:0;display:flex;flex-direction:column}.kode-host-progress{padding:12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.kode-navigation-error{position:fixed;bottom:24px;left:50%;padding:12px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-error-primary);z-index:100}
 .kode-agent-trajectory{height:100%;overflow:auto;padding:20px 28px;color:var(--dsw-alias-label-primary)}.kode-trace-toolbar{position:sticky;top:0;background:var(--dsw-alias-bg-base);padding-bottom:16px;z-index:1}.kode-trace-toolbar input{width:100%;max-width:440px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);color:inherit;font:inherit}.kode-trace-event{padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-trace-heading{display:flex;align-items:center;gap:12px;font-size:13px}.kode-trace-heading time{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-trace-heading small{color:var(--dsw-alias-label-secondary)}.kode-trace-event pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.6}.kode-trace-event details{font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-trace-event summary{cursor:pointer;padding:6px 0}.kode-trace-event summary:focus-visible,.kode-trace-toolbar input:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}

@@ -177,7 +177,7 @@ async fn workbench_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SavedTranscript { backend_key: String, session_id: String, cwd: String, limit: Option<usize>, tail_bytes: Option<usize> }
+struct SavedTranscript { backend_key: String, session_id: String, cwd: String, limit: Option<usize>, tail_bytes: Option<usize>, before: Option<i64> }
 async fn workbench_transcript(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<SavedTranscript>) -> Result<Json<serde_json::Value>> {
     admin(&hub, &h)?;
     if !valid_id(&input.session_id) || !std::path::Path::new(&input.cwd).is_absolute() { return Err(Error(StatusCode::BAD_REQUEST, "invalid saved session".into())); }
@@ -186,7 +186,7 @@ async fn workbench_transcript(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(in
     let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(protocol).ok_or_else(|| Error(StatusCode::BAD_REQUEST, "unsupported transcript format".into()))?;
     let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let Some(path) = kode_core::session::jsonl_tail::resolve_session_path(backend, std::path::Path::new(&input.cwd), &input.session_id) else { return Ok(json!({"messages":[],"available":false})); };
-        super::transcript::recent(&path,input.limit.unwrap_or(80).clamp(1,1000),input.tail_bytes.unwrap_or(8*1024*1024).clamp(4096,64*1024*1024))
+        super::transcript::recent_before(&path,input.limit.unwrap_or(80).clamp(1,1000),input.tail_bytes.unwrap_or(8*1024*1024).clamp(4096,64*1024*1024),input.before)
     }).await.map_err(anyhow::Error::from)??;
     Ok(Json(messages))
 }

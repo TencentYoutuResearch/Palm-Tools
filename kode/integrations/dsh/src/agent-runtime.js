@@ -8,6 +8,12 @@ import { z } from 'zod'
 import { BackendAgentProfiles } from './backend-state.js'
 
 export { profileRoute } from './agent-profiles.js'
+export function nativeToolDescriptor(item) {
+  if(item.type==='commandExecution' && typeof item.command==='string')return{name:'exec_command',args:{cmd:item.command,...(item.cwd?{cwd:item.cwd}:{})}}
+  if(item.type==='fileChange')return{name:'apply_patch',args:{patch:(item.changes??[]).map(change=>change.diff??'').join('\n')}}
+  if(item.type==='webSearch')return{name:'web_search',args:item}
+  return{name:`kode_native_${item.type}`,args:item}
+}
 export class AgentRuntimeAdapter {
   constructor(ctx, profiles, { recordNative = (session, data) => appendPluginRecord(session, 'plugin:kode/native-event', data), resolveProfile = async profile => profile, onThread = async () => {} } = {}) {
     this.ctx = ctx; this.profiles = profiles; this.live = new Map(); this.busy = new Set(); this.catalogs = new Map(); this.positions = new WeakMap(); this.stop = new AbortController(); this.probes = new Set()
@@ -144,13 +150,17 @@ export class AgentRuntimeAdapter {
       await this.profiles.patchBinding(agent.id, { seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
       await agent.ctx.parallel('session/flush', agent.session)
       let text = '', reasoning = '', textIndex, reasoningIndex, nextIndex = 0
-      const streamed = new Set()
+      const streamed = new Set(), reasoningChannels=new Map()
       for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, signal })) {
         this.recordNative(agent.session, { ...this.boundary(agent), event })
         const { method, params } = event
-        if (method === 'item/reasoning/summaryTextDelta' && params.delta) {
-          if (reasoningIndex === undefined) { reasoningIndex = nextIndex++; yield { type: 'block-start', index: reasoningIndex, blockType: 'reasoning' } }
-          reasoning += params.delta; yield { type: 'reasoning-delta', index: reasoningIndex, text: params.delta }
+        if (['item/reasoning/summaryTextDelta','item/reasoning/textDelta'].includes(method) && params.delta) {
+          const id=params.itemId ?? 'reasoning'
+          if(!reasoningChannels.has(id))reasoningChannels.set(id,method)
+          if(reasoningChannels.get(id)===method){
+            if (reasoningIndex === undefined) { reasoningIndex = nextIndex++; yield { type: 'block-start', index: reasoningIndex, blockType: 'reasoning' } }
+            reasoning += params.delta; yield { type: 'reasoning-delta', index: reasoningIndex, text: params.delta }
+          }
         }
         let delta
         if (method === 'item/agentMessage/delta') { delta = params.delta; streamed.add(params.itemId) }
@@ -160,11 +170,12 @@ export class AgentRuntimeAdapter {
           text += delta; yield { type: 'text-delta', index: textIndex, text: delta }
         }
         const item = params?.item
-        if (item && ['commandExecution', 'fileChange', 'mcpToolCall'].includes(item.type)) {
+        if (item && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'imageView', 'collabAgentToolCall'].includes(item.type)) {
           const callId = runtime.callIdentity(params.turnId, item.id)
-          if (method === 'item/started' && !runtime.nativeCalls.has(callId)) { this.logCall(agent, callId, `kode_native_${item.type}`, item); runtime.nativeCalls.add(callId) }
+          const descriptor=nativeToolDescriptor(item)
+          if (method === 'item/started' && !runtime.nativeCalls.has(callId)) { this.logCall(agent, callId, descriptor.name, descriptor.args); runtime.nativeCalls.add(callId) }
           if (method === 'item/completed') {
-            if (!runtime.nativeCalls.has(callId)) this.logCall(agent, callId, `kode_native_${item.type}`, item)
+            if (!runtime.nativeCalls.has(callId)) this.logCall(agent, callId, descriptor.name, descriptor.args)
             this.logResult(agent, callId, [{ type: 'text', text: item.aggregatedOutput ?? JSON.stringify(item) }], ['failed', 'declined'].includes(item.status))
             runtime.nativeCalls.delete(callId)
           }

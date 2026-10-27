@@ -105,7 +105,7 @@ export class ProjectHosts {
       })().finally(() => this.directoryJobs.delete(host.id))
       this.directoryJobs.set(host.id, job)
     }
-    const hosts = [{ id: 'local', name: '此计算机', status: 'online', ...local }, ...this.hosts.map(host => ({ id: host.id, name: host.name, ...(this.directoryCache.get(host.id) ?? { status: 'connecting', workspaces: [], sessions: [] }) }))]
+    const hosts = [{ id: 'local', name: '此计算机', status: 'online', ...local }, ...this.hosts.map(host => ({ id: host.id, name: host.name, status:'connecting', workspaces:[], sessions:[], archivedSessionIds:[], pinnedSessionIds:[], ...this.directoryCache.get(host.id) }))]
     if (this.config.backendClient) {
       const catalog = await this.config.backendClient.call('/api/v1/messaging/workbench/catalog')
       this.saved.clear()
