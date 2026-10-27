@@ -10,7 +10,7 @@ export function localSavedTabs(index) {
     const key = `${tab.backend_key}:${tab.session_id}`
     if (!local(tab) || !tab.session_id || !tab.backend_key || !tab.cwd || seen.has(key)) return false
     seen.add(key); return true
-  }).map(tab => Object.fromEntries(['backend_key', 'session_id', 'cwd', 'title', 'dsh_session_id', 'endpoint_id', 'agent_id', 'model', 'title_pinned', 'transport_kind'].filter(key => tab[key] !== undefined).map(key => [key, tab[key]])))
+  }).map(tab => Object.fromEntries(['backend_key', 'session_id', 'cwd', 'title', 'dsh_session_id', 'endpoint_id', 'agent_id', 'avatar_id', 'model', 'title_pinned', 'transport_kind'].filter(key => tab[key] !== undefined).map(key => [key, tab[key]])))
 }
 async function edit(client, key, change) {
   const document = new BackendDocument(client, key)
@@ -22,7 +22,7 @@ async function edit(client, key, change) {
 }
 export async function savedSessionOperation(client, input) {
   const { backend_key, session_id } = input.nativeSession ?? {}, operation = input.operation
-  if (!['archive-session', 'unarchive-session', 'pin-session', 'unpin-session', 'rename-session'].includes(operation)) throw new Error('不支持此历史会话操作。')
+  if (!['archive-session', 'unarchive-session', 'pin-session', 'unpin-session', 'rename-session', 'session-avatar'].includes(operation)) throw new Error('不支持此历史会话操作。')
   let id
   await edit(client, 'session-index', index => {
     const tab = localSavedTabs(index).find(tab => tab.backend_key === backend_key && tab.session_id === session_id)
@@ -39,8 +39,14 @@ export async function savedSessionOperation(client, input) {
       if (!title || title.length > 512) throw new Error('会话名称不能为空，且不能超过 512 个字符。')
       row.title = title; row.title_pinned = true
     }
+    if (operation === 'session-avatar') {
+      const avatarId = input.args?.avatarId ?? null
+      if (avatarId !== null && (!/^gallery\/[^/\\\x00]+$/.test(avatarId) || avatarId.includes('..'))) throw new Error('无效头像标识。')
+      row.avatar_id = avatarId
+      for (const tab of index.gui?.tabs ?? []) if (local(tab) && tab.backend_key === backend_key && tab.session_id === session_id) tab.avatar_id = avatarId
+    }
   })
-  if (operation === 'rename-session') return
+  if (['rename-session', 'session-avatar'].includes(operation)) return
   await edit(client, 'workspaces', state => {
     const global = state.global
     global.archivedSessionIds ??= []; global.pinnedSessionIds ??= []

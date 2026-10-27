@@ -231,6 +231,7 @@ export async function apply(ctx, config = {}) {
     runtimeCtx.inject(['webServer', 'connection', 'sessionController', 'agentDefaultModel'], async webCtx => {
       const { registerAgentApi } = await import('./agent-api.js')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
+      if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
       if (config.sharedBackendState) webCtx.effect(() => {
         const lifetime = new AbortController()
         const task = import('./workbench-import.js').then(({ syncNativeTabs }) => syncNativeTabs(webCtx.sessionController, admin, service.profiles, lifetime.signal))

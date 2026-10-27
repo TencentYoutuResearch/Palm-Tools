@@ -13,7 +13,7 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
   const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'native', name: 'dsh', type: 'dsh' }])
   let handler, selection = { provider: 'native-llm', model: 'fixture' }, turns = 0
   const selected = []
-  const agent = { id: 'conversation', status: 'idle', session: {},selectModel:request=>{selected.push(request);selection={provider:request.provider,model:request.model};return{selected:selection}} }
+  const agent = { id: 'conversation', status: 'idle', session: {},selectModel:request=>{selected.push(request);selection={provider:request.provider,model:request.model,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{})};return{selected:selection}} }
   const ctx = {
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-test-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : req.headers['x-test-role'] === 'guest' ? { peer: { principal: { kind: 'guest' } } } : { rejection: 401 } },
@@ -25,7 +25,7 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
       selectModel: async()=>{throw new Error('Native model selection must not reconfigure dsh defaults')},
     },
   }
-  const service = { profiles, adapter: { listModels: async () => [{ id: 'fixture' }] }, refresh() {} }
+  const service = { profiles, adapter: { listModels: async () => [{ id: 'fixture', reasoningEfforts:[{id:'medium',name:'Medium'},{id:'high',name:'High'}],defaultReasoningEffort:'medium' }] }, refresh() {} }
   registerAgentApi(ctx, service)
   const server = http.createServer((req, res) => { void handler(req, res) })
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -50,6 +50,9 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     assert.match((await failed.json()).error, /new conversation/)
     assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id, model: 'fixture' })).status, 200)
     assert.equal(selected.at(-1).model, 'fixture')
+    assert.equal((await request({action:'select',profileId:two.profile.id,sessionId:agent.id,model:'fixture',reasoningEffort:'high'})).status,200)
+    assert.equal(selected.at(-1).reasoningEffort,'high')
+    assert.equal((await request({action:'select',profileId:two.profile.id,sessionId:agent.id,model:'fixture',reasoningEffort:'not-advertised'})).status,400)
     assert.equal(selected.at(-1).provider, `kode-agent-${two.profile.id}`)
     assert.equal(profiles.binding(agent.id).profile.id, two.profile.id)
     assert.equal((await request({ action: 'remove', profileId: two.profile.id }, 'guest')).status, 403)

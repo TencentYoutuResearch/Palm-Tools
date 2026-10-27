@@ -14,6 +14,7 @@ import { resolveAdvertisedModel } from './model-alias.js'
 import { modeAllowed } from './native-commands.js'
 
 const flattenOptions = options => (options ?? []).flatMap(o => o.options ?? [o])
+const effortOption = state => state?.configOptions?.find(option => option.type === 'select' && (option.category === 'thought_level' || /(?:^|[_-])effort(?:$|[_-])/i.test(option.id)))
 function abortable(task, signal) {
   signal.throwIfAborted()
   let abort
@@ -76,24 +77,28 @@ export class AcpSession {
       mcpServers.push(this.proxy.definition)
     }
     this.opening = true
+    const settings = typeof this.profile.autoCompactEnabled === 'boolean' ? { _meta: { claudeCode: { options: { settings: { autoCompactEnabled: this.profile.autoCompactEnabled } } } } } : {}
     try { if (binding.threadId) {
       const resume = this.info.agentCapabilities?.sessionCapabilities?.resume
       if (!this.info.agentCapabilities?.loadSession && !resume) throw new Error('This ACP Agent cannot restore saved conversations; it will not silently start a new one')
       this.threadId = binding.threadId
-      this.state = await this.request(resume ? 'session/resume' : 'session/load', { sessionId: this.threadId, cwd: this.cwd, mcpServers }, signal) ?? {}
+      this.state = await this.request(resume ? 'session/resume' : 'session/load', { sessionId: this.threadId, cwd: this.cwd, mcpServers, ...settings }, signal) ?? {}
     } else {
-      this.state = await this.request('session/new', { cwd: this.cwd, mcpServers }, signal)
+      this.state = await this.request('session/new', { cwd: this.cwd, mcpServers, ...settings }, signal)
       this.threadId = this.state.sessionId
     } } finally { this.opening = false }
     if (!this.threadId) throw new Error('ACP Agent returned no session ID')
     for (const update of this.setupUpdates.splice(0)) this.update(update)
     return this.threadId
   }
-  async listModels(signal) {
+  async listModels(signal, { model } = {}) {
     await this.open({}, [], signal)
     await this.waitForCommands(signal)
+    if (model && model !== 'default') await this.selectModel(model, signal)
     const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
-    return option ? flattenOptions(option.options).map(m => ({ id: m.value, model: m.value, displayName: m.name, isDefault: m.value === option.currentValue })) : (this.state.models?.availableModels ?? []).map(m => ({ id: m.modelId, model: m.modelId, displayName: m.name, isDefault: m.modelId === this.state.models.currentModelId }))
+    const effort = effortOption(this.state), current = option?.currentValue ?? this.state.models?.currentModelId
+    const models = option ? flattenOptions(option.options).map(m => ({ id: m.value, model: m.value, displayName: m.name, isDefault: m.value === current })) : (this.state.models?.availableModels ?? []).map(m => ({ id: m.modelId, model: m.modelId, displayName: m.name, isDefault: m.modelId === current }))
+    return models.map(row => ({ ...row, ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}) }))
   }
   async waitForCommands(signal = this.lifetime.signal) {
     // Claude sends its authoritative commands after the setup response.
@@ -101,7 +106,7 @@ export class AcpSession {
     try { await abortable(Promise.race([this.commandsReady.promise, new Promise(resolve => { timer = setTimeout(resolve, 1500) })]), signal ?? this.lifetime.signal) }
     finally { clearTimeout(timer) }
   }
-  async configure(model, signal) {
+  async configure(model, signal, effort) {
     const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
     if (this.profile.fixedPolicy && (policy.mode !== this.profile.fixedPolicy.mode || (this.handlers.approvalPolicy?.() ?? 'ask') !== this.profile.fixedPolicy.approval)) throw new Error('此 dsh ACP 版本不支持运行中修改权限，请新建会话应用新的权限。')
     const available = this.state.modes?.availableModes ?? []
@@ -113,15 +118,27 @@ export class AcpSession {
       await this.request('session/set_mode', { sessionId: this.threadId, modeId: mode.id }, signal)
       this.state.modes.currentModeId = mode.id
     }
+    await this.selectModel(model, signal)
+    if (effort) {
+      const option = effortOption(this.state)
+      if (!option || !flattenOptions(option.options).some(value => value.value === effort)) throw new Error('当前 Agent 未公布此推理强度，请刷新模型列表。')
+      const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value: effort }, signal)
+      if (result.configOptions) this.state.configOptions = result.configOptions
+      else option.currentValue = effort
+    }
+  }
+  async selectModel(model, signal) {
     if (model && model !== 'default') {
       const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
       if (option) {
         model = resolveAdvertisedModel(flattenOptions(option.options), model)
         const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value: model }, signal)
         if (result.configOptions) this.state.configOptions = result.configOptions
+        else option.currentValue = model
       } else if (this.state.models?.availableModels?.length) {
         model = resolveAdvertisedModel(this.state.models.availableModels, model)
         await this.request('session/set_model', { sessionId: this.threadId, modelId: model }, signal)
+        this.state.models.currentModelId = model
       } else throw new Error('This ACP Agent does not advertise model selection')
     }
   }
@@ -166,7 +183,7 @@ export class AcpSession {
     }
     throw new Error(`Unsupported ACP interaction: ${method}`)
   }
-  async *turn(input, { model, signal = this.lifetime.signal, command } = {}) {
+  async *turn(input, { model, signal = this.lifetime.signal, command, effort } = {}) {
     if (this.active) throw new Error('ACP conversation already has an active turn')
     const fused = AbortSignal.any([signal, this.lifetime.signal]), queue = []
     const active = { turnId: randomUUID(), signal: fused, tools: new Map(), done: false, error: undefined,
@@ -178,7 +195,7 @@ export class AcpSession {
     const abort = () => { void this.connection.agent.notify('session/cancel', { sessionId: this.threadId }).catch(() => {}); active.end(fused.reason ?? new Error('ACP turn cancelled')) }
     fused.addEventListener('abort', abort, { once: true })
     try {
-      await this.configure(model === 'default' ? this.profile.defaultModel : model, fused)
+      await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort)
       if (command) await this.waitForCommands(fused)
       if (command && !this.commands.some(row => row.name === command.name)) throw new Error(`此 Agent 未公布 /${command.name}，请使用 /help 查看可用命令。`)
       const task = this.request('session/prompt', { sessionId: this.threadId, prompt: input }, fused, 0).then(result => {

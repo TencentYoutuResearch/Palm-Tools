@@ -34,7 +34,7 @@ export function installSessionCreator(ctx, backend, nodeId) {
       const runtime = ctx.get('kodeAgents')
       if (!runtime) throw new Error('Agent runtime is still starting; retry after Host initialization')
       await runtime.profiles.reload?.()
-      const profiles = runtime.profiles.list().filter(profile => runtime.hasRuntime(profile.type))
+      const profiles = (runtime.appearance?.profilesView() ?? runtime.profiles.list()).filter(profile => runtime.hasRuntime(profile.type))
       const wanted = input.agent?.trim().toLocaleLowerCase()
       const sensitive = wanted && profiles.filter(profile => profile.id === input.agent || profile.name === input.agent)
       const exact = wanted && (sensitive.length ? sensitive : profiles.filter(profile => profile.name.toLocaleLowerCase() === wanted))

@@ -51,6 +51,8 @@ export async function saveNativeTab(client, profiles, agent, title) {
     const saved=(catalog.tabs??[]).find(tab=>tab.session_id===binding.threadId && tab.backend_key===backend)
     const model=agent.session.requestHeader()?.config.model
     const row = { backend_key: backend, agent_id: profile.id, title: title?.trim() || saved?.title || state.native_sessions[index]?.title || '未命名会话', title_pinned: true, cwd: agent.session.header.cwd, session_id: binding.threadId, dsh_session_id: agent.id, ...(model?{model}:{}), transport_kind: 'pty', endpoint_id: null }
+    const pendingAvatars = state.presentation?.sessionAvatars
+    if (pendingAvatars && Object.hasOwn(pendingAvatars, agent.id)) { row.avatar_id = pendingAvatars[agent.id]; delete pendingAvatars[agent.id] }
     if (index >= 0) state.native_sessions[index] = { ...state.native_sessions[index], ...row }; else state.native_sessions.push(row)
     try { await document.write(state); return } catch (error) { if (attempt === 3 || !/configuration changed/.test(error.message)) throw error }
   }

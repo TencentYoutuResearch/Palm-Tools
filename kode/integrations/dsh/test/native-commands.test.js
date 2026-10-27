@@ -38,27 +38,32 @@ for(const late of [false,true])test(`ACP discovers commands ${late?'after':'befo
   const root=await mkdtemp(join(tmpdir(),'kode-acp-commands-')),log=join(root,'wire.jsonl')
   const session=new AcpSession({type:'custom',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-acp-server.js',import.meta.url))],env:{KODE_ACP_FIXTURE_LOG:log,...(late?{KODE_ACP_LATE_COMMANDS:'1'}:{})}},root)
   try{
-    await session.listModels(AbortSignal.timeout(5000))
+    const catalog = await session.listModels(AbortSignal.timeout(5000),{model:'fixture-large'})
+    assert.deepEqual(catalog.find(model=>model.id==='fixture-large').reasoningEfforts.map(row=>row.id),['medium','high'])
     assert.ok(session.commands.some(row=>row.name==='fixture:skill'))
-    const events=await collect(session.turn([{type:'text',text:'/fixture:skill review this'}],{model:'Large fixture',command:{name:'fixture:skill',input:'review this'}}))
+    const events=await collect(session.turn([{type:'text',text:'/fixture:skill review this'}],{model:'Large fixture',effort:'high',command:{name:'fixture:skill',input:'review this'}}))
     assert.match(events.find(event=>event.method==='item/agentMessage/delta').params.delta,/\/fixture:skill review this/)
     const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
     assert.ok(rows.some(row=>row.method==='session/set_config_option'&&row.params.value==='fixture-large'))
+    assert.ok(rows.some(row=>row.method==='session/set_config_option'&&row.params.configId==='effort'&&row.params.value==='high'))
   }finally{await session.close();await rm(root,{recursive:true,force:true})}
 })
 test('Codex commands use native RPCs and $skills become typed inputs with discovered workspace paths',async()=>{
   const root=await mkdtemp(join(tmpdir(),'kode-codex-commands-')),log=join(root,'wire.jsonl')
-  const session=new CodexSession({executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:log}},root,{policy:()=>({mode:'read-only'})})
+  const session=new CodexSession({executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:log}},root,{policy:()=>({mode:'read-only'}),collaborationMode:()=>true})
   try{
     await session.open({},[],AbortSignal.timeout(5000))
+    await session.rename('Native renamed conversation',AbortSignal.timeout(5000))
     for(const name of ['compact','review','mcp','skills']){
       const events=await collect(session.turn([{type:'text',text:`/${name}`}],{signal:AbortSignal.timeout(5000),command:{name,input:''}}))
       assert.ok(events.some(event=>event.method==='turn/completed'))
     }
-    await collect(session.turn([{type:'text',text:'Use $fixture-skill to review'}],{skillNames:['fixture-skill'],signal:AbortSignal.timeout(5000)}))
+    await collect(session.turn([{type:'text',text:'Use $fixture-skill to review'}],{skillNames:['fixture-skill'],effort:'high',model:'fixture',signal:AbortSignal.timeout(5000)}))
     const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
     assert.equal(rows.filter(row=>row.method==='turn/start').length,1,'native control commands must not be ordinary model prompts')
     assert.ok(rows.some(row=>row.method==='thread/compact/start'));assert.ok(rows.some(row=>row.method==='review/start'&&row.params.delivery==='inline'))
+    assert.ok(rows.some(row=>row.method==='thread/name/set'&&row.params.name==='Native renamed conversation'))
+    assert.equal(rows.find(row=>row.method==='turn/start').params.effort,'high');assert.equal(rows.find(row=>row.method==='turn/start').params.collaborationMode.mode,'plan')
     assert.deepEqual(rows.find(row=>row.method==='turn/start').params.input.at(-1),{type:'skill',name:'fixture-skill',path:join(root,'.agents/skills/fixture-skill/SKILL.md')})
   }finally{await session.close();await rm(root,{recursive:true,force:true})}
 })

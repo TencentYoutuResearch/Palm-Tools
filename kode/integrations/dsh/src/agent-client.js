@@ -3,6 +3,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const React = require('react'), h = React.createElement
   const { useState, useEffect, useSyncExternalStore } = React
   const { Menu, Modal, Button, MarkdownText, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
   let stagedAgent, transport
   const fetchHost = (url, options, host) => transport ? transport.fetch(url, options, host) : fetch(url, options)
@@ -53,7 +54,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const id = sessionId ?? Object.values(listed.byId).find(s => s.blank && (s.retainedBy.mainView ?? 0) > 0)?.id
     const selection = listed.byId[id]?.projectionValues?.modelSelection
     const selected = selection?.pending ?? selection?.next ?? selection?.lastUsed
-    const selectedKey = `${selected?.provider ?? ''}/${selected?.model ?? ''}`
+    const selectedKey = `${selected?.provider ?? ''}/${selected?.model ?? ''}/${selected?.reasoningEffort ?? ''}`
     const store = directory(id), state = useSyncExternalStore(store.subscribe, store.getSnapshot)
     useEffect(() => {
       let alive = true
@@ -75,9 +76,22 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }, [store, selectedKey])
     return { ...state, store, id }
   }
-  function Trigger({ label, open, onClick, disabled, agent = false }) {
+  function AgentAvatar({ profile, host, size = 20 }) {
+    const [failed, setFailed] = useState(false)
+    const source = profile?.avatar?.url ?? (profile?.type && profile.type !== 'custom' ? `/api/kode/avatars/media?type=${encodeURIComponent(profile.type)}&state=idle` : null)
+    useEffect(() => setFailed(false), [source, host])
+    const url = source && (transport ? transport.path(source, 'local') : source)
+    return h('span', { className: 'kode-agent-avatar', style: { width: size, height: size }, 'aria-hidden': true }, source && !failed ? !profile?.avatar?.id && profile?.type === 'cursor' ? h('span', { className: 'kode-agent-mask', style: { maskImage: `url("${url}")`, WebkitMaskImage: `url("${url}")` } }) : h('img', { src: url, alt: '', loading: 'lazy', onError: () => setFailed(true) }) : h(IconAgentPresetOutlineRegular, { size }))
+  }
+  function LineGlyph({ kind = 'command', size = 16, ...props }) {
+    const paths = { command: 'm4 6 5 6-5 6m8 0h8', skill: 'm12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5', model: 'M5 5h14v14H5zM9 9h6v6H9zM9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3', info: 'M12 11v6m0-10h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z', compact: 'M4 9h16M4 15h16m-8-9V2m0 20v-4m-3-1 3-3 3 3M9 7l3 3 3-3', permission: 'm12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6' }
+    return h('svg', { ...props, width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.65, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: paths[kind] ?? paths.command }))
+  }
+  const CommandGlyph = props => h(LineGlyph, { ...props, kind: 'command' }), SkillGlyph = props => h(LineGlyph, { ...props, kind: 'skill' })
+  const ModelGlyph = props => h(LineGlyph, { ...props, kind: 'model' }), InfoGlyph = props => h(LineGlyph, { ...props, kind: 'info' }), CompactGlyph = props => h(LineGlyph, { ...props, kind: 'compact' }), PermissionGlyph = props => h(LineGlyph, { ...props, kind: 'permission' })
+  function Trigger({ label, open, onClick, disabled, agent = false, profile }) {
     return h('button', { type: 'button', className: `kode-trigger${agent ? ' kode-agent-trigger' : ''}`, 'aria-label': agent ? `Agent：${label}` : `模型：${label}`, 'aria-haspopup': 'menu', 'aria-expanded': open, disabled, onClick },
-      agent && h(IconAgentPresetOutlineRegular, { size: 16 }), h('span', null, label), h(IconChevronDownOutlineRegular, { size: 12, className: open ? 'kode-chevron-open' : '' }))
+      agent && h(AgentAvatar, { profile, size: 18 }), h('span', null, label), h(IconChevronDownOutlineRegular, { size: 12, className: open ? 'kode-chevron-open' : '' }))
   }
   function Failure({ text }) { return text ? h('p', { className: 'kode-error', role: 'alert' }, text) : null }
   function SelectField({ label, value, options, onChange, disabled = false }) {
@@ -130,13 +144,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')
     useEffect(() => setOpen(false), [id])
     const current = data?.currentProfile ?? data?.profiles.find(p => p.id === data.selectedProfileId)
-    const items = (data?.profiles ?? []).map(p => ({ id: p.id, disabled: busy || !id || (!data.canChangeAgent && p.id !== current?.id) || !data.supportedTypes.includes(p.type), label: h('span', { className: 'kode-option' }, h('span', null, p.name), h('span', { className: 'kode-secondary' }, data.types[p.type]?.name)) }))
+    const rows = data?.profiles ?? [], firstCustom = rows.findIndex(profile => profile.origin !== 'builtin')
+    const items = rows.flatMap((p, index) => [...(index === firstCustom && index > 0 ? [{ type: 'separator' }] : []), { id: p.id, disabled: busy || !id || (!data.canChangeAgent && p.id !== current?.id) || !data.supportedTypes.includes(p.type), label: h('span', { className: 'kode-agent-option' }, h(AgentAvatar, { profile: p }), h('span', { className: 'kode-option' }, h('span', null, p.name), p.origin !== 'builtin' && h('span', { className: 'kode-secondary' }, data.types[p.type]?.name))) }])
     items.push({ type: 'separator' }, { id: 'configure', label: '自定义 Agent…' })
     return h(React.Fragment, null,
       h(Menu, { open, onClose: () => setOpen(false), selectedId: current?.id, items, side: 'bottom', portal: true,
         footer: !data?.canChangeAgent && current ? h('div', { className: 'kode-menu-note' }, '新建会话后可切换 Agent') : undefined,
         onSelect: profileId => { setOpen(false); if (profileId === 'configure') { requestedProfile = current?.origin !== 'builtin' ? current?.id : undefined; try { openSettings(slots) } catch (e) { setNavigationError(e.message) } } else void store.operate({ action: 'select', profileId, sessionId: id }).catch(() => {}) },
-        anchor: h(Trigger, { agent: true, label: current?.name ?? '选择 Agent', open, disabled: busy || !data, onClick: () => { setOpen(!open); void store.load() } }),
+        anchor: h(Trigger, { agent: true, profile: current, label: current?.name ?? '选择 Agent', open, disabled: busy || !data, onClick: () => { setOpen(!open); void store.load() } }),
       }),
       current?.type === 'dsh' && h(DshModeControl, { id, sessions, remote, canChange: data.canChangeAgent }),
       h(Failure, { text: navigationError || error }),
@@ -174,21 +189,57 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('div', { className: 'kode-settings-footer' }, draft.id && customProfiles.some(p => p.id === draft.id) && h(Button, { variant: 'outline', className: 'kode-delete', disabled: busy, onClick: () => setDeleting(true) }, '删除配置'), h(Button, { variant: 'outline', disabled: busy, onClick: () => setEditing(false) }, '取消'), h(Button, { variant: 'primary', type: 'submit', form: 'kode-agent-form', disabled: busy }, busy ? '保存中…' : '保存配置')))
     return h('section', { className: 'kode-agent-settings', 'aria-label': 'Agent 设置' },
       h('h2', null, 'Agent'),
-      h('p', { className: 'kode-agent-intro' }, '添加自定义 Agent。同一类型可添加多份配置。'),
+      h('p', { className: 'kode-agent-intro' }, '内置 Agent 可直接使用，也可为同一类型添加多份配置。会话头像在会话菜单中设置。'),
       saved && h('p', { className: 'kode-config-note', role: 'status' }, '已保存'),
       h(Failure, { text: !editing ? formError || error : '' }),
+      h('h3', { className: 'kode-settings-group-title' }, '内置 Agent'),
       h('ul', { className: 'kode-agent-rows' },
+        ...(data?.profiles ?? []).filter(profile => profile.origin === 'builtin' && profile.type !== 'dsh').map(profile => h('li', { className: 'kode-agent-row', key: profile.id },
+          h('div', { className: 'kode-agent-row-head' }, h(AgentAvatar, { profile, size: 24 }), h('span', { className: 'kode-agent-name' }, profile.name)))),
         data?.types?.dsh && h('li', { className: 'kode-agent-row' },
           h('div', { className: 'kode-agent-row-head' }, h('span', { className: 'kode-agent-name' }, 'DeepSeek Harness'), h(Button, { variant: 'outline', className: 'kode-agent-edit', 'aria-label': '编辑 DeepSeek Harness', 'aria-expanded': modelsOpen, onClick: () => { setModelsOpen(!modelsOpen); setEditing(false) } }, modelsOpen ? '收起' : '编辑')),
           modelsOpen && h('div', { className: 'kode-agent-models' }, renderModels ? renderModels({ close }) : h(Failure, { text: '模型设置尚未就绪，请稍后重试。' }))),
+      ),
+      h('h3', { className: 'kode-settings-group-title' }, '自定义 Agent'),
+      h('ul', { className: 'kode-agent-rows' },
         ...customProfiles.map(p => h('li', { className: 'kode-agent-row', key: p.id },
-          h('div', { className: 'kode-agent-row-head' }, h('span', { className: 'kode-agent-name' }, p.name), h('span', { className: 'kode-agent-tag' }, data.types[p.type]?.name), h(Button, { variant: 'outline', className: 'kode-agent-edit', disabled: busy, 'aria-label': `编辑 ${p.name}`, 'aria-expanded': editing && draft.id === p.id, onClick: () => editing && draft.id === p.id ? setEditing(false) : edit(p) }, editing && draft.id === p.id ? '收起' : '编辑')),
+          h('div', { className: 'kode-agent-row-head' }, h(AgentAvatar, { profile: p, size: 24 }), h('span', { className: 'kode-agent-name' }, p.name), h('span', { className: 'kode-agent-tag' }, data.types[p.type]?.name), h(Button, { variant: 'outline', className: 'kode-agent-edit', disabled: busy, 'aria-label': `编辑 ${p.name}`, 'aria-expanded': editing && draft.id === p.id, onClick: () => editing && draft.id === p.id ? setEditing(false) : edit(p) }, editing && draft.id === p.id ? '收起' : '编辑')),
           editing && draft.id === p.id && h('div', { className: 'kode-agent-editor' }, editor))),
       ),
       h(Button, { variant: 'outline', className: 'kode-agent-add', disabled: busy || !data, onClick: () => edit(newDraft(data?.types)) }, h(IconPlusOutlineRegular, { size: 16 }), '添加 Agent'),
       editing && !draft.id && h('div', { className: 'kode-agent-editor' }, editor),
       h(Modal, { open: deleting, title: `删除 ${draft.name}？`, closeLabel: '关闭', onClose: () => setDeleting(false), description: '此配置将从 Agent 列表移除。已有会话和启动配置会保留。', footer: h(React.Fragment, null, h(Button, { variant: 'outline', onClick: () => setDeleting(false) }, '取消'), h(Button, { variant: 'primary', disabled: busy, onClick: () => { void store.operate({ action: 'remove', profileId: draft.id }).then(result => { if (result) { setDeleting(false); setEditing(false); setSaved(false) } }).catch(() => {}) } }, '删除配置')) }, h(Failure, { text: error })),
     )
+  }
+  function AvatarChoices({ profile, onChoose }) {
+    const [avatars, setAvatars] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
+    useEffect(() => { let active = true; fetchHost('/api/kode/avatars', { credentials: 'same-origin', cache: 'no-store' }, 'local').then(async response => { const value = await response.json(); if (!response.ok) throw new Error(value.error); if (active) setAvatars(value.avatars) }).catch(error => { if (active) setError(error.message) }); return () => { active = false } }, [])
+    const choose = avatarId => { if (busy) return; setBusy(true); setError(''); void Promise.resolve(onChoose(avatarId)).catch(error => setError(error.message)).finally(() => setBusy(false)) }
+    return h('div', { className: 'kode-avatar-editor' },
+      h('p', { className: 'kode-config-note' }, '仅更改当前会话的头像；默认使用 Agent 图标。'),
+      h('div', { className: 'kode-avatar-grid', 'aria-label': '会话头像' },
+        h('button', { type: 'button', className: 'kode-avatar-choice', 'aria-pressed': !profile.avatar?.id, disabled: busy, onClick: () => choose(null) }, h(AgentAvatar, { profile: { ...profile, avatar: null }, size: 36 }), h('span', null, '默认图标')),
+        ...(avatars ?? []).map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': profile.avatar?.id === avatar.id, disabled: busy, title: avatar.name, onClick: () => choose(avatar.id) }, h(AgentAvatar, { profile: { ...profile, avatar }, size: 36 }), h('span', null, avatar.name)))),
+      avatars?.length === 0 && h('p', { className: 'kode-config-note' }, '当前主机还没有自定义头像，可复用 Kode 的头像库。'),
+      !avatars && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取头像…'), h(Failure, { text: error }))
+  }
+  function AgentIdentity({ sessionId, sessions }) {
+    const { data, store } = useDirectory(sessionId, sessions), profile = data?.currentProfile, [open, setOpen] = useState(false)
+    return profile && !data.canChangeAgent ? h(React.Fragment, null,
+      h('span', { className: 'kode-agent-identity', title: `${profile.name} · ${data.types[profile.type]?.name ?? profile.type}` }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置会话头像', onClick: () => setOpen(true) }, h(AgentAvatar, { profile })), h('span', null, profile.name)),
+      h(Modal, { open, title: '会话头像', className: 'kode-avatar-dialog', closeLabel: '关闭', onClose: () => setOpen(false) }, open && h(AvatarChoices, { profile, onChoose: async avatarId => { await store.operate({ action: 'session-avatar', sessionId, avatarId }); await refreshWorkspaceDirectory(); setOpen(false) } }))) : null
+  }
+  function SessionAvatarMenuItem({ sessionId, useMenuOpenState }) {
+    const [, setOpen] = useMenuOpenState()
+    return h(MenuItemButton, { icon: h(IconAgentPresetOutlineRegular, { size: 16 }), onSelect: () => { setOpen(false); window.dispatchEvent(new CustomEvent('kode-session-avatar', { detail: { sessionId } })) } }, '设置会话头像')
+  }
+  function SidebarAgentAvatar({ sessionId }) {
+    const data = useWorkspaceDirectory()
+    for (const host of data.hosts) {
+      const row = host.sessions?.find(row => (host.id === data.current ? row.id : foreignId(host.id, row.id)) === sessionId)
+      if (row?.agent) return h(AgentAvatar, { profile: row.agent, host: host.id, size: 16 })
+    }
+    return null
   }
   function ModelControl({ sessionId, sessions }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions), [open, setOpen] = useState(false)
@@ -203,7 +254,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       onSelect: index => { setOpen(false); if (index === 'reload') void store.load(true); else { const model = models[Number(index)]; if (model) void store.operate({ action: 'select', profileId: current.id, sessionId: id, provider: model.provider, model: model.id }).catch(() => {}) } },
       anchor: h(Trigger, { label: selected?.name ?? selected?.id ?? (data ? '选择模型' : '正在读取模型…'), open, disabled: busy || !id, onClick: () => { setOpen(!open); void store.load() } }),
       footer: data?.modelError ? h('div', { className: 'kode-menu-note', role: 'alert' }, '请检查 Agent 的安装与登录状态。') : undefined,
-    }), h(Failure, { text: error }))
+    }), h(EffortControl, { model: selected, value: data?.selection?.reasoningEffort, profile: current, sessionId: id, store, busy }), h(Failure, { text: error }))
+  }
+  function EffortControl({ model, value, profile, sessionId, store, busy }) {
+    const [open, setOpen] = useState(false), rows = model?.reasoningEfforts ?? []
+    if (!rows.length) return null
+    const selected = value ?? model.defaultReasoningEffort, label = rows.find(row => row.id === selected)?.name ?? selected ?? '推理强度'
+    return h(Menu, { open, onClose: () => setOpen(false), side: 'top', align: 'end', portal: true, selectedId: selected,
+      items: rows.map(row => ({ id: row.id, label: row.name ?? row.id })),
+      onSelect: reasoningEffort => { setOpen(false); void store.operate({ action: 'select', sessionId, profileId: profile.id, model: model.id, reasoningEffort }).catch(() => {}) },
+      anchor: h('button', { type: 'button', className: 'kode-trigger', 'aria-label': `推理强度：${label}`, 'aria-haspopup': 'menu', 'aria-expanded': open, disabled: busy || rows.length < 2, onClick: () => { setOpen(!open); void store.load() } }, h(ModelGlyph, { size: 14 }), label, h(IconChevronDownOutlineRegular, { size: 12 })) })
   }
 
   async function projectCall(body) {
@@ -276,11 +336,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const cssString = value => `"${Array.from(String(value), ch => `\\${ch.codePointAt(0).toString(16)} `).join('')}"`
   function FederatedWorkspaceBrowser({ native, slots, ...props }) {
     const connection = useSyncExternalStore(transport?.subscribe ?? (() => () => {}), transport?.getSnapshot ?? (() => null))
-    const data = useWorkspaceDirectory(), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [rename, setRename] = useState(null), [title, setTitle] = useState('')
+    const data = useWorkspaceDirectory(), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [rename, setRename] = useState(null), [title, setTitle] = useState(''), [avatarTarget, setAvatarTarget] = useState(null)
     const source = props.useSessions(state => state), workspaceSource = props.useWorkspaces(state => state)
     const merged = React.useMemo(() => {
       const own = data.hosts.find(host => host.id === data.current), hidden = new Set(own?.hiddenSessionIds ?? [])
       const byId = Object.fromEntries(Object.entries(source.byId).filter(([id]) => !hidden.has(id)))
+      for (const row of own?.sessions ?? []) if (byId[row.id] && row.agent) byId[row.id] = { ...byId[row.id], agent: row.agent }
       const ids = source.ids.filter(id => !hidden.has(id)), items = [], routes = new Map(), remoteRows = []
       const archivedSessionIds = [...workspaceSource.archivedSessionIds], pinnedSessionIds = [...workspaceSource.pinnedSessionIds]
       for (const host of data.hosts) {
@@ -318,6 +379,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const populated = items.filter(workspace => workspace.sessionIds.some(id => byId[id] && !byId[id].blank))
       return { sessions: { ...source, ids, byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds, pinnedSessionIds }, routes, remoteRows }
     }, [source, workspaceSource, data])
+    useEffect(() => {
+      if (!window.addEventListener) return
+      const show = event => { if (merged.sessions.byId[event.detail?.sessionId]) setAvatarTarget(event.detail.sessionId) }
+      window.addEventListener('kode-session-avatar', show)
+      return () => window.removeEventListener('kode-session-avatar', show)
+    }, [merged])
     const navigate = async (id, target) => { if (busy) return; setBusy(true); setError(''); setNotice(''); try {
       if (target.sessionId?.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId }); id = imported.hostId; target = { sessionId: imported.sessionId }; if(imported.historyWindow?.truncated)setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`) }
       await switchHost(id, target); await refreshWorkspaceDirectory()
@@ -337,10 +404,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const renderSlot = (name, owner, options) => {
       const route = merged.routes.get(owner?.sessionId)
       if (!route || !name.startsWith('sidebar.')) return props.renderSlot(name, owner, options)
+      if (name === 'sidebar.session.row.leading') return h(SidebarAgentAvatar, owner)
       if (['sidebar.workspaces.session.menu.item', 'sidebar.workspaces.session.row.action'].includes(name)) {
         // Reuse the shipped action components with host-qualified state and commands.
         // Their icons, hover buttons and menu-close behavior stay identical locally and remotely.
-        const allowed = name.endsWith('menu.item') ? ['pin', 'rename', 'archive'] : ['pin', 'archive']
+        const allowed = name.endsWith('menu.item') ? ['pin', 'rename', 'kode-avatar', 'archive'] : ['pin', 'archive']
         return h(React.Fragment, null, ...slots.entries(name).filter(entry => allowed.includes(entry.options.id)).map(entry => h(entry.component, {
           ...owner, key: entry.options.id, t: props.t, useShortcuts: props.useShortcuts,
           useMenuOpenState: () => options.hookContext,
@@ -376,7 +444,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         },
         unarchiveSession: id => merged.routes.has(id) ? mutate(id, 'unarchive-session', { sessionId: merged.routes.get(id).id }) : props.unarchiveSession(id),
       }),
-      h(Modal, { open: Boolean(rename), title: '重命名会话', closeLabel: '关闭', onClose: () => setRename(null), footer: h(React.Fragment, null, h(Button, { onClick: () => setRename(null) }, '取消'), h(Button, { variant: 'primary', disabled: !title.trim(), onClick: async () => { try { await mutate(rename, 'rename-session', { sessionId: merged.routes.get(rename).id, title: title.trim() }); setRename(null) } catch (error) { setError(error.message) } } }, '保存')) }, h('label', { className: 'kode-field' }, '会话名称', h('input', { value: title, onChange: e => setTitle(e.target.value) })), h(Failure, { text: error })))
+      h(Modal, { open: Boolean(rename), title: '重命名会话', closeLabel: '关闭', onClose: () => setRename(null), footer: h(React.Fragment, null, h(Button, { onClick: () => setRename(null) }, '取消'), h(Button, { variant: 'primary', disabled: !title.trim(), onClick: async () => { try { await mutate(rename, 'rename-session', { sessionId: merged.routes.get(rename).id, title: title.trim() }); setRename(null) } catch (error) { setError(error.message) } } }, '保存')) }, h('label', { className: 'kode-field' }, '会话名称', h('input', { value: title, onChange: e => setTitle(e.target.value) })), h(Failure, { text: error })),
+      h(Modal, { open: Boolean(avatarTarget), title: '会话头像', className: 'kode-avatar-dialog', closeLabel: '关闭', onClose: () => setAvatarTarget(null) }, avatarTarget && h(AvatarChoices, {
+        profile: merged.sessions.byId[avatarTarget]?.agent ?? { name: 'Agent', type: 'custom' },
+        onChoose: async avatarId => { const route = merged.routes.get(avatarTarget) ?? { id: avatarTarget, hostId: data.current }; await projectCall({ action: 'host-operation', id: route.hostId, operation: 'session-avatar', args: { sessionId: route.id, avatarId } }); await refreshWorkspaceDirectory(); void stores.get(`${route.hostId}:${route.id}`)?.load(); setAvatarTarget(null) },
+      })))
   }
   function WorkspaceArrival({ uiWorkspace, workspaces, sessions, layout }) {
     const workspacePhase = useSyncExternalStore(React.useCallback(fn => workspaces.list.subscribe(fn), [workspaces]), () => workspaces.list.getSnapshot().phase)
@@ -474,52 +546,105 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     )
   }
   const textContent = content => (content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n')
-  function CodexSkillPicker({ sessionId, sessions, useInput, inputActions }) {
-    const { data } = useDirectory(sessionId, sessions), input = useInput(state => state)
-    const [catalog, setCatalog] = useState(null), [error, setError] = useState(''), [index, setIndex] = useState(0), [dismissed, setDismissed] = useState(-1)
-    const root = React.useRef(null), selection = inputActions.captureInsertion()
-    const match = input.phase === 'plain' && /(?:^|\s)\$([a-zA-Z0-9_-]*)$/.exec(input.draft.slice(0, selection.end))
-    const enabled = Boolean(match && data?.currentProfile && (data.currentProfile.type === 'codex' || data.currentProfile.protocol === 'codex'))
-    const profileKey = data?.currentProfile?.id
-    useEffect(() => { setCatalog(null); setError('') }, [sessionId, profileKey])
-    useEffect(() => {
-      if (!enabled || catalog) return
-      const stop = new AbortController()
-      fetchHost(`${API}?session_id=${encodeURIComponent(sessionId)}&skills=1`, { credentials: 'same-origin', cache: 'no-store', signal: stop.signal }).then(async response => {
-        const value = await response.json(); if (!response.ok) throw new Error(value.error ?? '技能目录读取失败。')
-        if (!stop.signal.aborted) { setCatalog(value.skills ?? []); if (value.skillErrors?.length) setError('部分技能无法读取，请检查 Agent 的技能配置。') }
-      }).catch(error => { if (!stop.signal.aborted) setError(error.message) })
-      return () => stop.abort()
-    }, [enabled, sessionId, profileKey, catalog])
-    const candidates = (catalog ?? []).filter(skill => `${skill.name} ${skill.description ?? ''}`.toLowerCase().includes((match?.[1] ?? '').toLowerCase())).slice(0, 30)
-    const open = enabled && dismissed !== input.draftRev
-    const pick = skill => {
-      const start = selection.end - match[1].length - 1
-      if (inputActions.insertText(`$${skill.name} `, { start, end: selection.end, draftRev: input.draftRev })) setDismissed(input.draftRev)
-    }
-    useEffect(() => { setIndex(0) }, [match?.[1]])
-    useEffect(() => { root.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }) }, [index])
-    useEffect(() => {
-      if (!open || !root.current) return
-      let region = root.current.parentElement
-      for (let depth = 0; region && depth < 8 && !region.querySelector('[contenteditable="true"]'); depth++) region = region.parentElement
-      if (!region) return
-      const handle = event => {
-        if (event.isComposing || !event.target.closest?.('[contenteditable="true"]') || !region.contains(event.target)) return
-        if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); setDismissed(input.draftRev); return }
-        if (!candidates.length) return
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); event.stopImmediatePropagation(); setIndex(value => (value + (event.key === 'ArrowDown' ? 1 : -1) + candidates.length) % candidates.length) }
-        else if (event.key === 'Tab' || event.key === 'Enter') { event.preventDefault(); event.stopImmediatePropagation(); pick(candidates[index % candidates.length]) }
+  function installInputPresentation(ctx) {
+    ctx.inject(['inputTriggers', 'commandUi', 'remote.commands'], scope => {
+      const input = scope.inputTriggers, commands = scope.commandUi
+      if (!input?.sessionOf || typeof commands?.candidates !== 'function') return
+      const metadata = new Map(), skillLists = new Map(), adapted = new Map(), sourceName = 'kode-codex-skills'
+      const originalCandidates = commands.candidates, originalSessionOf = input.sessionOf
+      let candidateWrapper, sessionOf
+      scope.effect(() => () => {
+        if (candidateWrapper && commands.candidates === candidateWrapper) commands.candidates = originalCandidates
+        if (sessionOf && input.sessionOf === sessionOf) input.sessionOf = originalSessionOf
+        for (const [controller, methods] of adapted) if (controller.track === methods.wrapper) { controller.dismiss(); controller.track = methods.track }
+        metadata.clear(); skillLists.clear(); adapted.clear()
+      }, 'kode.input-presentation')
+      const keyOf = session => `${transport?.current ?? 'local'}:${session.sessionId}`
+      const metadataFor = session => {
+        const key = keyOf(session)
+        if (!metadata.has(key)) metadata.set(key, scope.remote.commands.list(session.sessionId).then(result => {
+          if (!result.ok) throw new Error(result.error.message)
+          return new Map(result.value.commands.map(row => [row.name, row]))
+        }).catch(error => { metadata.delete(key); throw error }))
+        return metadata.get(key)
       }
-      window.addEventListener('keydown', handle, true)
-      return () => window.removeEventListener('keydown', handle, true)
-    }, [open, input.draftRev, index, candidates.map(skill => skill.name).join('\n')])
-    if (!open) return null
-    return h('div', { ref: root, className: 'kode-skill-menu', role: 'listbox', 'aria-label': 'Codex 技能' },
-      h('div', { className: 'kode-skill-caption' }, 'Codex 技能'), h(Failure, { text: error }),
-      !catalog && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取工作区技能…'),
-      catalog && !candidates.length && h('p', { className: 'kode-config-note' }, '没有匹配的技能'),
-      ...candidates.map((skill, position) => h(Button, { key: skill.path, variant: 'ghost', className: `kode-skill-option${position === index ? ' kode-skill-current' : ''}`, role: 'option', 'aria-selected': position === index, onMouseDown: event => event.preventDefault(), onClick: () => pick(skill) }, h('span', null, `$${skill.name}`), skill.description && h('small', null, skill.description))))
+      const iconFor = name => name === 'new' ? IconPlusOutlineRegular : ['model', 'mode', 'effort'].includes(name) ? ModelGlyph : ['help', 'status', 'context', 'cost', 'usage'].includes(name) ? InfoGlyph : name === 'compact' ? CompactGlyph : ['permission', 'permissions', 'plan'].includes(name) ? PermissionGlyph : name === 'mcp' ? IconGlobeOutlineRegular : CommandGlyph
+      candidateWrapper = async function(session, request) {
+        // The native catalog first retains/opens the Session. Presentation
+        // metadata must neither race that admission nor hide an otherwise
+        // usable menu when its optional read is unavailable.
+        const rows = await originalCandidates.call(this, session, request)
+        const catalog = await metadataFor(session).catch(() => new Map())
+        const groups = { '快捷操作': [], 'Agent 命令': [], '技能': [] }
+        for (const row of rows) {
+          const definition = catalog.get(row.name)?.definitionId ?? ''
+          const skill = definition.startsWith('@kode/dsh/native/skill/')
+          const section = skill ? '技能' : ['file', 'feedback', 'export', 'new'].includes(row.name) ? '快捷操作' : 'Agent 命令'
+          groups[section].push({ ...row, section, icon: row.icon ?? (skill ? SkillGlyph : iconFor(row.name)) })
+        }
+        return Object.values(groups).flat()
+      }
+      commands.candidates = candidateWrapper
+      if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
+        name: 'new',
+        available: session => Boolean(directory(session.sessionId).getSnapshot().data?.currentProfile && scope.get('uiWorkspace')),
+        ui: { kind: 'action', run: session => {
+          const binding = scope.sessions.binding(session.sessionId), sourceHost = transport?.current ?? 'local'
+          void (async () => {
+            const data = directory(session.sessionId).getSnapshot().data, previous = scope.sessions.list.getSnapshot().byId[session.sessionId]
+            const workspace = scope.get('workspaces')?.list.getSnapshot().items.find(row => row.sessionIds.includes(session.sessionId))
+            const id = await scope.sessions.create({ ...(workspace ? { workspaceId: workspace.workspaceId } : previous?.cwd ? { cwd: previous.cwd } : {}), agentPreset: 'kode-native' })
+            if ((transport?.current ?? 'local') !== sourceHost) throw new Error('执行主机已切换，新会话保留在原主机。')
+            await call({ action: 'select', sessionId: id, profileId: data.currentProfile.id, model: data.selection?.model, reasoningEffort: data.selection?.reasoningEffort }, id, false, sourceHost)
+            scope.get('uiWorkspace').openSession(id); await refreshWorkspaceDirectory()
+          })().catch(error => binding?.ctx.get('conversation')?.input.for(binding.ctx).notify('error', error.message))
+        } },
+      }), 'kode.new-session-command')
+      const invalidate = () => { metadata.clear(); skillLists.clear() }
+      scope.remote.$on?.('commands/change', invalidate)
+      scope.on?.('connection/reset', invalidate)
+      scope.on?.('command/executed', (_id, name) => { if (['skills', 'reload-skills', 'reload-plugins'].includes(name)) skillLists.clear() })
+      scope.effect(() => input.registerSource({
+        trigger: '$', name: sourceName, showGroupTitle: false,
+        async candidates(session, request) {
+          const key = keyOf(session)
+          if (!skillLists.has(key)) skillLists.set(key, fetchHost(`${API}?session_id=${encodeURIComponent(session.sessionId)}&skills=1`, { credentials: 'same-origin', cache: 'no-store', signal: request.signal }).then(async response => {
+            const value = await response.json(); if (!response.ok) throw new Error(value.error ?? '技能目录读取失败。')
+            return value.skills ?? []
+          }).catch(error => { skillLists.delete(key); throw error }))
+          const rows = await skillLists.get(key), query = request.query.toLocaleLowerCase()
+          return rows.filter(skill => `${skill.name} ${skill.description ?? ''}`.toLocaleLowerCase().includes(query)).map(skill => ({ name: skill.name, description: (skill.description ?? '').replace(/\s+/g, ' ').trim(), icon: SkillGlyph, section: '技能', value: skill.path }))
+        },
+        onPick: ({ candidate }) => ({ text: `$${candidate.name} ` }),
+      }), 'kode.native-skill-source')
+      const decorate = (controller, sessionId, actx) => {
+        if (adapted.has(controller)) return controller
+        const track = controller.track
+        let previous = null, dollar = false
+        const wrapper = function(draft, caret, guard, draftRev) {
+          const profile = directory(sessionId).getSnapshot().data?.currentProfile
+          const match = guard.tier === 'plain' && (!profile || profile.type === 'codex' || profile.protocol === 'codex') && /(?:^|\s)\$([a-zA-Z0-9_:-]*)$/.exec(draft.slice(0, caret))
+          if (!match) { if (dollar) controller.dismiss(); dollar = false; previous = null; return track.call(this, draft, caret, guard, draftRev) }
+          const start = caret - match[1].length - 1, stamp = `${start}:${caret}:${match[1]}:${draftRev}`
+          if (stamp === previous) return
+          previous = stamp; dollar = true
+          // The pinned public launcher supplies the same native menu, keyboard
+          // arbitration, scrolling and guarded insertion used by / and @.
+          track.call(this, draft, caret, guard, draftRev)
+          controller.toggleSource(sourceName, { trigger: '$', query: match[1], quoted: false, position: draft.slice(0, start).trim() ? 'inline' : 'leading', span: { start, end: caret, draftRev } })
+        }
+        controller.track = wrapper; adapted.set(controller, { track, wrapper })
+        const cacheKey = keyOf({ sessionId })
+        actx?.effect?.(() => () => { if (controller.track === wrapper) controller.track = track; adapted.delete(controller); metadata.delete(cacheKey); skillLists.delete(cacheKey) }, 'kode.session-input-presentation')
+        return controller
+      }
+      sessionOf = function(actx) { const controller = originalSessionOf.call(this, actx), session = scope.sessions.sessionOf(actx); return session ? decorate(controller, session.sessionId, actx) : controller }
+      input.sessionOf = sessionOf
+      scope.slots.inject('conversation.input.overlay', () => scope.slots.register({ name: 'conversation.input.overlay', id: 'kode-input-adapter', inject: sessionId => {
+        const binding = scope.sessions.binding(sessionId); if (binding) input.sessionOf(binding.ctx)
+        return {}
+      } }, () => null))
+    })
   }
   function InlineFileChat({native,...props}) {
     const openFile=React.useCallback((path,options)=>{
@@ -612,7 +737,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         section.status && h('span',{className:section.tone==='error'?'kode-error':'kode-secondary'},section.status),
         (section.hint || preview) && h('span',{className:'kode-internal-hint'},section.hint || preview), h(IconChevronDownOutlineRegular,{size:12,className:'kode-internal-chevron'})),
       h('div',{className:'kode-internal-body'},
-        section.fields.length ? h('dl',null,...section.fields.map(([label,value])=>h('div',{key:label},h('dt',null,label),h('dd',null,value)))) : h(MarkdownText,{text:section.body})))
+        section.fields.length ? h('dl',null,...section.fields.map(([label,value])=>h('div',{key:label},h('dt',null,label),h('dd',null,value)))) : h(MarkdownText,{text:section.body,labels:markdownLabels})))
   }
   function InternalMessageAdapter({ native, ...props }) {
     const data=props.node?.data
@@ -715,7 +840,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     return h('section',{className:'kode-message-tool'},
       h('button',{type:'button',className:'kode-tool-heading','aria-expanded':open,onClick:()=>setOpen(!open)},h(IconAgentPresetOutlineRegular,{size:14}),h('span',null,title),h('span',{className:block.isError?'kode-error':'kode-secondary'},block.isError?'未完成':phase==='result'?'已完成':'运行中'),h(IconChevronDownOutlineRegular,{size:12})),
       preview && h('code',{className:open?'kode-native-input':'kode-relay-preview'},preview),
-      open && output && h('pre',{className:'kode-native-output'},output))
+      open && output && h(ConsoleOutput,{text:output}))
+  }
+  function ConsoleOutput({ text }) {
+    const rows = [], pattern = /^```(?:console|shellsession|terminal|bash|sh|zsh)[^\S\r\n]*\r?\n[\s\S]*?^```[^\S\r\n]*$/gm
+    let offset = 0, match
+    while ((match = pattern.exec(text))) {
+      if (match.index > offset) rows.push(h('pre', { className: 'kode-native-output', key: offset }, text.slice(offset, match.index)))
+      rows.push(h('div', { className: 'kode-console-output', key: match.index }, h(MarkdownText, { text: match[0], labels: markdownLabels })))
+      offset = pattern.lastIndex
+    }
+    if (offset < text.length) rows.push(h('pre', { className: 'kode-native-output', key: offset }, text.slice(offset)))
+    return h(React.Fragment, null, ...rows)
   }
   function RelayTrigger(props) {
     const entries = useSyncExternalStore(fn => props.slots.subscribe('conversation.chat.node', fn), () => props.slots.entries('conversation.chat.node'))
@@ -812,7 +948,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const binding = ctx.sessions.binding(sessionId)
       return { eventSource: binding.eventSource, session: binding.session }
     } }, AgentTrajectory))
-    ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'kode-native-skills', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, CodexSkillPicker))
+    installInputPresentation(ctx)
+    ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, AgentIdentity))
+    ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'kode-agent-avatar' }, SidebarAgentAvatar))
+    ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'kode-avatar', order: 350 }, SessionAvatarMenuItem))
     ctx.slots.inject('conversation.view',()=>{
       let source,original,wrapper
       const restore=()=>{if(source&&source.component===wrapper)source.component=original}
@@ -903,10 +1042,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-relay{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);padding:12px 16px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-size:13px;min-width:0}.kode-relay-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-relay-heading strong{font-weight:500;overflow-wrap:anywhere;min-width:0;max-width:100%}.kode-relay-heading time{margin-left:auto;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-relay-source{display:flex;align-items:center;gap:10px;margin-top:8px;color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}.kode-relay-preview{margin:8px 0;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.kode-relay summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:12px;padding:4px 0}.kode-relay-body{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;max-height:320px;overflow:auto}.kode-message-tool{min-width:0;font-size:13px;padding:4px 0}.kode-tool-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;background:none;border:0;color:var(--dsw-alias-label-primary);padding:4px 0;font:inherit;text-align:left}.kode-tool-target{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:normal;overflow-wrap:anywhere;line-height:1.6;padding-left:22px}.kode-message-tool>.kode-relay-preview{margin-left:22px;color:var(--dsw-alias-label-secondary)}.kode-tool-detail{padding-left:22px}.kode-relay button:focus-visible,.kode-relay summary:focus-visible,.kode-tool-heading:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-trigger{border-radius:var(--dsw-radius-sm);min-width:0;max-width:240px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:0;align-items:center;gap:4px;padding:0 4px 0 8px;font:inherit;font-size:13px;line-height:20px;display:inline-flex}
 .kode-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-trigger svg{flex:none}.kode-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.kode-trigger:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}.kode-agent-trigger{color:var(--dsw-alias-label-primary)}.kode-chevron-open{transform:rotate(180deg)}
-.kode-skill-menu{max-height:16rem;overflow:auto;width:calc(100% - var(--dsh-composer-side-clearance,16px)*2);max-width:var(--dsh-composer-card-max-width);margin:0 auto 8px;box-sizing:border-box;padding:6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-skill-caption{padding:6px 10px;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-skill-menu .kode-skill-option{display:flex;align-items:flex-start;flex-direction:column;gap:4px;width:100%;text-align:left;padding:8px 10px;background:transparent;border:0;color:inherit}.kode-skill-option:hover,.kode-skill-menu .kode-skill-current{background:var(--dsw-alias-interactive-bg-hover)}.kode-skill-option small{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5;white-space:normal}.kode-skill-option:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:-2px}
+.kode-session-avatar-button{display:inline-flex;align-items:center;justify-content:center;padding:2px;background:transparent;color:inherit;border:0;border-radius:6px;cursor:pointer}.kode-session-avatar-button:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-session-avatar-button:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
+.kode-unified-workspaces:has([data-row-key^="workspace:"]) [data-row-key^="session:"]{padding-inline-start:calc(24px + var(--dsh-workspace-indent,0px))}.kode-console-output{min-width:0;overflow:hidden;margin-top:8px}
+.kode-agent-avatar{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;overflow:hidden;border-radius:6px;color:var(--dsw-alias-label-primary)}.kode-agent-mask{display:block;width:100%;height:100%;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-agent-avatar img{display:block;width:100%;height:100%;object-fit:contain}.kode-agent-identity,.kode-agent-option{display:inline-flex;align-items:center;gap:8px;min-width:0}.kode-agent-identity{max-width:180px;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-agent-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-agent-option>.kode-option{flex:1}.kode-settings-group-title{font-size:13px;font-weight:500;color:var(--dsw-alias-label-secondary);margin:24px 0 8px}.kode-avatar-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.kode-avatar-editor{padding:12px 0}.kode-avatar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px;max-height:min(360px,50vh);overflow:auto;padding:4px}.kode-avatar-choice{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0;padding:8px;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer}.kode-avatar-choice>span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px}.kode-avatar-choice:hover,.kode-avatar-choice[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-choice[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary)}.kode-avatar-choice:disabled{opacity:.5;cursor:default}.kode-avatar-choice:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-option{display:flex;align-items:center;justify-content:space-between;gap:24px;min-width:200px}.kode-secondary{color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-menu-note{padding:8px 12px;max-width:260px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .kode-agent-settings{max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}.kode-agent-settings h2{margin:0;font-size:16px;font-weight:500;line-height:24px}.kode-agent-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}.kode-agent-rows{display:flex;flex-direction:column;gap:8px;margin:12px 0 0;padding:0;list-style:none}.kode-agent-row{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);padding:12px 14px;display:flex;flex-direction:column;gap:12px}.kode-agent-row-head{display:flex;align-items:center;gap:10px;min-width:0}.kode-agent-name{font-size:14px;font-weight:500;line-height:22px;overflow-wrap:anywhere;min-width:0}.kode-agent-tag{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);color:var(--dsw-alias-label-secondary);padding:1px 6px;font-size:11px;line-height:16px;flex-shrink:0}.kode-agent-edit{margin-left:auto;flex-shrink:0!important;height:28px!important;padding:0 10px!important;border-radius:var(--dsw-radius-sm)!important;font-size:12px!important;line-height:18px!important}.kode-agent-add{width:100%;min-height:44px!important;border:1px dashed var(--dsw-alias-border-l3)!important;border-radius:var(--dsw-radius-lg)!important;gap:6px!important}.kode-agent-editor{border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);padding:14px 16px;min-width:0}.kode-agent-editor .kode-field{gap:6px;margin-bottom:14px}.kode-agent-editor .kode-field>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-agent-models{min-width:0}.kode-settings-footer{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:14px}
-.kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-advanced summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary);padding:2px 0 14px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}
+.kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-advanced summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary);padding:2px 0 14px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}
 .kode-field-select{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}.kode-field-select:hover{border-color:var(--dsw-alias-border-l1)}.kode-mode-control{display:inline-flex;align-items:center;position:relative}.kode-delete{color:var(--dsw-alias-state-error-primary);margin-right:auto}
 @media(max-width:600px){.kode-agent-row-head{flex-wrap:wrap}.kode-agent-editor{padding:12px}.kode-option{min-width:180px}.kode-trigger{max-width:180px}}
 `

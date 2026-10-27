@@ -86,8 +86,13 @@ export class CodexSession {
       models.push(...page.data); cursor = page.nextCursor
       if (models.length > 10000) throw new Error('Agent model catalog is too large')
     } while (cursor)
+    try {
+      const result = await this.rpc.request('collaborationMode/list', {}, { signal })
+      if (result.data.some(row => row.mode === 'plan') && !this.commands.some(row => row.name === 'plan')) this.commands.push({ name: 'plan', description: '切换 Codex 原生计划模式', input: { hint: 'on | off | status' } })
+    } catch (error) { if (!/method|unsupported/i.test(error.message)) throw error }
     return models
   }
+  async rename(name, signal) { await this.initialize(signal); await this.rpc.request('thread/name/set', { threadId: this.threadId, name }, { signal }) }
   async listSkills(signal) {
     await this.initialize(signal)
     const response = await this.rpc.request('skills/list', { cwds: [this.cwd], forceReload: true }, { signal })
@@ -158,7 +163,11 @@ export class CodexSession {
           await this.rpc.request('thread/resume', { threadId: this.threadId, cwd: this.cwd, sandbox: policy.mode, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request' }, { signal })
           result = await this.rpc.request('review/start', { threadId: this.threadId, delivery: 'inline', target: command.input ? { type: 'custom', instructions: command.input } : { type: 'uncommittedChanges' } }, { signal })
         }
-      } else result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}) }, { signal })
+      } else {
+        const plan = this.handlers.collaborationMode?.()
+        const collaborationMode = typeof plan === 'boolean' ? { mode: plan ? 'plan' : 'default', settings: { model: model ?? this.profile.defaultModel, reasoning_effort: effort ?? null, developer_instructions: null } } : undefined
+        result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}), ...(collaborationMode ? { collaborationMode } : {}) }, { signal })
+      }
       turnId = result.turn?.id; active.turnId = turnId
       if (cancelled) { if (!this.rpc.closed) void this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId }).catch(() => {}); signal.throwIfAborted() }
       while (true) {

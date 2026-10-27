@@ -13,8 +13,8 @@ export function registerAgentApi(ctx, service) {
     const state = ctx.sessionProjections.stateOf(agent.session, 'modelSelection')
     return state?.pending ?? state?.next ?? state?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
   }
-  const modelsFor = async (profile, catalog) => profile
-    ? (adapter.listModels ? await adapter.listModels(profileRoute(profile.id), profile) : catalog.groups.find(g => g.id === profileRoute(profile.id))?.models ?? []).filter(m => m.id !== 'default')
+  const modelsFor = async (profile, catalog, modelHint) => profile
+    ? (adapter.listModels ? await adapter.listModels(profileRoute(profile.id), profile, modelHint) : catalog.groups.find(g => g.id === profileRoute(profile.id))?.models ?? []).filter(m => m.id !== 'default')
     : catalog.groups.filter(g => !g.id.startsWith('kode-agent-')).flatMap(g => g.models.map(m => ({ ...m, provider: g.id })))
   const disposeUpdates = ctx.webServer.register({ kind: 'exact', path: `${PATH}/runtimes`, handler: (req, res) => {
     const admitted = ctx.connection.admit(req)
@@ -35,6 +35,7 @@ export function registerAgentApi(ctx, service) {
     try {
       if (req.method === 'GET') {
         await profiles.reload?.()
+        const appearanceIndex = await service.appearance?.load()
         const query = new URL(req.url, 'http://localhost').searchParams
         const sessionId = query.get('session_id')
         const agent = sessionId ? ctx.agents.get(sessionId) : undefined
@@ -47,11 +48,12 @@ export function registerAgentApi(ctx, service) {
         const catalog = { groups: [] }
         if (query.get('refresh') === '1' && profile) adapter.invalidateModels?.(profileRoute(profile.id))
         let models = [], modelError
-        try { if (profile && available(profile)) models = await modelsFor(profile, catalog) } catch (error) { modelError = error.message }
+        try { if (profile && available(profile)) models = await modelsFor(profile, catalog, selection?.provider === profileRoute(profile.id) ? selection.model : undefined) } catch (error) { modelError = error.message }
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })
-        const installed = profiles.list().filter(available)
+        const installed = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
+        const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
         const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await ctx.sessionController.list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
-        json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, currentProfile: profile && available(profile) ? profile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: binding.profile.name, type: binding.profile.type } : null,
+        json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
           selectedProfileId, selection, catalog, models, modelError, ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
           canChangeAgent: !agent || (agent.status === 'idle' && !(ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')?.lastTurn > 0)),
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
@@ -62,6 +64,14 @@ export function registerAgentApi(ctx, service) {
       let body = ''
       for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) throw new Error('Agent configuration exceeds 128 KiB') }
       const input = JSON.parse(body)
+      if (input.action === 'session-avatar') {
+        if (!service.appearance) throw new Error('头像配置服务尚未就绪。')
+        const known = ctx.agents.get(input.sessionId) || (await ctx.sessionController.list({})).items.some(row => row.sessionId === input.sessionId)
+        if (!known) throw new Error('会话不存在，请刷新列表。')
+        await service.appearance.setSession(input.sessionId, input.avatarId ?? null); json(res, 200, { ok: true }); return
+      }
+      const existingId = input.profile?.id ?? input.profileId
+      if (['save', 'remove'].includes(input.action) && existingId && service.appearance?.profilesView().find(profile => profile.id === existingId)?.origin === 'builtin') throw new Error('内置 Agent 的执行配置由 Kode 管理；请添加另一份自定义配置。')
       if (input.action === 'save') { if (!available(input.profile ?? {})) throw new Error('此 Agent 的执行插件尚未安装。'); const profile = await profiles.save(input.profile); service.refresh(); json(res, 200, { profile }); return }
       if (input.action === 'remove') { await profiles.remove(input.profileId); service.refresh(); json(res, 200, { ok: true }); return }
       if (input.action !== 'select') throw new Error('unknown Agent operation')
@@ -77,18 +87,24 @@ export function registerAgentApi(ctx, service) {
         if (position?.lastTurn > 0 || agent.status !== 'idle') throw new Error('Start a new conversation to change its Agent; the current conversation retains its history and runtime.')
         await profiles.clearUnusedBinding(agent.id)
       }
-      let provider, model
+      let provider, model, reasoningEffort
       {
         provider = profileRoute(profile.id)
-        const models = await modelsFor(profile, { groups: [] })
-        if (!models.length) throw new Error('无法读取此 Agent 的模型，请检查可执行文件和登录状态后重试。')
         const prior = selected(agent)
+        const models = await modelsFor(profile, { groups: [] }, input.model ?? (prior?.provider === provider ? prior.model : undefined))
+        if (!models.length) throw new Error('无法读取此 Agent 的模型，请检查可执行文件和登录状态后重试。')
         model = input.model ?? (prior?.provider === provider && prior.model !== 'default' ? prior.model : undefined) ?? profile.defaultModel ?? models.find(m => m.isDefault)?.id ?? models[0].id
         model = resolveAdvertisedModel(models, model)
+        const selectedModel = models.find(row => row.id === model), efforts = selectedModel.reasoningEfforts ?? []
+        reasoningEffort = input.reasoningEffort ?? (prior?.provider === provider && prior.model === model ? prior.reasoningEffort : undefined) ?? selectedModel.defaultReasoningEffort
+        if (reasoningEffort && !efforts.some(row => row.id === reasoningEffort)) {
+          if (input.reasoningEffort) throw new Error('此模型未公布该推理强度，请重新选择。')
+          reasoningEffort = undefined
+        }
       }
       // Verify the route before committing the profile binding; no executable is
       // launched by changing the selector (only bounded model discovery runs).
-      const selection = agent.selectModel({provider,model})
+      const selection = agent.selectModel({provider,model,...(reasoningEffort ? { reasoningEffort } : {})})
       await agent.ctx?.parallel?.('session/flush',agent.session)
       await profiles.bind(agent.id, profile.id)
       service.recordBinding?.(agent, profile)

@@ -1444,6 +1444,32 @@ async function waitForSessionService(fetcher, signal, { timeoutMs = 15e3, retryM
   return false;
 }
 
+// packages/transport/preferences.js
+async function fetchWithLocalAppearance(input, init, { current, send }) {
+  const path = new URL(input, "http://localhost/").pathname;
+  let envelope;
+  if (init?.method === "POST" && typeof init.body === "string") {
+    try {
+      envelope = JSON.parse(init.body);
+    } catch {
+    }
+  }
+  const namespace = envelope?.payload?.args?.ns;
+  if (["/api/settings/mutate", "/api/settings/replace"].includes(path) && namespace === "ui-theme") return send(input, init, "local");
+  if (current === "local" || path !== "/api/settings/describe") return send(input, init, current);
+  const [remote, local] = await Promise.all([send(input, init, current), send(input, init, "local")]);
+  if (!remote.ok) return remote;
+  if (!local.ok) return local;
+  const [remoteBody, localBody] = await Promise.all([remote.clone().json(), local.json()]);
+  if (!remoteBody.result?.ok) return remote;
+  if (!localBody.result?.ok) return new Response(JSON.stringify(localBody), { status: local.status, headers: { "content-type": "application/json" } });
+  const theme = localBody.result.value.namespaces.find((row) => row.ns === "ui-theme");
+  if (!theme) throw new Error("\u5165\u53E3\u4E3B\u673A\u672A\u63D0\u4F9B ui-theme\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u754C\u9762\u5916\u89C2\u3002");
+  const rows = remoteBody.result.value.namespaces;
+  remoteBody.result.value.namespaces = [...rows.filter((row) => row.ns !== "ui-theme"), theme];
+  return new Response(JSON.stringify(remoteBody), { status: remote.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+
 // packages/transport/client-source.js
 var inject = [];
 async function apply(ctx) {
@@ -1464,7 +1490,7 @@ async function apply(ctx) {
   };
   const fetchHost = (input, init, host = current) => fetch(pathFor(input, host), { ...init, credentials: "same-origin" });
   installConnection(ctx, { location: window.location, transport: {
-    fetch: fetchHost,
+    fetch: (input, init) => fetchWithLocalAppearance(input, init, { current, send: fetchHost }),
     createWebSocket: (input) => {
       const original = new URL(input, window.location.origin);
       const url = current === "local" ? original : new URL(`/api/kode/transport-ws?host=${encodeURIComponent(current)}&path=${encodeURIComponent(original.pathname + original.search)}`, window.location.origin);

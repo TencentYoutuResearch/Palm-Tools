@@ -107,3 +107,25 @@ test('native ACP approvals follow the owning dsh session policy and full-access 
     assert.deepEqual(records.filter(r => r.method === 'permission-result').map(r => r.params.outcome.optionId), ['deny', 'allow', 'deny'])
   } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('Claude autocompact applies session SDK settings on the same resumed native thread',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'kode-autocompact-')),log=join(root,'wire.jsonl')
+ const profiles=await new AgentProfiles(join(root,'profiles.json')).open([{id:'claude-fixture',name:'Claude fixture',type:'claude',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-acp-server.js',import.meta.url))],env:{KODE_ACP_FIXTURE_LOG:log}}])
+ const events=[],session={header:{cwd:root},snapshotEvents:()=>events,append:(type,data)=>{const event={type,data,seq:events.length};events.push(event);return event}}
+ const agent={id:'autocompact-fixture',session,ctx:{parallel:async()=>{},get:()=>undefined,tools:{execute:async()=>{throw new Error('No tools expected')}}}}
+ const ctx={agents:{get:()=>agent},sessionProjections:{stateOf:()=>({lastTurn:1,lastStepBoundary:{kind:'start',step:1}})}}
+ const adapter=new AgentRuntimeAdapter(ctx,profiles,{recordNative:()=>{},resolveProfile:async profile=>({...profile,type:'custom'})})
+ const request=(id,text)=>({sessionId:agent.id,provider:profileRoute('claude-fixture'),model:'fixture-fast',messages:[{id,role:'user',source:{kind:'user'},content:[{type:'text',text}]}],tools:[],signal:AbortSignal.timeout(5000)})
+ try{
+  await consume(adapter.stream(request('one','first')))
+  const thread=profiles.binding(agent.id).threadId
+  session.append('plugin:kode/autocompact',{enabled:false})
+  await consume(adapter.stream(request('two','second')))
+  const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(rows.filter(row=>row.method==='session/new').length,1)
+  const resumed=rows.find(row=>row.method==='session/load')
+  assert.equal(resumed.params.sessionId,thread);assert.equal(resumed.params._meta.claudeCode.options.settings.autoCompactEnabled,false)
+  assert.equal(profiles.binding(agent.id).profile.autoCompactEnabled,undefined,'launch profile remains immutable')
+  assert.deepEqual(profiles.binding(agent.id).seenInputs,['one','two'])
+ }finally{await adapter.close();await rm(root,{recursive:true,force:true})}
+})

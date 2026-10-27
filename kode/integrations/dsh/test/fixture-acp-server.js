@@ -8,7 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const app = agent({ name: 'kode-acp-fixture' })
 const sessionId = 'same-native-session', clients = new Map(), pending = new Map()
 const modes = { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'plan', name: 'Plan' }] }
-const configOptions = [{ id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: 'fixture-fast', options: [{ value: 'fixture-fast', name: 'Fast fixture' }, { value: 'fixture-large', name: 'Large fixture' }] }]
+const configOptions = [{ id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: 'fixture-fast', options: [{ value: 'fixture-fast', name: 'Fast fixture' }, { value: 'fixture-large', name: 'Large fixture' }] }, { id: 'effort', category: 'thought_level', name: 'Effort', type: 'select', currentValue: 'medium', options: [{ value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }] }]
 const record = async (method, params) => { if (process.env.KODE_ACP_FIXTURE_LOG) await appendFile(process.env.KODE_ACP_FIXTURE_LOG, JSON.stringify({ method, params, label: process.env.KODE_ACP_FIXTURE_LABEL }) + '\n') }
 app.onRequest('initialize', async ({ params }) => { await record('initialize', params); return { protocolVersion: 1, agentCapabilities: { loadSession: process.env.KODE_ACP_NO_RESUME !== '1' }, agentInfo: { name: 'Fixture', version: '1' }, authMethods: [] } })
 async function configureServers(params) {
@@ -19,7 +19,7 @@ async function configureServers(params) {
     await client.listTools()
   }
 }
-const availableCommands = [{ name: 'fixture-command', description: 'Native fixture command', input: { hint: 'message' } }, { name: 'fixture:skill', description: 'Workspace skill', input: { hint: 'task' } }]
+const availableCommands = [{ name: 'fixture-command', description: 'Native fixture command', input: { hint: 'message' } }, { name: 'fixture:skill', description: 'Workspace skill', input: { hint: 'task' }, _meta: { type: 'skill' } }]
 const announceCommands = client => client.notify('session/update', { sessionId, update: { sessionUpdate: 'available_commands_update', availableCommands } })
 app.onRequest('session/new', async ({ params, client }) => { await record('session/new', params); await configureServers(params); if(process.env.KODE_ACP_LATE_COMMANDS==='1')setTimeout(()=>void announceCommands(client),20);else await announceCommands(client); return { sessionId, modes, configOptions } })
 app.onRequest('session/load', async ({ params, client }) => {
@@ -29,7 +29,7 @@ app.onRequest('session/load', async ({ params, client }) => {
   return { modes, configOptions }
 })
 app.onRequest('session/set_mode', async ({ params }) => { await record('session/set_mode', params); modes.currentModeId = params.modeId; return {} })
-app.onRequest('session/set_config_option', async ({ params }) => { await record('session/set_config_option', params); configOptions[0].currentValue = params.value; return { configOptions } })
+app.onRequest('session/set_config_option', async ({ params }) => { await record('session/set_config_option', params); configOptions.find(option => option.id === params.configId).currentValue = params.value; return { configOptions } })
 app.onNotification('session/cancel', ({ params }) => pending.get(params.sessionId)?.())
 app.onRequest('session/prompt', async ({ params, client, signal }) => {
   await record('session/prompt', params)

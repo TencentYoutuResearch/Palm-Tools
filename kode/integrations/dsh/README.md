@@ -479,3 +479,42 @@ The existing slash menu contains session-scoped native capabilities, including C
 Codex `$skill` completion reads `skills/list` for the current profile and workspace. Selection preserves existing draft references; matching explicit references become native skill inputs containing the discovered name and path. Claude and CodeBuddy skills remain native slash commands. Unique advertised display names and case variants resolve to canonical model IDs; unknown or ambiguous names are rejected.
 
 Saved native tabs can be pinned, renamed, archived, and restored through canonical Kode metadata even if their Agent configuration or adapter is gone. These actions allocate no Agent, import no transcript, and never rewrite CLI logs. Archive state stays in the workspace document; the session index retains the identity a future import would use. Kode's catalog respects that archive state too.
+
+### Native conversation presentation
+
+These extensions live entirely in this plugin; they do not require editing dsh
+source or its installed files. The supported release is pinned to
+`0.2.1-rc.2` with Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
+primitives provide the integration. A reversible presentation adapter wraps
+that release's `commandUi.candidates` and input controller to share the native
+menu for `/` and `$`; upgrading dsh requires checking those interfaces.
+Installation still requires the Kode backend and configured, authenticated
+Agent CLIs. `serverCommand`/`serverConfig` can start an existing backend binary;
+the plugin is not a standalone backend installer.
+
+Configured native CodeBuddy presets appear as built-ins without rewriting
+their IDs, executables or saved bindings. Additional installations remain
+independent custom Agents. Every built-in Agent uses its existing Kode icon.
+Avatars belong to individual conversations: the header and sidebar menu open
+a responsive chooser with eight columns at its desktop width. The chooser
+reuses Kode's avatar library, or `avatarDirectory`/`KODE_AVATAR_DIR`. Artwork is
+served by the entry Host even for SSH conversations. The execution Host saves
+the gallery ID in canonical session-index metadata; an unbound conversation
+temporarily uses `presentation.sessionAvatars` until its native identity is
+saved. Agent launch bindings are unchanged.
+
+Appearance (`ui-theme`, including native font roles) belongs to the entry Host,
+so switching SSH execution does not change the window theme. Execution settings
+remain owned by their selected Host. Native model discovery carries published
+reasoning effort choices; the selector validates and forwards only those values.
+Fenced `console` tool output uses dsh's Markdown code renderer.
+
+The slash menu groups quick actions, Agent commands and skills with consistent
+icons. Skill classification uses native metadata or bounded SKILL.md discovery.
+Codex `$` completion uses dsh's menu and guarded draft insertion, including
+namespaced skills. Shared `/rename`, `/diff`, `/stop` and frontend `/new` are
+available; Codex rename also updates its native thread title. `/plan` is offered
+when the app-server advertises that collaboration mode. For Claude adapters
+without native `/autocompact`, `/autocompact on|off|status` records the preference
+and passes SDK settings when reopening the same native thread at the next turn
+boundary. This fallback does not implement numeric context-window arguments.

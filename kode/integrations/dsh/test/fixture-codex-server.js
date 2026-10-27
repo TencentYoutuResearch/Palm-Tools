@@ -14,7 +14,9 @@ async function receive(message) {
   if (process.env.KODE_FIXTURE_RPC_LOG && method) await appendFile(process.env.KODE_FIXTURE_RPC_LOG, JSON.stringify({ method, params, label: process.env.KODE_FIXTURE_AGENT_LABEL, hostCredentialPresent: Boolean(process.env.KODE_BRIDGE_TOKEN || process.env.KODE_MESSAGING_ADMIN_TOKEN_FILE || process.env.KODE_SESSION_ID) }) + '\n')
   if (method === 'initialize') return result(id, { userAgent: 'fixture' })
   if (method === 'initialized') return
-  if (method === 'model/list') return result(id, { data: [{ id: 'fixture', model: 'fixture', displayName: 'Fixture' }], nextCursor: null })
+  if (method === 'model/list') return result(id, { data: [{ id: 'fixture', model: 'fixture', displayName: 'Fixture', supportedReasoningEfforts:[{reasoningEffort:'medium',description:'Balanced'},{reasoningEffort:'high',description:'Deep'}],defaultReasoningEffort:'medium' }], nextCursor: null })
+  if (method === 'collaborationMode/list') return result(id,{data:[{name:'Default',mode:'default'},{name:'Plan',mode:'plan'}]})
+  if (method === 'thread/name/set') return result(id,{})
   if (method === 'thread/start' || method === 'thread/resume') return result(id, { thread: { id: params.threadId ?? 'same-native-id' } })
   if (method === 'turn/interrupt') { result(id, {}); return }
   if (method === 'skills/list') return result(id,{data:[{cwd:params.cwds[0],skills:[{name:'fixture-skill',description:'Example workspace skill',path:params.cwds[0]+'/.agents/skills/fixture-skill/SKILL.md',enabled:true}],errors:[]}]})

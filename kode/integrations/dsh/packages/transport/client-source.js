@@ -1,5 +1,6 @@
 import { installConnection } from '@deepseek-ai/dsh-client-connection/client'
 import { waitForSessionService } from './readiness.js'
+import { fetchWithLocalAppearance } from './preferences.js'
 export const inject = []
 export async function apply(ctx) {
   const startup=new AbortController()
@@ -16,7 +17,7 @@ export async function apply(ctx) {
   }
   const fetchHost = (input, init, host = current) => fetch(pathFor(input, host), { ...init, credentials: 'same-origin' })
   installConnection(ctx, { location: window.location, transport: {
-    fetch: fetchHost,
+    fetch: (input, init) => fetchWithLocalAppearance(input, init, { current, send: fetchHost }),
     createWebSocket: input => {
       const original = new URL(input, window.location.origin)
       const url = current === 'local' ? original : new URL(`/api/kode/transport-ws?host=${encodeURIComponent(current)}&path=${encodeURIComponent(original.pathname + original.search)}`, window.location.origin)

@@ -10,6 +10,8 @@ import { nativeToolDescriptor } from './native-tools.js'
 import { mountNativeCommands } from './native-commands.js'
 import { humanInput, terminalOnlyCommands } from './native-commands.js'
 import { pendingShellContext } from './native-shell.js'
+import { classifyCommands } from './command-skills.js'
+import { SessionAppearance } from './session-appearance.js'
 
 export { profileRoute } from './agent-profiles.js'
 export { nativeToolDescriptor } from './native-tools.js'
@@ -37,24 +39,25 @@ export class AgentRuntimeAdapter {
   async resolveModel(provider, model) { return { provider, id: model, name: model, inputModalities: ['text'] } }
   async prepareCall(provider, model, signal) { return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options) } }
   invalidateModels(provider) { for (const key of this.catalogs.keys()) if (key === provider || key.startsWith(`${provider}:`)) this.catalogs.delete(key) }
-  async capabilities(provider, profileOverride, cwd = process.cwd()) {
+  async capabilities(provider, profileOverride, cwd = process.cwd(), modelHint) {
     this.stop.signal.throwIfAborted()
     const profile = profileOverride ?? this.profile(provider)
-    const key = `${provider}:${profileRevision(profile)}:${cwd}`
+    if (profile.type === 'codex' || profile.protocol === 'codex') modelHint = undefined
+    const key = `${provider}:${profileRevision(profile)}:${cwd}:${modelHint ?? ''}`
     if (!this.catalogs.has(key)) {
       const task = (async () => {
         const session = await createNativeSession(await this.resolveProfile(profile), cwd)
         this.probes.add(session)
         try {
-          const models = await session.listModels(AbortSignal.any([this.stop.signal, AbortSignal.timeout(45000)]))
-          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: ['text'] })), commands: session.commands ?? [], modes: session.state?.modes?.availableModes ?? [] }
+          const models = await session.listModels(AbortSignal.any([this.stop.signal, AbortSignal.timeout(45000)]), { model: modelHint })
+          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}) })), commands: await classifyCommands(session.commands ?? [], profile, cwd), modes: session.state?.modes?.availableModes ?? [] }
         } finally { this.probes.delete(session); await session.close() }
       })().catch(error => { if (this.catalogs.get(key) === task) this.catalogs.delete(key); throw error })
       this.catalogs.set(key, task)
     }
     return this.catalogs.get(key)
   }
-  async listModels(provider, profile) { return (await this.capabilities(provider, profile)).models }
+  async listModels(provider, profile, modelHint) { return (await this.capabilities(provider, profile, process.cwd(), modelHint)).models }
   async listCommands(provider, profile) { return (await this.capabilities(provider, profile)).commands }
   async listSkills(provider, profile, cwd) {
     if (profile.type !== 'codex' && profile.protocol !== 'codex') return { skills: [], errors: [] }
@@ -87,14 +90,17 @@ export class AgentRuntimeAdapter {
     const nativeCalls = new Set()
     const epoch = randomUUID()
     const callIdentity = (turnId, itemId) => `kode:${epoch}:${turnId}:${itemId}`
-    const runtime = await createNativeSession(await this.resolveProfile(binding.profile, agent), agent.session.header.cwd ?? process.cwd(), {
+    const autoCompact = binding.profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact') : undefined
+    const resolved = await this.resolveProfile(binding.profile, agent)
+    const runtime = await createNativeSession({ ...resolved, ...(autoCompact ? { autoCompactEnabled: autoCompact.data.enabled } : {}) }, agent.session.header.cwd ?? process.cwd(), {
       policy: () => agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session }) ?? { mode: 'read-only' },
       approvalPolicy: () => agent.ctx.get('approval')?.effectivePolicy?.(agent.session) ?? 'ask',
       mode: () => {
         const row = agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/native-mode')?.data
         return row && row.policy === agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })?.mode ? row.mode : undefined
       },
-      commands: commands => this.onCommands?.(agent, commands),
+      commands: commands => { void classifyCommands(commands, binding.profile, agent.session.header.cwd ?? process.cwd()).then(rows => { if (!this.stop.signal.aborted) this.onCommands?.(agent, rows) }).catch(error => this.ctx.logger?.warn('Native command classification failed: %s', error.message)) },
+      collaborationMode: () => agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/collaboration-mode')?.data.enabled,
       tool: async (request, signal) => {
         if (!tools.some(t => t.name === request.tool)) throw new Error('native Agent requested an unadvertised dsh tool')
         const callId = callIdentity(request.turnId, request.callId)
@@ -127,6 +133,7 @@ export class AgentRuntimeAdapter {
       },
     })
     runtime.nativeCalls = nativeCalls
+    runtime.autoCompactRevision = autoCompact?.seq ?? -1
     runtime.callIdentity = callIdentity
     try {
       const threadId = await runtime.open(binding, tools, signal)
@@ -160,9 +167,11 @@ export class AgentRuntimeAdapter {
       }))
       const tools = options.tools ?? []
       runtime = this.live.get(agent.id)
+      const autoCompactRevision = profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact')?.seq ?? -1 : -1
+      if (runtime && runtime.autoCompactRevision !== autoCompactRevision) { await runtime.close(); this.live.delete(agent.id); runtime = undefined }
       if (runtime?.rpc.closed) { this.live.delete(agent.id); runtime = undefined }
       if (!runtime) { runtime = await this.createRuntime(agent, binding, tools, signal); this.live.set(agent.id, runtime) }
-      const skillNames = messages.flatMap(message => [...(humanInput(message) ?? '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_-]*)\b/g)].map(match => match[1]))
+      const skillNames = messages.flatMap(message => [...(humanInput(message) ?? '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1]))
       if (command && terminalOnlyCommands.has(command.name)) throw new Error(`/${command.name} 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。`)
       // Commit admission before sending. A crash cannot automatically repeat a
       // native turn with potentially irreversible tools; the user may follow up.
@@ -221,6 +230,16 @@ export class AgentRuntimeAdapter {
     }
   }
   async closeSession(id) { const runtime = this.live.get(id); this.live.delete(id); await runtime?.close() }
+  async renameSession(agent, title, signal) {
+    const binding = this.profiles.binding(agent.id)
+    if (!binding?.threadId || binding.profile.type !== 'codex') return
+    const live = this.live.get(agent.id)
+    if (live?.rename) return live.rename(title, signal)
+    const runtime = await createNativeSession(await this.resolveProfile(binding.profile, agent), agent.session.header.cwd ?? process.cwd())
+    this.probes.add(runtime)
+    try { await runtime.initialize(signal); runtime.threadId = binding.threadId; await runtime.rename(title, signal) }
+    finally { this.probes.delete(runtime); await runtime.close() }
+  }
   async closeType(type) { await Promise.all([...this.live.keys()].filter(id => this.profiles.binding(id)?.profile.type === type).map(id => this.closeSession(id))) }
   async close() {
     this.stop.abort(new Error('Agent adapter closed'))
@@ -258,7 +277,7 @@ export async function installAgentRuntime(ctx, config) {
     else if (routes().length) registration = ctx.llm.registerAdapter(routes(), adapter)
   }
   refresh()
-  const service = { profiles, adapter, refresh, commandOwners: new Map(),
+  const service = { profiles, adapter, refresh, commandOwners: new Map(), appearance: config.backendClient ? new SessionAppearance(config.backendClient, profiles, config) : undefined,
     get types() { return Object.fromEntries([...runtimes].map(([id, spec]) => [id, { name: spec.name, executable: spec.executable, available: spec.available }])) },
     hasRuntime: type => runtimes.has(type), driver: type => runtimes.get(type)?.driver,
     channelFor: type => runtimes.get(type)?.uiChannel ?? 'native',

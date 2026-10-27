@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
 const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
-function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}) {
+function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}) {
   let plugin
   const registry = [], openedSections = [], requests = [], native = () => null, disposers = []
   const shell = { options: {}, component: native, locale: 'settings', children: { 'settings.section': { kind: 'list', scope: 'root' } }, store: { create: () => ({ actions: { openSection: id => openedSections.push(id) } }) } }
@@ -20,12 +20,12 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
   vm.runInNewContext(source, { window: { ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
-    setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
+    setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
   const ctx = { sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
     slots: { entries, subscribe: (name,fn) => {const set=listeners.get(name)??new Set();listeners.set(name,set);set.add(fn);return()=>set.delete(fn)}, inject: (_name, callback) => { const result = callback(); if (result?.next) for (const _ of result) {}; if (typeof result === 'function') disposers.push(result) }, register: (options, component) => { registry.push({ options, component });for(const fn of listeners.get(options.name)??[])fn(); return () => {} } },
-    inject: (_names, callback) => callback(ctx), effect: callback => { callback() },
+    inject: (_names, callback) => callback(ctx), effect: callback => { const result = callback(); if (typeof result === 'function') disposers.push(result) }, ...contextProperties,
   }
   plugin.apply(ctx)
   return { ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
@@ -57,6 +57,43 @@ test('inline native citations split line suffixes before entering the shipped fi
  for(const path of ['/srv/project/plain.md','/srv/project/a%20literal.md','https://example.com/page:12']){await view.props.openFile(path);assert.equal(calls.at(-1).path,path)}
  assert.equal(c.chatShell.children,children);assert.equal(c.chatShell.store,store)
  for(const dispose of c.disposers)dispose();assert.equal(c.chatShell.component,c.native)
+})
+test('native menu presentation groups skills and gives every command an icon without replacing dispatch',async()=>{
+ const builtInIcon=()=>null, original=async()=>[{name:'file',icon:builtInIcon},{name:'status'},{name:'team-review'},{name:'export'}]
+ const commands={candidates:original},sources=[]
+ const input={sessionOf:()=>({}),registerSource:source=>{sources.push(source);return()=>sources.splice(sources.indexOf(source),1)}}
+ const c=client(undefined,{}, {inputTriggers:input,commandUi:commands,remote:{commands:{list:async()=>({ok:true,value:{commands:[{name:'status',definitionId:'@kode/dsh/native/status'},{name:'team-review',definitionId:'@kode/dsh/native/skill/team-review'}]}})}}})
+ const rows=await commands.candidates({sessionId:'example'},{query:''})
+ assert.deepEqual(Array.from(rows,row=>row.section),['快捷操作','快捷操作','Agent 命令','技能'])
+ assert.ok(rows.every(row=>typeof row.icon==='function'));assert.equal(rows[0].icon,builtInIcon)
+ for(const dispose of c.disposers)dispose();assert.equal(commands.candidates,original);assert.equal(sources.length,0)
+})
+test('optional command decoration metadata cannot close the native / menu and waits for its Session admission',async()=>{
+ let admitted=false,readAfterAdmission=false
+ const commands={candidates:async()=>{await Promise.resolve();admitted=true;return[{name:'model'}]}},sources=[]
+ const input={sessionOf:()=>({}),registerSource:source=>{sources.push(source);return()=>{}}}
+ client(undefined,{}, {inputTriggers:input,commandUi:commands,remote:{commands:{list:async()=>{readAfterAdmission=admitted;return{ok:false,error:{message:'not ready'}}}}}})
+ const rows=await commands.candidates({sessionId:'example'},{query:''})
+ assert.equal(readAfterAdmission,true);assert.equal(rows.length,1);assert.equal(rows[0].name,'model');assert.equal(typeof rows[0].icon,'function')
+})
+test('console fences in native tool results use the shipped Markdown code renderer',()=>{
+ const c=client(),render=c.entry('tool.call.toolview','exec_command'),text='```console\n$ pwd\n/srv/project\n```'
+ const tree=render({toolName:'exec_command',phase:'result',block:{args:{text:key=>key==='cmd'?'pwd':undefined},content:[{type:'text',text}]},useDisclosure:()=>({expanded:true,setExpanded:()=>{}})})
+ const output=tree.children.at(-1),rendered=output.type(output.props),code=rendered.children[0]
+ assert.equal(code.props.className,'kode-console-output');assert.equal(code.children[0].type,'MarkdownText');assert.equal(code.children[0].props.text,text);assert.equal(code.children[0].props.labels.code.copyLabel,'复制')
+})
+test('$ uses the same native trigger controller for layout, scrolling and guarded namespaced skill insertion',async()=>{
+ const calls=[],sources=[],controller={track(...args){calls.push(['track',...args])},toggleSource(name,hit){calls.push(['toggle',name,hit])},dismiss(){calls.push(['dismiss'])}}
+ const originalTrack=controller.track,sessionOf=()=>controller,input={sessionOf,registerSource:source=>{sources.push(source);return()=>sources.splice(sources.indexOf(source),1)}}
+ const commands={candidates:async()=>[]},sessions={list:{subscribe:()=>()=>{},getSnapshot:()=>({byId:{}})},sessionOf:()=>({sessionId:'example'})}
+ const c=client(undefined,{skillFixtures:[{name:'documents:documents',path:'/srv/project/SKILL.md',description:'A long\ndescription that stays in one native menu row.'}]},{inputTriggers:input,commandUi:commands,sessions,remote:{commands:{list:async()=>({ok:true,value:{commands:[]}})}}})
+ const active=input.sessionOf({});active.track('$doc',4,{tier:'plain'},1)
+ assert.equal(calls.at(-1)[0],'toggle');assert.equal(calls.at(-1)[2].trigger,'$');assert.equal(calls.at(-1)[2].span.draftRev,1)
+ const count=calls.length;active.track('$doc',4,{tier:'plain'},1);assert.equal(calls.length,count,'a dismissed token must not immediately reopen')
+ const source=sources.find(source=>source.trigger==='$'),rows=await source.candidates({sessionId:'example'},{query:'doc',signal:new AbortController().signal})
+ assert.equal(rows[0].section,'技能');assert.doesNotMatch(rows[0].description,/\n/);assert.equal(source.onPick({candidate:rows[0]}).text,'$documents:documents ')
+ active.track('normal',6,{tier:'plain'},2);assert.ok(calls.some(call=>call[0]==='dismiss'))
+ for(const dispose of c.disposers)dispose();assert.equal(controller.track,originalTrack);assert.equal(input.sessionOf,sessionOf)
 })
 test('ACP operations render nested command input and old completed metadata instead of generic Terminal labels',()=>{
  const c=client(),render=c.entry('tool.call.toolview','kode_native_commandExecution')
@@ -293,12 +330,12 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
     const id = `kode-host:${foreign}/same`, menuState = [true, () => {}]
     const menu = native.props.renderSlot('sidebar.workspaces.session.menu.item', { sessionId: id }, { hookContext: menuState })
     const controls = menu.children.flat()
-    assert.equal(controls[0].type, pin)
-    assert.equal(controls[1].type, archive)
-    assert.equal(controls[0].props.usePinned(set => set.has(id)), true)
-    assert.equal(controls[0].props.useMenuOpenState(), menuState)
+    const pinControl = controls.find(control => control.type === pin)
+    assert.ok(controls.some(control => control.type === archive))
+    assert.equal(pinControl.props.usePinned(set => set.has(id)), true)
+    assert.equal(pinControl.props.useMenuOpenState(), menuState)
     for (const [callback, operation] of [['pinSession', 'pin-session'], ['unpinSession', 'unpin-session'], ['archiveSession', 'archive-session'], ['unarchiveSession', 'unarchive-session']]) {
-      controls[0].props[callback](id); await new Promise(resolve => setImmediate(resolve))
+      pinControl.props[callback](id); await new Promise(resolve => setImmediate(resolve))
       assert.deepEqual(c.requests.at(-1), { action: 'host-operation', id: foreign, operation, args: { sessionId: 'same' } })
     }
   }
@@ -311,7 +348,7 @@ test('saved legacy tab archive controls work without importing or starting the s
  const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
  assert.ok(native.props.useWorkspaces(state=>state.archivedSessionIds).includes('saved:legacy'))
  const menu=native.props.renderSlot('sidebar.workspaces.session.menu.item',{sessionId:'saved:legacy'},{hookContext:[true,()=>{}]})
- menu.children.flat()[0].props.archiveSession('saved:legacy');await new Promise(resolve=>setImmediate(resolve))
+ menu.children.flat().find(control => control.type === archive).props.archiveSession('saved:legacy');await new Promise(resolve=>setImmediate(resolve))
  assert.deepEqual(c.requests[0],{action:'host-operation',id:'local',operation:'archive-session',args:{sessionId:'saved:legacy'}})
  assert.ok(!c.requests.some(row=>row.action==='import-saved'))
 })
