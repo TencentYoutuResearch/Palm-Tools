@@ -18,6 +18,7 @@ import {
 } from './app_events'
 import { pushToast } from './toast'
 import { currentTermTheme } from './terminal_settings'
+import { SessionMetadataBuffer, upsertSessionTab, sessionTabToPersisted } from './session_metadata'
 
 export interface TabInfo {
   transportKind?: 'acp' | 'pty'
@@ -34,6 +35,7 @@ export interface TabInfo {
   costUsd?: number
   /// 启动时的 cwd —— 持久化用
   cwd?: string
+  workspaceTitle?: string | null
   /// 子进程的 --session-id;恢复时用 --resume <sid>
   sessionId?: string | null
   /// 用户视角 permission mode("default" / "bypass");spawn 时通过 CLI 注入子进程
@@ -81,6 +83,7 @@ export const activeTab = derived([tabs, activeId], ([$tabs, $id]) => {
 // The status ticker can emit before spawnSession resolves and the tab enters the store.
 // Keep its latest value so startup restoration does not miss that ready transition.
 const sessionStatuses = new Map<SessionId, SessionStatus>()
+const sessionMetadata = new SessionMetadataBuffer()
 
 export interface NewTabOptions {
   transportKind?: 'acp' | 'pty'
@@ -129,19 +132,18 @@ export async function newTab(
     titlePinned: false,
     status: sessionStatuses.get(s.id) ?? (s.endpoint_id.kind === 'remote' ? 'idle' : 'starting'),
   }
-  tabs.update((arr) => arr.some((existing) => existing.id === t.id)
-    ? arr.map((existing) => existing.id === t.id ? { ...existing, ...t } : existing)
-    : [...arr, t])
+  tabs.update((arr) => upsertSessionTab(arr, t, sessionMetadata, true))
   activeId.set(s.id)
   ensureMounted(s.id)
   schedulePersist()
-  return t
+  return get(tabs).find((tab) => tab.id === s.id)!
 }
 
 export async function closeTab(id: SessionId) {
   const tab = get(tabs).find((t) => t.id === id)
   await ipc.killSession(id, tab?.endpointId ?? null).catch(() => {})
   sessionStatuses.delete(id)
+  sessionMetadata.delete(id)
   clearAppEventsForSession(id)
   tabs.update((arr) => arr.filter((t) => t.id !== id))
   mountedIds.update((arr) => arr.filter((x) => x !== id))
@@ -187,9 +189,7 @@ function upsertLocalTabFromDto(dto: {
   cwd?: string | null
   session_uuid?: string | null
 }): void {
-  tabs.update((arr) => {
-    if (arr.some((tab) => tab.id === dto.id)) return arr
-    return [...arr, {
+  tabs.update((arr) => upsertSessionTab(arr, {
       id: dto.id,
       transportKind: dto.transport_kind,
       backendKey: dto.backend_key ?? '',
@@ -200,8 +200,7 @@ function upsertLocalTabFromDto(dto: {
       endpointId: ENDPOINT_LOCAL,
       titlePinned: false,
       status: dto.status ?? 'idle',
-    }]
-  })
+    }, sessionMetadata))
   ensureMounted(dto.id)
 }
 
@@ -233,42 +232,13 @@ export async function startEventSubscriptions() {
   })
   metaUnlisten = await ipc.onSessionMeta((m) => {
     if (m.model) console.debug('[session-meta] id=%d model=%s', m.id, m.model)
-    tabs.update((arr) =>
-      arr.map((t) => {
-        if (t.id !== m.id) return t
-        // A new conversation binding invalidates every usage value from the
-        // previous conversation even if an older bridge omitted tokens_reset.
-        // The target tail will replay its authoritative totals afterwards.
-        const sessionChanged = Boolean(m.session_id && m.session_id !== t.sessionId)
-        const next: TabInfo = {
-          ...t,
-          ...(m.title && !t.titlePinned ? { title: m.title } : null),
-          ...(m.model ? { model: m.model } : null),
-          ...(m.session_id ? { sessionId: m.session_id } : null),
-        }
-        if (m.tokens_reset || sessionChanged) {
-          delete next.tokens
-          delete next.inputTokens
-          delete next.outputTokens
-          delete next.cachedTokens
-          delete next.costUsd
-        }
-        if (sessionChanged && !t.titlePinned && !m.title) {
-          next.title = `tab · ${t.backendKey}`
-        }
-        if (m.tokens != null) next.tokens = m.tokens
-        if (m.input_tokens != null) next.inputTokens = m.input_tokens
-        if (m.output_tokens != null) next.outputTokens = m.output_tokens
-        if (m.cached_tokens != null) next.cachedTokens = m.cached_tokens
-        if (m.cost_usd != null) next.costUsd = m.cost_usd
-        return next
-      }),
-    )
+    tabs.update((arr) => sessionMetadata.receive(arr, m))
     // title / model / session_id 变了要持久化(token / cost 不持久化,频繁变化没意义)
     if (m.title || m.model || m.session_id) schedulePersist()
   })
   exitUnlisten = await ipc.onSessionExited((m) => {
     sessionStatuses.delete(m.id)
+    sessionMetadata.delete(m.id)
     // 子进程退出 → tab 直接从列表消失(不展示 exited 状态)。复用 closeTab 的
     // 清理顺序:过滤 tab、清 mountedIds、若是 active 则切到下一个。后端 bridge
     // 仍保留该 session(mark_exited),SpecOps 的 monitor 还能再 poll 一次拿到
@@ -292,6 +262,12 @@ export async function startEventSubscriptions() {
       detail: exitTitle,
       source: tab?.backendKey,
     })
+    // Keep failed resumes inspectable instead of making their history vanish.
+    if (m.code !== 0) {
+      tabs.update((arr) => arr.map((t) => t.id === m.id ? { ...t, exited: m.code, status: 'exited' } : t))
+      schedulePersist()
+      return
+    }
     tabs.update((arr) => arr.filter((t) => t.id !== m.id))
     mountedIds.update((arr) => arr.filter((x) => x !== m.id))
     clearAppEventsForSession(m.id)
@@ -389,6 +365,7 @@ export async function startEventSubscriptions() {
     // 或主窗口刚启动)。此时用 focus payload 里的 DTO 补建,而不是静默忽略。
     upsertLocalTabFromDto(m)
     selectTab(m.id)
+    schedulePersist()
     // SpecOps 是独立窗口,会盖住主窗口。focus 必须把主窗口拉到最前,否则 tab
     // 切换发生在 SpecOps 窗口背后,看起来像什么都没发生。用 Rust 命令聚焦
     // "main" 窗口 —— macOS 上比 webview 层 setFocus 更可靠。
@@ -413,6 +390,7 @@ export function stopEventSubscriptions() {
   turnFinishedUnlisten = null
   statusUnlisten = null
   focusUnlisten = null
+  sessionMetadata.clear()
 }
 
 // ============ 持久化 ============
@@ -464,23 +442,7 @@ export function schedulePersist() {
   if (persistTimer) clearTimeout(persistTimer)
   persistTimer = setTimeout(() => {
     persistTimer = null
-    const liveTabs: PersistedTab[] = get(tabs).map((t) => ({
-      backend_key: t.backendKey,
-      transport_kind: t.transportKind,
-      title: t.title,
-      title_pinned: t.titlePinned ?? false,
-      cwd: t.cwd ?? '',
-      session_id: t.sessionId ?? null,
-      // model 走 store 里实时同步的值 — jsonl_tail 上报新 model 时 onSessionMeta 已经更新过 t.model,
-      // 这里取就是最新值。空字符串("auto")也存,反正 restore 时按用户上次状态恢复。
-      model: t.model ?? null,
-      permission_mode: t.permissionMode ?? null,
-      // Phase 11.2:Local endpoint 不写字段(老 tab 兼容,持久化最小)。
-      // Remote 必须写入,否则 restore 时只能降级成本地 spawn。
-      endpoint_id:
-        t.endpointId && t.endpointId.kind === 'remote' ? t.endpointId : null,
-      avatar_id: t.avatarId ?? null,
-    }))
+    const liveTabs = get(tabs).map(sessionTabToPersisted)
     // 合并 restore 失败 tab:它们不在 $tabs 里(没 spawn 成功),但 state.json 必须保留
     // 才能下次启动重试。按 session_id 去重(live 优先)。
     const liveSids = new Set(liveTabs.map((t) => t.session_id?.trim()).filter(Boolean) as string[])
@@ -544,7 +506,7 @@ export async function restoreTabs(
           tabs.update((arr) =>
             arr.map((t) =>
               t.id === restored.id
-                ? { ...t, title: p.title, titlePinned: p.title_pinned ?? false }
+                ? { ...t, title: p.title, titlePinned: p.title_pinned ?? false, workspaceTitle: p.workspace_title }
                 : t,
             ),
           )

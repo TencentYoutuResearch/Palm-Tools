@@ -78,6 +78,7 @@
   // 本地 bucket = 'local';远端 bucket = endpoint_id。
   // 点历史项 → 填进 cwd 输入框(不自动 start,用户可能还要改 model/mode)。
   let cwdHistory: string[] = $state([])
+  let workspaceError = $state('')
 
   /// 当前 bucket 名:本地 → 'local';远端 → endpoint_id
   function currentBucket(): string {
@@ -208,15 +209,16 @@
       return
     }
     const bucket = currentBucket()
+    workspaceError = ''
     let cancelled = false
     void bucket // 依赖
     cwdHistoryIpc
       .get(bucket)
       .then((list) => {
-        if (!cancelled) cwdHistory = list
+        if (!cancelled) { cwdHistory = list; if (!cwd && list.length === 1) cwd = list[0] }
       })
-      .catch(() => {
-        if (!cancelled) cwdHistory = []
+      .catch((error) => {
+        if (!cancelled) { cwdHistory = []; workspaceError = String(error) }
       })
     return () => {
       cancelled = true
@@ -263,21 +265,8 @@
     phase = 'configure'
     void probeModels(b, ep)
 
-    // 先同步给一个兜底值(Local 全局默认 cwd / Remote 协议返回的 default_cwd),
-    // 避免输入框在异步查询期间闪一下上个 backend 遗留的 cwd。
-    cwd = ep.kind === 'local' ? defaultCwd : (initialCwd?.trim() ?? '')
-
-    // cwd 预填优先级:该 endpoint bucket 最近用过的目录 > 上面的兜底值。
-    // 历史按 bucket 隔离(本地 vs 各远端各自一份),跟 $effect 拉取下拉候选
-    // 用的是同一份数据,这里只是取第一条(最近一次)直接预填,省得每次新建
-    // tab 都要手动点开历史下拉重新选。查询失败静默回退,不阻断流程。
-    const bucket = ep.kind === 'remote' ? ep.id : 'local'
-    try {
-      const recent = (await cwdHistoryIpc.get(bucket))[0]
-      if (recent) cwd = recent
-    } catch (e) {
-      console.warn('cwd_history_get failed:', e)
-    }
+    // Kode's node-specific catalog supplies the choices; no local/remote cwd fallback.
+    cwd = ''
   }
 
   async function submitOnce(opts: {
@@ -299,14 +288,7 @@
 
   function quickStart(b: BackendInfo) {
     if (submitting) return
-    // 1..9 数字键直接启动:用全局默认 cwd / default mode / 不指定 model,跳过 Configure
-    // **只对本地 backend 有效** — 远端 backend 没快捷键(也不预填 cwd)
-    void submitOnce({
-      backendKey: b.key,
-      cwd: defaultCwd || undefined,
-      permissionMode: 'default',
-      endpointId: ENDPOINT_LOCAL,
-    })
+    void pickBackend(b, ENDPOINT_LOCAL)
   }
 
   async function toggleEndpoint(ep: EndpointSummary) {
@@ -396,13 +378,7 @@
   function start(resumeSessionId?: string) {
     if (!selected || submitting) return
     const finalCwd = cwd.trim()
-    // 把这次用的 cwd 推进历史(top 5,去重)。失败不阻塞 start,
-    // 毕竟历史只是便利功能,不该影响主流程。
-    if (finalCwd) {
-      cwdHistoryIpc
-        .push(currentBucket(), finalCwd)
-        .catch((e) => console.warn('cwd_history_push failed:', e))
-    }
+    if (!finalCwd) { workspaceError = 'Select a Kode workspace before creating this session.'; return }
     void submitOnce({
       backendKey: selected.key,
       cwd: finalCwd || undefined,
@@ -499,7 +475,7 @@
   <div class="card">
     <div class="header">
       <div class="title-row">
-        <h1>{phase === 'list' ? 'New session' : `Configure ${selected?.key}`}</h1>
+        <h1>{phase === 'list' ? 'New session' : `Configure ${selected?.name ?? selected?.key}`}</h1>
         <span class="version">v0.2-dev</span>
       </div>
       <p class="hint">
@@ -536,7 +512,7 @@
               <button onclick={() => pickBackend(b, ENDPOINT_LOCAL)}>
                 <BackendIcon backendKey={b.key} command={b.command} size={20} />
                 <div class="entry-main">
-                  <span class="key">{b.key}</span>
+                  <span class="key">{b.name ?? b.key}</span>
                   {#if b.command && b.command !== b.key}
                     <code class="cmd">{b.command}</code>
                   {/if}
@@ -581,7 +557,7 @@
                           <button onclick={() => pickRemoteBackend(ep.id, b)}>
                             <BackendIcon backendKey={b.key || b.display_name} size={18} />
                             <div class="entry-main">
-                              <span class="key">{b.key}</span>
+                              <span class="key">{b.display_name ?? b.key}</span>
                               {#if b.default_cwd}
                                 <code class="cmd">{b.default_cwd}</code>
                               {/if}
@@ -621,11 +597,12 @@
           </div>
           <p class="hint-line">
             {#if selectedEndpoint.kind === 'remote'}
-              Path on the remote server. Leave empty to use the server's default cwd.
+              Select a Kode workspace on this server, or browse to register one.
             {:else}
               New session's cwd. <code>{selected.command}</code> will run here.
             {/if}
           </p>
+          {#if workspaceError}<p class="ep-msg ep-err" role="alert">{workspaceError}</p>{/if}
         </div>
 
         <div class="field">
@@ -720,7 +697,7 @@
         {/if}
 
         <div class="actions">
-          <button class="btn primary" onclick={() => start()} disabled={submitting}>
+          <button class="btn primary" onclick={() => start()} disabled={submitting || !cwd.trim()}>
             {submitting ? 'Starting...' : 'New session'}
           </button>
           <button class="btn ghost" onclick={back} disabled={submitting}>Back</button>

@@ -135,6 +135,7 @@ fn detect_lan_ip() -> String {
 #[derive(Debug, Serialize)]
 pub struct BackendInfo {
     pub key: String,
+    pub name: String,
     pub command: String,
     pub default_model: Option<String>,
     pub model_flag: Option<String>,
@@ -146,7 +147,12 @@ pub struct BackendInfo {
 /// 前端 toggle 写回时用 `backend_set_enabled` 写显式 true/false。
 #[derive(Debug, Serialize)]
 pub struct BackendListItem {
+    pub protocol: Option<String>,
     pub key: String,
+    pub name: String,
+    pub args: Vec<String>,
+    pub model_flag: Option<String>,
+    pub permission_mode_flag: Option<String>,
     pub command: String,
     pub default_model: Option<String>,
     pub enabled: bool,
@@ -483,19 +489,12 @@ fn effective_enabled(
 }
 
 #[tauri::command]
-pub fn list_backends(state: State<'_, AppState>) -> Vec<BackendInfo> {
-    let overrides = crate::backend_admin::read_enabled_overrides(&state);
-    let backends = state.ctx.backend_configs.read().clone();
-    backends
-        .iter()
-        .filter(|(k, v)| effective_enabled(k, v, &overrides))
-        .map(|(k, v)| BackendInfo {
-            key: k.clone(),
-            command: v.command.clone(),
-            default_model: v.default_model.clone(),
-            model_flag: v.model_flag.clone(),
-        })
-        .collect()
+pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo>, String> {
+    let catalog = crate::shared_agents::refresh(&state).await?;
+    Ok(catalog.backends.iter().filter(|(_, config)|config.is_enabled()).map(|(key,config)|BackendInfo {
+        key: key.clone(), name: catalog.names.get(key).cloned().unwrap_or_else(||key.clone()),
+        command: config.command.clone(), default_model: config.default_model.clone(), model_flag: config.model_flag.clone(),
+    }).collect())
 }
 
 /// Query the installed CLI at runtime instead of baking version-sensitive model IDs into the GUI.
@@ -504,28 +503,25 @@ pub async fn discover_backend_models(
     backend_key: String,
     state: State<'_, AppState>,
 ) -> Result<kode_bridge::model_discovery::ModelDiscoveryResult, String> {
-    let backends = state.ctx.backend_configs.read().clone();
+    let backends = crate::shared_agents::refresh(&state).await?.backends;
     let cfg = backends
         .get(&backend_key)
         .ok_or_else(|| format!("backend '{backend_key}' not found"))?;
-    kode_bridge::model_discovery::discover_models(&backend_key, &cfg.command).await
+    kode_bridge::model_discovery::discover_models_with_config(&backend_key, cfg).await
 }
 
 /// Settings 面板用:返回**全部** backend(含被关掉的),附带 enabled。
 /// enabled 取 config.toml 实时值(回落冷快照),所以开关后立刻正确。
 #[tauri::command]
-pub fn list_all_backends(state: State<'_, AppState>) -> Vec<BackendListItem> {
-    let overrides = crate::backend_admin::read_enabled_overrides(&state);
-    let backends = state.ctx.backend_configs.read().clone();
-    backends
-        .iter()
-        .map(|(k, v)| BackendListItem {
-            key: k.clone(),
-            command: v.command.clone(),
-            default_model: v.default_model.clone(),
-            enabled: effective_enabled(k, v, &overrides),
-        })
-        .collect()
+pub async fn list_all_backends(state: State<'_, AppState>) -> Result<Vec<BackendListItem>, String> {
+    let catalog = crate::shared_agents::refresh(&state).await?;
+    Ok(catalog.backends.iter().map(|(key,config)|BackendListItem {
+        protocol: config.protocol.clone(),
+        key: key.clone(), name: catalog.names.get(key).cloned().unwrap_or_else(||key.clone()),
+        command: config.command.clone(), args: config.args.clone(),
+        default_model: config.default_model.clone(), model_flag: config.model_flag.clone(),
+        permission_mode_flag: config.permission_mode_flag.clone(), enabled: config.is_enabled(),
+    }).collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -581,6 +577,7 @@ pub async fn spawn_session(
     state: State<'_, AppState>,
 ) -> Result<SpawnedSession, String> {
     let endpoint_id = endpoint_id.unwrap_or(EndpointId::Local);
+    if matches!(endpoint_id, EndpointId::Local) { crate::shared_agents::refresh(&state).await?; }
     let transport = get_transport(&state, &endpoint_id)?;
 
     // cwd 解析仅对 Local endpoint 有意义。Remote 的 cwd 必须是 server 端绝对路径
@@ -592,6 +589,13 @@ pub async fn spawn_session(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from),
+    };
+    let bucket = match &endpoint_id { EndpointId::Local => "local", EndpointId::Remote { id } => id.as_str() };
+    let cwd_path = match cwd_path {
+        // Restoring history must not recreate a deleted workspace registration.
+        Some(path) if resume_session_id.as_deref().is_some_and(|id| !id.trim().is_empty()) => Some(path),
+        Some(path) => Some(std::path::PathBuf::from(crate::workbench_state::ensure_workspace(bucket, &path.to_string_lossy()).await.map_err(|error| format!("Kode workspace registration failed: {error}"))?)),
+        None => return Err("Select a workspace on the SSH server before creating a session".into()),
     };
 
     // 仅 Local endpoint + prompt 注入开启时，预查项目 memory 快照，让 agent 一开始就看到。
@@ -1043,6 +1047,8 @@ pub struct PersistedTabDto {
     pub title_pinned: bool,
     pub cwd: String,
     #[serde(default)]
+    pub workspace_title: Option<String>,
+    #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
@@ -1077,8 +1083,9 @@ fn dedupe_persisted_tabs(tabs: Vec<PersistedTabDto>) -> Vec<PersistedTabDto> {
 }
 
 #[tauri::command]
-pub fn get_persisted_tabs() -> Vec<PersistedTabDto> {
-    let s = crate::persistence::load();
+pub async fn get_persisted_tabs() -> Vec<PersistedTabDto> {
+    let mut s = crate::persistence::load();
+    crate::workbench_state::load_tabs(&mut s).await;
     dedupe_persisted_tabs(
         s.tabs
             .into_iter()
@@ -1088,6 +1095,7 @@ pub fn get_persisted_tabs() -> Vec<PersistedTabDto> {
                 title: t.title,
                 title_pinned: t.title_pinned,
                 cwd: t.cwd,
+                workspace_title: t.workspace_title,
                 session_id: t.session_id,
                 model: t.model,
                 permission_mode: t.permission_mode,
@@ -1100,6 +1108,17 @@ pub fn get_persisted_tabs() -> Vec<PersistedTabDto> {
 
 #[tauri::command]
 pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Result<(), String> {
+    let bindings: Vec<_> = {
+        let sessions=state.ctx.sessions.lock();
+        tabs.iter().filter(|tab| !matches!(tab.endpoint_id,Some(EndpointId::Remote{..}))).filter_map(|tab| {
+            let thread=tab.session_id.as_deref()?;
+            let session=sessions.values().find(|session|session.backend_key==tab.backend_key && session.session_id.as_deref()==Some(thread))?;
+            Some(serde_json::json!({"action":"bind","key":tab.backend_key,"thread_id":thread,"config":session.launch_config,"cwd":tab.cwd,"title":tab.title,"model":tab.model}))
+        }).collect()
+    };
+    tauri::async_runtime::spawn(async move {
+        if let Err(error)=crate::shared_agents::bind_native(bindings).await { tracing::warn!(%error,"shared native session binding failed"); }
+    });
     let mut persisted = crate::persistence::load();
     persisted.version = 1;
     persisted.tabs = dedupe_persisted_tabs(tabs)
@@ -1110,6 +1129,7 @@ pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Resu
             title: t.title,
             title_pinned: t.title_pinned,
             cwd: t.cwd,
+            workspace_title: t.workspace_title,
             session_id: t.session_id,
             model: t.model,
             permission_mode: t.permission_mode,
@@ -1515,9 +1535,8 @@ pub fn get_home_dir() -> String {
 ///
 /// `bucket`:`"local"` = 本地;其它字符串 = 远端 endpoint_id。
 #[tauri::command]
-pub fn cwd_history_get(bucket: String) -> Vec<String> {
-    let state = crate::persistence::load();
-    crate::persistence::get_cwd_history(&state, &bucket)
+pub async fn cwd_history_get(bucket: String) -> Result<Vec<String>, String> {
+    crate::workbench_state::workspace_paths(&bucket).await.map_err(|error| format!("Kode workspace catalog unavailable: {error}"))
 }
 
 /// 把一个 cwd 推进某 bucket 的历史(top 5,去重),立即落盘。
@@ -1525,10 +1544,8 @@ pub fn cwd_history_get(bucket: String) -> Vec<String> {
 /// `bucket`:`"local"` = 本地;其它字符串 = 远端 endpoint_id。
 /// 空 cwd 会被忽略(不记录、不报错)。
 #[tauri::command]
-pub fn cwd_history_push(bucket: String, cwd: String) -> Result<(), String> {
-    let mut state = crate::persistence::load();
-    crate::persistence::push_cwd_history(&mut state, &bucket, &cwd);
-    crate::persistence::save_sync(&state).map_err(|e| format!("persist failed: {e}"))
+pub async fn cwd_history_push(bucket: String, cwd: String) -> Result<(), String> {
+    crate::workbench_state::ensure_workspace(&bucket, &cwd).await.map(|_| ()).map_err(|error| format!("Kode workspace registration failed: {error}"))
 }
 
 /// 读系统剪贴板文本(在 Rust 侧调用,绕过 WKWebView 的剪贴板权限弹窗)。
@@ -1563,16 +1580,19 @@ pub struct SessionSummary {
 }
 
 #[tauri::command]
-pub fn list_sessions_for_cwd(
+pub async fn list_sessions_for_cwd(
     backend_key: String,
     cwd: String,
+    state: State<'_, AppState>,
 ) -> Result<Vec<SessionSummary>, String> {
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_absolute() {
         return Err("cwd must be an absolute path".into());
     }
 
-    let Some(profile) = kode_core::session::backend::profile_for_key(&backend_key) else {
+    let backends = crate::shared_agents::refresh(&state).await?.backends;
+    let protocol = backends.get(&backend_key).map(|config|config.protocol_key(&backend_key)).unwrap_or(&backend_key);
+    let Some(profile) = kode_core::session::backend::profile_for_key(protocol) else {
         return Ok(Vec::new());
     };
     let pinned_titles = crate::persistence::load().session_titles;

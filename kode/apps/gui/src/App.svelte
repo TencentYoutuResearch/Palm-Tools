@@ -419,7 +419,7 @@
       const first = tabs[0]
       const cwd = first.cwd ?? '(no cwd)'
       const endpoint = wsEndpointInfo(first)
-      const name = cwd === '(no cwd)' ? 'Other' : wsBasename(cwd)
+      const name = first.workspaceTitle || (cwd === '(no cwd)' ? 'Other' : wsBasename(cwd))
       return {
         id: key,
         cwd,

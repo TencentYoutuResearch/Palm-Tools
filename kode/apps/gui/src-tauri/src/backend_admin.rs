@@ -57,6 +57,20 @@ const KNOWN_CANDIDATES: &[KnownBackend] = &[
         suggested_setup_cli: "codex",
         suggested_json_path: None,
     },
+    KnownBackend {
+        key: "tcodex",
+        command: "tcodex",
+        suggested_setup_style: "none",
+        suggested_setup_cli: "",
+        suggested_json_path: None,
+    },
+    KnownBackend {
+        key: "tclaude",
+        command: "tclaude",
+        suggested_setup_style: "none",
+        suggested_setup_cli: "",
+        suggested_json_path: None,
+    },
     // 2026-06:预置一批常见 AI CLI(参考 kooky)。大多数没有已知 MCP 配置入口；
     // Cursor 是例外,使用官方全局 ~/.cursor/mcp.json。
     KnownBackend {
@@ -192,6 +206,10 @@ pub fn detect_known_backends(state: State<'_, AppState>) -> Vec<DetectedBackend>
 /// `mcp_setup` 部分是扁平结构,后端拼成 `McpSetupSpec` enum。
 #[derive(Debug, Clone, Deserialize)]
 pub struct BackendSaveRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
     /// `[backends.<key>]` 里的 key
     pub key: String,
     pub command: String,
@@ -262,6 +280,7 @@ impl BackendSaveRequest {
     fn into_backend_config(self) -> Result<BackendConfig, String> {
         let spec = self.build_spec()?;
         Ok(BackendConfig {
+            protocol: self.protocol,
             command: self.command,
             args: self.args,
             default_model: self.default_model,
@@ -278,45 +297,20 @@ impl BackendSaveRequest {
 ///
 /// 写盘后同步运行时 backend snapshot 并 emit `backends-changed`,新 tab 无需重启即可使用。
 #[tauri::command]
-pub fn backend_save(
+pub async fn backend_save(
     request: BackendSaveRequest,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    if request.key.is_empty() {
-        return Err("backend key cannot be empty".into());
-    }
-    if request.command.is_empty() {
-        return Err("backend command cannot be empty".into());
+    if request.key.trim().is_empty() || request.command.trim().is_empty() {
+        return Err("Agent key and command cannot be empty".into());
     }
     let key = request.key.clone();
-    let mut backend = request
-        .clone()
-        .into_backend_config()
-        .map_err(|e| format!("invalid backend config: {e}"))?;
-
-    // 编辑表单为了兼容旧配置可能把 enabled 留成 None;保留已有显式开关,
-    // 避免保存其它字段时意外把 backend 重新打开。
-    if backend.enabled.is_none() {
-        backend.enabled = state
-            .ctx
-            .backend_configs
-            .read()
-            .get(&key)
-            .and_then(|existing| existing.enabled);
-    }
-
-    let path = config_toml_path(&state)?;
-    let mut doc = load_or_init_doc(&path)?;
-    upsert_backend_table(&mut doc, &key, &backend);
-    write_doc(&path, &doc)?;
-
-    state
-        .ctx
-        .backend_configs
-        .write()
-        .insert(key.clone(), backend);
-
+    let name = request.name.clone();
+    let mut backend = request.into_backend_config()?;
+    let catalog = crate::shared_agents::refresh(&state).await?;
+    if backend.enabled.is_none() { backend.enabled = catalog.backends.get(&key).and_then(|old|old.enabled); }
+    crate::shared_agents::change(&state, serde_json::json!({"action":"save","key":key,"config":backend,"name":name})).await?;
     let _ = app.emit("backends-changed", ());
     Ok(())
 }
@@ -324,26 +318,12 @@ pub fn backend_save(
 /// 删除指定 backend。同样 read-modify-write,删 `[backends.<key>]` table。
 /// 不存在不报错(让前端可以「确保删除」式调用)。
 #[tauri::command]
-pub fn backend_delete(
+pub async fn backend_delete(
     key: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    if key.is_empty() {
-        return Err("backend key cannot be empty".into());
-    }
-    let path = config_toml_path(&state)?;
-    if !path.exists() {
-        // 没文件 → 不存在,直接 emit 完事
-        let _ = app.emit("backends-changed", ());
-        return Ok(());
-    }
-    let mut doc = load_or_init_doc(&path)?;
-    if let Some(backends) = doc.get_mut("backends").and_then(|i| i.as_table_mut()) {
-        backends.remove(&key);
-    }
-    write_doc(&path, &doc)?;
-    state.ctx.backend_configs.write().remove(&key);
+    crate::shared_agents::change(&state, serde_json::json!({"action":"remove","key":key})).await?;
     let _ = app.emit("backends-changed", ());
     Ok(())
 }
@@ -358,51 +338,13 @@ pub fn backend_delete(
 /// 用户却需要能直接在 Settings 里关掉它。早期版本在此报错,导致开关全部点不动。
 /// 写盘后 emit `backends-changed`,运行时 backend snapshot 立即同步。
 #[tauri::command]
-pub fn backend_set_enabled(
+pub async fn backend_set_enabled(
     key: String,
     enabled: bool,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    if key.is_empty() {
-        return Err("backend key cannot be empty".into());
-    }
-    let path = config_toml_path(&state)?;
-    let mut doc = load_or_init_doc(&path)?;
-
-    let table_exists = doc
-        .get("backends")
-        .and_then(|i| i.as_table())
-        .map(|t| t.contains_key(&key))
-        .unwrap_or(false);
-
-    if table_exists {
-        // 已有 table:surgical 只改 enabled,不动其他字段。
-        let backend_table = doc
-            .get_mut("backends")
-            .and_then(|i| i.as_table_mut())
-            .and_then(|t| t.get_mut(&key))
-            .and_then(|i| i.as_table_mut())
-            .expect("table_exists checked above");
-        backend_table.insert("enabled", value(enabled));
-    } else {
-        // 文件里没有 → 从内存默认物化一份完整 table 再设 enabled。
-        let cfg = state
-            .ctx
-            .backend_configs
-            .read()
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| format!("backend '{key}' not found"))?;
-        let mut materialized = cfg;
-        materialized.enabled = Some(enabled);
-        upsert_backend_table(&mut doc, &key, &materialized);
-    }
-
-    write_doc(&path, &doc)?;
-    if let Some(cfg) = state.ctx.backend_configs.write().get_mut(&key) {
-        cfg.enabled = Some(enabled);
-    }
+    crate::shared_agents::change(&state, serde_json::json!({"action":"enable","key":key,"enabled":enabled})).await?;
     let _ = app.emit("backends-changed", ());
     Ok(())
 }
@@ -684,6 +626,23 @@ mod tests {
         assert_eq!(cursor.suggested_json_path, Some("~/.cursor/mcp.json"));
     }
 
+    #[test]
+    fn t_backend_candidates_do_not_suggest_auto_mcp_setup() {
+        let defaults = kode_core::config::Config::default();
+        for key in ["tcodex", "tclaude"] {
+            let matching: Vec<_> = KNOWN_CANDIDATES
+                .iter()
+                .filter(|candidate| candidate.key == key)
+                .collect();
+            assert_eq!(matching.len(), 1, "{key} should have one candidate");
+            let candidate = matching[0];
+            assert_eq!(candidate.command, defaults.backend(key).unwrap().command);
+            assert_eq!(candidate.suggested_setup_style, "none");
+            assert_eq!(candidate.suggested_setup_cli, "");
+            assert_eq!(candidate.suggested_json_path, None);
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn which_finds_windows_executable_via_pathext() {
@@ -722,6 +681,7 @@ sidebar_width = 30
 "#;
         let mut doc: DocumentMut = original.parse().unwrap();
         let new_backend = BackendConfig {
+            protocol: None,
             command: "/usr/local/bin/codex".into(),
             args: vec!["--no-banner".into()],
             default_model: None,
@@ -764,6 +724,7 @@ model_flag = "--model"
 "#;
         let mut doc: DocumentMut = original.parse().unwrap();
         let updated = BackendConfig {
+            protocol: None,
             command: "new-command".into(),
             args: vec![],
             default_model: None,
@@ -828,6 +789,8 @@ sidebar_width = 30
     #[test]
     fn build_spec_handles_all_styles() {
         let none = BackendSaveRequest {
+            name: None,
+            protocol: None,
             key: "x".into(),
             command: "x".into(),
             args: vec![],

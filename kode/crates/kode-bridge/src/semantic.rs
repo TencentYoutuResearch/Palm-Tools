@@ -115,7 +115,7 @@ async fn run(
         let n = reader.read_line(&mut buf).await?;
         if n == 0 {
             if !replay_finished {
-                if backend == Backend::Codex {
+                if backend.is_codex_family() {
                     if let Some(start) = replay_turn.take_active_start() {
                         bus.emit(start);
                     }
@@ -127,7 +127,7 @@ async fn run(
         }
         let is_replay = line_start < replay_boundary;
         if !is_replay && !replay_finished {
-            if backend == Backend::Codex {
+            if backend.is_codex_family() {
                 if let Some(start) = replay_turn.take_active_start() {
                     bus.emit(start);
                 }
@@ -143,7 +143,7 @@ async fn run(
             // not drive status or duplicate completion notifications. Codex
             // alone retains the last unmatched start for live-state recovery.
             if is_replay && is_turn_lifecycle_event(&env.r#type) {
-                if backend == Backend::Codex {
+                if backend.is_codex_family() {
                     replay_turn.observe(&env);
                 }
                 continue;
@@ -193,7 +193,7 @@ pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvel
     match backend {
         Backend::Codebuddy => parse_codebuddy(id, line),
         Backend::Claude | Backend::Tclaude => parse_claude(id, line),
-        Backend::Codex => parse_codex(id, line),
+        Backend::Codex | Backend::Tcodex => parse_codex(id, line),
         Backend::Cursor => parse_cursor(id, line),
     }
 }

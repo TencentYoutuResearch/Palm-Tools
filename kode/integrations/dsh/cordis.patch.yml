@@ -1,0 +1,80 @@
+- insert:
+    - id: kode
+      name: '@kode/dsh'
+      config:
+        url: http://127.0.0.1:47870
+        sharedBackendState: true
+    - id: kode-native-factory
+      name: '@kode/dsh/native-factory'
+    - id: kode-workspace-storage
+      name: '@kode/dsh/workspace-backend'
+    - id: kode-workspace-registry
+      name: '@kode/dsh/workspace-registry'
+    # Both flows are required when one tab can select a local or SSH Host.
+    - id: kode-directory-browse
+      name: '@kode/dsh-directory-browse'
+    - id: kode-connection
+      name: '@kode/dsh-transport'
+      inject: [webStartup]
+      config:
+        trustedHosts: !!js ctx.webStartup.trustedHosts
+    # This plugin owns its presets, prompt contributions and model loop.
+    - id: kode-dsh-conversation
+      name: '@kode/dsh/dsh-conversation'
+      disabled: true
+- id: connection
+  disabled: true
+- id: workspace
+  disabled: true
+- id: storage-domain
+  config:
+    backend: json
+    routes:
+      workspace: kode-workspaces
+- id: agent-loop
+  disabled: true
+- id: system-prompt
+  # Shared tool/workspace infrastructure needs the registry. It owns no model
+  # identity or persona; only the optional conversation plugin contributes those.
+  config:
+    includeHarnessIdentity: false
+    personaPrefix: ''
+    personaSuffix: ''
+- id: harness-dev-context
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+- id: subagent
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: ui-settings-agent-loop
+  disabled: true
+- id: ui-settings-subagent
+  disabled: true
+- id: ui-settings-web-search
+  disabled: true
+- id: ui-settings-models
+  disabled: true
+- id: preset-standard
+  disabled: true
+- id: preset-minimal
+  disabled: true
+- id: preset-ptc
+  disabled: true
+- id: preset-cordis
+  disabled: true
+- id: agent-preset-registry
+  config:
+    default: kode-native
+- id: ui-trajectory
+  disabled: true
+- id: ui-model-selection
+  disabled: true
+- id: ui-agent-preset
+  disabled: true
+# The bundled browser is opt-in on Web; retain dsh's sandboxed implementation.
+- id: ui-sidebar-browser
+  disabled: false

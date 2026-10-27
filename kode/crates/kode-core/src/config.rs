@@ -17,6 +17,9 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BackendConfig {
+    /// Protocol identity is independent of the shared Agent's name or ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -51,6 +54,10 @@ pub struct BackendConfig {
 }
 
 impl BackendConfig {
+    pub fn protocol_key<'a>(&'a self, key: &'a str) -> &'a str {
+        self.protocol.as_deref().unwrap_or(key)
+    }
+
     /// 是否应在 BackendChooser 里展示。`None`(待探测)和 `Some(true)` 都算开,
     /// 只有显式 `Some(false)` 才隐藏。
     pub fn is_enabled(&self) -> bool {
@@ -159,6 +166,7 @@ impl Default for Config {
         backends.insert(
             "codebuddy".into(),
             BackendConfig {
+                protocol: None,
                 command: "codebuddy".into(),
                 // 不传任何 positional 参数 —— codebuddy 直接跑就是交互模式;
                 // 任何 positional 都会被当作初始 prompt 发给 LLM。
@@ -178,6 +186,7 @@ impl Default for Config {
         backends.insert(
             "claude-internal".into(),
             BackendConfig {
+                protocol: None,
                 // 用户内部环境的 claude 入口(自带 wrapper 脚本或别名)
                 // 用户的 PATH 里需要有这个命令。如果实际命令名不同,
                 // 可在 ~/.config/kode/config.toml 覆盖 command 字段
@@ -195,6 +204,7 @@ impl Default for Config {
         backends.insert(
             "claude".into(),
             BackendConfig {
+                protocol: None,
                 command: "claude".into(),
                 args: vec![],
                 default_model: None,
@@ -209,6 +219,7 @@ impl Default for Config {
         backends.insert(
             "codex".into(),
             BackendConfig {
+                protocol: None,
                 command: "codex".into(),
                 args: vec![],
                 default_model: None,
@@ -223,9 +234,28 @@ impl Default for Config {
                 enabled: None,
             },
         );
+        for (key, permission_flag) in [
+            ("tcodex", "--ask-for-approval"),
+            ("tclaude", "--permission-mode"),
+        ] {
+            backends.insert(
+                key.into(),
+                BackendConfig {
+                    protocol: None,
+                    command: key.into(),
+                    args: vec![],
+                    default_model: None,
+                    model_flag: Some("--model".into()),
+                    permission_mode_flag: Some(permission_flag.into()),
+                    mcp_setup: None,
+                    enabled: None,
+                },
+            );
+        }
         backends.insert(
             "cursor".into(),
             BackendConfig {
+                protocol: None,
                 command: "cursor-agent".into(),
                 args: vec![],
                 default_model: None,
@@ -256,6 +286,7 @@ impl Default for Config {
             backends.insert(
                 key.into(),
                 BackendConfig {
+                    protocol: None,
                     command: command.into(),
                     args: vec![],
                     default_model: None,
@@ -301,6 +332,17 @@ impl Config {
                     .get("cursor")
                     .and_then(|backend| backend.mcp_setup.clone());
                 for (k, v) in defaults.backends {
+                    // 旧 tcodex/tclaude 配置缺少注入 flag,只补缺失项,不覆盖用户显式值。
+                    if matches!(k.as_str(), "tcodex" | "tclaude") {
+                        if let Some(backend) = c.backends.get_mut(&k) {
+                            if backend.model_flag.is_none() {
+                                backend.model_flag = v.model_flag.clone();
+                            }
+                            if backend.permission_mode_flag.is_none() {
+                                backend.permission_mode_flag = v.permission_mode_flag.clone();
+                            }
+                        }
+                    }
                     c.backends.entry(k).or_insert(v);
                 }
                 if let Some(cursor) = c.backends.get_mut("cursor") {
@@ -362,6 +404,30 @@ mod tests {
             "codex default args must be empty, got: {:?}",
             b.args
         );
+    }
+
+    #[test]
+    fn default_t_backends_have_flags_without_startup_args_or_mcp_setup() {
+        let cfg = Config::default();
+        for (key, permission_flag) in [
+            ("tcodex", "--ask-for-approval"),
+            ("tclaude", "--permission-mode"),
+        ] {
+            let backend = cfg.backend(key).expect(key);
+            assert_eq!(backend.command, key);
+            assert!(
+                backend.args.is_empty(),
+                "{key} must not inject startup args"
+            );
+            assert_eq!(backend.default_model, None);
+            assert_eq!(backend.model_flag.as_deref(), Some("--model"));
+            assert_eq!(
+                backend.permission_mode_flag.as_deref(),
+                Some(permission_flag)
+            );
+            assert_eq!(backend.enabled, None);
+            assert_eq!(backend.mcp_setup, None);
+        }
     }
 
     /// 回归:三个内置 backend 都要有 permission_mode_flag(默认 --permission-mode)。
@@ -467,12 +533,8 @@ mod tests {
         let cursor = cfg.backend("cursor").expect("cursor");
         assert_eq!(cursor.command, "cursor-agent");
         assert_eq!(cursor.enabled, None);
-        // 5 MCP-enabled + 10 other presets = 15。
-        assert!(
-            cfg.backends.len() >= 15,
-            "expected >=15 backends, got {}",
-            cfg.backends.len()
-        );
+        // 5 MCP-enabled + 10 other presets + tcodex/tclaude = 17。
+        assert_eq!(cfg.backends.len(), 17);
     }
 
     /// 回归:`is_enabled()` 把 None / Some(true) 都当开,只有 Some(false) 隐藏。
@@ -533,6 +595,113 @@ command = "legacy"
             legacy.mcp_setup.is_none(),
             "missing field should default to None"
         );
+    }
+
+    fn load_test_config_without_rewriting(txt: &str) -> Config {
+        let path = std::env::temp_dir().join(format!("kode-config-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, txt).unwrap();
+        let cfg = Config::load_from(&path);
+        let after = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(after, txt, "loading must not rewrite the user config");
+        cfg
+    }
+
+    #[test]
+    fn load_from_hydrates_only_missing_t_backend_flags_in_legacy_config() {
+        let txt = r#"# Preserve user comments and custom settings.
+default_backend = "tcodex"
+
+[backends.tcodex]
+command = "/custom/tcodex-wrapper"
+args = ["--profile", "work", "--ask-for-approval", "on-request"]
+default_model = "custom-codex-model"
+enabled = false
+
+[backends.tclaude]
+command = "/custom/tclaude-wrapper"
+args = ["--permission-mode", "plan"]
+default_model = "custom-claude-model"
+enabled = true
+
+[ui]
+sidebar_width = 31
+"#;
+        let original: Config = toml::from_str(txt).unwrap();
+        let defaults = Config::default();
+        let loaded = load_test_config_without_rewriting(txt);
+        assert_eq!(loaded.default_backend, "tcodex");
+        assert_eq!(loaded.ui.sidebar_width, 31);
+        for key in ["tcodex", "tclaude"] {
+            let mut expected = original.backend(key).unwrap().clone();
+            let default = defaults.backend(key).unwrap();
+            expected.model_flag = default.model_flag.clone();
+            expected.permission_mode_flag = default.permission_mode_flag.clone();
+            assert_eq!(loaded.backend(key), Some(&expected));
+            assert!(loaded.backend(key).unwrap().mcp_setup.is_none());
+        }
+    }
+
+    #[test]
+    fn load_from_preserves_explicit_t_backend_flags_including_empty_strings() {
+        let defaults = Config::default();
+        for key in ["tcodex", "tclaude"] {
+            for (model_flag, permission_flag) in [
+                (Some("--custom-model"), Some("--custom-permission")),
+                (Some(""), Some("")),
+                (Some("--custom-model"), None),
+                (None, Some("--custom-permission")),
+                (Some(""), None),
+                (None, Some("")),
+            ] {
+                let mut backend = defaults.backend(key).unwrap().clone();
+                backend.command = format!("/custom/{key}");
+                backend.args = vec!["--profile".into(), "custom".into()];
+                backend.default_model = Some("custom-model".into());
+                backend.model_flag = model_flag.map(str::to_string);
+                backend.permission_mode_flag = permission_flag.map(str::to_string);
+                backend.enabled = Some(false);
+                backend.mcp_setup = Some(McpSetupSpec::JsonMerge {
+                    config_path: "~/.custom/mcp.json".into(),
+                });
+                let cfg = Config {
+                    default_backend: key.into(),
+                    backends: HashMap::from([(key.into(), backend.clone())]),
+                    ui: UiConfig::default(),
+                };
+                let txt = toml::to_string(&cfg).unwrap();
+                let loaded = load_test_config_without_rewriting(&txt);
+                backend.model_flag = backend
+                    .model_flag
+                    .or_else(|| defaults.backend(key).unwrap().model_flag.clone());
+                backend.permission_mode_flag = backend
+                    .permission_mode_flag
+                    .or_else(|| defaults.backend(key).unwrap().permission_mode_flag.clone());
+                assert_eq!(loaded.backend(key), Some(&backend));
+            }
+        }
+    }
+
+    #[test]
+    fn load_from_does_not_hydrate_t_backend_family_aliases_or_matching_commands() {
+        let txt = r#"
+[backends.tcodex-custom]
+command = "tcodex"
+
+[backends.tclaude-custom]
+command = "tclaude"
+
+[backends.custom-codex]
+command = "tcodex"
+
+[backends.custom-claude]
+command = "tclaude"
+"#;
+        let original: Config = toml::from_str(txt).unwrap();
+        let loaded = load_test_config_without_rewriting(txt);
+        for (key, backend) in original.backends {
+            assert_eq!(loaded.backend(&key), Some(&backend));
+        }
     }
 
     #[test]

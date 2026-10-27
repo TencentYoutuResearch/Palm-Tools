@@ -160,6 +160,7 @@ impl AppState {
             memory: memory_handle,
         });
         let protocol_ctx = Arc::new(kode_bridge::Ctx {
+            agent_backends: Default::default(),
             acp: Arc::new(kode_bridge::acp::Registry::default()),
             config: ctx.config.clone(),
             sessions: Arc::clone(&ctx.sessions),
@@ -400,9 +401,7 @@ fn spawn_event_router(
                                     let should_start_semantic = s.claim_semantic_session(sid);
                                     s.session_id = Some(sid.clone());
                                     if should_start_semantic {
-                                        kode_core::session::jsonl_tail::Backend::from_backend_key(
-                                            &s.backend_key,
-                                        )
+                                        s.backend_kind()
                                         .map(|backend| (backend, s.cwd.clone(), sid.clone()))
                                     } else {
                                         None
@@ -561,7 +560,7 @@ fn apply_session_uuid_retarget_from_pty(
         );
         s.session_id = Some(session_uuid.to_string());
 
-        kode_core::session::jsonl_tail::Backend::from_backend_key(&s.backend_key)
+        s.backend_kind()
             .map(|backend| (backend, s.cwd.clone(), session_uuid.to_string()))
     };
 
@@ -971,9 +970,7 @@ fn spawn_attention_forwarder(
                                     let mut locked = sessions.lock();
                                     let session = locked.get_mut(&env.session_id)?;
                                     let backend =
-                                        kode_core::session::jsonl_tail::Backend::from_backend_key(
-                                            &session.backend_key,
-                                        )?;
+                                        session.backend_kind()?;
                                     if backend != kode_core::session::jsonl_tail::Backend::Cursor
                                         || !session.accepts_transcript_path(path_buf)
                                     {
@@ -1020,8 +1017,8 @@ fn spawn_attention_forwarder(
                                         let codex_semantic = {
                                             let mut locked = sessions.lock();
                                             locked.get_mut(&env.session_id).and_then(|session| {
-                                                let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(&session.backend_key)?;
-                                                if backend != kode_core::session::jsonl_tail::Backend::Codex {
+                                                let backend = session.backend_kind()?;
+                                                if !backend.is_codex_family() {
                                                     return None;
                                                 }
                                                 let path = kode_core::session::jsonl_tail::resolve_session_path(

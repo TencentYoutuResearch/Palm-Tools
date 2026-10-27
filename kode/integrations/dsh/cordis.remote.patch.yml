@@ -1,0 +1,7 @@
+# Apply in addition to the Kode bundle on an SSH execution Host.
+# Always browse the remote filesystem, even if the Host has a desktop picker.
+- id: directory-picker
+  disabled: true
+- insert:
+    - id: kode-directory-browse-host
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'

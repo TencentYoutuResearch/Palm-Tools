@@ -141,6 +141,8 @@
   function newRequest(seed?: Partial<BackendSaveRequest>): BackendSaveRequest {
     return {
       key: seed?.key ?? '',
+      name: seed?.name ?? '',
+      protocol: seed?.protocol ?? null,
       command: seed?.command ?? '',
       args: seed?.args ?? [],
       default_model: seed?.default_model ?? null,
@@ -163,7 +165,9 @@
     editing = newRequest({
       key: d.suggested_key,
       command: d.command,
-      permission_mode_flag: d.suggested_key === 'codex' ? '--ask-for-approval' : '--permission-mode',
+      permission_mode_flag: d.suggested_key === 'codex' || d.suggested_key === 'tcodex'
+        ? '--ask-for-approval'
+        : '--permission-mode',
       setup_style: d.suggested_setup_style,
       setup_cli: d.suggested_setup_cli,
       setup_json_path: d.suggested_json_path ?? '',
@@ -175,6 +179,11 @@
   function startEdit(b: BackendListItem) {
     editing = newRequest({
       key: b.key,
+      name: b.name ?? b.key,
+      protocol: b.protocol ?? null,
+      args: b.args ?? [],
+      model_flag: b.model_flag,
+      permission_mode_flag: b.permission_mode_flag,
       command: b.command,
       default_model: b.default_model,
     })
@@ -447,7 +456,7 @@
               </div>
               <div class="field">
                 <label for="be-pflag">Permission flag</label>
-                <input id="be-pflag" type="text" value={editing.permission_mode_flag ?? ''} oninput={(e) => editing && (editing.permission_mode_flag = (e.target as HTMLInputElement).value || null)} placeholder="--permission-mode" spellcheck="false" autocomplete="off" />
+                <input id="be-pflag" type="text" value={editing.permission_mode_flag ?? ''} oninput={(e) => editing && (editing.permission_mode_flag = (e.target as HTMLInputElement).value || null)} placeholder={editing.key === 'codex' || editing.key === 'tcodex' ? '--ask-for-approval' : '--permission-mode'} spellcheck="false" autocomplete="off" />
               </div>
             </div>
 
@@ -508,7 +517,7 @@
                 </div>
                 <div class="item-body">
                   <div class="item-title">
-                    <span class="name">{b.key}</span>
+                    <span class="name">{b.name ?? b.key}</span>
                     {#if inst === true}
                       <span class="tag ok">installed</span>
                     {:else if inst === false}

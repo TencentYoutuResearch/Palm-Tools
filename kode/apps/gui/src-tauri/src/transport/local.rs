@@ -85,7 +85,7 @@ impl SessionTransport for LocalTransport {
     }
 
     async fn spawn(&self, spec: SpawnSpec) -> Result<SpawnedSession, TransportError> {
-        let backend: BackendConfig = self
+        let mut backend: BackendConfig = self
             .ctx
             .backend_configs
             .read()
@@ -94,6 +94,10 @@ impl SessionTransport for LocalTransport {
                 TransportError::BadRequest(format!("backend not configured: {}", spec.backend_key))
             })?
             .clone();
+        if self.use_persisted_memory_prompt_flag && spec.resume_session_uuid.is_some() {
+            backend = crate::shared_agents::configuration(&spec.backend_key,spec.resume_session_uuid.as_deref()).await
+                .map_err(TransportError::BadRequest)?;
+        }
 
         let id = self.ctx.alloc_id();
         let cwd_path = spec
@@ -178,7 +182,7 @@ impl SessionTransport for LocalTransport {
         // Phase 9.1.4 jsonl 语义 tail
         if let (Some(sid), Some(backend_kind)) = (
             session_uuid.as_deref(),
-            kode_core::session::jsonl_tail::Backend::from_backend_key(&spec.backend_key),
+            kode_core::session::jsonl_tail::Backend::from_backend_key(backend.protocol_key(&spec.backend_key)),
         ) {
             let claimed = self
                 .ctx
@@ -262,14 +266,14 @@ impl SessionTransport for LocalTransport {
 
 fn apply_resume_meta_snapshot(
     session: &mut Session,
-    backend_key: &str,
+    _backend_key: &str,
     cwd: &Path,
     session_id: Option<&str>,
 ) {
     let Some(session_id) = session_id else {
         return;
     };
-    let Some(backend) = kode_core::session::jsonl_tail::Backend::from_backend_key(backend_key)
+    let Some(backend) = session.backend_kind()
     else {
         return;
     };
@@ -304,6 +308,7 @@ mod tests {
         backends.insert(
             "echo".to_string(),
             BackendConfig {
+                protocol: None,
                 command: "/bin/cat".to_string(),
                 args: vec![],
                 default_model: None,

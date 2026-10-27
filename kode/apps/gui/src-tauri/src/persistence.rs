@@ -42,6 +42,9 @@ pub struct PersistedTab {
     pub title_pinned: bool,
     /// 启动时的 cwd;恢复时 spawn 用同样 cwd 才能保证 jsonl 路径对得上
     pub cwd: String,
+    /// Canonical backend workspace name, independent of the directory basename.
+    #[serde(default)]
+    pub workspace_title: Option<String>,
     /// 上次会话的 session uuid;恢复时通过 `--resume <sid>` 让子进程加载历史。
     /// v1 → v2 迁移:旧文件没有此字段 → 反序列化为 None,降级成普通 spawn。
     #[serde(default)]
@@ -351,6 +354,9 @@ impl PersistWriter {
                     if let Err(e) = save_sync(&s) {
                         tracing::warn!(error = %e, "state save failed");
                     }
+                    if let Err(error) = crate::workbench_state::save(&s).await {
+                        tracing::warn!(%error, "shared workbench state save failed; local backup retained");
+                    }
                 }
             }
         });
@@ -394,6 +400,7 @@ mod tests {
                 title: "Test".into(),
                 title_pinned: true,
                 cwd: "/tmp".into(),
+                workspace_title: None,
                 session_id: Some("abc-123".into()),
                 model: Some("claude-opus-4.7".into()),
                 permission_mode: Some("bypass".into()),
