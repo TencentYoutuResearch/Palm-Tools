@@ -90,12 +90,12 @@ async fn run(
     path: PathBuf,
     bus: Arc<BridgeBus>,
 ) -> std::io::Result<()> {
-    let mut attempts = 0;
+    // Wrapped CLIs may not create the transcript until their first request.
+    // The session owns this wait: `session.exited` or a rebind aborts the task.
     let file = loop {
         match File::open(&path).await {
             Ok(f) => break f,
-            Err(_) if attempts < 60 => {
-                attempts += 1;
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 sleep(Duration::from_millis(500)).await;
             }
             Err(e) => return Err(e),
@@ -1656,6 +1656,44 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<SPECOPS_DOCUMENT>"));
+    }
+
+    #[tokio::test]
+    async fn tclaude_tail_waits_for_transcript_created_after_old_deadline() {
+        let path = std::env::temp_dir().join(format!(
+            "kode-tclaude-semantic-{}.jsonl",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let bus = Arc::new(BridgeBus::new());
+        let task = tokio::spawn(run(43, Backend::Tclaude, path.clone(), Arc::clone(&bus)));
+        // No real CLI is invoked. Exceed the former 30-second retry deadline.
+        sleep(Duration::from_secs(31)).await;
+        assert!(!task.is_finished());
+
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "reply after a late first prompt" }]
+            }
+        });
+        tokio::fs::write(&path, format!("{line}\n")).await.unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let events = bus.history_for(43, 0, 10);
+                if !events.is_empty() {
+                    break events;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("semantic tail stopped before the transcript appeared");
+
+        task.abort();
+        let _ = tokio::fs::remove_file(path).await;
+        assert_eq!(events[0].r#type, "message");
+        assert_eq!(events[0].payload["text"], "reply after a late first prompt");
     }
 
     #[tokio::test]
