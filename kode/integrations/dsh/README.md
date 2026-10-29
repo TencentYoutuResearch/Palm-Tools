@@ -56,6 +56,35 @@ To add the same service to the **existing kode GUI or headless bridge**, set `KO
 
 ## Install in dsh
 
+### Self-contained platform bundle
+
+Build an npm package that contains the pinned plugin and matching Kode backend:
+
+```sh
+npm run build:bundle
+```
+
+The generated archive is printed under `dist/`. Install it with one plugin command:
+
+```sh
+dsh plugin --profile web add /absolute/path/to/dist/kode-dsh-0.1.0-darwin-arm64.tgz
+```
+
+The archive includes the private UI subpackages as bundled dependencies, so pnpm
+does not need a source checkout. Other npm dependencies are downloaded during installation.
+Start the installed profile with `dsh web --no-open` (or `dsh web` to open a browser).
+
+On first start the plugin creates private state under `~/.config/kode/dsh`, including
+the administrator token, backend configuration and owner-token state. The
+bundled `kode-session-server` is started only for a loopback HTTP URL. An existing
+authenticated backend is reused and left running when the plugin exits; a backend
+started by the plugin is stopped on exit. Set
+`KODE_DSH_HOME` to move this state, or provide `tokenFile`, `serverConfig`,
+`serverCommand`, and `stateFile` explicitly to keep an existing backend setup.
+Explicit configuration always takes precedence over automatic provisioning.
+
+### Source checkout
+
 ```sh
 dsh plugin --profile web add /absolute/path/to/kode/integrations/dsh
 ```
@@ -418,6 +447,7 @@ checkouts can also use local compiled binaries.
 | Sidebar browser | Official chrome with a private Chromium page provider; internal MR browsing. See input/accessibility limitations above. |
 | New conversations in worktrees | Create a branch/checkout from a registered Git workspace and start the new session there, preserving draft and Agent/model. Moving an existing conversation back to the main checkout is not implemented. |
 | Mid-turn steering | Codex uses native `turn/steer` with the expected active turn. ACP Agents without protocol support explicitly require queueing. |
+| Queued-message steering | Native admission is checked before transferring a queued input. Rejection retains the queue item and content; unsupported Agents disable queue steering and submit busy composer inputs as queued followups. |
 | Shared memory UI and synchronization controls | Missing: desktop review queue, scope/relation editing, memory sync controls. Existing CLI MCP/hook configuration can still operate independently. |
 | Native plugin/Hook installation and management | Missing desktop management UI; dsh's own plugin page manages dsh bundles, not all native CLI plugins. |
 | Model usage and desktop floating monitor | Missing desktop-wide monitoring parity; dsh has its own per-session observations. |

@@ -72,8 +72,12 @@ export class NativeAgentDriver {
   }
   send(message, target, wakeup) { if (this.disposed) throw new Error('Agent runtime has been unplugged'); this.inbox.append(target, message); if (wakeup) { this.parked = false; this.wake() } }
   followup(message) { this.send(message, 'next-turn', true) }
-  steer(message) {
+  assertSteeringAvailable(message) {
+    if (this.disposed) throw new Error('Agent runtime has been unplugged')
     if (this.status === 'running' && ['user', 'human'].includes(message.source?.kind) && !this.runtime.adapter.supportsSteering?.(this)) throw new Error('当前 Agent 不支持原生中途插入，请选择排队发送。')
+  }
+  steer(message) {
+    this.assertSteeringAvailable(message)
     this.send(message, 'next-step', true)
     this.scheduleSteering()
   }

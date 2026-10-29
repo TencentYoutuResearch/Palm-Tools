@@ -2,6 +2,7 @@ import { contextUsageProjection } from './context-usage.js'
 /** Cordis-owned Agent factory. Storage and lifecycle are independent of dsh's LLM loop. */
 import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import { NativeAgentDriver, boundaryProjection, inboxProjection } from './native-agent-driver.js'
+import { installQueueSteering } from './queue-steering.js'
 export const name = 'kode-native-agent-factory'
 export const inject = ['agents', 'sessions', 'sessionProjections', 'sessionPersistence', 'kodeAgents', 'tools', 'agentPresets']
 export class NativeAgentFactory {
@@ -75,6 +76,7 @@ export class NativeAgentFactory {
   async close() { this.stopping = true; this.stop.abort(new Error('Agent runtime unplugged')); await Promise.allSettled([...this.pending]); await Promise.all([...this.live].map(dispose => dispose())) }
 }
 export async function apply(ctx) {
+  ctx.inject(['sessionController'], scope => scope.effect(() => installQueueSteering(scope, scope.sessionController), 'kode.queue-steering'))
   const unregisterPreset = await ctx.agentPresets.register({ id: 'kode-native', name: '外部 Agent', description: '由所选 Agent 负责模型、指令和工具执行。', plugins: [] })
   ctx.effect(() => unregisterPreset, 'kode.native-preset')
   // Migrate only this adapter's recorded external sessions. The original logs,

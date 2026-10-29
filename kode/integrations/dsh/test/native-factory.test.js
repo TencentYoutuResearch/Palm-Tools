@@ -14,6 +14,7 @@ import { AgentRuntimeAdapter } from '../src/agent-runtime.js'
 import { AgentProfiles } from '../src/agent-profiles.js'
 import { mountNativeCommands } from '../src/native-commands.js'
 import { pendingShellContext } from '../src/native-shell.js'
+import { installQueueSteering } from '../src/queue-steering.js'
 import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -57,7 +58,12 @@ for (const outcome of ['accepted', 'rejected', 'uncertain']) test(`Codex steerin
     agent.followup(message('initial', 'WAIT'))
     for (let i = 0; i < 100 && !adapter.canSteer(agent.id); i++) await new Promise(resolve => setTimeout(resolve, 10))
     assert.ok(adapter.canSteer(agent.id))
-    agent.steer(message('steering-input', 'Focus on the new task'))
+    const input = message('steering-input', 'Focus on the new task')
+    agent.followup(input)
+    const controller = { updateQueue() { throw new Error('Native transfer must not use remove-before-steer') } }
+    const restore = installQueueSteering(h.ctx, controller)
+    try { await controller.updateQueue({ sessionId: agent.id, itemId: input.id, action: { kind: 'steer' } }) }
+    finally { restore() }
     await Promise.race([agent.whenIdle(), new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('steering timed out')), 6000); timer.unref() })])
     const rows = (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse)
     assert.equal(rows.filter(row => row.method === 'turn/steer').length, 1)

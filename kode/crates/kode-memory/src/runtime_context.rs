@@ -14,6 +14,29 @@ pub fn is_active(expected_backend: Option<&str>) -> bool {
     )
 }
 
+/// Return the actual backend only for a Kode-owned session in the allowed family.
+pub fn active_backend_for(allowed_backends: &[&str]) -> Option<String> {
+    active_backend_for_values(
+        std::env::var("KODE_HOST").ok().as_deref(),
+        std::env::var("KODE_SESSION_ID").ok().as_deref(),
+        std::env::var("KODE_BACKEND_KEY").ok().as_deref(),
+        allowed_backends,
+    )
+    .map(str::to_owned)
+}
+
+pub(crate) fn active_backend_for_values<'a>(
+    host: Option<&str>,
+    session_id: Option<&str>,
+    backend_key: Option<&'a str>,
+    allowed_backends: &[&str],
+) -> Option<&'a str> {
+    if !is_active_values(host, session_id, backend_key, None) {
+        return None;
+    }
+    backend_key.filter(|backend| allowed_backends.contains(backend))
+}
+
 fn is_active_values(
     host: Option<&str>,
     session_id: Option<&str>,
@@ -42,6 +65,37 @@ mod tests {
         assert!(!is_active_values(None, None, None, None));
         assert!(!is_active_values(None, Some("42"), Some("codex"), None));
         assert!(!is_active_values(Some("1"), Some("42"), None, None));
+    }
+
+    #[test]
+    fn family_detection_keeps_exact_backend_guard_and_requires_ownership() {
+        let allowed = &["codex", "tcodex"];
+        for backend in ["codex", "tcodex"] {
+            assert_eq!(
+                active_backend_for_values(Some("1"), Some("42"), Some(backend), allowed),
+                Some(backend)
+            );
+            assert_eq!(
+                active_backend_for_values(None, Some("42"), Some(backend), allowed),
+                None
+            );
+            assert_eq!(
+                active_backend_for_values(Some("1"), Some(" "), Some(backend), allowed),
+                None
+            );
+        }
+        for backend in ["claude", "custom-codex", "unknown", " "] {
+            assert_eq!(
+                active_backend_for_values(Some("1"), Some("42"), Some(backend), allowed),
+                None
+            );
+        }
+        assert!(!is_active_values(
+            Some("1"),
+            Some("42"),
+            Some("tcodex"),
+            Some("codex")
+        ));
     }
 
     #[test]

@@ -19,6 +19,7 @@
     "assets",
     "packages",
     "scripts/build-remote.js",
+    "scripts/build-bundle.js",
     "README.md",
     "cordis.patch.yml",
     "cordis.remote.patch.yml"
@@ -42,6 +43,7 @@
     "test": "node --test test/*.test.js",
     "test:integration": "node scripts/test-integration.js",
     "test:ssh": "python3 scripts/test-ssh.py",
+    "build:bundle": "node scripts/build-bundle.js",
     "build:directory-browse": "node scripts/build-directory-browse.js",
     "build:chat": "node scripts/build-chat.js"
   },

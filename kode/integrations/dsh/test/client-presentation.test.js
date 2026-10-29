@@ -309,10 +309,11 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
 test('saved legacy tab archive controls work without importing or starting the saved Agent',async()=>{
  const c=client({current:'local',hosts:[{id:'local',sessions:[{id:'saved:legacy',title:'Removed Agent tab'}],archivedSessionIds:['saved:legacy'],workspaces:[]}]})
  const archive=()=>null;c.addSlot('sidebar.workspaces.session.menu.item','archive',archive)
- const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:[],byId:{}}),useWorkspaces:select=>select({items:[],archivedSessionIds:[],pinnedSessionIds:[]})})
+ const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:[],byId:{}}),useWorkspaces:select=>select({items:[],archivedSessionIds:[],pinnedSessionIds:[]}),renderSlot:name=>({type:name})})
  wrapper.type(wrapper.props);await new Promise(resolve=>setImmediate(resolve))
  const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
  assert.ok(native.props.useWorkspaces(state=>state.archivedSessionIds).includes('saved:legacy'))
+ assert.equal(native.props.renderSlot('sidebar.session.row.hover',{sessionId:'saved:legacy'},{}).type,'sidebar.session.row.hover')
  const menu=native.props.renderSlot('sidebar.workspaces.session.menu.item',{sessionId:'saved:legacy'},{hookContext:[true,()=>{}]})
  menu.children.flat().find(control => control.type === archive).props.archiveSession('saved:legacy');await new Promise(resolve=>setImmediate(resolve))
  assert.deepEqual(c.requests[0],{action:'host-operation',id:'local',operation:'archive-session',args:{sessionId:'saved:legacy'}})
@@ -387,12 +388,29 @@ test('avatar animation subscribes to native running and interaction facts indepe
 })
 
 test('the sidebar status overlay preserves animated avatars while retaining its native running and completion signals',()=>{
- const h=(type,props,...children)=>({type,props,children}),scope={React:{Fragment:'fragment'},h,AgentAvatar:'avatar',createPortal:element=>element,useState:()=>[[{id:'busy',seat:{},state:'ongoing'},{id:'done',seat:{},state:'done'}],()=>{}],useEffect:()=>{}}
+ const h=(type,props,...children)=>({type,props,children}),targets=[{id:'busy',seat:{},state:'ongoing'},{id:'done',seat:{},state:'done'}]
+ const scope={React:{Fragment:'fragment'},h,AgentAvatar:'avatar',createPortal:element=>element,useState:()=>[targets.splice(0),()=>{}],useEffect:()=>{}}
  vm.runInNewContext(source.slice(source.indexOf('  function SessionStatusAvatars'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
  const tree=scope.SessionStatusAvatars({root:{current:null},rows:{busy:{agent:{type:'codex',avatar:{id:'gallery/person'}}},done:{agent:{type:'codex',avatar:{id:'gallery/person'}}}}})
  const avatars=tree.children.map(overlay=>overlay.children[0].children[0])
  assert.deepEqual(avatars.map(avatar=>avatar.props.status),['running','idle'])
- assert.ok(avatars.every(avatar=>avatar.props.profile.avatar.id==='gallery/person'))
+ assert.ok(avatars.every(avatar=>avatar.props.profile.avatar.id==='gallery/person'&&avatar.props.size===20))
+})
+
+test('workspace status survives collapsed session rows and gives running sessions visual priority',()=>{
+ const scope={};vm.runInNewContext(source.slice(source.indexOf('  function sessionStateMap'),source.indexOf('  function SessionStatusAvatars')),scope)
+ const collapsed=scope.sessionStateMap({busy:{running:false},done:{},idle:{}},new Map([['busy',{running:true}],['done',{completionUnread:true}],['idle',{running:false}]]))
+ assert.equal(collapsed.get('busy'),'ongoing');assert.equal(collapsed.get('done'),'done');assert.equal(collapsed.has('idle'),false)
+ const statuses=new Map([['busy','ongoing'],['done','done'],['idle','idle']])
+ assert.deepEqual({...scope.workspaceStatusSummary(['busy','done','idle'],statuses)},{ongoing:1,done:1})
+ assert.deepEqual({...scope.workspaceStatusSummary(['done','idle'],statuses)},{ongoing:0,done:1})
+ assert.deepEqual({...scope.workspaceStatusSummary(['idle','missing'],statuses)},{ongoing:0,done:0})
+ const h=(type,props,...children)=>({type,props,children}),workspace={id:'project',seat:{},ongoing:1,done:2},states=[[],[workspace]]
+ Object.assign(scope,{React:{Fragment:'fragment'},h,createPortal:element=>element,useState:()=>[states.shift(),()=>{}],useEffect:()=>{}})
+ vm.runInNewContext(source.slice(source.indexOf('  function SessionStatusAvatars'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
+ const tree=scope.SessionStatusAvatars({root:{current:null},rows:{}}),indicator=tree.children[0]
+ assert.equal(indicator.props['data-status'],'ongoing')
+ assert.equal(indicator.props['aria-label'],'1 个会话进行中 · 2 个会话已完成')
 })
 
 test('avatar and background generation each open a dedicated named session without editing or submitting the source draft',async()=>{

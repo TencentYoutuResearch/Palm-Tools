@@ -109,7 +109,7 @@ pub fn build(cwd: &Path, backend_key: &str) -> String {
 fn is_supported_backend(backend_key: &str) -> bool {
     matches!(
         backend_key,
-        "codebuddy" | "claude" | "claude-internal" | "codex" | "cursor"
+        "codebuddy" | "claude" | "claude-internal" | "tclaude" | "codex" | "tcodex" | "cursor"
     )
 }
 
@@ -209,6 +209,19 @@ mod tests {
         let p = build(&PathBuf::from("/tmp/kode"), "claude-internal");
         assert!(p.contains("claude-internal"), "backend not substituted");
         assert!(!p.contains("{{BACKEND}}"), "raw placeholder leaked");
+    }
+
+    #[test]
+    fn template_preserves_tencent_backend_identity() {
+        for backend in ["tclaude", "tcodex"] {
+            let p = build(Path::new("/tmp/kode"), backend);
+            assert!(p.contains(&format!("backend=`{backend}`")));
+            assert!(p.contains(&format!("author=\"{backend}\"")));
+            assert!(p.contains("scope=\"project:kode\""));
+        }
+        for backend in ["custom-codex", "tcustom", "sh"] {
+            assert!(build(Path::new("/tmp/kode"), backend).is_empty());
+        }
     }
 
     #[test]

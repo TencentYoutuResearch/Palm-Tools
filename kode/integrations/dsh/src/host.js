@@ -7,6 +7,7 @@ import { BackendClient } from './backend-client.js'
 import { connectBackend } from './service-launcher.js'
 import { searchSessions } from './session-search.js'
 import { installAgentRuntime } from './agent-runtime.js'
+import { prepareRuntimeConfig } from './bundle-runtime.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -23,26 +24,27 @@ const output = {
 }
 
 export async function apply(ctx, config = {}) {
-  const token = config.tokenFile ? (await readFile(config.tokenFile, 'utf8')).trim() : process.env.KODE_BRIDGE_TOKEN
+  const runtimeConfig = await prepareRuntimeConfig(config)
+  const token = runtimeConfig.tokenFile ? (await readFile(runtimeConfig.tokenFile, 'utf8')).trim() : process.env.KODE_BRIDGE_TOKEN
   if (!token) throw new Error('kode requires tokenFile or KODE_BRIDGE_TOKEN on the dsh Host')
-  const admin = new BackendClient(config.url ?? 'http://127.0.0.1:47870', token)
+  const admin = new BackendClient(runtimeConfig.url, token)
   ctx.provide?.('kodeBackend', admin)
-  const backend = await connectBackend(admin, config)
+  const backend = await connectBackend(admin, runtimeConfig)
   ctx.effect(() => backend.close, 'kode.backend-lifetime')
   const node = backend.node
-  if (config.publishWorkbenchConnection && config.sharedBackendState) {
-    const path = config.workbenchConnectionFile ?? join(homedir(), process.platform === 'darwin' ? 'Library/Application Support/kode/workbench-connection.json' : '.config/kode/workbench-connection.json')
+  if (runtimeConfig.publishWorkbenchConnection && runtimeConfig.sharedBackendState) {
+    const path = runtimeConfig.workbenchConnectionFile ?? join(homedir(), process.platform === 'darwin' ? 'Library/Application Support/kode/workbench-connection.json' : '.config/kode/workbench-connection.json')
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-    await writeFile(path, JSON.stringify({ url: admin.url, token_file: config.tokenFile, server_command: config.serverCommand, server_config: config.serverConfig }), { mode: 0o600 })
+    await writeFile(path, JSON.stringify({ url: admin.url, token_file: runtimeConfig.tokenFile, server_command: runtimeConfig.serverCommand, server_config: runtimeConfig.serverConfig }), { mode: 0o600 })
   }
-  const stateFile = config.stateFile ?? join(homedir(), '.config', 'kode', `dsh-${node.node_id}.json`)
+  const stateFile = runtimeConfig.stateFile ?? join(homedir(), '.config', 'kode', `dsh-${node.node_id}.json`)
   let tokens = Object.create(null)
   try { tokens = Object.assign(Object.create(null), JSON.parse(await readFile(stateFile, 'utf8'))) } catch (e) { if (e.code !== 'ENOENT') throw e }
   const active = new Map()
   const installing = new Map()
   const stop = new AbortController()
   let wakeTask
-  let runtimeReady = !(config.agentRuntime !== false && ctx.inject && ctx.get?.('llm'))
+  let runtimeReady = !(runtimeConfig.agentRuntime !== false && ctx.inject && ctx.get?.('llm'))
   let saving = Promise.resolve()
   const persist = () => {
     saving = saving.then(async () => {
@@ -60,7 +62,7 @@ export async function apply(ctx, config = {}) {
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerProjectHosts } = await import('./project-hosts.js')
-    await registerProjectHosts(webCtx, { ...config, backendClient: admin })
+    await registerProjectHosts(webCtx, { ...runtimeConfig, backendClient: admin })
     const { registerMessagingApi, syncSessionTitles } = await import('./messaging-api.js')
     webCtx.effect(() => registerMessagingApi(webCtx, admin, node.node_id), 'kode.messaging-directory-api')
     webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
@@ -161,7 +163,7 @@ export async function apply(ctx, config = {}) {
     const { agent, client } = entry
     const signal = AbortSignal.any([stop.signal, entry.stop.signal])
     while (!signal.aborted) {
-      if (!runtimeReady) { await sleep(config.pollMs ?? 1000, signal); continue }
+      if (!runtimeReady) { await sleep(runtimeConfig.pollMs ?? 1000, signal); continue }
       try {
         const title = sessionTitle(agent)
         if (title !== entry.title && Date.now() >= entry.titleRetryAt) {
@@ -202,7 +204,7 @@ export async function apply(ctx, config = {}) {
       } catch (e) {
         if (!signal.aborted) ctx.logger.warn('Kode session connection failed: %s', e.message)
       }
-      await sleep(config.pollMs ?? 1000, signal)
+      await sleep(runtimeConfig.pollMs ?? 1000, signal)
     }
   }
   ctx.effect(() => async () => {
@@ -225,14 +227,14 @@ export async function apply(ctx, config = {}) {
   for (const agent of ctx.agents.list()) await install(agent)
   // Runtime profiles are independent from messaging; the Kode factory drives native protocols.
   // Minimal/headless Hosts may omit the model and Web capabilities entirely.
-  if (config.agentRuntime !== false && ctx.inject) ctx.inject(['llm', 'sessionProjections'], async runtimeCtx => {
-    const service = await installAgentRuntime(runtimeCtx, { ...config, backendClient: admin, agentProfilesFile: config.agentProfilesFile ?? join(dirname(stateFile), `agents-${node.node_id}.json`) }).catch(error => { console.error('Kode Agent runtime initialization failed:', error.stack); throw error })
+  if (runtimeConfig.agentRuntime !== false && ctx.inject) ctx.inject(['llm', 'sessionProjections'], async runtimeCtx => {
+    const service = await installAgentRuntime(runtimeCtx, { ...runtimeConfig, backendClient: admin, agentProfilesFile: runtimeConfig.agentProfilesFile ?? join(dirname(stateFile), `agents-${node.node_id}.json`) }).catch(error => { console.error('Kode Agent runtime initialization failed:', error.stack); throw error })
     runtimeReady = true
     runtimeCtx.inject(['webServer', 'connection', 'agentDefaultModel'], async webCtx => {
       const { registerAgentApi } = await import('./agent-api.js')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
       if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
-      if (config.sharedBackendState) webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
+      if (runtimeConfig.sharedBackendState) webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
         const lifetime = new AbortController()
         const task = import('./workbench-import.js').then(({ syncNativeTabs }) => syncNativeTabs(sessionCtx.sessionController, admin, service.profiles, lifetime.signal))
           .catch(error => { if (!lifetime.signal.aborted) ctx.logger.warn('Kode native session catalog sync failed: %s', error.message) })
@@ -242,14 +244,14 @@ export async function apply(ctx, config = {}) {
   })
   // Resume through the public Session controller: it restores the recorded preset,
   // model selection, persistence ownership and archive admission policy.
-  if (config.resumeInactive !== false && ctx.get) wakeTask = wakeInactive()
+  if (runtimeConfig.resumeInactive !== false && ctx.get) wakeTask = wakeInactive()
   async function wakeInactive() {
     const retryAfter = new Map()
     while (!stop.signal.aborted) {
       // Services mount independently; the Web Session controller can become
       // available after this plugin has finished starting.
       const controller = ctx.get('sessionController')
-      if (!controller || !runtimeReady) { await sleep(config.resumePollMs ?? 2000, stop.signal); continue }
+    if (!controller || !runtimeReady) { await sleep(runtimeConfig.resumePollMs ?? 2000, stop.signal); continue }
       for (const id of Object.keys(tokens)) {
         if (stop.signal.aborted) return
         if (active.has(id) || installing.has(id) || ctx.agents.get(id) || (retryAfter.get(id) ?? 0) > Date.now()) continue
@@ -276,7 +278,7 @@ export async function apply(ctx, config = {}) {
           ctx.logger.warn('Kode could not resume session %s: %s', id, e.message)
         }
       }
-      await sleep(config.resumePollMs ?? 2000, stop.signal)
+      await sleep(runtimeConfig.resumePollMs ?? 2000, stop.signal)
     }
   }
 }

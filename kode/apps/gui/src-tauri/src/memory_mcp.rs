@@ -580,6 +580,9 @@ pub fn install_managed_hooks(app_state: &AppState) {
     // 其它 command hooks 需要 socket 才有实际作用，仅在 relay 可用时注入。
     let relay_cmd = kode_memory::hook_setup::build_codebuddy_hook_command();
     for (label, path) in kode_memory::hook_setup::target_settings() {
+        if let Err(e) = kode_memory::hook_setup::remove_pretooluse_hooks(&path) {
+            tracing::warn!("pretooluse hook cleanup failed for {label}: {e}");
+        }
         if let Err(e) = kode_memory::hook_setup::inject_stop_hook(&path, &relay_cmd) {
             tracing::warn!("stop hook inject failed for {label}: {e}");
         }
@@ -591,9 +594,6 @@ pub fn install_managed_hooks(app_state: &AppState) {
                 kode_memory::hook_setup::inject_user_prompt_submit_hook(&path, &relay_cmd)
             {
                 tracing::warn!("user_prompt_submit hook inject failed for {label}: {e}");
-            }
-            if let Err(e) = kode_memory::hook_setup::inject_pretooluse_hook(&path, &relay_cmd) {
-                tracing::warn!("pretooluse hook inject failed for {label}: {e}");
             }
             if let Err(e) = kode_memory::hook_setup::inject_session_start_hook(&path, &relay_cmd) {
                 tracing::warn!("session_start hook inject failed for {label}: {e}");
@@ -608,11 +608,11 @@ pub fn install_managed_hooks(app_state: &AppState) {
         }
     }
 
-    // Codex hooks are command-only and live in ~/.codex/hooks.json.
-    if let Some(path) = kode_memory::hook_setup::codex_hooks_path() {
-        let cmd = kode_memory::hook_setup::build_codex_hook_command();
+    // Codex-family hooks are command-only and use separate user-level files.
+    let cmd = kode_memory::hook_setup::build_codex_hook_command();
+    for (label, path) in kode_memory::hook_setup::codex_hook_targets() {
         if let Err(e) = kode_memory::hook_setup::inject_codex_hooks(&path, &cmd) {
-            tracing::warn!("codex hook inject failed: {e}");
+            tracing::warn!("codex hook inject failed for {label}: {e}");
         }
     }
 
