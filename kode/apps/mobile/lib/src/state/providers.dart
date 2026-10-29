@@ -374,6 +374,103 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
       }
     }
   }
+
+  void removeLocal(int id) {
+    final current = state.valueOrNull;
+    if (current == null || current.every((session) => session.id != id)) {
+      return;
+    }
+    state = AsyncData(
+      current.where((session) => session.id != id).toList(growable: false),
+    );
+  }
+
+  void restore(SessionDto session) {
+    final current = state.valueOrNull ?? const <SessionDto>[];
+    if (current.any((item) => item.id == session.id)) return;
+    state = AsyncData([...current, session]);
+  }
+
+  /// Ask the desktop to stop [id]. A 204 or `executed` receipt is final. A
+  /// 202 waits for `session.exited` or the matching command receipt.
+  Future<void> delete(int id) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) {
+      throw StateError('Desktop connection unavailable');
+    }
+    final events = ref.read(wsClientProvider)?.events;
+    final done = Completer<void>();
+    String? commandId;
+    final pending = <Envelope>[];
+
+    void consider(Envelope envelope) {
+      if (done.isCompleted || envelope.sessionId != id) return;
+      if (envelope.type == 'session.exited') {
+        done.complete();
+        return;
+      }
+      if (envelope.type != 'command.status') return;
+      if (commandId != null && envelope.payload['command_id'] != commandId) {
+        return;
+      }
+      final status = envelope.payload['status'];
+      if (status == 'executed') {
+        done.complete();
+      } else if (status == 'failed' || status == 'expired') {
+        done.completeError(
+          ApiException(
+            409,
+            'delete_failed',
+            envelope.payload['error'] as String? ??
+                'Could not delete this session.',
+          ),
+        );
+      }
+    }
+
+    final subscription = events?.listen((envelope) {
+      if (commandId == null && envelope.type == 'command.status') {
+        pending.add(envelope);
+        return;
+      }
+      consider(envelope);
+    });
+    try {
+      final receipt = await api.deleteSession(id);
+      commandId = receipt.commandId;
+      for (final envelope in pending) {
+        consider(envelope);
+      }
+      final confirmed = receipt.isConfirmed || receipt.commandId == null;
+      if (!confirmed) {
+        if (subscription == null) {
+          throw ApiException(
+            409,
+            'delete_unconfirmed',
+            'Desktop did not confirm deletion.',
+          );
+        }
+        await done.future.timeout(const Duration(seconds: 20));
+      }
+      removeLocal(id);
+      ref.read(sessionDraftProvider.notifier).clear(id);
+    } on ApiException catch (error) {
+      if (error.status == 404) {
+        removeLocal(id);
+        ref.read(sessionDraftProvider.notifier).clear(id);
+        return;
+      }
+      rethrow;
+    } on TimeoutException {
+      throw ApiException(
+        408,
+        'delete_unconfirmed',
+        'The desktop did not confirm deletion.',
+      );
+    } finally {
+      await subscription?.cancel();
+    }
+  }
 }
 
 enum SessionMessageQueueStatus { submitting, queued, sent, processed, failed }

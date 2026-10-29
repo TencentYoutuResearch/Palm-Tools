@@ -118,6 +118,22 @@ pub trait BackendProfile: Send + Sync {
 
     fn spawn_tail(&self, req: MetaTailRequest);
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession>;
+    /// 按最近修改时间倒序、按 session_id 去重后取 `[offset, offset+limit)` 一页。
+    /// 第二个返回值表示后面是否还有。默认实现全量列出再切片；jsonl 型 backend
+    /// 覆盖为只解析本页文件，避免新建 tab 时把目录下所有 transcript 都读一遍。
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let mut all = self.list_sessions(cwd);
+        all.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
+        let mut seen = std::collections::HashSet::new();
+        all.retain(|s| seen.insert(s.session_id.clone()));
+        let has_more = all.len() > offset.saturating_add(limit);
+        (all.into_iter().skip(offset).take(limit).collect(), has_more)
+    }
 
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf>;
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent>;
@@ -213,6 +229,18 @@ impl BackendProfile for CodebuddyProfile {
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
         list_slug_jsonl_sessions(self, cwd)
     }
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let (page, has_more) = page_candidates(slug_jsonl_candidates(self, cwd), offset, limit);
+        (
+            page.into_iter().map(|c| c.into_listed(None)).collect(),
+            has_more,
+        )
+    }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
         vec![home.join(".codebuddy/projects")]
     }
@@ -246,6 +274,18 @@ impl BackendProfile for ClaudeProfile {
     }
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
         list_slug_jsonl_sessions(self, cwd)
+    }
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let (page, has_more) = page_candidates(slug_jsonl_candidates(self, cwd), offset, limit);
+        (
+            page.into_iter().map(|c| c.into_listed(None)).collect(),
+            has_more,
+        )
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
         vec![home.join(if self.0 == Backend::Tclaude {
@@ -291,39 +331,77 @@ impl BackendProfile for CodexProfile {
             .as_deref()
             .and_then(|sid| jsonl_tail::find_codex_session_by_id(self.0, sid))
         {
-            jsonl_tail::spawn(req.id, self.0, path, req.evt_tx, Some(req.retarget_rx));
+            jsonl_tail::spawn_with_replay_policy(
+                req.id,
+                self.0,
+                path,
+                req.evt_tx,
+                Some(req.retarget_rx),
+                true,
+            );
         } else {
-            jsonl_tail::spawn_waiting_for_binding(
+            jsonl_tail::spawn_waiting_for_binding_with_replay_policy(
                 req.id,
                 self.0,
                 req.evt_tx,
                 Some(req.retarget_rx),
+                req.resume_session_id.is_some(),
             );
         }
     }
     fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = jsonl_tail::codex_home(self.0) else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        let names = codex_title::thread_names(self.0);
-        collect_codex_listed(
-            &self.0.codex_home(&home).join("sessions"),
-            cwd,
-            &names,
-            &mut out,
-        );
-        out
+        let names = codex_title::thread_names(&home.join("state_5.sqlite"));
+        let mut candidates = Vec::new();
+        collect_codex_candidates(&home.join("sessions"), cwd, &mut candidates);
+        candidates
+            .into_iter()
+            .map(|c| {
+                let title = names.get(&c.session_id).cloned();
+                c.into_listed(title)
+            })
+            .collect()
+    }
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let Some(home) = jsonl_tail::codex_home(self.0) else {
+            return (Vec::new(), false);
+        };
+        let mut candidates = Vec::new();
+        collect_codex_candidates(&home.join("sessions"), cwd, &mut candidates);
+        let (page, has_more) = page_candidates(candidates, offset, limit);
+        if page.is_empty() {
+            return (Vec::new(), has_more);
+        }
+        let names = codex_title::thread_names(&home.join("state_5.sqlite"));
+        let page = page
+            .into_iter()
+            .map(|c| {
+                let title = names.get(&c.session_id).cloned();
+                c.into_listed(title)
+            })
+            .collect();
+        (page, has_more)
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
-        vec![self.0.codex_home(home).join("sessions")]
+        let codex_home = if self.0 == Backend::Codex {
+            std::env::var_os("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.0.codex_home(home))
+        } else {
+            self.0.codex_home(home)
+        };
+        vec![codex_home.join("sessions")]
     }
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
-        let mut events = codex_file_events(path, fallback_ms);
-        for event in &mut events {
-            event.backend = self.usage_key().into();
-        }
-        events
+        codex_file_events(path, self.usage_key(), fallback_ms)
     }
 }
 
@@ -437,16 +515,63 @@ fn spawn_sid_jsonl_tail(profile: &dyn BackendProfile, req: MetaTailRequest) {
     let Some(path) = path else {
         return;
     };
-    jsonl_tail::spawn(
+    jsonl_tail::spawn_with_replay_policy(
         req.id,
         profile.kind(),
         path,
         req.evt_tx,
         Some(req.retarget_rx),
+        req.resume_session_id.is_some(),
     );
 }
 
+/// 列 session 时的廉价候选：只读目录项与 mtime（Codex 额外读首行 session_meta），
+/// 不解析 transcript。真正的 title/model/tokens 由 [`SessionCandidate::into_listed`]
+/// 按需解析。
+struct SessionCandidate {
+    session_id: String,
+    path: PathBuf,
+    last_modified_secs: u64,
+}
+
+impl SessionCandidate {
+    fn into_listed(self, title_override: Option<String>) -> ListedSession {
+        let snap = transcript_snapshot(&self.path);
+        ListedSession {
+            session_id: self.session_id,
+            title: title_override.or(snap.title),
+            model: snap.model,
+            total_tokens: snap.total_tokens,
+            last_modified_secs: self.last_modified_secs,
+        }
+    }
+}
+
+/// 最近修改优先，同一 session_id 只保留最新的一份（Codex resume 会产生多个 rollout），
+/// 再切出一页。
+fn page_candidates(
+    mut candidates: Vec<SessionCandidate>,
+    offset: usize,
+    limit: usize,
+) -> (Vec<SessionCandidate>, bool) {
+    candidates.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert(c.session_id.clone()));
+    let has_more = candidates.len() > offset.saturating_add(limit);
+    (
+        candidates.into_iter().skip(offset).take(limit).collect(),
+        has_more,
+    )
+}
+
 fn list_slug_jsonl_sessions(profile: &dyn BackendProfile, cwd: &Path) -> Vec<ListedSession> {
+    slug_jsonl_candidates(profile, cwd)
+        .into_iter()
+        .map(|c| c.into_listed(None))
+        .collect()
+}
+
+fn slug_jsonl_candidates(profile: &dyn BackendProfile, cwd: &Path) -> Vec<SessionCandidate> {
     let Some(probe) = profile.session_path(cwd, "__probe__") else {
         return Vec::new();
     };
@@ -468,24 +593,17 @@ fn list_slug_jsonl_sessions(profile: &dyn BackendProfile, cwd: &Path) -> Vec<Lis
         if session_id.is_empty() {
             continue;
         }
-        let snap = transcript_snapshot(&path);
-        out.push(ListedSession {
+        let last_modified_secs = modified_secs(&path);
+        out.push(SessionCandidate {
             session_id,
-            title: snap.title,
-            model: snap.model,
-            total_tokens: snap.total_tokens,
-            last_modified_secs: modified_secs(&path),
+            path,
+            last_modified_secs,
         });
     }
     out
 }
 
-fn collect_codex_listed(
-    dir: &Path,
-    cwd: &Path,
-    names: &std::collections::HashMap<String, String>,
-    out: &mut Vec<ListedSession>,
-) {
+fn collect_codex_candidates(dir: &Path, cwd: &Path, out: &mut Vec<SessionCandidate>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -495,7 +613,7 @@ fn collect_codex_listed(
             continue;
         };
         if meta.is_dir() {
-            collect_codex_listed(&path, cwd, names, out);
+            collect_codex_candidates(&path, cwd, out);
             continue;
         }
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -507,14 +625,11 @@ fn collect_codex_listed(
         if session_cwd != cwd {
             continue;
         }
-        let snap = transcript_snapshot(&path);
-        let title = names.get(&session_id).cloned().or(snap.title);
-        out.push(ListedSession {
+        let last_modified_secs = modified_secs(&path);
+        out.push(SessionCandidate {
             session_id,
-            title,
-            model: snap.model,
-            total_tokens: snap.total_tokens,
-            last_modified_secs: modified_secs(&path),
+            path,
+            last_modified_secs,
         });
     }
 }
@@ -834,7 +949,7 @@ pub(crate) fn parse_cursor_request(value: &Value) -> Option<(String, UsageBucket
     ))
 }
 
-fn codex_file_events(path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
+fn codex_file_events(path: &Path, backend: &str, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
     let mut events = Vec::new();
     let mut model = String::from("unknown");
     let mut previous = UsageBucket::default();
@@ -874,7 +989,7 @@ fn codex_file_events(path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
         };
         if delta.total > 0 {
             events.push(UsageEvent {
-                backend: "codex".to_string(),
+                backend: backend.to_string(),
                 model: model.clone(),
                 timestamp_ms: event_timestamp_ms(value).or(fallback_ms),
                 usage: UsageBucket {
@@ -985,12 +1100,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn page_candidates_sorts_dedupes_and_slices() {
+        let c = |id: &str, t: u64| SessionCandidate {
+            session_id: id.into(),
+            path: PathBuf::from(format!("/nonexistent/{id}-{t}.jsonl")),
+            last_modified_secs: t,
+        };
+        let all = vec![c("a", 1), c("b", 5), c("a", 9), c("c", 3), c("d", 7)];
+        // 去重后倒序: a(9) d(7) b(5) c(3)
+        let (page, more) = page_candidates(all, 0, 2);
+        let ids: Vec<_> = page.iter().map(|c| c.session_id.as_str()).collect();
+        assert_eq!(ids, ["a", "d"]);
+        assert_eq!(page[0].last_modified_secs, 9);
+        assert!(more);
+        let all = vec![c("a", 1), c("b", 5), c("c", 3)];
+        let (page, more) = page_candidates(all, 2, 2);
+        assert_eq!(page.len(), 1);
+        assert!(!more);
+    }
+
+    #[test]
     fn registry_covers_known_keys() {
         assert!(profile_for_key("codebuddy").is_some());
         assert!(profile_for_key("claude-internal").is_some());
         assert!(profile_for_key("tclaude").is_some());
         assert!(profile_for_key("tclaude").unwrap().has_idle_animation());
         assert_eq!(profile_for_key("tclaude").unwrap().kind(), Backend::Tclaude);
+        assert_eq!(profile_for_key("tcodex").unwrap().kind(), Backend::Tcodex);
+        assert!(profile_for_key("tcodex")
+            .unwrap()
+            .has_authoritative_turn_lifecycle());
+        assert!(profile_for_key("tcodex").unwrap().has_idle_animation());
         assert!(profile_for_key("codex").unwrap().resume_style() == ResumeStyle::Subcommand);
         // tcodex keeps Codex resume syntax but has an isolated storage identity.
         assert_eq!(profile_for_key("tcodex").unwrap().kind(), Backend::Tcodex);
@@ -1010,7 +1150,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("kode-tcodex-home-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let old_home = std::env::var_os("HOME");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("HOME", &root);
+        std::env::remove_var("CODEX_HOME");
         let sid = "11111111-1111-4111-8111-111111111111";
         let cwd = Path::new("/tmp/example-workspace");
         for (kind, model, name) in [
@@ -1036,11 +1178,15 @@ mod tests {
         let actual_path = tcodex.find_session_path(cwd, sid);
         let tcodex_history = tcodex.list_sessions(cwd);
         let codex_history = codex.list_sessions(cwd);
-        let name = codex_title::read_thread_name(Backend::Tcodex, sid);
+        let name = codex_title::read_thread_name(&root.join(".tcodex/state_5.sqlite"), sid);
         // Restore HOME before asserting, so failures don't leak into other tests.
         match old_home {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
+        }
+        match old_codex_home {
+            Some(home) => std::env::set_var("CODEX_HOME", home),
+            None => std::env::remove_var("CODEX_HOME"),
         }
         assert_eq!(
             actual_path.unwrap(),
@@ -1053,6 +1199,27 @@ mod tests {
         assert_eq!(codex_history[0].title.as_deref(), Some("Codex title"));
         assert_eq!(name.flatten().as_deref(), Some("Tcodex title"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_usage_respects_custom_home_without_redirecting_tcodex() {
+        let old_home = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", "/tmp/example-codex-home");
+        let home = Path::new("/tmp/example-home");
+        let codex = profile_for_key("codex").unwrap().usage_roots(home);
+        let tcodex = profile_for_key("tcodex").unwrap().usage_roots(home);
+        match old_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        assert_eq!(
+            codex,
+            vec![PathBuf::from("/tmp/example-codex-home/sessions")]
+        );
+        assert_eq!(
+            tcodex,
+            vec![PathBuf::from("/tmp/example-home/.tcodex/sessions")]
+        );
     }
 
     #[test]
@@ -1196,5 +1363,32 @@ mod tests {
             (delta.input, delta.output, delta.cached, delta.total),
             (60, 15, 30, 75)
         );
+    }
+
+    #[test]
+    fn tcodex_usage_keeps_its_backend_identity() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-backend-tcodex-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-codex\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":80,\"output_tokens\":20,\"total_tokens\":100}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let events = TCODEX_PROFILE.parse_usage_file(&path, None);
+        fs::remove_file(&path).ok();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].backend, "tcodex");
+        assert_eq!(events[0].model, "gpt-5.6-codex");
+        assert_eq!(events[0].usage.total, 100);
     }
 }

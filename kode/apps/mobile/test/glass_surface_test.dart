@@ -121,7 +121,14 @@ void main() {
           ),
         ),
       );
-      expect(find.byType(BackdropFilter), findsNothing);
+      // Keep the widget mounted to preserve focused form fields; the filter
+      // itself must be disabled for accessibility settings.
+      expect(
+        tester
+            .widgetList<BackdropFilter>(find.byType(BackdropFilter))
+            .every((filter) => !filter.enabled),
+        isTrue,
+      );
       expect(find.text('Readable content'), findsOneWidget);
     }
   });
@@ -182,6 +189,35 @@ void main() {
             find.byKey(const ValueKey('session-transcript')),
             findsOneWidget,
           );
+        }
+        if (page == 'conversation') {
+          expect(find.text('gpt-test'), findsNothing);
+          await tester.tap(
+            find.byKey(const ValueKey('session-composer-input')),
+          );
+          await tester.pump(const Duration(milliseconds: 300));
+          final model = find.byKey(const ValueKey('session-composer-model'));
+          final permission = find.byKey(
+            const ValueKey('session-permission-menu'),
+          );
+          expect(model, findsOneWidget);
+          expect(
+            tester.getTopLeft(model).dx,
+            greaterThan(tester.getTopLeft(permission).dx),
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('session-floating-composer')),
+              matching: find.text('gpt-test'),
+            ),
+            findsOneWidget,
+          );
+          await tester.enterText(
+            find.byKey(const ValueKey('session-composer-input')),
+            'Keep this draft',
+          );
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(tester.takeException(), isNull);
         }
         if (output.isNotEmpty) {
           await expectLater(

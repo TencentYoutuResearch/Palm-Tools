@@ -57,6 +57,8 @@ pub struct Client {
     interactions: Mutex<HashMap<String, Interaction>>,
     response_lock: tokio::sync::Mutex<()>,
     stream: Mutex<Option<(String, String)>>,
+    config_options: Mutex<Vec<Value>>,
+    legacy_models: AtomicBool,
 }
 impl Client {
     pub async fn start(
@@ -115,6 +117,8 @@ impl Client {
             interactions: Mutex::new(HashMap::new()),
             response_lock: tokio::sync::Mutex::new(()),
             stream: Mutex::new(None),
+            config_options: Mutex::new(Vec::new()),
+            legacy_models: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&client);
         std::thread::spawn(move || {
@@ -148,6 +152,8 @@ impl Client {
             } else { client.request("session/new", json!({"cwd":cwd,"mcpServers":[]}), Some(Duration::from_secs(30))).await? };
             let sid = result["sessionId"].as_str().or(resume).filter(|s| !s.is_empty()).ok_or("ACP session id missing")?.to_string();
             *client.native_id.lock() = sid.clone();
+            client.legacy_models.store(result["models"].is_object(), Ordering::Release);
+            client.apply_config_options(&result);
             if let Some(mode) = mode.filter(|m| *m != "default") {
                 client.request("session/set_mode", json!({"sessionId":sid,"modeId": if mode == "bypass" { "bypassPermissions" } else { mode }}), Some(Duration::from_secs(30))).await?;
             }
@@ -273,6 +279,84 @@ impl Client {
         });
         Ok(())
     }
+    pub async fn set_model(&self, model: &str) -> Result<(), String> {
+        if !self.interactions.lock().is_empty() {
+            return Err("Resolve the pending interaction before switching models".into());
+        }
+        if self.busy.swap(true, Ordering::AcqRel) {
+            return Err("Wait for the current turn before switching models".into());
+        }
+        let option = self
+            .config_options
+            .lock()
+            .iter()
+            .find(|o| o["category"] == "model" && o["type"] == "select")
+            .cloned();
+        let result = if let Some(option) = option {
+            let config_id = option["id"].as_str().or(option["configId"].as_str());
+            if let Some(config_id) = config_id {
+                self.request(
+                    "session/set_config_option",
+                    json!({"sessionId":self.session_id(),"configId":config_id,"value":model}),
+                    Some(Duration::from_secs(20)),
+                )
+                .await
+                .and_then(|response| {
+                    self.apply_config_options(&response);
+                    if self
+                        .config_options
+                        .lock()
+                        .iter()
+                        .any(|o| o["category"] == "model" && o["currentValue"] == model)
+                    {
+                        Ok(response)
+                    } else {
+                        Err("Agent did not confirm the requested model".into())
+                    }
+                })
+            } else {
+                Err("Agent returned a model option without an id".into())
+            }
+        } else if self.legacy_models.load(Ordering::Acquire) {
+            self.request(
+                "session/set_model",
+                json!({"sessionId":self.session_id(),"modelId":model}),
+                Some(Duration::from_secs(20)),
+            )
+            .await
+        } else {
+            Err("This ACP agent does not advertise model switching".into())
+        };
+        self.busy.store(false, Ordering::Release);
+        result?;
+        if let Some(ctx) = self.ctx.upgrade() {
+            if let Some(session) = ctx.sessions.lock().get_mut(&self.local_id) {
+                session.state.model = model.to_owned();
+            }
+        }
+        self.emit("meta", json!({"model":model}));
+        Ok(())
+    }
+
+    fn apply_config_options(&self, value: &Value) {
+        let Some(options) = value["configOptions"].as_array() else {
+            return;
+        };
+        *self.config_options.lock() = options.clone();
+        if let Some(model) = options
+            .iter()
+            .find(|o| o["category"] == "model")
+            .and_then(|o| o["currentValue"].as_str())
+        {
+            if let Some(ctx) = self.ctx.upgrade() {
+                if let Some(session) = ctx.sessions.lock().get_mut(&self.local_id) {
+                    session.state.model = model.to_owned();
+                }
+            }
+            self.emit("meta", json!({"model":model}));
+        }
+    }
+
     pub async fn set_mode(&self, mode: &str) -> Result<(), String> {
         self.request("session/set_mode", json!({"sessionId":self.session_id(),"modeId":if mode == "bypass" {"bypassPermissions"} else {mode}}), Some(Duration::from_secs(30))).await.map(|_| ())
     }
@@ -356,6 +440,7 @@ impl Client {
             }
         }
         match update["sessionUpdate"].as_str() {
+            Some("config_option_update") => self.apply_config_options(update),
             Some("agent_message_chunk") => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     let mut stream = self.stream.lock();
@@ -807,4 +892,67 @@ fn validate_answers(params: &Value, answers: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod model_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn model_switch_uses_advertised_config_id_and_checks_acknowledgement() {
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "test".into());
+        let mut backend = ctx.config.backend("codebuddy").unwrap().clone();
+        backend.command = "/usr/bin/python3".into();
+        backend.default_model = None;
+        backend.args = vec!["-u".into(), "-c".into(), r#"
+import json, sys
+option={'id':'provider-model','category':'model','type':'select','currentValue':'old','options':[{'value':'old','name':'Old'},{'value':'new','name':'New'}]}
+for line in sys.stdin:
+    frame=json.loads(line)
+    method=frame.get('method')
+    if 'id' not in frame: continue
+    if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+    elif method=='session/new': result={'sessionId':'native-test','configOptions':[option], 'models':{'currentModelId':'old'}}
+    elif method=='session/set_config_option':
+        assert frame['params']['configId']=='provider-model'
+        if frame['params']['value']!='unconfirmed': option['currentValue']=frame['params']['value']
+        result={'configOptions':[option]}
+    else:
+        print(json.dumps({'jsonrpc':'2.0','id':frame['id'],'error':{'code':-32601,'message':'unsupported method'}}),flush=True)
+        continue
+    print(json.dumps({'jsonrpc':'2.0','id':frame['id'],'result':result}),flush=True)
+"#.into()];
+        ctx.sessions.lock().insert(
+            991,
+            kode_core::session::Session::structured(
+                991,
+                "codebuddy",
+                "test",
+                Path::new("/tmp"),
+                "native-test".into(),
+                "old".into(),
+            ),
+        );
+        let client = Client::start(
+            ctx.clone(),
+            991,
+            &backend,
+            Path::new("/tmp"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(client.set_model("unconfirmed").await.is_err());
+        assert_eq!(ctx.sessions.lock().get(&991).unwrap().state.model, "old");
+        client.set_model("new").await.unwrap();
+        assert_eq!(ctx.sessions.lock().get(&991).unwrap().state.model, "new");
+        client.receive(json!({"method":"session/update","params":{"sessionId":"native-test","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"provider-model","category":"model","type":"select","currentValue":"external"}]}}}));
+        assert_eq!(
+            ctx.sessions.lock().get(&991).unwrap().state.model,
+            "external"
+        );
+        client.shutdown();
+    }
 }

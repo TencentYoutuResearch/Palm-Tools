@@ -267,7 +267,7 @@ impl BackendSaveRequest {
     #[allow(dead_code)]
     fn into_backend_config(self) -> Result<BackendConfig, String> {
         let spec = self.build_spec()?;
-        Ok(BackendConfig {
+        let mut backend = BackendConfig {
             protocol: self.protocol,
             command: self.command,
             args: self.args,
@@ -276,7 +276,9 @@ impl BackendSaveRequest {
             permission_mode_flag: self.permission_mode_flag,
             mcp_setup: spec,
             enabled: self.enabled,
-        })
+        };
+        backend.hydrate_permission_flag();
+        Ok(backend)
     }
 }
 
@@ -296,8 +298,14 @@ pub async fn backend_save(
     let name = request.name.clone();
     let mut backend = request.into_backend_config()?;
     let catalog = crate::shared_agents::refresh(&state).await?;
-    if backend.enabled.is_none() { backend.enabled = catalog.backends.get(&key).and_then(|old|old.enabled); }
-    crate::shared_agents::change(&state, serde_json::json!({"action":"save","key":key,"config":backend,"name":name})).await?;
+    if backend.enabled.is_none() {
+        backend.enabled = catalog.backends.get(&key).and_then(|old| old.enabled);
+    }
+    crate::shared_agents::change(
+        &state,
+        serde_json::json!({"action":"save","key":key,"config":backend,"name":name}),
+    )
+    .await?;
     let _ = app.emit("backends-changed", ());
     Ok(())
 }
@@ -331,7 +339,11 @@ pub async fn backend_set_enabled(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    crate::shared_agents::change(&state, serde_json::json!({"action":"enable","key":key,"enabled":enabled})).await?;
+    crate::shared_agents::change(
+        &state,
+        serde_json::json!({"action":"enable","key":key,"enabled":enabled}),
+    )
+    .await?;
     let _ = app.emit("backends-changed", ());
     Ok(())
 }
@@ -459,7 +471,9 @@ fn upsert_backend_table(doc: &mut DocumentMut, key: &str, backend: &BackendConfi
     // 字段顺序固定为 command → args → 选项,跟 BackendConfig struct 一致便于人读。
     let mut t = Table::new();
     t.insert("command", value(backend.command.as_str()));
-    if let Some(protocol)=&backend.protocol { t.insert("protocol",value(protocol.as_str())); }
+    if let Some(protocol) = &backend.protocol {
+        t.insert("protocol", value(protocol.as_str()));
+    }
 
     let mut args_arr = Array::new();
     for a in &backend.args {

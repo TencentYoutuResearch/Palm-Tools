@@ -31,6 +31,8 @@ use tokio::sync::{broadcast, mpsc};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod mobile_setup;
+
 const PAIRING_TTL_MS: u64 = 2 * 60 * 1000;
 const COMMAND_TTL_MS: u64 = 30 * 1000;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -51,6 +53,7 @@ struct Inner {
     db: parking_lot::Mutex<Connection>,
     public_url: String,
     agents: parking_lot::Mutex<HashMap<String, AgentConnection>>,
+    setup_pending: parking_lot::Mutex<mobile_setup::Pending>,
     mobile_buses: parking_lot::Mutex<HashMap<String, broadcast::Sender<CloudEnvelope>>>,
 }
 
@@ -193,11 +196,13 @@ impl ServerState {
                UNIQUE(binding_id, idempotency_key)
              );",
         )?;
+        db.execute_batch(mobile_setup::SCHEMA)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 db: parking_lot::Mutex::new(db),
                 public_url: normalize_server_url(&config.public_url)?,
                 agents: parking_lot::Mutex::new(HashMap::new()),
+                setup_pending: parking_lot::Mutex::new(HashMap::new()),
                 mobile_buses: parking_lot::Mutex::new(HashMap::new()),
             }),
         })
@@ -284,8 +289,14 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
         .route("/api/v1/agent/ws", get(agent_ws_upgrade))
         .route("/api/v1/bindings/current", delete(revoke_current_binding))
-        .route("/api/v1/sessions", get(list_sessions))
-        .route("/api/v1/sessions/:id", get(get_session))
+        .route(
+            "/api/v1/sessions",
+            get(list_sessions).post(mobile_setup::create),
+        )
+        .route("/api/v1/backends", get(mobile_setup::backends))
+        .route("/api/v1/backends/:key/models", get(mobile_setup::models))
+        .route("/api/v1/fs/list", get(mobile_setup::directories))
+        .route("/api/v1/sessions/:id", get(get_session).delete(delete_session))
         .route("/api/v1/sessions/:id/history", get(get_history))
         .route("/api/v1/sessions/:id/input", post(post_input))
         .route("/api/v1/sessions/:id/interrupt", post(post_interrupt))
@@ -295,6 +306,7 @@ pub fn build_router(state: ServerState) -> Router {
             post(post_plan_response),
         )
         .route("/api/v1/sessions/:id/mode", post(post_mode))
+        .route("/api/v1/sessions/:id/model", post(post_model))
         .route("/ws", get(mobile_ws_upgrade))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -594,6 +606,13 @@ enum AgentFrame {
         local_session_id: u64,
         event: AgentEnvelope,
     },
+    #[serde(rename = "setup.result")]
+    SetupResult {
+        request_id: String,
+        boot_id: String,
+        status: u16,
+        body: Value,
+    },
     #[serde(rename = "command.result")]
     CommandResult {
         command_id: String,
@@ -645,6 +664,13 @@ enum ServerFrame {
     BindingChanged {
         sync_enabled: bool,
         binding_count: u64,
+    },
+    #[serde(rename = "setup.request")]
+    SetupRequest {
+        request_id: String,
+        kind: String,
+        payload: Value,
+        expires_at: u64,
     },
     #[serde(rename = "command")]
     Command {
@@ -755,6 +781,14 @@ fn handle_agent_frame(
             status,
             error,
         } => update_command_result(state, device_id, &command_id, &status, error.as_deref())?,
+        AgentFrame::SetupResult {
+            request_id,
+            boot_id,
+            status,
+            body,
+        } => {
+            mobile_setup::complete(state, device_id, &request_id, &boot_id, status, body)?;
+        }
         AgentFrame::Ping => {
             let _ = tx.send(ServerFrame::Pong);
         }
@@ -1145,6 +1179,14 @@ async fn post_interrupt(
     dispatch_mobile_command(&state, session_id, &headers, "interrupt", json!({}))
 }
 
+async fn delete_session(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(session_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    dispatch_mobile_command(&state, session_id, &headers, "delete", json!({}))
+}
+
 async fn post_answer(
     axum::extract::State(state): axum::extract::State<ServerState>,
     Path(session_id): Path<i64>,
@@ -1181,6 +1223,20 @@ async fn post_plan_response(
         return Err(ApiError::BadRequest("accept is required".into()));
     }
     dispatch_mobile_command(&state, session_id, &headers, "plan_response", payload)
+}
+
+async fn post_model(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(session_id): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let model = payload.get("model").and_then(Value::as_str)
+        .ok_or_else(|| ApiError::BadRequest("model is required".into()))?;
+    if model.is_empty() || model.len() > 200 || !model.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.:/[]".contains(&c)) {
+        return Err(ApiError::BadRequest("invalid model id".into()));
+    }
+    dispatch_mobile_command(&state, session_id, &headers, "model", payload)
 }
 
 async fn post_mode(
@@ -1562,6 +1618,8 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(test)]
+mod mobile_setup_tests;
 #[cfg(test)]
 mod multidevice_tests;
 

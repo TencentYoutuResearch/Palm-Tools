@@ -7,6 +7,8 @@
   "settings.agents.argsError": { "message": "请将启动参数填写为由字符串组成的 JSON 数组。" },
   "settings.agents.keyHint": { "message": "固定的 Agent 标识，已有会话会保留此关联。" },
   "settings.agents.sharedHint": { "message": "与 dsh 共用配置，修改用于新会话。" },
+  "workspace.moreCommits": { "message": "更多" },
+  "workspace.moreCommitsError": { "message": "无法加载更多提交，请重试。" },
   "filePreview.find": { "message": "在文件中查找…" },
   "filePreview.findShortcut": { "message": "在文件中查找（Cmd/Ctrl+F）" },
   "filePreview.clear": { "message": "清空查找" },
@@ -35,6 +37,20 @@
   "acp.message": { "message": "发送给 CodeBuddy…" },
   "acp.send": { "message": "发送" },
   "acp.stop": { "message": "停止" },
+  "app.startup.waiting": { "message": "等待 {count} 个会话就绪 · {names}" },
+  "app.startup.title": { "message": "启动进度" },
+  "app.startup.preferences": { "message": "加载语言与外观设置" },
+  "app.startup.shortcuts": { "message": "配置快捷键" },
+  "app.startup.events": { "message": "连接会话事件" },
+  "app.startup.backends": { "message": "加载后端列表" },
+  "app.startup.connections": { "message": "加载远程连接" },
+  "app.startup.memory": { "message": "加载记忆设置" },
+  "app.startup.sessions": { "message": "恢复上次的会话" },
+  "app.startup.ready": { "message": "等待会话就绪" },
+  "app.startup.sessionProgress": { "message": "正在恢复 {current}/{total} · {name}" },
+  "app.startup.processed": { "message": "已处理" },
+  "app.startup.active": { "message": "进行中" },
+  "app.startup.scrollHint": { "message": "可滚动查看加载进度" },
   "app.restoringSessions": { "message": "正在恢复会话…" },
   "settings.updates.ignoreVersion": { "message": "调试：忽略本地版本号" },
   "settings.updates.ignoreVersionHint": { "message": "允许安装当前通道的同版或更低版本，仍验证更新包签名。仅本次运行有效，重启后关闭；测试预发布版需同时开启 Beta。" },
@@ -622,5 +638,59 @@
   "pairing.deploy.step.Done": { "message": "生成二维码" },
   "pairing.deploy.existingTitle": { "message": "已有同步服务" },
   "pairing.deploy.existingHint": { "message": "输入服务的公网 HTTPS 地址。连接成功后会保存为可切换后端并直接生成二维码。" },
-  "pairing.deploy.connectExisting": { "message": "连接并生成二维码" }
+  "pairing.deploy.connectExisting": { "message": "连接并生成二维码" },
+  "workspace.files.newFile": {
+    "message": "新建文件"
+  },
+  "workspace.files.newFolder": {
+    "message": "新建文件夹"
+  },
+  "workspace.files.importFiles": {
+    "message": "导入文件…"
+  },
+  "workspace.files.importFolders": {
+    "message": "导入文件夹…"
+  },
+  "workspace.files.rename": {
+    "message": "重命名"
+  },
+  "workspace.files.delete": {
+    "message": "删除"
+  },
+  "workspace.files.cancel": {
+    "message": "取消"
+  },
+  "workspace.files.copySelection": {
+    "message": "复制选中内容"
+  },
+  "workspace.files.copied": {
+    "message": "已复制到剪贴板"
+  },
+  "workspace.files.failed": {
+    "message": "文件操作失败"
+  },
+  "workspace.files.done": {
+    "message": "文件已更新"
+  },
+  "workspace.files.busy": {
+    "message": "正在更新文件…"
+  },
+  "workspace.files.deleteMessage": {
+    "message": "永久删除 {path}？文件夹及其内容将被移除，此操作无法撤销。"
+  },
+  "workspace.files.nameHint": {
+    "message": "输入名称。Enter 保存 · Esc 取消"
+  },
+  "workspace.files.nameError": {
+    "message": "请输入不含 / 或 \\ 路径分隔符的名称。"
+  },
+  "workspace.files.dropHint": {
+    "message": "拖入文件或文件夹，复制到此目录"
+  },
+  "workspace.files.more": {
+    "message": "文件操作"
+  },
+  "workspace.files.differentEndpoint": {
+    "message": "暂不支持在不同端点之间复制。"
+  }
 }

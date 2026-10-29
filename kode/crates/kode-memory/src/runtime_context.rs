@@ -53,7 +53,19 @@ fn is_active_values(
         return false;
     };
     let _ = session_id;
-    expected_backend.is_none_or(|expected| expected == backend_key)
+    expected_backend.is_none_or(|expected| backend_matches(expected, backend_key))
+}
+
+fn backend_matches(expected: &str, actual: &str) -> bool {
+    if expected == actual {
+        return true;
+    }
+    match expected {
+        "codex" => actual.ends_with("codex"),
+        "claude" => matches!(actual, "claude" | "claude-internal" | "tclaude"),
+        "codebuddy" => actual.ends_with("codebuddy"),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -68,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn family_detection_keeps_exact_backend_guard_and_requires_ownership() {
+    fn family_detection_preserves_backend_identity_and_requires_ownership() {
         let allowed = &["codex", "tcodex"];
         for backend in ["codex", "tcodex"] {
             assert_eq!(
@@ -90,7 +102,9 @@ mod tests {
                 None
             );
         }
-        assert!(!is_active_values(
+        // Family-level checks accept tcodex while the allowlist above returns
+        // its exact identity for authorship and independent hook storage.
+        assert!(is_active_values(
             Some("1"),
             Some("42"),
             Some("tcodex"),
@@ -112,6 +126,18 @@ mod tests {
             Some("42"),
             Some("claude"),
             Some("codex")
+        ));
+        assert!(is_active_values(
+            Some("1"),
+            Some("42"),
+            Some("tcodex"),
+            Some("codex")
+        ));
+        assert!(is_active_values(
+            Some("1"),
+            Some("42"),
+            Some("tclaude"),
+            Some("claude")
         ));
         assert!(is_active_values(
             Some("1"),

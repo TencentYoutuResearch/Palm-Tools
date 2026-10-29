@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { routeWorkspaceNativeDrop } from './lib/workspace_drop'
+  import { workspaceReferenceTarget, type WorkspaceReference } from './lib/workspace_drag'
   /**
    * 主窗口:左侧栏(tab 列表) + 右侧 PTY 区 + 底部状态栏。
    *
@@ -25,6 +27,7 @@
   } from '@tauri-apps/api/window'
   import { open } from '@tauri-apps/plugin-dialog'
   import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
+  import StartupProgress from './lib/StartupProgress.svelte'
   import Terminal from './lib/Terminal.svelte'
   import StructuredSession from './lib/StructuredSession.svelte'
   import CommandPalette, { type Command } from './lib/CommandPalette.svelte'
@@ -104,6 +107,18 @@
   let backends: BackendInfo[] = $state([])
   let bootError: string | null = $state(null)
   let bootLoading = $state(true)
+  let bootStep = $state(0)
+  let bootSessionProgress = $state('')
+  let bootWaitingIds: SessionId[] = $state([])
+  let bootWaitingTabs = $derived($tabs.filter((tab) => bootWaitingIds.includes(tab.id) && (tab.status === 'starting')))
+  let bootDetail = $derived(bootStep === 7 && bootWaitingTabs.length
+    ? tr('app.startup.waiting', { count: bootWaitingTabs.length, names: bootWaitingTabs.map((tab) => tab.title || tab.backendKey).join(' · ') })
+    : bootSessionProgress)
+  const bootSteps = ['preferences', 'shortcuts', 'events', 'backends', 'connections', 'memory', 'sessions', 'ready']
+  function advanceBoot(step: number) {
+    bootStep = step
+    bootSessionProgress = ''
+  }
   let sessionStartError: string | null = $state(null)
 
   function friendlySessionStartError(error: unknown): string {
@@ -131,6 +146,7 @@
   $effect(() => {
     if (chooserOpen) void ipc.listBackends().then(rows => { backends = rows }).catch(error => console.warn('refresh shared Agents:', error))
   })
+  let chooserWorkspace = $state<WsGroup | null>(null)
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
   /** Phase 11.4 远端 endpoint 配置面板 */
@@ -500,6 +516,12 @@
     toggleCollapse(groupId)
   }
 
+  function createWorkspaceSession(group: WsGroup) {
+    chooserWorkspace = group
+    sessionStartError = null
+    chooserOpen = true
+  }
+
   /**
    * 切到某 tab 时,若其所在 workspace 被折叠,自动展开 —— active tab 永远可见。
    *
@@ -699,7 +721,8 @@
    *
    * 外部(Finder / Explorer / VS Code)走 Tauri `onDragDropEvent`:WKWebView 的
    * HTML5 `File.path` / `text/uri-list` 经常是空的,只有原生事件带绝对路径。
-   * 内部 WorkspacePanel 文件树仍走 HTML5 自定义 MIME,与 OS 级拖拽互不干扰。
+   * 内部 WorkspacePanel 文件树使用 workspace_drag 指针事件，不依赖原生拖拽。
+   * HTML5 自定义 MIME handler 保留用于兼容其它内部来源。
    *
    * xterm.js 会消费终端区的 HTML5 drop,所以拖拽中渲染 overlay 覆盖终端。
    */
@@ -738,6 +761,16 @@
       .then(() => focusTerminal())
       .catch((err) => console.warn(`${source} drag-drop failed:`, err))
   }
+  function receiveWorkspaceReference(reference: WorkspaceReference) {
+    const tab = $activeTab
+    if (!tab || chooserOpen || tab.exited != null) return
+    const endpoint = tab.endpointId?.kind === 'remote' ? tab.endpointId.id : null
+    if (reference.endpointId !== endpoint) {
+      pushToast({ severity: 'error', title: t('workspace.files.differentEndpoint') })
+      return
+    }
+    void insertWorkspaceReference(`@${reference.path.replace(/[\u0000-\u001f\u007f]/g, ' ')} `)
+  }
   function onMainDragOver(e: DragEvent) {
     const types = e.dataTransfer?.types ?? []
     if (!types.includes('application/x-kode-file') && !types.includes('Files')) return
@@ -746,10 +779,15 @@
     dragOver = true
   }
   function onMainDragLeave(e: DragEvent) {
-    if (e.currentTarget === e.target) dragOver = false
+    const bounds = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    if (e.clientX <= bounds.left || e.clientX >= bounds.right
+      || e.clientY <= bounds.top || e.clientY >= bounds.bottom) dragOver = false
   }
   function onOverlayDrop(e: DragEvent) {
+    const types = e.dataTransfer?.types ?? []
+    if (!types.includes('application/x-kode-file') && !types.includes('Files')) return
     e.preventDefault()
+    e.stopPropagation()
     dragOver = false
     const dt = e.dataTransfer
     if (!dt) return
@@ -761,9 +799,8 @@
     if (raw) {
       try {
         const { path, endpointId } = JSON.parse(raw) as { path: string; endpointId: string | null }
-        const tabEp = tab.endpointId?.kind === 'remote' ? tab.endpointId.id : null
-        if (endpointId !== tabEp) return
-        insertDroppedPaths([path], 'internal')
+        if (typeof path !== 'string' || !path) return
+        receiveWorkspaceReference({ path, endpointId })
       } catch {}
       return
     }
@@ -780,7 +817,8 @@
       'external',
     )
   }
-  function onNativeFileDrop(event: { payload: { type: string; paths?: string[] } }) {
+  function onNativeFileDrop(event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) {
+    if (routeWorkspaceNativeDrop(event.payload)) { dragOver = false; return }
     if (event.payload.type === 'enter' || event.payload.type === 'over') {
       dragOver = true
       return
@@ -795,11 +833,13 @@
   }
   /** 拖拽完成后 focus 到终端,让用户直接继续打字 */
   function focusTerminal() {
-    const el = document.querySelector<HTMLTextAreaElement>('.main .xterm-helper-textarea')
+    const el = document.querySelector<HTMLTextAreaElement>('.main .term-wrapper.visible .xterm-helper-textarea')
     el?.focus()
   }
 
-  /** Insert workspace context into the active CLI composer without submitting it. */
+  const structuredSessions: Record<number, StructuredSession | undefined> = {}
+
+  /** Insert workspace context into the active composer without submitting it. */
   async function insertWorkspaceReference(text: string) {
     const tab = $activeTab
     if (!tab || !text) return
@@ -809,6 +849,10 @@
       const safe = text
         .replace(/\r\n?/g, '\n')
         .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+      if (tab.transportKind === 'acp') {
+        structuredSessions[tab.id]?.insertReference(safe)
+        return
+      }
       const input = safe.includes('\n') ? `\x1b[200~${safe}\x1b[201~` : safe
       await ipc.writeInput(tab.id, new TextEncoder().encode(input), tab.endpointId)
       focusTerminal()
@@ -1078,6 +1122,7 @@
       mql = window.matchMedia('(prefers-color-scheme: dark)')
       systemPrefersDark = mql.matches
       mql.addEventListener('change', onSystemThemeChange)
+      advanceBoot(1)
       await syncScreenshotShortcutRegistration()
       screenshotSettingsUnlisten = onScreenshotSettingsChanged((detail) => {
         screenshotSettings = detail
@@ -1092,7 +1137,9 @@
       }
 
       void loadAvatarLibrary()
+      advanceBoot(2)
       await startEventSubscriptions()
+      advanceBoot(3)
       backends = await ipc.listBackends()
       // 订阅 backend 开关/增删变更 — SettingsPanel 写盘后 Rust 端 emit `backends-changed`,
       // 这里重新拉一次让 BackendChooser 立刻看到最新列表(无需重启 GUI)。
@@ -1104,12 +1151,14 @@
           console.warn('refresh backends on changed:', e)
         }
       })
+      advanceBoot(4)
       // Phase 11.6:启动时拉 endpoints 列表(用于状态栏连接指示)
       try {
         endpoints = await endpointIpc.list()
       } catch {
         // 没有 endpoint 也不影响启动
       }
+      advanceBoot(5)
       // M4 memory:订阅 pending 数变化(后端 1.5s 轮询 + review/propose 后即时 emit)
       try {
         memoryUnlisten = await memoryIpc.onPendingCount((n) => {
@@ -1144,12 +1193,19 @@
       } catch {
         // 无持久化或失败 — 静默,Browse 自带空默认
       }
+      advanceBoot(6)
       const persisted = await ipc.getPersistedTabs()
       if (persisted && persisted.length > 0) {
         const localRestoredIds: SessionId[] = []
         await restoreTabs(persisted, (tab) => {
           if (!tab.endpointId || tab.endpointId.kind === 'local') localRestoredIds.push(tab.id)
+        }, (progress) => {
+          bootSessionProgress = tr('app.startup.sessionProgress', {
+            current: progress.current, total: progress.total, name: progress.name,
+          })
         })
+        bootWaitingIds = localRestoredIds
+        advanceBoot(7)
         await waitForRestoredTabsReady(localRestoredIds)
       }
       // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
@@ -1411,6 +1467,7 @@
     } else if (k === 't' || k === 'T') {
       e.preventDefault()
       sessionStartError = null
+      chooserWorkspace = null
       chooserOpen = true
     } else if (k === 'w' || k === 'W') {
       const id = $activeId
@@ -1813,14 +1870,24 @@
         </button>
         <button
           role="menuitem"
-          onclick={(e) => { e.stopPropagation(); duplicateTab(t.id); closeMenu() }}
+          onclick={(e) => {
+            e.stopPropagation()
+            void duplicateTab(t.id).catch(error =>
+              pushToast({ severity: 'error', title: tr('tab.menu.duplicate'), detail: String(error) }))
+            closeMenu()
+          }}
         >
           <Icon name="copy" size={13} /> {tr('tab.menu.duplicate')}
         </button>
         {#if t.sessionId}
           <button
             role="menuitem"
-            onclick={(e) => { e.stopPropagation(); restoreTab(t.id); closeMenu() }}
+            onclick={(e) => {
+              e.stopPropagation()
+              void restoreTab(t.id).catch(error =>
+                pushToast({ severity: 'error', title: tr('tab.menu.restore'), detail: String(error) }))
+              closeMenu()
+            }}
           >
             <Icon name="refresh-cw" size={13} /> {tr('tab.menu.restore')}
           </button>
@@ -1846,7 +1913,7 @@
   </div>
 {/snippet}
 
-<svelte:window onkeydown={onKey} oncontextmenu={onContextMenu} onmessage={onSpecOpsMessage} onclick={onGlobalClick} />
+<svelte:window ondragend={() => { dragOver = false }} onkeydown={onKey} oncontextmenu={onContextMenu} onmessage={onSpecOpsMessage} onclick={onGlobalClick} />
 
 <div
   class="root"
@@ -1872,7 +1939,7 @@
         class="icon-btn"
         title={tr('tab.action.newTabTooltip')}
         aria-label={tr('tab.action.newTab')}
-        onclick={() => { sessionStartError = null; chooserOpen = true }}
+        onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
       >
         <Icon name="plus" size={16} />
       </button>
@@ -1907,6 +1974,7 @@
           {#each wsShadows as group, gi (group.id)}
             <div class="ws-group" class:dragging={dragging} data-cwd={group.cwd} data-group-id={group.id}>
               {#if useGroupedLayout}
+                <div class="ws-group-heading">
                 <button
                   type="button"
                   class="ws-group-header"
@@ -1933,8 +2001,18 @@
                       <span class="ws-path">{group.pathHint}</span>
                     {/if}
                   </span>
-                  <span class="ws-count">{group.tabs.length}</span>
                 </button>
+                <button
+                  type="button"
+                  class="ws-create-session"
+                  title={`${tr('tab.action.newTab')} · ${group.fullPath || group.name}`}
+                  aria-label={`${tr('tab.action.newTab')} · ${group.fullPath || group.name}`}
+                  onclick={(event) => { event.stopPropagation(); void createWorkspaceSession(group) }}
+                >
+                  <span class="ws-count">{group.tabs.length}</span>
+                  <span class="ws-create-icon"><Icon name="plus" size={14} /></span>
+                </button>
+                </div>
               {:else if wsGrouped && gi > 0}
                 <!-- compact 多 workspace:组间细分隔线 -->
                 <div class="ws-group-separator" aria-hidden="true"></div>
@@ -1962,11 +2040,11 @@
     </div>
   </aside>
 
-  <main class="main" class:drag-over={dragOver} ondragover={onMainDragOver} ondragleave={onMainDragLeave}>
+  <main class="main" class:drag-over={dragOver} data-workspace-reference-target use:workspaceReferenceTarget={{ hover: (active) => { dragOver = active }, drop: receiveWorkspaceReference }} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
     <!-- 拖拽中覆盖终端区:捕获 drop 事件,防止 xterm.js 消费 -->
     {#if dragOver}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="drag-overlay" ondragover={(e) => e.preventDefault()} ondrop={onOverlayDrop} ondragleave={() => { dragOver = false }}></div>
+      <div class="drag-overlay" ondragover={(e) => e.preventDefault()}></div>
     {/if}
     <!-- 浮在终端区顶部的单条标题栏(与左侧红绿灯条同高 44px,同一水平线):
          hidden 时左侧补红绿灯 + 新建;中间居中蓝色标题/副标题;右侧 inspector 开关。 -->
@@ -1979,7 +2057,7 @@
           class="icon-btn hidden-fallback-add"
           title={tr('tab.action.newTabTooltip')}
           aria-label={tr('tab.action.newTab')}
-          onclick={() => { sessionStartError = null; chooserOpen = true }}
+          onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
         >
           <Icon name="plus" size={16} />
         </button>
@@ -2059,8 +2137,11 @@
       </div>
     {/if}
     {#if $tabs.length === 0 || chooserOpen}
+      {#key chooserWorkspace}
       <BackendChooser
         {backends}
+        workspaceCwd={chooserWorkspace?.tabs[0]?.cwd}
+        workspaceEndpoint={chooserWorkspace?.tabs[0]?.endpointId}
         errorMessage={sessionStartError}
         onSubmit={async (opts) => {
           try {
@@ -2080,6 +2161,7 @@
           }
         }}
       />
+      {/key}
     {/if}
     {#each $mountedIds as id (id)}
       {@const isActive = id === $activeId && !chooserOpen}
@@ -2088,7 +2170,7 @@
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
         {#if tab?.transportKind === 'acp'}
-          <StructuredSession sessionId={id} visible={isActive} />
+          <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} />
         {:else}
         <Terminal
           sessionId={id}
@@ -2158,7 +2240,7 @@
         <span class="status-dot dot-{s.cls}"></span>
         <span class="status-text">{s.text}</span>
         <span class="dot-sep">·</span>
-        <span class="model">{shortModelName($activeTab.model)}</span>
+        <span class="model">{compactModelName($activeTab.model)}</span>
 
         {#if $activeTab.inputTokens != null}
           <span class="dot-sep">·</span>
@@ -2260,9 +2342,10 @@
 </div>
 
 {#if bootLoading}
-  <div class="startup-overlay" role="status" aria-live="polite" aria-label={tr('app.restoringSessions')}>
+  <div class="startup-overlay">
     <div class="startup-indicator" aria-hidden="true"></div>
-    <span>{tr('app.restoringSessions')}</span>
+    <span role="status">{tr('app.restoringSessions')}</span>
+    <StartupProgress steps={bootSteps} current={bootStep} detail={bootDetail} />
   </div>
 {/if}
 
@@ -2797,13 +2880,17 @@
   }
 
   /* ===== workspace 分组 header ===== */
+  .ws-group-heading {
+    position: relative;
+    margin: 8px 1px 3px;
+  }
   .ws-group-header {
     display: flex;
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 6px 7px;
-    margin: 8px 1px 3px;
+    padding: 6px 39px 6px 7px;
+    margin: 0;
     border: 1px solid transparent;
     border-radius: var(--rad-md);
     background: transparent;
@@ -2879,7 +2966,36 @@
     font-weight: 500;
     line-height: 12px;
   }
-  .ws-group-header .ws-count {
+  .ws-create-session {
+    position: absolute;
+    right: 7px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
+    min-width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: var(--fg-secondary);
+    cursor: pointer;
+  }
+  .ws-create-session > span { grid-area: 1 / 1; }
+  .ws-create-icon { display: inline-flex; opacity: 0; }
+  .ws-group-heading:hover .ws-create-icon,
+  .ws-group-heading:focus-within .ws-create-icon { opacity: 1; }
+  .ws-group-heading:hover .ws-count,
+  .ws-group-heading:focus-within .ws-count { opacity: 0; }
+  .ws-create-session:hover { background: var(--bg-tab-hover); color: var(--fg-primary); }
+  .ws-create-session:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .ws-create-session:disabled { cursor: wait; opacity: 0.5; }
+  @media (hover: none) {
+    .ws-create-session .ws-create-icon { opacity: 1; }
+    .ws-create-session .ws-count { opacity: 0; }
+  }
+  .ws-create-session .ws-count {
     flex-shrink: 0;
     min-width: 16px;
     height: 16px;

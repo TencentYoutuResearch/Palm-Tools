@@ -402,7 +402,7 @@ fn spawn_event_router(
                                     s.session_id = Some(sid.clone());
                                     if should_start_semantic {
                                         s.backend_kind()
-                                        .map(|backend| (backend, s.cwd.clone(), sid.clone()))
+                                            .map(|backend| (backend, s.cwd.clone(), sid.clone()))
                                     } else {
                                         None
                                     }
@@ -969,8 +969,7 @@ fn spawn_attention_forwarder(
                                     let path_buf = path_buf.as_ref()?;
                                     let mut locked = sessions.lock();
                                     let session = locked.get_mut(&env.session_id)?;
-                                    let backend =
-                                        session.backend_kind()?;
+                                    let backend = session.backend_kind()?;
                                     if backend != kode_core::session::jsonl_tail::Backend::Cursor
                                         || !session.accepts_transcript_path(path_buf)
                                     {

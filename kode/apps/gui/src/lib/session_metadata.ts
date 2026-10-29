@@ -110,7 +110,7 @@ export function upsertSessionTab(
     cwd: incoming.cwd ?? existing.cwd,
     permissionMode: incoming.permissionMode,
     endpointId: incoming.endpointId,
-    model: existing.model || incoming.model,
+    model: existing.model && existing.model !== 'auto' ? existing.model : incoming.model,
     sessionId: existing.sessionId || incoming.sessionId,
   } : existing ?? incoming
   const next = pending.consume(base)

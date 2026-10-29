@@ -45,6 +45,8 @@
     backends: BackendInfo[]
     /** Human-readable, recoverable start failure. Keep the chooser mounted so the user can retry. */
     errorMessage?: string | null
+    workspaceCwd?: string
+    workspaceEndpoint?: EndpointId
     /// 提交回调。
     /// quick-pick(1..9 数字键)时 cwd 仍是预填的默认,permissionMode = 'default',model = undefined。
     onSubmit: (opts: {
@@ -59,7 +61,13 @@
       resumeSessionId?: string
     }) => void | Promise<void>
   }
-  let { backends, onSubmit, errorMessage = null }: Props = $props()
+  let { backends, onSubmit, errorMessage = null, workspaceCwd, workspaceEndpoint }: Props = $props()
+
+  function workspacePathFor(ep: EndpointId): string | undefined {
+    const target = workspaceEndpoint ?? ENDPOINT_LOCAL
+    return ep.kind === target.kind && (ep.kind === 'local' || (target.kind === 'remote' && ep.id === target.id))
+      ? workspaceCwd : undefined
+  }
 
   type Phase = 'list' | 'configure'
   let phase: Phase = $state('list')
@@ -165,7 +173,38 @@
   let sessions = $state<SessionSummary[]>([])
   let sessionsLoading = $state(false)
   let sessionsError = $state('')
+  let sessionsHasMore = $state(false)
+  let sessionsLoadingMore = $state(false)
   let sessionsFetchId = 0 // 递增 id,防止竞态(旧的 fetch 回来后覆盖新结果)
+  /// 首屏只解析最近几条 transcript;"More" 每次再追加一页。
+  const SESSION_PAGE_SIZE = 5
+
+  function fetchSessionPage(offset: number) {
+    const key = selected?.key
+    const dir = cwd.trim()
+    const ep = selectedEndpoint
+    if (!key) return Promise.resolve({ sessions: [], has_more: false })
+    return ep.kind === 'remote'
+      ? endpointIpc.listSessionsForCwd(ep.id, key, dir, offset, SESSION_PAGE_SIZE)
+      : ipc.listSessionsForCwd(key, dir, offset, SESSION_PAGE_SIZE)
+  }
+
+  async function loadMoreSessions() {
+    if (sessionsLoadingMore || !sessionsHasMore) return
+    const fetchId = sessionsFetchId
+    sessionsLoadingMore = true
+    try {
+      const page = await fetchSessionPage(sessions.length)
+      if (fetchId !== sessionsFetchId) return
+      const known = new Set(sessions.map((s) => s.session_id))
+      sessions = [...sessions, ...page.sessions.filter((s) => !known.has(s.session_id))]
+      sessionsHasMore = page.has_more
+    } catch (e) {
+      if (fetchId === sessionsFetchId) sessionsError = String(e)
+    } finally {
+      if (fetchId === sessionsFetchId) sessionsLoadingMore = false
+    }
+  }
 
   /// 当 cwd 变化时(debounce 500ms)查询该目录下的历史 session。
   /// Local 直接扫本机 jsonl;Remote 通过 endpoint 协议扫 server 侧 jsonl。
@@ -174,21 +213,25 @@
     const key = selected?.key
     const ep = selectedEndpoint
     // 只有 configure 阶段 + 有 backend 和绝对 cwd 才查
+    void ep // 依赖:切换 endpoint 时重新拉首页
     if (phase !== 'configure' || !key || !dir || !dir.startsWith('/')) {
+      sessionsFetchId++
       sessions = []
+      sessionsHasMore = false
+      sessionsLoadingMore = false
       sessionsError = ''
       return
     }
     const fetchId = ++sessionsFetchId
     sessionsLoading = true
+    sessionsLoadingMore = false
     sessionsError = ''
     const timer = setTimeout(async () => {
       try {
-        const result = ep.kind === 'remote'
-          ? await endpointIpc.listSessionsForCwd(ep.id, key, dir)
-          : await ipc.listSessionsForCwd(key, dir)
+        const page = await fetchSessionPage(0)
         if (fetchId === sessionsFetchId) {
-          sessions = result
+          sessions = page.sessions
+          sessionsHasMore = page.has_more
           sessionsLoading = false
         }
       } catch (e) {
@@ -239,12 +282,17 @@
     try {
       const cfg = await ipc.getPathsConfig()
       defaultCwd = cfg.session_cwd ?? ''
-      cwd = defaultCwd
+      if (phase === 'list') cwd = workspaceCwd ?? defaultCwd
     } catch (e) {
       console.warn('getPathsConfig failed:', e)
     }
     // 拉远端 endpoints — 没有 endpoint 也没事,UI 这块不渲染。
     await refreshEndpoints()
+    if (workspaceEndpoint?.kind === 'remote') {
+      const targetId = workspaceEndpoint.id
+      const target = endpoints.find((ep) => ep.id === targetId)
+      if (target) await toggleEndpoint(target)
+    }
     endpointRefreshHandler = () => {
       void refreshEndpoints()
     }
@@ -265,8 +313,8 @@
     phase = 'configure'
     void probeModels(b, ep)
 
-    // Kode's node-specific catalog supplies the choices; no local/remote cwd fallback.
-    cwd = ''
+    // Use the node-specific catalogue unless a workspace was explicitly chosen.
+    cwd = workspacePathFor(ep) ?? ''
   }
 
   async function submitOnce(opts: {
@@ -418,7 +466,7 @@
 
   function handleKey(e: KeyboardEvent) {
     if (phase === 'list') {
-      if (submitting) return
+      if (submitting || (workspaceCwd !== undefined && workspaceEndpoint?.kind === 'remote')) return
       // 数字键 1..9 quick pick — 仅对**本地 backends** 启用
       if (/^[1-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const i = Number(e.key) - 1
@@ -480,7 +528,11 @@
       </div>
       <p class="hint">
         {#if phase === 'list'}
+          {#if workspaceCwd !== undefined}
+            Choose a backend and model for <code>{workspaceCwd}</code>
+          {:else}
           Choose a backend, or press <kbd>1..9</kbd> to start with defaults
+          {/if}
         {:else if selectedEndpoint.kind === 'remote'}
           Set <strong>remote</strong> working directory (absolute path on the server) and start
         {:else}
@@ -499,6 +551,7 @@
 
     {#if phase === 'list'}
       <!-- ======================== Local backends ======================== -->
+      {#if workspaceCwd === undefined || workspaceEndpoint?.kind !== 'remote'}
       <h2 class="section">Local</h2>
       {#if backends.length === 0}
         <div class="empty">
@@ -530,10 +583,11 @@
       {/if}
 
       <!-- ======================== Remote endpoints ======================== -->
-      {#if endpoints.length > 0}
+      {/if}
+      {#if endpoints.length > 0 && (workspaceCwd === undefined || workspaceEndpoint?.kind === 'remote')}
         <h2 class="section">Remote</h2>
         <ul class="endpoints">
-          {#each endpoints as ep (ep.id)}
+          {#each endpoints.filter((ep) => workspaceCwd === undefined || (workspaceEndpoint?.kind === 'remote' && ep.id === workspaceEndpoint.id)) as ep (ep.id)}
             {@const st = remoteStates[ep.id]}
             <li class="endpoint">
               <button class="endpoint-row" onclick={() => toggleEndpoint(ep)}>
@@ -690,6 +744,11 @@
                   </li>
                 {/each}
               </ul>
+              {#if sessionsHasMore}
+                <button class="btn sh-more" onclick={loadMoreSessions} disabled={sessionsLoadingMore}>
+                  {sessionsLoadingMore ? 'Loading…' : 'More'}
+                </button>
+              {/if}
             {:else if cwd.trim().startsWith('/')}
               <p class="sh-msg sh-muted">No existing sessions found. Start a new one below.</p>
             {/if}
@@ -1252,6 +1311,11 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     padding: 3px 10px;
+  }
+  .sh-more {
+    width: 100%;
+    font-size: var(--fs-xs);
+    padding: 4px 10px;
   }
 
   .footer {

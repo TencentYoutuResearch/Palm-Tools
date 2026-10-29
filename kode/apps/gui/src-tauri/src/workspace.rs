@@ -105,9 +105,14 @@ pub struct GitCommitDetail {
 pub async fn workspace_snapshot(
     cwd: String,
     show_hidden: Option<bool>,
+    commit_limit: Option<usize>,
 ) -> Result<WorkspaceSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        workspace_snapshot_sync(&cwd, show_hidden.unwrap_or(true))
+        workspace_snapshot_sync(
+            &cwd,
+            show_hidden.unwrap_or(true),
+            commit_limit.unwrap_or(80),
+        )
     })
     .await
     .map_err(|e| format!("workspace snapshot task failed: {e}"))?
@@ -183,7 +188,11 @@ pub fn open_path(path: String) -> Result<(), String> {
     open_path_sync(&path)
 }
 
-fn workspace_snapshot_sync(cwd: &str, show_hidden: bool) -> Result<WorkspaceSnapshot, String> {
+fn workspace_snapshot_sync(
+    cwd: &str,
+    show_hidden: bool,
+    commit_limit: usize,
+) -> Result<WorkspaceSnapshot, String> {
     let path = absolute_path(cwd)?;
     let exists = path.is_dir();
     let entries = if exists {
@@ -192,7 +201,7 @@ fn workspace_snapshot_sync(cwd: &str, show_hidden: bool) -> Result<WorkspaceSnap
         Vec::new()
     };
     let git = if exists {
-        read_git_summary(&path)
+        read_git_summary(&path, commit_limit)
     } else {
         WorkspaceGitSummary::default()
     };
@@ -536,7 +545,7 @@ fn image_mime_for_ext(ext: &str) -> Option<String> {
     }
 }
 
-fn read_git_summary(path: &Path) -> WorkspaceGitSummary {
+fn read_git_summary(path: &Path, commit_limit: usize) -> WorkspaceGitSummary {
     let Some(root) = run_git(path, &["rev-parse", "--show-toplevel"]) else {
         return WorkspaceGitSummary::default();
     };
@@ -548,11 +557,11 @@ fn read_git_summary(path: &Path) -> WorkspaceGitSummary {
         branch,
         short_head,
         branches: read_git_branches(path),
-        commits: read_git_commits(path),
+        commits: read_git_commits(path, commit_limit),
         ..Default::default()
     };
 
-    if let Some(status) = run_git(path, &["status", "--porcelain=v1", "--branch"]) {
+    if let Ok(status) = run_git_raw(path, &["status", "--porcelain=v1", "--branch", "-z"]) {
         parse_git_status(&status, &mut summary, "");
     }
     // porcelain v1 把 submodule 折叠成单个 M 条目,内部文件不可见。
@@ -602,14 +611,14 @@ fn parse_git_branches(output: &str) -> Vec<GitBranchInfo> {
     branches
 }
 
-fn read_git_commits(path: &Path) -> Vec<GitCommitInfo> {
+fn read_git_commits(path: &Path, limit: usize) -> Vec<GitCommitInfo> {
     let Some(output) = run_git(
         path,
         &[
             "log",
             "--all",
             "-n",
-            "80",
+            &limit.max(1).to_string(),
             "--date=unix",
             "--decorate=full",
             "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s%x1f%P%x1f%D",
@@ -721,14 +730,17 @@ fn collect_submodule_changes(root: &Path, summary: &mut WorkspaceGitSummary) {
         if !sub_abs.is_dir() {
             continue;
         }
-        if let Some(sub_status) = run_git(&sub_abs, &["status", "--porcelain=v1", "--branch"]) {
+        if let Ok(sub_status) =
+            run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"])
+        {
             parse_git_status(&sub_status, summary, &format!("{sub_path}/"));
         }
     }
 }
 
 fn parse_git_status(status: &str, summary: &mut WorkspaceGitSummary, prefix: &str) {
-    for line in status.lines() {
+    let mut records = status.split('\0');
+    while let Some(line) = records.next() {
         if let Some(branch_line) = line.strip_prefix("## ") {
             parse_git_ahead_behind(branch_line, summary);
             continue;
@@ -737,12 +749,12 @@ fn parse_git_status(status: &str, summary: &mut WorkspaceGitSummary, prefix: &st
             continue;
         }
         let xy = &line[..2];
-        let raw_path = line[3..].trim();
-        let path = raw_path
-            .rsplit_once(" -> ")
-            .map(|(_, to)| to)
-            .unwrap_or(raw_path)
-            .to_string();
+        // With -z, paths are literal and renames/copies put the destination first,
+        // followed by a separate source-path record.
+        let path = line[3..].to_string();
+        if xy.contains(['R', 'C']) {
+            records.next();
+        }
         // submodule 聚合时,prefix = "<sub_path>/" —— 把子模块内部路径前缀成
         // superproject 视角的完整路径,前端点击时才能拿对路径去 diff。
         let path = if prefix.is_empty() {
@@ -834,7 +846,7 @@ fn git_diff_sync(cwd: &str, path: &str, bucket: &str) -> Result<GitDiffPreview, 
     let root = run_git(&cwd, &["rev-parse", "--show-toplevel"])
         .ok_or_else(|| "not a Git repository".to_string())?;
     let root_path = PathBuf::from(&root);
-    let rel = path.trim();
+    let rel = path;
     if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
         return Err("git path must be a repository-relative path".into());
     }
@@ -879,6 +891,7 @@ fn git_commit_diff_sync(cwd: &str, commit: &str) -> Result<GitDiffPreview, Strin
             "--no-pager",
             "show",
             "--format=fuller",
+            "--diff-merges=first-parent",
             "--stat",
             "--patch",
             "--no-ext-diff",
@@ -909,6 +922,7 @@ fn git_commit_detail_sync(cwd: &str, commit: &str) -> Result<GitCommitDetail, St
             "--no-pager",
             "show",
             "--format=%B%x1e",
+            "--diff-merges=first-parent",
             "--name-status",
             "--no-renames",
             commit,
@@ -937,6 +951,7 @@ fn git_commit_file_diff_sync(
             "--no-pager",
             "show",
             "--format=",
+            "--diff-merges=first-parent",
             "--patch",
             "--no-ext-diff",
             "--find-renames",
@@ -1053,7 +1068,8 @@ fn run_diff_no_index(path: &Path) -> Result<String, String> {
         .arg(path)
         .output()
         .map_err(|e| format!("git diff failed: {e}"))?;
-    if !output.status.success() && output.status.code() != Some(1) {
+    // Exit 1 can also mean an inaccessible input; do not discard its diagnostic.
+    if !output.status.success() && (output.status.code() != Some(1) || !output.stderr.is_empty()) {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1124,6 +1140,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn git_status_preserves_literal_paths_and_rename_records() {
+        let mut summary = WorkspaceGitSummary::default();
+        parse_git_status(
+            "## main...origin/main [ahead 2, behind 1]\0?? docs/SDK 升级指引（v1.3 → v1.4）.zh.md\0??  spaced \"name\"\\\t\n -> file \0R  new -> name.md\0old name.md\0C  copy.md\0source.md\0 M modified.md\0UU conflict.md\0",
+            &mut summary,
+            "sub/",
+        );
+        assert_eq!(summary.ahead, 2);
+        assert_eq!(summary.behind, 1);
+        assert_eq!(summary.untracked, 2);
+        assert_eq!(summary.staged, 2);
+        assert_eq!(summary.modified, 1);
+        assert_eq!(summary.conflicts, 1);
+        let paths: Vec<_> = summary
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "sub/docs/SDK 升级指引（v1.3 → v1.4）.zh.md",
+                "sub/ spaced \"name\"\\\t\n -> file ",
+                "sub/new -> name.md",
+                "sub/copy.md",
+                "sub/modified.md",
+                "sub/conflict.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn git_untracked_preview_handles_special_paths_and_missing_files() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path().canonicalize().unwrap();
+        run_git_raw(&root, &["init"]).unwrap();
+        let names = [
+            "SDK 升级指引（v1.3 → v1.4）.zh.md",
+            " spaced \"name\"\\\t\n -> file ",
+        ];
+        for name in names {
+            std::fs::write(root.join(name), "preview content\n").unwrap();
+        }
+        let summary = read_git_summary(&root, 1);
+        assert_eq!(summary.untracked, 2);
+        for name in names {
+            let change = summary
+                .changes
+                .iter()
+                .find(|change| change.path == name)
+                .unwrap();
+            let preview =
+                git_diff_sync(root.to_str().unwrap(), &change.path, &change.bucket).unwrap();
+            assert_eq!(preview.path, name);
+            assert!(preview.content.contains("+preview content"));
+        }
+        assert!(run_diff_no_index(&root.join("missing.md")).is_err());
+        std::fs::write(root.join("empty.md"), "").unwrap();
+        assert!(run_diff_no_index(&root.join("empty.md")).is_ok());
+    }
+
+    #[test]
     fn parses_git_branches_and_skips_remote_head_alias() {
         let branches = parse_git_branches(
             "refs/heads/main\x1fmain\x1f*\nrefs/remotes/origin/HEAD\x1forigin/HEAD\x1f \nrefs/remotes/origin/feature\x1forigin/feature\x1f ",
@@ -1163,6 +1241,79 @@ mod tests {
             "HEAD -> refs/heads/main, refs/remotes/origin/main, tag: refs/tags/v1",
         );
         assert_eq!(labels, vec!["HEAD", "main", "origin/main", "tag: v1"]);
+    }
+
+    #[test]
+    fn git_commit_views_include_clean_merge_changes() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-b", "fixture-main"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "root"]);
+        let initial = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "fixture-topic"]);
+        std::fs::write(root.join("topic.txt"), "topic change\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "topic"]);
+        let ordinary = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "fixture-main"]);
+        std::fs::write(root.join("main.txt"), "main change\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "main"]);
+        git(&["merge", "--no-ff", "fixture-topic", "-m", "merge topic"]);
+        let merged = git(&["rev-parse", "HEAD"]);
+        // A clean merge has no combined diff, but does change the first parent's tree.
+        assert!(git(&[
+            "show",
+            "--format=",
+            "--name-status",
+            "--diff-merges=combined",
+            &merged
+        ])
+        .is_empty());
+        git(&["config", "diff.merges", "combined"]);
+        let cwd = root.to_str().unwrap();
+        for (commit, file, added) in [
+            (initial.as_str(), "base.txt", "+base"),
+            (ordinary.as_str(), "topic.txt", "+topic change"),
+            (merged.as_str(), "topic.txt", "+topic change"),
+        ] {
+            let detail = git_commit_detail_sync(cwd, commit).unwrap();
+            let full = git_commit_diff_sync(cwd, commit).unwrap();
+            let single = git_commit_file_diff_sync(cwd, commit, file).unwrap();
+
+            assert_eq!(detail.files.len(), 1, "commit {commit}");
+            assert_eq!(detail.files[0].path, file);
+            assert_eq!(detail.files[0].status, "A");
+            assert!(full.content.contains(added), "{}", full.content);
+            assert!(single.content.contains(added), "{}", single.content);
+            assert!(!full.content.contains("diff --cc"));
+            assert!(!single.content.contains("diff --cc"));
+        }
     }
 
     #[test]
@@ -1395,4 +1546,20 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+#[tauri::command]
+pub async fn workspace_edit(
+    request: kode_core::workspace_files::FileEdit,
+) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || kode_core::workspace_files::edit(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn workspace_copy_text(text: String) -> Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(|e| e.to_string())
 }

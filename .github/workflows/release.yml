@@ -180,6 +180,9 @@ jobs:
         working-directory: kode
         env:
           KODE_FORCE_DMG: "1"
+          # These artifacts were built from this revision by the Linux job.
+          # Checkout/version stamping changes mtimes; macOS must not rebuild them.
+          KODE_USE_PREBUILT_LINUX_BUNDLES: "1"
           CONFIGURED_APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}

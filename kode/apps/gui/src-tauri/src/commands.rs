@@ -479,10 +479,22 @@ fn read_avatar_set(dir: &Path, name: &str) -> Option<AvatarSet> {
 #[tauri::command]
 pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo>, String> {
     let catalog = crate::shared_agents::refresh(&state).await?;
-    Ok(catalog.backends.iter().filter(|(_, config)|config.is_enabled()).map(|(key,config)|BackendInfo {
-        key: key.clone(), name: catalog.names.get(key).cloned().unwrap_or_else(||key.clone()),
-        command: config.command.clone(), default_model: config.default_model.clone(), model_flag: config.model_flag.clone(),
-    }).collect())
+    Ok(catalog
+        .backends
+        .iter()
+        .filter(|(_, config)| config.is_enabled())
+        .map(|(key, config)| BackendInfo {
+            key: key.clone(),
+            name: catalog
+                .names
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| key.clone()),
+            command: config.command.clone(),
+            default_model: config.default_model.clone(),
+            model_flag: config.model_flag.clone(),
+        })
+        .collect())
 }
 
 /// Query the installed CLI at runtime instead of baking version-sensitive model IDs into the GUI.
@@ -503,14 +515,26 @@ pub async fn discover_backend_models(
 #[tauri::command]
 pub async fn list_all_backends(state: State<'_, AppState>) -> Result<Vec<BackendListItem>, String> {
     let catalog = crate::shared_agents::refresh(&state).await?;
-    Ok(catalog.backends.iter().map(|(key,config)|BackendListItem {
-        read_only: catalog.read_only.contains(key),
-        protocol: config.protocol.clone(),
-        key: key.clone(), name: catalog.names.get(key).cloned().unwrap_or_else(||key.clone()),
-        command: config.command.clone(), args: config.args.clone(),
-        default_model: config.default_model.clone(), model_flag: config.model_flag.clone(),
-        permission_mode_flag: config.permission_mode_flag.clone(), enabled: config.is_enabled(),
-    }).collect())
+    Ok(catalog
+        .backends
+        .iter()
+        .map(|(key, config)| BackendListItem {
+            read_only: catalog.read_only.contains(key),
+            protocol: config.protocol.clone(),
+            key: key.clone(),
+            name: catalog
+                .names
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| key.clone()),
+            command: config.command.clone(),
+            args: config.args.clone(),
+            default_model: config.default_model.clone(),
+            model_flag: config.model_flag.clone(),
+            permission_mode_flag: config.permission_mode_flag.clone(),
+            enabled: config.is_enabled(),
+        })
+        .collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -566,7 +590,9 @@ pub async fn spawn_session(
     state: State<'_, AppState>,
 ) -> Result<SpawnedSession, String> {
     let endpoint_id = endpoint_id.unwrap_or(EndpointId::Local);
-    if matches!(endpoint_id, EndpointId::Local) { crate::shared_agents::refresh(&state).await?; }
+    if matches!(endpoint_id, EndpointId::Local) {
+        crate::shared_agents::refresh(&state).await?;
+    }
     let transport = get_transport(&state, &endpoint_id)?;
 
     // cwd 解析仅对 Local endpoint 有意义。Remote 的 cwd 必须是 server 端绝对路径
@@ -579,12 +605,27 @@ pub async fn spawn_session(
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from),
     };
-    let bucket = match &endpoint_id { EndpointId::Local => "local", EndpointId::Remote { id } => id.as_str() };
+    let bucket = match &endpoint_id {
+        EndpointId::Local => "local",
+        EndpointId::Remote { id } => id.as_str(),
+    };
     let cwd_path = match cwd_path {
         // Restoring history must not recreate a deleted workspace registration.
-        Some(path) if resume_session_id.as_deref().is_some_and(|id| !id.trim().is_empty()) => Some(path),
-        Some(path) => Some(std::path::PathBuf::from(crate::workbench_state::ensure_workspace(bucket, &path.to_string_lossy()).await.map_err(|error| format!("Kode workspace registration failed: {error}"))?)),
-        None => return Err("Select a workspace on the SSH server before creating a session".into()),
+        Some(path)
+            if resume_session_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            Some(path)
+        }
+        Some(path) => Some(std::path::PathBuf::from(
+            crate::workbench_state::ensure_workspace(bucket, &path.to_string_lossy())
+                .await
+                .map_err(|error| format!("Kode workspace registration failed: {error}"))?,
+        )),
+        None => {
+            return Err("Select a workspace on the SSH server before creating a session".into())
+        }
     };
 
     // 仅 Local endpoint + prompt 注入开启时，预查项目 memory 快照，让 agent 一开始就看到。
@@ -597,12 +638,17 @@ pub async fn spawn_session(
 
     let model = sanitize_spawn_model(model);
 
-    let structured = matches!(endpoint_id, EndpointId::Local)
-        && state.ctx.backend_configs.read().get(&backend_key).is_some_and(|backend|backend.protocol_key(&backend_key)=="codebuddy")
-        && (transport_kind.as_deref() == Some("acp")
-            || (transport_kind.is_none() && resume_session_id.is_none()));
+    let protocol = state
+        .ctx
+        .backend_configs
+        .read()
+        .get(&backend_key)
+        .map(|backend| backend.protocol_key(&backend_key).to_owned())
+        .unwrap_or_else(|| backend_key.clone());
+    let structured = uses_structured_transport(&endpoint_id, &protocol, transport_kind.as_deref());
     if structured {
-        let mut backend = crate::shared_agents::configuration(&backend_key,resume_session_id.as_deref()).await?;
+        let mut backend =
+            crate::shared_agents::configuration(&backend_key, resume_session_id.as_deref()).await?;
         let id = state.protocol_ctx.alloc_id();
         let cwd = cwd_path.as_deref().ok_or("Working directory is required")?;
         backend.args = kode_core::session::inject_kode_memory_prompt(
@@ -635,8 +681,8 @@ pub async fn spawn_session(
                 .or(backend.default_model.clone())
                 .unwrap_or_else(|| "auto".into()),
         );
-        session.backend_protocol=backend.protocol_key(&backend_key).into();
-        session.launch_config=backend.clone();
+        session.backend_protocol = backend.protocol_key(&backend_key).into();
+        session.launch_config = backend.clone();
         let result = SpawnedSession {
             transport_kind: "acp".into(),
             id,
@@ -678,6 +724,17 @@ pub async fn spawn_session(
         cwd: spawned.cwd,
         endpoint_id,
     })
+}
+
+fn uses_structured_transport(
+    endpoint_id: &EndpointId,
+    backend_key: &str,
+    transport_kind: Option<&str>,
+) -> bool {
+    // ACP is opt-in; ordinary new tabs retain the PTY metadata and input path.
+    matches!(endpoint_id, EndpointId::Local)
+        && backend_key == "codebuddy"
+        && transport_kind == Some("acp")
 }
 
 fn sanitize_spawn_model(model: Option<String>) -> Option<String> {
@@ -1094,7 +1151,7 @@ pub async fn get_persisted_tabs() -> Vec<PersistedTabDto> {
 #[tauri::command]
 pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Result<(), String> {
     let bindings: Vec<_> = {
-        let sessions=state.ctx.sessions.lock();
+        let sessions = state.ctx.sessions.lock();
         tabs.iter().filter(|tab| !matches!(tab.endpoint_id,Some(EndpointId::Remote{..}))).filter_map(|tab| {
             let thread=tab.session_id.as_deref()?;
             let session=sessions.values().find(|session|session.backend_key==tab.backend_key && session.session_id.as_deref()==Some(thread))?;
@@ -1102,7 +1159,9 @@ pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Resu
         }).collect()
     };
     tauri::async_runtime::spawn(async move {
-        if let Err(error)=crate::shared_agents::bind_native(bindings).await { tracing::warn!(%error,"shared native session binding failed"); }
+        if let Err(error) = crate::shared_agents::bind_native(bindings).await {
+            tracing::warn!(%error,"shared native session binding failed");
+        }
     });
     let mut persisted = crate::persistence::load();
     persisted.version = 1;
@@ -1521,7 +1580,9 @@ pub fn get_home_dir() -> String {
 /// `bucket`:`"local"` = 本地;其它字符串 = 远端 endpoint_id。
 #[tauri::command]
 pub async fn cwd_history_get(bucket: String) -> Result<Vec<String>, String> {
-    crate::workbench_state::workspace_paths(&bucket).await.map_err(|error| format!("Kode workspace catalog unavailable: {error}"))
+    crate::workbench_state::workspace_paths(&bucket)
+        .await
+        .map_err(|error| format!("Kode workspace catalog unavailable: {error}"))
 }
 
 /// 把一个 cwd 推进某 bucket 的历史(top 5,去重),立即落盘。
@@ -1530,7 +1591,10 @@ pub async fn cwd_history_get(bucket: String) -> Result<Vec<String>, String> {
 /// 空 cwd 会被忽略(不记录、不报错)。
 #[tauri::command]
 pub async fn cwd_history_push(bucket: String, cwd: String) -> Result<(), String> {
-    crate::workbench_state::ensure_workspace(&bucket, &cwd).await.map(|_| ()).map_err(|error| format!("Kode workspace registration failed: {error}"))
+    crate::workbench_state::ensure_workspace(&bucket, &cwd)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("Kode workspace registration failed: {error}"))
 }
 
 /// 读系统剪贴板文本(在 Rust 侧调用,绕过 WKWebView 的剪贴板权限弹窗)。
@@ -1564,25 +1628,43 @@ pub struct SessionSummary {
     pub last_modified_secs: u64,
 }
 
+/// 一页历史 session。`has_more` 为 true 时前端显示 "More" 继续加载。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPage {
+    pub sessions: Vec<SessionSummary>,
+    pub has_more: bool,
+}
+
+/// 新建 tab 时列出 cwd 下的历史 session,按最近修改倒序分页。
+/// 只解析当前页的 transcript:目录里 session 很多时首屏也只读 `limit` 个文件。
 #[tauri::command]
 pub async fn list_sessions_for_cwd(
     backend_key: String,
     cwd: String,
     state: State<'_, AppState>,
-) -> Result<Vec<SessionSummary>, String> {
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<SessionPage, String> {
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_absolute() {
         return Err("cwd must be an absolute path".into());
     }
 
     let backends = crate::shared_agents::refresh(&state).await?.backends;
-    let protocol = backends.get(&backend_key).map(|config|config.protocol_key(&backend_key)).unwrap_or(&backend_key);
+    let protocol = backends
+        .get(&backend_key)
+        .map(|config| config.protocol_key(&backend_key))
+        .unwrap_or(&backend_key);
     let Some(profile) = kode_core::session::backend::profile_for_key(protocol) else {
-        return Ok(Vec::new());
+        return Ok(SessionPage {
+            sessions: Vec::new(),
+            has_more: false,
+        });
     };
     let pinned_titles = crate::persistence::load().session_titles;
-    let mut sessions: Vec<SessionSummary> = profile
-        .list_sessions(cwd_path)
+    let (page, has_more) =
+        profile.list_sessions_page(cwd_path, offset.unwrap_or(0), limit.unwrap_or(usize::MAX));
+    let mut sessions: Vec<SessionSummary> = page
         .into_iter()
         .map(|s| SessionSummary {
             session_id: s.session_id.clone(),
@@ -1595,7 +1677,7 @@ pub async fn list_sessions_for_cwd(
 
     dedupe_session_summaries(&mut sessions);
 
-    Ok(sessions)
+    Ok(SessionPage { sessions, has_more })
 }
 
 /// 按最新修改时间保留每个逻辑 session 的一个 rollout。
@@ -1642,6 +1724,40 @@ fn persist_paths(state: &AppState) {
         .clone()
         .map(|p| p.to_string_lossy().into_owned());
     state.persist.request_save(s);
+}
+
+#[cfg(test)]
+mod session_transport_tests {
+    use super::uses_structured_transport;
+    use kode_core::EndpointId;
+
+    #[test]
+    fn new_codebuddy_tabs_default_to_pty() {
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            None
+        ));
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            Some("pty")
+        ));
+    }
+
+    #[test]
+    fn codebuddy_acp_remains_explicitly_available() {
+        assert!(uses_structured_transport(
+            &EndpointId::Local,
+            "codebuddy",
+            Some("acp")
+        ));
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            "codex",
+            Some("acp")
+        ));
+    }
 }
 
 #[cfg(test)]

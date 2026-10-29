@@ -4,7 +4,7 @@
  *
  * xterm can recolour indexed cells when `theme.extendedAnsi` changes, but a
  * truecolor background is stored as a literal RGB value in the buffer.  This
- * adapter maps painted backgrounds to semantic indexed slots (16–23), with
+ * adapter maps painted backgrounds to semantic indexed slots (16–24), with
  * red/green diff surfaces using distinct dark/light values.
  * Foreground groups are parsed and skipped as one unit so an
  * RGB component such as the `41` in `38;2;41;209;119` can never be mistaken
@@ -31,6 +31,7 @@ const SURFACE_SLOT = {
   blue: 21,
   magenta: 22,
   cyan: 23,
+  reverse: 24,
 } as const
 
 const ANSI_BACKGROUND_SLOTS = [
@@ -61,6 +62,7 @@ const DARK_SURFACES = [
   '#183449', // 21 blue
   '#332541', // 22 magenta
   '#173A37', // 23 cyan
+  '#5F6B62', // 24 reverse video / TUI-drawn cursor
 ]
 
 const LIGHT_SURFACES = [
@@ -72,6 +74,7 @@ const LIGHT_SURFACES = [
   '#DDECF4', // 21 blue
   '#EDE2F5', // 22 magenta
   '#DDF0ED', // 23 cyan
+  '#B4BBB2', // 24 reverse video / TUI-drawn cursor
 ]
 
 export function terminalSurfacePalette(dark: boolean): string[] {
@@ -231,9 +234,11 @@ function rewriteSgrBackgroundsWithState(
     // TUIs commonly paint their input row with reverse video.  Literal reverse
     // swaps xterm's default foreground into a white background in dark mode and
     // a black background in light mode.  Use the theme-owned neutral surface
-    // instead; SGR 27 also clears that synthesized background.
+    // instead; SGR 27 also clears that synthesized background.  Reverse has its
+    // own slot because TUIs also draw their input cursor this way: it must stay
+    // clearly visible against the input row (~3:1) while text on it stays ≥4.5:1.
     if (code === 7) {
-      rewritten.push('27', '48', '5', String(SURFACE_SLOT.neutralStrong))
+      rewritten.push('27', '48', '5', String(SURFACE_SLOT.reverse))
       reverseSurfaceActive = true
       index += 1
       continue

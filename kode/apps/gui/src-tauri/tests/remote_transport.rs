@@ -29,6 +29,7 @@ fn echo_config() -> Config {
     backends.insert(
         "echo".to_string(),
         BackendConfig {
+            protocol: None,
             command: "/bin/cat".into(),
             args: vec![],
             default_model: None,
@@ -232,10 +233,12 @@ async fn unknown_backend_returns_bad_request() {
         .await
         .expect_err("should fail");
     match err {
-        TransportError::BadRequest(d) => assert!(
-            d.contains("no-such-backend") || d.contains("backend"),
-            "expected backend-related detail, got {d:?}"
-        ),
+        TransportError::BadRequest(detail) => {
+            let body: serde_json::Value = serde_json::from_str(&detail)
+                .expect("unknown Agent should return a structured API error");
+            assert_eq!(body["error"], "bad_request");
+            assert_eq!(body["detail"], "Agent is not configured");
+        }
         other => panic!("expected BadRequest, got {other:?}"),
     }
 }

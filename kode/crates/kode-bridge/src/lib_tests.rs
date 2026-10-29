@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn native_transcripts_decode_codex_and_claude_envelopes_without_system_or_tool_noise() {
-    let rows=[
+    let rows = [
         json!({"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"private system instructions"}]}}),
         json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"检查工作区"}]}}),
         json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"检查完成"}]}}),
@@ -12,9 +12,83 @@ fn native_transcripts_decode_codex_and_claude_envelopes_without_system_or_tool_n
         json!({"type":"user","message":{"role":"user","content":"继续"}}),
         json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"已完成"}]}}),
     ];
-    let messages=parse_transcript_lines(rows.iter().map(Value::to_string));
-    assert_eq!(messages.len(),4);
-    assert_eq!(messages.iter().map(|row|row["text"].as_str().unwrap()).collect::<Vec<_>>(),vec!["检查工作区","检查完成","继续","已完成"]);
+    let messages = parse_transcript_lines(rows.iter().map(Value::to_string));
+    assert_eq!(messages.len(), 4);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|row| row["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["检查工作区", "检查完成", "继续", "已完成"]
+    );
+}
+
+#[test]
+fn git_status_preserves_literal_paths_and_rename_records() {
+    let mut summary = WsGitSummary::default();
+    parse_git_status(
+        "## main...origin/main [ahead 2, behind 1]\0?? docs/SDK 升级指引（v1.3 → v1.4）.zh.md\0??  spaced \"name\"\\\t\n -> file \0R  new -> name.md\0old name.md\0C  copy.md\0source.md\0 M modified.md\0UU conflict.md\0",
+        &mut summary,
+        "sub/",
+    );
+    assert_eq!(summary.ahead, 2);
+    assert_eq!(summary.behind, 1);
+    assert_eq!(summary.untracked, 2);
+    assert_eq!(summary.staged, 2);
+    assert_eq!(summary.modified, 1);
+    assert_eq!(summary.conflicts, 1);
+    let paths: Vec<_> = summary
+        .changes
+        .iter()
+        .map(|change| change.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "sub/docs/SDK 升级指引（v1.3 → v1.4）.zh.md",
+            "sub/ spaced \"name\"\\\t\n -> file ",
+            "sub/new -> name.md",
+            "sub/copy.md",
+            "sub/modified.md",
+            "sub/conflict.md",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn git_untracked_preview_handles_special_paths_and_missing_files() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().canonicalize().unwrap();
+    run_git_raw(&root, &["init"]).unwrap();
+    let names = [
+        "SDK 升级指引（v1.3 → v1.4）.zh.md",
+        " spaced \"name\"\\\t\n -> file ",
+    ];
+    for name in names {
+        std::fs::write(root.join(name), "preview content\n").unwrap();
+    }
+    let summary = read_git_summary_best_effort(&root, 1);
+    assert_eq!(summary.untracked, 2);
+    for name in names {
+        let change = summary
+            .changes
+            .iter()
+            .find(|change| change.path == name)
+            .unwrap();
+        let preview = git_diff(Query(GitDiffQuery {
+            cwd: root.to_str().unwrap().into(),
+            path: change.path.clone(),
+            bucket: change.bucket.clone(),
+        }))
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(preview.path, name);
+        assert!(preview.content.contains("+preview content"));
+    }
+    assert!(run_diff_no_index(&root.join("missing.md")).is_err());
+    std::fs::write(root.join("empty.md"), "").unwrap();
+    assert!(run_diff_no_index(&root.join("empty.md")).is_ok());
 }
 
 #[test]
@@ -288,6 +362,98 @@ fn create_session_sanitizes_requested_model() {
     assert_eq!(sanitize_requested_model(Some("auto")), None);
     assert_eq!(sanitize_requested_model(Some(" \n ")), None);
     assert_eq!(sanitize_requested_model(None), None);
+}
+
+#[tokio::test]
+async fn git_commit_views_include_clean_merge_changes() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-b", "fixture-main"]);
+    std::fs::write(root.join("base.txt"), "base\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "root"]);
+    let initial = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-b", "fixture-topic"]);
+    std::fs::write(root.join("topic.txt"), "topic change\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "topic"]);
+    let ordinary = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "fixture-main"]);
+    std::fs::write(root.join("main.txt"), "main change\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "main"]);
+    git(&["merge", "--no-ff", "fixture-topic", "-m", "merge topic"]);
+    let merged = git(&["rev-parse", "HEAD"]);
+    // A clean merge has no combined diff, but does change the first parent's tree.
+    assert!(git(&[
+        "show",
+        "--format=",
+        "--name-status",
+        "--diff-merges=combined",
+        &merged
+    ])
+    .is_empty());
+    git(&["config", "diff.merges", "combined"]);
+    let cwd = root.to_str().unwrap();
+    for (commit, file, added) in [
+        (initial.as_str(), "base.txt", "+base"),
+        (ordinary.as_str(), "topic.txt", "+topic change"),
+        (merged.as_str(), "topic.txt", "+topic change"),
+    ] {
+        let detail = git_commit_detail(Query(GitCommitDiffQuery {
+            cwd: cwd.into(),
+            commit: commit.into(),
+        }))
+        .await
+        .unwrap()
+        .0;
+        let full = git_commit_diff(Query(GitCommitDiffQuery {
+            cwd: cwd.into(),
+            commit: commit.into(),
+        }))
+        .await
+        .unwrap()
+        .0;
+        let single = git_commit_file_diff(Query(GitCommitFileDiffQuery {
+            cwd: cwd.into(),
+            commit: commit.into(),
+            path: file.into(),
+        }))
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(detail.files.len(), 1, "commit {commit}");
+        assert_eq!(detail.files[0].path, file);
+        assert_eq!(detail.files[0].status, "A");
+        assert!(full.content.contains(added), "{}", full.content);
+        assert!(single.content.contains(added), "{}", single.content);
+        assert!(!full.content.contains("diff --cc"));
+        assert!(!single.content.contains("diff --cc"));
+    }
 }
 
 #[test]

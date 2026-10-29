@@ -115,6 +115,7 @@ The center intentionally preserves the existing v1 mobile read surface:
 - `GET /api/v1/sessions/:id`
 - `GET /api/v1/sessions/:id/history?from=&limit=`
 - `POST /api/v1/sessions/:id/input`
+- `DELETE /api/v1/sessions/:id`
 - `GET /ws` with the mobile bearer header; access tokens are never accepted in URLs
 
 `POST input` accepts `{ "text": "…" }`, requires `sessions.send`, validates a
@@ -122,6 +123,52 @@ The center intentionally preserves the existing v1 mobile read surface:
 command has been persisted and dispatched to an online desktop. Command state
 is `dispatched → accepted → executed` or `failed/expired`; transitions are also
 published as `command.status` events.
+
+`DELETE /api/v1/sessions/:id` uses the same dispatch rules with command kind
+`delete`. The desktop stops that session and emits `session.exited`, which
+removes it from the mobile list. An offline desktop returns `409` and the
+session stays visible.
+
+
+## Mobile session creation and desktop catalogues
+
+The paired desktop owns backend discovery, models and filesystem paths. Mobile
+uses `GET /api/v1/backends`, `GET /api/v1/backends/:key/models` and
+`GET /api/v1/fs/list?path=&show_hidden=` through the center. These reads require
+`sessions.content.read`; directory browsing returns directories only, never file
+contents. The backend response includes the desktop `home` directory.
+
+`POST /api/v1/sessions` requires `sessions.send` and `Idempotency-Key`. Its
+allowlisted body is `{ backend_key, cwd?, model? }`. The desktop verifies the
+backend is enabled and executable and the working directory is an existing
+absolute directory. Permission defaults and transport selection remain owned by
+the bridge (new CodeBuddy sessions use ACP). Mobile cannot inject CLI arguments,
+initial prompts, permission bypass flags, or arbitrary bridge endpoints.
+
+The relay uses `setup.request { request_id, kind, payload, expires_at }` and
+`setup.result { request_id, boot_id, status, body }` over the existing outbound
+WebSocket. Kinds are `backends`, `models`, `directories`, `create_session`.
+Requests start only while the desktop is online and expire before execution
+after 30 seconds. Desktop setup runs separately from the socket receive loop;
+slow model discovery does not block heartbeats or session events. The REST call
+waits up to 50 seconds for a response. Older desktop/center installations must
+be upgraded together to expose this feature.
+
+Create receipts are persisted in SQLite by binding and idempotency key before
+dispatch; they are never queued or replayed on reconnect. The desktop also
+records acceptance before execution. A retry with the same payload/key returns
+the saved result, or `202 creation_unconfirmed` while no result is known. Reusing
+a key with a changed payload returns `409`. A timeout returns
+`504 creation_unconfirmed`; it does not assert that creation failed. Mobile
+locks the selections and offers **Check creation result**, retaining the same
+key. Leaving that state prompts the user to inspect the session list before
+starting another request. Definitive failures permit editing and a fresh retry.
+
+Before returning a successful create response, the center maps the local ID
+and boot ID into the canonical cloud session ID and publishes the complete DTO.
+The response opens that session in mobile. Create results persist even when the
+original HTTP waiter has timed out. Read results are ephemeral, scoped to the
+requesting device, and mobile authorization is checked again before returning.
 
 ## Deployment
 

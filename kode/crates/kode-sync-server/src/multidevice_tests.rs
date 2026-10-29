@@ -163,3 +163,71 @@ async fn independent_devices_share_server_without_sharing_sessions_or_commands()
         ServerFrame::Command { .. }
     ));
 }
+
+#[tokio::test]
+async fn delete_session_dispatches_a_close_command_to_the_owning_desktop() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('office','office','office','device-token-hash',1,1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('office','office','phone',?1,?2,1)",
+            params![
+                token_hash("office"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let (tx, mut agent) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "office".into(),
+        AgentConnection {
+            connection_id: "office".into(),
+            tx,
+        },
+    );
+    sync_session_snapshot(
+        &state,
+        "office",
+        "boot",
+        vec![AgentSession {
+            local_id: 7,
+            dto: json!({"id":7,"backend_key":"codex","title":"open","status":"idle","tokens":{}}),
+        }],
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let session_id = list["sessions"][0]["id"].as_i64().unwrap();
+    let (status, _) = delete_session(
+        axum::extract::State(state),
+        Path(session_id),
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(matches!(
+        agent.try_recv().unwrap(),
+        ServerFrame::Command {
+            local_session_id: 7,
+            ref kind,
+            ..
+        } if kind == "delete"
+    ));
+}

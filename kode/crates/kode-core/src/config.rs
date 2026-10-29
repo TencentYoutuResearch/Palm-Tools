@@ -234,24 +234,36 @@ impl Default for Config {
                 enabled: None,
             },
         );
-        for (key, permission_flag) in [
-            ("tcodex", "--ask-for-approval"),
-            ("tclaude", "--permission-mode"),
-        ] {
-            backends.insert(
-                key.into(),
-                BackendConfig {
-                    protocol: None,
-                    command: key.into(),
-                    args: vec![],
-                    default_model: None,
-                    model_flag: Some("--model".into()),
-                    permission_mode_flag: Some(permission_flag.into()),
-                    mcp_setup: None,
-                    enabled: None,
-                },
-            );
-        }
+        backends.insert(
+            "tcodex".into(),
+            BackendConfig {
+                protocol: None,
+                command: "tcodex".into(),
+                args: vec![],
+                default_model: None,
+                model_flag: Some("--model".into()),
+                permission_mode_flag: Some("--ask-for-approval".into()),
+                mcp_setup: Some(McpSetupSpec::Codex {
+                    cli: "tcodex".into(),
+                }),
+                enabled: None,
+            },
+        );
+        backends.insert(
+            "tclaude".into(),
+            BackendConfig {
+                protocol: None,
+                command: "tclaude".into(),
+                args: vec![],
+                default_model: None,
+                model_flag: Some("--model".into()),
+                permission_mode_flag: Some("--permission-mode".into()),
+                mcp_setup: Some(McpSetupSpec::Claude {
+                    cli: "tclaude".into(),
+                }),
+                enabled: None,
+            },
+        );
         backends.insert(
             "cursor".into(),
             BackendConfig {
@@ -324,32 +336,31 @@ impl Config {
         };
         match toml::from_str::<Config>(&txt) {
             Ok(mut c) => {
-                // 合并默认 backends(用户没写也能用)。Cursor 早期版本已经会把
-                // backend table 落盘,但当时没有 mcp_setup；为已有安装补上新能力。
+                // 合并默认 backends(用户没写也能用)。早期版本已经把 cursor/tclaude/tcodex
+                // 等 backend table 落盘,但当时没有 mcp_setup；命令未被改过时为已有安装
+                // 补上新能力,否则这些 backend 永远接不上 memory MCP。
                 let defaults = Self::default();
-                let cursor_mcp_setup = defaults
-                    .backends
-                    .get("cursor")
-                    .and_then(|backend| backend.mcp_setup.clone());
                 for (k, v) in defaults.backends {
-                    // 旧 tcodex/tclaude 配置缺少注入 flag,只补缺失项,不覆盖用户显式值。
-                    if matches!(k.as_str(), "tcodex" | "tclaude") {
-                        if let Some(backend) = c.backends.get_mut(&k) {
-                            if backend.model_flag.is_none() {
-                                backend.model_flag = v.model_flag.clone();
+                    match c.backends.get_mut(&k) {
+                        Some(existing) => {
+                            if matches!(k.as_str(), "tcodex" | "tclaude") {
+                                if existing.model_flag.is_none() {
+                                    existing.model_flag = v.model_flag.clone();
+                                }
+                                if existing.permission_mode_flag.is_none() {
+                                    existing.permission_mode_flag = v.permission_mode_flag.clone();
+                                }
                             }
-                            if backend.permission_mode_flag.is_none() {
-                                backend.permission_mode_flag = v.permission_mode_flag.clone();
+                            if existing.mcp_setup.is_none() && existing.command == v.command {
+                                existing.mcp_setup = v.mcp_setup;
                             }
                         }
-                    }
-                    c.backends.entry(k).or_insert(v);
-                }
-                if let Some(cursor) = c.backends.get_mut("cursor") {
-                    if cursor.command == "cursor-agent" && cursor.mcp_setup.is_none() {
-                        cursor.mcp_setup = cursor_mcp_setup;
+                        None => {
+                            c.backends.insert(k, v);
+                        }
                     }
                 }
+                hydrate_known_permission_flags(&mut c.backends);
                 c
             }
             Err(e) => {
@@ -365,6 +376,50 @@ impl Config {
 
     pub fn backend(&self, key: &str) -> Option<&BackendConfig> {
         self.backends.get(key)
+    }
+}
+
+fn hydrate_known_permission_flags(backends: &mut HashMap<String, BackendConfig>) {
+    for backend in backends.values_mut() {
+        backend.hydrate_permission_flag();
+    }
+}
+
+impl BackendConfig {
+    /// Infer a known wrapper's permission flag, preserving explicit overrides.
+    pub fn hydrate_permission_flag(&mut self) {
+        if self.permission_mode_flag.is_some() {
+            return;
+        }
+        // Explicit permission arguments are an opt-out from automatic flag
+        // injection. Keep them exactly as configured.
+        if self.args.iter().any(|arg| {
+            matches!(
+                arg.split('=').next().unwrap_or(arg),
+                "--permission-mode"
+                    | "--ask-for-approval"
+                    | "--dangerously-bypass-approvals-and-sandbox"
+                    | "--dangerously-skip-permissions"
+                    | "--allow-dangerously-skip-permissions"
+                    | "-a"
+            )
+        }) {
+            return;
+        }
+        let command = std::path::Path::new(&self.command)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.command);
+        let flag = if command == "tcodex" {
+            Some("--ask-for-approval")
+        } else if command == "tclaude" {
+            Some("--permission-mode")
+        } else {
+            None
+        };
+        if let Some(flag) = flag {
+            self.permission_mode_flag = Some(flag.into());
+        }
     }
 }
 
@@ -407,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn default_t_backends_have_flags_without_startup_args_or_mcp_setup() {
+    fn default_t_backends_have_flags_and_mcp_setup_without_startup_args() {
         let cfg = Config::default();
         for (key, permission_flag) in [
             ("tcodex", "--ask-for-approval"),
@@ -426,7 +481,12 @@ mod tests {
                 Some(permission_flag)
             );
             assert_eq!(backend.enabled, None);
-            assert_eq!(backend.mcp_setup, None);
+            let expected_mcp = if key == "tcodex" {
+                McpSetupSpec::Codex { cli: key.into() }
+            } else {
+                McpSetupSpec::Claude { cli: key.into() }
+            };
+            assert_eq!(backend.mcp_setup, Some(expected_mcp));
         }
     }
 
@@ -435,7 +495,7 @@ mod tests {
     #[test]
     fn default_backends_have_permission_mode_flag() {
         let cfg = Config::default();
-        for key in ["codebuddy", "claude", "claude-internal"] {
+        for key in ["codebuddy", "claude", "claude-internal", "tclaude"] {
             let b = cfg.backend(key).expect(key);
             assert_eq!(
                 b.permission_mode_flag.as_deref(),
@@ -446,6 +506,11 @@ mod tests {
         let codex = cfg.backend("codex").expect("codex");
         assert_eq!(
             codex.permission_mode_flag.as_deref(),
+            Some("--ask-for-approval")
+        );
+        let tcodex = cfg.backend("tcodex").expect("tcodex");
+        assert_eq!(
+            tcodex.permission_mode_flag.as_deref(),
             Some("--ask-for-approval")
         );
     }
@@ -533,7 +598,7 @@ mod tests {
         let cursor = cfg.backend("cursor").expect("cursor");
         assert_eq!(cursor.command, "cursor-agent");
         assert_eq!(cursor.enabled, None);
-        // 5 MCP-enabled + 10 other presets + tcodex/tclaude = 17。
+        // 7 MCP-enabled + 10 other presets = 17。
         assert_eq!(cfg.backends.len(), 17);
     }
 
@@ -683,7 +748,7 @@ sidebar_width = 31
     }
 
     #[test]
-    fn load_from_does_not_hydrate_t_backend_family_aliases_or_matching_commands() {
+    fn load_from_hydrates_only_permission_flags_for_known_wrapper_commands() {
         let txt = r#"
 [backends.tcodex-custom]
 command = "tcodex"
@@ -699,8 +764,18 @@ command = "tclaude"
 "#;
         let original: Config = toml::from_str(txt).unwrap();
         let loaded = load_test_config_without_rewriting(txt);
-        for (key, backend) in original.backends {
+        for (key, mut backend) in original.backends {
+            backend.permission_mode_flag = Some(
+                if backend.command == "tcodex" {
+                    "--ask-for-approval"
+                } else {
+                    "--permission-mode"
+                }
+                .into(),
+            );
             assert_eq!(loaded.backend(&key), Some(&backend));
+            assert!(loaded.backend(&key).unwrap().model_flag.is_none());
+            assert!(loaded.backend(&key).unwrap().mcp_setup.is_none());
         }
     }
 
@@ -740,6 +815,48 @@ enabled = true
         }
     }
 
+    /// 早期落盘的 tclaude/tcodex table 没有 mcp_setup → 加载时补上,否则 kode 不会给
+    /// 它们配 memory MCP,而守门员又要求调用 memory_propose。
+    #[test]
+    fn load_from_hydrates_tclaude_and_tcodex_mcp_setup_in_legacy_config() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-config-tclaude-migration-{}-{unique}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[backends.tclaude]
+command = "tclaude"
+args = []
+model_flag = "--model"
+enabled = true
+
+[backends.tcodex]
+command = "tcodex"
+args = []
+model_flag = "--model"
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load_from(&path);
+        std::fs::remove_file(path).ok();
+        match &cfg.backend("tclaude").unwrap().mcp_setup {
+            Some(McpSetupSpec::Claude { cli }) => assert_eq!(cli, "tclaude"),
+            other => panic!("legacy tclaude should gain Claude mcp_setup, got {other:?}"),
+        }
+        match &cfg.backend("tcodex").unwrap().mcp_setup {
+            Some(McpSetupSpec::Codex { cli }) => assert_eq!(cli, "tcodex"),
+            other => panic!("legacy tcodex should gain Codex mcp_setup, got {other:?}"),
+        }
+    }
+
     #[test]
     fn load_from_does_not_hydrate_repurposed_cursor_backend() {
         let unique = std::time::SystemTime::now()
@@ -764,5 +881,109 @@ command = "custom-agent"
         let cfg = Config::load_from(&path);
         std::fs::remove_file(path).ok();
         assert!(cfg.backend("cursor").unwrap().mcp_setup.is_none());
+    }
+
+    #[test]
+    fn load_from_hydrates_permission_flags_for_existing_tcodex_and_tclaude_tables() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "kode-config-t-wrapper-migration-{}-{unique}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[backends.tcodex]
+command = "tcodex"
+args = []
+model_flag = "--model"
+enabled = true
+
+[backends.tclaude]
+command = "/usr/local/bin/tclaude"
+args = []
+model_flag = "--model"
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load_from(&path);
+        std::fs::remove_file(path).ok();
+        assert_eq!(
+            cfg.backend("tcodex")
+                .unwrap()
+                .permission_mode_flag
+                .as_deref(),
+            Some("--ask-for-approval")
+        );
+        assert_eq!(
+            cfg.backend("tclaude")
+                .unwrap()
+                .permission_mode_flag
+                .as_deref(),
+            Some("--permission-mode")
+        );
+    }
+
+    #[test]
+    fn permission_flag_migration_preserves_explicit_empty_and_manual_args() {
+        let mut backends = HashMap::new();
+        backends.insert(
+            "tcodex".into(),
+            BackendConfig {
+                protocol: None,
+                command: "tcodex".into(),
+                args: vec![],
+                default_model: None,
+                model_flag: Some("--model".into()),
+                permission_mode_flag: Some(String::new()),
+                mcp_setup: None,
+                enabled: Some(true),
+            },
+        );
+        backends.insert(
+            "tclaude".into(),
+            BackendConfig {
+                protocol: None,
+                command: "tclaude".into(),
+                args: vec!["--dangerously-skip-permissions".into()],
+                default_model: None,
+                model_flag: Some("--model".into()),
+                permission_mode_flag: None,
+                mcp_setup: None,
+                enabled: Some(true),
+            },
+        );
+
+        hydrate_known_permission_flags(&mut backends);
+        assert_eq!(backends["tcodex"].permission_mode_flag.as_deref(), Some(""));
+        assert!(backends["tclaude"].permission_mode_flag.is_none());
+    }
+
+    #[test]
+    fn permission_flag_migration_uses_command_and_preserves_manual_equals_args() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+[backends.tcodex]
+command = "custom-agent"
+[backends.renamed]
+command = "/usr/local/bin/tcodex"
+[backends.tclaude]
+command = "tclaude"
+args = ["--permission-mode=plan"]
+"#,
+        )
+        .unwrap();
+        hydrate_known_permission_flags(&mut cfg.backends);
+        assert!(cfg.backends["tcodex"].permission_mode_flag.is_none());
+        assert_eq!(
+            cfg.backends["renamed"].permission_mode_flag.as_deref(),
+            Some("--ask-for-approval")
+        );
+        assert!(cfg.backends["tclaude"].permission_mode_flag.is_none());
     }
 }

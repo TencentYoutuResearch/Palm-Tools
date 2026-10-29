@@ -112,6 +112,12 @@ pub struct SshSpec {
 }
 
 impl RemoteConfig {
+    fn usage_host_key(&self) -> String {
+        match &self.ssh {
+            Some(ssh) => format!("ssh:{}:{}:{}", ssh.host, ssh.ssh_port, ssh.remote_port),
+            None => format!("url:{}", self.base_url.trim_end_matches('/')),
+        }
+    }
     /// 从给定 base url 拼 WS url。`base` 由 caller 解析(直连 = `base_url`;
     /// SSH 模式 = 隧道 rewrite 后的本地 url)。
     fn ws_url_for(&self, base: &str) -> String {
@@ -182,6 +188,9 @@ pub struct RemoteTransport {
 }
 
 impl RemoteTransport {
+    pub fn usage_host_key(&self) -> String {
+        self.cfg.usage_host_key()
+    }
     pub fn new(
         cfg: RemoteConfig,
         core_tx: mpsc::UnboundedSender<CoreEvent>,
@@ -290,6 +299,37 @@ impl RemoteTransport {
             .map_err(|e| RestError {
                 status: None,
                 message: format!("rest_get {path}: {e}"),
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(RestError {
+                status: Some(status.as_u16()),
+                message: detail,
+            });
+        }
+        resp.json::<Value>().await.map_err(|e| RestError {
+            status: None,
+            message: format!("decode {path}: {e}"),
+        })
+    }
+
+    pub async fn rest_post(&self, path: &str, body: Value) -> Result<Value, RestError> {
+        let base = self.ensure_tunnel().await.map_err(|e| RestError {
+            status: None,
+            message: format!("ssh tunnel: {e}"),
+        })?;
+        let url = RemoteConfig::rest_url_for(&base, path);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.cfg.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| RestError {
+                status: None,
+                message: format!("rest_post {path}: {e}"),
             })?;
         let status = resp.status();
         if !status.is_success() {

@@ -38,6 +38,8 @@ pub mod acp;
 pub mod messaging;
 pub mod backend_probe;
 pub mod hook_relay;
+pub mod mobile_setup;
+pub mod model_usage;
 pub mod semantic;
 
 pub use hook_relay::HookRelay;
@@ -762,6 +764,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
             post(post_plan_response),
         )
         .route("/api/v1/sessions/:id/mode", post(post_mode))
+        .route("/api/v1/sessions/:id/model", post(post_model))
         .route("/api/v1/sessions/:id/resize", post(post_resize))
         .route("/api/v1/shells", post(shell_spawn))
         .route("/api/v1/shells/:id", delete(shell_kill))
@@ -769,8 +772,10 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/api/v1/shells/:id/resize", post(shell_resize))
         .route("/api/v1/shells/:id/snapshot", get(shell_snapshot))
         .route("/api/v1/backends", get(list_backends))
+        .route("/api/v1/model-usage", get(get_model_usage))
         .route("/api/v1/backends/:key/models", get(list_backend_models))
         .route("/api/v1/fs/list", get(fs_list))
+        .route("/api/v1/fs/edit", post(fs_edit))
         .route("/api/v1/fs/preview", get(fs_preview))
         .route("/api/v1/git/status", get(git_status))
         .route("/api/v1/git/diff", get(git_diff))
@@ -789,6 +794,27 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .merge(protected)
         .merge(messaging)
         .layer(Extension(ctx))
+}
+
+async fn get_model_usage(
+    Query(query): Query<model_usage::ModelUsageQuery>,
+) -> Result<Json<model_usage::ModelUsageSnapshot>, ApiError> {
+    let period = model_usage::normalize_period(&query.period)
+        .map_err(ApiError::BadRequest)?
+        .to_string();
+    if query
+        .timezone_offset_minutes
+        .is_some_and(|offset| !(-1439..=1439).contains(&offset))
+    {
+        return Err(ApiError::BadRequest("invalid timezone offset".into()));
+    }
+    let snapshot = tokio::task::spawn_blocking(move || {
+        model_usage::collect_snapshot(&period, query.since_ms, query.timezone_offset_minutes)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("usage task failed: {error}")))?
+    .map_err(ApiError::Internal)?;
+    Ok(Json(snapshot))
 }
 
 async fn auth_layer(
@@ -1052,9 +1078,6 @@ async fn create_session(
     .map_err(|e| ApiError::Internal(format!("spawn failed: {e}")))?;
     let resume_meta = resume_meta_snapshot(backend.protocol_key(&req.backend_key), &cwd, session.session_id.as_deref());
     if let Some(meta) = &resume_meta {
-        if let Some(model) = &meta.model {
-            session.state.model = model.clone();
-        }
         if let Some(title) = &meta.title {
             session.state.title = title.clone();
         }
@@ -1168,23 +1191,29 @@ async fn get_session(
     Ok(Json(session_to_dto(s)))
 }
 
-async fn kill_session(
-    Extension(ctx): Extension<Arc<Ctx>>,
-    Path(id): Path<SessionId>,
-) -> Result<StatusCode, ApiError> {
+/// Stop a session and publish `session.exited`. Shared by the local DELETE
+/// route and the desktop handler for a mobile delete command.
+pub fn delete_session(ctx: &Ctx, id: SessionId) -> Result<(), String> {
     ctx.acp.remove(id);
-    let s = ctx.sessions.lock().remove(&id);
-    let Some(s) = s else {
-        return Err(ApiError::NotFound(format!("session {id}")));
+    let Some(session) = ctx.sessions.lock().remove(&id) else {
+        return Err(format!("session {id}"));
     };
-    if let Some(p) = &s.pty {
-        p.kill();
+    if let Some(pty) = &session.pty {
+        pty.kill();
     }
     ctx.bus.emit(EventEnvelope::new(
         id,
         "session.exited",
         json!({ "exit_code": null, "reason": "deleted_by_api" }),
     ));
+    Ok(())
+}
+
+async fn kill_session(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<SessionId>,
+) -> Result<StatusCode, ApiError> {
+    delete_session(&ctx, id).map_err(ApiError::NotFound)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2045,6 +2074,50 @@ async fn post_mode(
     Ok(Json(ModeResp { mode, cycles }))
 }
 
+#[derive(Deserialize)]
+struct ModelReq {
+    model: String,
+}
+
+async fn post_model(
+    Extension(ctx): Extension<Arc<Ctx>>,
+    Path(id): Path<SessionId>,
+    Json(req): Json<ModelReq>,
+) -> Result<Json<Value>, ApiError> {
+    set_session_model(&ctx, id, &req.model)
+        .await
+        .map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"model":req.model})))
+}
+
+fn session_model_matches(requested: &str, actual: &str) -> bool {
+    if requested.eq_ignore_ascii_case(actual) {
+        return true;
+    }
+    let actual = actual.to_ascii_lowercase();
+    matches!(requested, "sonnet" | "opus" | "haiku")
+        && actual.starts_with("claude-")
+        && actual.split('-').any(|part| part == requested)
+}
+
+pub async fn set_session_model(ctx: &Ctx, id: SessionId, model: &str) -> Result<(), String> {
+    if model.is_empty()
+        || model.len() > 200
+        || !model
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.:/[]".contains(&c))
+    {
+        return Err("Invalid model id".into());
+    }
+    if pending_interaction(ctx, id).is_some() {
+        return Err("Resolve the pending question or plan before switching models".into());
+    }
+    if let Some(client) = ctx.acp.get(id) {
+        return client.set_model(model).await;
+    }
+    model_switch::set_pty_model(ctx, id, model).await
+}
+
 pub async fn set_session_permission_mode(
     ctx: &Ctx,
     id: SessionId,
@@ -2383,6 +2456,11 @@ async fn list_backend_models(
 struct SessionHistoryQuery {
     backend_key: String,
     cwd: String,
+    /// 分页参数(可选)。老客户端不传 → 返回全部。
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2406,8 +2484,9 @@ async fn list_sessions_history(
     let protocol = backends.get(&q.backend_key).map(|config|config.protocol_key(&q.backend_key)).unwrap_or(&q.backend_key);
     let profile = kode_core::session::backend::profile_for_key(protocol)
         .ok_or_else(|| ApiError::BadRequest(format!("unsupported backend: {}", q.backend_key)))?;
-    let mut sessions: Vec<SessionSummary> = profile
-        .list_sessions(&cwd)
+    let (page, has_more) =
+        profile.list_sessions_page(&cwd, q.offset.unwrap_or(0), q.limit.unwrap_or(usize::MAX));
+    let sessions: Vec<SessionSummary> = page
         .into_iter()
         .map(|s| SessionSummary {
             session_id: s.session_id,
@@ -2417,8 +2496,7 @@ async fn list_sessions_history(
             last_modified_secs: s.last_modified_secs,
         })
         .collect();
-    sessions.sort_by(|a, b| b.last_modified_secs.cmp(&a.last_modified_secs));
-    Ok(Json(json!({ "sessions": sessions })))
+    Ok(Json(json!({ "sessions": sessions, "has_more": has_more })))
 }
 
 #[derive(Deserialize)]
@@ -2509,12 +2587,14 @@ async fn fs_list(Query(q): Query<FsListQuery>) -> Result<Json<Value>, ApiError> 
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
+    let truncated = entries.len() > 160;
     entries.truncate(160);
     let parent = canonical.parent().map(|p| p.to_string_lossy().to_string());
     Ok(Json(json!({
         "path": canonical.to_string_lossy(),
         "parent": parent,
         "entries": entries,
+        "truncated": truncated,
     })))
 }
 
@@ -2689,6 +2769,7 @@ async fn fs_preview(Query(q): Query<FsPreviewQuery>) -> Result<Json<WsFilePrevie
 #[derive(Deserialize)]
 struct GitStatusQuery {
     cwd: String,
+    commit_limit: Option<usize>,
 }
 
 /// `GET /api/v1/git/status?cwd=<abs>` — git 仓库摘要(best-effort)。
@@ -2698,7 +2779,10 @@ async fn git_status(Query(q): Query<GitStatusQuery>) -> Result<Json<WsGitSummary
     if !path.is_absolute() {
         return Err(ApiError::BadRequest("cwd must be absolute".into()));
     }
-    Ok(Json(read_git_summary_best_effort(path)))
+    Ok(Json(read_git_summary_best_effort(
+        path,
+        q.commit_limit.unwrap_or(80),
+    )))
 }
 
 /// `GET /api/v1/git/diff?cwd=<abs>&path=<rel>&bucket=<staged|modified|untracked|conflict>`
@@ -2719,7 +2803,7 @@ async fn git_diff(Query(q): Query<GitDiffQuery>) -> Result<Json<WsGitDiffPreview
     let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
         .ok_or_else(|| ApiError::BadRequest("not a Git repository".into()))?;
     let root_path = PathBuf::from(&root);
-    let rel = q.path.trim();
+    let rel = q.path.as_str();
     if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
         return Err(ApiError::BadRequest(
             "git path must be a repository-relative path".into(),
@@ -2780,6 +2864,7 @@ async fn git_commit_diff(
             "--no-pager",
             "show",
             "--format=fuller",
+            "--diff-merges=first-parent",
             "--stat",
             "--patch",
             "--no-ext-diff",
@@ -2817,6 +2902,7 @@ async fn git_commit_detail(
             "--no-pager",
             "show",
             "--format=%B%x1e",
+            "--diff-merges=first-parent",
             "--name-status",
             "--no-renames",
             commit,
@@ -2855,6 +2941,7 @@ async fn git_commit_file_diff(
             "--no-pager",
             "show",
             "--format=",
+            "--diff-merges=first-parent",
             "--patch",
             "--no-ext-diff",
             "--find-renames",
@@ -2874,7 +2961,7 @@ async fn git_commit_file_diff(
 
 // ===== bridge 端 git 辅助(对齐 workspace.rs:211-404,best-effort 降级)=====
 
-fn read_git_summary_best_effort(path: &std::path::Path) -> WsGitSummary {
+fn read_git_summary_best_effort(path: &std::path::Path, commit_limit: usize) -> WsGitSummary {
     // git 不在 → 直接返回 default(is_repo=false),不崩
     if run_git(path, &["--version"]).is_none() {
         return WsGitSummary::default();
@@ -2890,10 +2977,10 @@ fn read_git_summary_best_effort(path: &std::path::Path) -> WsGitSummary {
         branch,
         short_head,
         branches: read_git_branches(path),
-        commits: read_git_commits(path),
+        commits: read_git_commits(path, commit_limit),
         ..Default::default()
     };
-    if let Some(status) = run_git(path, &["status", "--porcelain=v1", "--branch"]) {
+    if let Ok(status) = run_git_raw(path, &["status", "--porcelain=v1", "--branch", "-z"]) {
         parse_git_status(&status, &mut summary, "");
     }
     // porcelain v1 把 submodule 折叠成单个 M 条目,内部文件不可见。
@@ -2943,14 +3030,14 @@ fn parse_git_branches(output: &str) -> Vec<WsGitBranchInfo> {
     branches
 }
 
-fn read_git_commits(path: &std::path::Path) -> Vec<WsGitCommitInfo> {
+fn read_git_commits(path: &std::path::Path, limit: usize) -> Vec<WsGitCommitInfo> {
     let Some(output) = run_git(
         path,
         &[
             "log",
             "--all",
             "-n",
-            "80",
+            &limit.max(1).to_string(),
             "--date=unix",
             "--decorate=full",
             "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s%x1f%P%x1f%D",
@@ -3092,14 +3179,17 @@ fn collect_submodule_changes(root: &std::path::Path, summary: &mut WsGitSummary)
         if !sub_abs.is_dir() {
             continue;
         }
-        if let Some(sub_status) = run_git(&sub_abs, &["status", "--porcelain=v1", "--branch"]) {
+        if let Ok(sub_status) =
+            run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"])
+        {
             parse_git_status(&sub_status, summary, &format!("{sub_path}/"));
         }
     }
 }
 
 fn parse_git_status(status: &str, summary: &mut WsGitSummary, prefix: &str) {
-    for line in status.lines() {
+    let mut records = status.split('\0');
+    while let Some(line) = records.next() {
         if let Some(branch_line) = line.strip_prefix("## ") {
             parse_git_ahead_behind(branch_line, summary);
             continue;
@@ -3108,12 +3198,12 @@ fn parse_git_status(status: &str, summary: &mut WsGitSummary, prefix: &str) {
             continue;
         }
         let xy = &line[..2];
-        let raw_path = line[3..].trim();
-        let path = raw_path
-            .rsplit_once(" -> ")
-            .map(|(_, to)| to)
-            .unwrap_or(raw_path)
-            .to_string();
+        // With -z, paths are literal and renames/copies put the destination first,
+        // followed by a separate source-path record.
+        let path = line[3..].to_string();
+        if xy.contains(['R', 'C']) {
+            records.next();
+        }
         // submodule 聚合时,prefix = "<sub_path>/" —— 把子模块内部路径前缀成
         // superproject 视角的完整路径,前端点击时才能拿对路径去 diff。
         let path = if prefix.is_empty() {
@@ -3259,8 +3349,8 @@ fn run_diff_no_index(path: &std::path::Path) -> Result<String, ApiError> {
         .arg(path)
         .output()
         .map_err(|e| ApiError::Internal(format!("git diff failed: {e}")))?;
-    // git diff --no-index 对有差异的输入返 exit code 1,这是正常的
-    if !output.status.success() && output.status.code() != Some(1) {
+    // Exit 1 can also mean an inaccessible input; do not discard its diagnostic.
+    if !output.status.success() && (output.status.code() != Some(1) || !output.stderr.is_empty()) {
         return Err(ApiError::Internal(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
@@ -3598,6 +3688,17 @@ async fn memory_recent(
 }
 
 pub mod model_discovery;
+mod model_switch;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+async fn fs_edit(
+    Json(request): Json<kode_core::workspace_files::FileEdit>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    tokio::task::spawn_blocking(move || kode_core::workspace_files::edit(request))
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?
+        .map(Json)
+        .map_err(ApiError::BadRequest)
+}

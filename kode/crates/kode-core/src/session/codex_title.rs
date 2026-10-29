@@ -8,22 +8,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 /// The outer `None` means the database could not be read; it must not erase a
 /// previously observed name. The inner `None` means the thread has no name.
-pub(super) fn read_thread_name(
-    backend: super::jsonl_tail::Backend,
-    session_id: &str,
-) -> Option<Option<String>> {
-    let home = dirs::home_dir()?;
-    read_thread_name_in(
-        &backend.codex_home(&home).join("state_5.sqlite"),
-        session_id,
-    )
+pub(super) fn read_thread_name(db_path: &Path, session_id: &str) -> Option<Option<String>> {
+    read_thread_name_in(db_path, session_id)
 }
 
-pub(super) fn thread_names(backend: super::jsonl_tail::Backend) -> HashMap<String, String> {
-    let Some(home) = dirs::home_dir() else {
-        return HashMap::new();
-    };
-    thread_names_in(&backend.codex_home(&home).join("state_5.sqlite"))
+pub(super) fn thread_names(db_path: &Path) -> HashMap<String, String> {
+    thread_names_in(db_path)
 }
 
 fn thread_names_in(db_path: &Path) -> HashMap<String, String> {

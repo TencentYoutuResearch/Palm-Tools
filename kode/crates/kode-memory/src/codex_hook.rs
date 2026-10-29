@@ -251,6 +251,11 @@ fn relay_to_kode(input: &str) -> Result<()> {
     write_unix_line(Path::new(&sock), &rewritten)
 }
 
+#[cfg(test)]
+fn supports_backend_key(backend: &str) -> bool {
+    backend == "codex" || backend.ends_with("codex")
+}
+
 /// 把 Codex hook payload 改写成 GUI relay 可路由的形式。
 ///
 /// Codex 原始 `session_id` 是 rollout/session uuid；GUI HookRelay 的 `session_id`
@@ -403,6 +408,13 @@ mod tests {
             let input = json!({"hook_event_name": event, "session_id": "tcodex-uuid"}).to_string();
             assert!(handle_json(&input, "tcodex").unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn accepts_codex_family_backend_keys() {
+        assert!(supports_backend_key("codex"));
+        assert!(supports_backend_key("tcodex"));
+        assert!(!supports_backend_key("tclaude"));
     }
 
     #[test]

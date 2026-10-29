@@ -358,6 +358,21 @@ fn process_hook_json_inner(
 
             if kode_core::session::backend::hook_resets_tokens(event_name) {
                 reset_hook_tokens(session_id);
+                if let Some(tx) = core_tx.filter(|_| session_id != 0) {
+                    let _ = tx.send(CoreEvent::JsonlMeta {
+                        id: session_id,
+                        model: None,
+                        title: None,
+                        session_uuid: None,
+                        tokens_reset: true,
+                        tokens: None,
+                        input_tokens: None,
+                        output_tokens: None,
+                        cached_tokens: None,
+                        cost_usd: None,
+                        context_pct: None,
+                    });
+                }
             }
 
             // Do not publish model/session UUID before the GUI has validated
@@ -787,6 +802,25 @@ mod tests {
             }
             other => panic!("unexpected events: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cursor_session_start_resets_visible_token_totals() {
+        let bus = Arc::new(BridgeBus::new());
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+        process_hook_json_with_core_tx(
+            r#"{"session_id":"79","hook_event_name":"sessionStart","conversation_id":"cursor-chat-2"}"#,
+            &bus,
+            &core_tx,
+        );
+        assert!(matches!(
+            core_rx.try_recv(),
+            Ok(CoreEvent::JsonlMeta {
+                id: 79,
+                tokens_reset: true,
+                ..
+            })
+        ));
     }
 
     #[test]
