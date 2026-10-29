@@ -37,7 +37,14 @@ export class AgentRuntimeAdapter {
   providerRetryPolicy() { return { mode: 'normal', maxRetries: 0, retryableCodes: [], initialDelayMs: 1000, maxDelayMs: 1000, jitterRatio: 0 } }
   imageRequestPricing() {}
   imageRequestTarget(_provider, _model, image) { return { width: image.width, height: image.height, maxBytes: image.bytes } }
-  async resolveModel(provider, model) { return (await this.listModels(provider)).find(row => row.id === model) ?? { provider, id: model, name: model, inputModalities: ['text'] } }
+  async resolveModel(provider, model) {
+    const profile = this.profile(provider), models = await this.listModels(provider)
+    const listed = models.find(row => row.id === model)
+    // Native harnesses own model routing (including aliases and image tools).
+    // Missing/stale outer model metadata must not block a supported input type.
+    const acceptsImages = profile.type === 'codex' || profile.protocol === 'codex' || profile.type === 'claude' || models.some(row => row.inputModalities?.includes('image'))
+    return { ...(listed ?? { provider, id: model, name: model }), inputModalities: acceptsImages ? ['text', 'image'] : listed?.inputModalities ?? ['text'] }
+  }
   async prepareCall(provider, model, signal) { return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options) } }
   invalidateModels(provider) { for (const key of this.catalogs.keys()) if (key === provider || key.startsWith(`${provider}:`)) this.catalogs.delete(key) }
   async capabilities(provider, profileOverride, cwd = process.cwd(), modelHint) {
@@ -58,7 +65,7 @@ export class AgentRuntimeAdapter {
               commands.push(...skills.map(skill => ({ name: skill.name, description: skill.description, kind: 'skill', input: { hint: '技能参数或任务' } })))
             } catch (error) { this.stop.signal.throwIfAborted(); this.ctx.logger?.warn('Codex skill discovery failed: %s', error.message) }
           }
-          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: m.inputModalities ?? ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}) })), commands, modes: session.state?.modes?.availableModes ?? [] }
+          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: profile.type === 'codex' || profile.protocol === 'codex' || profile.type === 'claude' ? ['text', 'image'] : m.inputModalities ?? ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}) })), commands, modes: session.state?.modes?.availableModes ?? [] }
         } finally { this.probes.delete(session); await session.close() }
       })().catch(error => { if (this.catalogs.get(key) === task) this.catalogs.delete(key); throw error })
       this.catalogs.set(key, task)
@@ -78,10 +85,11 @@ export class AgentRuntimeAdapter {
     const observed = this.positions.get(agent.session)
     if (observed) return observed
     const position = this.ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
-    if (!position?.lastStepBoundary) throw new Error('external Agent call requires an open dsh step')
+    if (position?.lastStepBoundary?.kind !== 'start') throw new Error('external Agent call requires an open dsh step')
     return { turn: position.lastTurn, step: position.lastStepBoundary.step ?? 1 }
   }
   logCall(agent, callId, name, args) {
+    this.stepPreparers?.get(agent.id)?.()
     const boundary = this.boundary(agent)
     const argumentsJson = JSON.stringify(args ?? {})
     const route = agent.session.requestHeader?.()?.config ?? { provider: profileRoute(this.profiles.binding(agent.id).profile.id), model: 'default' }
@@ -108,6 +116,7 @@ export class AgentRuntimeAdapter {
         return row && row.policy === agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })?.mode ? row.mode : undefined
       },
       commands: commands => { void classifyCommands(commands, binding.profile, agent.session.header.cwd ?? process.cwd()).then(rows => { if (!this.stop.signal.aborted) this.onCommands?.(agent, rows) }).catch(error => this.ctx.logger?.warn('Native command classification failed: %s', error.message)) },
+      continuation: () => queueMicrotask(() => agent.wake?.()),
       collaborationMode: () => agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/collaboration-mode')?.data.enabled,
       tool: async (request, signal) => {
         if (!tools.some(t => t.name === request.tool)) throw new Error('native Agent requested an unadvertised dsh tool')
@@ -158,40 +167,53 @@ export class AgentRuntimeAdapter {
     if (!agent) throw new Error('dsh conversation is not active')
     if (this.busy.has(agent.id)) throw new Error('Agent conversation already has an active native request')
     this.busy.add(agent.id)
+    this.stepPreparers ??= new Map()
+    if (options.prepareStep) this.stepPreparers.set(agent.id, options.prepareStep)
     let runtime, completed = false
     try {
       const profile = this.profile(options.provider)
       const binding = await this.profiles.bind(agent.id, profile.id)
       const seen = new Set(binding.seenInputs)
       const messages = options.messages.filter(m => m.role === 'user' && m.id && !seen.has(m.id))
-      if (!messages.length) throw new Error('No new user input; refusing to replay a native Agent turn')
+      if (!messages.length && !options.nativeContinuation) throw new Error('No new user input; refusing to replay a native Agent turn')
       const human = messages.length === 1 ? humanInput(messages[0]) : undefined
       const match = human && /^\/([a-z][a-z0-9_:-]*)(?:\s|$)/.exec(human)
       const command = match ? { name: match[1], input: human.slice(match[0].length).trim() } : undefined
-      const context = command ? [] : pendingShellContext(agent.session)
-      if (messages.some(message => message.content.some(part => part.type === 'image' && !part.offloaded))) {
-        const model = await this.resolveModel(options.provider, options.model)
-        if (!model.inputModalities.includes('image')) throw new Error('当前模型不支持图片输入，请选择支持图片的模型。')
-      }
+      const context = command || options.nativeContinuation ? [] : pendingShellContext(agent.session)
       const input = await nativeInput([...context, ...messages], { attachments: (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments), codex: profile.type === 'codex' || profile.protocol === 'codex', signal })
       const tools = options.tools ?? []
       runtime = this.live.get(agent.id)
       const autoCompactRevision = profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact')?.seq ?? -1 : -1
       if (runtime && runtime.autoCompactRevision !== autoCompactRevision) { await runtime.close(); this.live.delete(agent.id); runtime = undefined }
       if (runtime?.rpc.closed) { this.live.delete(agent.id); runtime = undefined }
+      if (!runtime && options.nativeContinuation) throw new Error('原生目标连接已关闭，不能重放继续事件。')
       if (!runtime) { runtime = await this.createRuntime(agent, binding, tools, signal); this.live.set(agent.id, runtime) }
       const skillNames = messages.flatMap(message => [...(['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1]))
+      if (command?.name === 'resume') throw new Error('请在 dsh 的 /resume 菜单中选择要恢复的原生会话。')
       if (command && terminalOnlyCommands.has(command.name)) throw new Error(`/${command.name} 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。`)
       // Commit admission before sending. A crash cannot automatically repeat a
       // native turn with potentially irreversible tools; the user may follow up.
       await this.profiles.patchBinding(agent.id, { seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
       if (context.length) appendPluginRecord(agent.session, 'plugin:kode/shell-context-consumed', { ids: context.map(row => row.id) })
       await agent.ctx.parallel('session/flush', agent.session)
-      let text = '', reasoning = '', textIndex, reasoningIndex, nextIndex = 0
+      let text = '', reasoning = '', textIndex, reasoningIndex, textItemId, nextIndex = 0
       const streamed = new Set(), reasoningChannels=new Map()
-      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, signal, command, skillNames })) {
-        this.recordNative(agent.session, { ...this.boundary(agent), event })
+      function* closeSegment() {
+        if (reasoningIndex === undefined && textIndex === undefined) return
+        if (reasoningIndex !== undefined) yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoning } }
+        if (textIndex !== undefined) yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
+        options.onAssistantMessageBoundary?.()
+        text = ''; reasoning = ''; textIndex = undefined; reasoningIndex = undefined; textItemId = undefined
+        if (options.onAssistantMessageBoundary) nextIndex = 0
+      }
+      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, signal, command, skillNames, observe: options.nativeContinuation })) {
         const { method, params } = event
+        if (method === 'turn/started') options.onNativeTurnReady?.()
+        const messageOutput = method === 'item/agentMessage/delta' && params.delta || method === 'item/completed' && params.item?.type === 'agentMessage' && !streamed.has(params.item.id) && params.item.text
+        const thoughtOutput = ['item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(method) && params.delta && (!reasoningChannels.has(params.itemId ?? 'reasoning') || reasoningChannels.get(params.itemId ?? 'reasoning') === method)
+        const toolOutput = params.item && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'imageView', 'collabAgentToolCall'].includes(params.item.type)
+        if (messageOutput || thoughtOutput || toolOutput) options.prepareStep?.()
+        this.recordNative(agent.session, { ...this.boundary(agent), event })
         if (['item/reasoning/summaryTextDelta','item/reasoning/textDelta'].includes(method) && params.delta) {
           const id=params.itemId ?? 'reasoning'
           if(!reasoningChannels.has(id))reasoningChannels.set(id,method)
@@ -204,11 +226,16 @@ export class AgentRuntimeAdapter {
         if (method === 'item/agentMessage/delta') { delta = params.delta; streamed.add(params.itemId) }
         if (method === 'item/completed' && params.item?.type === 'agentMessage' && !streamed.has(params.item.id)) delta = params.item.text
         if (delta) {
+          const itemId = params.itemId ?? params.item?.id
+          if (textIndex !== undefined && itemId && textItemId && itemId !== textItemId) yield* closeSegment()
           if (textIndex === undefined) { textIndex = nextIndex++; yield { type: 'block-start', index: textIndex, blockType: 'text' } }
+          textItemId = itemId
           text += delta; yield { type: 'text-delta', index: textIndex, text: delta }
         }
         const item = params?.item
+        if (method === 'item/completed' && item?.type === 'agentMessage') yield* closeSegment()
         if (item && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'imageView', 'collabAgentToolCall'].includes(item.type)) {
+          yield* closeSegment()
           const callId = runtime.callIdentity(params.turnId, item.id)
           const descriptor=nativeToolDescriptor(item)
           if (method === 'item/started' && !runtime.nativeCalls.has(callId)) { this.logCall(agent, callId, descriptor.name, descriptor.args); runtime.nativeCalls.add(callId) }
@@ -221,13 +248,13 @@ export class AgentRuntimeAdapter {
       }
       for (const callId of runtime.nativeCalls) this.logResult(agent, callId, [{ type: 'text', text: 'The Agent ended its turn without reporting the operation outcome.' }], true)
       runtime.nativeCalls.clear()
-      if (reasoningIndex !== undefined) yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoning } }
-      if (textIndex !== undefined) yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
+      yield* closeSegment()
       await this.profiles.patchBinding(agent.id, { inFlight: null, lastOutcome: 'completed' })
       completed = true
       yield { type: 'finish', reason: { kind: 'stop' } }
     } finally {
       this.busy.delete(agent.id)
+      this.stepPreparers.delete(agent.id)
       if (!completed) {
         if (runtime) {
           await runtime.close(); this.live.delete(agent.id)
@@ -239,6 +266,56 @@ export class AgentRuntimeAdapter {
     }
   }
   async closeSession(id) { const runtime = this.live.get(id); this.live.delete(id); await runtime?.close() }
+  supportsSteering(agent) {
+    const profile = this.profiles.binding(agent.id)?.profile ?? this.profiles.list().find(profile => profileRoute(profile.id) === agent.options?.provider)
+    return Boolean(profile && (profile.type === 'codex' || profile.protocol === 'codex') && !this.live.get(agent.id)?.steeringUnsupported)
+  }
+  canSteer(id) { return this.live.get(id)?.canSteer?.() === true }
+  async steer(agent, message, signal, { admit, accepted }) {
+    const runtime = this.live.get(agent.id)
+    if (!runtime?.canSteer?.()) return { status: 'not-ready' }
+    let input = await nativeInput([message], { codex: true, signal, attachments: agent.ctx.get?.('attachments') ?? this.ctx.get?.('attachments') })
+    const text = ['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : ''
+    const names = [...text.matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1])
+    if (names.length) {
+      const { skills } = await runtime.listSkills(signal)
+      for (const name of new Set(names)) {
+        const matches = skills.filter(skill => skill.name === name)
+        if (matches.length > 1) throw new Error(`技能 ${name} 对应多个路径。`)
+        if (matches.length === 1) input.push({ type: 'skill', name, path: matches[0].path })
+      }
+    }
+    if (!runtime.canSteer() || !await admit()) return { status: 'not-ready' }
+    const binding = this.profiles.binding(agent.id)
+    try { await this.profiles.patchBinding(agent.id, { seenInputs: [...new Set([...(binding.seenInputs ?? []), message.id])], ...(binding.inFlight ? { inFlight: { ...binding.inFlight, inputIds: [...binding.inFlight.inputIds, message.id] } } : {}) }) }
+    catch (error) { return { status: 'rejected', error } }
+    try {
+      const result = await runtime.steer(input, signal)
+      accepted()
+      appendPluginRecord(agent.session, 'plugin:kode/steering', { inputId: message.id, status: 'accepted', nativeTurnId: result.turnId })
+      await agent.ctx.sessions.flush(agent.session)
+      return { status: 'accepted' }
+    } catch (error) {
+      if (error.rpcRejected) {
+        const latest = this.profiles.binding(agent.id)
+        await this.profiles.patchBinding(agent.id, { seenInputs: latest.seenInputs.filter(id => id !== message.id), ...(latest.inFlight ? { inFlight: { ...latest.inFlight, inputIds: latest.inFlight.inputIds.filter(id => id !== message.id) } } : {}) })
+        return { status: 'rejected', error }
+      }
+      accepted()
+      appendPluginRecord(agent.session, 'plugin:kode/steering', { inputId: message.id, status: 'uncertain' })
+      await agent.ctx.sessions.flush(agent.session)
+      return { status: 'uncertain', error }
+    }
+  }
+  hasContinuation(id) { return this.live.get(id)?.hasContinuation?.() ?? false }
+  async controlGoal(agent, input, signal, selection = {}) {
+    const runtime = this.live.get(agent.id)
+    if (!runtime?.goal || runtime.rpc.closed) throw new Error('原生会话尚未就绪，请稍后重试 /goal。')
+    const result = await runtime.goal(input, signal, { model: selection.model, effort: selection.reasoningEffort })
+    appendPluginRecord(agent.session, 'plugin:kode/goal-command', { input, result: result.text })
+    await agent.ctx.sessions.flush(agent.session)
+    return result.text
+  }
   async renameSession(agent, title, signal) {
     const binding = this.profiles.binding(agent.id)
     if (!binding?.threadId || binding.profile.type !== 'codex') return

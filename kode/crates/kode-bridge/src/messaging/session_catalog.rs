@@ -128,7 +128,8 @@ pub(super) async fn federated(hub: Arc<Hub>) -> Result<Value> {
             if let Some(mut tab) = sanitized(row) { tab["endpoint_id"] = row["endpoint_id"].clone(); tabs.push(tab); }
         }
     }
-    let results = futures_util::future::join_all(hub.config.peers.iter().filter_map(|peer| endpoint_for(peer,&endpoints).map(|endpoint| (peer,endpoint))).map(|(peer,endpoint)| {
+    let peers = hub.peers();
+    let results = futures_util::future::join_all(peers.iter().filter_map(|peer| endpoint_for(peer,&endpoints).map(|endpoint| (peer,endpoint))).map(|(peer,endpoint)| {
         let hub = &hub;
         async move { (endpoint,tokio::time::timeout(std::time::Duration::from_secs(3),read_node(hub,&peer.node_id)).await) }
     })).await;

@@ -9,7 +9,7 @@ function backend(){
 }
 test('removed Agent tabs can pin, archive and unarchive without an adapter, transcript import or runtime',async()=>{
  const client=backend(),calls=[]
- const ctx={get:name=>name==='workspaceRegistry'?{archivedSessionIds:[],pinnedSessionIds:[],list:()=>[{id:'project',title:'Project',path:'/srv/project',sessionIds:[]}]}:undefined,sessionController:{list:async()=>({items:[]}),resolveAgent:()=>{throw new Error('must not resume')}}}
+ const ctx={get:function(name){if(name==='sessionController')return this.sessionController;return name==='workspaceRegistry'?{archivedSessionIds:[],pinnedSessionIds:[],list:()=>[{id:'project',title:'Project',path:'/srv/project',sessionIds:[]}]}:undefined},sessionController:{list:async()=>({items:[]}),resolveAgent:()=>{throw new Error('must not resume')}}}
  const input={nativeSession:{backend_key:tab.backend_key,session_id:tab.session_id},args:{sessionId:'saved:example'}}
  for(const operation of ['pin-session','archive-session'])await hostOperation(ctx,{...input,operation},{backendClient:client})
  const id=importedSessionId(tab)
@@ -26,4 +26,17 @@ test('removed Agent tabs can pin, archive and unarchive without an adapter, tran
  assert.deepEqual(client.documents.workspaces.global.archivedSessionIds,[],'changing a legacy avatar must not alter archive state')
  await assert.rejects(savedSessionOperation(client,{...input,nativeSession:{backend_key:'another-host',session_id:tab.session_id},operation:'archive-session'}),/当前主机没有/)
  assert.deepEqual(calls,[])
+})
+
+import { savedSessionTime, savedImportIdentity } from '../src/saved-session-state.js'
+test('missing saved timestamps are unknown rather than epoch; valid UUIDv7 supplies its creation time',()=>{
+ assert.equal(savedSessionTime({updatedAt:0,session_id:'legacy-id'}),null)
+ assert.equal(savedSessionTime({updated_at:1700000000}),1700000000000)
+ assert.equal(savedSessionTime({created_at:'2024-01-01T00:00:00Z'}),Date.parse('2024-01-01T00:00:00Z'))
+ const id='01900000-0000-7000-8000-000000000001';assert.equal(savedSessionTime({session_id:id}),parseInt('019000000000',16))
+ assert.equal(savedSessionTime({session_id:'01900000-0000-4000-8000-000000000001'}),null)
+})
+test('registered saved IDs are preserved rather than replaced with a newly derived hash',()=>{
+ assert.equal(savedImportIdentity({session_id:'thread',backend_key:'codex',dsh_session_id:'registered'},'p',{}),'registered')
+ assert.equal(savedImportIdentity({session_id:'thread',backend_key:'codex'},'p',{'other-profile':{threadId:'thread',profile:{id:'other'}},'matching':{threadId:'thread',profile:{id:'p'}}}),'matching')
 })

@@ -1,11 +1,13 @@
 /** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
 import { BackendDocument } from './backend-state.js'
-import { importedSessionId, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
+import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
+const sessionController = ctx => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用；工作区配置仍保留，请先恢复会话服务。'); return value }
 export const DIRECTORY_PATH = '/api/kode/host-directory'
 export async function hostDirectory(ctx, config = {}) {
   const registry = ctx.get('workspaceRegistry')
   if (!registry) throw new Error('工作区服务尚未就绪。')
-  const { items } = await ctx.sessionController.list({})
+  const controller = sessionController(ctx)
+  const { items } = await controller.list({})
   const runtime = ctx.get('kodeAgents'), profiles = runtime?.profiles
   const presentation = profile => { const view = runtime?.appearance?.profileView(profile) ?? profile; return { id: view.id, name: view.name, type: view.type, ...(view.avatar ? { avatar: view.avatar } : {}) } }
   const hiddenSessionIds = []
@@ -30,14 +32,14 @@ export async function hostDirectory(ctx, config = {}) {
     if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
     for (const tab of localSavedTabs(index)) {
       const adopted = tab.dsh_session_id ?? importedSessionId(tab)
-      if (sessions.some(row => row.id === adopted)) continue
+      if (sessions.some(row => row.id === adopted || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))) continue
       const id = savedDirectoryId(node.node_id, tab)
       const profileId = tab.agent_id ?? Object.keys(profiles?.sharedState?.desktop_ids ?? {}).find(id => profiles.sharedState.desktop_ids[id] === tab.backend_key)
       const profile = profiles?.list().find(profile => profile.id === profileId)
       const agent = profile ? presentation(profile) : { id: profileId ?? tab.backend_key, name: tab.backend_key, type: 'custom' }
       if (runtime?.appearance) agent.avatar = runtime.appearance.avatarForSession(adopted, agent.type, index, agent.id)
       else if (tab.avatar_id) agent.avatar = { id: tab.avatar_id, url: `/api/kode/avatars/media?avatar=${encodeURIComponent(tab.avatar_id)}&state=idle` }
-      sessions.push({ id, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: 0, running: false, nativeThreadId: tab.session_id, savedTab: tab, agent })
+      sessions.push({ id, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: savedSessionTime(tab), running: false, nativeThreadId: tab.session_id, savedTab: tab, agent })
       const workspace = result.workspaces.find(workspace => workspace.path === tab.cwd)
       if (workspace) workspace.sessionIds.push(id)
       if (result.archivedSessionIds.includes(adopted)) result.archivedSessionIds.push(id)
@@ -55,12 +57,12 @@ export async function hostOperation(ctx, input, config = {}) {
   if (input.operation === 'session-avatar') {
     const appearance = ctx.get('kodeAgents')?.appearance
     if (!appearance) throw new Error('会话头像服务尚未就绪。')
-    const known = ctx.get('agents')?.get(args.sessionId) || (await ctx.sessionController.list({})).items.some(row => row.sessionId === args.sessionId)
+    const known = ctx.get('agents')?.get(args.sessionId) || (await sessionController(ctx).list({})).items.some(row => row.sessionId === args.sessionId)
     if (!known) throw new Error('会话不存在，请刷新列表。')
     return appearance.setSession(args.sessionId, args.avatarId ?? null)
   }
   const allowed = { 'rename-workspace': 'rename', 'delete-workspace': 'delete', 'reorder-workspace': 'insertBefore', 'archive-session': 'archiveSession', 'unarchive-session': 'unarchiveSession', 'pin-session': 'pinSession', 'unpin-session': 'unpinSession' }
-  if (input.operation === 'rename-session') return ctx.sessionController.rename({ sessionId: args.sessionId, title: args.title })
+  if (input.operation === 'rename-session') return sessionController(ctx).rename({ sessionId: args.sessionId, title: args.title })
   if (!Object.hasOwn(allowed, input.operation)) throw new Error('未知目录操作。')
   const controller = ctx.get('workspaceController')
   if (!controller) throw new Error('工作区服务尚未就绪。')

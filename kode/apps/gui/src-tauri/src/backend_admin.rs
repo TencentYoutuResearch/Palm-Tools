@@ -1,20 +1,8 @@
-//! Backend 管理 tauri commands(2026-06)。
+//! Desktop Agent management and local CLI discovery.
 //!
-//! 三个职责:
-//!
-//! 1. **CRUD on `~/.config/kode/config.toml`**:`backend_save` / `backend_delete`
-//!    用 `toml_edit` 做 read-modify-write,保留用户的注释和顺序(普通 toml crate
-//!    走 parse-then-stringify 会丢这些)。
-//!
-//! 2. **自动探测内置已知 CLI**:`detect_known_backends` 在 PATH 上扫一遍写死的
-//!    candidate 列表(codebuddy / claude / claude-internal / codex),命中的返回
-//!    `DetectedBackend`,前端用来弹「检测到 X,要加吗?」对话框。
-//!    **范围被刻意限制**(不扫所有 PATH 上跑得了 `mcp add` 的工具) —— 用户已经
-//!    答复:false-positive 太烦,不要那条路。
-//!
-//! 3. **变更通知**:写盘后 emit `backends-changed`(payload 空),同时更新运行时
-//!    backend snapshot,前端可以立即重新拉 `list_backends`。`ctx.config` 仍保留
-//!    启动时的其他全局配置,backend CRUD 走独立的可刷新 snapshot。
+//! Agent CRUD uses the same backend registry as dsh. TOML helpers remain for
+//! legacy CLI detection/migration; they no longer own Agent edits. Successful
+//! changes refresh the runtime snapshot and emit `backends-changed`.
 
 use std::path::PathBuf;
 
@@ -292,8 +280,7 @@ impl BackendSaveRequest {
     }
 }
 
-/// 创建 / 更新 backend 配置。read-modify-write `~/.config/kode/config.toml`,
-/// 用 `toml_edit` 保留用户已有注释和其他配置项。失败时不写文件。
+/// Create/update an Agent through the shared registry.
 ///
 /// 写盘后同步运行时 backend snapshot 并 emit `backends-changed`,新 tab 无需重启即可使用。
 #[tauri::command]
@@ -418,33 +405,6 @@ pub fn resolve_pending_enabled(state: &State<'_, AppState>) -> Result<bool, Stri
     Ok(changed)
 }
 
-/// 读 config.toml,返回每个 backend key 的 `enabled` 字段实时值(文件没写过该字段 → None)。
-/// 命令层(`list_backends` / `list_all_backends`)用它覆盖冷快照,这样开关 / 探测落地
-/// 写盘后**当前进程立刻反映正确状态**,无需重启。文件 / 解析失败 → 空 map(回落冷快照)。
-pub fn read_enabled_overrides(
-    state: &State<'_, AppState>,
-) -> std::collections::HashMap<String, bool> {
-    let mut out = std::collections::HashMap::new();
-    let path = match config_toml_path(state) {
-        Ok(p) => p,
-        Err(_) => return out,
-    };
-    let doc = match load_or_init_doc(&path) {
-        Ok(d) => d,
-        Err(_) => return out,
-    };
-    if let Some(backends) = doc.get("backends").and_then(|i| i.as_table()) {
-        for (key, item) in backends.iter() {
-            if let Some(t) = item.as_table() {
-                if let Some(b) = t.get("enabled").and_then(|v| v.as_bool()) {
-                    out.insert(key.to_string(), b);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// 解析当前生效的 config.toml 路径。优先级和 `Config::load` 一致:
 ///   1. AppState.ctx.config_path 的 override(用户在 PathsBanner 设过)
 ///   2. dirs::config_dir()/kode/config.toml
@@ -499,6 +459,7 @@ fn upsert_backend_table(doc: &mut DocumentMut, key: &str, backend: &BackendConfi
     // 字段顺序固定为 command → args → 选项,跟 BackendConfig struct 一致便于人读。
     let mut t = Table::new();
     t.insert("command", value(backend.command.as_str()));
+    if let Some(protocol)=&backend.protocol { t.insert("protocol",value(protocol.as_str())); }
 
     let mut args_arr = Array::new();
     for a in &backend.args {

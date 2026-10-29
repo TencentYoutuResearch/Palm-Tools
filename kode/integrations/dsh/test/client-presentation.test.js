@@ -16,7 +16,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: value => [typeof value === 'function' ? value() : value, () => {}],
-    useEffect(fn) { fn() }, useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (subscribe, get) => { subscribe(() => {}); return get() },
+    useEffect(fn) { fn() }, useRef: value => ({ current: value }), useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (subscribe, get) => { subscribe(() => {}); return get() },
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
   vm.runInNewContext(source, { window: { ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
@@ -45,7 +45,7 @@ function visibleText(node) {
   if(typeof node==='string' || typeof node==='number')return String(node)
   if(Array.isArray(node))return node.map(visibleText).join(' ')
   if(typeof node.type==='function')return visibleText(node.type(node.props))
-  return (node.type==='MarkdownText'?node.props.text:'')+' '+visibleText(node.children)
+  return (node.type==='MarkdownText'?node.props.text:node.type==='TerminalBlock'?[node.props.command,node.props.output].filter(Boolean).join('\n'):'')+' '+visibleText(node.children)
 }
 test('inline native citations split line suffixes before entering the shipped file preview',async()=>{
  const c=client(),calls=[],children=c.chatShell.children,store=c.chatShell.store
@@ -76,11 +76,11 @@ test('optional command decoration metadata cannot close the native / menu and wa
  const rows=await commands.candidates({sessionId:'example'},{query:''})
  assert.equal(readAfterAdmission,true);assert.equal(rows.length,1);assert.equal(rows[0].name,'model');assert.equal(typeof rows[0].icon,'function')
 })
-test('console fences in native tool results use the shipped Markdown code renderer',()=>{
+test('native command details reuse the shipped terminal renderer without altering output',()=>{
  const c=client(),render=c.entry('tool.call.toolview','exec_command'),text='```console\n$ pwd\n/srv/project\n```'
  const tree=render({toolName:'exec_command',phase:'result',block:{args:{text:key=>key==='cmd'?'pwd':undefined},content:[{type:'text',text}]},useDisclosure:()=>({expanded:true,setExpanded:()=>{}})})
- const output=tree.children.at(-1),rendered=output.type(output.props),code=rendered.children[0]
- assert.equal(code.props.className,'kode-console-output');assert.equal(code.children[0].type,'MarkdownText');assert.equal(code.children[0].props.text,text);assert.equal(code.children[0].props.labels.code.copyLabel,'复制')
+ const output=tree.children.at(-1)
+ assert.equal(output.type,'TerminalBlock');assert.equal(output.props.command,'pwd');assert.equal(output.props.output,text);assert.equal(output.props.labels.copy,'复制');assert.equal(output.props.runStateDot,false)
 })
 test('$ uses the same native trigger controller for layout, scrolling and guarded namespaced skill insertion',async()=>{
  const calls=[],sources=[],controller={track(...args){calls.push(['track',...args])},toggleSource(name,hit){calls.push(['toggle',name,hit])},dismiss(){calls.push(['dismiss'])}}
@@ -100,7 +100,7 @@ test('ACP operations render nested command input and old completed metadata inst
  const values={title:'Terminal',kind:'execute',input:{command:'git status --short'}}
  const tree=render({toolName:'kode_native_commandExecution',phase:'result',block:{args:{text:key=>typeof values[key]==='string'?values[key]:undefined,value:key=>typeof values[key]==='object'?values[key]:undefined},content:[{type:'text',text:JSON.stringify({input:{command:'git status --short'},aggregatedOutput:' M app.ts'})}]},useDisclosure:()=>({expanded:true,setExpanded:()=>{}})})
  const visible=visibleText(tree)
- assert.match(visible,/执行命令/);assert.match(visible,/git status --short/);assert.match(visible,/ M app.ts/);assert.doesNotMatch(visible,/Agent 操作|Terminal|aggregatedOutput/)
+ assert.match(visible,/已执行/);assert.match(visible,/git status --short/);assert.match(visible,/ M app.ts/);assert.doesNotMatch(visible,/Agent 操作|Terminal|aggregatedOutput/)
 })
 test('subagent notifications show named status and Markdown without protocol IDs or raw controls',()=>{
   const c=client(),text='<subagent_notification>\n'+JSON.stringify({agent_path:'agent-secret-id',nickname:'评审助手',status:{completed:'**检查完成**\n\n发现两项需要修复的问题。'}})+'\n</subagent_notification>'
@@ -228,12 +228,12 @@ test('native command cards describe the command and outcome instead of protocol 
  for(const name of ['exec_command','kode_native_commandExecution']){
   const render=c.entry('tool.call.toolview',name)
   const tree=render({toolName:name,phase:'result',block:{args:{text:key=>({command:'pwd',type:'commandExecution',id:'private-item-id'})[key]},content:[{type:'text',text:'/srv/project'}]},useDisclosure:()=>({expanded:true,setExpanded(){}})})
-  assert.match(visibleText(tree),/执行命令[\s\S]*已完成[\s\S]*pwd[\s\S]*\/srv\/project/)
+  assert.match(visibleText(tree),/已执行[\s\S]*pwd[\s\S]*\/srv\/project/)
   assert.doesNotMatch(visibleText(tree),/commandExecution|private-item-id|kode_native|查看原文/)
  }
  const render=c.entry('tool.call.toolview','exec_command')
  const pending=render({toolName:'exec_command',phase:'call',block:{args:{text:key=>key==='cmd'?'git status':undefined}},useDisclosure:()=>({expanded:false,setExpanded(){}})})
- assert.match(visibleText(pending),/运行中/);assert.doesNotMatch(visibleText(pending),/已完成/)
+ assert.match(visibleText(pending),/正在执行/);assert.doesNotMatch(visibleText(pending),/已执行/)
 })
 
 test('workspace menu reads the bound native source and adopts the picked directory', async () => {
@@ -255,36 +255,19 @@ test('workspace menu reads the bound native source and adopts the picked directo
 test('Agent list keeps editors collapsed until requested', () => {
   const c = client(), render = c.entry('settings.section')
   const tree = render({ sessions: c.ctx.sessions })
-  assert.match(JSON.stringify(tree), /编辑 DeepSeek Harness|添加 Agent/)
-  assert.doesNotMatch(JSON.stringify(tree), /kode-agent-form|type.:.password/)
+  assert.match(JSON.stringify(tree), /配置主机/)
+  const body = tree.children.find(child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
+  assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
+  assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
 
-test('official settings navigation and model editor remain unwrapped', () => {
+test('official settings shell, model navigation and plugin inventory remain untouched', () => {
   const c = client()
   assert.equal(c.shell.component, c.native)
-})
-
-test('unified workspace tree reuses the native renderer and namespaces foreign session identities', async () => {
-  const c = client({ current: 'local', hosts: [
-    { id: 'local', name: '此计算机', hiddenSessionIds: ['dsh-history'] },
-    { id: 'build', name: 'Build server', status: 'online', sessions: [{ id: 'same-id', title: 'Remote title', updatedAt: 2 }], workspaces: [{ id: 'same-workspace', title: 'Remote project', path: '/remote/project', sessionIds: ['same-id'] }] },
-  ] })
-  const local = { ids: ['same-id', 'dsh-history'], byId: { 'same-id': { id: 'same-id', title: 'Local title' }, 'dsh-history': { id: 'dsh-history' } }, projectionsBySession: {} }
-  const props = { wide: true, useSessions: select => select(local), useWorkspaces: select => select({ items: [{ workspaceId: 'same-workspace', title: 'Local project', sessionIds: ['same-id'] }], archivedSessionIds: [], pinnedSessionIds: [] }) }
-  const wrapper = c.workspaceShell.component(props)
-  wrapper.type(wrapper.props)
-  await new Promise(resolve => setImmediate(resolve))
-  const tree = wrapper.type(wrapper.props)
-  const native = tree.children.find(child => child?.type === c.native)
-  assert.ok(native, 'both hosts use the original workspace tree')
-  const merged = native.props.useSessions(s => s)
-  assert.equal(merged.byId['same-id'].title, 'Local title')
-  assert.equal(merged.byId['kode-host:build/same-id'].title, 'Remote title')
-  assert.equal(merged.byId['dsh-history'], undefined)
-  assert.ok(local.byId['dsh-history'], 'hiding must not mutate history')
-  assert.deepEqual(Array.from(native.props.useWorkspaces(s => s.items), w => w.workspaceId), ['same-workspace', 'kode-host:build/same-workspace'])
+  assert.equal(c.shell.locale, 'settings')
+  assert.ok(c.shell.children['settings.section'])
   for (const dispose of c.disposers) dispose()
-  assert.equal(c.workspaceShell.component, c.native)
+  assert.equal(c.shell.component, c.native)
 })
 
 test('cross-host arrival waits for both catalogs and binds subscriptions before cancelling draft restoration', () => {
@@ -346,4 +329,105 @@ test('/resume filters by execution host and Agent and retains original native id
   assert.deepEqual(Array.from(context.resumeCandidates(hosts, target), row => row.id), ['recent', 'saved:old'])
   assert.equal(context.resumeCandidates(hosts, target, 'native-saved:old')[0].nativeThreadId, 'native-saved:old')
   assert.equal(context.resumeCandidates(hosts, { ...target, hostId: 'missing' }).length, 0)
+})
+
+test('directory browsing keeps injected callbacks stable across unrelated rerenders but renews them for a new Host', () => {
+  const context = { URL, window: { __ModuleLoader__: { load() {} } } }
+  vm.runInNewContext(source, context)
+  let injected = 0
+  const entry = { inject() { injected++; return { listDirectory() {} } } }
+  const initial = context.stableDirectoryBindings(entry, 'ssh-one')
+  for (let i = 0; i < 5; i++) assert.equal(context.stableDirectoryBindings(entry, 'ssh-one').listDirectory, initial.listDirectory)
+  assert.equal(injected, 1)
+  assert.notEqual(context.stableDirectoryBindings(entry, 'ssh-two').listDirectory, initial.listDirectory)
+  assert.equal(injected, 2)
+})
+
+test('remote Agent configuration and default writes stay on the selected Host without changing the active workspace', async () => {
+ const calls=[],agents={profiles:[{id:'remote-codex',name:'Remote Codex',type:'codex',executable:'codex'}],types:{codex:{name:'Codex'}},selection:{provider:'kode-agent-remote-codex',model:'default'},configuredDefaultProfileId:'remote-codex'}
+ const transport={current:'local',subscribe:()=>()=>{},path:url=>url,select:()=>{throw new Error('settings must not switch execution Host')},fetch:async(url,options,host)=>{calls.push({url,host,body:options?.body&&JSON.parse(options.body)});return{ok:true,json:async()=>url.includes('/settings/')?{result:{ok:true,value:{}}}:agents}}}
+ const c=client(undefined,{}, {kodeTransport:transport})
+ const outer=c.entry('settings.section')({sessions:c.ctx.sessions,slots:c.ctx.slots})
+ const component=outer.children.find(node=>node?.props?.settingsHost).type
+ component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
+ await new Promise(resolve=>setImmediate(resolve))
+ const body=component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
+ const selector=body.children.find(node=>node?.props?.label==='默认 Agent')
+ assert.equal(selector.props.value,'remote-codex')
+ selector.props.onChange('remote-codex')
+ await new Promise(resolve=>setImmediate(resolve))
+ const mutation=calls.find(row=>row.body?.method==='settings/mutate')
+ assert.equal(mutation.host,'ssh-test');assert.equal(mutation.body.payload.args.ns,'agent-default-model')
+ assert.equal(mutation.body.payload.args.ops.find(op=>op.path[0]==='provider').value,'kode-agent-remote-codex')
+ assert.ok(calls.some(row=>row.url.includes('configuration=1')&&row.host==='ssh-test'))
+ assert.equal(transport.current,'local');assert.ok(!calls.some(row=>row.body?.action==='select'))
+})
+
+test('file-change headings use file identities, never a unified-diff hunk', () => {
+ const scope={window:{__ModuleLoader__:{load(){}}}};vm.runInNewContext(source,scope)
+ assert.equal(scope.changedFileSummary({changes:[{path:'src/app.js',diff:'@@ -1 +1 @@\n-old\n+new'}],patch:'@@ -1 +1 @@'}),'src/app.js')
+ assert.equal(scope.changedFileSummary({changes:[{path:'a.js'},{path:'b.js'}]}),'a.js 等 2 个文件')
+ assert.equal(scope.changedFileSummary({patch:'*** Begin Patch\n*** Update File: src/app.js\n@@\n-old\n+new\n*** End Patch'}),'src/app.js')
+ assert.equal(scope.changedFileSummary({patch:'@@ -1 +1 @@\n-old\n+new'}),'文件')
+})
+test('plain-text missing routes show a connection error instead of leaking a JSON parser exception',async()=>{
+ const scope={window:{__ModuleLoader__:{load(){}}}};vm.runInNewContext(source,scope)
+ await assert.rejects(scope.parseHostJson({status:404,json:async()=>{throw new SyntaxError('Unexpected token o')}}),/接口不存在.*404/)
+ await assert.rejects(scope.parseHostJson({status:502,json:async()=>{throw new SyntaxError('Unexpected token o')}}),/无效响应.*502/)
+})
+
+test('avatar animation subscribes to native running and interaction facts independently of sidebar refresh',()=>{
+ const states=new Map([['running',{running:true}],['awaiting',{running:true,pendingInteraction:{kind:'approval'}}],['idle',{running:false}]])
+ const statusSource={subscribe:()=>()=>{},getSnapshot:()=>states}
+ const scope={avatarContext:{get:name=>name==='uiSession'?{sessionStatus:statusSource}:undefined},useSyncExternalStore:(_subscribe,getSnapshot)=>getSnapshot()}
+ vm.runInNewContext(source.slice(source.indexOf('  const emptyAvatarStatuses'),source.indexOf('  function AgentAvatar')),scope)
+ assert.equal(scope.useAvatarStatus('running'),'running');assert.equal(scope.useAvatarStatus('awaiting'),'awaiting');assert.equal(scope.useAvatarStatus('idle'),'idle');assert.equal(scope.useAvatarStatus('not-loaded'),undefined)
+ scope.avatarContext.sessions={list:{subscribe:()=>()=>{},getSnapshot:()=>({byId:{'not-loaded':{running:true}}})}}
+ assert.equal(scope.useAvatarStatus('not-loaded'),'running','cold artwork directories must not delay the native running state')
+})
+
+test('the sidebar status overlay preserves animated avatars while retaining its native running and completion signals',()=>{
+ const h=(type,props,...children)=>({type,props,children}),scope={React:{Fragment:'fragment'},h,AgentAvatar:'avatar',createPortal:element=>element,useState:()=>[[{id:'busy',seat:{},state:'ongoing'},{id:'done',seat:{},state:'done'}],()=>{}],useEffect:()=>{}}
+ vm.runInNewContext(source.slice(source.indexOf('  function SessionStatusAvatars'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
+ const tree=scope.SessionStatusAvatars({root:{current:null},rows:{busy:{agent:{type:'codex',avatar:{id:'gallery/person'}}},done:{agent:{type:'codex',avatar:{id:'gallery/person'}}}}})
+ const avatars=tree.children.map(overlay=>overlay.children[0].children[0])
+ assert.deepEqual(avatars.map(avatar=>avatar.props.status),['running','idle'])
+ assert.ok(avatars.every(avatar=>avatar.props.profile.avatar.id==='gallery/person'))
+})
+
+test('avatar and background generation each open a dedicated named session without editing or submitting the source draft',async()=>{
+ const created=[],selected=[],renamed=[],opened=[],drafts=new Map([['source','unfinished original draft']]),focused=[],requests=[]
+ const sourceData={currentProfile:{id:'work-codex'},selection:{model:'model-x',reasoningEffort:'high'}}
+ let next=0
+ const input={requestDraftInitialization(binding,options){drafts.set(binding.id,options.prompt);return'applied'},for:ctx=>({focus:()=>focused.push(ctx.id)})}
+ const sessions={list:{getSnapshot:()=>({byId:{source:{id:'source',cwd:'/project',retainedBy:{mainView:1}}}})},create:async options=>{created.push(options);return`artwork-${++next}`},binding:id=>({id,ctx:{id,get:()=>({input})}})}
+ const scope={avatarContext:{sessions,get:name=>name==='uiWorkspace'?{openSession:async id=>opened.push(id)}:name==='workspaces'?{list:{getSnapshot:()=>({items:[{workspaceId:'project-workspace',sessionIds:['source']}]})}}:undefined},transport:{current:'local'},directory:()=>({getSnapshot:()=>({data:sourceData})}),fetchHost:async url=>{requests.push(url);return{ok:true,json:async()=>({prompt:url.includes('mode=background')?'background prompt':'avatar and background prompt'})}},parseHostJson:response=>response.json(),call:async body=>selected.push(body),projectCall:async body=>renamed.push(body),refreshWorkspaceDirectory:async()=>{},requestAnimationFrame:fn=>fn()}
+ vm.runInNewContext(source.slice(source.indexOf('  async function stageAvatarPrompt'),source.indexOf('  function ConversationBackground')),scope)
+ await scope.stageAvatarPrompt('source','local',false)
+ await scope.stageAvatarPrompt('source','local',true,'gallery/person')
+ assert.deepEqual(opened,['artwork-1','artwork-2']);assert.deepEqual(focused,opened)
+ assert.equal(drafts.get('source'),'unfinished original draft')
+ assert.equal(drafts.get('artwork-1'),'avatar and background prompt');assert.equal(drafts.get('artwork-2'),'background prompt')
+ assert.deepEqual(selected.map(row=>[row.sessionId,row.profileId,row.model,row.reasoningEffort]),[['artwork-1','work-codex','model-x','high'],['artwork-2','work-codex','model-x','high']])
+ assert.deepEqual(created.map(row=>row.workspaceId),['project-workspace','project-workspace'])
+ assert.deepEqual(renamed.map(row=>row.args.title),['生成头像与背景','生成头像背景'])
+ assert.ok(requests[1].includes('mode=background&avatar=gallery%2Fperson'))
+})
+
+test('avatar drafts preview without persistence, confirm explicitly, and retain failed saves for retry',async()=>{
+ const state=[],chosen=[],preferences=[],cancelled=[];let cursor=0,fail=true
+ const scope={h:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity)}),useState:initial=>{const index=cursor++;if(!(index in state))state[index]=initial;return[state[index],value=>{state[index]=value}]},useEffect:()=>{},useAvatarLibrary:()=>({loaded:true,avatars:[{id:'b',name:'Beta',background:'/b.png'}],error:''}),useBackgroundPreference:()=>[true,value=>preferences.push(value)],loadAvatars:async()=>{},AgentAvatar:'avatar',Button:'button',Failure:'failure',IconPlusOutlineRegular:'plus',IconEditOutlineRegular:'edit',transport:{current:'local',path:value=>value}}
+ vm.runInNewContext(source.slice(source.indexOf('  function AvatarChoices('),source.indexOf('  function AgentIdentity')),scope)
+ const render=()=>{cursor=0;return scope.AvatarChoices({profile:{avatar:null},onCancel:()=>cancelled.push(true),onChoose:async id=>{chosen.push(id);if(fail)throw new Error('save unavailable')}})}
+ const nodes=root=>[root,...root.children.filter(child=>child&&typeof child==='object').flatMap(nodes)]
+ nodes(render()).find(node=>node.props.title==='Beta').props.onClick()
+ assert.equal(nodes(render()).find(node=>node.type==='img').props.src,'/b.png')
+ nodes(render()).find(node=>node.type==='input').props.onChange({target:{checked:false}})
+ nodes(render()).find(node=>node.children.includes('取消')).props.onClick()
+ assert.deepEqual(chosen,[]);assert.deepEqual(preferences,[]);assert.equal(cancelled.length,1)
+ nodes(render()).find(node=>node.children.includes('确认应用')).props.onClick();await new Promise(resolve=>setImmediate(resolve))
+ assert.deepEqual(preferences,[]);assert.equal(nodes(render()).find(node=>node.type==='failure').props.text,'save unavailable')
+ assert.equal(nodes(render()).find(node=>node.props.title==='Beta').props['aria-pressed'],true)
+ fail=false;nodes(render()).find(node=>node.children.includes('确认应用')).props.onClick();await new Promise(resolve=>setImmediate(resolve))
+ assert.deepEqual(chosen,['b','b']);assert.deepEqual(preferences,[false])
 })

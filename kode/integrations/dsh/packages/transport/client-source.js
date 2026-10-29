@@ -1,6 +1,8 @@
 import { installConnection } from '@deepseek-ai/dsh-client-connection/client'
 import { waitForSessionService } from './readiness.js'
 import { fetchWithLocalAppearance } from './preferences.js'
+import { showConnectionProgress } from './connection-progress.js'
+import { openSessionTarget } from './navigation.js'
 export const inject = []
 export async function apply(ctx) {
   const startup=new AbortController()
@@ -45,6 +47,7 @@ export async function apply(ctx) {
       navigation = new AbortController()
       const signal = navigation.signal
       if (host !== current) {
+        const hideProgress = showConnectionProgress(host === 'local' ? '正在返回此计算机…' : '正在连接 SSH 主机…')
         switching = true; publish()
         const previousHost = current
         try {
@@ -59,25 +62,26 @@ export async function apply(ctx) {
           current = host; revision++; publish()
           const connectionReady = ready(generation, signal)
           ctx.connection.reconnect(); await connectionReady
-          await sessions.refresh()
+          await ctx.get('sessions').refresh()
           await new Promise((resolve, reject) => {
             let unsubscribe = () => {}
             const timer = setTimeout(() => { unsubscribe(); reject(new Error('工作区目录读取超时。')) }, 15000)
-            const check = () => { if (workspaces.list.getSnapshot().phase === 'ready') { unsubscribe(); clearTimeout(timer); resolve() } }
-            unsubscribe = workspaces.list.subscribe(check); check()
+            const currentWorkspaces = ctx.get('workspaces')
+            const check = () => { if (currentWorkspaces.list.getSnapshot().phase === 'ready') { unsubscribe(); clearTimeout(timer); resolve() } }
+            unsubscribe = currentWorkspaces.list.subscribe(check); check()
           })
         } catch (error) {
           if (current !== previousHost) { current = previousHost; revision++; publish(); ctx.connection.reconnect() }
           throw error
-        } finally { switching = false; publish() }
+        } finally { hideProgress(); switching = false; publish() }
       }
       signal.throwIfAborted()
-      if (target.sessionId) ui.openSession(target.sessionId)
-      else if (target.workspaceId) await ui.openWorkspace(target.workspaceId)
+      if (target.sessionId) await openSessionTarget(ctx, target, signal)
+      else if (target.workspaceId) await ctx.get('uiWorkspace').openWorkspace(target.workspaceId)
       else if (target.create) window.dispatchEvent(new CustomEvent('kode-create-project', { detail: { name: target.name ?? '' } }))
       else {
-        const workspace = workspaces.list.getSnapshot().items[0]
-        if (workspace) await ui.openWorkspace(workspace.workspaceId)
+        const workspace = ctx.get('workspaces').list.getSnapshot().items[0]
+        if (workspace) await ctx.get('uiWorkspace').openWorkspace(workspace.workspaceId)
       }
     },
   }

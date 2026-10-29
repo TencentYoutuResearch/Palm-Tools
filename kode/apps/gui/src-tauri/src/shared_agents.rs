@@ -12,31 +12,81 @@ pub async fn change(state: &AppState, command: Value) -> Result<Catalog, String>
 }
 
 async fn request(state: &AppState, command: Option<Value>) -> Result<Catalog, String> {
-    let (client, url, token) = crate::workbench_state::connection().await.map_err(|error| error.to_string())?;
-    let url = format!("{}/agents", url.trim_end_matches("/documents/session-index"));
-    let request = match command { Some(command) => client.post(url).json(&command), None => client.get(url) };
-    let response = request.bearer_auth(token).send().await.map_err(|error| error.to_string())?;
-    if !response.status().is_success() { return Err(format!("Agent registry rejected the request: {}", response.text().await.unwrap_or_default())); }
+    let (client, url, token) = crate::workbench_state::connection()
+        .await
+        .map_err(|error| error.to_string())?;
+    let url = format!(
+        "{}/agents",
+        url.trim_end_matches("/documents/session-index")
+    );
+    let request = match command {
+        Some(command) => client.post(url).json(&command),
+        None => client.get(url),
+    };
+    let response = request
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Agent registry rejected the request: {}",
+            response.text().await.unwrap_or_default()
+        ));
+    }
     let catalog: Catalog = response.json().await.map_err(|error| error.to_string())?;
     *state.ctx.backend_configs.write() = catalog.backends.clone();
     *state.protocol_ctx.agent_backends.write() = Some(catalog.clone());
     Ok(catalog)
 }
 
-pub async fn configuration(key: &str, thread: Option<&str>) -> Result<kode_core::BackendConfig, String> {
-    let (client,url,token)=crate::workbench_state::connection().await.map_err(|error|error.to_string())?;
-    let url=format!("{}/agents",url.trim_end_matches("/documents/session-index"));
-    let catalog: Catalog=client.get(url).bearer_auth(token).send().await.map_err(|error|error.to_string())?.error_for_status().map_err(|error|error.to_string())?.json().await.map_err(|error|error.to_string())?;
-    kode_bridge::messaging::agents::resolve(&catalog,key,thread).map_err(|error|error.to_string())
+pub async fn configuration(
+    key: &str,
+    thread: Option<&str>,
+) -> Result<kode_core::BackendConfig, String> {
+    let (client, url, token) = crate::workbench_state::connection()
+        .await
+        .map_err(|error| error.to_string())?;
+    let url = format!(
+        "{}/agents",
+        url.trim_end_matches("/documents/session-index")
+    );
+    let catalog: Catalog = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())?;
+    kode_bridge::messaging::agents::resolve(&catalog, key, thread)
+        .map_err(|error| error.to_string())
 }
 
 pub async fn bind_native(commands: Vec<Value>) -> Result<(), String> {
-    if commands.is_empty() { return Ok(()); }
-    let (client,url,token)=crate::workbench_state::connection().await.map_err(|error|error.to_string())?;
-    let url=format!("{}/agents",url.trim_end_matches("/documents/session-index"));
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let (client, url, token) = crate::workbench_state::connection()
+        .await
+        .map_err(|error| error.to_string())?;
+    let url = format!(
+        "{}/agents",
+        url.trim_end_matches("/documents/session-index")
+    );
     for command in commands {
-        client.post(&url).bearer_auth(&token).json(&command).send().await
-            .map_err(|error|error.to_string())?.error_for_status().map_err(|error|error.to_string())?;
+        client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&command)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }

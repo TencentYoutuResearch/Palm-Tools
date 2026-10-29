@@ -35,7 +35,7 @@ export class RpcProcess extends EventEmitter {
     const pending = this.pending.get(message.id)
     if (!pending) return
     this.pending.delete(message.id); pending.cleanup()
-    if (message.error) pending.reject(new Error(`Agent RPC ${pending.method}: ${message.error.message ?? 'failed'}`))
+    if (message.error) pending.reject(Object.assign(new Error(`Agent RPC ${pending.method}: ${message.error.message ?? 'failed'}`), { rpcCode: message.error.code, rpcRejected: true }))
     else pending.resolve(message.result)
   }
   send(message) {

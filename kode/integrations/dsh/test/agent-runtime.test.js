@@ -94,7 +94,7 @@ test('native ACP approvals follow the owning dsh session policy and full-access 
     parallel: async () => {}, tools: { execute: async () => { throw new Error('Unexpected delegated tool') } },
     get: name => name === 'sandboxPolicy' ? { resolve: () => ({ mode, workspaceRoot: root }) } : name === 'approval' ? { effectivePolicy: () => policy, request: async () => { prompted++; return 'rejected' } } : undefined,
   } }
-  const adapter = new AgentRuntimeAdapter({ agents: { get: () => agent }, sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { step: 1 } }) } }, profiles, { recordNative: () => {} })
+  const adapter = new AgentRuntimeAdapter({ agents: { get: () => agent }, sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { kind: 'start', step: 1 } }) } }, profiles, { recordNative: () => {} })
   const request = id => ({ sessionId: agent.id, provider: profileRoute('acp'), model: 'fixture-fast', tools: [], signal: AbortSignal.timeout(5000), messages: [{ id, role: 'user', content: [{ type: 'text', text: 'APPROVAL' }] }] })
   try {
     await consume(adapter.stream(request('first')))
@@ -130,4 +130,12 @@ test('Claude autocompact applies session SDK settings on the same resumed native
   assert.equal(profiles.binding(agent.id).profile.autoCompactEnabled,undefined,'launch profile remains immutable')
   assert.deepEqual(profiles.binding(agent.id).seenInputs,['one','two'])
  }finally{await adapter.close();await rm(root,{recursive:true,force:true})}
+})
+
+test('late native events cannot append a tool lifecycle after its step has closed',()=>{
+ const writes=[],agent={id:'closed',session:{append:(...args)=>writes.push(args)}}
+ const adapter=new AgentRuntimeAdapter({sessionProjections:{stateOf:()=>({lastTurn:1,lastStepBoundary:{kind:'end',step:1}})}},{},{recordNative(){}})
+ assert.throws(()=>adapter.logCall(agent,'late','exec_command',{}),/open dsh step/)
+ assert.throws(()=>adapter.logResult(agent,'late',[]),/open dsh step/)
+ assert.equal(writes.length,0)
 })

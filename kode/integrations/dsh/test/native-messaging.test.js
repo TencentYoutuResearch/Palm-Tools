@@ -34,7 +34,7 @@ for (const type of ['codex', 'cursor', 'custom']) test(`${type} native tools sen
     agents: { list: () => [agent], get: id => id === sessionId ? agent : undefined },
     logger: { warn: (...args) => { throw new Error(args.join(' ')) } }, on() {},
     effect: callback => disposers.push(callback()),
-    sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { step: 1 } }) },
+    sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { kind: 'start', step: 1 } }) },
   }
   try {
     await apply(ctx, { url, tokenFile, stateFile: join(root, 'tokens.json'), pollMs: 20, agentRuntime: false })

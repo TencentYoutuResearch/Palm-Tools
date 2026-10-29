@@ -9,14 +9,14 @@ import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
 
 export const boundaryProjection = {
-  key: 'turnBoundary', stateVersion: 2,
-  stateSchema: z.object({ openTurnStartSeq: z.number().nullable(), lastStepStartSeq: z.number().nullable(), lastStepBoundary: z.object({ kind: z.enum(['start', 'end']), seq: z.number() }).nullable(), lastTurn: z.number() }),
+  key: 'turnBoundary', stateVersion: 3,
+  stateSchema: z.object({ openTurnStartSeq: z.number().nullable(), lastStepStartSeq: z.number().nullable(), lastStepBoundary: z.object({ kind: z.enum(['start', 'end']), seq: z.number(), step: z.number() }).nullable(), lastTurn: z.number() }),
   init: () => ({ openTurnStartSeq: null, lastStepStartSeq: null, lastStepBoundary: null, lastTurn: 0 }),
   apply: (state, event) => {
     if (event.type === 'turn/start') return { ...state, openTurnStartSeq: event.seq, lastTurn: Math.max(state.lastTurn,event.data.turn) }
     if (event.type === 'turn/end') return { ...state, openTurnStartSeq: null }
-    if (event.type === 'step/start') return { ...state, lastStepStartSeq: event.seq, lastStepBoundary: { kind: 'start', seq: event.seq } }
-    if (event.type === 'step/end') return { ...state, lastStepBoundary: { kind: 'end', seq: event.seq } }
+    if (event.type === 'step/start') return { ...state, lastStepStartSeq: event.seq, lastStepBoundary: { kind: 'start', seq: event.seq, step: event.data.step } }
+    if (event.type === 'step/end') return { ...state, lastStepBoundary: { kind: 'end', seq: event.seq, step: event.data.step } }
     return state
   },
 }
@@ -72,7 +72,38 @@ export class NativeAgentDriver {
   }
   send(message, target, wakeup) { if (this.disposed) throw new Error('Agent runtime has been unplugged'); this.inbox.append(target, message); if (wakeup) { this.parked = false; this.wake() } }
   followup(message) { this.send(message, 'next-turn', true) }
-  steer(message) { this.send(message, 'next-step', true) }
+  steer(message) {
+    if (this.status === 'running' && ['user', 'human'].includes(message.source?.kind) && !this.runtime.adapter.supportsSteering?.(this)) throw new Error('当前 Agent 不支持原生中途插入，请选择排队发送。')
+    this.send(message, 'next-step', true)
+    this.scheduleSteering()
+  }
+  scheduleSteering() {
+    if (this.steeringTask) { this.steeringRequested = true; return }
+    if (!this.runtime.adapter.canSteer?.(this.id) || !this.inbox.nextStep.length) return
+    this.steeringRequested = false
+    this.steeringTask = (async () => {
+      while (this.inbox.nextStep.length && this.runtime.adapter.canSteer(this.id) && !this.abort.signal.aborted) {
+        const message = this.inbox.nextStep[0]
+        let admitted = false
+        const result = await this.runtime.adapter.steer(this, message, this.abort.signal, {
+          admit: async () => {
+            if (this.inbox.nextStep[0] !== message) return false
+            this.inbox.splice('next-step', 0, 1, []); admitted = true
+            this.events.emit('agent/inbox/claimed', { message, turn: this.turn })
+            await this.ctx.sessions.flush(this.session); return true
+          },
+          accepted: () => this.session.append('user/message', message, { surfaceOp: 'append' }),
+        }).catch(error => ({ status: admitted ? 'uncertain' : 'not-ready', error }))
+        if (result.status === 'not-ready') {
+          if (result.error) this.events.emit('agent/error', { turn: this.turn, step: 1, error: result.error })
+          if (!result.error && this.inbox.nextStep[0] !== message) continue
+          break
+        }
+        if (result.status === 'rejected') { this.inbox.prepend('next-turn', message); break }
+        if (result.status === 'uncertain') this.events.emit('agent/error', { turn: this.turn, step: 1, error: new Error('中途插入的投递结果不确定；为避免重复执行，未自动重发。') })
+      }
+    })().catch(error => { this.events.emit('agent/error', { turn: this.turn, step: 1, error }) }).finally(() => { this.steeringTask = undefined; if (this.steeringRequested) this.scheduleSteering() })
+  }
   inject(message) { this.send(message, 'next-step', false) }
   cancel(cause, options = {}) { if (!options.keepInbox) this.inbox.clear(); this.abort?.abort(cause) }
   async whenIdle() { let pending; do { await (pending = this.activity) } while (pending !== this.activity) }
@@ -85,7 +116,7 @@ export class NativeAgentDriver {
   }
   start() { this.ready = true; this.wake() }
   wake() {
-    if (!this.ready || this.disposed || this.parked || this.maintenance || this.status === 'running' || !(this.inbox.nextTurn.length || this.inbox.nextStep.length)) return
+    if (!this.ready || this.disposed || this.parked || this.maintenance || this.status === 'running' || !(this.inbox.nextTurn.length || this.inbox.nextStep.length || this.runtime.adapter.hasContinuation?.(this.id))) return
     this.setStatus('running'); this.abort = new AbortController()
     this.activity = this.ctx.agents.withInitiator(this, () => this.drive(this.abort.signal)).catch(error => { this.parked = true; this.lastError = error; this.ctx.logger?.warn('Kode Agent could not start: %s', error.stack ?? error.message); this.events.emit('agent/error', { turn: this.turn, step: 1, error }) }).finally(() => { this.setStatus('idle'); this.wake() })
   }
@@ -98,18 +129,20 @@ export class NativeAgentDriver {
         ?? (!selection.provider?.startsWith('kode-agent-') && this.runtime.hasRuntime('dsh') ? this.runtime.profiles.list().find(profile => profile.type === 'dsh') : undefined)
       if (profile) { binding = await this.runtime.profiles.bind(this.id, profile.id); this.runtime.recordBinding(this, profile) }
     }
-    while (!signal.aborted && !this.disposed && (this.inbox.nextTurn.length || this.inbox.nextStep.length)) {
+    while (!signal.aborted && !this.disposed && (this.inbox.nextTurn.length || this.inbox.nextStep.length || this.runtime.adapter.hasContinuation?.(this.id))) {
       // A driver may be attached before an owner imports its historical seed.
       // Allocate from the current log projection, not the constructor snapshot.
       this.turn = Math.max(this.turn, this.ctx.sessionProjections.stateOf(this.session, 'turnBoundary')?.lastTurn ?? 0)
-      const turn = ++this.turn, step = 1
+      const turn = ++this.turn
+      let step = 1, advancePending = false
       this.session.append('turn/start', { turn })
       let reason = { kind: 'completed' }, opened = false
       const recovery = new ToolCallRecovery()
       const stop = this.ctx.on('session/event', (session, event) => { if (session === this.session) recovery.observe(event) })
       try {
-        const messages = this.inbox.claim(turn)
-        if (!messages.length) continue
+        const nativeContinuation = this.runtime.adapter.hasContinuation?.(this.id) ?? false
+        const messages = nativeContinuation ? [] : this.inbox.claim(turn)
+        if (!messages.length && !nativeContinuation) continue
         const state = this.ctx.sessionProjections.stateOf(this.session, 'modelSelection')
         const selection = state?.pending ?? state?.next ?? state?.lastUsed ?? this.options
         if (!selection.provider?.startsWith('kode-agent-')) throw new Error('Select an installed Agent before sending a message')
@@ -125,30 +158,42 @@ export class NativeAgentDriver {
         this.session.append('request/header', { header: { config: selection, ...(tools.length ? { tools } : {}) }, reason: previous ? 'resume' : 'initial' })
         this.session.append('step/start', { turn, step }); opened = true
         for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
-        const stream = new AssistantStreamAccumulator(), assembler = new BlockAssembler(); let chunkCount = 0
-        const attemptId = `kode-native:${randomUUID()}`
-        this.events.emit('agent/assistant-stream', { frame: { type: 'start', attemptId, revision: ++this.revision, turn, step } })
-        let settlement
+        let stream = new AssistantStreamAccumulator(), assembler = new BlockAssembler(), chunkCount = 0, started = false
+        let attemptId = `kode-native:${randomUUID()}`
+        const prepareStep = () => {
+          // A native operation may overlap commentary and another operation. The
+          // released log format requires every advertised call to settle before
+          // its canonical step closes. results() is a read-only pending view.
+          if (!advancePending || recovery.results().length) return
+          this.session.append('step/end', { turn, step }); step++; this.session.append('step/start', { turn, step }); advancePending = false
+        }
+        const commitSegment = (interrupted = false) => {
+          if (!started) return
+          const content = interrupted ? assembler.interruptedBlocks() : assembler.blocks()
+          const settlement = content.length ? this.session.append('assistant/message', { turn, step, message: { id: randomUUID(), role: 'assistant', source: { kind: 'model', provider: selection.provider, model: selection.model }, content }, ...(interrupted ? { interrupted: true } : {}), stream: [...stream.snapshot()] }, { surfaceOp: 'append' }) : undefined
+          this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision: ++this.revision, index: chunkCount, outcome: settlement ? { kind: 'committed', eventType: 'assistant/message', seq: settlement.seq } : { kind: 'abandoned' } } })
+          if (settlement) advancePending = true
+          stream = new AssistantStreamAccumulator(); assembler = new BlockAssembler(); chunkCount = 0; started = false; attemptId = `kode-native:${randomUUID()}`
+        }
         try {
-          for await (const chunk of this.runtime.adapter.stream({ ...selection, sessionId: this.id, messages, tools, signal })) {
+          for await (const chunk of this.runtime.adapter.stream({ ...selection, sessionId: this.id, messages, tools, signal, nativeContinuation, prepareStep, onNativeTurnReady: () => this.scheduleSteering(), onAssistantMessageBoundary: () => commitSegment() })) {
+            if (chunk.type === 'finish' && !started) continue
+            if (!started) { prepareStep(); this.events.emit('agent/assistant-stream', { frame: { type: 'start', attemptId, revision: ++this.revision, turn, step } }); started = true }
             const time = Date.now(), index = chunkCount++
             stream.push({ time, chunk })
             assembler.push(chunk)
             this.events.emit('agent/assistant-stream', { frame: { type: 'chunk', attemptId, revision: ++this.revision, index, time, chunk } })
           }
-          const content = assembler.blocks()
-          if (content.length) settlement = this.session.append('assistant/message', { turn, step, message: { id: randomUUID(), role: 'assistant', source: { kind: 'model', provider: selection.provider, model: selection.model }, content }, stream: [...stream.snapshot()] }, { surfaceOp: 'append' })
+          commitSegment()
         } catch (error) {
-          const content = assembler.interruptedBlocks()
-          if (content.length) settlement = this.session.append('assistant/message', { turn, step, message: { id: randomUUID(), role: 'assistant', source: { kind: 'model', provider: selection.provider, model: selection.model }, content }, interrupted: true, stream: [...stream.snapshot()] }, { surfaceOp: 'append' })
+          commitSegment(true)
           throw error
-        } finally {
-          this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision: ++this.revision, index: chunkCount, outcome: settlement ? { kind: 'committed', eventType: 'assistant/message', seq: settlement.seq } : { kind: 'abandoned' } } })
         }
       } catch (error) {
         reason = signal.aborted ? { kind: 'aborted', reason: signal.reason?.kind ? signal.reason : { kind: 'disposed' } } : { kind: 'error', error: { code: 'NATIVE_AGENT', message: error.message } }
         if (!signal.aborted) this.events.emit('agent/error', { turn, step, error })
       } finally {
+        await this.steeringTask
         stop()
         for (const event of recovery.results()) this.session.append('tool/result', event.data, { surfaceOp: 'append' })
         if (opened) this.session.append('step/end', { turn, step })

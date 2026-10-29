@@ -243,7 +243,7 @@ The adapter streams native answers into dsh's existing chat and projects command
 
 Native command/file approvals and supported interactive questions go through dsh's human-interaction services. Codex receives the current sandbox policy and workspace root per turn. ACP selects an advertised read-only/plan/ask mode for read-only sessions and refuses to proceed if the Agent exposes no such mode. ACP-native operations remain enforced by that CLI's own mode and permission implementation; tools delegated to dsh always use dsh's policy. Only one-operation permission grants are returned; unhandled requests fail rather than granting access. Host administration credentials and inherited kode parent-session identities are removed from the child environment. The plugin owns and closes its ACP process group, scoped MCP server and temporary launcher/credential files.
 
-The adapter accepts text, files and images through the official dsh attachment service. Codex receives validated local image paths (or inline images for memory-only stores); ACP receives image blocks only when the Agent advertises image support. Model capabilities control image admission. Skill commands preserve attachments, and durable logs retain attachment references across resume. Auxiliary compaction/title calls through an external Agent route are refused. Work-bearing native turns are not automatically retried: input admission is persisted before dispatch, and a crash or lost result is marked uncertain. New followups can resume the native thread; the admitted input is never silently submitted a second time. Account login remains the configured CLI's own login.
+The adapter accepts text, files and images through the official dsh attachment service. Codex receives validated local image paths (or inline images for memory-only stores); Claude receives image blocks directly; other ACP Agents require negotiated image support. Native Codex/Claude image transport is not blocked by incomplete model-catalog metadata; actual image understanding still depends on the chosen backend model. Remote attachments use dsh execution-host storage, without a second temporary-file upload. Skill commands preserve attachments, and durable logs retain attachment references across resume. Auxiliary compaction/title calls through an external Agent route are refused. Work-bearing native turns are not automatically retried: input admission is persisted before dispatch, and a crash or lost result is marked uncertain. New followups can resume the native thread; the admitted input is never silently submitted a second time. Account login remains the configured CLI's own login.
 
 The Web controls use dsh's authenticated owner connection and public hero/header/composer slots; the bundle replaces the stock preset and model-selection UI so model choices stay within the selected Agent configuration. The dsh outer loop, persistence and delegated tools still run; an external CLI owns its native agent turn. Headless Hosts keep the model tools and need no browser. Configuration files stay on the executing Host, so remote CLI environments are not copied to a local process.
 
@@ -309,7 +309,7 @@ The subsequent profile/defaults/deletion follow-up passed **31 integration-runne
 
 The project menu uses native dsh Menu rows with project-name/path search, a current-Host label, and the native folder picker. Local projects remain selectable. The execution-host control switches between this computer and saved SSH Hosts. The unified Create Project dialog uses dsh’s native system folder picker locally and its browse picker on the remote Host. Messaging peers and execution Hosts are separate directories.
 
-`ui-sidebar-browser` is bundled with the pinned dsh release but disabled by its default Web profile. The Kode patch enables it. It retains dsh's sandboxed HTTP(S) iframe implementation, address bar, reload and external-open actions. Sites that reject embedding still require opening externally; this is not an unrestricted desktop browser engine.
+`@kode/dsh-browser` reuses the pinned official sidebar browser chrome and replaces only the Web page provider. An owner-authenticated API renders top-level pages in an installed Chrome/Chromium with a private profile; the browser sandbox and site framing policies remain intact. MR links stay in the sidebar, including sites that reject iframes. The original address bar, tabs, history controls and explicit external-open action remain. `browserExecutable` and `browserProfileDirectory` are optional Host settings. The entry machine owns browsing even when the conversation executes over SSH. This initial pixel-stream provider supports pointer, keyboard, paste and IME input; viewport coordinates follow actual stream geometry, final frames are coalesced, and expired pages recover without replaying input. Native accessibility trees, file selection and download management are not exposed. Selection copying has an implementation but is not yet verified across host clipboard integrations. Login state is separate from the user's regular browser.
 
 Communication remains model-tool driven. The transcript shows sender session name → recipient session name and the actual message, with no raw source addresses, message IDs, reply IDs or JSON in the communication cards. Long received messages expand in place. Send statuses are explicitly the recorded status at send time, not a claim of task completion. The original protocol is still available to the model and in the native trajectory/log.
 
@@ -324,7 +324,7 @@ Validation: 36 integration-runner tests passed, followed by 6 focused client/nam
 
 The local plugin starts `kode-ssh-tunnel`, which reuses `kode-bridge::ssh::Tunnel` and its SSH config / known-host checks. An authenticated loopback portal forwards the complete remote dsh HTTP/WebSocket application. Agent execution, directory browsing, file preview, Git and PTY terminals therefore belong to the remote dsh Host. Kode does not reimplement these services. Switching Hosts selects a different dsh session store; it does not migrate an existing conversation.
 
-Build the helper with `cargo build -p kode-bridge --bin kode-ssh-tunnel`, then put it on PATH or set the Kode Host plugin’s `sshTunnelCommand` to its absolute path. Install the same pinned dsh and Kode plugin on the remote machine, apply `cordis.remote.patch.yml` in addition to the bundle, and start `dsh web --no-open` bound to loopback. Automatic remote installation is not implemented. In Create Project → Add SSH Host, provide the SSH config alias, port, and complete loopback access URL printed by the remote dsh. Profiles are saved mode 0600; remote tokens stay server-side. The browser receives a single-use portal ticket and a separate HttpOnly cookie. Closing the owning dsh Host closes its portals and tunnels.
+Build the helper with `cargo build -p kode-bridge --bin kode-ssh-tunnel`, then put it on PATH or set the Kode Host plugin’s `sshTunnelCommand` to its absolute path. Install the same pinned dsh and Kode plugin on the remote machine, apply `cordis.remote.patch.yml` in addition to the bundle, and start `dsh web --no-open` bound to loopback. For manual installations (automatic deployment is documented below), In Create Project → Add SSH Host, provide the SSH config alias, port, and complete loopback access URL printed by the remote dsh. Profiles are saved mode 0600; remote tokens stay server-side. The browser receives a single-use portal ticket and a separate HttpOnly cookie. Closing the owning dsh Host closes its portals and tunnels.
 
 Settings → Agent contains custom Agent CRUD, including multiple instances of the same type and default avatar selection. The composer's Custom Agent action opens this section. The official Models section and settings navigation remain intact; DeepSeek Harness's model-settings button opens that native section through the shared `openSection` action. The composer retains per-conversation Agent/model controls and dsh work-mode selection. Kode does not wrap or reorder the official settings shell.
 
@@ -353,6 +353,82 @@ services; it adds native protocol adapters, shared Agent/session metadata and SS
 routing. The framework's internal plugin lifecycle remains an implementation
 detail.
 
+### Official sidebar capabilities
+
+The workspace/session tree, files, document preview, Git, terminal, browser and
+Plugins page reuse dsh's official services and UI. Kode adds local/SSH routing,
+shared session metadata and Agent avatars through the existing sidebar slots.
+There is no parallel Kode sidebar plugin suite to install.
+
+The experimental **Codex subagent** and **Claude Code subagent** entries are
+optional task-delegation bundles, unrelated to rendering the sidebar or selecting
+a main native Agent. Leave them uninstalled for this integration. The main Agent
+adapters use the configured CLI and protocol libraries; neither subagent bundle
+is a dependency. Other optional official sidebar/UI features can be selected
+through dsh's own Plugins page. Features that change execution or session
+lifecycle (such as Teams, Ralph and moving existing sessions between worktrees) require separate
+compatibility work with native conversations and are not enabled by this bundle.
+
+### Managed SSH installation
+
+Settings → SSH Hosts accepts a display name, SSH address and port. The default
+action uploads the matching Kode services and this plugin, prepares Node.js when
+needed, installs the pinned official dsh distribution, starts both services on
+loopback, checks authentication and pairs the two messaging nodes. A live progress
+dialog exposes each step, errors, cancellation and retry. The existing-access-URL
+path remains available for manually administered Hosts.
+
+The SSH transport uses the user's keys/config and strict known-host checks.
+Unknown host keys or password-only authentication must be resolved through the
+user's normal SSH setup. Nothing is installed with sudo. The managed installation
+lives under `~/.local/share/kode/dsh-host`; its data stays separate from an existing
+dsh home. It does not install AI CLIs or copy local CLI credentials to the remote
+Host. Existing remote CLI configuration and login remain authoritative.
+
+Updates are staged before stopping managed services and refuse to replace a Host
+with running/queued conversations. Only recorded managed processes are stopped;
+failed activation attempts restore the previous release where possible. Two
+release directories are retained for rollback, while databases and profiles live
+outside those release directories. Repeated deployment reuses healthy matching
+services. Removing a managed Host revokes the local messaging pair; it does not
+delete remote workspaces, native histories or installed services.
+
+Distribution builds must include the native artifacts for their supported targets:
+
+```sh
+npm run build:remote -- --target x86_64-unknown-linux-musl
+```
+
+Other supported artifact targets are `aarch64-unknown-linux-musl`,
+`aarch64-apple-darwin` and `x86_64-apple-darwin`. Linux cross-builds on macOS use
+the existing Kode Docker build image. The deployment checks artifact availability
+before upload; `remoteArtifactsDirectory` can supply an externally packaged tree
+of `<platform>-<arch>/{kode-session-server,kode-ssh-tunnel}`. Same-platform source
+checkouts can also use local compiled binaries.
+
+### Desktop parity audit (2026-10-28)
+
+| Capability | dsh integration status |
+| --- | --- |
+| Agent configurations, default/session avatars | Shared Kode registry and metadata; native dsh controls. |
+| Local/SSH projects and independent native sessions | Available; managed SSH installation adds setup/progress/pairing. |
+| Session creation and communication | `kode_sessions_*`, including authenticated cross-node delivery. |
+| Resume, skills, images, approvals | Native protocol adapters; `/resume` lists registered Kode histories, not every arbitrary CLI history file. |
+| Files, Git preview, manual terminal | Official dsh services, including terminal font preferences. |
+| Sidebar browser | Official chrome with a private Chromium page provider; internal MR browsing. See input/accessibility limitations above. |
+| New conversations in worktrees | Create a branch/checkout from a registered Git workspace and start the new session there, preserving draft and Agent/model. Moving an existing conversation back to the main checkout is not implemented. |
+| Mid-turn steering | Codex uses native `turn/steer` with the expected active turn. ACP Agents without protocol support explicitly require queueing. |
+| Shared memory UI and synchronization controls | Missing: desktop review queue, scope/relation editing, memory sync controls. Existing CLI MCP/hook configuration can still operate independently. |
+| Native plugin/Hook installation and management | Missing desktop management UI; dsh's own plugin page manages dsh bundles, not all native CLI plugins. |
+| Model usage and desktop floating monitor | Missing desktop-wide monitoring parity; dsh has its own per-session observations. |
+| Phone pairing, cloud sync deployment | Missing Kode desktop/mobile cloud-management flow. |
+| Native screenshot tools, desktop window/tab actions, SpecOps window | Not ported; some are desktop-specific rather than Web-session requirements. |
+
+Managed service supervision is currently process based; automatic startup on OS
+boot and general service-manager integration are not included. Native Agent forks,
+Teams and Ralph also need lifecycle-specific integration before they can be
+advertised as substitutes for independent Kode conversations.
+
 External Agents run through `@kode/dsh/native-factory`, an independent durable
 inbox/driver built on the public Session API. It sends only new inputs to the
 native CLI protocol and never assembles the shell's dsh system prompt or runs an
@@ -375,13 +451,19 @@ selected remote Session in the same page. The local native folder chooser and
 the released remote directory browser coexist through a small pinned slot
 priority adapter. Files, Git and terminals continue to use dsh's own services.
 
-With `sharedBackendState: true`, Agent configurations/immutable CLI bindings and
-SSH Host definitions are versioned documents in the Kode backend SQLite store.
-Existing Host JSON files are imported once and retained for rollback; compare-
-and-swap rejects stale updates. The owner-only workbench catalog also reads
-Kode GUI's persisted tab/endpoint metadata. Native CLI transcripts remain in
-their original homes. Saved GUI tabs are adopted on first open: compatible text history is imported,
-and the original CLI thread is resumed on the next new user input.
+With `sharedBackendState: true`, the desktop and dsh read and edit the same
+Agent registry in Kode's backend SQLite store. Agent IDs and protocol types are
+independent of display names. Desktop `config.toml` and the former Host Agent
+JSON file are migration inputs, retained for rollback; later Agent edits go to
+the shared registry. New conversations use updated definitions, while existing
+conversations keep their immutable launch bindings, including across frontends.
+Compare-and-swap rejects stale updates.
+
+Both frontends use the common native session catalog, keyed by Agent and native
+thread identity. Closing a desktop tab does not delete its conversation.
+Native CLI transcripts remain authoritative in their original homes; dsh keeps
+its presentation events and resumes the original CLI thread without replaying
+historical prompts. SSH Host definitions are also shared backend documents.
 
 ## Natural session cooperation and creation
 
@@ -542,3 +624,61 @@ including DeepSeek Harness when installed. Individual session avatar overrides
 owns the picker and image delivery; Kode persists `presentation.agentAvatars`
 alongside session appearance metadata. Executable profiles and bound launch
 snapshots are unchanged by appearance edits.
+
+### Ordered native output and compact operation cards
+
+Native commentary, tool boundaries and final answers are committed to distinct canonical steps. The pinned official Chat UI is bundled as `@kode/dsh-chat`, using the native standard presentation. Text replies remain in chronological order outside the tool groups. Each consecutive run of tools shares one initially collapsed row whose title follows the latest running operation; expanding it reveals every call, including already completed ones. A later text reply ends that group. Completion-time Turn collapsing still leaves the final answer visible. Native tool renderers remain intact; individual tool completion never removes a row from history. The bundle adapts native Agent tool categories and uses its own `kode-chat` configuration namespace. Expanding the completed process reveals chronological text/tool groups; tool groups expand to individual operations. Commands use a compact monochrome summary and the official shell output renderer. Existing historical messages that were already concatenated are not rewritten.
+
+Archived `/resume` targets are unarchived through the official workspace service before navigation. Directory-picker bindings stay stable across renders so remote browsing does not reset to the home directory. Advanced sections animate both opening and closing and respect reduced motion. Running and unread-completed sessions retain their avatars with a muted pulsing outline.
+
+Validation for this update: released session-log compatibility and steering tests; real Codex same-turn steering; isolated browser acceptance for ordered output, nested tool expansion, archived resume, and a new worktree with preserved draft/model and verified session cwd. Internal browser acceptance reached an authenticated `git.woa.com` MR without opening an external browser.
+
+### Saved-session and browser recovery
+
+Opening an owner-selected saved native conversation registers its existing canonical working directory when the registry entry is missing. It never creates a missing directory, substitutes a parent workspace, or starts work while merely listing history. Unavailable transcripts and missing adapters fail before adding an empty project. Cached imported histories can restore their workspace registration without reseeding history.
+
+The sidebar page provider leaves hidden pages unfrozen and pauses only their screencast. A browser-control timeout during tab allocation triggers one private-browser recovery and retry; it never restarts the Host or Agent services. Errors now retain their concrete description in the official browser error strip. Build the pinned presentation adapters with `npm run build:chat` and `npm run build:browser`.
+
+Tool-group rows use a 2px vertical gap and compact 26px command headings without additional indentation. The running elapsed timer sits above the current reply. Completion transfers focus from a disclosed process to its surviving Turn header before folding, so focus protection cannot reopen intermediate replies. Interleaved steering also no longer forces a successfully completed process to remain open. Session avatar outlines use a stronger 2.5px amber/green pulse, retaining reduced-motion behavior.
+
+### Agent configuration without changing the active Host
+
+Settings → Agent has a configuration-Host selector. It uses the existing owner-authenticated SSH gateway for profile reads/writes while the current Session, filesystem view and terminal Host remain unchanged. Settings-only reads can request `configuration=1` to skip model discovery on updated Hosts. The default-Agent control persists the selected `kode-agent-*` provider and native default model through the official `agent-default-model` settings namespace, independently per Host. Explicit per-session Agent selection does not overwrite this default. Moving an unsent draft to another workspace preserves its chosen Agent; ordinary new conversations use the Host default. Existing bound sessions keep their immutable launch profile.
+
+A command-line/home patch that pins `agent-default-model` blocks edits under dsh's normal precedence rules. Move that selection to the profile's editable patch (preserving provider/model) and restart the Host when idle; the bundled integration itself does not pin it.
+
+The Agent scheduler and session messaging remain Kode-owned. The remote dsh service supplies the remote filesystem/Git/terminal/UI protocol endpoints, so remote work still needs a remote service connection; configuring remote Agent profiles does not require switching the active UI to that Host.
+
+File-change summaries derive their labels from structured file paths, falling back to patch file headers and never to `@@` hunk lines. Plain-text HTTP failures now produce a Host/HTTP-status error instead of a JSON parser exception.
+
+### Parallel operations and context pressure
+
+The native driver defers a canonical step boundary while any advertised tool call is unsettled, including when reasoning, commentary and other tools arrive concurrently. Late events cannot advertise tools against a closed step. The Chat adapter retains superseded assistant messages from the same step at their original positions, so parallel native work does not erase earlier commentary.
+
+`repairNativeStepBoundaries` is a lossless, explicit repair primitive for already affected native logs. It preserves event sequence IDs, message/tool payloads and real results; premature boundaries become ignorable audit records and step coordinates are normalized. Missing outcomes and active logs are refused. Physical artifacts must use `encodeHistoryArtifact` (separate checksum-protected header and event frames), and be validated with the released persistence reader. Back up originals before replacing any file.
+
+The session-statistics icon is a context-pressure ring. Codex uses `tokenUsage.last.totalTokens / modelContextWindow`; ACP uses `usage_update.used / size`. Cumulative spend and cached-token counters are not added to context use. Unknown data is shown as unreported, not as zero. The same latest sample is projected on the Host and retained as a hidden client metadata node for older Hosts. The popup preserves native statistics and shows exact used/total token counts.
+
+Owner configuration/SSH gateway routes no longer depend on the Session controller lifecycle; session-dependent synchronization is scoped separately. A history-loader failure therefore need not remove the management endpoints.
+
+Saved native-session imports reuse existing bindings and preserve archive state. Unknown timestamps are not rendered as Unix epoch dates. Context statistics use the latest native window-usage sample, clear stale usage after compaction, and wait for a fresh sample instead of accumulating lifetime tokens.
+
+Codex `/goal` uses native `thread/goal/*` APIs: `/goal <objective>`, `/goal` (or `status`), `edit <objective>`, `pause`, `resume`, and `clear`. The thread enables native goals without changing global CLI configuration. Mutations carry explicit user provenance. Running goal controls execute immediately; automatic native turns are consumed as dsh turns without manufacturing user prompts or dispatching a duplicate `turn/start`. Model and permission settings are applied before starting/resuming a goal.
+
+### Sidebar browser display density
+
+The private Chromium page follows the actual sidebar CSS viewport and the display pixel ratio (up to 2×, with an 8-megapixel backing-surface budget). Frames use lossless PNG so text stays sharp on Retina displays. High-density updates use coalesced surface captures triggered by browser frame changes, with one capture in flight and a 33 ms minimum start interval (up to 30 captures per second). Resizing the sidebar, entering fullscreen, and moving between display densities update the rendering dimensions; pointer coordinates remain in CSS pixels. Device metrics are restored after bringing a page to the foreground, avoiding deprecated visible-size overrides that can produce tiled captures.
+
+Pointer motion is coalesced while requests are in flight, and adjacent wheel events retain their summed distance. Clicks, releases, keys, and resizes keep their order. Foreground targets reuse their focus and device metrics until the active page changes. Browser event streams bypass response compression and flush each frame immediately, avoiding delayed visual feedback from compression buffers. PNG captures use Chromium’s fast lossless encoder.
+
+### Animated avatars and conversation backgrounds
+
+The avatar picker now includes “创建头像与背景”, a refresh action, a background preview and a browser-local background visibility preference. Creation opens a separate, named local artwork conversation in the source workspace, inheriting its Agent and model selection, then stages an unsent prompt through dsh’s public draft-initialization API. The source conversation and its draft are untouched. Creating avatars and generating or replacing backgrounds all use this independent-session flow. The dsh-specific bundled copy of Kode’s avatar-generation workflow requests the existing 36-frame layout plus a separate landscape background. Kode desktop’s skill and prompt are unchanged. Existing avatars can generate or replace only their background without touching animation frames.
+
+Conversation avatars open the picker directly. Settings → 个性化 shows the same picker as its page; Agent defaults are edited from each Agent's avatar edit badge. Choosing artwork previews it, and “确认应用” commits the selection and background visibility. The full-width background preview retains its original aspect ratio and keeps the avatar/name outside the image. User message bubbles retain their own surface over conversation backgrounds.
+
+The edit icon beside the preview name renames the actual gallery directory. The owner-only rename API validates paths and collisions, migrates local native/GUI session references and Agent defaults, and rolls back the directory/catalog on metadata-write failure. `.dsh-gallery.json` retains old-to-new media aliases so older URLs and SSH appearance references continue to resolve without duplicating the old folder.
+
+Gallery assets live on the browser entry Host, including when the conversation executes over SSH. Generation requires a local conversation so that its agent can write to the entry Host’s gallery. Each `gallery/<avatar-id>/` can contain `background.png`, `background.jpg`, `background.jpeg`, or `background.webp`; the selected avatar determines the conversation backdrop. Older galleries without a background continue to render normally. Backgrounds are subdued behind the conversation to preserve text contrast and can be disabled in the picker.
+
+The picker previews idle frames; running conversations animate their avatar’s running frames at 180 ms per frame. Idle conversations remain still. Animation pauses offscreen, on hidden pages, or when reduced motion is requested. The owner-authenticated artwork API serves bounded frame sequences and optional backgrounds, checks real paths against the configured gallery, and never forwards local artwork through an SSH agent runtime.

@@ -6,7 +6,7 @@ const row = (sessionId, provider, extra = {}) => ({ sessionId, cwd: '/work/proje
 function context(withDsh = true) {
   const items = [row('native','deepseek'), row('codex','kode-agent-builtin-codex'), row('archived','kode-agent-builtin-codex'), row('blank','deepseek',{blank:true})]
   const registry = { archivedSessionIds: ['archived'], list: () => [{ id:'workspace',title:'Project',path:'/work/project',sessionIds:items.map(s=>s.sessionId) }] }
-  return { get: key => key === 'workspaceRegistry' ? registry : key === 'kodeAgents' ? { hasRuntime: type => type !== 'dsh' || withDsh } : undefined, sessionController: { list: async () => ({ items }), resolveAgent: () => { throw new Error('must not activate') } } }
+  return { get: function(key) { if(key === 'sessionController') return this.sessionController; return key === 'workspaceRegistry' ? registry : key === 'kodeAgents' ? { hasRuntime: type => type !== 'dsh' || withDsh } : undefined }, sessionController: { list: async () => ({ items }), resolveAgent: () => { throw new Error('must not activate') } } }
 }
 test('directory hides dsh history and blanks, preserves archive metadata, without resuming or deleting sessions',async()=>{
   const ctx=context(false), before=await ctx.sessionController.list({})

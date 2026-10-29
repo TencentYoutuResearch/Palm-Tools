@@ -67,6 +67,7 @@
 
   /** inline 编辑表单。null = 不在编辑。 */
   let editing: BackendSaveRequest | null = $state(null)
+  let agentArgsText = $state('[]')
   /** 正在编辑的是否为「新增」(决定 key 输入框是否可改)。 */
   let isNew = $state(false)
 
@@ -109,6 +110,7 @@
 
   onMount(async () => {
     window.addEventListener('keydown', onKeyCapture, { capture: true })
+    window.addEventListener('focus', refreshBackends)
     await Promise.all([refreshBackends(), refreshMemoryPrompt()])
     unlistens.push(await backendAdminIpc.onChanged(refreshBackends))
     unlistens.push(await memoryMcpIpc.onChanged(refreshBackends))
@@ -116,6 +118,7 @@
 
   onDestroy(() => {
     window.removeEventListener('keydown', onKeyCapture, { capture: true })
+    window.removeEventListener('focus', refreshBackends)
     for (const u of unlistens) u()
     if (toastTimer) clearTimeout(toastTimer)
   })
@@ -156,12 +159,14 @@
   }
 
   function startAdd() {
+    agentArgsText = '[]'
     editing = newRequest()
     isNew = true
     err = null
   }
 
   function startAddFromDetected(d: DetectedBackend) {
+    agentArgsText = '[]'
     editing = newRequest({
       protocol: ['codex', 'tcodex', 'claude', 'tclaude', 'codebuddy','cursor'].includes(d.suggested_key) ? d.suggested_key : null,
       key: d.suggested_key,
@@ -178,6 +183,7 @@
   }
 
   function startEdit(b: BackendListItem) {
+    agentArgsText = JSON.stringify(b.args ?? [], null, 2)
     editing = newRequest({
       key: b.key,
       name: b.name ?? b.key,
@@ -202,6 +208,11 @@
     const e = editing
     if (!e.key.trim()) { err = 'Key cannot be empty'; return }
     if (!e.command.trim()) { err = 'Command cannot be empty'; return }
+    try {
+      const args = JSON.parse(agentArgsText)
+      if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string' || arg.includes('\0'))) throw new Error()
+      e.args = args
+    } catch { err = tr('settings.agents.argsError'); return }
     busy = true
     err = null
     try {
@@ -434,7 +445,13 @@
                 autocomplete="off"
                 disabled={!isNew}
               />
-              <p class="hint">TOML section name <code>[backends.&lt;key&gt;]</code>. {isNew ? '' : 'Cannot be changed.'}</p>
+              <p class="hint">{tr('settings.agents.keyHint')}</p>
+            </div>
+
+            <div class="field">
+              <label for="be-name">{tr('settings.agents.name')}</label>
+              <input id="be-name" type="text" value={editing.name ?? ''} oninput={e => editing && (editing.name = e.currentTarget.value)} autocomplete="off" />
+              <p class="hint">{tr('settings.agents.sharedHint')}</p>
             </div>
 
             <div class="field">
@@ -455,7 +472,6 @@
               </select>
             </div>
 
-
             <div class="field">
               <label for="be-cmd">Command</label>
               <input
@@ -467,6 +483,11 @@
                 autocomplete="off"
               />
               <p class="hint">Executable name (resolved via PATH) or an absolute path.</p>
+            </div>
+
+            <div class="field">
+              <label for="be-args">{tr('settings.agents.args')}</label>
+              <textarea id="be-args" rows="3" bind:value={agentArgsText} spellcheck="false"></textarea>
             </div>
 
             <div class="field-row">
@@ -550,17 +571,17 @@
                   <code class="item-cmd">{b.command}</code>
                 </div>
                 <div class="item-actions">
-                  <button class="icon-btn" onclick={() => startEdit(b)} disabled={busy} title="Edit" aria-label={`Edit ${b.key}`}>
+                  <button class="icon-btn" onclick={() => startEdit(b)} disabled={busy || b.read_only} title="Edit" aria-label={`Edit ${b.key}`}>
                     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
                   </button>
-                  <button class="icon-btn danger" onclick={() => deleteBackend(b.key)} disabled={busy} title="Delete" aria-label={`Delete ${b.key}`}>
+                  <button class="icon-btn danger" onclick={() => deleteBackend(b.key)} disabled={busy || b.read_only} title="Delete" aria-label={`Delete ${b.key}`}>
                     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg>
                   </button>
                   <button
                     class="switch"
                     class:on={b.enabled}
                     onclick={() => toggleEnabled(b)}
-                    disabled={busy}
+                    disabled={busy || b.read_only}
                     role="switch"
                     aria-checked={b.enabled}
                     aria-label={`Toggle ${b.key}`}
@@ -1135,6 +1156,7 @@
     color: var(--fg-secondary);
   }
   .field input,
+  .field textarea,
   .field select {
     font-family: var(--font-ui);
     font-size: var(--fs-md);
@@ -1147,6 +1169,7 @@
     transition: border-color var(--t-fast), box-shadow var(--t-fast);
   }
   .field input:focus,
+  .field textarea:focus,
   .field select:focus {
     border-color: var(--bd-focus);
     box-shadow: 0 0 0 3px var(--acc-soft);

@@ -4,7 +4,10 @@ export function nativeToolDescriptor(item) {
   if (typeof input === 'string') { try { input = JSON.parse(input) } catch { input = { command: input } } }
   const command = item.command ?? input.command ?? input.cmd
   if (item.type === 'commandExecution' && typeof command === 'string') return { name: 'exec_command', args: { cmd: command, ...((item.cwd ?? input.cwd) ? { cwd: item.cwd ?? input.cwd } : {}) } }
-  if (item.type === 'fileChange') return { name: 'apply_patch', args: { patch: (item.changes ?? []).map(change => change.diff ?? '').join('\n') || input.patch || input.content || input.new_string || '', ...(input.file_path || input.path ? { path: input.file_path ?? input.path } : {}), title: item.title } }
+  if (item.type === 'fileChange') {
+    const paths = [...new Set([input.file_path ?? input.path, ...(item.changes ?? []).map(change => change.path)].filter(path => typeof path === 'string' && path))]
+    return { name: 'apply_patch', args: { patch: (item.changes ?? []).map(change => change.diff ?? '').join('\n') || input.patch || input.content || input.new_string || '', ...(paths.length ? { path: paths[0], paths } : {}), title: item.title } }
+  }
   if (item.type === 'webSearch') return { name: 'web_search', args: item }
   return { name: `kode_native_${item.type}`, args: { ...item, ...(input.file_path || input.path ? { path: input.file_path ?? input.path } : {}), ...(item.kind ? { kind: item.kind } : {}) } }
 }

@@ -22,7 +22,8 @@ test('SSH host configuration rejects option injection and non-loopback dsh targe
 })
 test('an unavailable SSH host cannot break the directory when GUI has saved remote sessions',async()=>{
  const registry={list:()=>[],archivedSessionIds:[],pinnedSessionIds:[]}
- const ctx={get:key=>key==='workspaceRegistry'?registry:undefined,sessionController:{list:async()=>({items:[]})}}
+ const sessionController={list:async()=>({items:[]})}
+ const ctx={get:key=>key==='workspaceRegistry'?registry:key==='sessionController'?sessionController:undefined,sessionController}
  const backendClient={call:async()=>({tabs:[{backend_key:'codex',session_id:'remote-thread',cwd:'/srv/project',title:'Remote helper',endpoint_id:{kind:'remote',id:'remote'}}],endpoints:[{id:'remote',ssh_host:'builder@build.example'}]})}
  const manager=new ProjectHosts(ctx,{backendClient})
  manager.hosts=[{id:'build',name:'Build',host:'build.example'}]

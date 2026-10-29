@@ -6,7 +6,12 @@ pub async fn run(args: impl Iterator<Item=String>) -> Result<()> {
     let config:super::Config=serde_json::from_slice(&std::fs::read(config.context("--config is required")?)?)?;
     let token=std::fs::read_to_string(token_file.context("--token-file is required")?)?.trim().to_owned();
     if token.len()<32{bail!("administrator token must contain at least 32 bytes")}
-    let ctx=crate::build_runtime_ctx(kode_core::config::Config::load(),token);
+    let state_path=std::env::var_os("KODE_GUI_STATE_PATH").map(std::path::PathBuf::from)
+        .or_else(||dirs::config_dir().map(|path|path.join("kode/state.json")));
+    let selected=state_path.and_then(|path|std::fs::read(path).ok()).and_then(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|state|state["config_path"].as_str().map(std::path::PathBuf::from));
+    let legacy=selected.as_deref().map(kode_core::config::Config::load_from).unwrap_or_else(kode_core::config::Config::load);
+    let ctx=crate::build_runtime_ctx(legacy,token);
     let hub=super::Hub::open(config,&ctx)?;let router=hub.router();hub.start();
     let listener=tokio::net::TcpListener::bind(&bind).await?;
     println!("kode-session-server {} {}",hub.node_id(),listener.local_addr()?);

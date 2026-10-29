@@ -146,26 +146,23 @@ pub(super) async fn upgrade(
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .unwrap_or("");
-    let allowed = hub
-        .config
-        .peers
-        .iter()
-        .any(|p| p.node_id == peer && crate::constant_eq(&p.link_token, token));
+    let allowed = hub.peer_allowed(peer, token);
     if !allowed {
         return Err(Error(StatusCode::UNAUTHORIZED, "unauthorized peer".into()));
     }
     let peer = peer.to_string();
+    let token = token.to_string();
     Ok(ws
         .max_message_size(128 * 1024)
         .max_frame_size(128 * 1024)
         .on_upgrade(move |socket| async move {
-            if let Err(e) = serve(&hub, &peer, socket).await {
+            if let Err(e) = serve(&hub, &peer, &token, socket).await {
                 tracing::debug!(error=%e,"messaging peer disconnected");
             }
             disconnected(&hub, &peer);
         }))
 }
-async fn serve(hub: &Arc<Hub>, peer: &str, mut socket: WebSocket) -> Result<()> {
+async fn serve(hub: &Arc<Hub>, peer: &str, token: &str, mut socket: WebSocket) -> Result<()> {
     socket
         .send(AxMessage::Text(serde_json::to_string(&initial(hub))?))
         .await?;
@@ -182,10 +179,10 @@ async fn serve(hub: &Arc<Hub>, peer: &str, mut socket: WebSocket) -> Result<()> 
     loop {
         tokio::select! {
             _=tick.tick()=>{
-                if hub.stopped.load(Ordering::Relaxed){break}
+                if hub.stopped.load(Ordering::Relaxed) || !hub.peer_allowed(peer, token){break}
                 if last_seen.elapsed()>Duration::from_secs(15){bail!("peer heartbeat timed out")} for f in frames(hub,peer,&mut sent)? {tokio::time::timeout(Duration::from_secs(10),socket.send(AxMessage::Text(serde_json::to_string(&f)?))).await??;}}
             msg=socket.recv()=>match msg {
-                Some(Ok(AxMessage::Text(text)))=>{last_seen=Instant::now();if let Some(f)=incoming(hub,peer,&text).await? {tokio::time::timeout(Duration::from_secs(10),socket.send(AxMessage::Text(serde_json::to_string(&f)?))).await??;}},
+                Some(Ok(AxMessage::Text(text)))=>{if !hub.peer_allowed(peer,token){break} last_seen=Instant::now();if let Some(f)=incoming(hub,peer,&text).await? {tokio::time::timeout(Duration::from_secs(10),socket.send(AxMessage::Text(serde_json::to_string(&f)?))).await??;}},
                 Some(Ok(AxMessage::Ping(b)))=>socket.send(AxMessage::Pong(b)).await?,
                 Some(Ok(AxMessage::Pong(_)))=>{},
                 _=>break,
@@ -197,7 +194,7 @@ async fn serve(hub: &Arc<Hub>, peer: &str, mut socket: WebSocket) -> Result<()> 
 pub(super) fn connect(hub: Arc<Hub>, peer: Peer) {
     tokio::spawn(async move {
         let mut backoff = 1;
-        while !hub.stopped.load(Ordering::Relaxed) {
+        while !hub.stopped.load(Ordering::Relaxed) && hub.peer_allowed(&peer.node_id, &peer.link_token) {
             let mut tunnel = None;
             let url = if let Some(ssh) = &peer.ssh {
                 match super::ssh::Tunnel::start(ssh).await {
@@ -261,10 +258,10 @@ async fn dial(hub: &Arc<Hub>, peer: &Peer, url: &str) -> Result<()> {
     loop {
         tokio::select! {
             _=tick.tick()=>{
-                if hub.stopped.load(Ordering::Relaxed){break}
+                if hub.stopped.load(Ordering::Relaxed) || !hub.peer_allowed(&peer.node_id, &peer.link_token){break}
                 if last_seen.elapsed()>Duration::from_secs(15){bail!("peer heartbeat timed out")} for f in frames(hub,&peer.node_id,&mut sent)? {tokio::time::timeout(Duration::from_secs(10),socket.send(TungMessage::Text(serde_json::to_string(&f)?))).await??;}}
             msg=socket.next()=>match msg {
-                Some(Ok(TungMessage::Text(text)))=>{last_seen=Instant::now();if let Some(f)=incoming(hub,&peer.node_id,&text).await? {tokio::time::timeout(Duration::from_secs(10),socket.send(TungMessage::Text(serde_json::to_string(&f)?))).await??;}},
+                Some(Ok(TungMessage::Text(text)))=>{if !hub.peer_allowed(&peer.node_id,&peer.link_token){break} last_seen=Instant::now();if let Some(f)=incoming(hub,&peer.node_id,&text).await? {tokio::time::timeout(Duration::from_secs(10),socket.send(TungMessage::Text(serde_json::to_string(&f)?))).await??;}},
                 Some(Ok(TungMessage::Ping(b)))=>socket.send(TungMessage::Pong(b)).await?,
                 Some(Ok(TungMessage::Pong(_)))=>{},
                 _=>break,

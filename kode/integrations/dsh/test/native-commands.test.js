@@ -69,3 +69,30 @@ test('Codex commands use native RPCs and $skills become typed inputs with discov
     assert.deepEqual(rows.find(row=>row.method==='turn/start').params.input.at(-1),{type:'skill',name:'fixture-skill',path:join(root,'.agents/skills/fixture-skill/SKILL.md')})
   }finally{await session.close();await rm(root,{recursive:true,force:true})}
 })
+
+test('native file changes retain their paths alongside patch-only hunks',()=>{
+ const value=nativeToolDescriptor({type:'fileChange',changes:[{path:'one.js',diff:'@@ -1 +1 @@\n-a\n+b'},{path:'two.js',diff:'@@ -2 +2 @@'}]})
+ assert.equal(value.args.path,'one.js');assert.deepEqual(value.args.paths,['one.js','two.js']);assert.match(value.args.patch,/@@/)
+})
+
+test('Codex goal controls use native state and preserve usage on pause/resume',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'kode-goal-controls-')),log=join(root,'wire.jsonl')
+ const session=new CodexSession({executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:log}},root)
+ try{
+  await session.open({},[],AbortSignal.timeout(5000))
+  assert.ok(commandDescriptors({commands:session.commands}).some(c=>c.name==='goal'&&c.input))
+  assert.match((await session.goal('')).text,/没有目标/)
+  assert.equal((await session.goal('Finish checks')).run,true)
+  assert.match((await session.goal('pause')).text,/已暂停/)
+  assert.match((await session.goal('edit Better checks')).text,/Better checks/)
+  assert.equal((await session.goal('resume')).run,true)
+  assert.match((await session.goal('clear')).text,/已清除/)
+  const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(rows.filter(r=>r.method==='turn/start').length,0)
+  const writes=rows.filter(r=>r.method==='thread/goal/set')
+  assert.equal(writes.length,4)
+  assert.deepEqual(writes.map(r=>r.params.origin),['user','user','user','user'])
+  assert.equal(writes[1].params.objective,undefined);assert.equal(writes[3].params.objective,undefined)
+  await assert.rejects(session.goal('x'.repeat(4001)),/4000/)
+ }finally{await session.close();await rm(root,{recursive:true,force:true})}
+})

@@ -1,5 +1,6 @@
 /** Session-scoped commands use dsh's existing slash menu and command lifecycle. */
 import { randomUUID } from 'node:crypto'
+import { parseGoalInput } from './codex-goal.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { profileRevision, profileRoute } from './agent-profiles.js'
 import { resolveAdvertisedModel } from './model-alias.js'
@@ -66,6 +67,10 @@ export async function mountNativeCommands(agent, service, profile) {
         if (receiving !== agent) throw new Error('Command belongs to another conversation')
         signal.throwIfAborted()
         const input = rawInput.trim(), selection = selectedModel(agent)
+        if (descriptor.name === 'goal' && (profile.type === 'codex' || profile.protocol === 'codex')) {
+          parseGoalInput(input)
+          if (agent.status === 'running') return { kind: 'success', text: await service.adapter.controlGoal(agent, input, signal, selection) }
+        }
         if (descriptor.name === 'help') return { kind: 'success', text: descriptors.map(row => `/${row.nativeName ?? row.name} — ${row.description}`).join('\n') }
         if (descriptor.name === 'status') return { kind: 'success', text: `${profile.name}\n模型：${selection.model}\n工作区：${agent.session.header.cwd}\n权限：${agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })?.mode ?? 'read-only'}` }
         if (descriptor.name === 'rename') {

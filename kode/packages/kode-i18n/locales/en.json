@@ -1,7 +1,12 @@
 {
+  "settings.agents.name": { "message": "Agent name" },
   "settings.agents.protocol": { "message": "Agent type" },
   "settings.agents.automatic": { "message": "Use existing backend defaults" },
   "settings.agents.raw": { "message": "Terminal CLI" },
+  "settings.agents.args": { "message": "Launch arguments (JSON array)" },
+  "settings.agents.argsError": { "message": "Enter launch arguments as a JSON array of strings." },
+  "settings.agents.keyHint": { "message": "Stable Agent ID. Existing sessions keep this identity." },
+  "settings.agents.sharedHint": { "message": "Shared with dsh. Changes apply to new conversations." },
   "filePreview.find": { "message": "Find in file…" },
   "filePreview.findShortcut": { "message": "Find in file (Cmd/Ctrl+F)" },
   "filePreview.clear": { "message": "Clear search" },

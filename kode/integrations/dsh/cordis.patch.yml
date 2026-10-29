@@ -13,6 +13,13 @@
     # Both flows are required when one tab can select a local or SSH Host.
     - id: kode-directory-browse
       name: '@kode/dsh-directory-browse'
+    - id: kode-chat
+      name: '@kode/dsh-chat'
+      config:
+        transcriptView: standard
+        collapseTiming: completion
+    - id: kode-sidebar-browser
+      name: '@kode/dsh-browser'
     - id: kode-connection
       name: '@kode/dsh-transport'
       inject: [webStartup]
@@ -68,6 +75,8 @@
   disabled: true
 - id: ui-agent-preset
   disabled: true
-# The bundled browser is opt-in on Web; retain dsh's sandboxed implementation.
+- id: ui-chat
+  disabled: true
+# Keep the official sidebar chrome with a private top-level Chromium page provider.
 - id: ui-sidebar-browser
-  disabled: false
+  disabled: true

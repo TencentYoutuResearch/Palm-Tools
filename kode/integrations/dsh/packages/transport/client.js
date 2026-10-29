@@ -26,7 +26,7 @@ __export(client_source_exports, {
 });
 module.exports = __toCommonJS(client_source_exports);
 
-// ../../../../../../../../../private/tmp/kode-dsh-validation/node_modules/@deepseek-ai/cosmokit/lib/index.js
+// node_modules/@deepseek-ai/cosmokit/lib/index.js
 function isNullable(value) {
   return value === null || value === void 0;
 }
@@ -251,7 +251,7 @@ var Time;
   Time2.template = template;
 })(Time || (Time = {}));
 
-// ../../../../../../../../../private/tmp/kode-dsh-validation/node_modules/@deepseek-ai/schemastery/lib/index.mjs
+// node_modules/@deepseek-ai/schemastery/lib/index.mjs
 var kSchema = Symbol.for("schemastery");
 var kValidationError = Symbol.for("ValidationError");
 globalThis.__schemastery_index__ ??= 0;
@@ -892,7 +892,7 @@ defineMethod("transform", [
   "preserve"
 ], ({ inner }, isInner) => inner.toString(isInner));
 
-// ../../../../../../../../../private/tmp/kode-dsh-validation/node_modules/@deepseek-ai/dsh-client-connection/lib/client.node.js
+// node_modules/@deepseek-ai/dsh-client-connection/lib/client.node.js
 var MAX_TIMER_MS = 2147483647;
 var ConnectionRecoveryConfigSchema = Schema.object({
   backoffBaseMs: Schema.natural().min(1).max(MAX_TIMER_MS).default(500),
@@ -1470,6 +1470,53 @@ async function fetchWithLocalAppearance(input, init, { current, send }) {
   return new Response(JSON.stringify(remoteBody), { status: remote.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
+// packages/transport/connection-progress.js
+var import_react = require("react");
+var import_client = require("react-dom/client");
+var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+function showConnectionProgress(label, document2 = globalThis.document) {
+  const style = document2.createElement("style");
+  style.textContent = `.kode-host-connection-status{position:fixed;z-index:10000;top:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:12px 18px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:13px var(--ds-font-family-ui,sans-serif);box-shadow:0 4px 16px rgb(0 0 0 / .12);pointer-events:none;animation:kode-host-feedback 150ms ease-out}.kode-host-connection-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:16px}.kode-host-connection-icon>svg{flex:none;display:block}@keyframes kode-host-feedback{from{opacity:0}to{opacity:1}}@media(prefers-reduced-motion:reduce){.kode-host-connection-status,.kode-host-connection-icon *{animation:none}}`;
+  const indicator = document2.createElement("div"), spinner = document2.createElement("span"), text = document2.createElement("span");
+  indicator.className = "kode-host-connection-status";
+  indicator.setAttribute("role", "status");
+  indicator.setAttribute("aria-live", "polite");
+  spinner.className = "kode-host-connection-icon";
+  spinner.setAttribute("aria-hidden", "true");
+  text.textContent = label;
+  indicator.append(spinner, text);
+  document2.head.append(style);
+  document2.body.append(indicator);
+  const root = (0, import_client.createRoot)(spinner);
+  root.render((0, import_react.createElement)(import_dsh_client_ui_primitives.StateDot, { state: "ongoing", size: 16 }));
+  const visibility = () => {
+    indicator.style.display = document2.hidden ? "none" : "";
+  };
+  visibility();
+  document2.addEventListener("visibilitychange", visibility);
+  return () => {
+    document2.removeEventListener("visibilitychange", visibility);
+    root.unmount();
+    indicator.remove();
+    style.remove();
+  };
+}
+
+// packages/transport/navigation.js
+async function openSessionTarget(ctx, target, signal) {
+  signal.throwIfAborted();
+  if (target.resume) {
+    await ctx.get("workspaces").unarchiveSession(target.sessionId);
+    signal.throwIfAborted();
+    await ctx.get("sessions").refresh();
+  }
+  signal.throwIfAborted();
+  const ui = ctx.get("uiWorkspace"), layout = ctx.get("layout");
+  if (!ui || !layout) throw new Error("\u4F1A\u8BDD\u89C6\u56FE\u5C1A\u672A\u5C31\u7EEA\uFF0C\u8BF7\u91CD\u8BD5\u3002");
+  layout.beginNavigation();
+  ui.openSession(target.sessionId);
+}
+
 // packages/transport/client-source.js
 var inject = [];
 async function apply(ctx) {
@@ -1536,6 +1583,7 @@ async function apply(ctx) {
       navigation = new AbortController();
       const signal = navigation.signal;
       if (host !== current) {
+        const hideProgress = showConnectionProgress(host === "local" ? "\u6B63\u5728\u8FD4\u56DE\u6B64\u8BA1\u7B97\u673A\u2026" : "\u6B63\u5728\u8FDE\u63A5 SSH \u4E3B\u673A\u2026");
         switching = true;
         publish();
         const previousHost = current;
@@ -1553,7 +1601,7 @@ async function apply(ctx) {
           const connectionReady = ready(generation, signal);
           ctx.connection.reconnect();
           await connectionReady;
-          await sessions.refresh();
+          await ctx.get("sessions").refresh();
           await new Promise((resolve2, reject) => {
             let unsubscribe = () => {
             };
@@ -1561,14 +1609,15 @@ async function apply(ctx) {
               unsubscribe();
               reject(new Error("\u5DE5\u4F5C\u533A\u76EE\u5F55\u8BFB\u53D6\u8D85\u65F6\u3002"));
             }, 15e3);
+            const currentWorkspaces = ctx.get("workspaces");
             const check = () => {
-              if (workspaces.list.getSnapshot().phase === "ready") {
+              if (currentWorkspaces.list.getSnapshot().phase === "ready") {
                 unsubscribe();
                 clearTimeout(timer);
                 resolve2();
               }
             };
-            unsubscribe = workspaces.list.subscribe(check);
+            unsubscribe = currentWorkspaces.list.subscribe(check);
             check();
           });
         } catch (error) {
@@ -1580,17 +1629,18 @@ async function apply(ctx) {
           }
           throw error;
         } finally {
+          hideProgress();
           switching = false;
           publish();
         }
       }
       signal.throwIfAborted();
-      if (target.sessionId) ui.openSession(target.sessionId);
-      else if (target.workspaceId) await ui.openWorkspace(target.workspaceId);
+      if (target.sessionId) await openSessionTarget(ctx, target, signal);
+      else if (target.workspaceId) await ctx.get("uiWorkspace").openWorkspace(target.workspaceId);
       else if (target.create) window.dispatchEvent(new CustomEvent("kode-create-project", { detail: { name: target.name ?? "" } }));
       else {
-        const workspace = workspaces.list.getSnapshot().items[0];
-        if (workspace) await ui.openWorkspace(workspace.workspaceId);
+        const workspace = ctx.get("workspaces").list.getSnapshot().items[0];
+        if (workspace) await ctx.get("uiWorkspace").openWorkspace(workspace.workspaceId);
       }
     }
   };

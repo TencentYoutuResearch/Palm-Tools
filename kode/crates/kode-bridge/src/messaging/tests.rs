@@ -50,6 +50,45 @@ fn peer(node: &str, url: Option<String>) -> Peer {
     }
 }
 #[tokio::test]
+async fn owner_can_pair_live_hosts_without_restart_or_exposing_link_secrets() {
+    let left = server("pair-left", vec![]).await;
+    let right = server("pair-right", vec![]).await;
+    let sender = register(&left, "sender").await;
+    let _receiver = register(&right, "receiver").await;
+    let client = reqwest::Client::new();
+    let path = format!("{}/api/v1/messaging/workbench/peers", left.url);
+    let remote = peer("pair-right", Some(right.url.clone()));
+    assert_eq!(client.post(&path).bearer_auth(&sender.owner_token).json(&remote).send().await.unwrap().status(), 403);
+    right.hub.add_peer(peer("pair-left", None)).unwrap();
+    let response = client.post(&path).bearer_auth("admin-test").json(&remote).send().await.unwrap();
+    assert!(response.status().is_success());
+    assert!(!response.text().await.unwrap().contains(SECRET));
+    let stored = left.hub.store.document("managed-peers").unwrap();
+    assert_eq!(stored["revision"], 1);
+    assert_eq!(super::peers::load(&left.hub.store, &left.hub.config).unwrap().len(), 1);
+    assert!(client.post(&path).bearer_auth("admin-test").json(&remote).send().await.unwrap().status().is_success());
+    assert_eq!(left.hub.store.document("managed-peers").unwrap()["revision"], 1);
+    let mut conflicting = remote.clone(); conflicting.link_token = "a-different-owner-secret-32-characters".into();
+    assert_eq!(client.post(&path).bearer_auth("admin-test").json(&conflicting).send().await.unwrap().status(), 400);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !left.hub.directory().unwrap().iter().any(|s| s.address.node_id == "pair-right") {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.unwrap();
+    let response = send(&left, &sender.owner_token, &request("pair-right", "receiver", "paired-message")).await;
+    assert!(response.status().is_success());
+    let message: Message = response.json().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while right.hub.store.get(&message.id).unwrap().is_none() { tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    }).await.unwrap();
+    let remove = format!("{path}/remove");
+    assert_eq!(client.post(&remove).bearer_auth(&sender.owner_token).json(&json!({"node_id":"pair-right"})).send().await.unwrap().status(), 403);
+    assert!(client.post(&remove).bearer_auth("admin-test").json(&json!({"node_id":"pair-right"})).send().await.unwrap().status().is_success());
+    assert!(left.hub.peers().is_empty());
+    assert!(super::peers::load(&left.hub.store, &left.hub.config).unwrap().is_empty());
+    assert!(!left.hub.peer_allowed("pair-right", SECRET));
+}
+#[tokio::test]
 async fn workbench_configuration_is_durable_versioned_and_not_agent_accessible() {
     let s = server("workbench-test", vec![]).await;
     let client = reqwest::Client::new();

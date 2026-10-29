@@ -66,6 +66,8 @@ fn owner(hub: &Hub, h: &HeaderMap, id: &str) -> Result<()> {
 pub(super) fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/api/v1/messaging/node", get(node))
+        .route("/api/v1/messaging/workbench/peers", post(add_peer))
+        .route("/api/v1/messaging/workbench/peers/remove", post(remove_peer))
         .route("/api/v1/messaging/workbench/catalog", get(workbench_catalog))
         .route("/api/v1/messaging/workbench/agents", get(agent_catalog).post(change_agent))
         .route("/api/v1/messaging/workbench/sessions", get(workbench_sessions))
@@ -93,7 +95,20 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
 }
 async fn node(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     auth(&hub, &h)?;
-    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1})))
+    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"managed_peers":true})))
+}
+async fn add_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(peer): Json<super::Peer>) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    let node_id = peer.node_id.clone();
+    hub.add_peer(peer)?;
+    Ok(Json(json!({"node_id":node_id})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PeerRemoval { node_id: String }
+async fn remove_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<PeerRemoval>) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?; hub.remove_peer(&input.node_id)?;
+    Ok(Json(json!({"removed":true})))
 }
 fn document_key(key: &str) -> Result<()> {
     if !matches!(key, "agents" | "ssh-hosts" | "session-index" | "workspaces") {
@@ -141,7 +156,7 @@ async fn change_workspace(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input)
 }
 async fn workspace_hosts(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;
-    Ok(Json(json!({"local_node_id":hub.node_id(),"hosts":hub.config.peers.iter().map(|peer| json!({"node_id":peer.node_id,"ssh_host":peer.ssh.as_ref().map(|ssh| &ssh.host)})).collect::<Vec<_>>()})))
+    Ok(Json(json!({"local_node_id":hub.node_id(),"hosts":hub.peers().iter().map(|peer| json!({"node_id":peer.node_id,"ssh_host":peer.ssh.as_ref().map(|ssh| &ssh.host)})).collect::<Vec<_>>()})))
 }
 async fn workbench_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;

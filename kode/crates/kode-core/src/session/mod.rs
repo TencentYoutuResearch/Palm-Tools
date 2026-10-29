@@ -1538,6 +1538,8 @@ mod tests {
         let mut s = Session {
             id: 1,
             backend_key: key.into(),
+            backend_protocol: key.into(),
+            launch_config: crate::config::Config::default().backends[key].clone(),
             cwd: PathBuf::from("/tmp"),
             command: String::new(),
             args: vec![],

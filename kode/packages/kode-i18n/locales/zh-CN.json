@@ -1,7 +1,12 @@
 {
+  "settings.agents.name": { "message": "Agent 名称" },
   "settings.agents.protocol": { "message": "Agent 类型" },
   "settings.agents.automatic": { "message": "沿用原有后端设置" },
   "settings.agents.raw": { "message": "终端 CLI" },
+  "settings.agents.args": { "message": "启动参数（JSON 数组）" },
+  "settings.agents.argsError": { "message": "请将启动参数填写为由字符串组成的 JSON 数组。" },
+  "settings.agents.keyHint": { "message": "固定的 Agent 标识，已有会话会保留此关联。" },
+  "settings.agents.sharedHint": { "message": "与 dsh 共用配置，修改用于新会话。" },
   "filePreview.find": { "message": "在文件中查找…" },
   "filePreview.findShortcut": { "message": "在文件中查找（Cmd/Ctrl+F）" },
   "filePreview.clear": { "message": "清空查找" },

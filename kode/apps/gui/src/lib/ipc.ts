@@ -34,6 +34,7 @@ export interface ModelDiscoveryResult {
 /// Settings 面板用的 backend 列表项 —— 比 BackendInfo 多 enabled 字段,
 /// 因为 Settings 要展示全部(含被关掉的)backend 及其开关状态。
 export interface BackendListItem {
+  read_only?: boolean
   name?: string
   protocol?: string | null
   args?: string[]

@@ -7,6 +7,7 @@ const PATH = '/api/kode/agents'
 const json = (res, status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
 export function registerAgentApi(ctx, service) {
   const streams = new Set()
+  const controller = () => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用，请稍后重试。'); return value }
   const { profiles, adapter } = service
   const available = profile => service.hasRuntime ? service.hasRuntime(profile.type) : Object.hasOwn(service.types ?? AGENT_TYPES, profile.type)
   const selected = agent => {
@@ -38,22 +39,24 @@ export function registerAgentApi(ctx, service) {
         const appearanceIndex = await service.appearance?.load()
         const query = new URL(req.url, 'http://localhost').searchParams
         const sessionId = query.get('session_id')
+        const configurationOnly = query.get('configuration') === '1'
         const agent = sessionId ? ctx.agents.get(sessionId) : undefined
         const binding = sessionId ? profiles.binding(sessionId) : undefined
-        const stored = sessionId && !agent ? (await ctx.sessionController.list?.({}))?.items.find(row => row.sessionId === sessionId)?.projections?.values?.modelSelection : undefined
+        const stored = sessionId && !agent ? (await controller().list?.({}))?.items.find(row => row.sessionId === sessionId)?.projections?.values?.modelSelection : undefined
         const selection = agent ? selected(agent) : stored?.pending ?? stored?.next ?? stored?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
         const inferred = profiles.list().find(p => profileRoute(p.id) === selection?.provider)
-        const selectedProfileId = binding?.profile.id ?? inferred?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
+        const configuredDefault = profiles.list().find(p => profileRoute(p.id) === ctx.agentDefaultModel.currentSelection()?.provider && available(p))
+        const selectedProfileId = binding?.profile.id ?? (!sessionId ? configuredDefault?.id : undefined) ?? inferred?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
         const profile = binding?.profile ?? profiles.list().find(p => p.id === selectedProfileId)
         const catalog = { groups: [] }
         if (query.get('refresh') === '1' && profile) adapter.invalidateModels?.(profileRoute(profile.id))
         let models = [], modelError
-        try { if (profile && available(profile)) models = await modelsFor(profile, catalog, selection?.provider === profileRoute(profile.id) ? selection.model : undefined) } catch (error) { modelError = error.message }
+        try { if (!configurationOnly && profile && available(profile)) models = await modelsFor(profile, catalog, selection?.provider === profileRoute(profile.id) ? selection.model : undefined) } catch (error) { modelError = error.message }
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })
         const installed = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
         const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
-        const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await ctx.sessionController.list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
-        json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
+        const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
+        json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
           selectedProfileId, selection, catalog, models, modelError, ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
           canChangeAgent: !agent || (agent.status === 'idle' && !(ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')?.lastTurn > 0)),
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
@@ -70,7 +73,7 @@ export function registerAgentApi(ctx, service) {
       }
       if (input.action === 'session-avatar') {
         if (!service.appearance) throw new Error('头像配置服务尚未就绪。')
-        const known = ctx.agents.get(input.sessionId) || (await ctx.sessionController.list({})).items.some(row => row.sessionId === input.sessionId)
+        const known = ctx.agents.get(input.sessionId) || (await controller().list({})).items.some(row => row.sessionId === input.sessionId)
         if (!known) throw new Error('会话不存在，请刷新列表。')
         await service.appearance.setSession(input.sessionId, input.avatarId ?? null); json(res, 200, { ok: true }); return
       }
@@ -79,7 +82,7 @@ export function registerAgentApi(ctx, service) {
       if (input.action === 'save') { if (!available(input.profile ?? {})) throw new Error('此 Agent 的执行插件尚未安装。'); const profile = await profiles.save(input.profile); service.refresh(); json(res, 200, { profile }); return }
       if (input.action === 'remove') { await profiles.remove(input.profileId); service.refresh(); json(res, 200, { ok: true }); return }
       if (input.action !== 'select') throw new Error('unknown Agent operation')
-      const found = await ctx.sessionController.resolveAgent(input.sessionId)
+      const found = await controller().resolveAgent(input.sessionId)
       if (found.error) throw new Error(found.error.message)
       const agent = found.agent, binding = profiles.binding(agent.id)
       const profile = binding?.profile.id === input.profileId ? binding.profile : profiles.get(input.profileId)

@@ -4,6 +4,7 @@ mod api;
 pub mod agents;
 mod codebuddy_registry;
 mod link;
+mod peers;
 pub mod model;
 mod ssh;
 pub use ssh::SshConfig;
@@ -51,6 +52,7 @@ pub struct Peer {
 pub struct Hub {
     store: Store,
     config: Config,
+    peers: Mutex<Vec<Peer>>,
     ctx: Weak<crate::Ctx>,
     gate: Mutex<()>,
     remote: Mutex<HashMap<String, Vec<SessionInfo>>>,
@@ -81,9 +83,11 @@ impl Hub {
             }
         }
         let store = Store::open(&config.database, &config.node_id)?;
+        let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
             store,
             config,
+            peers: Mutex::new(peers),
             ctx: Arc::downgrade(ctx),
             gate: Mutex::new(()),
             remote: Mutex::new(HashMap::new()),
@@ -107,8 +111,7 @@ impl Hub {
             }
         });
         for peer in self
-            .config
-            .peers
+            .peers()
             .iter()
             .filter(|p| p.url.is_some() || p.ssh.is_some())
         {
@@ -126,7 +129,7 @@ impl Hub {
     }
     async fn workspace(self: &Arc<Self>, node: &str, command: workspaces::Command) -> Result<serde_json::Value> {
         if node == self.node_id() || node.is_empty() { return workspaces::execute(self.clone(), command).await }
-        if !self.config.peers.iter().any(|peer| peer.node_id == node) { bail!("unknown workspace execution node") }
+        if !self.peers().iter().any(|peer| peer.node_id == node) { bail!("unknown workspace execution node") }
         let id = uuid::Uuid::new_v4().to_string();
         let (send, receive) = tokio::sync::oneshot::channel();
         { let mut pending = self.workspace_pending.lock(); if pending.len() >= 32 { bail!("too many workspace requests") }; pending.insert(id.clone(), (node.into(), command, send)); }
@@ -165,8 +168,7 @@ impl Hub {
         }
         if req.target.node_id != self.node_id()
             && !self
-                .config
-                .peers
+                .peers()
                 .iter()
                 .any(|p| p.node_id == req.target.node_id)
         {
@@ -354,6 +356,9 @@ impl Hub {
                     s.state.status,
                     s.backend_key.clone(),
                     s.pty.is_some(),
+                    s.launch_config.clone(),
+                    s.cwd.clone(),
+                    s.state.model.clone(),
                 )
             })
             .collect();
@@ -369,7 +374,11 @@ impl Hub {
             self.native.lock().remove(&old);
             self.store.offline(&old)?;
         }
-        for (id, title, uuid, status, backend_key, has_pty) in rows {
+        for (id, title, uuid, status, backend_key, has_pty, config, cwd, model) in rows {
+            if let Some(thread_id)=uuid.as_ref() {
+                let _gate=self.gate.lock();
+                agents::change(self,agents::Change::Bind{key:backend_key.clone(),thread_id:thread_id.clone(),config,cwd:cwd.to_string_lossy().into(),title:title.clone(),model:Some(model)})?;
+            }
             // A backend config key is an independent identity, even when two CLI
             // installations happen to expose the same native session UUID.
             let sid = uuid

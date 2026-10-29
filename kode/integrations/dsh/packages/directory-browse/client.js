@@ -1,4 +1,5 @@
-// Generated from dsh 0.2.1-rc.2; build-directory-browse.js owns the slot-priority adaptation.
+// Generated from the MIT-licensed @deepseek-ai/dsh-client-ui-directory-picker-browse, 0.2.1-rc.2.
+// Run npm run build:directory-browse.
 window.__ModuleLoader__.load({
 	id: "@kode/dsh-directory-browse",
 	factory: (require) => {

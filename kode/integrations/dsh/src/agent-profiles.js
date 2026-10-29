@@ -127,16 +127,17 @@ export class AgentProfiles {
   }
   bindNative(sessionId, profileId, threadId) {
     return this.update(state => {
-      const existing = state.bindings[sessionId]
+      const existing = Object.hasOwn(state.bindings, sessionId) ? state.bindings[sessionId] : undefined
       if (existing) {
-        if (existing.profile.id !== profileId || existing.threadId !== threadId) throw new Error('native conversation identity changed')
-        return existing
+        if (existing.profile.id !== profileId || (existing.threadId && existing.threadId !== threadId)) throw new Error('native conversation identity changed')
+        if (existing.threadId === threadId) return existing
+        if (existing.seenInputs?.length) throw new Error('native conversation already received input')
       }
       const prior = Object.values(state.bindings).find(row => row.threadId === threadId && row.profile.id === profileId)
-      const profile = prior?.profile ?? state.profiles.find(row => row.id === profileId)
+      const profile = prior?.profile ?? existing?.profile ?? state.profiles.find(row => row.id === profileId)
       if (!profile) throw new Error('unknown Agent profile')
       const binding = { profile: structuredClone(profile), revision: profileRevision(profile), threadId, seenInputs: [] }
-      state.bindings[sessionId] = binding
+      Object.defineProperty(state.bindings, sessionId, { value: binding, enumerable: true, configurable: true, writable: true })
       return binding
     })
   }

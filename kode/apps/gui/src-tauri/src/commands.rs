@@ -147,6 +147,7 @@ pub struct BackendInfo {
 /// 前端 toggle 写回时用 `backend_set_enabled` 写显式 true/false。
 #[derive(Debug, Serialize)]
 pub struct BackendListItem {
+    pub read_only: bool,
     pub protocol: Option<String>,
     pub key: String,
     pub name: String,
@@ -475,19 +476,6 @@ fn read_avatar_set(dir: &Path, name: &str) -> Option<AvatarSet> {
     })
 }
 
-/// 计算某 backend 实时 enabled:优先 config.toml 文件里的显式值(用户开关 / 探测落地
-/// 刚写的),否则回落冷快照的 `is_enabled()`。这样写盘后当前进程立刻反映,无需重启。
-fn effective_enabled(
-    key: &str,
-    cfg: &kode_core::config::BackendConfig,
-    overrides: &std::collections::HashMap<String, bool>,
-) -> bool {
-    overrides
-        .get(key)
-        .copied()
-        .unwrap_or_else(|| cfg.is_enabled())
-}
-
 #[tauri::command]
 pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo>, String> {
     let catalog = crate::shared_agents::refresh(&state).await?;
@@ -516,6 +504,7 @@ pub async fn discover_backend_models(
 pub async fn list_all_backends(state: State<'_, AppState>) -> Result<Vec<BackendListItem>, String> {
     let catalog = crate::shared_agents::refresh(&state).await?;
     Ok(catalog.backends.iter().map(|(key,config)|BackendListItem {
+        read_only: catalog.read_only.contains(key),
         protocol: config.protocol.clone(),
         key: key.clone(), name: catalog.names.get(key).cloned().unwrap_or_else(||key.clone()),
         command: config.command.clone(), args: config.args.clone(),

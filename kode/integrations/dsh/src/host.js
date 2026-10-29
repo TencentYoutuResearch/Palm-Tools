@@ -56,18 +56,18 @@ export async function apply(ctx, config = {}) {
   function sessionTitle(agent) {
     return ctx.get?.('sessionTitle')?.get(agent.session)?.title ?? agent.session?.header?.title ?? '未命名会话'
   }
-  if (ctx.inject) ctx.inject(['webServer', 'connection', 'sessionController'], async webCtx => {
+  if (ctx.inject) ctx.inject(['webServer', 'connection'], async webCtx => {
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerProjectHosts } = await import('./project-hosts.js')
     await registerProjectHosts(webCtx, { ...config, backendClient: admin })
     const { registerMessagingApi, syncSessionTitles } = await import('./messaging-api.js')
     webCtx.effect(() => registerMessagingApi(webCtx, admin, node.node_id), 'kode.messaging-directory-api')
-    webCtx.effect(() => {
+    webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
       const lifetime = new AbortController()
-      const task = syncSessionTitles(webCtx.sessionController, admin, new Set(Object.keys(tokens)), lifetime.signal).catch(error => { if (!lifetime.signal.aborted) ctx.logger.warn('Kode session name sync failed: %s', error.message) })
+      const task = syncSessionTitles(sessionCtx.sessionController, admin, new Set(Object.keys(tokens)), lifetime.signal).catch(error => { if (!lifetime.signal.aborted) ctx.logger.warn('Kode session name sync failed: %s', error.message) })
       return async () => { lifetime.abort(); await task }
-    }, 'kode.session-name-sync')
+    }, 'kode.session-name-sync'))
   })
   function install(agent) {
     if (installing.has(agent.id)) return installing.get(agent.id)
@@ -228,16 +228,16 @@ export async function apply(ctx, config = {}) {
   if (config.agentRuntime !== false && ctx.inject) ctx.inject(['llm', 'sessionProjections'], async runtimeCtx => {
     const service = await installAgentRuntime(runtimeCtx, { ...config, backendClient: admin, agentProfilesFile: config.agentProfilesFile ?? join(dirname(stateFile), `agents-${node.node_id}.json`) }).catch(error => { console.error('Kode Agent runtime initialization failed:', error.stack); throw error })
     runtimeReady = true
-    runtimeCtx.inject(['webServer', 'connection', 'sessionController', 'agentDefaultModel'], async webCtx => {
+    runtimeCtx.inject(['webServer', 'connection', 'agentDefaultModel'], async webCtx => {
       const { registerAgentApi } = await import('./agent-api.js')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
       if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
-      if (config.sharedBackendState) webCtx.effect(() => {
+      if (config.sharedBackendState) webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
         const lifetime = new AbortController()
-        const task = import('./workbench-import.js').then(({ syncNativeTabs }) => syncNativeTabs(webCtx.sessionController, admin, service.profiles, lifetime.signal))
+        const task = import('./workbench-import.js').then(({ syncNativeTabs }) => syncNativeTabs(sessionCtx.sessionController, admin, service.profiles, lifetime.signal))
           .catch(error => { if (!lifetime.signal.aborted) ctx.logger.warn('Kode native session catalog sync failed: %s', error.message) })
         return async () => { lifetime.abort(); await task }
-      }, 'kode.native-catalog-sync')
+      }, 'kode.native-catalog-sync'))
     })
   })
   // Resume through the public Session controller: it restores the recorded preset,

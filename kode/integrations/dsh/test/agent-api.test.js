@@ -38,6 +38,11 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     const one = await (await request({ action: 'save', profile: { name: 'Codex', type: 'codex' } })).json()
     const two = await (await request({ action: 'save', profile: { name: 'Tcodex', type: 'codex', executable: 'tcodex' } })).json()
     assert.notEqual(one.profile.id, two.profile.id)
+    const beforeDiscovery=service.adapter.listModels
+    service.adapter.listModels=async()=>{throw new Error('configuration listing must not discover models')}
+    const configuration=await (await fetch(endpoint+'?configuration=1',{headers:{'x-test-role':'owner'}})).json()
+    assert.equal(configuration.modelError,undefined);assert.deepEqual(configuration.models,[])
+    service.adapter.listModels=beforeDiscovery
     assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id })).status, 200)
     assert.equal(profiles.binding(agent.id).profile.executable, 'tcodex')
     assert.equal(selected.at(-1).model, 'fixture', 'select an advertised model instead of a synthetic CLI default')

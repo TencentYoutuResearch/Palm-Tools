@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
-import SessionStore from '@deepseek-ai/dsh-session'
+import SessionStore, { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import * as factoryPlugin from '../src/native-agent-factory.js'
@@ -45,6 +45,50 @@ async function host(adapter) {
 }
 const message = (id, text) => ({ id, role: 'user', source: { kind: 'human' }, content: [{ type: 'text', text }] })
 const options = { sessionId: 'session-native-check', agentOptions: { provider: 'kode-agent-fixture', model: 'fixture' }, meta: { cwd: '/tmp' } }
+
+for (const outcome of ['accepted', 'rejected', 'uncertain']) test(`Codex steering ${outcome}: original active turn and input admission stay consistent`, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-steering-')), wire = join(root, 'wire.jsonl')
+  const h = await host({ closeSession: async () => {} })
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))], env: { KODE_FIXTURE_RPC_LOG: wire, ...(outcome === 'rejected' ? { KODE_FIXTURE_STEER_REJECT: '1' } : outcome === 'uncertain' ? { KODE_FIXTURE_STEER_DROP: '1' } : {}) } }])
+  const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
+  Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
+    agent.followup(message('initial', 'WAIT'))
+    for (let i = 0; i < 100 && !adapter.canSteer(agent.id); i++) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.ok(adapter.canSteer(agent.id))
+    agent.steer(message('steering-input', 'Focus on the new task'))
+    await Promise.race([agent.whenIdle(), new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('steering timed out')), 6000); timer.unref() })])
+    const rows = (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.equal(rows.filter(row => row.method === 'turn/steer').length, 1)
+    assert.equal(rows.find(row => row.method === 'turn/steer').params.expectedTurnId, 'turn-1')
+    assert.equal(rows.filter(row => row.method === 'turn/start').length, outcome === 'rejected' ? 2 : 1)
+    assert.equal(h.stored.get(agent.id).events.filter(event => event.type === 'user/message' && event.data.id === 'steering-input').length, 1)
+    assert.equal(agent.inbox.nextStep.length + agent.inbox.nextTurn.length, 0)
+    assert.ok(profiles.binding(agent.id).seenInputs.includes('steering-input'))
+  } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('native commentary and final answer remain separate durable messages around tool activity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-native-messages-'))
+  const h = await host({ closeSession: async () => {} })
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))] }])
+  const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
+  Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
+    agent.followup(message('multi-message', 'MULTI_MESSAGE')); await agent.whenIdle()
+    const events = h.stored.get(options.sessionId).events
+    const answers = events.filter(event => event.type === 'assistant/message').map(event => event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')).filter(Boolean)
+    assert.deepEqual(answers, ['Inspecting the workspace.', 'Final answer.'])
+    assert.ok(events.some(event => event.type === 'tool/result'))
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    if (process.env.KODE_TEST_DSH_NODE_MODULES) {
+      const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+      assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(options.sessionId).header, inheritedEventCount: 0, events }, KNOWN_SESSION_EVENT_TYPES))
+    }
+  } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
 
 test('native factory persists actual Agent turns without assembling a dsh system prompt and resumes once', async () => {
   const inputs = []
@@ -170,4 +214,68 @@ test('unplugging a native runtime cancels and drains a live Agent before releasi
   assert.equal(h.writers.size, 0)
   assert.equal(h.ctx.agents.list().length, 0)
   assert.equal(h.stored.get(options.sessionId).events.at(-1).data.reason.kind, 'aborted')
+})
+
+test('parallel native commands remain in an open canonical step across reasoning and commentary', async()=>{
+ const root=await mkdtemp(join(tmpdir(),'kode-overlap-')),h=await host({closeSession:async()=>{}})
+ const profiles=await new AgentProfiles(join(root,'agents.json')).open([{id:'fixture',name:'Fixture',type:'codex',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))]}])
+ const adapter=new AgentRuntimeAdapter(h.ctx,profiles,{recordNative(){}});Object.assign(h.ctx.kodeAgents,{profiles,adapter,recordBinding(){}})
+ try{
+  const {agent}=await h.ctx.agents.create({...options,meta:{cwd:root}})
+  agent.followup(message('overlap','OVERLAPPING_NATIVE'));await agent.whenIdle()
+  const events=h.stored.get(agent.id).events,pending=new Map()
+  for(const e of events){if(e.type==='tool/call')pending.set(e.data.callId,e.data.step);if(e.type==='tool/result'){assert.equal(e.data.step,pending.get(e.data.message.toolCallId));pending.delete(e.data.message.toolCallId)}if(e.type==='step/end')assert.equal(pending.size,0)}
+  assert.equal(events.filter(e=>e.type==='tool/result').length,2);assert.equal(events.at(-1).data.reason.kind,'completed')
+  if(process.env.KODE_TEST_DSH_NODE_MODULES){const {assertReleasedV4Relationships}=await import('@deepseek-ai/dsh-session-format-v3-to-v4');assert.doesNotThrow(()=>assertReleasedV4Relationships({header:h.stored.get(agent.id).header,events,inheritedEventCount:0},KNOWN_SESSION_EVENT_TYPES))}
+ }finally{await h.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true})}
+})
+
+test('native goals wake idle dsh turns without injecting or replaying user prompts',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'kode-native-goal-')),wire=join(root,'wire.jsonl')
+ const h=await host({closeSession:async()=>{}})
+ const profiles=await new AgentProfiles(join(root,'profiles.json')).open([{id:'fixture',name:'Fixture',type:'codex',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:wire,KODE_FIXTURE_GOAL_AUTO:'1'}}])
+ const adapter=new AgentRuntimeAdapter(h.ctx,profiles,{recordNative(){}})
+ Object.assign(h.ctx.kodeAgents,{profiles,adapter,recordBinding(){}})
+ try{
+  const {agent}=await h.ctx.agents.create({...options,meta:{cwd:root}})
+  agent.followup(message('goal-input','/goal Verify continuation'))
+  for(let i=0;i<150;i++){
+   if(h.stored.get(agent.id).events.filter(e=>e.type==='turn/end').length>=2)break
+   await new Promise(r=>setTimeout(r,10))
+  }
+  await agent.whenIdle()
+  const events=h.stored.get(agent.id).events
+  assert.equal(events.filter(e=>e.type==='turn/end').length,2)
+  assert.equal(events.filter(e=>e.type==='user/message').length,1)
+  assert.ok(events.filter(e=>e.type==='turn/end').every(e=>e.data.reason.kind==='completed'))
+  const answers=events.filter(e=>e.type==='assistant/message').flatMap(e=>e.data.message.content).filter(b=>b.type==='text').map(b=>b.text).join('\n')
+  assert.match(answers,/Native goal 1/);assert.match(answers,/Native goal 2/)
+  const rows=(await readFile(wire,'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(rows.filter(r=>r.method==='turn/start').length,0)
+  assert.equal(rows.filter(r=>r.method==='thread/goal/set').length,1)
+  if(process.env.KODE_TEST_DSH_NODE_MODULES){
+   const {assertReleasedV4Relationships}=await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+   assert.doesNotThrow(()=>assertReleasedV4Relationships({header:h.stored.get(agent.id).header,inheritedEventCount:0,events},KNOWN_SESSION_EVENT_TYPES))
+  }
+ }finally{await h.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true})}
+})
+
+test('goal pause reaches the live native thread while a turn is running',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'kode-live-goal-control-'))
+ const h=await host({closeSession:async()=>{}})
+ const profiles=await new AgentProfiles(join(root,'profiles.json')).open([{id:'fixture',name:'Fixture',type:'codex',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))]}])
+ const adapter=new AgentRuntimeAdapter(h.ctx,profiles,{recordNative(){}})
+ Object.assign(h.ctx.kodeAgents,{profiles,adapter,recordBinding(){}})
+ try{
+  const {agent}=await h.ctx.agents.create({...options,meta:{cwd:root}})
+  agent.followup(message('initial','WAIT'))
+  for(let i=0;i<100&&!adapter.canSteer(agent.id);i++)await new Promise(r=>setTimeout(r,10))
+  assert.ok(adapter.canSteer(agent.id))
+  await adapter.controlGoal(agent,'Finish checks',AbortSignal.timeout(5000))
+  assert.match(await adapter.controlGoal(agent,'pause',AbortSignal.timeout(5000)),/已暂停/)
+  assert.equal(agent.status,'running');assert.equal(agent.inbox.nextTurn.length,0)
+  assert.match(await adapter.controlGoal(agent,'',AbortSignal.timeout(5000)),/已暂停/)
+  agent.steer(message('finish','Finish now'));await agent.whenIdle()
+  assert.equal(h.stored.get(agent.id).events.filter(e=>e.type==='turn/start').length,1)
+ }finally{await h.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true})}
 })

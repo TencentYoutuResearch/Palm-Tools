@@ -128,6 +128,9 @@
   let renameOpen = $state(false)
   /** 显式弹出后端选择器(Cmd+T 触发,或主区域为空时常驻) */
   let chooserOpen = $state(false)
+  $effect(() => {
+    if (chooserOpen) void ipc.listBackends().then(rows => { backends = rows }).catch(error => console.warn('refresh shared Agents:', error))
+  })
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
   /** Phase 11.4 远端 endpoint 配置面板 */

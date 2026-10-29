@@ -38,6 +38,7 @@ for (const type of ['codex', 'custom']) test(`${type} preserves image capability
     const models = await adapter.listModels(profileRoute('images'))
     const model = models[0].id
     assert.ok((await adapter.resolveModel(profileRoute('images'), model)).inputModalities.includes('image'))
+    if (type === 'codex' || type === 'claude') assert.ok((await adapter.resolveModel(profileRoute('images'), 'enterprise-alias-not-in-catalog')).inputModalities.includes('image'))
     await collect(adapter.stream({ provider: profileRoute('images'), sessionId: 'images', model, messages: [message('one')], signal: AbortSignal.timeout(5000) }))
     await adapter.close()
     adapter = new AgentRuntimeAdapter(ctx, profiles, { recordNative() {} })
@@ -61,4 +62,12 @@ test('ACP without an advertised image capability remains text-only', async () =>
   const adapter = new AgentRuntimeAdapter({}, profiles)
   try { assert.deepEqual((await adapter.listModels(profileRoute('text')))[0].inputModalities, ['text']) }
   finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('enterprise model aliases do not disable Codex or Claude native image input',async()=>{
+ for(const type of ['codex','claude']){
+  const adapter=new AgentRuntimeAdapter({}, {list:()=>[{id:'images',type}],bindings:{}}, {recordNative(){}})
+  adapter.listModels=async()=>[]
+  assert.deepEqual((await adapter.resolveModel(profileRoute('images'),'enterprise-alias')).inputModalities,['text','image'])
+ }
 })

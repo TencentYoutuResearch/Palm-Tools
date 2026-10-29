@@ -1,3 +1,4 @@
+import { savedSessionTime } from './saved-session-state.js'
 /** Kode owns SSH; the remote dsh Host owns all workspace and execution services. */
 import { createServer, request as httpRequest } from 'node:http'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
@@ -11,6 +12,9 @@ import { hostDirectory, hostOperation, registerHostDirectory, DIRECTORY_PATH } f
 import { BackendDocument } from './backend-state.js'
 import { createHash } from 'node:crypto'
 import { importSavedSession } from './workbench-import.js'
+import { deployRemote, deploymentHost, DEPLOY_STEPS } from './remote-deploy.js'
+import { registerWorktreeApi } from './worktree-api.js'
+import { registerBrowserApi } from './browser-host.js'
 const PATH = '/api/kode/project-hosts'
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
 const equal = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b))
@@ -22,7 +26,7 @@ export function validateHost(input, previous) {
   const url = new URL(accessUrl || (previous ? `http://127.0.0.1:${previous.remote_port}/?token=${encodeURIComponent(previous.token)}` : ''))
   if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.pathname !== '/') throw new Error('请粘贴远端 dsh 输出的本机 HTTP 访问链接，连接只通过 SSH。')
   if (!url.searchParams.get('token')) throw new Error('访问链接需要包含 token，请复制远端 dsh 输出的完整链接。')
-  return { id: input.id || randomUUID(), name, host, port, remote_port: Number(url.port || 80), token: url.searchParams.get('token'), ...((input.configFile ?? previous?.config_file) ? { config_file: String(input.configFile ?? previous.config_file) } : {}) }
+  return { id: input.id || randomUUID(), name, host, port, remote_port: Number(url.port || 80), token: url.searchParams.get('token'), ...((input.configFile ?? previous?.config_file) ? { config_file: String(input.configFile ?? previous.config_file) } : {}), ...(!accessUrl && previous?.managed ? { managed: true, node_id: previous.node_id } : {}) }
 }
 export async function openKodeTunnel(command, host) {
   const child = spawn(command, [], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
@@ -55,6 +59,7 @@ export class ProjectHosts {
     this.hosts = []; this.portals = new Map(); this.pending = new Map(); this.saving = Promise.resolve(); this.closed = false; this.directoryCache = new Map(); this.directoryJobs = new Map()
     this.document = config.sharedBackendState && config.backendClient ? new BackendDocument(config.backendClient, 'ssh-hosts') : undefined
     this.saved = new Map()
+    this.deployments = new Map()
   }
   async load() {
     if (this.document) { const state = await this.document.read(); if (state) {
@@ -80,7 +85,7 @@ export class ProjectHosts {
     }
     return Promise.all([view('此计算机', 'local', nodes.local_node_id), ...this.hosts.map(host => view(host.name, 'ssh', nodes.hosts.find(node => normalize(node.ssh_host) === normalize(host.host))?.node_id))])
   }
-  view(current = 'local') { return { current, hosts: [{ id: 'local', name: '此计算机' }, ...this.hosts.map(({ id, name, host, port }) => ({ id, name, host, port, connected: this.portals.has(id) }))] } }
+  view(current = 'local') { return { current, deploymentSupported: Boolean(this.config.backendClient), hosts: [{ id: 'local', name: '此计算机' }, ...this.hosts.map(({ id, name, host, port }) => ({ id, name, host, port, connected: this.portals.has(id) }))] } }
   save() {
     this.saving = this.saving.then(async () => {
       if (this.document) { await this.document.write(this.hosts); return }
@@ -120,10 +125,11 @@ export class ProjectHosts {
         const hostId = target?.id ?? 'local', host = hosts.find(row => row.id === hostId)
         if (!host) continue
         const key = `saved:${createHash('sha256').update(`${hostId}:${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0,32)}`
-        const adopted = `session-kode-${createHash('sha256').update(`${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0,32)}`
+        const adopted = tab.dsh_session_id ?? `session-kode-${createHash('sha256').update(`${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0,32)}`
         if (host.sessions.some(row => row.id === adopted || row.nativeThreadId === tab.session_id)) continue
         this.saved.set(key, { tab, hostId })
-        host.sessions = [...host.sessions, { id: key, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: 0, running: false }]
+        host.sessions = [...host.sessions, { id: key, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: savedSessionTime(tab), running: false, nativeThreadId: tab.session_id }]
+        if (host.archivedSessionIds?.includes(adopted)) host.archivedSessionIds.push(key)
         let workspace = host.workspaces.find(row => row.path === tab.cwd)
         if (workspace) { workspace = { ...workspace, sessionIds: [...workspace.sessionIds, key] }; host.workspaces = host.workspaces.map(row => row.id === workspace.id ? workspace : row) }
       }
@@ -133,12 +139,26 @@ export class ProjectHosts {
   async handle(req, res, current = 'local') {
     try {
       if (this.document) await this.load()
-      if (req.method === 'GET') return json(res, 200, new URL(req.url, 'http://localhost').searchParams.get('view') === 'directory' ? await this.directory(current) : this.view(current))
+      if (req.method === 'GET') {
+        const query = new URL(req.url, 'http://localhost').searchParams
+        if (query.has('deployment')) return this.deploymentResponse(req, res, query.get('deployment'), query.get('events') === '1')
+        return json(res, 200, query.get('view') === 'directory' ? await this.directory(current) : this.view(current))
+      }
       if (req.method !== 'POST') return json(res, 405, { error: 'GET or POST required' })
       if (!(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 415, { error: 'JSON required' })
       let text = ''
       for await (const chunk of req) { text += chunk; if (Buffer.byteLength(text) > 16384) throw new Error('配置过长。') }
       const input = JSON.parse(text)
+      if (input.action === 'deploy') {
+        if (current !== 'local') throw new Error('请返回此计算机后添加或部署 SSH 主机。')
+        return json(res, 202, this.startDeployment(input))
+      }
+      if (input.action === 'cancel-deployment') {
+        const job = this.deployments.get(input.deploymentId)
+        if (!job) throw new Error('部署任务不存在。')
+        if (job.status === 'running') job.controller.abort(new Error('部署已取消。'))
+        return json(res, 200, this.deploymentView(job))
+      }
       if (input.action === 'import-saved') {
         await this.directory(current)
         const saved = this.saved.get(input.sessionId)
@@ -167,7 +187,7 @@ export class ProjectHosts {
         if (index >= 0) { await this.disconnect(host.id); this.hosts[index] = host } else this.hosts.push(host)
         await this.save(); return json(res, 200, { id: host.id, ...this.view(current) })
       }
-      if (input.action === 'delete') { if (current !== 'local' && input.id === current) throw new Error('请先切换到此计算机，再移除当前主机。'); await this.disconnect(input.id); this.hosts = this.hosts.filter(row => row.id !== input.id); await this.save(); return json(res, 200, this.view(current)) }
+      if (input.action === 'delete') { if (current !== 'local' && input.id === current) throw new Error('请先切换到此计算机，再移除当前主机。'); const host = this.hosts.find(row => row.id === input.id); if (host?.managed && host.node_id && this.config.backendClient) await this.config.backendClient.call('/api/v1/messaging/workbench/peers/remove', { node_id: host.node_id }); await this.disconnect(input.id); this.hosts = this.hosts.filter(row => row.id !== input.id); await this.save(); return json(res, 200, this.view(current)) }
       if (input.action === 'connect') {
         const target = input.sessionId ? ['session', input.sessionId] : input.workspaceId ? ['workspace', input.workspaceId] : null
         if (target && (typeof target[1] !== 'string' || target[1].length > 256)) throw new Error('无效会话或项目。')
@@ -180,6 +200,50 @@ export class ProjectHosts {
       }
       throw new Error('未知项目操作。')
     } catch (error) { json(res, 400, { error: error.message }) }
+  }
+  deploymentView(job) { return { id: job.id, status: job.status, steps: [...job.steps.values()], ...(job.error ? { error: job.error } : {}), ...(job.result ? { result: job.result } : {}) } }
+  deploymentResponse(req, res, id, events) {
+    const job = this.deployments.get(id)
+    if (!job) return json(res, 404, { error: '部署任务不存在，请重新连接。' })
+    if (!events) return json(res, 200, this.deploymentView(job))
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' })
+    const send = () => { res.write(`data: ${JSON.stringify(this.deploymentView(job))}\n\n`); if (job.status !== 'running') res.end() }
+    const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000)
+    job.listeners.add(send); res.on('close', () => { job.listeners.delete(send); clearInterval(heartbeat) }); send()
+  }
+  startDeployment(input) {
+    if (this.closed) throw new Error('Host is stopping')
+    const previous = input.id && this.hosts.find(row => row.id === input.id)
+    const host = deploymentHost({ ...input, configFile: input.configFile || previous?.config_file })
+    if (input.id && !previous) throw new Error('主机不存在，请刷新后重试。')
+    for (const job of this.deployments.values()) if (job.status === 'running' && job.host.host === host.host && job.host.port === host.port) return this.deploymentView(job)
+    if ([...this.deployments.values()].filter(job => job.status === 'running').length >= 3) throw new Error('已有多个主机正在部署，请稍后重试。')
+    for (const [id, job] of this.deployments) if (this.deployments.size >= 20 && job.status !== 'running') this.deployments.delete(id)
+    const job = { id: randomUUID(), host, status: 'running', controller: new AbortController(), listeners: new Set(), steps: new Map(DEPLOY_STEPS.map(step => [step, { step, status: 'pending', message: '' }])) }
+    this.deployments.set(job.id, job)
+    const notify = () => { for (const listener of job.listeners) { try { listener() } catch { job.listeners.delete(listener) } } }
+    const progress = (step, status, message) => { job.steps.set(step, { step, status, message }); notify() }
+    job.promise = (async () => {
+      try {
+        const deployed = await (this.config.deployRemote ?? deployRemote)(host, this.config, { signal: job.controller.signal, progress })
+        job.controller.signal.throwIfAborted()
+        progress('save', 'running', '保存主机并检查连接')
+        await this.load()
+        const same = previous ?? this.hosts.find(row => row.host === host.host && row.port === host.port)
+        const record = { ...deployed, id: same?.id ?? randomUUID() }
+        await this.disconnect(record.id)
+        const index = this.hosts.findIndex(row => row.id === record.id)
+        if (index < 0) this.hosts.push(record); else this.hosts[index] = record
+        await this.save(); await this.connect(record.id)
+        progress('save', 'done', '主机已连接，可以选择远端项目')
+        job.result = { id: record.id, name: record.name }; job.status = 'done'
+      } catch (error) {
+        job.status = job.controller.signal.aborted ? 'cancelled' : 'failed'
+        job.error = String(job.controller.signal.aborted ? '部署已取消；已下载的资源可在重试时复用。' : error.message).replace(/([?&]token=)[^\s&]+/g, '$1[redacted]').slice(0,800)
+        for (const [step, entry] of job.steps) if (entry.status === 'running') job.steps.set(step, { ...entry, status: 'failed' })
+      } finally { notify() }
+    })()
+    return this.deploymentView(job)
   }
   connect(id) {
     if (this.closed) throw new Error('Host is stopping')
@@ -270,9 +334,11 @@ export class ProjectHosts {
     } catch (error) { server?.close(); await tunnel.close(); throw error }
   }
   async disconnect(id) { await this.pending.get(id)?.catch(() => {}); const portal = this.portals.get(id); this.portals.delete(id); await portal?.close(); this.directoryCache.delete(id) }
-  async close() { this.closed = true; await Promise.allSettled([...this.pending.values()]); await Promise.all([...this.portals.keys()].map(id => this.disconnect(id))); await this.saving }
+  async close() { this.closed = true; for (const job of this.deployments.values()) if (job.status === 'running') job.controller.abort(new Error('Host is stopping')); await Promise.allSettled([...this.deployments.values()].map(job => job.promise)); await Promise.allSettled([...this.pending.values()]); await Promise.all([...this.portals.keys()].map(id => this.disconnect(id))); await this.saving }
 }
 export async function registerProjectHosts(ctx, config) {
+  ctx.effect(() => registerWorktreeApi(ctx, config), 'kode.worktree-api')
+  ctx.effect(() => registerBrowserApi(ctx, { ...config, browserProfileDirectory: config.browserProfileDirectory ?? join(dirname(config.stateFile ?? join(homedir(), '.config/kode/owners.json')), 'sidebar-browser') }), 'kode.browser-api')
   const manager = new ProjectHosts(ctx, config); await manager.load()
   ctx.provide('kodeProjectHosts', manager)
   ctx.effect(() => registerHostDirectory(ctx, config), 'kode.host-directory')
