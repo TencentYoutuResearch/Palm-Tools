@@ -64,6 +64,10 @@ export function registerAgentApi(ctx, service) {
       let body = ''
       for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) throw new Error('Agent configuration exceeds 128 KiB') }
       const input = JSON.parse(body)
+      if (input.action === 'agent-avatar') {
+        if (!service.appearance) throw new Error('头像配置服务尚未就绪。')
+        await service.appearance.setAgent(input.profileId, input.avatarId ?? null); json(res, 200, { ok: true }); return
+      }
       if (input.action === 'session-avatar') {
         if (!service.appearance) throw new Error('头像配置服务尚未就绪。')
         const known = ctx.agents.get(input.sessionId) || (await ctx.sessionController.list({})).items.some(row => row.sessionId === input.sessionId)

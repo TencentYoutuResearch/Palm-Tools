@@ -1,3 +1,8 @@
+function resumeCandidates(hosts, target, query = '') {
+  if (!target?.profile) return []
+  const text = query.trim().toLocaleLowerCase()
+  return (hosts.find(host => host.id === target.hostId)?.sessions ?? []).filter(row => row.id !== target.sessionId && row.nativeThreadId && (row.agent?.id === target.profile.id) && `${row.title} ${row.cwd} ${row.nativeThreadId}`.toLocaleLowerCase().includes(text)).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+}
 /** Native dsh menus and modal; Agent occupies the preset seat, model stays in the composer. */
 window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const React = require('react'), h = React.createElement
@@ -127,17 +132,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (!actions?.openSection) throw new Error('设置尚未就绪，请稍后重试。')
     actions.openSection(section)
   }
-  function AgentSettingsShell({ native, ...props }) {
-    const requestedModels = props.useStore(state => state.activeId === 'models')
-    const useStore = selector => props.useStore(state => selector(state.activeId === 'models' ? { ...state, activeId: 'kode-agents' } : state))
-    const useSections = selector => props.useSections(rows => selector(rows.filter(row => row.id !== 'models').sort((a, b) => Number(a.id === 'plugins') - Number(b.id === 'plugins'))))
-    const renderSlot = (name, owner, options) => {
-      if (name !== 'settings.section') return props.renderSlot(name, owner, options)
-      const only = options?.only === 'models' ? 'kode-agents' : options?.only
-      return props.renderSlot(name, { ...owner, showModels: requestedModels, renderModels: modelOwner => props.renderSlot(name, modelOwner, { only: 'models' }) }, { ...options, only })
-    }
-    return h(native, { ...props, useStore, useSections, renderSlot })
-  }
   let requestedProfile
   function AgentControl({ sessionId, sessions, remote, slots }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions)
@@ -157,12 +151,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h(Failure, { text: navigationError || error }),
     )
   }
-  function AgentSettings({ sessions, renderModels, close, showModels = false }) {
+  function AgentSettings({ sessions, slots }) {
     const { data, busy, error, store } = useDirectory(undefined, sessions)
-    const [draft, setDraft] = useState(() => newDraft()), [saved, setSaved] = useState(false), [formError, setFormError] = useState(''), [deleting, setDeleting] = useState(false), [editing, setEditing] = useState(false), [modelsOpen, setModelsOpen] = useState(showModels)
-    useEffect(() => { if (showModels) setModelsOpen(true) }, [showModels])
+    const [draft, setDraft] = useState(() => newDraft()), [saved, setSaved] = useState(false), [formError, setFormError] = useState(''), [deleting, setDeleting] = useState(false), [editing, setEditing] = useState(false), [avatarProfile, setAvatarProfile] = useState(null)
     const customProfiles = (data?.profiles ?? []).filter(p => p.origin !== 'builtin')
-    const edit = profile => { setEditing(true); setModelsOpen(false); setSaved(false); setFormError(''); setDraft({ ...profile, argsText: JSON.stringify(profile.args ?? []), envText: JSON.stringify(profile.env ?? {}, null, 2) }) }
+    const edit = profile => { setEditing(true); setSaved(false); setFormError(''); setDraft({ ...profile, argsText: JSON.stringify(profile.args ?? []), envText: JSON.stringify(profile.env ?? {}, null, 2) }) }
     const change = patch => { setSaved(false); setDraft(value => ({ ...value, ...patch })) }
     const field = (label, key, props = {}) => h('label', { className: 'kode-field' }, h('span', null, label), h('input', { value: draft[key] ?? '', onChange: e => change({ [key]: e.target.value }), ...props }))
     useEffect(() => { if (requestedProfile && data) { const profile = data.profiles.find(p => p.id === requestedProfile); if (profile) setDraft({ ...profile, argsText: JSON.stringify(profile.args ?? []), envText: JSON.stringify(profile.env ?? {}, null, 2) }); requestedProfile = undefined } }, [data])
@@ -189,34 +182,34 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('div', { className: 'kode-settings-footer' }, draft.id && customProfiles.some(p => p.id === draft.id) && h(Button, { variant: 'outline', className: 'kode-delete', disabled: busy, onClick: () => setDeleting(true) }, '删除配置'), h(Button, { variant: 'outline', disabled: busy, onClick: () => setEditing(false) }, '取消'), h(Button, { variant: 'primary', type: 'submit', form: 'kode-agent-form', disabled: busy }, busy ? '保存中…' : '保存配置')))
     return h('section', { className: 'kode-agent-settings', 'aria-label': 'Agent 设置' },
       h('h2', null, 'Agent'),
-      h('p', { className: 'kode-agent-intro' }, '内置 Agent 可直接使用，也可为同一类型添加多份配置。会话头像在会话菜单中设置。'),
+      h('p', { className: 'kode-agent-intro' }, '内置 Agent 可直接使用，也可为同一类型添加多份配置。点击头像可设置 Agent 默认头像。'),
       saved && h('p', { className: 'kode-config-note', role: 'status' }, '已保存'),
       h(Failure, { text: !editing ? formError || error : '' }),
       h('h3', { className: 'kode-settings-group-title' }, '内置 Agent'),
       h('ul', { className: 'kode-agent-rows' },
         ...(data?.profiles ?? []).filter(profile => profile.origin === 'builtin' && profile.type !== 'dsh').map(profile => h('li', { className: 'kode-agent-row', key: profile.id },
-          h('div', { className: 'kode-agent-row-head' }, h(AgentAvatar, { profile, size: 24 }), h('span', { className: 'kode-agent-name' }, profile.name)))),
+          h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${profile.name} 默认头像`, onClick: () => setAvatarProfile(profile) }, h(AgentAvatar, { profile, size: 24 })), h('span', { className: 'kode-agent-name' }, profile.name)))),
         data?.types?.dsh && h('li', { className: 'kode-agent-row' },
-          h('div', { className: 'kode-agent-row-head' }, h('span', { className: 'kode-agent-name' }, 'DeepSeek Harness'), h(Button, { variant: 'outline', className: 'kode-agent-edit', 'aria-label': '编辑 DeepSeek Harness', 'aria-expanded': modelsOpen, onClick: () => { setModelsOpen(!modelsOpen); setEditing(false) } }, modelsOpen ? '收起' : '编辑')),
-          modelsOpen && h('div', { className: 'kode-agent-models' }, renderModels ? renderModels({ close }) : h(Failure, { text: '模型设置尚未就绪，请稍后重试。' }))),
+          h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置 DeepSeek Harness 默认头像', onClick: () => setAvatarProfile(data.profiles.find(profile => profile.type === 'dsh')) }, h(AgentAvatar, { profile: data.profiles.find(profile => profile.type === 'dsh'), size: 24 })), h('span', { className: 'kode-agent-name' }, 'DeepSeek Harness'), h(Button, { variant: 'outline', className: 'kode-agent-edit', 'aria-label': '编辑 DeepSeek Harness', onClick: () => openSettings(slots, 'models') }, '模型设置'))),
       ),
       h('h3', { className: 'kode-settings-group-title' }, '自定义 Agent'),
       h('ul', { className: 'kode-agent-rows' },
         ...customProfiles.map(p => h('li', { className: 'kode-agent-row', key: p.id },
-          h('div', { className: 'kode-agent-row-head' }, h(AgentAvatar, { profile: p, size: 24 }), h('span', { className: 'kode-agent-name' }, p.name), h('span', { className: 'kode-agent-tag' }, data.types[p.type]?.name), h(Button, { variant: 'outline', className: 'kode-agent-edit', disabled: busy, 'aria-label': `编辑 ${p.name}`, 'aria-expanded': editing && draft.id === p.id, onClick: () => editing && draft.id === p.id ? setEditing(false) : edit(p) }, editing && draft.id === p.id ? '收起' : '编辑')),
+          h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${p.name} 默认头像`, onClick: () => setAvatarProfile(p) }, h(AgentAvatar, { profile: p, size: 24 })), h('span', { className: 'kode-agent-name' }, p.name), h('span', { className: 'kode-agent-tag' }, data.types[p.type]?.name), h(Button, { variant: 'outline', className: 'kode-agent-edit', disabled: busy, 'aria-label': `编辑 ${p.name}`, 'aria-expanded': editing && draft.id === p.id, onClick: () => editing && draft.id === p.id ? setEditing(false) : edit(p) }, editing && draft.id === p.id ? '收起' : '编辑')),
           editing && draft.id === p.id && h('div', { className: 'kode-agent-editor' }, editor))),
       ),
       h(Button, { variant: 'outline', className: 'kode-agent-add', disabled: busy || !data, onClick: () => edit(newDraft(data?.types)) }, h(IconPlusOutlineRegular, { size: 16 }), '添加 Agent'),
       editing && !draft.id && h('div', { className: 'kode-agent-editor' }, editor),
+      h(Modal, { open: Boolean(avatarProfile), title: 'Agent 默认头像', className: 'kode-avatar-dialog', closeLabel: '关闭', onClose: () => setAvatarProfile(null) }, avatarProfile && h(AvatarChoices, { profile: avatarProfile, agentDefault: true, onChoose: async avatarId => { await store.operate({ action: 'agent-avatar', profileId: avatarProfile.id, avatarId }); await refreshWorkspaceDirectory(); for (const entry of stores.values()) void entry.load(); setAvatarProfile(null) } })),
       h(Modal, { open: deleting, title: `删除 ${draft.name}？`, closeLabel: '关闭', onClose: () => setDeleting(false), description: '此配置将从 Agent 列表移除。已有会话和启动配置会保留。', footer: h(React.Fragment, null, h(Button, { variant: 'outline', onClick: () => setDeleting(false) }, '取消'), h(Button, { variant: 'primary', disabled: busy, onClick: () => { void store.operate({ action: 'remove', profileId: draft.id }).then(result => { if (result) { setDeleting(false); setEditing(false); setSaved(false) } }).catch(() => {}) } }, '删除配置')) }, h(Failure, { text: error })),
     )
   }
-  function AvatarChoices({ profile, onChoose }) {
+  function AvatarChoices({ profile, onChoose, agentDefault = false }) {
     const [avatars, setAvatars] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
     useEffect(() => { let active = true; fetchHost('/api/kode/avatars', { credentials: 'same-origin', cache: 'no-store' }, 'local').then(async response => { const value = await response.json(); if (!response.ok) throw new Error(value.error); if (active) setAvatars(value.avatars) }).catch(error => { if (active) setError(error.message) }); return () => { active = false } }, [])
     const choose = avatarId => { if (busy) return; setBusy(true); setError(''); void Promise.resolve(onChoose(avatarId)).catch(error => setError(error.message)).finally(() => setBusy(false)) }
     return h('div', { className: 'kode-avatar-editor' },
-      h('p', { className: 'kode-config-note' }, '仅更改当前会话的头像；默认使用 Agent 图标。'),
+      h('p', { className: 'kode-config-note' }, agentDefault ? '用于此 Agent 的默认头像；单独设置过头像的会话保留其选择。' : '仅更改当前会话的头像；默认使用 Agent 图标。'),
       h('div', { className: 'kode-avatar-grid', 'aria-label': '会话头像' },
         h('button', { type: 'button', className: 'kode-avatar-choice', 'aria-pressed': !profile.avatar?.id, disabled: busy, onClick: () => choose(null) }, h(AgentAvatar, { profile: { ...profile, avatar: null }, size: 36 }), h('span', null, '默认图标')),
         ...(avatars ?? []).map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': profile.avatar?.id === avatar.id, disabled: busy, title: avatar.name, onClick: () => choose(avatar.id) }, h(AgentAvatar, { profile: { ...profile, avatar }, size: 36 }), h('span', null, avatar.name)))),
@@ -336,7 +329,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const cssString = value => `"${Array.from(String(value), ch => `\\${ch.codePointAt(0).toString(16)} `).join('')}"`
   function FederatedWorkspaceBrowser({ native, slots, ...props }) {
     const connection = useSyncExternalStore(transport?.subscribe ?? (() => () => {}), transport?.getSnapshot ?? (() => null))
-    const data = useWorkspaceDirectory(), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [rename, setRename] = useState(null), [title, setTitle] = useState(''), [avatarTarget, setAvatarTarget] = useState(null)
+    const data = useWorkspaceDirectory(), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [rename, setRename] = useState(null), [title, setTitle] = useState(''), [avatarTarget, setAvatarTarget] = useState(null), [resumeTarget, setResumeTarget] = useState(null), [resumeQuery, setResumeQuery] = useState('')
     const source = props.useSessions(state => state), workspaceSource = props.useWorkspaces(state => state)
     const merged = React.useMemo(() => {
       const own = data.hosts.find(host => host.id === data.current), hidden = new Set(own?.hiddenSessionIds ?? [])
@@ -383,7 +376,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       if (!window.addEventListener) return
       const show = event => { if (merged.sessions.byId[event.detail?.sessionId]) setAvatarTarget(event.detail.sessionId) }
       window.addEventListener('kode-session-avatar', show)
-      return () => window.removeEventListener('kode-session-avatar', show)
+      const resume = event => { setResumeTarget(event.detail); setResumeQuery(''); void refreshWorkspaceDirectory() }
+      window.addEventListener('kode-resume-session', resume)
+      return () => { window.removeEventListener('kode-session-avatar', show); window.removeEventListener('kode-resume-session', resume) }
     }, [merged])
     const navigate = async (id, target) => { if (busy) return; setBusy(true); setError(''); setNotice(''); try {
       if (target.sessionId?.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId }); id = imported.hostId; target = { sessionId: imported.sessionId }; if(imported.historyWindow?.truncated)setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`) }
@@ -444,6 +439,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         },
         unarchiveSession: id => merged.routes.has(id) ? mutate(id, 'unarchive-session', { sessionId: merged.routes.get(id).id }) : props.unarchiveSession(id),
       }),
+      h(Modal, { open: Boolean(resumeTarget), title: '恢复原生会话', closeLabel: '关闭', onClose: () => setResumeTarget(null) },
+        h('label', { className: 'kode-field' }, '搜索会话', h('input', { autoFocus: true, value: resumeQuery, placeholder: '名称、工作区或原生会话 ID', onChange: event => setResumeQuery(event.target.value) })),
+        h('div', { className: 'kode-resume-list' }, ...resumeCandidates(data.hosts, resumeTarget, resumeQuery).map(row => h(Button, { key: row.id, variant: 'outline', disabled: busy, onClick: async () => { if (await navigate(resumeTarget.hostId, { sessionId: row.id })) setResumeTarget(null) } }, h('span', null, row.title), h('small', null, row.cwd)))),
+        !resumeCandidates(data.hosts, resumeTarget, resumeQuery).length && h('p', { className: 'kode-config-note' }, '没有匹配的历史会话。'), h(Failure, { text: error })),
       h(Modal, { open: Boolean(rename), title: '重命名会话', closeLabel: '关闭', onClose: () => setRename(null), footer: h(React.Fragment, null, h(Button, { onClick: () => setRename(null) }, '取消'), h(Button, { variant: 'primary', disabled: !title.trim(), onClick: async () => { try { await mutate(rename, 'rename-session', { sessionId: merged.routes.get(rename).id, title: title.trim() }); setRename(null) } catch (error) { setError(error.message) } } }, '保存')) }, h('label', { className: 'kode-field' }, '会话名称', h('input', { value: title, onChange: e => setTitle(e.target.value) })), h(Failure, { text: error })),
       h(Modal, { open: Boolean(avatarTarget), title: '会话头像', className: 'kode-avatar-dialog', closeLabel: '关闭', onClose: () => setAvatarTarget(null) }, avatarTarget && h(AvatarChoices, {
         profile: merged.sessions.byId[avatarTarget]?.agent ?? { name: 'Agent', type: 'custom' },
@@ -564,7 +563,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         const key = keyOf(session)
         if (!metadata.has(key)) metadata.set(key, scope.remote.commands.list(session.sessionId).then(result => {
           if (!result.ok) throw new Error(result.error.message)
-          return new Map(result.value.commands.map(row => [row.name, row]))
+          return new Map((Array.isArray(result.value) ? result.value : result.value.commands).map(row => [row.name, row]))
         }).catch(error => { metadata.delete(key); throw error }))
         return metadata.get(key)
       }
@@ -585,6 +584,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         return Object.values(groups).flat()
       }
       commands.candidates = candidateWrapper
+      if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
+        name: 'resume',
+        available: session => { const profile = directory(session.sessionId).getSnapshot().data?.currentProfile; return ['codex', 'claude'].includes(profile?.type) || profile?.protocol === 'codex' },
+        ui: { kind: 'action', run: session => window.dispatchEvent(new CustomEvent('kode-resume-session', { detail: { sessionId: session.sessionId, hostId: transport?.current ?? 'local', profile: directory(session.sessionId).getSnapshot().data?.currentProfile } })) },
+      }), 'kode.resume-session-command')
       if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
         name: 'new',
         available: session => Boolean(directory(session.sessionId).getSnapshot().data?.currentProfile && scope.get('uiWorkspace')),
@@ -880,40 +884,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     )
   }
 
-  function AgentTrajectory({ eventSource, session }) {
-    const snapshot = useSyncExternalStore(React.useCallback(fn => eventSource.subscribe(fn), [eventSource]), React.useCallback(() => eventSource.getSnapshot(), [eventSource]))
-    const [query, setQuery] = useState(''), [loading, setLoading] = useState(false), [error, setError] = useState('')
-    const rows = React.useMemo(() => {
-      const result = []
-      for (const entry of snapshot.entries) {
-        const record = entry.event
-        if (record?.type !== 'plugin:kode/native-event') continue
-        const { turn, event } = record.data, params = event.params ?? {}, item = params.item
-        const delta = typeof params.delta === 'string' ? params.delta : undefined
-        const kind = event.method.includes('reasoning') || item?.type === 'reasoning' ? '思考' : event.method.includes('agentMessage') || item?.type === 'agentMessage' ? '回答' : item?.type === 'commandExecution' ? '命令' : item?.type === 'fileChange' ? '文件修改' : item?.type === 'mcpToolCall' ? '工具调用' : event.method === 'turn/completed' ? '轮次完成' : event.method === 'turn/started' ? '轮次开始' : 'Agent 事件'
-        const previous = result.at(-1)
-        if (event.method === 'item/completed' && previous?.turn === turn && previous.kind === kind && previous.delta && previous.text === item?.text) {
-          previous.status = item.status ?? 'completed'; previous.events.push(event); continue
-        }
-        if (delta !== undefined && previous?.turn === turn && previous.kind === kind && previous.delta) {
-          previous.text += delta; previous.events.push(event); continue
-        }
-        const text = delta ?? item?.command ?? item?.text ?? item?.title ?? item?.aggregatedOutput ?? (item ? JSON.stringify(item, null, 2) : '')
-        result.push({ key: record.seq, turn, kind, text, delta: delta !== undefined, time: record.time, status: item?.status ?? params.turn?.status, events: [event] })
-      }
-      return result
-    }, [snapshot])
-    const visible = rows.filter(row => `${row.kind} ${row.text}`.toLowerCase().includes(query.trim().toLowerCase()))
-    return h('section', { className: 'kode-agent-trajectory', 'aria-label': 'Agent 轨迹' },
-      h('div', { className: 'kode-trace-toolbar' }, h('input', { type: 'search', placeholder: '搜索 Agent 轨迹', 'aria-label': '搜索 Agent 轨迹', value: query, onChange: event => setQuery(event.target.value) })),
-      snapshot.hasMore && h(Button, { disabled: loading, onClick: async () => { setLoading(true); try { await session.loadOlder() } catch (error) { setError(error.message) } finally { setLoading(false) } } }, loading ? '正在加载…' : '加载更早的记录'),
-      h(Failure, { text: error }),
-      !rows.length && h('p', { className: 'kode-config-note' }, '这段历史没有原生 Agent 事件记录。'),
-      ...visible.map(row => h('article', { className: 'kode-trace-event', key: row.key },
-        h('div', { className: 'kode-trace-heading' }, h('span', null, row.kind), h('span', { className: 'kode-secondary' }, `第 ${row.turn} 轮`), row.status && h('small', null, ({ completed: '已完成', inProgress: '进行中', failed: '失败' })[row.status] ?? row.status), h('time', null, new Date(row.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }))),
-        row.text && h('pre', null, row.text),
-        h('details', null, h('summary', null, '原始 Agent 事件'), h('pre', null, JSON.stringify(row.events, null, 2))))))
-  }
   return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets'], apply(ctx) {
     ctx.inject(['kodeTransport'], scope => {
       if (!scope.kodeTransport) return
@@ -926,10 +896,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           const host = transport.current
           events = new EventSource(transport.path(`${API}/runtimes`))
           events.onmessage = event => {
-            const capabilities = JSON.parse(event.data)
-            const current = Object.values(ctx.sessions.list.getSnapshot().byId).find(row => (row.retainedBy.mainView ?? 0) > 0)
-            const type = current?.projectionValues?.kodeAgent?.type
-            if (type && !Object.hasOwn(capabilities.types, type)) void ctx.sessions.create({ ...(current.cwd ? { cwd: current.cwd } : {}), agentPreset: 'kode-native' }).then(id => { if (transport?.current === host) ctx.get('uiWorkspace')?.openSession(id) }).catch(() => {})
             for (const [key, store] of stores) if (key.startsWith(`${host}:`)) void store.load()
             void refreshWorkspaceDirectory()
           }
@@ -944,10 +910,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         return () => { events?.close(); unsubscribe(); transport = undefined }
       }, 'kode.transport-binding')
     })
-    ctx.slots.inject('conversation.view', () => ctx.slots.register({ name: 'conversation.view', id: 'agent-trajectory', order: 10, label: () => '轨迹', kodeChannel: 'native', inject: sessionId => {
-      const binding = ctx.sessions.binding(sessionId)
-      return { eventSource: binding.eventSource, session: binding.session }
-    } }, AgentTrajectory))
     installInputPresentation(ctx)
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, AgentIdentity))
     ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'kode-agent-avatar' }, SidebarAgentAvatar))
@@ -977,24 +939,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       }
       const unsubscribe=ctx.slots.subscribe('conversation.chat.node',install);install()
       return()=>{unsubscribe();for(const [entry,{original,wrapper}] of adapted)if(entry.component===wrapper)entry.component=original}
-    })
-    // rc.2 has no settings-navigation filter. Adapt the existing registration
-    // in place so its store, locale, hooks and child-slot authorizations remain
-    // owned by dsh. Restore the component when this plugin is unloaded.
-    ctx.slots.inject('sidebar.settings', () => {
-      let source, original, wrapper
-      const restore = () => { if (source && source.component === wrapper) source.component = original }
-      const install = () => {
-        const native = ctx.slots.entries('sidebar.settings').find(entry => entry.store)
-        if (!native || native === source) return
-        restore(); source = native; original = native.component
-        const component = original
-        wrapper = props => h(AgentSettingsShell, { ...props, native: component })
-        native.component = wrapper
-      }
-      const unsubscribe = ctx.slots.subscribe('sidebar.settings', install)
-      install()
-      return () => { unsubscribe(); restore() }
     })
     ctx.slots.inject('sidebar.workspaces', () => {
       let source, original, wrapper
@@ -1037,11 +981,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-native-input{display:block;margin:8px 0 8px 22px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-family:var(--ds-font-family-code);font-size:12px}.kode-native-output{padding:12px 0 4px;margin:0 0 0 22px;max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
 .kode-internal-stack{display:flex;flex-direction:column;gap:8px;min-width:0}.kode-internal-message{min-width:0;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-turn-trigger-bg,var(--dsw-alias-markdown-code-block));font-size:var(--dsh-content-font-size,14px);color:var(--dsw-alias-label-secondary)}.kode-internal-message>summary{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer;list-style:none;padding:12px 16px;font-size:13px}.kode-internal-message>summary::-webkit-details-marker{display:none}.kode-internal-message>summary:hover{background:var(--dsw-alias-interactive-bg-hover);border-radius:inherit}.kode-internal-title{color:var(--dsw-alias-label-primary);flex-shrink:0}.kode-internal-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary);flex:1}.kode-internal-message>summary>svg{flex-shrink:0}.kode-internal-chevron{margin-left:auto}.kode-internal-message[open]>summary>.kode-internal-chevron{transform:rotate(180deg)}.kode-internal-message summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-internal-body{padding:12px 16px 16px;min-width:0;overflow-wrap:anywhere}.kode-internal-body>dl{margin:0;display:flex;flex-direction:column;gap:6px;font-size:13px}.kode-internal-body>dl>div{display:flex;gap:12px;min-width:0;flex-wrap:wrap}.kode-internal-body dt{min-width:64px;color:var(--dsw-alias-label-tertiary)}.kode-internal-body dd{margin:0;min-width:0;flex:1;overflow-wrap:anywhere}
 .kode-unified-workspaces{flex:1;min-height:0;display:flex;flex-direction:column}.kode-host-progress{padding:12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.kode-navigation-error{position:fixed;bottom:24px;left:50%;padding:12px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-error-primary);z-index:100}
-.kode-agent-trajectory{height:100%;overflow:auto;padding:20px 28px;color:var(--dsw-alias-label-primary)}.kode-trace-toolbar{position:sticky;top:0;background:var(--dsw-alias-bg-base);padding-bottom:16px;z-index:1}.kode-trace-toolbar input{width:100%;max-width:440px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);color:inherit;font:inherit}.kode-trace-event{padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-trace-heading{display:flex;align-items:center;gap:12px;font-size:13px}.kode-trace-heading time{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-trace-heading small{color:var(--dsw-alias-label-secondary)}.kode-trace-event pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.6}.kode-trace-event details{font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-trace-event summary{cursor:pointer;padding:6px 0}.kode-trace-event summary:focus-visible,.kode-trace-toolbar input:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}
 .kode-remote-computer{display:inline-block;flex-shrink:0;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-project-dialog{width:min(580px,calc(100vw - 32px))}.kode-project-source{padding:20px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);display:flex;flex-wrap:wrap;justify-content:center;gap:12px}.kode-project-source>.kode-field{width:100%;margin-bottom:8px}.kode-project-path{width:100%;overflow-wrap:anywhere;text-align:center;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-host-location{gap:6px;padding:0 8px;white-space:nowrap}.kode-workspace-menu{width:min(400px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.kode-workspace-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}.kode-workspace-search input{font:inherit;color:var(--dsw-alias-label-primary);background:transparent;border:0;outline:none;min-width:0;width:100%}.kode-workspace-search:focus-within{box-shadow:inset 0 -2px var(--dsw-focus-ring-color)}.kode-workspace-caption{font-size:12px;color:var(--dsw-alias-label-secondary);padding:10px 12px 4px}.kode-workspace-option{display:flex;flex-direction:column;gap:3px;min-width:0;max-width:310px}.kode-workspace-option>span,.kode-workspace-option small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-workspace-option small{font-size:12px;color:var(--dsw-alias-label-secondary)}
 .kode-relay{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);padding:12px 16px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-size:13px;min-width:0}.kode-relay-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-relay-heading strong{font-weight:500;overflow-wrap:anywhere;min-width:0;max-width:100%}.kode-relay-heading time{margin-left:auto;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-relay-source{display:flex;align-items:center;gap:10px;margin-top:8px;color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}.kode-relay-preview{margin:8px 0;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.kode-relay summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:12px;padding:4px 0}.kode-relay-body{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;max-height:320px;overflow:auto}.kode-message-tool{min-width:0;font-size:13px;padding:4px 0}.kode-tool-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;background:none;border:0;color:var(--dsw-alias-label-primary);padding:4px 0;font:inherit;text-align:left}.kode-tool-target{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:normal;overflow-wrap:anywhere;line-height:1.6;padding-left:22px}.kode-message-tool>.kode-relay-preview{margin-left:22px;color:var(--dsw-alias-label-secondary)}.kode-tool-detail{padding-left:22px}.kode-relay button:focus-visible,.kode-relay summary:focus-visible,.kode-tool-heading:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-trigger{border-radius:var(--dsw-radius-sm);min-width:0;max-width:240px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:0;align-items:center;gap:4px;padding:0 4px 0 8px;font:inherit;font-size:13px;line-height:20px;display:inline-flex}
 .kode-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-trigger svg{flex:none}.kode-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.kode-trigger:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}.kode-agent-trigger{color:var(--dsw-alias-label-primary)}.kode-chevron-open{transform:rotate(180deg)}
+.kode-resume-list{display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow:auto;padding:4px}.kode-resume-list button{display:flex;flex:0 0 auto;flex-direction:column;align-items:flex-start;justify-content:center;gap:4px;width:100%;height:auto;min-height:60px;padding:10px 12px;text-align:left;white-space:normal;line-height:1.4}.kode-resume-list button>span,.kode-resume-list small{display:block;max-width:100%;overflow-wrap:anywhere}.kode-resume-list small{font-size:12px;line-height:1.4;color:var(--dsw-alias-label-secondary)}
 .kode-session-avatar-button{display:inline-flex;align-items:center;justify-content:center;padding:2px;background:transparent;color:inherit;border:0;border-radius:6px;cursor:pointer}.kode-session-avatar-button:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-session-avatar-button:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-unified-workspaces:has([data-row-key^="workspace:"]) [data-row-key^="session:"]{padding-inline-start:calc(24px + var(--dsh-workspace-indent,0px))}.kode-console-output{min-width:0;overflow:hidden;margin-top:8px}
 .kode-agent-avatar{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;overflow:hidden;border-radius:6px;color:var(--dsw-alias-label-primary)}.kode-agent-mask{display:block;width:100%;height:100%;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-agent-avatar img{display:block;width:100%;height:100%;object-fit:contain}.kode-agent-identity,.kode-agent-option{display:inline-flex;align-items:center;gap:8px;min-width:0}.kode-agent-identity{max-width:180px;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-agent-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-agent-option>.kode-option{flex:1}.kode-settings-group-title{font-size:13px;font-weight:500;color:var(--dsw-alias-label-secondary);margin:24px 0 8px}.kode-avatar-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.kode-avatar-editor{padding:12px 0}.kode-avatar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px;max-height:min(360px,50vh);overflow:auto;padding:4px}.kode-avatar-choice{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0;padding:8px;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer}.kode-avatar-choice>span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px}.kode-avatar-choice:hover,.kode-avatar-choice[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-choice[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary)}.kode-avatar-choice:disabled{opacity:.5;cursor:default}.kode-avatar-choice:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}

@@ -128,17 +128,19 @@ test('native slash definitions shadow harness commands only for their Agent and 
   const commands=await h.ctx.plugin(CommandRuntime)
   const global=h.ctx.commands.register({name:'compact',description:'Harness compaction',handler:()=>({kind:'success',text:'global'})})
   const {agent}=await h.ctx.agents.create(options)
-  const service={commandOwners:new Map(),adapter:{capabilities:async()=>({commands:[{name:'compact',description:'Native compact'},{name:'team:review',description:'Project skill',input:{hint:'task'}}],modes:[]}),listModels:async()=>[{id:'next-model',name:'Friendly model'}]}}
+  const service={commandOwners:new Map(),adapter:{capabilities:async()=>({commands:[{name:'compact',description:'Native compact'},{name:'team:review',description:'Project skill',kind:'skill',input:{hint:'task'}}],modes:[]}),listModels:async()=>[{id:'next-model',name:'Friendly model'}]}}
   try{
     await mountNativeCommands(agent,service,{id:'fixture',name:'Company Codex',type:'codex',executable:'codex',args:[],env:{}})
     assert.equal(h.ctx.commands.list(agent).find(row=>row.name==='compact').description,'Native compact')
     const selected=await h.ctx.commands.execute(agent,'/model Friendly model',[],new AbortController().signal)
     assert.equal(selected.result.kind,'success');assert.equal(agent.options.model,'next-model')
     await h.ctx.commands.execute(agent,'/team-review inspect',[],new AbortController().signal);await agent.whenIdle()
-    assert.equal(received[0].messages[0].content[0].text,'/team:review inspect')
+    assert.equal(received[0].messages[0].content[0].text,'$team:review inspect')
+    assert.ok(h.ctx.commands.list(agent).some(row=>row.name==='resume'))
     service.adapter.capabilities=async()=>({commands:[{name:'context',description:'Claude context'}],modes:[]})
     await mountNativeCommands(agent,service,{id:'claude-profile',name:'Claude Code',type:'claude',executable:'claude',args:[],env:{}})
     assert.ok(h.ctx.commands.list(agent).some(row=>row.name==='context'))
+    assert.ok(h.ctx.commands.list(agent).some(row=>row.name==='resume'))
     assert.ok(!h.ctx.commands.list(agent).some(row=>row.name==='team-review'))
     assert.equal(h.ctx.commands.list(agent).find(row=>row.name==='compact').description,'Harness compaction')
     const other={id:'other'};assert.equal(h.ctx.commands.list(other).find(row=>row.name==='compact').description,'Harness compaction')

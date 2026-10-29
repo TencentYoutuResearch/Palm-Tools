@@ -26,7 +26,7 @@ export async function hostDirectory(ctx, config = {}) {
   if (config.backendClient) {
     const client = config.backendClient
     const [index, workspaces, node] = await Promise.all([new BackendDocument(client, 'session-index').read(), new BackendDocument(client, 'workspaces').read(), client.call('/api/v1/messaging/node')])
-    for (const row of sessions) if (row.agent && runtime?.appearance) row.agent.avatar = runtime.appearance.avatarForSession(row.id, row.agent.type, index)
+    for (const row of sessions) if (row.agent && runtime?.appearance) row.agent.avatar = runtime.appearance.avatarForSession(row.id, row.agent.type, index, row.agent.id)
     if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
     for (const tab of localSavedTabs(index)) {
       const adopted = tab.dsh_session_id ?? importedSessionId(tab)
@@ -35,7 +35,7 @@ export async function hostDirectory(ctx, config = {}) {
       const profileId = tab.agent_id ?? Object.keys(profiles?.sharedState?.desktop_ids ?? {}).find(id => profiles.sharedState.desktop_ids[id] === tab.backend_key)
       const profile = profiles?.list().find(profile => profile.id === profileId)
       const agent = profile ? presentation(profile) : { id: profileId ?? tab.backend_key, name: tab.backend_key, type: 'custom' }
-      if (runtime?.appearance) agent.avatar = runtime.appearance.avatarForSession(adopted, agent.type, index)
+      if (runtime?.appearance) agent.avatar = runtime.appearance.avatarForSession(adopted, agent.type, index, agent.id)
       else if (tab.avatar_id) agent.avatar = { id: tab.avatar_id, url: `/api/kode/avatars/media?avatar=${encodeURIComponent(tab.avatar_id)}&state=idle` }
       sessions.push({ id, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: 0, running: false, nativeThreadId: tab.session_id, savedTab: tab, agent })
       const workspace = result.workspaces.find(workspace => workspace.path === tab.cwd)

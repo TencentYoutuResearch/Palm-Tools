@@ -18,10 +18,9 @@
       inject: [webStartup]
       config:
         trustedHosts: !!js ctx.webStartup.trustedHosts
-    # This plugin owns its presets, prompt contributions and model loop.
+    # Ship the official dsh ACP runtime by default alongside external Agents.
     - id: kode-dsh-conversation
       name: '@kode/dsh/dsh-conversation'
-      disabled: true
 - id: connection
   disabled: true
 - id: workspace
@@ -35,7 +34,7 @@
   disabled: true
 - id: system-prompt
   # Shared tool/workspace infrastructure needs the registry. It owns no model
-  # identity or persona; only the optional conversation plugin contributes those.
+  # identity or persona; the built-in conversation integration contributes those.
   config:
     includeHarnessIdentity: false
     personaPrefix: ''
@@ -54,10 +53,6 @@
   disabled: true
 - id: ui-settings-subagent
   disabled: true
-- id: ui-settings-web-search
-  disabled: true
-- id: ui-settings-models
-  disabled: true
 - id: preset-standard
   disabled: true
 - id: preset-minimal
@@ -69,8 +64,6 @@
 - id: agent-preset-registry
   config:
     default: kode-native
-- id: ui-trajectory
-  disabled: true
 - id: ui-model-selection
   disabled: true
 - id: ui-agent-preset

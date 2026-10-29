@@ -59,11 +59,13 @@ test('Codex commands use native RPCs and $skills become typed inputs with discov
       assert.ok(events.some(event=>event.method==='turn/completed'))
     }
     await collect(session.turn([{type:'text',text:'Use $fixture-skill to review'}],{skillNames:['fixture-skill'],effort:'high',model:'fixture',signal:AbortSignal.timeout(5000)}))
+    await collect(session.turn([{type:'text',text:'/fixture-skill inspect'}],{command:{name:'fixture-skill',input:'inspect'},signal:AbortSignal.timeout(5000)}))
     const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
-    assert.equal(rows.filter(row=>row.method==='turn/start').length,1,'native control commands must not be ordinary model prompts')
+    assert.equal(rows.filter(row=>row.method==='turn/start').length,2,'native control commands must not be ordinary model prompts')
     assert.ok(rows.some(row=>row.method==='thread/compact/start'));assert.ok(rows.some(row=>row.method==='review/start'&&row.params.delivery==='inline'))
     assert.ok(rows.some(row=>row.method==='thread/name/set'&&row.params.name==='Native renamed conversation'))
     assert.equal(rows.find(row=>row.method==='turn/start').params.effort,'high');assert.equal(rows.find(row=>row.method==='turn/start').params.collaborationMode.mode,'plan')
+    assert.deepEqual(rows.filter(row=>row.method==='turn/start').at(-1).params.input,[{type:'text',text:'$fixture-skill inspect'},{type:'skill',name:'fixture-skill',path:join(root,'.agents/skills/fixture-skill/SKILL.md')}])
     assert.deepEqual(rows.find(row=>row.method==='turn/start').params.input.at(-1),{type:'skill',name:'fixture-skill',path:join(root,'.agents/skills/fixture-skill/SKILL.md')})
   }finally{await session.close();await rm(root,{recursive:true,force:true})}
 })

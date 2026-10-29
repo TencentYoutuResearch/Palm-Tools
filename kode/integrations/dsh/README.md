@@ -243,7 +243,7 @@ The adapter streams native answers into dsh's existing chat and projects command
 
 Native command/file approvals and supported interactive questions go through dsh's human-interaction services. Codex receives the current sandbox policy and workspace root per turn. ACP selects an advertised read-only/plan/ask mode for read-only sessions and refuses to proceed if the Agent exposes no such mode. ACP-native operations remain enforced by that CLI's own mode and permission implementation; tools delegated to dsh always use dsh's policy. Only one-operation permission grants are returned; unhandled requests fail rather than granting access. Host administration credentials and inherited kode parent-session identities are removed from the child environment. The plugin owns and closes its ACP process group, scoped MCP server and temporary launcher/credential files.
 
-The current adapter accepts text input. Auxiliary compaction/title calls through an external Agent route are refused. Work-bearing native turns are not automatically retried: input admission is persisted before dispatch, and a crash or lost result is marked uncertain. New followups can resume the native thread; the admitted input is never silently submitted a second time. Account login remains the configured CLI's own login.
+The adapter accepts text, files and images through the official dsh attachment service. Codex receives validated local image paths (or inline images for memory-only stores); ACP receives image blocks only when the Agent advertises image support. Model capabilities control image admission. Skill commands preserve attachments, and durable logs retain attachment references across resume. Auxiliary compaction/title calls through an external Agent route are refused. Work-bearing native turns are not automatically retried: input admission is persisted before dispatch, and a crash or lost result is marked uncertain. New followups can resume the native thread; the admitted input is never silently submitted a second time. Account login remains the configured CLI's own login.
 
 The Web controls use dsh's authenticated owner connection and public hero/header/composer slots; the bundle replaces the stock preset and model-selection UI so model choices stay within the selected Agent configuration. The dsh outer loop, persistence and delegated tools still run; an external CLI owns its native agent turn. Headless Hosts keep the model tools and need no browser. Configuration files stay on the executing Host, so remote CLI environments are not copied to a local process.
 
@@ -326,7 +326,8 @@ The local plugin starts `kode-ssh-tunnel`, which reuses `kode-bridge::ssh::Tunne
 
 Build the helper with `cargo build -p kode-bridge --bin kode-ssh-tunnel`, then put it on PATH or set the Kode Host plugin’s `sshTunnelCommand` to its absolute path. Install the same pinned dsh and Kode plugin on the remote machine, apply `cordis.remote.patch.yml` in addition to the bundle, and start `dsh web --no-open` bound to loopback. Automatic remote installation is not implemented. In Create Project → Add SSH Host, provide the SSH config alias, port, and complete loopback access URL printed by the remote dsh. Profiles are saved mode 0600; remote tokens stay server-side. The browser receives a single-use portal ticket and a separate HttpOnly cookie. Closing the owning dsh Host closes its portals and tunnels.
 
-Settings → Agent now contains custom Agent CRUD, including multiple instances of the same type. The composer’s Custom Agent action opens this exact native settings section. Agent settings follows dsh’s Models list layout: one row per Agent, an Edit action, and an Add Agent row. The standalone Models navigation item is removed; editing DeepSeek Harness expands the complete native Models section inside its Agent row, retaining provider and credential behavior. The composer retains a per-conversation model shortcut, and dsh retains its work-mode selector. Settings navigation uses the pinned rc.2 settings slot’s shared `openSection` action. Because rc.2 has no navigation-filter extension, a scoped adapter wraps the existing settings component in place and restores it on unload; its original store, locale, injected hooks and child-slot authorizations are retained. Native model-settings deep links are redirected to Agent with the dsh editor expanded. Revalidate this integration on dsh upgrades.
+Settings → Agent contains custom Agent CRUD, including multiple instances of the same type and default avatar selection. The composer's Custom Agent action opens this section. The official Models section and settings navigation remain intact; DeepSeek Harness's model-settings button opens that native section through the shared `openSection` action. The composer retains per-conversation Agent/model controls and dsh work-mode selection. Kode does not wrap or reorder the official settings shell.
+
 
 Terminal font family and size remain user preferences under Settings → General → More font settings. No default font is forced and existing preferences are not overwritten. An optional bundled Nerd Fonts Symbols face is available as `"Kode Terminal Symbols"`; users can append it to their configured font stack when their preferred font lacks prompt glyphs. The font asset is served behind dsh authentication, with the upstream license included. The browser machine’s installed fonts are used even when the shell executes remotely.
 
@@ -344,25 +345,26 @@ never resumes an Agent. A disconnected Host retains its last in-memory snapshot
 and offers retry; reconnecting reconciles the directory. The directory endpoints
 are metadata-only and never return credentials or conversation bodies.
 
-The `kode-dsh-conversation` entry is an optional plugin, disabled by default.
-Enable or disable it through dsh's Plugin Manager (`setPluginEnabled` with the
-entry ID returned by `listPlugins`). Its lifecycle owns the dsh Agent capability
-and mode declarations. Removing it withdraws its selector, mode and model/key
-settings; historical logs and immutable bindings remain stored. There is no
-`hideDshAgent` setting.
+The built-in dsh Agent is enabled by default alongside external Agents. Users
+can select it directly without configuring plugin lifecycle entries. Official
+settings navigation, Models, Web Search, Plugins and Trajectory remain available.
+Kode reuses dsh's attachment upload/storage, files, Git, terminal and browser
+services; it adds native protocol adapters, shared Agent/session metadata and SSH
+routing. The framework's internal plugin lifecycle remains an implementation
+detail.
 
 External Agents run through `@kode/dsh/native-factory`, an independent durable
 inbox/driver built on the public Session API. It sends only new inputs to the
 native CLI protocol and never assembles the shell's dsh system prompt or runs an
-outer dsh LLM loop. The conversation's Agent trajectory consumes durable native
-Agent events (reasoning, replies, commands, file changes and tool activity), not
-an edited presentation of dsh prompt records.
+outer dsh LLM loop. The official dsh Trajectory displays the canonical session events projected by
+the native driver. Raw native protocol events remain in the durable log.
 
-The optional dsh Agent uses the released `dsh acp` application in a separate
+The built-in dsh Agent uses the released `dsh acp` application in a separate
 managed process. That application retains its own complete harness, presets,
 tools, prompt and model loop. Its private launch patch reuses the configured
 provider definitions; credentials are never sent to the browser. Kode owns the
-process lifetime and closes it on unplug. Mode selection is applied when that
+process lifetime and closes it when its owning runtime stops. Plugins installed into the Web shell are not automatically installed into this
+separate ACP runtime or external Codex/Claude runtimes. Mode selection is applied when that
 native conversation starts. ACP permission policy is admitted in the launch
 patch; the pinned upstream protocol does not advertise live permission changes.
 
@@ -518,3 +520,25 @@ when the app-server advertises that collaboration mode. For Claude adapters
 without native `/autocompact`, `/autocompact on|off|status` records the preference
 and passes SDK settings when reopening the same native thread at the next turn
 boundary. This fallback does not implement numeric context-window arguments.
+
+### Native command and appearance controls
+
+Codex workspace skills appear in the `/` menu under **技能**, alongside the
+existing `$` completion. Selecting a skill dispatches its original name and the
+workspace-discovered path as a native Codex `skill` input; namespaced menu aliases
+retain their original native identity.
+
+Codex and Claude Code expose bare `/resume` as a session picker. It searches the
+current execution Host's registered native history for the selected Agent
+configuration, by title, workspace or native ID. Selecting a saved conversation
+uses the existing history import and native resume/load flow; it does not send
+`/resume` to the model or replace the current conversation's identity. Unregistered
+CLI histories are outside this picker’s catalog.
+
+Click an Agent's avatar in Agent settings to choose its default from the entry
+frontend's existing avatar library. This works for built-in and custom Agents,
+including DeepSeek Harness when installed. Individual session avatar overrides
+(including an explicit reset to the native icon) take precedence. The dsh plugin
+owns the picker and image delivery; Kode persists `presentation.agentAvatars`
+alongside session appearance metadata. Executable profiles and bound launch
+snapshots are unchanged by appearance edits.

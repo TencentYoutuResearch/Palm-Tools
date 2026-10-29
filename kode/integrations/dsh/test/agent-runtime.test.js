@@ -26,6 +26,8 @@ test('dsh runtime binds profiles, forwards dynamic tools, persists native identi
   const input = (id, text) => ({ role: 'user', id, source: { kind: 'human' }, content: [{ type: 'text', text }] })
   try {
     await Promise.all([adapter.listModels(profileRoute('codex')), adapter.listModels(profileRoute('codex'), profiles.get('codex'))])
+    const catalog = await adapter.capabilities(profileRoute('codex'))
+    assert.equal(catalog.commands.find(row => row.name === 'fixture-skill').kind, 'skill')
     const first = input('one', 'TOOL first'), second = input('two', 'second')
     const results = await Promise.all([consume(adapter.stream(request('first', 'codex', [first]))), consume(adapter.stream(request('second', 'tcodex', [second])))])
     assert.equal(results[0].find(c => c.type === 'text-delta').text, 'codex: TOOL first')

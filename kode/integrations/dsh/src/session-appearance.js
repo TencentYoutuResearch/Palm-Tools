@@ -15,17 +15,18 @@ export class SessionAppearance {
     this.root = config.avatarDirectory ?? process.env.KODE_AVATAR_DIR ?? join(process.platform === 'darwin' ? join(homedir(), 'Library/Application Support') : process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'kode/avatars')
     if (this.root.startsWith('~/')) this.root = join(homedir(), this.root.slice(2))
   }
-  profilesView() { return profilePresentations(this.profiles.list(), this.profiles.sharedState) }
-  async load() { return await new BackendDocument(this.client, 'session-index').read() ?? { version: 1 } }
-  avatarForSession(sessionId, type, index = this.index) {
+  profilesView() { return profilePresentations(this.profiles.list(), this.profiles.sharedState).map(profile => ({ ...profile, avatar: this.avatarForSession(undefined, profile.type, this.index, profile.id) })) }
+  async load() { return this.index = await new BackendDocument(this.client, 'session-index').read() ?? { version: 1 } }
+  avatarForSession(sessionId, type, index = this.index, profileId) {
     const local = row => !row.endpoint_id || row.endpoint_id.kind === 'local'
-    const native = index?.native_sessions?.find(row => local(row) && (row.dsh_session_id === sessionId || importedSessionId(row) === sessionId))
-    const gui = index?.gui?.tabs?.find(row => local(row) && (row.dsh_session_id === sessionId || importedSessionId(row) === sessionId || native && row.backend_key === native.backend_key && row.session_id === native.session_id))
+    const native = sessionId && index?.native_sessions?.find(row => local(row) && (row.dsh_session_id === sessionId || importedSessionId(row) === sessionId))
+    const gui = sessionId && index?.gui?.tabs?.find(row => local(row) && (row.dsh_session_id === sessionId || importedSessionId(row) === sessionId || native && row.backend_key === native.backend_key && row.session_id === native.session_id))
     const pending = index?.presentation?.sessionAvatars
-    const id = gui && Object.hasOwn(gui, 'avatar_id') ? gui.avatar_id : native?.avatar_id ?? pending?.[sessionId] ?? null
+    const fallback = index?.presentation?.agentAvatars?.[profileId] ?? null
+    const id = gui && Object.hasOwn(gui, 'avatar_id') ? gui.avatar_id : native && Object.hasOwn(native, 'avatar_id') ? native.avatar_id : Object.hasOwn(pending ?? {}, sessionId) ? pending[sessionId] : fallback
     return { id, url: `/api/kode/avatars/media?${id ? `avatar=${encodeURIComponent(id)}` : `type=${encodeURIComponent(type)}`}&state=idle` }
   }
-  profileView(profile, sessionId, index) { return { ...profilePresentations([profile], this.profiles.sharedState)[0], ...(sessionId ? { avatar: this.avatarForSession(sessionId, profile.type, index) } : {}) } }
+  profileView(profile, sessionId, index) { return { ...profilePresentations([profile], this.profiles.sharedState)[0], avatar: this.avatarForSession(sessionId, profile.type, index, profile.id) } }
   async gallery() {
     let entries
     try { entries = await readdir(join(this.root, 'gallery'), { withFileTypes: true }) } catch (error) { if (error.code === 'ENOENT') return []; throw error }
@@ -51,6 +52,17 @@ export class SessionAppearance {
           if (info.isFile() && info.size <= 4 * 1024 * 1024) return file
         } catch { /* Incomplete avatar sets fall back to the native Agent mark. */ }
       }
+    }
+  }
+  async setAgent(profileId, avatarId) {
+    if (!this.profiles.list().some(profile => profile.id === profileId)) throw new Error('Agent 不存在，请刷新列表。')
+    if (avatarId !== null && (!/^gallery\/[^/\\\x00]+$/.test(avatarId) || avatarId.includes('..'))) throw new Error('无效头像标识。')
+    const document = new BackendDocument(this.client, 'session-index')
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const value = await document.read() ?? { version: 1 }
+      value.presentation ??= {}; value.presentation.agentAvatars ??= {}
+      value.presentation.agentAvatars[profileId] = avatarId
+      try { this.index = await document.write(value); return } catch (error) { if (attempt === 5 || !/configuration changed/.test(error.message)) throw error }
     }
   }
   async setSession(sessionId, avatarId) {

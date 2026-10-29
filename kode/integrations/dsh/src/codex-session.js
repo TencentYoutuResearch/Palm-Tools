@@ -90,7 +90,7 @@ export class CodexSession {
       const result = await this.rpc.request('collaborationMode/list', {}, { signal })
       if (result.data.some(row => row.mode === 'plan') && !this.commands.some(row => row.name === 'plan')) this.commands.push({ name: 'plan', description: '切换 Codex 原生计划模式', input: { hint: 'on | off | status' } })
     } catch (error) { if (!/method|unsupported/i.test(error.message)) throw error }
-    return models
+    return models.map(model => ({ ...model, inputModalities: model.inputModalities ?? ['text', 'image'] }))
   }
   async rename(name, signal) { await this.initialize(signal); await this.rpc.request('thread/name/set', { threadId: this.threadId, name }, { signal }) }
   async listSkills(signal) {
@@ -126,8 +126,17 @@ export class CodexSession {
       signal?.throwIfAborted()
       const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
       const sandboxPolicy = policy.mode === 'danger-full-access' ? { type: 'dangerFullAccess' } : policy.mode === 'workspace-write' ? { type: 'workspaceWrite', writableRoots: [policy.workspaceRoot ?? this.cwd] } : { type: 'readOnly' }
+      let discoveredSkills
+      if (command && !this.commands.some(row => row.name === command.name)) {
+        discoveredSkills = (await this.listSkills(signal)).skills
+        if (discoveredSkills.some(skill => skill.name === command.name)) {
+          skillNames = [...skillNames, command.name]
+          input = [{ type: 'text', text: `$${command.name}${command.input ? ` ${command.input}` : ''}` }]
+          command = undefined
+        }
+      }
       if (skillNames.length) {
-        const { skills } = await this.listSkills(signal)
+        const skills = discoveredSkills ?? (await this.listSkills(signal)).skills
         for (const name of new Set(skillNames)) {
           const matches = skills.filter(skill => skill.name === name)
           if (matches.length > 1) throw new Error(`技能 ${name} 对应多个路径，请先处理同名技能。`)

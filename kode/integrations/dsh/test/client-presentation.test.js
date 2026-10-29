@@ -62,7 +62,7 @@ test('native menu presentation groups skills and gives every command an icon wit
  const builtInIcon=()=>null, original=async()=>[{name:'file',icon:builtInIcon},{name:'status'},{name:'team-review'},{name:'export'}]
  const commands={candidates:original},sources=[]
  const input={sessionOf:()=>({}),registerSource:source=>{sources.push(source);return()=>sources.splice(sources.indexOf(source),1)}}
- const c=client(undefined,{}, {inputTriggers:input,commandUi:commands,remote:{commands:{list:async()=>({ok:true,value:{commands:[{name:'status',definitionId:'@kode/dsh/native/status'},{name:'team-review',definitionId:'@kode/dsh/native/skill/team-review'}]}})}}})
+ const c=client(undefined,{}, {inputTriggers:input,commandUi:commands,remote:{commands:{list:async()=>({ok:true,value:[{name:'status',definitionId:'@kode/dsh/native/status'},{name:'team-review',definitionId:'@kode/dsh/native/skill/team-review'}]})}}})
  const rows=await commands.candidates({sessionId:'example'},{query:''})
  assert.deepEqual(Array.from(rows,row=>row.section),['快捷操作','快捷操作','Agent 命令','技能'])
  assert.ok(rows.every(row=>typeof row.icon==='function'));assert.equal(rows[0].icon,builtInIcon)
@@ -259,29 +259,12 @@ test('Agent list keeps editors collapsed until requested', () => {
   assert.doesNotMatch(JSON.stringify(tree), /kode-agent-form|type.:.password/)
 })
 
-test('settings adapter removes the model nav but preserves native model slot rendering and restores on unload', () => {
-  const c = client(), childDeclarations = c.shell.children, store = c.shell.store
-  const wrapped = c.shell.component({
-    useStore: selector => selector({ open: true, activeId: 'models' }),
-    useSections: selector => selector([{ id: 'general' }, { id: 'models' }, { id: 'kode-agents' }, { id: 'plugins' }, { id: 'kode-ssh' }]),
-    renderSlot: (name, owner, options) => ({ name, owner, options }),
-  })
-  const nativeTree = wrapped.type(wrapped.props)
-  assert.equal(nativeTree.type, c.native)
-  assert.deepEqual(Array.from(nativeTree.props.useSections(rows => rows), row => row.id), ['general', 'kode-agents', 'kode-ssh', 'plugins'])
-  assert.equal(nativeTree.props.useStore(state => state.activeId), 'kode-agents')
-  const rendered = nativeTree.props.renderSlot('settings.section', { close: 'close' }, { only: 'models' })
-  assert.equal(rendered.options.only, 'kode-agents')
-  assert.equal(rendered.owner.showModels, true)
-  assert.equal(rendered.owner.renderModels({ close: 'close' }).options.only, 'models')
-  assert.equal(c.shell.children, childDeclarations)
-  assert.equal(c.shell.store, store)
-  assert.equal(c.shell.locale, 'settings')
-  for (const dispose of c.disposers) dispose()
+test('official settings navigation and model editor remain unwrapped', () => {
+  const c = client()
   assert.equal(c.shell.component, c.native)
 })
 
- test('unified workspace tree reuses the native renderer and namespaces foreign session identities', async () => {
+test('unified workspace tree reuses the native renderer and namespaces foreign session identities', async () => {
   const c = client({ current: 'local', hosts: [
     { id: 'local', name: '此计算机', hiddenSessionIds: ['dsh-history'] },
     { id: 'build', name: 'Build server', status: 'online', sessions: [{ id: 'same-id', title: 'Remote title', updatedAt: 2 }], workspaces: [{ id: 'same-workspace', title: 'Remote project', path: '/remote/project', sessionIds: ['same-id'] }] },
@@ -351,4 +334,16 @@ test('saved legacy tab archive controls work without importing or starting the s
  menu.children.flat().find(control => control.type === archive).props.archiveSession('saved:legacy');await new Promise(resolve=>setImmediate(resolve))
  assert.deepEqual(c.requests[0],{action:'host-operation',id:'local',operation:'archive-session',args:{sessionId:'saved:legacy'}})
  assert.ok(!c.requests.some(row=>row.action==='import-saved'))
+})
+
+test('/resume filters by execution host and Agent and retains original native identities', () => {
+  const context = { window: { __ModuleLoader__: { load() {} } } }
+  vm.runInNewContext(source, context)
+  const agent = { id: 'work', type: 'codex' }
+  const row = (id, extras = {}) => ({ id, nativeThreadId: `native-${id}`, title: id, cwd: '/project', agent, ...extras })
+  const hosts = [{ id: 'local', sessions: [row('local')] }, { id: 'ssh', sessions: [row('current'), row('saved:old', { updatedAt: 1 }), row('recent', { updatedAt: 2 }), row('foreign', { agent: { id: 'other', type: 'codex' } }), row('empty', { nativeThreadId: undefined })] }]
+  const target = { hostId: 'ssh', sessionId: 'current', profile: agent }
+  assert.deepEqual(Array.from(context.resumeCandidates(hosts, target), row => row.id), ['recent', 'saved:old'])
+  assert.equal(context.resumeCandidates(hosts, target, 'native-saved:old')[0].nativeThreadId, 'native-saved:old')
+  assert.equal(context.resumeCandidates(hosts, { ...target, hostId: 'missing' }).length, 0)
 })

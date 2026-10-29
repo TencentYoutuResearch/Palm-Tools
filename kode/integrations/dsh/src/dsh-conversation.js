@@ -1,4 +1,4 @@
-/** Optional dsh Agent, backed by the official ACP application in its own process. */
+/** Built-in dsh Agent, backed by the official ACP application in its own process. */
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -12,8 +12,6 @@ export async function apply(ctx, config = {}) {
   const resolve = createRequire(import.meta.url).resolve
   const root = await mkdtemp(join(tmpdir(), 'kode-harness-acp-'))
   ctx.effect(() => () => rm(root, { recursive: true, force: true }), 'kode.dsh-acp-config')
-  const settingsId = await ctx.loader.create({ name: '@deepseek-ai/dsh-client-ui-settings-models' })
-  ctx.effect(() => async () => { const fiber = ctx.loader.resolve(settingsId).fiber; ctx.loader.remove(settingsId); await fiber?.dispose() }, 'kode.dsh-model-settings')
   const presets = []
   // These are selection declarations. The real compositions run in the ACP
   // process, so none of their prompt/tool plugins mount into external Agents.
@@ -29,7 +27,7 @@ export async function apply(ctx, config = {}) {
       const selection = ctx.agentDefaultModel.currentSelection()
       const providers = ctx.llm.listProviders().filter(provider => !provider.id.startsWith('kode-agent-'))
       const provider = providers.find(provider => provider.id === selection.provider) ?? providers[0]
-      if (!provider) throw new Error('请先在 Agent 设置中配置 dsh 模型提供商。')
+      if (!provider) throw new Error('请先在模型设置中配置 dsh 模型提供商。')
       const models = await ctx.llm.listModels(provider.id)
       const model = models.find(model => model.id === selection.model) ?? models[0]
       if (!model) throw new Error('dsh 模型提供商没有可用模型。')

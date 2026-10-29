@@ -98,7 +98,7 @@ export class AcpSession {
     const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
     const effort = effortOption(this.state), current = option?.currentValue ?? this.state.models?.currentModelId
     const models = option ? flattenOptions(option.options).map(m => ({ id: m.value, model: m.value, displayName: m.name, isDefault: m.value === current })) : (this.state.models?.availableModels ?? []).map(m => ({ id: m.modelId, model: m.modelId, displayName: m.name, isDefault: m.modelId === current }))
-    return models.map(row => ({ ...row, ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}) }))
+    return models.map(row => ({ ...row, inputModalities: this.info.agentCapabilities?.promptCapabilities?.image || this.profile.type === 'claude' ? ['text', 'image'] : ['text'], ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}) }))
   }
   async waitForCommands(signal = this.lifetime.signal) {
     // Claude sends its authoritative commands after the setup response.
@@ -151,6 +151,7 @@ export class AcpSession {
     if (update.sessionUpdate === 'current_mode_update' && this.state?.modes) this.state.modes.currentModeId = update.currentModeId
     if (!this.active) return // replay is owned by the persisted dsh log
     const active = this.active, base = { threadId: this.threadId, turnId: active.turnId }
+    if (update.sessionUpdate === 'usage_update') active.push({ method: 'session/update', params: { ...base, update } })
     if (update.sessionUpdate === 'agent_thought_chunk' && update.content.type === 'text') active.push({ method: 'item/reasoning/summaryTextDelta', params: { ...base, itemId: 'reasoning', delta: update.content.text } })
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') active.push({ method: 'item/agentMessage/delta', params: { ...base, itemId: 'answer', delta: update.content.text } })
     if (['tool_call', 'tool_call_update'].includes(update.sessionUpdate)) {
@@ -195,6 +196,7 @@ export class AcpSession {
     const abort = () => { void this.connection.agent.notify('session/cancel', { sessionId: this.threadId }).catch(() => {}); active.end(fused.reason ?? new Error('ACP turn cancelled')) }
     fused.addEventListener('abort', abort, { once: true })
     try {
+      if (input.some(part => part.type === 'image') && !this.info.agentCapabilities?.promptCapabilities?.image && this.profile.type !== 'claude') throw new Error('此 Agent 未声明支持图片输入，请选择支持图片的 Agent。')
       await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort)
       if (command) await this.waitForCommands(fused)
       if (command && !this.commands.some(row => row.name === command.name)) throw new Error(`此 Agent 未公布 /${command.name}，请使用 /help 查看可用命令。`)

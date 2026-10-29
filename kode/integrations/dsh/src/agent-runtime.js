@@ -11,6 +11,7 @@ import { mountNativeCommands } from './native-commands.js'
 import { humanInput, terminalOnlyCommands } from './native-commands.js'
 import { pendingShellContext } from './native-shell.js'
 import { classifyCommands } from './command-skills.js'
+import { nativeInput } from './native-input.js'
 import { SessionAppearance } from './session-appearance.js'
 
 export { profileRoute } from './agent-profiles.js'
@@ -36,7 +37,7 @@ export class AgentRuntimeAdapter {
   providerRetryPolicy() { return { mode: 'normal', maxRetries: 0, retryableCodes: [], initialDelayMs: 1000, maxDelayMs: 1000, jitterRatio: 0 } }
   imageRequestPricing() {}
   imageRequestTarget(_provider, _model, image) { return { width: image.width, height: image.height, maxBytes: image.bytes } }
-  async resolveModel(provider, model) { return { provider, id: model, name: model, inputModalities: ['text'] } }
+  async resolveModel(provider, model) { return (await this.listModels(provider)).find(row => row.id === model) ?? { provider, id: model, name: model, inputModalities: ['text'] } }
   async prepareCall(provider, model, signal) { return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options) } }
   invalidateModels(provider) { for (const key of this.catalogs.keys()) if (key === provider || key.startsWith(`${provider}:`)) this.catalogs.delete(key) }
   async capabilities(provider, profileOverride, cwd = process.cwd(), modelHint) {
@@ -50,7 +51,14 @@ export class AgentRuntimeAdapter {
         this.probes.add(session)
         try {
           const models = await session.listModels(AbortSignal.any([this.stop.signal, AbortSignal.timeout(45000)]), { model: modelHint })
-          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}) })), commands: await classifyCommands(session.commands ?? [], profile, cwd), modes: session.state?.modes?.availableModes ?? [] }
+          const commands = await classifyCommands(session.commands ?? [], profile, cwd)
+          if (profile.type === 'codex' || profile.protocol === 'codex') {
+            try {
+              const { skills } = await session.listSkills(AbortSignal.any([this.stop.signal, AbortSignal.timeout(20000)]))
+              commands.push(...skills.map(skill => ({ name: skill.name, description: skill.description, kind: 'skill', input: { hint: '技能参数或任务' } })))
+            } catch (error) { this.stop.signal.throwIfAborted(); this.ctx.logger?.warn('Codex skill discovery failed: %s', error.message) }
+          }
+          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: m.inputModalities ?? ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}) })), commands, modes: session.state?.modes?.availableModes ?? [] }
         } finally { this.probes.delete(session); await session.close() }
       })().catch(error => { if (this.catalogs.get(key) === task) this.catalogs.delete(key); throw error })
       this.catalogs.set(key, task)
@@ -161,17 +169,18 @@ export class AgentRuntimeAdapter {
       const match = human && /^\/([a-z][a-z0-9_:-]*)(?:\s|$)/.exec(human)
       const command = match ? { name: match[1], input: human.slice(match[0].length).trim() } : undefined
       const context = command ? [] : pendingShellContext(agent.session)
-      const input = [...context, ...messages].flatMap(m => m.content.map(c => {
-        if (c.type !== 'text') throw new Error('This Agent adapter currently accepts text input only')
-        return { type: 'text', text: c.text }
-      }))
+      if (messages.some(message => message.content.some(part => part.type === 'image' && !part.offloaded))) {
+        const model = await this.resolveModel(options.provider, options.model)
+        if (!model.inputModalities.includes('image')) throw new Error('当前模型不支持图片输入，请选择支持图片的模型。')
+      }
+      const input = await nativeInput([...context, ...messages], { attachments: (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments), codex: profile.type === 'codex' || profile.protocol === 'codex', signal })
       const tools = options.tools ?? []
       runtime = this.live.get(agent.id)
       const autoCompactRevision = profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact')?.seq ?? -1 : -1
       if (runtime && runtime.autoCompactRevision !== autoCompactRevision) { await runtime.close(); this.live.delete(agent.id); runtime = undefined }
       if (runtime?.rpc.closed) { this.live.delete(agent.id); runtime = undefined }
       if (!runtime) { runtime = await this.createRuntime(agent, binding, tools, signal); this.live.set(agent.id, runtime) }
-      const skillNames = messages.flatMap(message => [...(humanInput(message) ?? '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1]))
+      const skillNames = messages.flatMap(message => [...(['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1]))
       if (command && terminalOnlyCommands.has(command.name)) throw new Error(`/${command.name} 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。`)
       // Commit admission before sending. A crash cannot automatically repeat a
       // native turn with potentially irreversible tools; the user may follow up.

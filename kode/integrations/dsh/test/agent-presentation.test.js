@@ -84,3 +84,25 @@ test('session avatars persist in Kode session metadata without changing a bound 
     assert.equal(appearance.profileView(before.profile, 'session-avatar-b').avatar.id, null)
   } finally { if (backend.exitCode === null && backend.signalCode === null) { const exited = once(backend, 'exit'); backend.kill('SIGINT'); await exited } await rm(root, { recursive: true, force: true }) }
 })
+
+test('built-in and custom Agent avatars persist independently and session overrides win', async () => {
+  let value = { version: 1, native_sessions: [{ backend_key: 'codex', session_id: 'native', dsh_session_id: 'session-a' }] }, revision = 0
+  const client = { async call(_path, body) { if (body) { assert.equal(body.expected_revision, revision); value = body.value; revision++ } return { value: structuredClone(value), revision } } }
+  const rows = [{ id: 'builtin-codex', type: 'codex', origin: 'builtin' }, { id: 'work', type: 'codex', name: 'Work', executable: '/work/codex' }]
+  const profiles = { list: () => rows }, before = structuredClone(rows)
+  const appearance = new SessionAppearance(client, profiles)
+  await appearance.setAgent('builtin-codex', 'gallery/default')
+  await appearance.setAgent('work', 'gallery/work')
+  assert.equal(appearance.profilesView()[0].avatar.id, 'gallery/default')
+  assert.equal(appearance.profileView(rows[1], 'session-a').avatar.id, 'gallery/work')
+  await appearance.setSession('session-a', 'gallery/personal')
+  assert.equal(appearance.profileView(rows[1], 'session-a').avatar.id, 'gallery/personal')
+  await appearance.setSession('session-a', null)
+  assert.equal(appearance.profileView(rows[1], 'session-a').avatar.id, null)
+  const reloaded = new SessionAppearance(client, profiles)
+  await reloaded.load()
+  assert.equal(reloaded.profileView(rows[1], 'another-session').avatar.id, 'gallery/work')
+  await assert.rejects(appearance.setAgent('missing', null), /不存在/)
+  await assert.rejects(appearance.setAgent('work', 'gallery/../escape'), /无效/)
+  assert.deepEqual(rows, before)
+})

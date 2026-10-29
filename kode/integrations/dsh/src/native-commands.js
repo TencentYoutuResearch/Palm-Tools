@@ -6,7 +6,7 @@ import { resolveAdvertisedModel } from './model-alias.js'
 
 // These commands own a CLI window, login, or a different conversation identity.
 // ACP advertising a terminal command does not give this inline view that UI.
-export const terminalOnlyCommands = new Set(['clear', 'new', 'resume', 'fork', 'branch', 'background', 'bg', 'fork-bg', 'web', 'login', 'logout', 'exit', 'quit', 'keybindings', 'remote-control', 'gateway', 'multitask'])
+export const terminalOnlyCommands = new Set(['clear', 'new', 'fork', 'branch', 'background', 'bg', 'fork-bg', 'web', 'login', 'logout', 'exit', 'quit', 'keybindings', 'remote-control', 'gateway', 'multitask'])
 const shared = [
   { name: 'help', description: '查看当前 Agent 可用的命令' },
   { name: 'status', description: '查看当前 Agent、模型、工作区和权限' },
@@ -27,7 +27,7 @@ export function commandDescriptors(capabilities) {
     const name = command.name.replaceAll(':', '-')
     if (!/^[a-z][a-z0-9_-]*$/.test(name) || names.has(name)) continue
     names.add(name)
-    rows.push({ name, nativeName: command.name, kind: command.kind ?? 'command', description: `${name === command.name ? '' : `/${command.name} · `}${command.description ?? ''}`, ...(command.input ? { input: { hint: command.input.hint ?? '参数' } } : {}) })
+    rows.push({ name, nativeName: command.name, kind: command.kind ?? 'command', description: `${name === command.name ? '' : `/${command.name} · `}${command.description ?? ''}`, ...(command.input ? { input: { hint: command.input.hint ?? '参数', ...(command.kind === 'skill' ? { attachments: true } : {}) } } : {}) })
   }
   return rows
 }
@@ -39,8 +39,8 @@ export function humanInput(message) {
   if (!['user', 'human'].includes(message.source?.kind) || message.content.some(part => part.type !== 'text')) return undefined
   return message.content.map(part => part.text).join('\n').trim()
 }
-export function enqueueCommand(agent, line) {
-  agent.followup({ id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: line }] })
+export function enqueueCommand(agent, line, attachments = []) {
+  agent.followup({ id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: line }, ...attachments] })
 }
 export async function mountNativeCommands(agent, service, profile) {
   if (!agent.ctx.inject || !profile || profile.type === 'dsh') return
@@ -56,12 +56,13 @@ export async function mountNativeCommands(agent, service, profile) {
     let descriptors, releases = []
     const update = commands => {
       const advertised = [...commands]
+      if (['codex', 'claude'].includes(profile.type) || profile.protocol === 'codex') advertised.push({ name: 'resume', description: '恢复原生历史会话' })
       if (profile.type === 'claude' && !advertised.some(row => row.name === 'autocompact')) advertised.push({ name: 'autocompact', description: '设置当前 Claude 会话的原生自动压缩', input: { hint: 'on | off | status' }, localAction: 'claude-autocompact' })
       descriptors = commandDescriptors({ ...capabilities, commands: advertised })
       for (const release of releases.splice(0)) release()
       for (const descriptor of descriptors) releases.push(ctx.commands.register({
       definitionId: `@kode/dsh/native/${descriptor.kind === 'skill' ? 'skill/' : ''}${descriptor.name}`, ...descriptor,
-      handler: async ({ agent: receiving, rawInput, signal }) => {
+      handler: async ({ agent: receiving, rawInput, signal, attachments = [] }) => {
         if (receiving !== agent) throw new Error('Command belongs to another conversation')
         signal.throwIfAborted()
         const input = rawInput.trim(), selection = selectedModel(agent)
@@ -75,6 +76,7 @@ export async function mountNativeCommands(agent, service, profile) {
           return { kind: 'success', text: `会话已重命名为「${input}」。` }
         }
         if (descriptor.name === 'stop') { agent.ctx.get('sessionController').cancel({ sessionId: agent.id }); return { kind: 'success', text: '已停止当前任务。' } }
+        if (descriptor.name === 'resume') return { kind: 'error', text: '请在 dsh 的 /resume 菜单中选择要恢复的原生会话。' }
         if (descriptor.name === 'new') return { kind: 'error', text: '/new 需要前端的新建会话入口。' }
         if (descriptor.name === 'diff') { if (input) throw new Error('/diff 不接受参数。'); enqueueCommand(agent, '!git diff --no-ext-diff && git diff --cached --no-ext-diff'); await agent.ctx.sessions.flush(agent.session); return { kind: 'success' } }
         if (descriptor.name === 'autocompact' && profile.type === 'claude' && !commands.some(row => row.name === 'autocompact')) {
@@ -109,7 +111,7 @@ export async function mountNativeCommands(agent, service, profile) {
           return { kind: 'success', text: `后续请求使用 ${input} 模式。` }
         }
         if (descriptor.name === 'shell' && !input) throw new Error('请输入要执行的终端命令。')
-        enqueueCommand(agent, descriptor.name === 'shell' ? `!${rawInput.trimStart()}` : `/${descriptor.nativeName ?? descriptor.name}${rawInput}`)
+        enqueueCommand(agent, descriptor.name === 'shell' ? `!${rawInput.trimStart()}` : `${descriptor.kind === 'skill' && (profile.type === 'codex' || profile.protocol === 'codex') ? '$' : '/'}${descriptor.nativeName ?? descriptor.name}${input ? ` ${input}` : ''}`, attachments)
         await agent.ctx.sessions.flush(agent.session)
         return { kind: 'success' }
       },
