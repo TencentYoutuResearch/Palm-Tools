@@ -62,8 +62,13 @@ pub async fn configuration(
         .json()
         .await
         .map_err(|error| error.to_string())?;
-    kode_bridge::messaging::agents::resolve(&catalog, key, thread)
-        .map_err(|error| error.to_string())
+    let mut backend = kode_bridge::messaging::agents::resolve(&catalog, key, thread)
+        .map_err(|error| error.to_string())?;
+    // Shared custom CodeBuddy definitions predate explicit ACP capabilities.
+    if backend.acp.is_none() && backend.protocol_key(key) == "codebuddy" {
+        backend.acp = Some(kode_core::config::AcpSpec::flag());
+    }
+    Ok(backend)
 }
 
 pub async fn bind_native(commands: Vec<Value>) -> Result<(), String> {

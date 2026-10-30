@@ -36,6 +36,7 @@ fn echo_config() -> Config {
             model_flag: None,
             permission_mode_flag: None,
             mcp_setup: None,
+            acp: None,
             enabled: None,
         },
     );

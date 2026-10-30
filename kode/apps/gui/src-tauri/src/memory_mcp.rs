@@ -632,6 +632,13 @@ pub fn install_managed_hooks(app_state: &AppState) {
             tracing::warn!("cursor hook inject failed: {e}");
         }
     }
+
+    // opencode 只认插件目录;插件靠 KODE_HOOK_SOCK 上报,relay 不可用时装了也是 no-op。
+    if let Some(path) = kode_memory::hook_setup::opencode_plugin_path() {
+        if let Err(e) = kode_memory::hook_setup::install_opencode_plugin(&path) {
+            tracing::warn!("opencode plugin install failed: {e}");
+        }
+    }
 }
 
 /// setup hook 用:启动后 800ms 异步触发。

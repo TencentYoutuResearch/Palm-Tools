@@ -1008,15 +1008,18 @@ async fn create_session(
     if std::env::var("KODE_GUI_RUNTIME").as_deref()==Ok("1") {
         session_mcp::reserve_gui_session(id,&req.backend_key,&cwd,req.model.as_deref()).await.map_err(|e|ApiError::BadRequest(e.to_string()))?;
     }
+    if backend.acp.is_none() && backend.protocol_key(&req.backend_key) == "codebuddy" {
+        backend.acp = Some(kode_core::config::AcpSpec::flag());
+    }
     let use_acp = req.transport.as_deref() == Some("acp")
         || (req.transport.is_none()
-            && backend.protocol_key(&req.backend_key) == "codebuddy"
+            && backend.acp.is_some()
             && req.resume_session_uuid.is_none()
             && !req.headless);
     if use_acp {
-        if backend.protocol_key(&req.backend_key) != "codebuddy" || req.resume_session_uuid.is_some() {
+        if backend.acp.is_none() || req.resume_session_uuid.is_some() {
             return Err(ApiError::BadRequest(
-                "ACP creation currently supports new CodeBuddy sessions only".into(),
+                "ACP creation currently supports new sessions of ACP-capable backends only".into(),
             ));
         }
         backend.args = kode_core::session::inject_kode_memory_prompt(
@@ -1044,8 +1047,9 @@ async fn create_session(
             &backend.command,
             &cwd,
             client.session_id(),
-            req.model
-                .clone()
+            client
+                .current_model()
+                .or(req.model.clone())
                 .or(backend.default_model.clone())
                 .unwrap_or_else(|| "auto".into()),
         );

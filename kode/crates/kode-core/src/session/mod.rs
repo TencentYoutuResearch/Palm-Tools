@@ -8,6 +8,7 @@ pub mod cursor_tail;
 pub mod heuristic;
 mod invocation;
 pub mod jsonl_tail;
+pub mod opencode_tail;
 pub mod state;
 
 use std::path::{Path, PathBuf};
@@ -300,6 +301,7 @@ impl Session {
                 model_flag: Some("--model".into()),
                 permission_mode_flag: None,
                 mcp_setup: None,
+                acp: None,
                 enabled: Some(true),
             },
             cwd: cwd.into(),
@@ -838,7 +840,8 @@ fn inject_session_id(
 }
 
 /// 把 `--resume <sid>` 注入 args(若用户没已显式提供)。
-/// codebuddy 用 `-r/--resume`,claude 也是 `-r/--resume`,统一注入 long form。
+/// codebuddy 用 `-r/--resume`,claude 也是 `-r/--resume`,统一注入 long form;
+/// opencode 用 `-s/--session`。
 fn inject_resume_flag(backend_key: &str, args: &[String], sid: &str) -> Vec<String> {
     let style = backend::profile_for_key(backend_key)
         .map(|p| p.resume_style())
@@ -852,11 +855,16 @@ fn inject_resume_flag(backend_key: &str, args: &[String], sid: &str) -> Vec<Stri
         new_args.push(sid.to_string());
         return new_args;
     }
-    if args.iter().any(|a| a == "--resume" || a == "-r") {
+    let (flag, aliases): (&str, &[&str]) = if style == backend::ResumeStyle::SessionFlag {
+        ("--session", &["--session", "-s", "--continue", "-c"])
+    } else {
+        ("--resume", &["--resume", "-r"])
+    };
+    if args.iter().any(|a| aliases.contains(&a.as_str())) {
         return args.to_vec();
     }
     let mut new_args = args.to_vec();
-    new_args.push("--resume".into());
+    new_args.push(flag.into());
     new_args.push(sid.to_string());
     new_args
 }
@@ -1099,6 +1107,18 @@ mod tests {
         assert!(with_resume.contains(&resume_sid.to_string()));
         // 没调 inject_session_id → args 里不应出现 --session-id
         assert!(!with_resume.iter().any(|a| a == "--session-id"));
+    }
+
+    /// opencode 续接会话是 `--session <id>`;`--resume` 会被它当成未知参数。
+    #[test]
+    fn opencode_resume_uses_session_flag() {
+        let out = inject_resume_flag("opencode", &[], "ses_abc");
+        assert_eq!(out, vec!["--session".to_string(), "ses_abc".to_string()]);
+        let explicit = vec!["-s".to_string(), "ses_old".to_string()];
+        assert_eq!(
+            inject_resume_flag("opencode", &explicit, "ses_abc"),
+            explicit
+        );
     }
 
     #[test]
@@ -1874,6 +1894,7 @@ mod tests {
                 model_flag: None,
                 permission_mode_flag: None,
                 mcp_setup: None,
+                acp: None,
                 enabled: None,
             },
             80,
@@ -1920,6 +1941,7 @@ mod tests {
                 model_flag: None,
                 permission_mode_flag: None,
                 mcp_setup: None,
+                acp: None,
                 enabled: None,
             },
             80,
@@ -1979,6 +2001,7 @@ mod tests {
                 model_flag: None,
                 permission_mode_flag: None,
                 mcp_setup: None,
+                acp: None,
                 enabled: None,
             },
             80,

@@ -55,6 +55,9 @@ impl PtyHost {
             cmd.arg(a);
         }
         cmd.cwd(cwd);
+        // portable-pty 只 chdir,不改 PWD;从终端启动 kode 时子进程会继承启动目录的 PWD。
+        // opencode 等按 $PWD 记录会话目录,必须和真实 cwd 一致。
+        cmd.env("PWD", cwd);
 
         // PTY 子进程必须有 TERM/COLORTERM,否则 codebuddy/claude 等子 CLI
         // 会判定终端不支持颜色,输出全部退化为无色 → 视觉上"右边没颜色"。
@@ -749,6 +752,51 @@ mod tests {
         let s = String::from_utf8_lossy(&got);
         assert!(s.contains("TT=light"), "extra_env should win, got: {:?}", s);
         assert!(s.contains("CFG=0;15"), "extra_env should win, got: {:?}", s);
+    }
+
+    /// 回归:从终端启动 kode 时父进程 PWD 是启动目录;子进程的 PWD 必须是 tab cwd
+    /// (opencode 按 $PWD 记录会话目录)。用 env 而非 bash,bash 会自己校正 PWD。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn child_pwd_matches_spawn_cwd() {
+        let cwd = std::env::temp_dir().join(format!("kode-pwd-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let host = PtyHost::spawn(
+            97,
+            "/usr/bin/env",
+            &[],
+            portable_pty::PtySize {
+                cols: 200,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &cwd,
+            tx,
+            &[],
+        )
+        .expect("spawn");
+
+        let mut got = Vec::<u8>::new();
+        let _ = timeout(Duration::from_secs(2), async {
+            while let Some(act) = rx.recv().await {
+                match act {
+                    CoreEvent::PtyBytes { bytes, .. } => got.extend(bytes),
+                    CoreEvent::PtyExited { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        drop(host);
+        let _ = std::fs::remove_dir_all(&cwd);
+
+        let s = String::from_utf8_lossy(&got);
+        let expected = format!("PWD={}", cwd.display());
+        assert!(
+            s.lines().any(|line| line.trim_end() == expected),
+            "child PWD should be the spawn cwd, got: {s:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

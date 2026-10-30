@@ -275,6 +275,7 @@ impl BackendSaveRequest {
             model_flag: self.model_flag,
             permission_mode_flag: self.permission_mode_flag,
             mcp_setup: spec,
+            acp: None,
             enabled: self.enabled,
         };
         backend.hydrate_permission_flag();
@@ -665,6 +666,7 @@ sidebar_width = 30
             mcp_setup: Some(McpSetupSpec::JsonMerge {
                 config_path: "~/.codex/mcp.json".into(),
             }),
+            acp: None,
             enabled: None,
         };
         upsert_backend_table(&mut doc, "codex", &new_backend);
@@ -706,6 +708,7 @@ model_flag = "--model"
             model_flag: Some("--m".into()),
             permission_mode_flag: None,
             mcp_setup: None,
+            acp: None,
             enabled: None,
         };
         upsert_backend_table(&mut doc, "foo", &updated);

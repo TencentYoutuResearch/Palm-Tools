@@ -513,6 +513,7 @@ async fn existing_pty_session_receives_once_after_busy_and_approval_clear() {
         model_flag: None,
         permission_mode_flag: None,
         mcp_setup: None,
+        acp: None,
         enabled: None,
     };
     let mut session = Session::new(

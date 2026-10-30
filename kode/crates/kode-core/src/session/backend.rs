@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use super::codex_title;
 use super::cursor_tail;
 use super::jsonl_tail::{self, Backend};
+use super::opencode_tail;
 use super::SessionId;
 use crate::event::CoreEvent;
 use crate::model_alias::sanitize_model_name;
@@ -27,6 +28,8 @@ pub enum ResumeStyle {
     Flag,
     /// 子命令 `resume <id>`(Codex)
     Subcommand,
+    /// `--session <id>`(opencode)
+    SessionFlag,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -158,6 +161,7 @@ pub fn profile(kind: Backend) -> &'static dyn BackendProfile {
         Backend::Codex => &CODEX_PROFILE,
         Backend::Tcodex => &TCODEX_PROFILE,
         Backend::Cursor => &CursorProfile,
+        Backend::Opencode => &OpencodeProfile,
     }
 }
 
@@ -173,6 +177,7 @@ pub fn all_profiles() -> &'static [&'static dyn BackendProfile] {
         &CODEX_PROFILE,
         &TCODEX_PROFILE,
         &CursorProfile,
+        &OpencodeProfile,
     ];
     PROFILES
 }
@@ -209,6 +214,7 @@ struct CodexProfile(Backend);
 static CODEX_PROFILE: CodexProfile = CodexProfile(Backend::Codex);
 static TCODEX_PROFILE: CodexProfile = CodexProfile(Backend::Tcodex);
 struct CursorProfile;
+struct OpencodeProfile;
 
 impl BackendProfile for CodebuddyProfile {
     fn kind(&self) -> Backend {
@@ -496,6 +502,55 @@ impl BackendProfile for CursorProfile {
     }
     fn tab_for_conversation(&self, conversation_id: &str) -> Option<SessionId> {
         cursor_tail::tab_for_cursor_conversation(conversation_id)
+    }
+}
+
+impl BackendProfile for OpencodeProfile {
+    fn kind(&self) -> Backend {
+        Backend::Opencode
+    }
+    fn usage_key(&self) -> &'static str {
+        "opencode"
+    }
+    fn persist_title_to_transcript(&self) -> bool {
+        false
+    }
+    fn resume_style(&self) -> ResumeStyle {
+        ResumeStyle::SessionFlag
+    }
+    fn find_session_path(&self, _cwd: &Path, _session_id: &str) -> Option<PathBuf> {
+        None
+    }
+    fn spawn_tail(&self, req: MetaTailRequest) {
+        opencode_tail::spawn(
+            req.id,
+            req.cwd,
+            req.resume_session_id,
+            req.spawn_started_at,
+            req.evt_tx,
+        );
+    }
+    fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
+        let Some(db) = opencode_tail::db_path() else {
+            return Vec::new();
+        };
+        opencode_tail::list_sessions(&db, cwd)
+            .into_iter()
+            .map(|s| ListedSession {
+                total_tokens: Some(s.total_tokens()).filter(|t| *t > 0),
+                session_id: s.session_id,
+                title: s.title,
+                model: s.model,
+                last_modified_secs: (s.updated_ms.max(0) / 1000) as u64,
+            })
+            .collect()
+    }
+    // 用量统计读的是 usage 文件;opencode 的用量只在 SQLite 里,暂不进全局统计。
+    fn usage_roots(&self, _home: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn parse_usage_file(&self, _path: &Path, _fallback_ms: Option<i64>) -> Vec<UsageEvent> {
+        Vec::new()
     }
 }
 
@@ -1141,8 +1196,12 @@ mod tests {
         assert!(!profile_for_key("cursor")
             .unwrap()
             .supports_session_id_flag());
+        assert_eq!(
+            profile_for_key("opencode").unwrap().resume_style(),
+            ResumeStyle::SessionFlag
+        );
         assert!(profile_for_key("foo").is_none());
-        assert_eq!(all_profiles().len(), 6);
+        assert_eq!(all_profiles().len(), 7);
     }
 
     #[test]

@@ -102,7 +102,8 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
                 .ok_or_else(|| {
                     ApiError::BadRequest("Backend is unavailable on this desktop".into())
                 })?;
-            if req.model.as_ref().is_some_and(|m| !m.trim().is_empty()) && cfg.model_flag.is_none()
+            if req.model.as_ref().is_some_and(|m| !m.trim().is_empty())
+                && cfg.model_flag.is_none() && cfg.acp.is_none()
             {
                 return Err(ApiError::BadRequest(
                     "Backend does not support model selection".into(),

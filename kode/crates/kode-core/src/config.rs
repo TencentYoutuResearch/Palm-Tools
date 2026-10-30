@@ -43,6 +43,10 @@ pub struct BackendConfig {
     /// 用户可以在 `~/.config/kode/config.toml` 覆盖或给新 backend 添加。
     #[serde(default)]
     pub mcp_setup: Option<McpSetupSpec>,
+    /// **2026-10** 这个 backend 怎么以 ACP(Agent Client Protocol)启动。
+    /// `None` = 不支持 ACP,只能走 PTY。codebuddy / opencode 出厂值已填好。
+    #[serde(default)]
+    pub acp: Option<AcpSpec>,
     /// **2026-06** 这个 backend 是否在新建 tab 的 BackendChooser 里展示。
     /// - `None` = 尚未决定:GUI 首次启动会按 PATH 探测 `command`,命中写 `Some(true)`、
     ///   未命中写 `Some(false)`,然后落盘。正常流程首次启动后不再有 `None`。
@@ -62,6 +66,35 @@ impl BackendConfig {
     /// 只有显式 `Some(false)` 才隐藏。
     pub fn is_enabled(&self) -> bool {
         self.enabled != Some(false)
+    }
+}
+
+/// ACP 启动方式。不同 CLI 进 ACP 的入口不一样:
+/// - codebuddy:`codebuddy --acp --model <m>`(flag 形式,模型走命令行)
+/// - opencode:`opencode acp`(子命令形式,不认 `--model`,模型在 `session/new`
+///   之后通过 `session/set_config_option` 切)
+///
+/// 序列化形式(TOML):
+/// ```toml
+/// [backends.opencode.acp]
+/// args = ["acp"]
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AcpSpec {
+    /// 追加在 `BackendConfig::args` 之后、切到 ACP 模式的参数。
+    pub args: Vec<String>,
+    /// 设了就把 `[model_flag, model]` 拼到命令行;`None` 则建会话后用 config option 选模型。
+    #[serde(default)]
+    pub model_flag: Option<String>,
+}
+
+impl AcpSpec {
+    /// codebuddy 风格:`--acp` flag + `--model`。也是未配置 `acp` 时的兼容回退。
+    pub fn flag() -> Self {
+        Self {
+            args: vec!["--acp".into()],
+            model_flag: Some("--model".into()),
+        }
     }
 }
 
@@ -180,6 +213,7 @@ impl Default for Config {
                 mcp_setup: Some(McpSetupSpec::Codebuddy {
                     cli: "codebuddy".into(),
                 }),
+                acp: Some(AcpSpec::flag()),
                 enabled: None,
             },
         );
@@ -198,6 +232,7 @@ impl Default for Config {
                 mcp_setup: Some(McpSetupSpec::Claude {
                     cli: "claude-internal".into(),
                 }),
+                acp: None,
                 enabled: None,
             },
         );
@@ -213,6 +248,7 @@ impl Default for Config {
                 mcp_setup: Some(McpSetupSpec::Claude {
                     cli: "claude".into(),
                 }),
+                acp: None,
                 enabled: None,
             },
         );
@@ -231,6 +267,7 @@ impl Default for Config {
                 mcp_setup: Some(McpSetupSpec::Codex {
                     cli: "codex".into(),
                 }),
+                acp: None,
                 enabled: None,
             },
         );
@@ -246,6 +283,7 @@ impl Default for Config {
                 mcp_setup: Some(McpSetupSpec::Codex {
                     cli: "tcodex".into(),
                 }),
+                acp: None,
                 enabled: None,
             },
         );
@@ -261,6 +299,7 @@ impl Default for Config {
                 mcp_setup: Some(McpSetupSpec::Claude {
                     cli: "tclaude".into(),
                 }),
+                acp: None,
                 enabled: None,
             },
         );
@@ -276,6 +315,7 @@ impl Default for Config {
                 mcp_setup: Some(McpSetupSpec::JsonMerge {
                     config_path: "~/.cursor/mcp.json".into(),
                 }),
+                acp: None,
                 enabled: None,
             },
         );
@@ -305,9 +345,16 @@ impl Default for Config {
                     model_flag: Some("--model".into()),
                     permission_mode_flag: None,
                     mcp_setup: None,
+                    acp: None,
                     enabled: None,
                 },
             );
+        }
+        if let Some(opencode) = backends.get_mut("opencode") {
+            opencode.acp = Some(AcpSpec {
+                args: vec!["acp".into()],
+                model_flag: None,
+            });
         }
         Self {
             default_backend: default_backend_key(),
@@ -351,8 +398,13 @@ impl Config {
                                     existing.permission_mode_flag = v.permission_mode_flag.clone();
                                 }
                             }
-                            if existing.mcp_setup.is_none() && existing.command == v.command {
-                                existing.mcp_setup = v.mcp_setup;
+                            if existing.command == v.command {
+                                if existing.mcp_setup.is_none() {
+                                    existing.mcp_setup = v.mcp_setup;
+                                }
+                                if existing.acp.is_none() {
+                                    existing.acp = v.acp;
+                                }
                             }
                         }
                         None => {
@@ -428,6 +480,41 @@ mod tests {
     use super::*;
 
     /// 回归:codebuddy 默认不能带任何 positional 参数,否则会被当作初始 prompt 发给 LLM
+    /// opencode 进 ACP 是 `opencode acp` 子命令,不认 `--acp` / `--model`;codebuddy 维持 flag 形式。
+    #[test]
+    fn default_acp_specs_match_each_cli_entry() {
+        let cfg = Config::default();
+        let opencode = cfg.backend("opencode").unwrap().acp.clone().unwrap();
+        assert_eq!(opencode.args, vec!["acp".to_string()]);
+        assert_eq!(opencode.model_flag, None);
+        assert_eq!(cfg.backend("codebuddy").unwrap().acp, Some(AcpSpec::flag()));
+        assert!(cfg.backend("codex").unwrap().acp.is_none());
+    }
+
+    /// GUI 首次探测会把 `[backends.opencode]` 落盘(没有 acp 字段),加载时要补上出厂 ACP 能力。
+    #[test]
+    fn load_hydrates_acp_for_persisted_builtin_backends() {
+        let dir = std::env::temp_dir().join(format!("kode-acp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[backends.opencode]\ncommand = \"opencode\"\nenabled = true\n\n[backends.custom-oc]\ncommand = \"my-opencode\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path);
+        assert_eq!(
+            cfg.backend("opencode")
+                .unwrap()
+                .acp
+                .as_ref()
+                .map(|s| s.args.clone()),
+            Some(vec!["acp".to_string()])
+        );
+        assert!(cfg.backend("custom-oc").unwrap().acp.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn default_codebuddy_backend_has_no_positional_args() {
         let cfg = Config::default();
@@ -942,6 +1029,7 @@ enabled = true
                 model_flag: Some("--model".into()),
                 permission_mode_flag: Some(String::new()),
                 mcp_setup: None,
+                acp: None,
                 enabled: Some(true),
             },
         );
@@ -955,6 +1043,7 @@ enabled = true
                 model_flag: Some("--model".into()),
                 permission_mode_flag: None,
                 mcp_setup: None,
+                acp: None,
                 enabled: Some(true),
             },
         );
