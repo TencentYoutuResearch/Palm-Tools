@@ -116,20 +116,7 @@ async fn publish(
             .bus
             .history_for(id, 0, 1000)
             .into_iter()
-            .filter(|event| {
-                matches!(
-                    event.r#type.as_str(),
-                    "message"
-                        | "tool_use"
-                        | "meta"
-                        | "ask_user_question"
-                        | "plan_proposed"
-                        | "session.attention_cleared"
-                        | "interaction.resolved"
-                        | "session.status"
-                        | "session.mode_changed"
-                )
-            })
+            .filter(|event| kode_bridge::runtime::EVENT_KINDS.contains(&event.r#type.as_str()))
             .filter_map(|event| {
                 let key = event_key(&event);
                 (!seen.contains(&key))

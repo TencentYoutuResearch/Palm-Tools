@@ -10,6 +10,22 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 const FIRST_RUNTIME_ID: u64 = 1 << 40;
 
+/// Event kinds a runtime may publish. Publishers filter with this list: one
+/// unknown kind rejects the whole publication, which also stalls the
+/// runtime's command mailbox.
+pub const EVENT_KINDS: &[&str] = &[
+    "message",
+    "tool_use",
+    "tool_result",
+    "meta",
+    "ask_user_question",
+    "plan_proposed",
+    "session.attention_cleared",
+    "interaction.resolved",
+    "session.status",
+    "session.mode_changed",
+];
+
 #[derive(Default)]
 pub struct Registry {
     db: Mutex<Option<Connection>>,
@@ -232,18 +248,7 @@ impl Registry {
                 for event in session.events {
                     if event.key.len() > 256
                         || event.key.is_empty()
-                        || !matches!(
-                            event.kind.as_str(),
-                            "message"
-                                | "tool_use"
-                                | "tool_result"
-                                | "meta"
-                                | "ask_user_question"
-                                | "plan_proposed"
-                                | "session.attention_cleared"
-                                | "interaction.resolved"
-                                | "session.status"
-                        )
+                        || !EVENT_KINDS.contains(&event.kind.as_str())
                     {
                         bail!("invalid runtime event")
                     }
@@ -454,6 +459,24 @@ mod tests {
     use super::*;
     fn publication(boot: &str) -> Publication {
         serde_json::from_value(json!({"runtime":"dsh","boot_id":boot,"sessions":[{"session_id":"session-1","dto":{"title":"Shared conversation","status":"idle","backend_key":"codex"},"events":[{"key":"log:1","kind":"message","payload":{"id":"message-1","role":"assistant","text":"hello"}}]}]})).unwrap()
+    }
+
+    /// Mode changes are emitted on every Claude tool call; rejecting them
+    /// failed every publication and left mobile commands unclaimed.
+    #[tokio::test]
+    async fn publication_accepts_every_forwarded_event_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::build_test_ctx(Default::default(), "test".into());
+        ctx.runtimes.open(&dir.path().join("runtime.sqlite")).unwrap();
+        let events: Vec<_> = EVENT_KINDS
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| json!({"key":format!("k:{i}"),"kind":kind,"payload":{"mode":"bypassPermissions"}}))
+            .collect();
+        let publication: Publication = serde_json::from_value(json!({"runtime":"gui","boot_id":"gui-1","sessions":[{"session_id":"gui:1:1","dto":{"status":"idle","backend_key":"claude"},"events":events}]})).unwrap();
+        ctx.runtimes.publish(&ctx, publication).unwrap();
+        let rejected: Publication = serde_json::from_value(json!({"runtime":"gui","boot_id":"gui-1","sessions":[{"session_id":"gui:1:1","dto":{},"events":[{"key":"x","kind":"pty_bytes","payload":{}}]}]})).unwrap();
+        assert!(ctx.runtimes.publish(&ctx, rejected).is_err());
     }
 
     #[tokio::test]
