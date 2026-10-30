@@ -73,7 +73,7 @@ impl Drop for Switching {
 }
 
 #[derive(Debug, PartialEq)]
-enum Key {
+pub(super) enum Key {
     Up,
     Down,
     Enter,
@@ -82,7 +82,7 @@ enum Key {
     Escape,
 }
 impl Key {
-    fn bytes(&self) -> &'static [u8] {
+    pub(super) fn bytes(&self) -> &'static [u8] {
         match self {
             Self::Up => b"\x1b[A",
             Self::Down => b"\x1b[B",
@@ -101,7 +101,7 @@ fn row_text(line: &str) -> &str {
     line.trim().trim_start_matches(['›', '❯', '→', '>']).trim()
 }
 
-fn numbered_rows(menu: &str) -> Vec<(&str, bool)> {
+pub(super) fn numbered_rows(menu: &str) -> Vec<(&str, bool)> {
     menu.lines()
         .filter_map(|line| {
             let (number, text) = row_text(line).split_once(". ")?;
@@ -110,7 +110,7 @@ fn numbered_rows(menu: &str) -> Vec<(&str, bool)> {
         .collect()
 }
 
-fn navigate(rows: &[(&str, bool)], target: usize, accept: Key) -> Option<Key> {
+pub(super) fn navigate(rows: &[(&str, bool)], target: usize, accept: Key) -> Option<Key> {
     let current = rows.iter().position(|(_, active)| *active)?;
     Some(if current < target {
         Key::Down

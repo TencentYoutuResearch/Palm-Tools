@@ -2026,6 +2026,7 @@ pub fn submit_plan_response_for(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PermissionMode {
     Default,
+    Auto,
     AcceptEdits,
     Plan,
     BypassPermissions,
@@ -2034,7 +2035,8 @@ enum PermissionMode {
 impl PermissionMode {
     fn from_str(s: &str) -> Option<Self> {
         match s {
-            "default" => Some(Self::Default),
+            "default" | "manual" => Some(Self::Default),
+            "auto" => Some(Self::Auto),
             "acceptEdits" | "accept-edits" => Some(Self::AcceptEdits),
             "plan" => Some(Self::Plan),
             "bypass" | "bypassPermissions" | "bypass-permissions" => Some(Self::BypassPermissions),
@@ -2042,9 +2044,30 @@ impl PermissionMode {
         }
     }
 
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Auto => "Auto",
+            Self::AcceptEdits => "Accept edits",
+            Self::Plan => "Plan",
+            Self::BypassPermissions => "Bypass permissions",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Default => "Ask before each tool use",
+            Self::Auto => "A classifier approves safe actions",
+            Self::AcceptEdits => "Approve file edits automatically",
+            Self::Plan => "Plan only, no changes",
+            Self::BypassPermissions => "Skip every permission prompt",
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Auto => "auto",
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
             Self::BypassPermissions => "bypassPermissions",
@@ -2062,6 +2085,13 @@ fn detect_mode(screen: &str) -> Option<PermissionMode> {
     }
     if lower.contains("bypass permissions") || lower.contains("dangerously skip permissions") {
         return Some(PermissionMode::BypassPermissions);
+    }
+    // Claude Code 2.1 cycle: auto → manual (default) → accept edits → plan → bypass.
+    if lower.contains("auto mode on") {
+        return Some(PermissionMode::Auto);
+    }
+    if lower.contains("manual mode on") {
+        return Some(PermissionMode::Default);
     }
     if lower.contains("shift+tab to") {
         return Some(PermissionMode::Default);
@@ -2144,10 +2174,82 @@ pub async fn set_session_permission_mode(
 ) -> Result<(String, u32), String> {
     if let Some(client) = ctx.acp.get(id) {
         client.set_mode(mode).await?;
-        return Ok((mode.to_string(), 0));
+        let reached = if mode == "bypass" { "bypassPermissions" } else { mode };
+        emit_mode_changed(ctx, id, reached);
+        return Ok((reached.to_string(), 0));
     }
 
     let target = PermissionMode::from_str(mode).ok_or_else(|| format!("invalid mode: {mode}"))?;
+    let codex = ctx
+        .sessions
+        .lock()
+        .get(&id)
+        .ok_or_else(|| format!("session {id} not found"))?
+        .backend_kind()
+        .is_some_and(|kind| kind.is_codex_family());
+    let cycles = if codex {
+        permission_switch::set_codex_permission(ctx, id, target == PermissionMode::BypassPermissions)
+            .await?;
+        0
+    } else {
+        cycle_pty_mode(ctx, id, target).await?
+    };
+    if let Some(s) = ctx.sessions.lock().get_mut(&id) {
+        s.permission_mode = Some(target.as_str().to_string());
+    }
+    emit_mode_changed(ctx, id, target.as_str());
+    Ok((target.as_str().to_string(), cycles))
+}
+
+/// Current permission mode and the modes a remote client may request.
+pub fn permission_snapshot(ctx: &Ctx, session: &kode_core::session::Session) -> Value {
+    if let Some(client) = ctx.acp.get(session.id) {
+        return client.permission_snapshot();
+    }
+    let flag = session.launch_config.permission_mode_flag.as_deref().unwrap_or("");
+    if flag.is_empty() || !session.is_running() {
+        return json!({});
+    }
+    use PermissionMode::*;
+    let current = session
+        .permission_mode
+        .as_deref()
+        .and_then(PermissionMode::from_str)
+        .unwrap_or(Default);
+    if session.backend_kind().is_some_and(|kind| kind.is_codex_family()) {
+        // Codex's own /permissions preset names.
+        let current = if current == BypassPermissions { current } else { Default };
+        return json!({
+            "permission_mode": current.as_str(),
+            "permission_modes": [
+                {"id": Default.as_str(), "label": "Ask for approval", "description": "Approval required outside the workspace"},
+                {"id": BypassPermissions.as_str(), "label": "Full Access", "description": "No approvals and no sandbox"},
+            ],
+        });
+    }
+    let bypass_reachable = current == BypassPermissions
+        || session.args.iter().any(|arg| {
+            arg == "--allow-dangerously-skip-permissions" || arg == "--dangerously-skip-permissions"
+        });
+    let modes: Vec<Value> = [Default, Auto, AcceptEdits, Plan, BypassPermissions]
+        .into_iter()
+        .filter(|mode| *mode != BypassPermissions || bypass_reachable)
+        .map(|mode| json!({"id": mode.as_str(), "label": mode.label(), "description": mode.description()}))
+        .collect();
+    json!({"permission_mode": current.as_str(), "permission_modes": modes})
+}
+
+fn emit_mode_changed(ctx: &Ctx, id: SessionId, mode: &str) {
+    ctx.bus.emit(EventEnvelope::new(
+        id,
+        "session.mode_changed",
+        json!({ "mode": mode }),
+    ));
+}
+
+/// Claude-style CLIs cycle modes with Shift+Tab; bypass is in the cycle when
+/// the process was launched with it or with the bypass-option flag.
+async fn cycle_pty_mode(ctx: &Ctx, id: SessionId, target: PermissionMode) -> Result<u32, String> {
     const SHIFT_TAB: &[u8] = b"\x1b[Z";
 
     {
@@ -2156,7 +2258,7 @@ pub async fn set_session_permission_mode(
             .get(&id)
             .ok_or_else(|| format!("session {id} not found"))?;
         if detect_mode(&s.screen_text()) == Some(target) {
-            return Ok((target.as_str().to_string(), 0));
+            return Ok(0);
         }
     }
 
@@ -2177,12 +2279,7 @@ pub async fn set_session_permission_mode(
             detect_mode(&s.screen_text())
         };
         if cur == Some(target) {
-            ctx.bus.emit(EventEnvelope::new(
-                id,
-                "session.mode_changed",
-                json!({ "mode": target.as_str() }),
-            ));
-            return Ok((target.as_str().to_string(), cycle));
+            return Ok(cycle);
         }
     }
 
@@ -2422,6 +2519,20 @@ struct BackendInfo {
     /// `#[serde(default)]` 让旧客户端反序列化时不缺字段。
     #[serde(default)]
     enabled: bool,
+    /// Name of the skip-all-approvals launch mode; `None` when unsupported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bypass_label: Option<&'static str>,
+}
+
+fn bypass_label(key: &str, cfg: &BackendConfig) -> Option<&'static str> {
+    if cfg.acp.is_some() || cfg.protocol_key(key) == "codebuddy" {
+        return Some("Bypass permissions");
+    }
+    match cfg.permission_mode_flag.as_deref() {
+        None | Some("") => None,
+        Some("--ask-for-approval") => Some("Full access"),
+        Some(_) => Some("Bypass permissions"),
+    }
 }
 
 async fn list_backends(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
@@ -2447,6 +2558,7 @@ async fn list_backends(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
                 default_cwd: None,
                 model_flag: cfg.model_flag.clone(),
                 enabled: true,
+                bypass_label: bypass_label(k, cfg),
             })
             .collect();
         v.sort_by(|a, b| a.key.cmp(&b.key));
@@ -3708,6 +3820,7 @@ async fn memory_recent(
 
 pub mod model_discovery;
 mod model_switch;
+mod permission_switch;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;

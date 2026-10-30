@@ -371,7 +371,13 @@ class _SessionTile extends ConsumerWidget {
     final colors = Theme.of(context).colorScheme;
 
     final tile = InkWell(
-      onTap: () => GoRouter.of(context).push('/sessions/${s.id}'),
+      onTap: () {
+        // Revalidate on return: the socket may have missed exits while away.
+        final sessions = ref.read(sessionsProvider.notifier);
+        GoRouter.of(context)
+            .push('/sessions/${s.id}')
+            .whenComplete(() => sessions.refresh(showLoading: false));
+      },
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Row(

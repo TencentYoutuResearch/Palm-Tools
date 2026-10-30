@@ -1188,7 +1188,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                             child: Row(
                               children: [
                                 _ModeChip(
-                                  mode: permissionMode ?? _mode,
+                                  // Live mode events are newer than the
+                                  // published snapshot.
+                                  mode: _mode ?? permissionMode,
                                   options: permissionModes,
                                   busy: _modeBusy,
                                   onPick: (mode) {
@@ -2629,19 +2631,19 @@ class _ModeChip extends StatelessWidget {
 
   (Color, String) _styleFor(String? m) {
     final c = KillLaColors.modeColor(m);
+    final published =
+        options?.where((option) => option['id'] == m).firstOrNull?['label']
+            as String?;
     return (
       c,
-      switch (m) {
-        'default' => 'Default',
-        'acceptEdits' => 'Auto',
-        'plan' => 'Plan',
-        'bypassPermissions' => 'Bypass',
-        _ =>
-          options?.where((option) => option['id'] == m).firstOrNull?['label']
-                  as String? ??
-              m ??
-              '—',
-      },
+      published ??
+          switch (m) {
+            'default' => 'Default',
+            'acceptEdits' => 'Auto',
+            'plan' => 'Plan',
+            'bypassPermissions' => 'Bypass',
+            _ => m ?? '—',
+          },
     );
   }
 

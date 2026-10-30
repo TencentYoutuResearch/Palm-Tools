@@ -49,6 +49,7 @@ class FakeSetupApi extends ApiClient {
                 key: 'codex',
                 label: 'Codex',
                 modelFlag: '--model',
+                bypassLabel: 'Full access',
               ),
               const BackendOption(
                 key: 'claude',
@@ -95,6 +96,7 @@ class FakeSetupApi extends ApiClient {
       'backend': backendKey,
       'cwd': cwd,
       'model': model,
+      'permission': permissionMode,
       'request': requestId,
     });
     return creation?.future ??
@@ -262,6 +264,38 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('bypass launch option is sent only for backends that support it', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = FakeSetupApi();
+    await showSetup(tester, api);
+    expect(find.text('Full access'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const ValueKey('new-session-bypass')));
+    await tester.tap(find.byKey(const ValueKey('new-session-bypass')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Create session'));
+    await tester.tap(find.text('Create session'));
+    await tester.pumpAndSettle();
+    expect(api.calls.single, containsPair('permission', 'bypass'));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('backends without a bypass mode hide the launch option', (
+    tester,
+  ) async {
+    final api = FakeSetupApi();
+    await showSetup(tester, api);
+    await tester.tap(find.byType(DropdownButtonFormField<String>).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Claude').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('new-session-bypass')), findsNothing);
+  });
 
   testWidgets(
     'unknown creation outcome reuses request and prevents edits or double submit',

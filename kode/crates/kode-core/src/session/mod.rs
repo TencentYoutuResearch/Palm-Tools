@@ -32,6 +32,8 @@ pub struct Session {
     pub backend_key: String,
     pub backend_protocol: String,
     pub launch_config: BackendConfig,
+    /// Permission mode the process was started with or last switched to.
+    pub permission_mode: Option<String>,
     pub cwd: PathBuf,
     pub command: String,
     pub args: Vec<String>,
@@ -193,6 +195,10 @@ impl Session {
             );
             (args, session_id)
         };
+        let final_args_pre_prompt = inject_bypass_option_flag(
+            &final_args_pre_prompt,
+            backend::profile_for_key(protocol_key).and_then(|p| p.bypass_option_flag()),
+        );
         // 2) 模型注入(根据 backend.model_flag + effective_model)。
         //    effective_model = spawn 传入 model 优先,否则 backend.default_model。
         //    两者都 None 时不注入(行为与历史版本一致)。
@@ -256,6 +262,7 @@ impl Session {
             backend_key: backend_key.to_string(),
             backend_protocol: protocol_key.to_string(),
             launch_config,
+            permission_mode: permission_mode.map(str::to_string),
             cwd: cwd.to_path_buf(),
             command: backend.command.clone(),
             args: final_args,
@@ -304,6 +311,7 @@ impl Session {
                 acp: None,
                 enabled: Some(true),
             },
+            permission_mode: None,
             cwd: cwd.into(),
             command: command.into(),
             args: vec!["--acp".into()],
@@ -905,7 +913,7 @@ fn inject_permission_mode_flag(
     }
     if flag == "--ask-for-approval" {
         let mut new_args = args.to_vec();
-        if matches!(mode, Some("bypass")) {
+        if matches!(mode, Some("bypass" | "bypassPermissions")) {
             if !args
                 .iter()
                 .any(|a| a == "--dangerously-bypass-approvals-and-sandbox")
@@ -913,6 +921,10 @@ fn inject_permission_mode_flag(
                 new_args.push("--dangerously-bypass-approvals-and-sandbox".into());
             }
             return new_args;
+        }
+        // Claude-style modes (acceptEdits / plan) have no Codex approval equivalent.
+        if !matches!(requested, "untrusted" | "on-failure" | "on-request" | "never") {
+            return args.to_vec();
         }
         new_args.push(flag.to_string());
         new_args.push(requested.to_string());
@@ -922,6 +934,20 @@ fn inject_permission_mode_flag(
     new_args.push(flag.to_string());
     new_args.push(requested.to_string());
     new_args
+}
+
+/// Append the profile's bypass-option flag unless the user already chose a
+/// skip-permissions flag themselves.
+fn inject_bypass_option_flag(args: &[String], flag: Option<&str>) -> Vec<String> {
+    let mut out = args.to_vec();
+    if let Some(flag) = flag {
+        if !args.iter().any(|a| {
+            a == flag || a == "--dangerously-skip-permissions"
+        }) {
+            out.push(flag.to_string());
+        }
+    }
+    out
 }
 
 /// 把 `[model_flag, default_model]` 注入到 args 里,前提是:
@@ -1359,6 +1385,35 @@ mod tests {
     }
 
     #[test]
+    fn inject_permission_mode_maps_codex_canonical_bypass_and_skips_claude_modes() {
+        let out = inject_permission_mode_flag(&[], Some("--ask-for-approval"), Some("bypassPermissions"));
+        assert_eq!(out, vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]);
+        for mode in ["acceptEdits", "plan"] {
+            assert!(inject_permission_mode_flag(&[], Some("--ask-for-approval"), Some(mode)).is_empty());
+        }
+        assert_eq!(
+            inject_permission_mode_flag(&[], Some("--ask-for-approval"), Some("on-request")),
+            vec!["--ask-for-approval".to_string(), "on-request".to_string()]
+        );
+    }
+
+    #[test]
+    fn claude_profiles_allow_bypass_in_session_without_enabling_it() {
+        let flag = "--allow-dangerously-skip-permissions";
+        for key in ["claude", "tclaude"] {
+            let profile = backend::profile_for_key(key).unwrap();
+            assert_eq!(profile.bypass_option_flag(), Some(flag));
+            assert_eq!(inject_bypass_option_flag(&[], profile.bypass_option_flag()), vec![flag.to_string()]);
+        }
+        for key in ["codebuddy", "codex", "tcodex", "cursor", "opencode"] {
+            assert!(backend::profile_for_key(key).unwrap().bypass_option_flag().is_none(), "{key}");
+        }
+        // A user-chosen skip flag is not duplicated.
+        let manual = vec!["--dangerously-skip-permissions".to_string()];
+        assert_eq!(inject_bypass_option_flag(&manual, Some(flag)), manual);
+    }
+
+    #[test]
     fn inject_permission_mode_maps_codex_bypass() {
         let out = inject_permission_mode_flag(
             &["--model".into(), "gpt-5.5".into()],
@@ -1768,6 +1823,7 @@ mod tests {
             backend_key: key.into(),
             backend_protocol: key.into(),
             launch_config: crate::config::Config::default().backends[key].clone(),
+            permission_mode: None,
             cwd: PathBuf::from("/tmp"),
             command: String::new(),
             args: vec![],
@@ -1848,6 +1904,7 @@ mod tests {
             backend_key: "tcodex".into(),
             backend_protocol: "tcodex".into(),
             launch_config: crate::config::Config::default().backends["tcodex"].clone(),
+            permission_mode: None,
             cwd: PathBuf::from("/tmp"),
             command: String::new(),
             args: vec![],

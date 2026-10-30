@@ -879,3 +879,67 @@ mod build_session_env_tests {
         );
     }
 }
+
+/// Remote clients see each PTY agent's native permission modes: Codex
+/// presets, and Claude's cycle including bypass via the bypass-option flag.
+#[tokio::test]
+async fn pty_permission_snapshot_lists_native_modes() {
+    let mut config = Config::default();
+    for key in ["codex", "claude"] {
+        let backend = config.backends.get_mut(key).unwrap();
+        backend.command = "/bin/sh".into();
+        backend.args = vec!["-c".into(), "sleep 30".into(), "--no-daemon".into()];
+        backend.default_model = None;
+    }
+    let ctx = build_test_ctx(config, "test-token-permission".into());
+    for (key, mode, labels, current) in [
+        ("codex", None, vec!["Ask for approval", "Full Access"], "default"),
+        ("codex", Some("bypass"), vec!["Ask for approval", "Full Access"], "bypassPermissions"),
+        ("claude", None, vec!["Default", "Auto", "Accept edits", "Plan", "Bypass permissions"], "default"),
+    ] {
+        let req = CreateSessionReq {
+            transport: Some("pty".into()),
+            backend_key: key.into(),
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            cols: Some(80),
+            rows: Some(24),
+            permission_mode: mode.map(str::to_string),
+            model: None,
+            resume_session_uuid: None,
+            memory_context: None,
+            extra_args: None,
+            prompt: None,
+            headless: false,
+            term_theme: None,
+        };
+        let id = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
+            .await
+            .unwrap()
+            .id;
+        let g = ctx.sessions.lock();
+        let snapshot = permission_snapshot(&ctx, &g[&id]);
+        assert_eq!(snapshot["permission_mode"], current, "{key}");
+        let names: Vec<_> = snapshot["permission_modes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["label"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, labels, "{key}");
+        g[&id].pty.as_ref().unwrap().kill();
+    }
+}
+
+/// Claude Code 2.1 footers: auto mode must not read as default.
+#[test]
+fn detect_mode_reads_claude_cycle_footers() {
+    for (footer, mode) in [
+        ("⏵⏵ auto mode on (shift+tab to cycle)", PermissionMode::Auto),
+        ("⏸ manual mode on · ? for shortcuts", PermissionMode::Default),
+        ("⏵⏵ accept edits on (shift+tab to cycle)", PermissionMode::AcceptEdits),
+        ("⏸ plan mode on (shift+tab to cycle)", PermissionMode::Plan),
+        ("⏵⏵ bypass permissions on (shift+tab to cycle)", PermissionMode::BypassPermissions),
+    ] {
+        assert_eq!(detect_mode(footer), Some(mode), "{footer}");
+    }
+}

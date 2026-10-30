@@ -108,6 +108,11 @@ pub trait BackendProfile: Send + Sync {
     fn flags_before_resume(&self) -> bool {
         false
     }
+    /// Launch flag that adds bypass to the in-session permission cycle without
+    /// enabling it, so a running session can switch to bypass natively.
+    fn bypass_option_flag(&self) -> Option<&'static str> {
+        None
+    }
     fn usage_file_matches(&self, path: &Path) -> bool {
         path.extension().and_then(|s| s.to_str()) == Some("jsonl")
     }
@@ -258,6 +263,9 @@ impl BackendProfile for CodebuddyProfile {
 impl BackendProfile for ClaudeProfile {
     fn has_idle_animation(&self) -> bool {
         true
+    }
+    fn bypass_option_flag(&self) -> Option<&'static str> {
+        Some("--allow-dangerously-skip-permissions")
     }
     fn kind(&self) -> Backend {
         self.0

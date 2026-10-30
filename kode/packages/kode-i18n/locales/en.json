@@ -913,11 +913,19 @@
   },
   "command.view.showTerminal": {
     "message": "Show terminal panel",
-    "description": "Command: show terminal panel in workspace inspector"
+    "description": "Command: show shell terminal panel"
   },
   "command.view.hideTerminal": {
     "message": "Hide terminal panel",
     "description": "Command: hide terminal panel"
+  },
+  "command.view.terminalToBottom": {
+    "message": "Move terminal panel below conversation",
+    "description": "Command: dock shell terminal panel under the main conversation area"
+  },
+  "command.view.terminalToRight": {
+    "message": "Move terminal panel to workspace inspector",
+    "description": "Command: dock shell terminal panel at the bottom of the workspace inspector"
   },
   "command.memory.review": {
     "message": "Memory review queue...",

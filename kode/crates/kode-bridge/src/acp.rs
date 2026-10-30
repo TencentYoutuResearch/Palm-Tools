@@ -77,6 +77,12 @@ pub struct Client {
     config_options: Mutex<Vec<Value>>,
     modes: Mutex<Value>,
     legacy_models: AtomicBool,
+    /// Bypass selected on an agent without a bypass mode: Kode grants each
+    /// permission request itself, so the agent never waits for approval.
+    auto_approve: AtomicBool,
+}
+fn is_bypass(mode: &str) -> bool {
+    matches!(mode, "bypass" | "bypassPermissions")
 }
 impl Client {
     pub async fn start(
@@ -147,6 +153,7 @@ impl Client {
             config_options: Mutex::new(Vec::new()),
             modes: Mutex::new(Value::Null),
             legacy_models: AtomicBool::new(false),
+            auto_approve: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&client);
         std::thread::spawn(move || {
@@ -191,6 +198,8 @@ impl Client {
                 let mode_id = if mode == "bypass" { "bypassPermissions" } else { mode };
                 if advertises_mode(&result, mode_id) {
                     client.set_mode(mode).await?;
+                } else if is_bypass(mode) {
+                    client.auto_approve.store(true, Ordering::Release);
                 }
             }
             Ok::<(), String>(())
@@ -413,14 +422,57 @@ impl Client {
     }
 
     pub fn permission_snapshot(&self) -> Value {
-        let modes=self.modes.lock();
-        let Some(options)=modes["availableModes"].as_array() else {return json!({})};
-        json!({"permission_mode":modes["currentModeId"],"permission_modes":options.iter().map(|option|json!({"id":option["id"],"label":option["name"],"description":option.get("description").and_then(Value::as_str).unwrap_or("")})).collect::<Vec<_>>()})
+        let modes = self.modes.lock().clone();
+        let config = self
+            .config_options
+            .lock()
+            .iter()
+            .find(|o| o["category"] == "mode" && o["type"] == "select")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let describe = |o: &Value| o.get("description").and_then(Value::as_str).unwrap_or("").to_string();
+        let mut options: Vec<Value> = if let Some(list) = modes["availableModes"].as_array() {
+            list.iter().map(|o| json!({"id":o["id"],"label":o["name"],"description":describe(o)})).collect()
+        } else {
+            config["options"].as_array().into_iter().flatten()
+                .map(|o| json!({"id":o["value"],"label":o["name"],"description":describe(o)}))
+                .collect()
+        };
+        if options.is_empty() {
+            return json!({});
+        }
+        if !options.iter().any(|o| o["id"] == "bypassPermissions") {
+            options.push(json!({"id":"bypassPermissions","label":"Bypass permissions","description":"Kode approves every permission request"}));
+        }
+        let current = if self.auto_approve.load(Ordering::Acquire) {
+            json!("bypassPermissions")
+        } else if modes["currentModeId"].is_string() {
+            modes["currentModeId"].clone()
+        } else {
+            config["currentValue"].clone()
+        };
+        json!({"permission_mode":current,"permission_modes":options})
     }
     pub async fn set_mode(&self, mode: &str) -> Result<(), String> {
         let mode=if mode=="bypass" {"bypassPermissions"} else {mode};
-        self.request("session/set_mode", json!({"sessionId":self.session_id(),"modeId":mode}), Some(Duration::from_secs(30))).await?;
-        {let mut modes=self.modes.lock();if modes.is_object() {modes["currentModeId"]=json!(mode);}}
+        let advertised = advertises_mode(
+            &json!({"modes":*self.modes.lock(),"configOptions":*self.config_options.lock()}),
+            mode,
+        );
+        if is_bypass(mode) && !advertised {
+            self.auto_approve.store(true, Ordering::Release);
+            self.emit("meta",json!({"mode":mode}));
+            return Ok(());
+        }
+        let legacy = self.modes.lock()["availableModes"].is_array();
+        match self.select_config_option("mode", mode).await.filter(|_| !legacy) {
+            Some(result) => result?,
+            None => {
+                self.request("session/set_mode", json!({"sessionId":self.session_id(),"modeId":mode}), Some(Duration::from_secs(30))).await?;
+                {let mut modes=self.modes.lock();if modes.is_object() {modes["currentModeId"]=json!(mode);}}
+            }
+        }
+        self.auto_approve.store(false, Ordering::Release);
         self.emit("meta",json!({"mode":mode}));
         Ok(())
     }
@@ -468,6 +520,17 @@ impl Client {
             }
             match method {
                 "session/request_permission" if valid_permission(params) => {
+                    if self.auto_approve.load(Ordering::Acquire) {
+                        // Prefer a one-time grant so bypass leaves no saved rules.
+                        let options = params["options"].as_array().unwrap();
+                        if let Some(option) = ["allow_once", "allow_always"]
+                            .iter()
+                            .find_map(|kind| options.iter().find(|o| o["kind"] == *kind))
+                        {
+                            let _ = self.write(json!({"jsonrpc":"2.0","id":frame["id"],"result":{"outcome":{"outcome":"selected","optionId":option["optionId"]}}}));
+                            return;
+                        }
+                    }
                     self.register(method, Some(frame["id"].clone()), params.clone());
                 }
                 "elicitation/create"
@@ -1067,6 +1130,69 @@ for line in sys.stdin:
         .await
         .unwrap();
         assert_eq!(client.current_model().as_deref(), Some("local/qwen"));
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn bypass_without_agent_mode_grants_permission_requests_once() {
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "test".into());
+        let mut backend = ctx.config.backend("opencode").unwrap().clone();
+        backend.command = "/usr/bin/python3".into();
+        backend.args = vec!["-u".into(), "-c".into(), r#"
+import json, sys
+mode={'id':'mode','category':'mode','type':'select','currentValue':'build','options':[{'value':'build','name':'build'},{'value':'plan','name':'plan'}]}
+def send(frame): print(json.dumps(frame),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line)
+    method=frame.get('method')
+    if method is None:
+        # Echo the client's permission decision back as visible text.
+        text='granted:'+frame['result']['outcome']['optionId']
+        send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-oc','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}})
+        continue
+    if 'id' not in frame:
+        continue
+    if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+    elif method=='session/new': result={'sessionId':'native-oc','configOptions':[mode]}
+    elif method=='session/set_config_option':
+        mode['currentValue']=frame['params']['value']
+        result={'configOptions':[mode]}
+    elif method=='session/prompt':
+        send({'jsonrpc':'2.0','id':'perm-1','method':'session/request_permission','params':{'sessionId':'native-oc','toolCall':{'toolCallId':'t1','title':'edit'},'options':[{'optionId':'always','name':'Always','kind':'allow_always'},{'optionId':'once','name':'Once','kind':'allow_once'},{'optionId':'no','name':'Reject','kind':'reject_once'}]}})
+        continue
+    else:
+        send({'jsonrpc':'2.0','id':frame['id'],'error':{'code':-32601,'message':method}})
+        continue
+    send({'jsonrpc':'2.0','id':frame['id'],'result':result})
+"#.into()];
+        ctx.sessions.lock().insert(
+            994,
+            kode_core::session::Session::structured(994, "opencode", "test", Path::new("/tmp"), "native-oc".into(), "auto".into()),
+        );
+        let client = Client::start(ctx.clone(), 994, &backend, "opencode", Path::new("/tmp"), Some("bypass"), None, None)
+            .await
+            .unwrap();
+        let snapshot = client.permission_snapshot();
+        assert_eq!(snapshot["permission_mode"], "bypassPermissions");
+        let ids: Vec<_> = snapshot["permission_modes"].as_array().unwrap().iter().map(|m| m["id"].clone()).collect();
+        assert_eq!(ids, vec![json!("build"), json!("plan"), json!("bypassPermissions")]);
+        let mut events = ctx.bus.subscribe();
+        client.prompt("go".into()).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut texts = vec![];
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event.r#type, "ask_user_question");
+            if event.r#type == "message" {
+                texts.push(event.payload["text"].as_str().unwrap_or("").to_string());
+            }
+        }
+        assert!(texts.iter().any(|t| t == "granted:once"), "{texts:?}");
+        // Leaving bypass restores manual approval.
+        client.cancel().unwrap();
+        client.busy.store(false, Ordering::Release);
+        client.set_mode("plan").await.unwrap();
+        assert_eq!(client.permission_snapshot()["permission_mode"], "plan");
+        assert!(!client.auto_approve.load(Ordering::Acquire));
         client.shutdown();
     }
 }

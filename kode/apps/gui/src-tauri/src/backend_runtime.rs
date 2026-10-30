@@ -104,13 +104,6 @@ async fn publish(
             .as_u64()
             .ok_or("Missing GUI session identity")?;
         let mut dto = snapshot["dto"].clone();
-        if let Some(client) = ctx.acp.get(id) {
-            if let Some(fields) = client.permission_snapshot().as_object() {
-                dto.as_object_mut()
-                    .ok_or("Invalid session snapshot")?
-                    .extend(fields.clone());
-            }
-        }
         dto["runtime_backend_key"] = json!(format!(
             "gui:{}",
             dto["backend_key"].as_str().unwrap_or_default()
@@ -123,19 +116,7 @@ async fn publish(
             .bus
             .history_for(id, 0, 1000)
             .into_iter()
-            .filter(|event| {
-                matches!(
-                    event.r#type.as_str(),
-                    "message"
-                        | "tool_use"
-                        | "meta"
-                        | "ask_user_question"
-                        | "plan_proposed"
-                        | "session.attention_cleared"
-                        | "interaction.resolved"
-                        | "session.status"
-                )
-            })
+            .filter(|event| kode_bridge::runtime::EVENT_KINDS.contains(&event.r#type.as_str()))
             .filter_map(|event| {
                 let key = event_key(&event);
                 (!seen.contains(&key))

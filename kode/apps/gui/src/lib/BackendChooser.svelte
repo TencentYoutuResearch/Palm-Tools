@@ -11,8 +11,8 @@
    *      + Start/Back/Cancel
    *
    * 默认值:
-   *   - cwd 预填全局 session_cwd(从 ipc.getPathsConfig)— **仅 Local**;
-   *     Remote backend 不预填(server 端的"默认 cwd"由用户手填或留空让 server 兜底)
+   *   - 恢复上次成功创建时的 backend / endpoint / model;
+   *     cwd 优先指定工作区,其次同 endpoint 的上次目录,最后节点默认目录。
    *   - bypass = 该路径(cwd,不分 backend)勾选过则默认勾选;没记录则 false
    *     (见 project_permission.ts;Session history 的 Resume 同样沿用)
    *
@@ -37,6 +37,7 @@
   } from './ipc'
   import { modelsFor, type ModelOption } from './model_catalog'
   import { rememberBypass, rememberedBypass } from './project_permission'
+  import { rememberedSelection, rememberSelection, sameEndpoint } from './chooser_preferences'
   import { onMount, onDestroy } from 'svelte'
   import { open } from '@tauri-apps/plugin-dialog'
   import RemoteCwdPicker from './RemoteCwdPicker.svelte'
@@ -50,7 +51,7 @@
     workspaceCwd?: string
     workspaceEndpoint?: EndpointId
     /// 提交回调。
-    /// quick-pick(1..9 数字键)时 cwd 仍是预填的默认,permissionMode 按项目记忆(默认 'default'),model = undefined。
+    /// 返回 false 表示创建失败,不保存本次选择。
     onSubmit: (opts: {
       backendKey: string
       cwd?: string
@@ -61,9 +62,10 @@
       endpointId?: EndpointId
       /// 恢复已有 session(uuid)。不为空时 spawn 传 --resume <id>。
       resumeSessionId?: string
-    }) => void | Promise<void>
+    }) => void | boolean | Promise<void | boolean>
   }
   let { backends, onSubmit, errorMessage = null, workspaceCwd, workspaceEndpoint }: Props = $props()
+  const lastSelection = rememberedSelection()
 
   function workspacePathFor(ep: EndpointId): string | undefined {
     const target = workspaceEndpoint ?? ENDPOINT_LOCAL
@@ -152,7 +154,15 @@
     }))
     modelSource = result.source
     customModelAllowed = result.custom_allowed
+    if (selectedModelValue === '__custom__' && modelOptions.some((m) => m.value === customModel)) {
+      selectedModelValue = customModel
+    }
     if (!customModelAllowed && selectedModelValue === '__custom__') selectedModelValue = ''
+    if (selectedModelValue && selectedModelValue !== '__custom__'
+      && !modelOptions.some((m) => m.value === selectedModelValue)) {
+      customModel = selectedModelValue
+      selectedModelValue = customModelAllowed ? '__custom__' : ''
+    }
     modelNotice = result.warning ?? ''
   }
 
@@ -303,6 +313,20 @@
       const target = endpoints.find((ep) => ep.id === targetId)
       if (target) await toggleEndpoint(target)
     }
+    // Do not overwrite a selection made while the initial IPC requests were pending.
+    if (phase === 'list' && lastSelection
+      && (!workspaceEndpoint || sameEndpoint(workspaceEndpoint, lastSelection.endpointId))) {
+      const ep = lastSelection.endpointId
+      if (ep.kind === 'local') {
+        const backend = backends.find((b) => b.key === lastSelection.backendKey)
+        if (backend) await pickBackend(backend, ep)
+      } else {
+        const endpoint = endpoints.find((e) => e.id === ep.id)
+        if (endpoint && !remoteStates[ep.id]?.expanded) await toggleEndpoint(endpoint)
+        const backend = remoteStates[ep.id]?.backends.find((b) => b.key === lastSelection.backendKey)
+        if (phase === 'list' && backend) pickRemoteBackend(ep.id, backend)
+      }
+    }
     endpointRefreshHandler = () => {
       void refreshEndpoints()
     }
@@ -321,11 +345,16 @@
     customModelAllowed = true
     selectedModelValue = ''
     customModel = ''
+    const previous = lastSelection && sameEndpoint(ep, lastSelection.endpointId) ? lastSelection : null
+    if (previous?.backendKey === b.key && previous.model) {
+      customModel = previous.model
+      selectedModelValue = modelOptions.some((m) => m.value === previous.model) ? previous.model : '__custom__'
+    }
     phase = 'configure'
     void probeModels(b, ep)
 
-    // Use the node-specific catalogue unless a workspace was explicitly chosen.
-    cwd = workspacePathFor(ep) ?? ''
+    // An explicit workspace wins over the remembered directory on this node.
+    cwd = workspacePathFor(ep) ?? previous?.cwd ?? initialCwd ?? (ep.kind === 'local' ? defaultCwd : '')
   }
 
   async function submitOnce(opts: {
@@ -339,7 +368,10 @@
     if (submitting) return
     submitting = true
     try {
-      await onSubmit(opts)
+      const success = await onSubmit(opts)
+      if (success === false) return
+      rememberSelection({ backendKey: opts.backendKey, endpointId: opts.endpointId ?? ENDPOINT_LOCAL,
+        cwd: opts.cwd ?? '', model: opts.model })
       if (opts.cwd) rememberBypass(opts.cwd, opts.permissionMode === 'bypass')
     } finally {
       submitting = false

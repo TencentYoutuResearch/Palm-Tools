@@ -1,13 +1,22 @@
 /// Desktop-owned catalogues used when creating a mobile session.
 class BackendOption {
-  const BackendOption({required this.key, required this.label, this.modelFlag});
+  const BackendOption({
+    required this.key,
+    required this.label,
+    this.modelFlag,
+    this.bypassLabel,
+  });
   final String key;
   final String label;
   final String? modelFlag;
+
+  /// Name of the launch mode that skips every approval; null when unsupported.
+  final String? bypassLabel;
   factory BackendOption.fromJson(Map<String, dynamic> json) => BackendOption(
     key: json['key'] as String,
     label: json['display_name'] as String? ?? json['key'] as String,
     modelFlag: json['model_flag'] as String?,
+    bypassLabel: json['bypass_label'] as String?,
   );
 }
 
