@@ -650,7 +650,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const { data } = useDirectory(sessionId, sessions), status = useAvatarStatus(sessionId, useSessionStatus)
     const workspaceDirectory = useWorkspaceDirectory(), currentSession = workspaceDirectory.hosts.find(host => host.id === workspaceDirectory.current)?.sessions?.find(row => row.id === sessionId)
     const profile = data?.currentProfile && { ...data.currentProfile, avatar: currentSession?.agent?.avatar ?? data.currentProfile.avatar }
-    return profile && !data.canChangeAgent ? h('span', { className: 'kode-agent-identity', title: `${profile.name} · ${data.types[profile.type]?.name ?? profile.type}` }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置会话头像与背景', onClick: () => openAvatarDialog({ sessionId, host: workspaceDirectory.current, profile }) }, h(AgentAvatar, { profile, size: 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })), h('span', null, profile.name)) : null
+    return profile && !catalogBlank(sessions, sessionId) ? h('span', { className: 'kode-agent-identity', title: `${profile.name} · ${data.types[profile.type]?.name ?? profile.type}` }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置会话头像与背景', onClick: () => openAvatarDialog({ sessionId, host: workspaceDirectory.current, profile }) }, h(AgentAvatar, { profile, size: 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })), h('span', null, profile.name)) : null
   }
   function SessionAvatarMenuItem({ sessionId, useMenuOpenState }) {
     const [, setOpen] = useMenuOpenState()

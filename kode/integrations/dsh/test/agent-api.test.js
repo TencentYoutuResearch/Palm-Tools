@@ -18,7 +18,7 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-test-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : req.headers['x-test-role'] === 'guest' ? { peer: { principal: { kind: 'guest' } } } : { rejection: 401 } },
     agents: { get: () => agent }, agentDefaultModel: { currentSelection: () => selection },
-    sessionProjections: { stateOf: (_session, key) => key === 'turnBoundary' ? { lastTurn: turns } : { pending: selection } },
+    sessionProjections: { stateOf: (_session, key) => key === 'kodeTurnBoundary' ? { lastTurn: agent.isKodeNativeAgent ? turns : 999 } : key === 'turnBoundary' ? { lastTurn: agent.isKodeNativeAgent ? 0 : turns } : { pending: selection } },
     sessionController: {
       resolveAgent: async () => ({ agent }),
       modelCatalog: async () => ({ default: selection, groups: [{ id: 'native-llm', models: [{ id: 'fixture' }] }, ...profiles.list().filter(p => p.type === 'codex').map(p => ({ id: `kode-agent-${p.id}`, models: [{ id: 'default' }, { id: 'fixture' }] }))] }),
@@ -53,7 +53,12 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     const catalog = await (await request()).json()
     assert.deepEqual(catalog.models.map(m => m.id), ['fixture'])
     assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id, model: 'nonexistent' })).status, 400)
+    assert.equal(catalog.canChangeAgent, true, 'official sessions ignore Kode turn boundaries')
     turns = 1
+    agent.isKodeNativeAgent = true
+    const nativeView = await (await request()).json()
+    assert.equal(nativeView.canChangeAgent, false, 'completed native sessions keep their Agent header visible')
+    assert.equal(nativeView.currentProfile.id, two.profile.id)
     const failed = await request({ action: 'select', profileId: one.profile.id, sessionId: agent.id })
     assert.equal(failed.status, 400)
     assert.match((await failed.json()).error, /new conversation/)

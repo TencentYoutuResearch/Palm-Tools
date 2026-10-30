@@ -10,6 +10,7 @@ export function registerAgentApi(ctx, service) {
   const controller = () => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用，请稍后重试。'); return value }
   const { profiles, adapter } = service
   const available = profile => service.hasRuntime ? service.hasRuntime(profile.type) : Object.hasOwn(service.types ?? AGENT_TYPES, profile.type)
+  const positionOf = agent => ctx.sessionProjections.stateOf(agent.session, agent.isKodeNativeAgent ? 'kodeTurnBoundary' : 'turnBoundary')
   const selected = agent => {
     const state = ctx.sessionProjections.stateOf(agent.session, 'modelSelection')
     return state?.pending ?? state?.next ?? state?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
@@ -58,7 +59,7 @@ export function registerAgentApi(ctx, service) {
         const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
           selectedProfileId, selection, catalog, models, modelError, ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
-          canChangeAgent: !agent || (agent.status === 'idle' && !(ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')?.lastTurn > 0)),
+          canChangeAgent: !agent || (agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0)),
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
       }
@@ -94,7 +95,7 @@ export function registerAgentApi(ctx, service) {
       const profile = binding?.profile.id === input.profileId ? binding.profile : profiles.get(input.profileId)
       if (!available(profile)) throw new Error('此 Agent 的执行插件已拔出。')
       if (!SUPPORTED_AGENT_TYPES.includes(profile.type)) throw new Error(`Persistent ${profile.type} adapter is not installed`)
-      const position = ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
+      const position = positionOf(agent)
       const currentProfileId = binding?.profile.id ?? profiles.list().find(p => profileRoute(p.id) === selected(agent)?.provider)?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
       if (currentProfileId !== profile.id) {
         if (position?.lastTurn > 0 || agent.status !== 'idle') throw new Error('Start a new conversation to change its Agent; the current conversation retains its history and runtime.')

@@ -453,3 +453,17 @@ test('avatar drafts preview without persistence, confirm explicitly, and retain 
  fail=false;nodes(render()).find(node=>node.children.includes('确认应用')).props.onClick();await new Promise(resolve=>setImmediate(resolve))
  assert.deepEqual(chosen,['b','b']);assert.deepEqual(preferences,[false])
 })
+
+
+test('existing session identity remains visible when its runtime is idle or unloaded',()=>{
+ const h=(type,props,...children)=>({type,props,children}),scope=vm.createContext({h,AgentAvatar:'avatar',useDirectory:()=>({data:{currentProfile:{name:'Codex',type:'codex'},types:{codex:{name:'Codex'}},canChangeAgent:true}}),useAvatarStatus:()=>undefined,useWorkspaceDirectory:()=>({current:'local',hosts:[]}),catalogBlank:()=>false})
+ const start=source.indexOf('  function AgentIdentity('),end=source.indexOf('  function SessionAvatarMenuItem(',start)
+ vm.runInContext(source.slice(start,end),scope)
+ const props={sessionId:'saved-session',sessions:{}}
+ const tree=scope.AgentIdentity(props)
+ assert.equal(tree.props.className,'kode-agent-identity')
+ assert.equal(tree.children[0].props['aria-label'],'设置会话头像与背景')
+ assert.equal(tree.children[1].children[0],'Codex')
+ scope.catalogBlank=()=>true;assert.equal(scope.AgentIdentity(props),null,'draft identity belongs to the Agent picker')
+ scope.catalogBlank=()=>false;scope.useDirectory=()=>({data:null});assert.equal(scope.AgentIdentity(props),null,'wait for actual identity instead of guessing')
+})
