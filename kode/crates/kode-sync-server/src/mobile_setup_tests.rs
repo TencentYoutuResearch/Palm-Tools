@@ -96,7 +96,7 @@ async fn setup_requests_are_scoped_and_creates_are_not_replayed() {
         assert_eq!(response.status(), 200);
         assert_eq!(response.json::<Value>().await.unwrap(), result);
     }
-    let body = json!({"backend_key":"codex","cwd":"/workspace","model":"test-model"});
+    let body = json!({"backend_key":"codex","cwd":"/workspace","model":"test-model","permission_mode":"bypass"});
     let req = client
         .post(format!("{origin}/api/v1/sessions"))
         .bearer_auth("desktop")
@@ -176,6 +176,18 @@ async fn setup_requests_are_scoped_and_creates_are_not_replayed() {
             .unwrap()
             .status(),
         422
+    );
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/v1/sessions"))
+            .bearer_auth("desktop")
+            .header("Idempotency-Key", "bad-mode")
+            .json(&json!({"backend_key":"codex","permission_mode":"--yolo"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
     );
     // A receipt survives a server restart and does not need an online desktop.
     let reopened = ServerState::open(ServerConfig {

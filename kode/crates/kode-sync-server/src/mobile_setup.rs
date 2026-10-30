@@ -59,6 +59,9 @@ pub(super) struct CreateRequest {
     backend_key: String,
     cwd: Option<String>,
     model: Option<String>,
+    /// Omitted when unset so desktops that predate the field still accept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permission_mode: Option<String>,
 }
 
 pub(super) async fn create(
@@ -70,9 +73,12 @@ pub(super) async fn create(
         || req.backend_key.len() > 256
         || req.cwd.as_ref().is_some_and(|v| v.len() > 4096)
         || req.model.as_ref().is_some_and(|v| v.len() > 256)
+        || req.permission_mode.as_deref().is_some_and(|v| {
+            !matches!(v, "default" | "acceptEdits" | "plan" | "bypass" | "bypassPermissions")
+        })
     {
         return Err(ApiError::BadRequest(
-            "Invalid backend, path or model".into(),
+            "Invalid backend, path, model or permission mode".into(),
         ));
     }
     dispatch(

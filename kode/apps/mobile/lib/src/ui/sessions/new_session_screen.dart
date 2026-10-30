@@ -29,6 +29,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   ModelCatalogue? _models;
   String _model = '';
   bool _custom = false;
+  bool _bypass = false;
   bool _loading = true;
   bool _loadingModels = false;
   bool _submitting = false;
@@ -163,6 +164,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
         backendKey: _backend!.key,
         cwd: _cwd.text.trim(),
         model: model.isEmpty ? null : model,
+        permissionMode: _bypass && _backend!.bypassLabel != null
+            ? 'bypass'
+            : null,
         requestId: _requestId,
       );
       if (!_current) return;
@@ -386,6 +390,24 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                                 if (_models?.warning != null)
                                   Text(_models!.warning!),
                                 const SizedBox(height: 20),
+                              ],
+                              if (_backend?.bypassLabel != null) ...[
+                                SwitchListTile(
+                                  key: const ValueKey('new-session-bypass'),
+                                  contentPadding: EdgeInsets.zero,
+                                  value: _bypass,
+                                  title: Text(_backend!.bypassLabel!),
+                                  subtitle: const Text(
+                                    'Skip permission prompts. You can change this later in the session.',
+                                  ),
+                                  onChanged: _locked
+                                      ? null
+                                      : (value) => setState(() {
+                                          _bypass = value;
+                                          _dirty = true;
+                                        }),
+                                ),
+                                const SizedBox(height: 12),
                               ],
                               TextFormField(
                                 controller: _cwd,
