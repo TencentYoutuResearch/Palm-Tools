@@ -59,6 +59,16 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     const nativeView = await (await request()).json()
     assert.equal(nativeView.canChangeAgent, false, 'completed native sessions keep their Agent header visible')
     assert.equal(nativeView.currentProfile.id, two.profile.id)
+    const liveGet = ctx.agents.get
+    ctx.agents.get = () => undefined
+    let coldBlank = false
+    ctx.sessionController.list = async () => ({ items: [{ sessionId: agent.id, blank: coldBlank, projections: { values: { modelSelection: { lastUsed: selection } } } }] })
+    assert.equal((await (await request()).json()).canChangeAgent, false, 'unloading a historical session never unlocks its Agent')
+    coldBlank = true
+    assert.equal((await (await request()).json()).canChangeAgent, true, 'a saved blank draft can still choose its Agent')
+    ctx.sessionController.list = async () => ({ items: [] })
+    assert.equal((await (await request()).json()).canChangeAgent, false, 'unknown sessions cannot inherit blank-session privileges')
+    ctx.agents.get = liveGet
     const failed = await request({ action: 'select', profileId: one.profile.id, sessionId: agent.id })
     assert.equal(failed.status, 400)
     assert.match((await failed.json()).error, /new conversation/)

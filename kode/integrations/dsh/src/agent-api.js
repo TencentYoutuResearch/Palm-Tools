@@ -43,7 +43,8 @@ export function registerAgentApi(ctx, service) {
         const configurationOnly = query.get('configuration') === '1'
         const agent = sessionId ? ctx.agents.get(sessionId) : undefined
         const binding = sessionId ? profiles.binding(sessionId) : undefined
-        const stored = sessionId && !agent ? (await controller().list?.({}))?.items.find(row => row.sessionId === sessionId)?.projections?.values?.modelSelection : undefined
+        const storedRow = sessionId && !agent ? (await controller().list?.({}))?.items.find(row => row.sessionId === sessionId) : undefined
+        const stored = storedRow?.projections?.values?.modelSelection
         const selection = agent ? selected(agent) : stored?.pending ?? stored?.next ?? stored?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
         const inferred = profiles.list().find(p => profileRoute(p.id) === selection?.provider)
         const configuredDefault = profiles.list().find(p => p.id === profiles.defaultProfileId && available(p))
@@ -59,7 +60,7 @@ export function registerAgentApi(ctx, service) {
         const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
           selectedProfileId, selection, catalog, models, modelError, ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
-          canChangeAgent: !agent || (agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0)),
+          canChangeAgent: agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true,
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
       }

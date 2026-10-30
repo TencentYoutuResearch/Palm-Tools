@@ -84,6 +84,9 @@ test('recovery propagates deployment and auth failures and stops polling on unmo
 test('only an idle CLI Web Host can prepare recovery; backend launch arguments require a configured loopback service', async () => {
   assert.equal(hasPendingSessions([{ running: true }]), true)
   assert.equal(hasPendingSessions([{ projections: { values: { inbox: { waiting: [{}] } } } }]), true)
+  assert.equal(hasPendingSessions([{ projections: { values: { kodeInbox: { 'next-turn': [{}], 'next-step': [] } } } }]), true)
+  assert.equal(hasPendingSessions([{ projections: { values: { inbox: {}, kodeInbox: { 'next-step': [{}] } } } }]), true)
+  assert.equal(hasPendingSessions([{ projections: { values: { kodeInbox: { 'next-turn': [], 'next-step': [] } } } }]), false)
   assert.equal(hasPendingSessions([{ running: false }]), false)
   const ctx = { get: name => name === 'appExit' ? () => {} : { list: async () => ({ items: [{ running: true }] }) } }
   assert.equal(localRecoverySupported(ctx, ['/opt/node', '/opt/node_modules/@deepseek-ai/dsh/lib/bin.js', 'web']), true)

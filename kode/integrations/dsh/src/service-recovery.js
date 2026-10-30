@@ -9,7 +9,7 @@ import { resolveBundledServer } from './bundle-runtime.js'
 
 const exec = promisify(execFile)
 export function hasPendingSessions(items) {
-  return items.some(row => row.running || Object.values(row.projections?.values?.inbox ?? {}).some(queue => Array.isArray(queue) && queue.length))
+  return items.some(row => row.running || ['inbox', 'kodeInbox'].some(key => Object.values(row.projections?.values?.[key] ?? {}).some(queue => Array.isArray(queue) && queue.length)))
 }
 export function localRecoverySupported(ctx, argv = process.argv) {
   return typeof ctx.get?.('appExit') === 'function' && /[/\\]@deepseek-ai[/\\]dsh[/\\]lib[/\\]bin\.js$/.test(argv[1] ?? '') && argv.includes('web')
