@@ -1,25 +1,15 @@
 /** Built-in dsh Agent, backed by the official ACP application in its own process. */
-import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
+import { writeFile, mkdtemp, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createRequire } from 'node:module'
-import { load, dump } from 'js-yaml'
+import { dump } from 'js-yaml'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 
 export const name = 'kode-dsh-conversation'
 export const inject = ['kodeAgents', 'agentPresets', 'loader', 'llm', 'sessionProjections', 'agentDefaultModel']
 export async function apply(ctx, config = {}) {
-  const resolve = createRequire(import.meta.url).resolve
   const root = await mkdtemp(join(tmpdir(), 'kode-harness-acp-'))
   ctx.effect(() => () => rm(root, { recursive: true, force: true }), 'kode.dsh-acp-config')
-  const presets = []
-  // These are selection declarations. The real compositions run in the ACP
-  // process, so none of their prompt/tool plugins mount into external Agents.
-  for (const id of ['standard', 'minimal', 'ptc', 'cordis']) {
-    const patch = load(await readFile(resolve(`@deepseek-ai/dsh-web-app/presets/${id}.patch.yml`), 'utf8'), { schema: entryListSchema })
-    const definition = patch.flatMap(row => row.insert ?? []).find(row => row.config?.id === id)?.config
-    if (definition) presets.push(await ctx.agentPresets.register({ id, name: definition.name, order: definition.order, plugins: [] }))
-  }
   let counter = 0
   const unregister = ctx.kodeAgents.registerRuntime('dsh', {
     name: 'DeepSeek Harness', executable: config.executable ?? process.execPath, uiChannel: 'native',
@@ -51,6 +41,5 @@ export async function apply(ctx, config = {}) {
   ctx.effect(() => async () => {
     await unregister()
     await ctx.kodeAgents.adapter.closeType('dsh')
-    for (const dispose of presets.reverse()) await dispose()
   }, 'kode.dsh-conversation')
 }

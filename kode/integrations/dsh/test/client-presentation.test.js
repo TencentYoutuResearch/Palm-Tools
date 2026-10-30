@@ -19,7 +19,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
     useEffect(fn) { fn() }, useRef: value => ({ current: value }), useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (subscribe, get) => { subscribe(() => {}); return get() },
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
-  vm.runInNewContext(source, { window: { ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
+  vm.runInNewContext(source, { window: { addEventListener() {}, removeEventListener() {}, ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
     setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
@@ -256,13 +256,16 @@ test('Agent list keeps editors collapsed until requested', () => {
   const c = client(), render = c.entry('settings.section')
   const tree = render({ sessions: c.ctx.sessions })
   assert.match(JSON.stringify(tree), /配置主机/)
-  const body = tree.children.find(child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
+  const body = tree.children.flatMap(child => child?.children ?? []).find(child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
   assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
 
 test('official settings shell, model navigation and plugin inventory remain untouched', () => {
   const c = client()
+  assert.equal(c.ctx.slots.entries('settings.section').length, 1)
+  assert.equal(c.ctx.slots.entries('settings.section')[0].options.id, 'kode')
+  assert.equal(c.ctx.slots.entries('settings.section')[0].options.label(), 'Kode')
   assert.equal(c.shell.component, c.native)
   assert.equal(c.shell.locale, 'settings')
   assert.ok(c.shell.children['settings.section'])
@@ -349,7 +352,7 @@ test('remote Agent configuration and default writes stay on the selected Host wi
  const transport={current:'local',subscribe:()=>()=>{},path:url=>url,select:()=>{throw new Error('settings must not switch execution Host')},fetch:async(url,options,host)=>{calls.push({url,host,body:options?.body&&JSON.parse(options.body)});return{ok:true,json:async()=>url.includes('/settings/')?{result:{ok:true,value:{}}}:agents}}}
  const c=client(undefined,{}, {kodeTransport:transport})
  const outer=c.entry('settings.section')({sessions:c.ctx.sessions,slots:c.ctx.slots})
- const component=outer.children.find(node=>node?.props?.settingsHost).type
+ const component=outer.children.flatMap(node=>node?.children??[]).find(node=>node?.props?.settingsHost).type
  component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
  await new Promise(resolve=>setImmediate(resolve))
  const body=component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
@@ -357,9 +360,10 @@ test('remote Agent configuration and default writes stay on the selected Host wi
  assert.equal(selector.props.value,'remote-codex')
  selector.props.onChange('remote-codex')
  await new Promise(resolve=>setImmediate(resolve))
- const mutation=calls.find(row=>row.body?.method==='settings/mutate')
- assert.equal(mutation.host,'ssh-test');assert.equal(mutation.body.payload.args.ns,'agent-default-model')
- assert.equal(mutation.body.payload.args.ops.find(op=>op.path[0]==='provider').value,'kode-agent-remote-codex')
+ const mutation=calls.find(row=>row.body?.action==='set-default')
+ assert.equal(mutation.host,'ssh-test');assert.equal(mutation.url,'/api/kode/agents')
+ assert.equal(mutation.body.profileId,'remote-codex')
+ assert.ok(!calls.some(row=>row.url.includes('/settings/')))
  assert.ok(calls.some(row=>row.url.includes('configuration=1')&&row.host==='ssh-test'))
  assert.equal(transport.current,'local');assert.ok(!calls.some(row=>row.body?.action==='select'))
 })

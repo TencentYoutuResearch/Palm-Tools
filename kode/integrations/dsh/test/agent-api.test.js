@@ -38,6 +38,10 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     const one = await (await request({ action: 'save', profile: { name: 'Codex', type: 'codex' } })).json()
     const two = await (await request({ action: 'save', profile: { name: 'Tcodex', type: 'codex', executable: 'tcodex' } })).json()
     assert.notEqual(one.profile.id, two.profile.id)
+    const officialDefault = ctx.agentDefaultModel.currentSelection()
+    assert.equal((await request({action:'set-default',profileId:one.profile.id})).status,200)
+    assert.equal(profiles.defaultProfileId,one.profile.id)
+    assert.deepEqual(ctx.agentDefaultModel.currentSelection(),officialDefault)
     const beforeDiscovery=service.adapter.listModels
     service.adapter.listModels=async()=>{throw new Error('configuration listing must not discover models')}
     const configuration=await (await fetch(endpoint+'?configuration=1',{headers:{'x-test-role':'owner'}})).json()

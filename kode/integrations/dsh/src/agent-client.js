@@ -12,10 +12,27 @@ function stableDirectoryBindings(entry, host) {
   return bindings
 }
 async function parseHostJson(response) {
+  if (response.status === 404) throw Object.assign(new Error('所选主机的接口不存在（HTTP 404），请更新或重新连接该主机的 Kode 服务。'), { code: 'KODE_SERVICE_UPDATE_REQUIRED' })
   try { return await response.json() } catch {
-    if (response.status === 404) throw new Error('所选主机的接口不存在（HTTP 404），请更新或重新连接该主机的 Kode 服务。')
     throw new Error(`主机返回了无效响应（HTTP ${response.status ?? '未知'}），请检查连接后重试。`)
   }
+}
+async function recoverHostService(host, { request, readSettings, delay, signal, progress }) {
+  signal.throwIfAborted()
+  let job = await request({ action: 'recover-service', id: host })
+  const deadline = Date.now() + (host === 'local' ? 90000 : 1800000)
+  while (Date.now() < deadline) {
+    signal.throwIfAborted()
+    progress(job)
+    if (['failed', 'cancelled'].includes(job.status)) throw new Error(job.error || '服务恢复未完成，请重试。')
+    if (host === 'local' || job.status === 'done') {
+      try { return await readSettings() } catch (error) {
+        if (error.status === 401 || error.status === 403) throw error
+      }
+    } else job = await request(undefined, job.id)
+    await delay(1500, signal)
+  }
+  throw new Error('等待服务恢复超时，请检查服务状态后重新连接。')
 }
 function changedFileSummary({ path, paths, changes, patch }) {
   const files = [...new Set([...(typeof path === 'string' ? [path] : []), ...(Array.isArray(paths) ? paths : []), ...(Array.isArray(changes) ? changes.map(change => change.path) : [])].filter(value => typeof value === 'string' && value && value !== '/dev/null'))]
@@ -49,11 +66,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     return value
   }
   async function saveDefaultAgent(host, profile) {
-    const method = 'settings/mutate'
-    const ops = profile ? [{ op: 'set', path: ['provider'], value: `kode-agent-${profile.id}` }, { op: 'set', path: ['model'], value: profile.defaultModel || 'default' }, { op: 'unset', path: ['reasoningEffort'] }] : ['provider', 'model', 'reasoningEffort'].map(key => ({ op: 'unset', path: [key] }))
-    const response = await fetchHost(`/api/${method}`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'client-request', rpcId: `kode-default-${Date.now()}-${Math.random()}`, method, payload: { args: { ns: 'agent-default-model', ops } } }) }, host)
-    const value = await parseHostJson(response)
-    if (!response.ok || !value.result?.ok) throw new Error(value.result?.error?.message ?? value.error ?? '默认 Agent 保存失败。')
+    return call({ action: 'set-default', profileId: profile?.id ?? null }, undefined, false, host)
   }
   function directory(id, host = transport?.current ?? 'local', configurationOnly = false) {
     const key = `${host}:${configurationOnly ? 'settings' : id ?? ''}`
@@ -73,6 +86,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           publish({ busy: true, error: '' })
           try {
             const result = await call(body, id, false, host)
+            if (result.rebound) {
+              const ui = avatarContext?.get('uiWorkspace')
+              if (ui) {
+                ui.clearMain()
+                await avatarContext.sessions.refresh()
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+                await ui.openSession(id)
+              }
+            }
             await pending
             await store.load()
             if (['save', 'remove'].includes(body.action)) for (const other of stores.values()) if (other !== store) void other.load()
@@ -294,9 +316,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const shell = slots.entries('sidebar.settings').find(entry => entry.store?.create)
     const actions = shell?.store.create().actions
     if (!actions?.openSection) throw new Error('设置尚未就绪，请稍后重试。')
-    actions.openSection(section)
+    if (section.startsWith('kode-')) {
+      requestedSettingsSection = section.slice(5)
+      actions.openSection('kode')
+      window.dispatchEvent(new CustomEvent('kode-settings-navigate'))
+    } else actions.openSection(section)
   }
-  let requestedProfile
+  let requestedProfile, requestedServiceHost, requestedSettingsSection
   function AgentControl({ sessionId, sessions, remote, slots }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions)
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')
@@ -315,52 +341,177 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h(Failure, { text: navigationError || error }),
     )
   }
-  function IntegrationSettings() {
-    const { data: hosts } = useProjectHosts()
-    const [host, setHost] = useState(() => transport?.current ?? 'local')
-    const [data, setData] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [server, setServer] = useState(''), [pairing, setPairing] = useState(null)
+  function useIntegrationSettings(host) {
+    const [data, setData] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('')
+    const [recoveryNeeded, setRecoveryNeeded] = useState(false), [reload, setReload] = useState(0)
     const writing = React.useRef(false), revision = React.useRef(0)
-    const request = async body => {
-      const response = await fetchHost('/api/kode/integrations', body ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { credentials: 'same-origin' }, host)
+    const request = async (body, signal) => {
+      const options = body ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { credentials: 'same-origin' }
+      options.signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000)
+      const response = await fetchHost('/api/kode/integrations', options, host)
       const value = await parseHostJson(response)
-      if (!response.ok) throw new Error(value.error ?? '无法读取互通设置，请重试。')
+      if (!response.ok) throw Object.assign(new Error(value.error ?? '无法读取设置，请重试。'), { code: value.code, status: response.status })
       return value
     }
     useEffect(() => {
-      let alive = true, pending = false, first = true
-      setData(null); setError(''); setPairing(null)
+      let alive = true, pending = false
       const refresh = async () => {
         if (pending || writing.current) return
         pending = true
         const before = revision.current
-        try { const value = await request(); if (alive && !writing.current && revision.current === before) { setData(value); if (first) setServer(value.cloud.server_url); first = false } }
-        catch (error) { if (alive && first) setError(error.message) }
+        try { const value = await request(); if (alive && !writing.current && revision.current === before) { setData(value); setError(''); setRecoveryNeeded(false) } }
+        catch (error) { if (alive && !writing.current && revision.current === before) { setError(error.message); setRecoveryNeeded(error.code === 'KODE_SERVICE_UPDATE_REQUIRED') } }
         finally { pending = false }
       }
       void refresh(); const timer = setInterval(() => { void refresh() }, 5000)
       return () => { alive = false; clearInterval(timer) }
-    }, [host])
-    const update = async body => { revision.current++; writing.current = true; setBusy(true); setError(''); try { const value = await request(body); if (value.settings) setData(prior => ({ ...prior, settings: value.settings })); if (value.pairing) setPairing(value.pairing) } catch (error) { setError(error.message) } finally { writing.current = false; setBusy(false) } }
-    return h('section', { className: 'kode-agent-settings' }, h('h2', null, '会话互通与记忆'),
-      h(SelectField, { label: '配置主机', value: host, options: hosts.hosts.map(row => ({ value: row.id, label: row.name })), onChange: setHost, disabled: busy }),
-      h('p', { className: 'kode-config-note' }, '设置保存在所选主机的 Kode 后端，与原 Kode GUI 共用。关闭通信或记忆不会删除已有内容。'),
-      !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在连接 Kode 后端…'),
-      data && h(React.Fragment, null,
-        ...[{ key: 'messaging_enabled', label: '跨会话通信', detail: '允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: '允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
-        h('h3', null, '手机访问'), h('p', { className: 'kode-config-note' }, data.cloud.connected ? '云同步服务已连接。配对后，手机可访问这台主机发布的会话。' : '填写手机可访问的同步服务地址，再生成一次性配对链接。'),
-        h('label', { className: 'kode-field' }, h('span', null, '同步服务地址'), h('input', { type: 'url', value: server, disabled: busy, placeholder: 'https://sync.example.com', onChange: event => setServer(event.target.value) })),
-        h(Button, { disabled: busy || !server.trim(), onClick: () => void update({ action: 'pair', server_url: server.trim() }) }, busy ? '正在保存…' : '生成手机配对链接'),
-        pairing && h('label', { className: 'kode-field' }, h('span', null, '在手机 App 的手动配对中粘贴此链接'), h('textarea', { readOnly: true, value: pairing.uri, rows: 4, onFocus: event => event.target.select() }), h('span', { className: 'kode-config-note' }, '链接仅可使用一次；过期后请重新生成。')),
-      ), h(Failure, { text: error }))
+    }, [host, reload])
+    const update = async body => {
+      revision.current++; writing.current = true; setBusy(true); setError('')
+      try { const value = await request(body); if (value.settings) setData(prior => ({ ...prior, settings: value.settings })); return value }
+      catch (error) { setError(error.message); setRecoveryNeeded(error.code === 'KODE_SERVICE_UPDATE_REQUIRED'); return null }
+      finally { writing.current = false; setBusy(false) }
+    }
+    return { data, busy, error, update, recoveryNeeded, retry: () => setReload(value => value + 1), request }
   }
-  function AgentSettings({ sessions, slots }) {
+  function ServiceRecovery({ host, settings, onBusyChange }) {
     const { data: hosts } = useProjectHosts()
-    const [settingsHost, setSettingsHost] = useState(() => transport?.current ?? 'local')
+    const [busy, setBusy] = useState(false), [job, setJob] = useState(null), [error, setError] = useState('')
+    const task = React.useRef(null)
+    useEffect(() => () => task.current?.abort(), [])
+    useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false) }, [busy, onBusyChange])
+    const supported = host === 'local' ? hosts.localRecoverySupported !== false : hosts.deploymentSupported !== false
+    const recover = async () => {
+      if (task.current) return
+      const controller = new AbortController(); task.current = controller
+      setBusy(true); setError('')
+      try {
+        await recoverHostService(host, {
+          signal: controller.signal, progress: setJob, readSettings: () => settings.request(undefined, controller.signal),
+          request: async (body, id) => {
+            const response = await fetch(`/api/kode/project-hosts?current=local${id ? `&deployment=${encodeURIComponent(id)}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) })
+            let value
+            try { value = await parseHostJson(response) } catch (error) { if (error.code === 'KODE_SERVICE_UPDATE_REQUIRED') throw new Error('此计算机的 Host 尚不支持自动恢复，请先更新并重启 Web Host 和 Kode 服务。'); throw error }
+            if (!response.ok) throw new Error(value.error === '未知项目操作。' ? '此计算机的 Host 尚不支持自动恢复，请先更新并重启 Web Host 和 Kode 服务。' : value.error || '无法恢复服务，请重试。')
+            return value
+          },
+          delay: (ms, signal) => new Promise((resolve, reject) => {
+            const done = () => { signal.removeEventListener('abort', abort); resolve() }
+            const timer = setTimeout(done, ms)
+            const abort = () => { clearTimeout(timer); reject(signal.reason) }
+            signal.addEventListener('abort', abort, { once: true })
+          }),
+        })
+        if (!controller.signal.aborted) settings.retry()
+      } catch (error) { if (!controller.signal.aborted) setError(error.message) }
+      finally { if (!controller.signal.aborted) setBusy(false); task.current = null }
+    }
+    return h('div', { className: 'kode-service-recovery', 'aria-busy': busy },
+      h('p', { className: 'kode-config-note' }, supported ? (host === 'local' ? '使用已安装的服务版本重启 Web Host 和 Kode 后端。有运行中或排队会话时会停止操作，请等待任务结束后重试。' : '通过已保存的 SSH 配置更新并重启此主机的服务。有运行中或排队会话时会停止部署，请等待任务结束后重试。') : '此启动方式不支持自动恢复。请更新 Kode 插件和服务，退出并重新打开 Desktop，或手动重启 Web Host 和 Kode 后端。'),
+      h('div', { className: 'kode-service-recovery-actions' },
+        supported && h(Button, { disabled: busy, onClick: () => void recover() }, busy ? host === 'local' ? '正在重启…' : '正在更新部署…' : host === 'local' ? '重启服务' : '更新并部署服务'),
+        h(Button, { variant: 'outline', disabled: busy, onClick: settings.retry }, '重新连接')),
+      busy && h('p', { className: 'kode-config-note', role: 'status', 'aria-live': 'polite' }, job?.steps?.find(step => step.status === 'running')?.message || (host === 'local' ? '正在等待服务重新启动并检查接口…' : job?.status === 'done' ? '部署完成，正在检查接口…' : '正在准备部署…')),
+      h(Failure, { text: error }))
+  }
+  function ServiceRecoveryLink({ host, slots }) {
+    const [error, setError] = useState('')
+    const open = () => {
+      try { requestedServiceHost = host; openSettings(slots, 'kode-ssh') }
+      catch (error) { requestedServiceHost = undefined; setError(error.message) }
+    }
+    return h('div', null,
+      h(Button, { variant: 'outline', onClick: open }, '前往主机与服务'),
+      h(Failure, { text: error }))
+  }
+  function HostServiceStatus({ host, onBusyChange }) {
+    const settings = useIntegrationSettings(host)
+    return h('div', { className: 'kode-host-service' },
+      h('p', { className: 'kode-config-note', role: 'status' }, settings.error ? '服务连接异常，请检查或恢复所选主机的服务。' : settings.data ? '服务已连接。' : '正在检查服务状态…'),
+      h(Failure, { text: settings.error }),
+      h(ServiceRecovery, { host, settings, onBusyChange }))
+  }
+  function IntegrationSettingsBody({ host, slots }) {
+    const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
     return h(React.Fragment, null,
-      h('section', { className: 'kode-agent-settings' }, h('h2', null, 'Agent'),
-        h(SelectField, { label: '配置主机', value: settingsHost, options: hosts.hosts.map(host => ({ value: host.id, label: host.name })), onChange: setSettingsHost }),
-        h('p', { className: 'kode-config-note' }, '配置保存到所选主机，不切换当前工作区。远端可执行文件和环境变量均在远端使用。')),
-      h(AgentSettingsBody, { key: settingsHost, sessions, slots, settingsHost }))
+      h('p', { className: 'kode-config-note' }, '管理 Agent 使用的集成能力。设置保存在所选主机，与原 Kode GUI 共用。'),
+      !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
+      data && [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
+      h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
+  }
+  function MobileSettingsBody({ host, slots }) {
+    const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
+    const [server, setServer] = useState(''), [pairing, setPairing] = useState(null)
+    const initialized = React.useRef(false)
+    useEffect(() => {
+      if (data && !initialized.current) { initialized.current = true; setServer(data.cloud.server_url ?? '') }
+    }, [data])
+    const pair = async () => {
+      setPairing(null)
+      const value = await update({ action: 'pair', server_url: server.trim() })
+      if (value?.pairing) setPairing(value.pairing)
+    }
+    return h(React.Fragment, null,
+      h('p', { className: 'kode-config-note' }, '将 Kode 手机 App 与所选主机配对，在手机上查看、创建和继续会话。'),
+      !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取手机与同步配置…'),
+      data && h(React.Fragment, null,
+        h('p', { className: 'kode-config-note', role: 'status' }, data.cloud.connected ? '同步服务已连接。生成二维码后，使用 Kode 手机 App 扫码配对。' : '填写手机可访问的同步服务地址，再生成配对二维码。'),
+        h('label', { className: 'kode-field' }, h('span', null, '同步服务地址'), h('input', { type: 'url', value: server, disabled: busy, placeholder: 'https://sync.example.com', onChange: event => { setServer(event.target.value); setPairing(null) } })),
+        h(Button, { disabled: busy || !server.trim(), onClick: () => void pair() }, busy ? '正在生成…' : pairing ? '重新生成配对二维码' : '生成配对二维码'),
+        pairing && h(MobilePairingInvite, { key: pairing.uri, pairing })),
+      h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
+  }
+  function MobilePairingInvite({ pairing }) {
+    const expiresAt = Number(pairing.expires_at)
+    const [expired, setExpired] = useState(() => Number.isFinite(expiresAt) && expiresAt <= Date.now())
+    const [imageFailed, setImageFailed] = useState(false)
+    useEffect(() => {
+      if (!Number.isFinite(expiresAt)) return
+      const timer = setTimeout(() => setExpired(true), Math.max(0, expiresAt - Date.now()))
+      return () => clearTimeout(timer)
+    }, [expiresAt])
+    if (expired) return h('p', { className: 'kode-config-note kode-pairing-result', role: 'status' }, '配对码已过期，请重新生成。')
+    return h('div', { className: 'kode-pairing-result' },
+      pairing.qr_data_url && !imageFailed
+        ? h('figure', { className: 'kode-pairing-qr' },
+          h('img', { src: pairing.qr_data_url, alt: 'Kode 手机 App 一次性配对二维码', width: 280, height: 280, onError: () => setImageFailed(true) }),
+          h('figcaption', { className: 'kode-config-note' }, '打开 Kode 手机 App，使用扫码功能扫描此二维码。'))
+        : h('p', { className: 'kode-config-note', role: 'status' }, pairing.qr_error || '二维码暂不可用，请使用下方配对链接，或更新所选主机的 dsh 插件。'),
+      h('label', { className: 'kode-field' }, h('span', null, '手动配对链接'), h('textarea', { readOnly: true, value: pairing.uri, rows: 4, onFocus: event => event.target.select() }), h('span', { className: 'kode-config-note' }, '也可将链接粘贴到手机 App 的手动配对页面。')),
+      h('p', { className: 'kode-config-note' }, `二维码和链接仅可使用一次${Number.isFinite(expiresAt) ? `，有效期至 ${new Date(expiresAt).toLocaleTimeString()}` : ''}；使用后或过期后请重新生成。`))
+  }
+  const settingsSections = [['agents', 'Agent'], ['integrations', '集成'], ['mobile', '手机与同步'], ['ssh', '主机与服务'], ['personalization', '头像与背景']]
+  function KodeSettings({ sessions, slots, close }) {
+    const { data: hosts, error } = useProjectHosts()
+    const [host, setHost] = useState(() => requestedServiceHost ?? transport?.current ?? 'local')
+    const [serviceBusy, setServiceBusy] = useState(false)
+    const root = React.useRef(null)
+    const navigate = () => {
+      if (requestedServiceHost && !serviceBusy) { setHost(requestedServiceHost); requestedServiceHost = undefined }
+      const section = requestedSettingsSection
+      requestedSettingsSection = undefined
+      if (section) requestAnimationFrame(() => {
+        const target = root.current?.querySelector(`#kode-settings-${section}`)
+        target?.scrollIntoView({ block: 'start' }); target?.focus({ preventScroll: true })
+      })
+    }
+    useEffect(() => { navigate(); window.addEventListener('kode-settings-navigate', navigate); return () => window.removeEventListener('kode-settings-navigate', navigate) }, [serviceBusy])
+    const options = hosts.hosts.map(row => ({ value: row.id, label: row.name }))
+    if (!options.some(row => row.value === host)) options.push({ value: host, label: '正在读取主机…' })
+    const section = (id, title, body, note) => h('section', { id: `kode-settings-${id}`, className: 'kode-settings-section', tabIndex: -1, 'aria-labelledby': `kode-heading-${id}` },
+      h('h3', { id: `kode-heading-${id}` }, title), note && h('p', { className: 'kode-config-note' }, note), body)
+    return h('div', { ref: root, className: 'kode-settings-page kode-agent-settings' },
+      h('header', null, h('h2', null, 'Kode'), h('p', { className: 'kode-config-note' }, '管理 Kode 的 Agent、集成和主机连接。')),
+      h('nav', { className: 'kode-settings-nav', 'aria-label': 'Kode 设置分区' }, ...settingsSections.map(([id, label]) => h('button', { type: 'button', key: id, onClick: () => { requestedSettingsSection = id; navigate() } }, label))),
+      h('div', { className: 'kode-settings-scope' },
+        h(SelectField, { label: '配置主机', value: host, options, disabled: serviceBusy, onChange: setHost }),
+        h('p', { className: 'kode-config-note' }, '以下配置保存到所选主机，不切换当前工作区。远端程序和环境变量在远端使用。')),
+      h(Failure, { text: error }),
+      section('agents', 'Agent', h(AgentSettingsBody, { key: host, sessions, slots, settingsHost: host })),
+      section('integrations', '集成', h(IntegrationSettingsBody, { key: host, host, slots })),
+      section('mobile', '手机与同步', h(MobileSettingsBody, { key: host, host, slots })),
+      section('ssh', '主机与服务', h(SshSettings, { host, onBusyChange: setServiceBusy })),
+      section('personalization', '头像与背景', h(PersonalizationSettings, { sessions, close }), '应用到当前打开的会话，不受上方配置主机影响。'))
   }
   function AgentSettingsBody({ sessions, slots, settingsHost }) {
     const store = directory(undefined, settingsHost, true)
@@ -447,18 +598,19 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       } catch (error) { setError(error.message) } finally { setBusy(false) }
     }
     return h('div', { className: 'kode-avatar-editor' },
-      h('p', { className: 'kode-config-note' }, '选择后预览头像与背景，确认后应用。'),
-      h('div', { className: 'kode-avatar-preview-identity' }, h(AgentAvatar, { profile: previewProfile, host, size: 48, preview: true }), renaming ? h('form', { className: 'kode-avatar-rename', onSubmit: event => void renameSelected(event) }, h('input', { autoFocus: true, required: true, maxLength: 80, 'aria-label': '头像名称', value: nameDraft, disabled: busy, onChange: event => setNameDraft(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false) } } }), h(Button, { type: 'submit', variant: 'text', disabled: busy || !nameDraft.trim() }, '保存'), h(Button, { type: 'button', variant: 'text', disabled: busy, onClick: () => setRenaming(false) }, '取消')) : h('span', { className: 'kode-avatar-preview-name' }, h('span', null, selected?.name ?? '默认图标'), selected && library.canRename && h('button', { type: 'button', className: 'kode-avatar-name-edit', 'aria-label': '重命名头像', title: '重命名头像文件夹', disabled: busy, onClick: () => { setNameDraft(selected.name); setRenaming(true) } }, h(IconEditOutlineRegular, { size: 14 })))),
-      h('div', { className: 'kode-avatar-preview', role: 'img', 'aria-label': `${selected?.name ?? '默认图标'}的背景预览`, 'data-has-background': Boolean(previewBackground) }, previewBackground ? h('img', { src: transport ? transport.path(previewBackground, 'local') : previewBackground, alt: '', 'aria-hidden': true }) : h('span', null, selected?.background ? '背景显示已关闭' : '此头像暂无配套背景')),
-      h('div', { className: 'kode-avatar-grid', 'aria-label': '会话头像' },
-        h('button', { type: 'button', className: 'kode-avatar-choice', 'aria-pressed': !selectedId, disabled: busy, onClick: () => select(null) }, h(AgentAvatar, { profile: { ...profile, avatar: null }, host, size: 36 }), h('span', { className: 'kode-avatar-caption' }, '默认图标')),
-        ...(avatars ?? []).map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': selected?.id === avatar.id, disabled: busy, title: avatar.name, onClick: () => select(avatar.id) }, h(AgentAvatar, { profile: { ...profile, avatar }, host, size: 36, preview: true }), h('span', { className: 'kode-avatar-caption' }, h('span', null, avatar.name), avatar.background && h('svg', { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.3, role: 'img', 'aria-label': '有配套背景' }, h('title', null, '有配套背景'), h('rect', { x: 1.5, y: 2, width: 13, height: 12, rx: 2 }), h('path', { d: 'm2 11 3.5-3.5L9 11l2-2 3 3M10 5.5h.01', strokeLinecap: 'round', strokeLinejoin: 'round' })))))),
-      h('label', { className: 'kode-avatar-background-toggle' }, h('input', { type: 'checkbox', checked: showBackground, disabled: busy, onChange: event => setShowBackground(event.target.checked) }), '显示会话背景'),
-      !avatars && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取头像…'),
-      avatars?.length === 0 && h('p', { className: 'kode-config-note' }, '还没有自定义头像，可创建头像与背景。'),
-      h('div', { className: 'kode-avatar-actions' }, h(Button, { variant: 'outline', disabled: busy || !local, onClick: () => void generate(false) }, h(IconPlusOutlineRegular, { size: 16 }), '创建头像与背景'), selected && h(Button, { variant: 'text', disabled: busy || !local, onClick: () => void generate(true) }, '生成背景'), h(Button, { variant: 'text', disabled: busy, onClick: () => void loadAvatars(true) }, '刷新')),
-      !local && h('p', { className: 'kode-config-note' }, '生成素材请先切换到此计算机上的会话；SSH 会话也可使用此处的头像与背景。'),
-      h(Failure, { text: error || library.error }),
+      h('div', { className: 'kode-avatar-content' },
+        h('p', { className: 'kode-config-note' }, '选择后预览头像与背景，确认后应用。'),
+        h('div', { className: 'kode-avatar-preview-identity' }, h(AgentAvatar, { profile: previewProfile, host, size: 48, preview: true }), renaming ? h('form', { className: 'kode-avatar-rename', onSubmit: event => void renameSelected(event) }, h('input', { autoFocus: true, required: true, maxLength: 80, 'aria-label': '头像名称', value: nameDraft, disabled: busy, onChange: event => setNameDraft(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false) } } }), h(Button, { type: 'submit', variant: 'text', disabled: busy || !nameDraft.trim() }, '保存'), h(Button, { type: 'button', variant: 'text', disabled: busy, onClick: () => setRenaming(false) }, '取消')) : h('span', { className: 'kode-avatar-preview-name' }, h('span', null, selected?.name ?? '默认图标'), selected && library.canRename && h('button', { type: 'button', className: 'kode-avatar-name-edit', 'aria-label': '重命名头像', title: '重命名头像文件夹', disabled: busy, onClick: () => { setNameDraft(selected.name); setRenaming(true) } }, h(IconEditOutlineRegular, { size: 14 })))),
+        h('div', { className: 'kode-avatar-preview', role: 'img', 'aria-label': `${selected?.name ?? '默认图标'}的背景预览`, 'data-has-background': Boolean(previewBackground) }, previewBackground ? h('img', { src: transport ? transport.path(previewBackground, 'local') : previewBackground, alt: '', 'aria-hidden': true }) : h('span', null, selected?.background ? '背景显示已关闭' : '此头像暂无配套背景')),
+        h('div', { className: 'kode-avatar-grid', 'aria-label': '会话头像' },
+          h('button', { type: 'button', className: 'kode-avatar-choice', 'aria-pressed': !selectedId, disabled: busy, onClick: () => select(null) }, h(AgentAvatar, { profile: { ...profile, avatar: null }, host, size: 36 }), h('span', { className: 'kode-avatar-caption' }, '默认图标')),
+          ...(avatars ?? []).map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': selected?.id === avatar.id, disabled: busy, title: avatar.name, onClick: () => select(avatar.id) }, h(AgentAvatar, { profile: { ...profile, avatar }, host, size: 36, preview: true }), h('span', { className: 'kode-avatar-caption' }, h('span', null, avatar.name), avatar.background && h('svg', { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.3, role: 'img', 'aria-label': '有配套背景' }, h('title', null, '有配套背景'), h('rect', { x: 1.5, y: 2, width: 13, height: 12, rx: 2 }), h('path', { d: 'm2 11 3.5-3.5L9 11l2-2 3 3M10 5.5h.01', strokeLinecap: 'round', strokeLinejoin: 'round' })))))),
+        h('label', { className: 'kode-avatar-background-toggle' }, h('input', { type: 'checkbox', checked: showBackground, disabled: busy, onChange: event => setShowBackground(event.target.checked) }), '显示会话背景'),
+        !avatars && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取头像…'),
+        avatars?.length === 0 && h('p', { className: 'kode-config-note' }, '还没有自定义头像，可创建头像与背景。'),
+        h('div', { className: 'kode-avatar-actions' }, h(Button, { variant: 'outline', disabled: busy || !local, onClick: () => void generate(false) }, h(IconPlusOutlineRegular, { size: 16 }), '创建头像与背景'), selected && h(Button, { variant: 'text', disabled: busy || !local, onClick: () => void generate(true) }, '生成背景'), h(Button, { variant: 'text', disabled: busy, onClick: () => void loadAvatars(true) }, '刷新')),
+        !local && h('p', { className: 'kode-config-note' }, '生成素材请先切换到此计算机上的会话；SSH 会话也可使用此处的头像与背景。'),
+        h(Failure, { text: error || library.error })),
       h('div', { className: 'kode-avatar-footer' }, h(Button, { variant: 'outline', disabled: busy, onClick: onCancel }, '取消'), h(Button, { variant: 'primary', disabled: busy || !canApply || !library.loaded || Boolean(library.error), onClick: () => void apply() }, busy ? '应用中…' : '确认应用')))
   }
   function openAvatarDialog(target) {
@@ -489,11 +641,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     useEffect(() => { if (current?.id) void store.load() }, [store, current?.id])
     const target = { sessionId: current?.id, host, profile }
     return h('section', { className: 'kode-agent-settings kode-personalization', 'aria-label': '个性化' },
-      h('h2', null, '头像与背景'),
       !current && h('p', { className: 'kode-config-note' }, '打开会话后即可应用头像与背景。'),
       profile && h('p', { className: 'kode-config-note' }, current?.title || row?.title || '当前会话'),
-      (!current || profile) && h(AvatarChoices, { key: `${current?.id}:${revision}`, profile: profile ?? { type: 'dsh', name: 'DeepSeek Harness' }, sessionId: current?.id, host, canApply: Boolean(current?.id && profile), onChoose: async avatarId => { await saveAvatarChoice(target, avatarId); setNotice('已应用头像与背景') }, onCancel: () => { setRevision(value => value + 1); setNotice('') }, onGenerated: close }),
-      h(Failure, { text: state.error }), notice && h('p', { className: 'kode-config-note', role: 'status' }, notice))
+      h(Failure, { text: state.error }), notice && h('p', { className: 'kode-config-note', role: 'status' }, notice),
+      (!current || profile) && h(AvatarChoices, { key: `${current?.id}:${revision}`, profile: profile ?? { type: 'dsh', name: 'DeepSeek Harness' }, sessionId: current?.id, host, canApply: Boolean(current?.id && profile), onChoose: async avatarId => { await saveAvatarChoice(target, avatarId); setNotice('已应用头像与背景') }, onCancel: () => { setRevision(value => value + 1); setNotice('') }, onGenerated: close }))
   }
   function AgentIdentity({ sessionId, sessions, useSessionStatus }) {
     const { data } = useDirectory(sessionId, sessions), status = useAvatarStatus(sessionId, useSessionStatus)
@@ -599,12 +750,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h(AdvancedSection, { title: '高级连接设置', open: !supportsDeployment }, field('configFile', 'SSH 配置文件（可选）', '留空使用默认 SSH 配置'), field('accessUrl', '已有服务的访问链接（可选）', initial ? '留空保留已有连接' : '仅用于连接已手工部署的 dsh', 'password'))),
       h(Failure, { text: error }))
   }
-  function SshSettings() {
+  function SshSettings({ host, onBusyChange }) {
     const { data, error: loadError } = useProjectHosts()
     const [editing, setEditing] = useState(false), [initial, setInitial] = useState(undefined), [busy, setBusy] = useState(false), [error, setError] = useState('')
     const hosts = data.hosts.filter(row => row.id !== 'local')
-    return h('section', { className: 'kode-agent-settings' },
-      h('h2', null, 'SSH 主机'), h('p', { className: 'kode-agent-intro' }, '管理远程开发主机，在创建项目时选择执行位置。'),
+    return h('div', { className: 'kode-agent-settings' },
+      h(HostServiceStatus, { key: host, host, onBusyChange }),
+      h('h3', null, 'SSH 连接'),
       data.current !== 'local' && h('div', null, h('p', { className: 'kode-config-note' }, '当前连接的主机需返回此计算机后编辑，其他主机可直接管理。'), h(Button, { disabled: busy, onClick: async () => { setBusy(true); try { await switchHost('local') } catch (error) { setError(error.message) } finally { setBusy(false) } } }, '返回此计算机')),
       h('ul', { className: 'kode-agent-rows' }, ...hosts.map(host => h('li', { key: host.id, className: 'kode-agent-row' },
         h('div', { className: 'kode-agent-row-head' }, h(RemoteComputerIcon), h('span', { className: 'kode-agent-name' }, host.name), host.id === data.current && h('span', { className: 'kode-agent-tag' }, '当前主机'), h(Button, { className: 'kode-agent-edit', disabled: host.id === data.current, onClick: () => { setInitial(host); setEditing(true) } }, '编辑')),
@@ -1519,27 +1671,26 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-agent-avatar{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;overflow:hidden;border-radius:6px;color:var(--dsw-alias-label-primary)}.kode-agent-mask{display:block;width:100%;height:100%;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-agent-avatar img{display:block;width:100%;height:100%;object-fit:contain}.kode-agent-identity,.kode-agent-option{display:inline-flex;align-items:center;gap:8px;min-width:0}.kode-agent-identity{max-width:200px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}.kode-agent-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}span:has(>[data-slot="conversation.session.header.lineage"])>span:first-child{max-width:100%;font-size:16px;font-weight:600;line-height:24px}nav[aria-label="会话层级"]{flex:1 1 auto;min-width:0}nav[aria-label="会话层级"]~div:has(>[data-slot="conversation.session.header.actions"]){margin-left:auto;padding-left:16px}.kode-agent-option>.kode-option{flex:1}.kode-settings-group-title{font-size:13px;font-weight:500;color:var(--dsw-alias-label-secondary);margin:24px 0 8px}.kode-avatar-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100dvh - 48px)}.kode-avatar-dialog>:has(>.kode-avatar-editor){min-height:0;overflow-y:auto;overscroll-behavior:contain}.kode-avatar-editor{padding:12px 0}.kode-avatar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px;max-height:min(360px,50vh);overflow:auto;padding:4px}.kode-avatar-choice{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0;padding:8px;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer}.kode-avatar-choice>span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px}.kode-avatar-choice:hover,.kode-avatar-choice[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-choice[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary)}.kode-avatar-choice:disabled{opacity:.5;cursor:default}.kode-avatar-choice:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-option{display:flex;align-items:center;justify-content:space-between;gap:24px;min-width:200px}.kode-secondary{color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-menu-note{padding:8px 12px;max-width:260px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .kode-agent-settings{max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}.kode-agent-settings h2{margin:0;font-size:16px;font-weight:500;line-height:24px}.kode-agent-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}.kode-agent-rows{display:flex;flex-direction:column;gap:8px;margin:12px 0 0;padding:0;list-style:none}.kode-agent-row{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);padding:12px 14px;display:flex;flex-direction:column;gap:12px}.kode-agent-row-head{display:flex;align-items:center;gap:10px;min-width:0}.kode-agent-name{font-size:14px;font-weight:500;line-height:22px;overflow-wrap:anywhere;min-width:0}.kode-agent-tag{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);color:var(--dsw-alias-label-secondary);padding:1px 6px;font-size:11px;line-height:16px;flex-shrink:0}.kode-agent-edit{margin-left:auto;flex-shrink:0!important;height:28px!important;padding:0 10px!important;border-radius:var(--dsw-radius-sm)!important;font-size:12px!important;line-height:18px!important}.kode-agent-add{width:100%;min-height:44px!important;border:1px dashed var(--dsw-alias-border-l3)!important;border-radius:var(--dsw-radius-lg)!important;gap:6px!important}.kode-agent-editor{border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);padding:14px 16px;min-width:0}.kode-agent-editor .kode-field{gap:6px;margin-bottom:14px}.kode-agent-editor .kode-field>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-agent-models{min-width:0}.kode-settings-footer{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:14px}
-.kode-shared-conversation{display:flex;flex-direction:column;min-height:0;height:100%;color:var(--dsw-alias-label-primary)}.kode-shared-conversation>header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:16px 24px;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-shared-conversation>header p{margin:4px 0 0}.kode-shared-messages{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:24px}.kode-shared-composer{padding:16px 24px;border-top:1px solid var(--dsw-alias-border-l2)}.kode-shared-composer .kode-field{margin-bottom:12px}.kode-shared-composer>div:last-child{display:flex;justify-content:flex-end;gap:8px}.kode-integration-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-integration-row>span{display:grid;gap:6px;min-width:0}.kode-integration-row .kode-config-note{margin:0}.kode-integration-row input{flex:none;min-width:24px;min-height:24px;accent-color:var(--dsw-alias-state-business-primary)}.kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}
+.kode-shared-conversation{display:flex;flex-direction:column;min-height:0;height:100%;color:var(--dsw-alias-label-primary)}.kode-shared-conversation>header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:16px 24px;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-shared-conversation>header p{margin:4px 0 0}.kode-shared-messages{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:24px}.kode-shared-composer{padding:16px 24px;border-top:1px solid var(--dsw-alias-border-l2)}.kode-shared-composer .kode-field{margin-bottom:12px}.kode-shared-composer>div:last-child{display:flex;justify-content:flex-end;gap:8px}.kode-service-recovery{margin-top:16px}.kode-service-recovery-actions{display:flex;flex-wrap:wrap;gap:8px}.kode-service-recovery [role=status]{margin-top:12px}.kode-pairing-result{margin-top:20px}.kode-pairing-qr{margin:0 0 20px}.kode-pairing-qr img{display:block;width:280px;max-width:100%;height:auto;aspect-ratio:1;image-rendering:pixelated}.kode-pairing-qr figcaption{margin-top:12px}.kode-integration-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-integration-row>span{display:grid;gap:6px;min-width:0}.kode-integration-row .kode-config-note{margin:0}.kode-integration-row input{flex:none;min-width:24px;min-height:24px;accent-color:var(--dsw-alias-state-business-primary)}.kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}
 .kode-field-select{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}.kode-field-select:hover{border-color:var(--dsw-alias-border-l1)}.kode-mode-control{display:inline-flex;align-items:center;position:relative}.kode-delete{color:var(--dsw-alias-state-error-primary);margin-right:auto}
 @media(max-width:600px){.kode-agent-row-head{flex-wrap:wrap}.kode-agent-editor{padding:12px}.kode-option{min-width:180px}.kode-trigger{max-width:180px}.kode-agent-identity{max-width:32px}.kode-agent-identity>span:last-child{display:none}}
 `
     style.textContent += `
 [data-conversation-content][data-kode-scene]{background-image:linear-gradient(color-mix(in srgb,var(--dsw-alias-bg-base) 88%,transparent),color-mix(in srgb,var(--dsw-alias-bg-base) 88%,transparent)),var(--kode-scene-image);background-size:cover;background-position:center}
 [data-kode-scene] [data-kode-user-bubble]{background:var(--dsw-specific-bubble,var(--dsw-alias-bg-module-platform));border:.5px solid var(--dsw-alias-border-l2)}
-.kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}.kode-avatar-editor>.kode-config-note{margin:0}.kode-avatar-grid{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));max-height:min(240px,28vh);gap:8px}.kode-avatar-choice{gap:8px;padding:10px 6px}.kode-avatar-caption{display:flex;align-items:center;justify-content:center;gap:4px;max-width:100%;min-width:0;font-size:12px;line-height:16px;white-space:nowrap}.kode-avatar-caption>span{min-width:0;overflow:hidden;text-overflow:ellipsis}.kode-avatar-caption>svg{flex:none;color:var(--dsw-alias-label-secondary)}
+.kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}.kode-avatar-content{display:flex;flex-direction:column;gap:12px}.kode-avatar-content>*{flex-shrink:0}.kode-avatar-content>.kode-config-note{margin:0}.kode-avatar-grid{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));max-height:min(240px,28vh);gap:8px}.kode-avatar-choice{gap:8px;padding:10px 6px}.kode-avatar-caption{display:flex;align-items:center;justify-content:center;gap:4px;max-width:100%;min-width:0;font-size:12px;line-height:16px;white-space:nowrap}.kode-avatar-caption>span{min-width:0;overflow:hidden;text-overflow:ellipsis}.kode-avatar-caption>svg{flex:none;color:var(--dsw-alias-label-secondary)}
 .kode-avatar-preview{display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-secondary);font-size:12px;min-height:112px;background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);overflow:hidden;flex:none}.kode-avatar-preview[data-has-background=true]{display:block;min-height:0}.kode-avatar-preview>img{display:block;width:100%;height:auto}.kode-avatar-preview-identity{display:flex;align-items:center;gap:12px;color:var(--dsw-alias-label-primary);font-size:14px;min-width:0}.kode-avatar-preview-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kode-avatar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-avatar-actions>button:last-child{margin-left:auto}.kode-avatar-background-toggle{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;line-height:24px;color:var(--dsw-alias-label-primary);min-height:32px}.kode-avatar-background-toggle input{accent-color:var(--dsw-alias-state-business-primary)}.kode-avatar-footer{position:sticky;bottom:0;z-index:1;display:flex;justify-content:flex-end;gap:8px;padding:12px 0 4px;border-top:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
-.kode-avatar-preview-name{display:flex;align-items:center;gap:6px;min-width:0}.kode-avatar-preview-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-avatar-name-edit{display:inline-flex;align-items:center;justify-content:center;flex:none;min-width:32px;min-height:32px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}.kode-avatar-name-edit:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-name-edit:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename{display:flex;align-items:center;flex:1;min-width:0;gap:4px}.kode-avatar-rename input{min-width:0;width:100%;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}.kode-avatar-rename input:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename button{flex:none}.kode-editable-avatar{display:inline-flex;position:relative;flex:none}.kode-avatar-edit-mark{position:absolute;right:-4px;bottom:-3px;display:flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary)}.kode-agent-settings .kode-session-avatar-button{min-width:40px;min-height:40px;padding:8px}.kode-personalization>.kode-config-note{margin:0}.kode-personalization .kode-avatar-grid{max-height:min(320px,32vh)}
+.kode-avatar-preview-name{display:flex;align-items:center;gap:6px;min-width:0}.kode-avatar-preview-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-avatar-name-edit{display:inline-flex;align-items:center;justify-content:center;flex:none;min-width:32px;min-height:32px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}.kode-avatar-name-edit:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-name-edit:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename{display:flex;align-items:center;flex:1;min-width:0;gap:4px}.kode-avatar-rename input{min-width:0;width:100%;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}.kode-avatar-rename input:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename button{flex:none}.kode-editable-avatar{display:inline-flex;position:relative;flex:none}.kode-avatar-edit-mark{position:absolute;right:-4px;bottom:-3px;display:flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary)}.kode-agent-settings .kode-session-avatar-button{min-width:40px;min-height:40px;padding:8px}.kode-personalization{height:100%;min-height:0;box-sizing:border-box;overflow:hidden}.kode-personalization>.kode-config-note{margin:0}.kode-personalization>.kode-avatar-editor{flex:1;min-height:0;padding-bottom:0}.kode-personalization .kode-avatar-content{flex:1;min-height:0;overflow-y:auto;padding:0 4px 4px 0}.kode-personalization .kode-avatar-footer{position:static;flex:none}.kode-personalization .kode-avatar-grid{max-height:min(320px,32vh)}
 @media(max-width:600px){.kode-avatar-grid{grid-template-columns:repeat(auto-fill,minmax(76px,1fr))}.kode-avatar-dialog{width:calc(100vw - 24px);max-width:calc(100vw - 24px)}}
+
+.kode-settings-page{gap:0;padding-bottom:32px}.kode-settings-page>header{margin-bottom:16px}.kode-settings-page h2{margin:0 0 8px}.kode-settings-nav{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:24px}.kode-settings-nav button{font:inherit;font-size:13px;color:var(--dsw-alias-label-secondary);background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:7px 10px;cursor:pointer}.kode-settings-nav button:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}.kode-settings-nav button:focus-visible,.kode-settings-section:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}.kode-settings-scope{display:flex;flex-direction:column;gap:8px}.kode-settings-section{display:flex;flex-direction:column;gap:12px;padding-top:28px;margin-top:28px;border-top:1px solid var(--dsw-alias-border-l2);scroll-margin-top:20px;min-width:0}.kode-settings-section>h3{font-size:15px;font-weight:600;margin:0 0 4px}.kode-settings-page .kode-personalization{height:auto;overflow:visible}.kode-settings-page .kode-personalization .kode-avatar-content{flex:none;overflow:visible}.kode-settings-page .kode-personalization .kode-avatar-editor{flex:none}.kode-settings-page .kode-personalization .kode-avatar-grid{max-height:320px}
 `
 
     document.head.append(style)
     ctx.effect(() => () => style.remove(), 'kode.agent-styles')
     ctx.slots.inject('conversation.hero.agentPreset', () => ctx.slots.register({ name: 'conversation.hero.agentPreset', id: 'kode-agent', inject: sessionId => ({ sessionId, sessions: ctx.sessions, remote: ctx.remote, slots: ctx.slots }) }, AgentControl))
-    ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-agents', order: 5, label: () => 'Agent', inject: () => ({ sessions: ctx.sessions, slots: ctx.slots }) }, AgentSettings))
-    ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-integrations', order: 7, label: () => '会话互通与记忆' }, IntegrationSettings))
-    ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-personalization', order: 6, label: () => '个性化', inject: () => ({ sessions: ctx.sessions }) }, PersonalizationSettings))
-    ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-ssh', order: 15, label: () => 'SSH 主机' }, SshSettings))
+    ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode', order: 5, label: () => 'Kode', inject: () => ({ sessions: ctx.sessions, slots: ctx.slots }) }, KodeSettings))
     ctx.slots.inject('conversation.input.model', () => ctx.slots.register({ name: 'conversation.input.model', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, ModelControl))
   } }
 } })

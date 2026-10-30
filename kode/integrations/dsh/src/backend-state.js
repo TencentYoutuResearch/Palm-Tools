@@ -9,6 +9,7 @@ export class BackendAgentProfiles extends AgentProfiles {
   constructor(client, path) { super(path); this.document = new BackendDocument(client, 'agents'); this.usesSharedRegistry = true }
   adopt(state) {
     if (state?.version !== 1 || !Array.isArray(state.profiles) || !state.bindings || typeof state.bindings !== 'object') throw new Error('Invalid Kode Agent document')
+    this.defaultProfileId = state.defaultProfileId ?? null
     this.sharedState = structuredClone(state)
     this.profiles = state.profiles; this.bindings = Object.assign(Object.create(null), state.bindings)
   }

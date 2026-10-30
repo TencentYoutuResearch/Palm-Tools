@@ -12693,7 +12693,7 @@ const icon = (0, react_jsx_runtime.jsxs)("svg", { width: 18, height: 18, viewBox
 		//#region lib/types/chat-settings.js
 		/** Chat display preferences stored in the Host user-settings document. */
 		/** Settings namespace owned by the Chat target. */
-		const CHAT_SETTINGS_NAMESPACE = "kode-chat";
+		const CHAT_SETTINGS_NAMESPACE = "ui-chat";
 		/** Field carrying the work-details presentation mode. */
 		const TRANSCRIPT_VIEW_FIELD = "transcriptView";
 		/** Field carrying the independent work-details collapse timing. */

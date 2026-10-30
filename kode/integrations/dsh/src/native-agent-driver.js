@@ -9,7 +9,7 @@ import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
 
 export const boundaryProjection = {
-  key: 'turnBoundary', stateVersion: 3,
+  key: 'kodeTurnBoundary', stateVersion: 3,
   stateSchema: z.object({ openTurnStartSeq: z.number().nullable(), lastStepStartSeq: z.number().nullable(), lastStepBoundary: z.object({ kind: z.enum(['start', 'end']), seq: z.number(), step: z.number() }).nullable(), lastTurn: z.number() }),
   init: () => ({ openTurnStartSeq: null, lastStepStartSeq: null, lastStepBoundary: null, lastTurn: 0 }),
   apply: (state, event) => {
@@ -22,7 +22,7 @@ export const boundaryProjection = {
 }
 const inboxSchema = z.object({ 'next-turn': z.array(z.any()), 'next-step': z.array(z.any()) })
 export const inboxProjection = {
-  key: 'inbox', stateVersion: 1, stateSchema: inboxSchema,
+  key: 'kodeInbox', stateVersion: 1, stateSchema: inboxSchema,
   init: () => ({ 'next-turn': [], 'next-step': [] }),
   apply: (state, event) => {
     if (event.type !== 'agent/inbox/spliced') return state
@@ -33,7 +33,7 @@ export const inboxProjection = {
 }
 class Inbox {
   constructor(agent) { this.agent = agent }
-  get state() { return this.agent.ctx.sessionProjections.stateOf(this.agent.session, 'inbox') ?? inboxProjection.init() }
+  get state() { return this.agent.ctx.sessionProjections.stateOf(this.agent.session, 'kodeInbox') ?? inboxProjection.init() }
   get nextTurn() { return this.state['next-turn'] }
   get nextStep() { return this.state['next-step'] }
   splice(target, start, count, inserted, canceled = false) {
@@ -57,10 +57,11 @@ class Inbox {
 }
 export class NativeAgentDriver {
   constructor(ctx, id, options, session, runtime) {
+    this.isKodeNativeAgent = true
     this.id = id; this.options = options; this.session = session; this.runtime = runtime
     this.scope = createScope(ctx, this); this.ctx = this.scope.ctx; this.events = agentEvents(ctx, this)
     this.inbox = new Inbox(this); this.status = 'idle'; this.activity = Promise.resolve(); this.ready = false; this.disposed = false; this.revision = 0
-    this.turn = ctx.sessionProjections.stateOf(session, 'turnBoundary')?.lastTurn ?? 0
+    this.turn = ctx.sessionProjections.stateOf(session, 'kodeTurnBoundary')?.lastTurn ?? 0
   }
   setStatus(status) { if (this.status !== status) { this.status = status; this.events.emit('agent/status', { status }) } }
   selectModel({provider,model,reasoningEffort}) {
@@ -136,7 +137,7 @@ export class NativeAgentDriver {
     while (!signal.aborted && !this.disposed && (this.inbox.nextTurn.length || this.inbox.nextStep.length || this.runtime.adapter.hasContinuation?.(this.id))) {
       // A driver may be attached before an owner imports its historical seed.
       // Allocate from the current log projection, not the constructor snapshot.
-      this.turn = Math.max(this.turn, this.ctx.sessionProjections.stateOf(this.session, 'turnBoundary')?.lastTurn ?? 0)
+      this.turn = Math.max(this.turn, this.ctx.sessionProjections.stateOf(this.session, 'kodeTurnBoundary')?.lastTurn ?? 0)
       const turn = ++this.turn
       let step = 1, advancePending = false
       this.session.append('turn/start', { turn })

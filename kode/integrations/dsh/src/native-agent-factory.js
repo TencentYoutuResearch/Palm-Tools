@@ -4,7 +4,7 @@ import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import { NativeAgentDriver, boundaryProjection, inboxProjection } from './native-agent-driver.js'
 import { installQueueSteering } from './queue-steering.js'
 export const name = 'kode-native-agent-factory'
-export const inject = ['agents', 'sessions', 'sessionProjections', 'sessionPersistence', 'kodeAgents', 'tools', 'agentPresets']
+export const inject = ['agents', 'sessions', 'sessionProjections', 'sessionPersistence', 'kodeAgents', 'tools', 'agentPresets', 'agentLoop']
 export class NativeAgentFactory {
   constructor(ctx) { this.ctx = ctx; this.live = new Set(); this.byId = new Map(); this.pending = new Set(); this.stopping = false; this.stop = new AbortController() }
   createAgent(owner, options) { return this.track(() => this.attach(owner, options, false)) }
@@ -75,6 +75,70 @@ export class NativeAgentFactory {
   }
   async close() { this.stopping = true; this.stop.abort(new Error('Agent runtime unplugged')); await Promise.allSettled([...this.pending]); await Promise.all([...this.live].map(dispose => dispose())) }
 }
+/** Route only explicit Kode selections; other plugins retain the official factory. */
+export function installNativeFactoryRouting(ctx, native) {
+  const upstream = ctx.agents.requireFactory().target
+  const create = upstream.createAgent, resume = upstream.resume
+  const officialHandles = new Map()
+  ctx.on('agent/disposed', ({agent}) => { if (officialHandles.get(agent.id)?.handle.agent === agent) officialHandles.delete(agent.id) })
+  native.promote = async (agent, selection) => {
+    const record = officialHandles.get(agent.id)
+    if (!record || record.handle.agent !== agent) throw new Error('请新建会话后选择 Kode Agent。')
+    const boundary = ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
+    if (agent.status !== 'idle' || boundary?.lastTurn > 0 || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('已有运行历史的会话不能更换执行器，请新建会话。')
+    await record.handle.dispose()
+    const opened = await native.resume(record.owner, { resumeSessionId: agent.id, agentOptions: selection, setup: async (_scope, driver) => { driver.session.append('agent-preset/selected', {agentPreset:'kode-native'}) } })
+    return opened.agent
+  }
+  const remember = (owner, handle) => { officialHandles.set(handle.agent.id, {owner,handle}); return handle }
+  const owns = async (options, restoring) => {
+    const id = options.resumeSessionId ?? options.sessionId
+    if (ctx.kodeAgents.profiles?.binding?.(id)) return true
+    const provider = options.agentOptions?.provider
+    if (provider) return provider.startsWith('kode-agent-')
+    if (options.meta?.agentPreset === 'kode-native') return true
+    if (!restoring) return false
+    let handle
+    try {
+      handle = await ctx.sessionPersistence.open(id, 'read')
+      const stored = await handle.read()
+      const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
+        ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
+      if (selected?.provider) return selected.provider.startsWith('kode-agent-')
+      return (stored.header ?? handle.header)?.agentPreset === 'kode-native'
+    } finally { await handle?.close() }
+  }
+  const createRouter = async function(owner, options) {
+    return await owns(options, false) ? native.createAgent(owner, options) : remember(owner, await create.call(this, owner, options))
+  }
+  const resumeRouter = async function(owner, options) {
+    if (await owns(options, true)) return native.resume(owner, options)
+    // Earlier Kode releases tagged third-party sessions with the empty Kode
+    // preset. Repair only failed, never-executed sessions; preserve real history.
+    if (ctx.agentPresets.resolve && options.agentOptions?.provider) {
+      let handle, stored
+      try { handle = await ctx.sessionPersistence.open(options.resumeSessionId, 'read'); stored = await handle.read() }
+      finally { await handle?.close() }
+      const preset = stored.events.findLast(event => event.type === 'agent-preset/selected')?.data?.agentPreset ?? (stored.header ?? handle.header)?.agentPreset
+      if (preset === 'kode-native' && !stored.events.some(event => event.type === 'request/header')) {
+        const official = await ctx.agentPresets.resolve()
+        const setup = options.setup
+        options = { ...options, setup: async (agentCtx, agent) => {
+          const transaction = await setup?.(agentCtx, agent)
+          await ctx.agentPresets.mount(agentCtx, official.id)
+          agent.session.append('agent-preset/selected', { agentPreset: official.id })
+          return transaction
+        } }
+      }
+    }
+    return remember(owner, await resume.call(this, owner, options))
+  }
+  upstream.createAgent = createRouter; upstream.resume = resumeRouter
+  return () => {
+    if (upstream.createAgent === createRouter) upstream.createAgent = create
+    if (upstream.resume === resumeRouter) upstream.resume = resume
+  }
+}
 export async function apply(ctx) {
   ctx.inject(['sessionController'], scope => scope.effect(() => installQueueSteering(scope, scope.sessionController), 'kode.queue-steering'))
   const unregisterPreset = await ctx.agentPresets.register({ id: 'kode-native', name: '外部 Agent', description: '由所选 Agent 负责模型、指令和工具执行。', plugins: [] })
@@ -107,7 +171,7 @@ export async function apply(ctx) {
     yield ctx.sessionProjections.register(boundaryProjection)
     yield ctx.sessionProjections.register(inboxProjection)
     yield ctx.sessionProjections.register(contextUsageProjection)
-    yield ctx.agents.setFactory(factory)
+    yield installNativeFactoryRouting(ctx, factory)
     yield () => factory.close()
   }, 'kode.native-factory')
 }

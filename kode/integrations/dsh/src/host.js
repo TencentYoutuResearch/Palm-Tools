@@ -81,6 +81,8 @@ export async function apply(ctx, config = {}) {
     installRuntimeBridge(scope, admin)
   })
   function install(agent) {
+    // Third-party model sessions retain their own tools and execution context.
+    if (agent.options && !agent.isKodeNativeAgent && !agent.options.provider?.startsWith('kode-agent-')) return Promise.resolve()
     if (installing.has(agent.id)) return installing.get(agent.id)
     const task = performInstall(agent).finally(() => installing.delete(agent.id))
     installing.set(agent.id, task)

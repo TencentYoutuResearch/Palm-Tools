@@ -84,7 +84,7 @@ export class AgentRuntimeAdapter {
   boundary(agent) {
     const observed = this.positions.get(agent.session)
     if (observed) return observed
-    const position = this.ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
+    const position = this.ctx.sessionProjections.stateOf(agent.session, 'kodeTurnBoundary') ?? this.ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
     if (position?.lastStepBoundary?.kind !== 'start') throw new Error('external Agent call requires an open dsh step')
     return { turn: position.lastTurn, step: position.lastStepBoundary.step ?? 1 }
   }

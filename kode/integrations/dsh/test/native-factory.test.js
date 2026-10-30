@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionStore, { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
@@ -20,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-async function host(adapter) {
+async function host(adapter, official = false) {
   const ctx = new Context(), stored = new Map(), writers = new Map()
   await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(ProjectionRegistry)
   ctx.provide('tools', { schemas: () => [] })
@@ -41,6 +42,14 @@ async function host(adapter) {
   })
   ctx.on('session/event', (session, event) => { const row = stored.get(session.id); if (row && writers.has(session.id)) { assert.equal(event.seq, row.events.length); row.events.push(event) } })
   ctx.on('session/flush', async () => {})
+  if (official) {
+    ctx.provide('llm', {})
+    ctx.provide('systemPrompt', { variable: () => () => {} })
+    await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
+  } else {
+    ctx.agents.setFactory({ createAgent() { throw new Error('official create') }, resume() { throw new Error('official resume') } })
+    ctx.provide('agentLoop', {})
+  }
   const fiber = await ctx.plugin(factoryPlugin)
   return { ctx, stored, writers, fiber }
 }
@@ -284,4 +293,53 @@ test('goal pause reaches the live native thread while a turn is running',async()
   agent.steer(message('finish','Finish now'));await agent.whenIdle()
   assert.equal(h.stored.get(agent.id).events.filter(e=>e.type==='turn/start').length,1)
  }finally{await h.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true})}
+})
+
+
+test('third-party provider sessions use the real official loop while Kode sessions remain native', async () => {
+  const h = await host({ closeSession: async () => {} }, true)
+  try {
+    const route = { provider: 'deepseek-official', model: 'test-model' }
+    // An old QQ session may still carry the formerly global kode-native preset.
+    const qq = await h.ctx.agents.create({sessionId:'qq-isolated', agentOptions:route, meta:{agentPreset:'kode-native'}})
+    assert.equal(qq.agent.options.provider, route.provider)
+    assert.equal(qq.agent.assertSteeringAvailable, undefined)
+    assert.equal(typeof qq.agent.followup, 'function')
+    const native = await h.ctx.agents.create({...options, sessionId:'kode-isolated'})
+    assert.equal(typeof native.agent.assertSteeringAvailable, 'function')
+    assert.equal(h.ctx.agents.get('qq-isolated'), qq.agent)
+    await native.dispose(); await qq.dispose()
+    const resumed = await h.ctx.agents.resume({resumeSessionId:'qq-isolated', agentOptions:route})
+    assert.equal(resumed.agent.assertSteeringAvailable, undefined)
+    await resumed.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+
+test('explicit Kode selection promotes only its blank official session without changing other sessions', async () => {
+  const h = await host({ closeSession: async () => {} }, true)
+  try {
+    const official = await h.ctx.agents.create({sessionId:'blank-ui',agentOptions:{provider:'deepseek-official',model:'test'}})
+    const thirdParty = await h.ctx.agents.create({sessionId:'third-party',agentOptions:{provider:'deepseek-official',model:'test'}})
+    const selection={provider:'kode-agent-fixture',model:'fixture'}
+    const promoted=await h.ctx.kodeNativeFactory.promote(official.agent,selection)
+    assert.equal(promoted.id,official.agent.id)
+    assert.equal(typeof promoted.selectModel,'function')
+    assert.equal(h.ctx.agents.get(promoted.id),promoted)
+    assert.equal(h.ctx.agents.get(thirdParty.agent.id),thirdParty.agent)
+    await thirdParty.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+test('unloading Kode restores the official factory without disposing third-party sessions', async () => {
+  const h = await host({ closeSession: async () => {} }, true)
+  try {
+    const options = {agentOptions:{provider:'deepseek-official',model:'test'}}
+    const qq = await h.ctx.agents.create({...options,sessionId:'qq-before-unload'})
+    await h.fiber.dispose()
+    assert.equal(h.ctx.agents.get(qq.agent.id),qq.agent)
+    const next = await h.ctx.agents.create({...options,sessionId:'qq-after-unload'})
+    assert.equal(next.agent.assertSteeringAvailable,undefined)
+    await next.dispose(); await qq.dispose()
+  } finally { await h.ctx.fiber.dispose() }
 })

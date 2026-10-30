@@ -13,7 +13,9 @@
     # Both flows are required when one tab can select a local or SSH Host.
     - id: kode-directory-browse
       name: '@kode/dsh-directory-browse'
-    - id: kode-chat
+    # Loader entries are keyed by id; the appended entry replaces the base Chat
+    # while preserving the namespace used by official onboarding and settings.
+    - id: ui-chat
       name: '@kode/dsh-chat'
       config:
         transcriptView: standard
@@ -37,45 +39,10 @@
     backend: json
     routes:
       workspace: kode-workspaces
-- id: agent-loop
-  disabled: true
-- id: system-prompt
-  # Shared tool/workspace infrastructure needs the registry. It owns no model
-  # identity or persona; the built-in conversation integration contributes those.
-  config:
-    includeHarnessIdentity: false
-    personaPrefix: ''
-    personaSuffix: ''
-- id: harness-dev-context
-  disabled: true
-- id: tool-working-directory
-  disabled: true
-- id: subagent
-  disabled: true
-- id: subagent-spawn-in-process
-  disabled: true
-- id: subagent-fork-in-process
-  disabled: true
-- id: ui-settings-agent-loop
-  disabled: true
-- id: ui-settings-subagent
-  disabled: true
-- id: preset-standard
-  disabled: true
-- id: preset-minimal
-  disabled: true
-- id: preset-ptc
-  disabled: true
-- id: preset-cordis
-  disabled: true
-- id: agent-preset-registry
-  config:
-    default: kode-native
+# Official loops, prompts, tools, presets and defaults remain owned by dsh.
 - id: ui-model-selection
   disabled: true
 - id: ui-agent-preset
-  disabled: true
-- id: ui-chat
   disabled: true
 # Keep the official sidebar chrome with a private top-level Chromium page provider.
 - id: ui-sidebar-browser

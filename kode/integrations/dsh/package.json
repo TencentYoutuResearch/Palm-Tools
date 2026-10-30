@@ -59,11 +59,13 @@
     "@kode/dsh-directory-browse": "file:packages/directory-browse",
     "zod": "4.6.7",
     "js-yaml": "4.3.2",
-    "@kode/dsh-chat": "file:packages/chat"
+    "@kode/dsh-chat": "file:packages/chat",
+    "qrcode": "1.5.4"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-include": "^1.0.10",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-connection": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "@deepseek-ai/dsh-scope": "0.2.1-rc.2",

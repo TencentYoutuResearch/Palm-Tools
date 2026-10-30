@@ -18,13 +18,16 @@ export async function apply(ctx) {
     return host === 'local' ? url.pathname + url.search : `/api/kode/transport/${encodeURIComponent(host)}${url.pathname}${url.search}`
   }
   const fetchHost = (input, init, host = current) => fetch(pathFor(input, host), { ...init, credentials: 'same-origin' })
+  const carrier = globalThis.__DSH_TRANSPORT__
   installConnection(ctx, { location: window.location, transport: {
+    ...carrier,
     fetch: (input, init) => fetchWithLocalAppearance(input, init, { current, send: fetchHost }),
     createWebSocket: input => {
-      const original = new URL(input, window.location.origin)
-      const url = current === 'local' ? original : new URL(`/api/kode/transport-ws?host=${encodeURIComponent(current)}&path=${encodeURIComponent(original.pathname + original.search)}`, window.location.origin)
-      url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      return new WebSocket(url)
+      const base = carrier?.streamBaseUrl ?? window.location.href
+      const original = new URL(input, base)
+      const url = new URL(current === 'local' ? original.pathname + original.search : `/api/kode/transport-ws?host=${encodeURIComponent(current)}&path=${encodeURIComponent(original.pathname + original.search)}`, base)
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      return carrier?.createWebSocket ? carrier.createWebSocket(url.href) : new WebSocket(url)
     },
   } })
   const ready = (previous, signal) => new Promise((resolve, reject) => {

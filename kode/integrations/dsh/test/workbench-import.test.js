@@ -89,3 +89,12 @@ test('cold reconciliation never replaces an active native alias with its archive
  await syncNativeTabs({list:async()=>({items:[{sessionId:'active',cwd:'/srv/project',updatedAt:100,projections:{values:{title:'Kept conversation'}}},{sessionId:'archived',cwd:'/srv/project',updatedAt:200,projections:{values:{title:'Archived duplicate'}}}]})},h.client,h.profiles)
  assert.equal(h.state().native_sessions.length,1);assert.equal(h.state().native_sessions[0].dsh_session_id,'active');assert.equal(h.state().native_sessions[0].title,'Kept conversation')
 })
+
+test('saved sessions already owned by a live dsh runtime reuse its shared view without importing', async () => {
+  const h = importFixture()
+  const live = { id: 42, runtime: 'dsh', backend_key: h.tab.backend_key, native_thread_id: h.tab.session_id, session_uuid: 'existing-dsh-session', status: 'idle', owner_alive: true }
+  const call = h.client.call
+  h.client.call = async (path, body) => path.endsWith('/runtime/sessions') ? { sessions: [{...live, backend_key:'other-agent'}, live] } : call(path, body)
+  assert.deepEqual(await importSavedSession(h.ctx, h.client, h.tab), {sharedSession:live, imported:false})
+  assert.deepEqual(h.calls, [])
+})
