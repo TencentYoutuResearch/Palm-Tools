@@ -38,6 +38,23 @@ impl Registry {
         }
     }
 }
+/// Whether a session/new|load result advertises `mode_id`; agents that list no modes are trusted.
+fn advertises_mode(result: &Value, mode_id: &str) -> bool {
+    let legacy = result["modes"]["availableModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str());
+    let options = result["configOptions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|o| o["category"] == "mode")
+        .flat_map(|o| o["options"].as_array().into_iter().flatten())
+        .filter_map(|o| o["value"].as_str());
+    let mut ids = legacy.chain(options).peekable();
+    ids.peek().is_none() || ids.any(|id| id == mode_id)
+}
 #[derive(Clone)]
 struct Interaction {
     rpc_id: Option<Value>,
@@ -81,17 +98,22 @@ impl Client {
                 "This ACP session already has a live owner; close it before restoring".into(),
             );
         }
-        // Preserve configured agent arguments; only ACP supplies the transport flag.
+        // Preserve configured agent arguments; only the ACP spec supplies the transport entry.
+        let spec = backend
+            .acp
+            .clone()
+            .unwrap_or_else(kode_core::config::AcpSpec::flag);
+        let model = model.or(backend.default_model.as_deref());
         let mut command = Command::new(kode_core::pty::resolve_spawn_command(&backend.command));
         command
             .args(&backend.args)
-            .arg("--acp")
+            .args(&spec.args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(model) = model.or(backend.default_model.as_deref()) {
-            command.args(["--model", model]);
+        if let (Some(flag), Some(model)) = (spec.model_flag.as_deref(), model) {
+            command.args([flag, model]);
         }
         command
             .env("KODE_HOST", "1")
@@ -154,8 +176,15 @@ impl Client {
             *client.native_id.lock() = sid.clone();
             client.legacy_models.store(result["models"].is_object(), Ordering::Release);
             client.apply_config_options(&result);
+            // Agents without a model flag pick the model in-session; an unknown model keeps the agent default.
+            if let Some(model) = model.filter(|_| spec.model_flag.is_none()) {
+                let _ = client.select_config_option("model", model).await;
+            }
             if let Some(mode) = mode.filter(|m| *m != "default") {
-                client.request("session/set_mode", json!({"sessionId":sid,"modeId": if mode == "bypass" { "bypassPermissions" } else { mode }}), Some(Duration::from_secs(30))).await?;
+                let mode_id = if mode == "bypass" { "bypassPermissions" } else { mode };
+                if advertises_mode(&result, mode_id) {
+                    client.request("session/set_mode", json!({"sessionId":sid,"modeId":mode_id}), Some(Duration::from_secs(30))).await?;
+                }
             }
             Ok::<(), String>(())
         }.await;
@@ -286,37 +315,8 @@ impl Client {
         if self.busy.swap(true, Ordering::AcqRel) {
             return Err("Wait for the current turn before switching models".into());
         }
-        let option = self
-            .config_options
-            .lock()
-            .iter()
-            .find(|o| o["category"] == "model" && o["type"] == "select")
-            .cloned();
-        let result = if let Some(option) = option {
-            let config_id = option["id"].as_str().or(option["configId"].as_str());
-            if let Some(config_id) = config_id {
-                self.request(
-                    "session/set_config_option",
-                    json!({"sessionId":self.session_id(),"configId":config_id,"value":model}),
-                    Some(Duration::from_secs(20)),
-                )
-                .await
-                .and_then(|response| {
-                    self.apply_config_options(&response);
-                    if self
-                        .config_options
-                        .lock()
-                        .iter()
-                        .any(|o| o["category"] == "model" && o["currentValue"] == model)
-                    {
-                        Ok(response)
-                    } else {
-                        Err("Agent did not confirm the requested model".into())
-                    }
-                })
-            } else {
-                Err("Agent returned a model option without an id".into())
-            }
+        let result = if let Some(result) = self.select_config_option("model", model).await {
+            result
         } else if self.legacy_models.load(Ordering::Acquire) {
             self.request(
                 "session/set_model",
@@ -324,6 +324,7 @@ impl Client {
                 Some(Duration::from_secs(20)),
             )
             .await
+            .map(|_| ())
         } else {
             Err("This ACP agent does not advertise model switching".into())
         };
@@ -338,6 +339,53 @@ impl Client {
         Ok(())
     }
 
+    /// Model the agent currently reports through its config options.
+    pub fn current_model(&self) -> Option<String> {
+        self.config_options
+            .lock()
+            .iter()
+            .find(|o| o["category"] == "model")
+            .and_then(|o| o["currentValue"].as_str())
+            .map(str::to_owned)
+    }
+    /// Select `value` on the advertised select option of `category`; `None` when not advertised.
+    async fn select_config_option(
+        &self,
+        category: &str,
+        value: &str,
+    ) -> Option<Result<(), String>> {
+        let option = self
+            .config_options
+            .lock()
+            .iter()
+            .find(|o| o["category"] == category && o["type"] == "select")
+            .cloned()?;
+        let Some(config_id) = option["id"].as_str().or(option["configId"].as_str()) else {
+            return Some(Err(format!(
+                "Agent returned a {category} option without an id"
+            )));
+        };
+        let result = self
+            .request(
+                "session/set_config_option",
+                json!({"sessionId":self.session_id(),"configId":config_id,"value":value}),
+                Some(Duration::from_secs(20)),
+            )
+            .await;
+        Some(result.and_then(|response| {
+            self.apply_config_options(&response);
+            if self
+                .config_options
+                .lock()
+                .iter()
+                .any(|o| o["category"] == category && o["currentValue"] == value)
+            {
+                Ok(())
+            } else {
+                Err(format!("Agent did not confirm the requested {category}"))
+            }
+        }))
+    }
     fn apply_config_options(&self, value: &Value) {
         let Some(options) = value["configOptions"].as_array() else {
             return;
@@ -953,6 +1001,45 @@ for line in sys.stdin:
             ctx.sessions.lock().get(&991).unwrap().state.model,
             "external"
         );
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn subcommand_agents_select_model_in_session_and_skip_unadvertised_modes() {
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "test".into());
+        let mut backend = ctx.config.backend("opencode").unwrap().clone();
+        backend.command = "/usr/bin/python3".into();
+        backend.args = vec!["-u".into(), "-c".into(), r#"
+import json, sys
+assert sys.argv[1:] == ['acp'], sys.argv
+option={'id':'model','category':'model','type':'select','currentValue':'free','options':[{'value':'free','name':'Free'},{'value':'local/qwen','name':'Qwen'}]}
+mode={'id':'mode','category':'mode','type':'select','currentValue':'build','options':[{'value':'build','name':'build'},{'value':'plan','name':'plan'}]}
+for line in sys.stdin:
+    frame=json.loads(line)
+    method=frame.get('method')
+    if 'id' not in frame: continue
+    if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+    elif method=='session/new': result={'sessionId':'native-oc','configOptions':[option, mode]}
+    elif method=='session/set_config_option':
+        option['currentValue']=frame['params']['value']
+        result={'configOptions':[option, mode]}
+    else:
+        print(json.dumps({'jsonrpc':'2.0','id':frame['id'],'error':{'code':-32601,'message':method}}),flush=True)
+        continue
+    print(json.dumps({'jsonrpc':'2.0','id':frame['id'],'result':result}),flush=True)
+"#.into()];
+        let client = Client::start(
+            ctx.clone(),
+            992,
+            &backend,
+            Path::new("/tmp"),
+            Some("bypass"),
+            Some("local/qwen"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.current_model().as_deref(), Some("local/qwen"));
         client.shutdown();
     }
 }

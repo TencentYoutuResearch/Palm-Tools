@@ -163,6 +163,7 @@ async fn mobile_text_input_submits_with_a_separate_carriage_return() {
             model_flag: None,
             permission_mode_flag: None,
             mcp_setup: None,
+            acp: None,
             enabled: None,
         },
     );

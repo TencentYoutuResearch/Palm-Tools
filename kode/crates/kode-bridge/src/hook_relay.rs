@@ -25,6 +25,7 @@
 //! | `PostToolUse` / `SubagentStop` / `SessionEnd` | — | `session.attention_cleared` | Codex 本轮结束后清除 stale attention |
 //! | `Stop` / `stop` | — | `session.turn_finished` + `session.attention_cleared` + `TurnHold(false)` | 本轮真正结束 |
 //! | `afterAgentResponse` / `stop`(Cursor) | token 字段 | `CoreEvent::JsonlMeta` | Cursor CLI 单轮 token;stop 在 CLI 更可靠,generation_id 去重 |
+//! | 任意事件(opencode 插件) | `opencode_session_uuid` | `opencode_tail::bind` | 把 tab 精确绑定到 opencode 会话 |
 //!
 //! ## 安全
 //!
@@ -218,6 +219,15 @@ fn process_hook_json_inner(
         .get("hook_event_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    // opencode 插件每条用户消息都带上当前会话 id;tab 的 SQLite tail 以它为准。
+    if let Some(sid) = doc
+        .get("opencode_session_uuid")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        kode_core::session::opencode_tail::bind(session_id, sid);
+    }
 
     match event_name {
         "Notification" => {
@@ -626,6 +636,21 @@ mod tests {
         let env = rx.try_recv().expect("should receive event");
         assert_eq!(env.r#type, "session.attention_cleared");
         assert_eq!(env.session_id, 42);
+    }
+
+    #[test]
+    fn opencode_plugin_prompt_binds_tab_session() {
+        let bus = Arc::new(BridgeBus::new());
+        let mut rx = bus.subscribe();
+        process_hook_json(
+            r#"{"session_id":"4242","hook_event_name":"UserPromptSubmit","opencode_session_uuid":"ses_abc"}"#,
+            &bus,
+        );
+        assert_eq!(
+            kode_core::session::opencode_tail::bound_session(4242).as_deref(),
+            Some("ses_abc")
+        );
+        assert_eq!(rx.try_recv().unwrap().r#type, "session.attention_cleared");
     }
 
     #[test]

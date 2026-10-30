@@ -195,6 +195,8 @@ pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvel
         Backend::Claude | Backend::Tclaude => parse_claude(id, line),
         Backend::Codex | Backend::Tcodex => parse_codex(id, line),
         Backend::Cursor => parse_cursor(id, line),
+        // opencode 没有 transcript 行可解析;结构化事件走 ACP。
+        Backend::Opencode => vec![],
     }
 }
 

@@ -808,6 +808,34 @@ fn codex_hook_quote(path: &Path) -> String {
     }
 }
 
+/// kode 随包分发的 opencode 插件:把 tab 精确绑定到 opencode 会话,并上报回合起止。
+const OPENCODE_PLUGIN_JS: &str = include_str!("opencode_plugin.js");
+
+/// opencode 全局插件路径 `$XDG_CONFIG_HOME/opencode/plugin/kode.js`
+/// (默认 `~/.config/opencode/plugin/kode.js`)。opencode 不读 hooks 配置,只认插件目录。
+pub fn opencode_plugin_path() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
+    Some(config.join("opencode").join("plugin").join("kode.js"))
+}
+
+/// 安装 / 升级 opencode 插件(幂等,内容一致时不写盘)。插件在 kode 外运行时是 no-op。
+pub fn install_opencode_plugin(path: &Path) -> Result<(), String> {
+    if std::fs::read_to_string(path).is_ok_and(|current| current == OPENCODE_PLUGIN_JS) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {} failed: {e}", parent.display()))?;
+    }
+    let tmp = path.with_extension("js.tmp");
+    std::fs::write(&tmp, OPENCODE_PLUGIN_JS)
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("write {} failed: {e}", path.display()))
+}
+
 /// Cursor Agent `~/.cursor/hooks.json` 路径。
 pub fn cursor_hooks_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".cursor").join("hooks.json"))
@@ -1532,6 +1560,19 @@ mod tests {
         // 对齐 GUI memory_mcp.rs 原有的 which_finds_sh 测试。
         let sh = super::resolve_named_binary("sh");
         assert!(sh.is_some(), "sh should be resolvable on PATH");
+    }
+
+    #[test]
+    fn install_opencode_plugin_writes_and_upgrades_managed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode").join("plugin").join("kode.js");
+        super::install_opencode_plugin(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("KODE_HOOK_SOCK"));
+        assert!(written.contains("opencode_session_uuid"));
+        std::fs::write(&path, "// stale").unwrap();
+        super::install_opencode_plugin(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
     }
 
     #[test]

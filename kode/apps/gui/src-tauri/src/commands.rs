@@ -604,8 +604,14 @@ pub async fn spawn_session(
 
     let model = sanitize_spawn_model(model);
 
+    let acp_spec = state
+        .ctx
+        .backend_configs
+        .read()
+        .get(&backend_key)
+        .and_then(|backend| backend.acp.clone());
     let structured =
-        uses_structured_transport(&endpoint_id, &backend_key, transport_kind.as_deref());
+        uses_structured_transport(&endpoint_id, acp_spec.as_ref(), transport_kind.as_deref());
     if structured {
         let mut backend = state
             .ctx
@@ -641,8 +647,9 @@ pub async fn spawn_session(
             &backend.command,
             cwd,
             client.session_id(),
-            model
-                .clone()
+            client
+                .current_model()
+                .or(model.clone())
                 .or(backend.default_model)
                 .unwrap_or_else(|| "auto".into()),
         );
@@ -691,13 +698,11 @@ pub async fn spawn_session(
 
 fn uses_structured_transport(
     endpoint_id: &EndpointId,
-    backend_key: &str,
+    acp: Option<&kode_core::config::AcpSpec>,
     transport_kind: Option<&str>,
 ) -> bool {
-    // ACP is opt-in; ordinary new tabs retain the PTY metadata and input path.
-    matches!(endpoint_id, EndpointId::Local)
-        && backend_key == "codebuddy"
-        && transport_kind == Some("acp")
+    // ACP is opt-in; ordinary new tabs keep the CLI's own TUI on the PTY path.
+    matches!(endpoint_id, EndpointId::Local) && acp.is_some() && transport_kind == Some("acp")
 }
 
 fn sanitize_spawn_model(model: Option<String>) -> Option<String> {
@@ -1666,18 +1671,23 @@ fn persist_paths(state: &AppState) {
 #[cfg(test)]
 mod session_transport_tests {
     use super::uses_structured_transport;
-    use kode_core::EndpointId;
+    use kode_core::{config::Config, EndpointId};
+
+    fn acp(key: &str) -> Option<kode_core::config::AcpSpec> {
+        Config::default().backend(key).and_then(|b| b.acp.clone())
+    }
 
     #[test]
     fn new_codebuddy_tabs_default_to_pty() {
+        let spec = acp("codebuddy");
         assert!(!uses_structured_transport(
             &EndpointId::Local,
-            "codebuddy",
+            spec.as_ref(),
             None
         ));
         assert!(!uses_structured_transport(
             &EndpointId::Local,
-            "codebuddy",
+            spec.as_ref(),
             Some("pty")
         ));
     }
@@ -1686,12 +1696,27 @@ mod session_transport_tests {
     fn codebuddy_acp_remains_explicitly_available() {
         assert!(uses_structured_transport(
             &EndpointId::Local,
-            "codebuddy",
+            acp("codebuddy").as_ref(),
             Some("acp")
         ));
         assert!(!uses_structured_transport(
             &EndpointId::Local,
-            "codex",
+            acp("codex").as_ref(),
+            Some("acp")
+        ));
+    }
+
+    #[test]
+    fn opencode_tabs_default_to_tui_and_allow_explicit_acp() {
+        let spec = acp("opencode");
+        assert!(!uses_structured_transport(
+            &EndpointId::Local,
+            spec.as_ref(),
+            None
+        ));
+        assert!(uses_structured_transport(
+            &EndpointId::Local,
+            spec.as_ref(),
             Some("acp")
         ));
     }

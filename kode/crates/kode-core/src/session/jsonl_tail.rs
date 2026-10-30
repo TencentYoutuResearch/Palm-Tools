@@ -38,6 +38,7 @@ pub enum Backend {
     Codex,
     Tcodex,
     Cursor,
+    Opencode,
 }
 
 impl Backend {
@@ -55,6 +56,7 @@ impl Backend {
             "codex" => Some(Backend::Codex),
             "tcodex" => Some(Backend::Tcodex),
             "cursor" => Some(Backend::Cursor),
+            "opencode" => Some(Backend::Opencode),
             // Teams commonly wrap a supported CLI with a short prefix (for
             // example `tclaude`). It still owns the same transcript and turn
             // lifecycle, so treating it as an unknown raw PTY leaves status
@@ -102,7 +104,7 @@ impl Backend {
                     .join(format!("{session_id}.jsonl")),
                 )
             }
-            Backend::Codex | Backend::Tcodex | Backend::Cursor => None,
+            Backend::Codex | Backend::Tcodex | Backend::Cursor | Backend::Opencode => None,
         }
     }
 
@@ -131,6 +133,8 @@ impl Backend {
             Backend::Codex => contains_pair(".codex", "sessions"),
             Backend::Tcodex => contains_pair(".tcodex", "sessions"),
             Backend::Cursor => contains_pair(".cursor", "projects"),
+            // opencode 不发 transcript hook,也没有 transcript 文件。
+            Backend::Opencode => false,
         }
     }
 }
@@ -170,7 +174,7 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
         Backend::Codebuddy => home.join(".codebuddy").join("projects"),
         Backend::Claude => home.join(".claude").join("projects"),
         Backend::Tclaude => home.join(".tclaude").join("projects"),
-        Backend::Codex | Backend::Tcodex | Backend::Cursor => return None,
+        Backend::Codex | Backend::Tcodex | Backend::Cursor | Backend::Opencode => return None,
     };
     let filename = format!("{session_id}.jsonl");
     let entries = fs::read_dir(&projects_root).ok()?;
@@ -736,7 +740,7 @@ async fn run_with_replay_policy(
             Backend::Codex | Backend::Tcodex => {
                 parse_codex_line_for_backend(line, &mut state, backend)
             }
-            Backend::Cursor => LineUpdate::default(),
+            Backend::Cursor | Backend::Opencode => LineUpdate::default(),
         };
         // Historical requests belong to this conversation, but not to the
         // newly spawned CLI's selected model. Keep their usage and identity.
