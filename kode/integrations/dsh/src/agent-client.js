@@ -663,7 +663,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h('span', { className: 'kode-status-avatar-overlay', 'aria-hidden': true }, h('span', { className: 'kode-status-avatar-body', 'data-status': item.state }, h(AgentAvatar, { profile: rows[item.id].agent, size: 20, status: item.state === 'ongoing' ? 'running' : 'idle' }))), item.seat, `${item.id}:${index}`)),
       ...workspaceTargets.map(item => {
         const label = [item.ongoing ? `${item.ongoing} 个会话进行中` : '', item.done ? `${item.done} 个会话已完成` : ''].filter(Boolean).join(' · ')
-        return createPortal(h('span', { className: 'kode-workspace-status', 'data-status': item.ongoing ? 'ongoing' : 'done', role: 'img', 'aria-label': label, title: label }), item.seat, `workspace:${item.id}`)
+        return createPortal(h('span', { className: 'kode-workspace-status', 'data-status': item.done ? 'done' : 'ongoing', role: 'img', 'aria-label': label, title: label }), item.seat, `workspace:${item.id}`)
       }))
   }
   function FederatedWorkspaceBrowser({ native, slots, ...props }) {

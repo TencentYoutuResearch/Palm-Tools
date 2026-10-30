@@ -397,7 +397,7 @@ test('the sidebar status overlay preserves animated avatars while retaining its 
  assert.ok(avatars.every(avatar=>avatar.props.profile.avatar.id==='gallery/person'&&avatar.props.size===20))
 })
 
-test('workspace status survives collapsed session rows and gives running sessions visual priority',()=>{
+test('workspace status survives collapsed session rows and gives completed sessions visual priority',()=>{
  const scope={};vm.runInNewContext(source.slice(source.indexOf('  function sessionStateMap'),source.indexOf('  function SessionStatusAvatars')),scope)
  const collapsed=scope.sessionStateMap({busy:{running:false},done:{},idle:{}},new Map([['busy',{running:true}],['done',{completionUnread:true}],['idle',{running:false}]]))
  assert.equal(collapsed.get('busy'),'ongoing');assert.equal(collapsed.get('done'),'done');assert.equal(collapsed.has('idle'),false)
@@ -409,7 +409,7 @@ test('workspace status survives collapsed session rows and gives running session
  Object.assign(scope,{React:{Fragment:'fragment'},h,createPortal:element=>element,useState:()=>[states.shift(),()=>{}],useEffect:()=>{}})
  vm.runInNewContext(source.slice(source.indexOf('  function SessionStatusAvatars'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
  const tree=scope.SessionStatusAvatars({root:{current:null},rows:{}}),indicator=tree.children[0]
- assert.equal(indicator.props['data-status'],'ongoing')
+ assert.equal(indicator.props['data-status'],'done')
  assert.equal(indicator.props['aria-label'],'1 个会话进行中 · 2 个会话已完成')
 })
 
