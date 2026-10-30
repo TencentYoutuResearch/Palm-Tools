@@ -2158,6 +2158,7 @@
             console.error('session start failed:', e)
             sessionStartError = friendlySessionStartError(e)
             chooserOpen = true
+            return false
           }
         }}
       />
