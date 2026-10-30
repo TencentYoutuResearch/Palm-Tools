@@ -22,6 +22,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event'
   import BackendIcon from './BackendIcon.svelte'
   import UpdateSettings from './UpdateSettings.svelte'
+  import IntegrationSettings from './IntegrationSettings.svelte'
   import { currentLocale, systemLanguageLabel, t } from './i18n'
   import {
     SCREENSHOT_MODE_OPTIONS,
@@ -53,7 +54,7 @@
   }
   let { onClose, onOpenMemorySync, onOpenPlugins, onTakeScreenshot, locale, onLocaleChange }: Props = $props()
 
-  type Tab = 'backends' | 'plugins' | 'memory' | 'terminal' | 'capture' | 'language' | 'updates'
+  type Tab = 'integrations' | 'backends' | 'plugins' | 'memory' | 'terminal' | 'capture' | 'language' | 'updates'
   let tab: Tab = $state('backends')
 
   let backends: BackendListItem[] = $state([])
@@ -372,6 +373,10 @@
         <span>{tr('settings.backends.title')}</span>
         <span class="nav-badge">{enabledCount}</span>
       </button>
+      <button class="nav-item" class:active={tab === 'integrations'} onclick={() => (tab = 'integrations')}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 8h8v8H8zM12 3v5m0 8v5M3 12h5m8 0h5" /></svg>
+        <span>{tr('settings.integrations.title')}</span>
+      </button>
       <button class="nav-item" class:active={tab === 'memory'} onclick={() => (tab = 'memory')}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 3v18M5 7a3 3 0 0 1 3-3h.5a3 3 0 0 1 3 3M5 7a3 3 0 0 0-3 3v4a3 3 0 0 0 3 3M19 7a3 3 0 0 0-3-3h-.5a3 3 0 0 0-3 3M19 7a3 3 0 0 1 3 3v4a3 3 0 0 1-3 3" />
@@ -612,6 +617,8 @@
             </div>
           {/if}
         {/if}
+      {:else if tab === 'integrations'}
+        <IntegrationSettings />
       {:else if tab === 'memory'}
         <div class="content-head">
           <h2>{tr('settings.memory.title')}</h2>

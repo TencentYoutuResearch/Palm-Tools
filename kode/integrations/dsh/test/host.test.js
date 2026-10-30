@@ -78,7 +78,7 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
 
 test('queued messages resume only previously registered dsh sessions through the native controller', { skip: !url || !tokenFile }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-dsh-wake-'))
-  const disposers = [], listeners = new Map(), received = [], tools = new Map()
+  const disposers = [], listeners = new Map(), received = [], tools = new Map(), registrations = new Map()
   const admin = new BackendClient(url, (await readFile(tokenFile, 'utf8')).trim())
   const id = `cold-${randomUUID()}`, otherId = `unowned-${randomUUID()}`
   const own = await admin.call('/api/v1/messaging/sessions', { session_id: id, title: 'Cold dsh', runtime: 'dsh' })
@@ -90,7 +90,7 @@ test('queued messages resume only previously registered dsh sessions through the
   })
   let resumes = 0, flushed = 0, current
   const agent = { id, session: { header: {} }, followup: message => received.push(message), ctx: {
-    tools: { register: tool => { tools.set(tool.name, tool); return () => tools.delete(tool.name) } },
+    tools: { register: tool => { tools.set(tool.name, tool); registrations.set(tool.name, (registrations.get(tool.name) ?? 0) + 1); return () => tools.delete(tool.name) } },
     parallel: async () => { flushed++ },
   } }
   const controller = { resolveAgent: async target => {
@@ -120,7 +120,8 @@ test('queued messages resume only previously registered dsh sessions through the
     assert.equal(resumes, 1)
     assert.equal(received.length, 1)
     assert.equal(flushed, 1)
-    assert.equal(tools.size, 5, 'created event and resolve continuation share one installation')
+    assert.ok(tools.has('kode_sessions_send')); assert.ok(tools.has('memory_search'))
+    assert.ok([...registrations.values()].every(count => count === 1), 'created event and resolve continuation share one installation')
   } finally {
     for (const dispose of disposers.reverse()) await dispose?.()
     await rm(root, { recursive: true, force: true })

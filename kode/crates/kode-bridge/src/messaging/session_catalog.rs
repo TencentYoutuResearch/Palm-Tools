@@ -19,6 +19,9 @@ fn sanitized(row: &Value) -> Option<Value> {
     if !super::model::valid_id(id) || backend.is_empty() || backend.len() > 128
         || cwd.len() > 4096 || !std::path::Path::new(cwd).is_absolute() { return None }
     let mut result = json!({"session_id":id,"backend_key":backend,"cwd":cwd,"transport_kind":"pty","endpoint_id":null,"title":"未命名会话","title_pinned":false});
+    if matches!(row["transport_kind"].as_str(), Some("acp" | "runtime")) {
+        result["transport_kind"] = row["transport_kind"].clone();
+    }
     for field in ["title", "model", "permission_mode", "avatar_id", "dsh_session_id", "workspace_title", "agent_id"] {
         if let Some(value) = row[field].as_str().filter(|value| value.len() <= 512) {
             result[field] = json!(value);

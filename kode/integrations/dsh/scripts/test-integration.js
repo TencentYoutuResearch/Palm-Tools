@@ -13,13 +13,13 @@ async function run(command, args, env = process.env) {
   const [code] = await once(child, 'exit')
   if (code !== 0) throw new Error(`${command} failed (${code})`)
 }
-await run('cargo', ['build', '-p', 'kode-bridge', '--bin', 'kode-session-server'])
+await run('cargo', ['build', '-p', 'kode-bridge', '--bin', 'kode-session-server', '--bin', 'kode-session-mcp'])
 const root = await mkdtemp(join(tmpdir(), 'kode-dsh-integration-'))
 const tokenFile = join(root, 'admin.token')
 const configFile = join(root, 'config.json')
 await writeFile(tokenFile, randomBytes(32).toString('hex'), { mode: 0o600 })
 await writeFile(configFile, JSON.stringify({ node_id: 'integration', database: join(root, 'messages.sqlite'), peers: [] }))
-const backend = spawn(join(project, 'target/debug/kode-session-server'), ['--config', configFile, '--token-file', tokenFile, '--bind', '127.0.0.1:0'], { env: { ...process.env, KODE_GUI_STATE_PATH: join(root, 'gui-state.json') }, stdio: ['ignore', 'pipe', 'inherit'] })
+const backend = spawn(join(project, 'target/debug/kode-session-server'), ['--config', configFile, '--token-file', tokenFile, '--bind', '127.0.0.1:0'], { env: { ...process.env, KODE_GUI_STATE_PATH: join(root, 'gui-state.json'), KODE_CLOUD_SYNC_CONFIG: join(root, 'cloud-sync.json'), KODE_MEMORY_ROOT: join(root, 'memory') }, stdio: ['ignore', 'pipe', 'inherit'] })
 try {
   const address = await new Promise((resolve, reject) => {
     let text = ''

@@ -5,6 +5,17 @@ import { appendFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+// CodeBuddy's discovery transport precedes interactive ACP creation.
+if (process.argv.includes('--input-format')) {
+  const { createInterface } = await import('node:readline')
+  const lines = createInterface({ input: process.stdin })
+  lines.on('line', line => {
+    const request = JSON.parse(line)
+    if (request.request?.subtype === 'get_available_models') process.stdout.write(JSON.stringify({ request_id: request.request_id, availableModels: [{ modelId: 'fixture-fast', name: 'Fast fixture', isDefault: true }, { modelId: 'fixture-large', name: 'Large fixture' }] }) + '\n')
+  })
+  await new Promise(resolve => lines.on('close', resolve))
+  process.exit(0)
+}
 const app = agent({ name: 'kode-acp-fixture' })
 const sessionId = 'same-native-session', clients = new Map(), pending = new Map()
 const modes = { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'plan', name: 'Plan' }] }

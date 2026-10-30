@@ -122,7 +122,7 @@ export function upsertSessionTab(
 export function sessionTabToPersisted(tab: TabInfo): PersistedTab {
   return {
     backend_key: tab.backendKey,
-    transport_kind: tab.transportKind,
+    transport_kind: tab.sharedRuntime ? 'runtime' : tab.transportKind,
     title: tab.title,
     title_pinned: tab.titlePinned ?? false,
     cwd: tab.cwd ?? '',

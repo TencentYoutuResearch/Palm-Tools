@@ -63,7 +63,7 @@ pub const STOP_HOOK_PROMPT: &str = r#"你是 kode-memory 的沉淀守门员。ko
 - 用户表达了稳定的偏好（不是一次性的「这次先 X」）
 
 ## 绝对不要拦（命中任一就放行）
-- transcript 中存在真实的 `mcp__memory__memory_propose` MCP 工具调用 → 已经记了，放行。只有该工具调用才算写入 kode-memory；写入 CodeBuddy file-based memory、CODEBUDDY.md/AGENTS.md/项目文档、通过 Write/Edit 修改文件，或仅在文字中声称/提到 memory_propose，均不算已沉淀
+- transcript 中存在真实的 `mcp__memory__memory_propose` MCP 工具调用，或共享后端的 `mcp__kode-shared-services__memory_propose` MCP 工具调用 → 已经记了，放行。只有该工具调用才算写入 kode-memory；写入 CodeBuddy file-based memory、CODEBUDDY.md/AGENTS.md/项目文档、通过 Write/Edit 修改文件，或仅在文字中声称/提到 memory_propose，均不算已沉淀
 - 纯一次性指令、闲聊、简单问答、只读探查、跑测试看结果
 - 结论能从代码或 git log 直接看出来（不算"非显而易见"）
 - 本轮没有任何决策/坑/偏好沉淀价值
@@ -71,7 +71,7 @@ pub const STOP_HOOK_PROMPT: &str = r#"你是 kode-memory 的沉淀守门员。ko
 
 ## 输出
 - 没有值得沉淀的：{"ok": true}
-- 确实有且 agent 没记、且已确认 MCP 可用：{"ok": false, "reason": "本轮产生了值得沉淀进 kode-memory 的内容：<一句话说清是什么>。请用 memory_search 查重后调 memory_propose 写入(author 用当前 backend，scope 用 project:<当前项目名>，body 含结论+why)。若工具不可用、已有等价 fact 或返回 out_of_energy，则无需写入，直接结束，不要反复查找工具。"}
+- 确实有且 agent 没记、且已确认 MCP 可用：{"ok": false, "reason": "本轮产生了值得沉淀进 kode-memory 的内容：<一句话说清是什么>。请用 memory_search 查重后调 memory_propose 写入(参数遵循当前工具 schema，scope 用 project:<当前项目名>，body 含结论+why)。若工具不可用、已有等价 fact 或返回 out_of_energy，则无需写入，直接结束，不要反复查找工具。"}
 
 保守判断：绝大多数轮次都应返回 {"ok": true}。只有明确命中"应当沉淀"且 agent 确实没写时才返回 ok:false。
 
@@ -1093,6 +1093,7 @@ mod tests {
     #[test]
     fn stop_prompt_only_accepts_real_shared_memory_proposal() {
         assert!(STOP_HOOK_PROMPT.contains("`mcp__memory__memory_propose` MCP 工具调用"));
+        assert!(STOP_HOOK_PROMPT.contains("`mcp__kode-shared-services__memory_propose` MCP 工具调用"));
         assert!(STOP_HOOK_PROMPT.contains("只有该工具调用才算写入 kode-memory"));
         for excluded in [
             "file-based memory",

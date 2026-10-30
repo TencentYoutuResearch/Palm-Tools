@@ -11,12 +11,13 @@ export async function connectBackend(client, config) {
   if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('automatic backend startup requires a loopback HTTP URL')
   if (!config.tokenFile) throw new Error('automatic backend startup requires tokenFile')
   const child = spawn(config.serverCommand ?? 'kode-session-server', [
+    ...(config.serverArgs ?? []),
     '--config', config.serverConfig, '--token-file', config.tokenFile,
     '--bind', `${url.hostname}:${url.port || '80'}`,
-  ], { stdio: ['ignore', 'ignore', 'pipe'], shell: false })
+  ], { stdio: config.sharedBackendState ? 'ignore' : ['ignore', 'ignore', 'pipe'], detached: Boolean(config.sharedBackendState), shell: false })
   let failure, stderr = ''
   child.on('error', error => { failure = error })
-  child.stderr.on('data', bytes => { stderr = (stderr + bytes.toString()).slice(-4096) })
+  child.stderr?.on('data', bytes => { stderr = (stderr + bytes.toString()).slice(-4096) })
   async function close() {
     if (child.exitCode !== null || child.signalCode !== null || !child.pid) return
     const exited = once(child, 'exit')
@@ -28,7 +29,7 @@ export async function connectBackend(client, config) {
     for (let attempt = 0; attempt < 50; attempt++) {
       if (failure) throw failure
       if (child.exitCode !== null) throw new Error(`kode-session-server exited (${child.exitCode}): ${stderr.trim()}`)
-      try { return { node: await client.call('/api/v1/messaging/node'), close } }
+      try { const node = await client.call('/api/v1/messaging/node'); if (config.sharedBackendState) { child.unref(); return { node, servicePid: child.pid, close: async () => {} } }; return { node, close } }
       catch (error) { if (!(error instanceof TypeError)) throw error }
       await new Promise(resolve => setTimeout(resolve, 200))
     }

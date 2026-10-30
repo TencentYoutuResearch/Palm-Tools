@@ -187,8 +187,9 @@ fn parse_codebuddy_models(result: &Value) -> Vec<DiscoveredModel> {
         .collect()
 }
 
-async fn discover_codebuddy(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
+async fn discover_codebuddy(backend: &str, command: &str, args: &[String]) -> Result<ModelDiscoveryResult, String> {
     let mut child = Command::new(command)
+        .args(args)
         .args([
             "--print",
             "--input-format",
@@ -307,7 +308,7 @@ async fn discover_models_with_args(
 ) -> Result<ModelDiscoveryResult, String> {
     match Backend::from_backend_key(protocol) {
         Some(Backend::Codex | Backend::Tcodex) => discover_codex(backend, command, args).await,
-        Some(Backend::Codebuddy) => discover_codebuddy(backend, command).await,
+        Some(Backend::Codebuddy) => discover_codebuddy(backend, command, args).await,
         Some(Backend::Claude) => discover_claude(backend, command).await,
         Some(Backend::Tclaude) => discover_tclaude(command).await,
         Some(Backend::Cursor) => discover_cursor(backend, command).await,

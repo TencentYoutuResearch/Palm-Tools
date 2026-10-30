@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { access, chmod, mkdir, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { homedir, hostname } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -68,6 +68,19 @@ async function ensurePrivateFile(path, content) {
 
 export async function prepareRuntimeConfig(config = {}, options = {}) {
   const env = options.env ?? process.env
+  const home = options.home ?? homedir()
+  const platform = options.platform ?? process.platform
+  const connectionFile = config.workbenchConnectionFile ?? env.KODE_WORKBENCH_CONNECTION ?? join(platform === 'darwin' ? join(home, 'Library', 'Application Support') : env.XDG_CONFIG_HOME || join(home, '.config'), 'kode', 'workbench-connection.json')
+  // A GUI-first installation already owns its service and database. Joining
+  // that service is essential: a second database cannot synchronize sessions.
+  if (config.autoProvision !== false && !config.tokenFile && !env.KODE_BRIDGE_TOKEN && !env.KODE_DSH_HOME && !config.serverConfig && (!config.url || config.url === 'http://127.0.0.1:47870')) {
+    let shared
+    try { shared = JSON.parse(await readFile(connectionFile, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    if (shared) {
+      if (!isLoopback(shared.url) || typeof shared.token_file !== 'string') throw new Error('Invalid shared Kode backend connection')
+      return { ...config, url: shared.url, tokenFile: shared.token_file, serverConfig: shared.server_config, serverCommand: shared.server_command, serverArgs: shared.server_args ?? [], sharedBackendState: true, workbenchConnectionFile: connectionFile }
+    }
+  }
   const url = config.url ?? 'http://127.0.0.1:47870'
   const autoProvision = config.autoProvision !== false
     && isLoopback(url)
@@ -79,7 +92,6 @@ export async function prepareRuntimeConfig(config = {}, options = {}) {
   let stateFile = config.stateFile
 
   if (autoProvision) {
-    const home = options.home ?? homedir()
     const dataDirectory = env.KODE_DSH_HOME || options.dataDirectory || join(home, '.config', 'kode', 'dsh')
     await mkdir(dataDirectory, { recursive: true, mode: 0o700 })
     await chmod(dataDirectory, 0o700)
@@ -107,6 +119,9 @@ export async function prepareRuntimeConfig(config = {}, options = {}) {
 
   return {
     ...config,
+    sharedBackendState: config.sharedBackendState ?? true,
+    publishWorkbenchConnection: config.publishWorkbenchConnection ?? (autoProvision && !env.KODE_DSH_HOME),
+    workbenchConnectionFile: connectionFile,
     url,
     tokenFile,
     serverConfig,

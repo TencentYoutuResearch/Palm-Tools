@@ -855,7 +855,7 @@ fn upsert_session_tx(
 ) -> Result<(i64, bool, Value), ApiError> {
     let existing = tx
         .query_row(
-            "SELECT id FROM sessions WHERE device_id=?1 AND boot_id=?2 AND local_id=?3",
+            "SELECT id FROM sessions WHERE device_id=?1 AND local_id=?3 AND (boot_id=?2 OR local_id>=1099511627776) ORDER BY (boot_id=?2) DESC,id DESC LIMIT 1",
             params![device_id, boot_id, local_id as i64],
             |row| row.get::<_, i64>(0),
         )
@@ -863,8 +863,8 @@ fn upsert_session_tx(
     if let Some(cloud_id) = existing {
         dto["id"] = json!(cloud_id);
         tx.execute(
-            "UPDATE sessions SET dto_json=?1, updated_at=?2 WHERE id=?3",
-            params![dto.to_string(), now_ms() as i64, cloud_id],
+            "UPDATE sessions SET dto_json=?1, updated_at=?2,boot_id=?4 WHERE id=?3",
+            params![dto.to_string(), now_ms() as i64, cloud_id,boot_id],
         )?;
         return Ok((cloud_id, false, dto));
     }
@@ -913,7 +913,7 @@ fn persist_agent_event(
             )
             .optional()?
             .ok_or_else(|| ApiError::Conflict("session snapshot required before events".into()))?;
-        let envelope = CloudEnvelope {
+        let mut envelope = CloudEnvelope {
             protocol_version: event.protocol_version,
             schema_version: event.schema_version,
             session_id: cloud_id,
@@ -921,6 +921,10 @@ fn persist_agent_event(
             kind: event.kind,
             payload: event.payload,
         };
+        if matches!(envelope.kind.as_str(), "session.created" | "session.updated") {
+            if !envelope.payload.is_object() { return Err(ApiError::BadRequest("session snapshot event must be an object".into())); }
+            envelope.payload["id"] = json!(cloud_id);
+        }
         // Runtime status is projection state, not conversation history. It can
         // flip thousands of times while a session remains open, so persisting
         // every transition eventually crowds messages out of bounded history
@@ -978,6 +982,7 @@ fn patch_session_from_event(
     let mut dto: Value = serde_json::from_str(&dto_raw)
         .map_err(|_| ApiError::Internal("invalid session snapshot".into()))?;
     match envelope.kind.as_str() {
+        "session.created" | "session.updated" => { dto = envelope.payload.clone(); dto["id"] = json!(cloud_id); }
         "meta" => {
             // Meta events are sparse updates. The desktop serializes absent
             // Option values as JSON null, so null means "unchanged" rather
@@ -1249,12 +1254,13 @@ async fn post_mode(
         .get("mode")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::BadRequest("mode is required".into()))?;
-    if !matches!(
-        mode,
-        "default" | "acceptEdits" | "bypassPermissions" | "plan"
-    ) {
-        return Err(ApiError::BadRequest("unsupported mode".into()));
-    }
+    // Runtime presets are deployment-defined. Validate against the authenticated
+    // session snapshot instead of silently translating sandbox/approval policies.
+    let Json(dto) = get_session(axum::extract::State(state.clone()), Path(session_id), headers.clone()).await?;
+    let supported = if let Some(options) = dto["permission_modes"].as_array() {
+        options.iter().any(|option| option["id"].as_str() == Some(mode))
+    } else { matches!(mode, "default" | "acceptEdits" | "bypassPermissions" | "plan") };
+    if !supported { return Err(ApiError::BadRequest("unsupported mode on this runtime".into())); }
     let requested_mode = mode.to_string();
     let (status, Json(mut response)) =
         dispatch_mobile_command(&state, session_id, &headers, "mode", payload)?;
@@ -1422,30 +1428,28 @@ fn update_command_result(
     if !matches!(status, "accepted" | "executed" | "failed" | "expired") {
         return Err(ApiError::BadRequest("invalid command status".into()));
     }
-    let cloud_session_id = {
-        let db = state.inner.db.lock();
-        let cloud_id = db
-            .query_row(
-                "SELECT cloud_session_id FROM commands WHERE id=?1 AND device_id=?2",
-                params![command_id, device_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| ApiError::NotFound("command not found".into()))?;
-        db.execute(
+    let envelope = {
+        let mut db = state.inner.db.lock();
+        let tx = db.transaction()?;
+        let prior = tx.query_row(
+            "SELECT cloud_session_id,status FROM commands WHERE id=?1 AND device_id=?2",
+            params![command_id, device_id],
+            |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?)),
+        ).optional()?.ok_or_else(||ApiError::NotFound("command not found".into()))?;
+        // Reconnects can resend an old acceptance after a terminal receipt.
+        if matches!(prior.1.as_str(), "executed" | "failed" | "expired") { return Ok(()); }
+        let envelope=CloudEnvelope::new(prior.0,"command.status",json!({"command_id":command_id,"status":status,"error":error}));
+        tx.execute(
             "UPDATE commands SET status=?1, updated_at=?2, error=?3 WHERE id=?4 AND device_id=?5",
-            params![status, now_ms() as i64, error, command_id, device_id],
+            params![status, envelope.ts as i64, error, command_id, device_id],
         )?;
-        cloud_id
+        // Actions wait on history as well as the socket, including when the
+        // execution receipt arrived before the HTTP response or while offline.
+        tx.execute("INSERT INTO events(device_id,cloud_session_id,event_key,ts,kind,envelope_json) VALUES(?1,?2,?3,?4,'command.status',?5) ON CONFLICT(event_key) DO UPDATE SET ts=excluded.ts,envelope_json=excluded.envelope_json",params![device_id,prior.0,format!("command:{command_id}"),envelope.ts as i64,serde_json::to_string(&envelope).map_err(|_|ApiError::Internal("receipt serialization failed".into()))?])?;
+        tx.commit()?;
+        envelope
     };
-    state.publish(
-        device_id,
-        CloudEnvelope::new(
-            cloud_session_id,
-            "command.status",
-            json!({ "command_id": command_id, "status": status, "error": error }),
-        ),
-    );
+    state.publish(device_id,envelope);
     Ok(())
 }
 
@@ -1576,7 +1580,7 @@ fn event_key(
     let mut hash = Sha256::new();
     hash.update(device_id.as_bytes());
     hash.update([0]);
-    hash.update(boot_id.as_bytes());
+    hash.update(if local_session_id >= (1 << 40) { b"shared-runtime" } else { boot_id.as_bytes() });
     hash.update(local_session_id.to_le_bytes());
     if event.kind == "message" && event.payload["source"] == "acp" {
         if let Some(id) = event.payload["id"].as_str() {
@@ -1870,6 +1874,20 @@ mod tests {
         assert_eq!(update.payload["title"], "修复 mobile title");
         assert_eq!(update.payload["id"], update.session_id);
         assert_eq!(update.payload["tokens"]["total"], 42);
+
+        // Runtime publication events carry a local id. Both the event envelope
+        // and its full DTO must use the cloud id or mobile creates a ghost row.
+        persist_agent_event(&state,"d","boot",7,AgentEnvelope {
+            protocol_version:"v1".into(),schema_version:1,session_id:7,ts:123,
+            kind:"session.updated".into(),
+            payload:json!({"id":7,"backend_key":"codex","title":"Live runtime update","model":"gpt-test","status":"idle","tokens":{"total":99}}),
+        }).unwrap();
+        let live=mobile.try_recv().unwrap();
+        assert_eq!(live.session_id,update.session_id);
+        assert_eq!(live.payload["id"],update.session_id);
+        let stored:String=state.inner.db.lock().query_row("SELECT dto_json FROM sessions WHERE id=?1",[update.session_id],|row|row.get(0)).unwrap();
+        let stored:Value=serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored["title"],"Live runtime update");assert_eq!(stored["tokens"]["total"],99);
     }
 
     #[test]
@@ -1947,6 +1965,25 @@ mod tests {
         assert_eq!(dto["tokens"]["cached"], 10);
     }
 
+    #[test]
+    fn durable_runtime_sessions_keep_cloud_identity_and_history_after_backend_restart() {
+        let dir=tempfile::tempdir().unwrap();
+        let state=ServerState::open(ServerConfig {database_path:dir.path().join("cloud.sqlite"),public_url:"http://localhost".into()}).unwrap();
+        state.inner.db.lock().execute("INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at) VALUES('durable','durable-install','Host','hash',1,1)",[]).unwrap();
+        let local_id=(1u64<<40)+7;
+        let snapshot=|| vec![AgentSession {local_id,dto:json!({"id":local_id,"backend_key":"fixture","status":"idle","tokens":{}})}];
+        sync_session_snapshot(&state,"durable","first",snapshot()).unwrap();
+        let event=||AgentEnvelope {protocol_version:"v1".into(),schema_version:1,session_id:local_id,ts:17,kind:"message".into(),payload:json!({"id":"reply","role":"assistant","text":"durable reply"})};
+        persist_agent_event(&state,"durable","first",local_id,event()).unwrap();
+        let first:i64=state.inner.db.lock().query_row("SELECT id FROM sessions",[],|row|row.get(0)).unwrap();
+        sync_session_snapshot(&state,"durable","second",snapshot()).unwrap();
+        persist_agent_event(&state,"durable","second",local_id,event()).unwrap();
+        let db=state.inner.db.lock();
+        let sessions:i64=db.query_row("SELECT COUNT(*) FROM sessions",[],|row|row.get(0)).unwrap();
+        assert_eq!(sessions,1);
+        assert_eq!(query_history(&db,first,0,100).unwrap().len(),1);
+    }
+
     #[tokio::test]
     async fn pairing_enables_sync_and_routes_message_to_online_desktop() {
         let dir = tempfile::tempdir().unwrap();
@@ -1958,8 +1995,9 @@ mod tests {
             public_url: origin.clone(),
         })
         .unwrap();
+        let server_state = state.clone();
         let server = tokio::spawn(async move {
-            axum::serve(listener, build_router(state)).await.unwrap();
+            axum::serve(listener, build_router(server_state)).await.unwrap();
         });
         let client = reqwest::Client::new();
 
@@ -2156,6 +2194,18 @@ mod tests {
             .unwrap();
         assert_eq!(history["events"][0]["session_id"], cloud_session_id);
         assert_eq!(history["events"][0]["payload"]["text"], "hello from phone");
+
+        // Receipts survive socket timing and cannot regress after reconnect.
+        let command_id = command["command_id"].as_str().unwrap();
+        update_command_result(&state, &device_id, command_id, "accepted", None).unwrap();
+        update_command_result(&state, &device_id, command_id, "executed", None).unwrap();
+        update_command_result(&state, &device_id, command_id, "accepted", None).unwrap();
+        let durable = query_history(&state.inner.db.lock(), cloud_session_id, 0, 100).unwrap();
+        let receipts: Vec<_> = durable.iter().filter(|row|row["type"]=="command.status").collect();
+        assert_eq!(receipts.len(),1);
+        assert_eq!(receipts[0]["payload"]["status"],"executed");
+        // Drain live receipts before checking the next event.
+        for _ in 0..2 { mobile.next().await.unwrap().unwrap(); }
 
         agent
             .send(tokio_tungstenite::tungstenite::Message::Text(

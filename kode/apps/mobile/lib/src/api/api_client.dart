@@ -380,6 +380,7 @@ class ApiClient {
       data: {'mode': mode},
     );
     _check(resp);
+    await _waitForActionExecution(id, resp);
     return resp.data['mode'] as String;
   }
 

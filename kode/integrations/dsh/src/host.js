@@ -8,6 +8,8 @@ import { connectBackend } from './service-launcher.js'
 import { searchSessions } from './session-search.js'
 import { installAgentRuntime } from './agent-runtime.js'
 import { prepareRuntimeConfig } from './bundle-runtime.js'
+import { registerIntegrationApi, memoryTools } from './integration-api.js'
+import { registerSharedSessionApi } from './shared-session-api.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -35,7 +37,7 @@ export async function apply(ctx, config = {}) {
   if (runtimeConfig.publishWorkbenchConnection && runtimeConfig.sharedBackendState) {
     const path = runtimeConfig.workbenchConnectionFile ?? join(homedir(), process.platform === 'darwin' ? 'Library/Application Support/kode/workbench-connection.json' : '.config/kode/workbench-connection.json')
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-    await writeFile(path, JSON.stringify({ url: admin.url, token_file: runtimeConfig.tokenFile, server_command: runtimeConfig.serverCommand, server_config: runtimeConfig.serverConfig }), { mode: 0o600 })
+    await writeFile(path, JSON.stringify({ url: admin.url, token_file: runtimeConfig.tokenFile, server_command: runtimeConfig.serverCommand, server_config: runtimeConfig.serverConfig, server_args: runtimeConfig.serverArgs ?? [] }), { mode: 0o600 })
   }
   const stateFile = runtimeConfig.stateFile ?? join(homedir(), '.config', 'kode', `dsh-${node.node_id}.json`)
   let tokens = Object.create(null)
@@ -59,6 +61,8 @@ export async function apply(ctx, config = {}) {
     return ctx.get?.('sessionTitle')?.get(agent.session)?.title ?? agent.session?.header?.title ?? '未命名会话'
   }
   if (ctx.inject) ctx.inject(['webServer', 'connection'], async webCtx => {
+    webCtx.effect(() => registerIntegrationApi(webCtx, admin), 'kode.integration-api')
+    webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerProjectHosts } = await import('./project-hosts.js')
@@ -70,6 +74,11 @@ export async function apply(ctx, config = {}) {
       const task = syncSessionTitles(sessionCtx.sessionController, admin, new Set(Object.keys(tokens)), lifetime.signal).catch(error => { if (!lifetime.signal.aborted) ctx.logger.warn('Kode session name sync failed: %s', error.message) })
       return async () => { lifetime.abort(); await task }
     }, 'kode.session-name-sync'))
+  })
+  if (runtimeConfig.runtimeBridge !== false && ctx.inject) ctx.inject(['sessionController', 'kodeAgents', 'sessionPersistence'], async scope => {
+    if (!scope.get?.('sessionController') || !scope.get?.('kodeAgents')) return
+    const { installRuntimeBridge } = await import('./runtime-bridge.js')
+    installRuntimeBridge(scope, admin)
   })
   function install(agent) {
     if (installing.has(agent.id)) return installing.get(agent.id)
@@ -94,7 +103,7 @@ export async function apply(ctx, config = {}) {
     active.set(agent.id, entry)
     const add = (name, description, parameters, execute) => entry.tools.push(agent.ctx.tools.register({ name, description,
       parameters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(Object.entries(parameters).map(([key, value]) => { const { required, ...property } = value; return [key, property] })), required: Object.entries(parameters).filter(([, value]) => value.required).map(([key]) => key) }, output,
-      execute: async (args, exec) => { if (exec.agent !== agent) throw new Error('foreign agent'); return execute(args, exec.signal) },
+      execute: async (args, exec) => { if (exec.agent !== agent) throw new Error('foreign agent'); if (name.startsWith('kode_sessions_')) { const settings = await client.call(`${PREFIX}integrations`, undefined, exec.signal); if (!settings.messaging_enabled) throw new Error('会话通信已在 Kode 设置中关闭。') }; return execute(args, exec.signal) },
     }))
     add('kode_sessions_list', 'Find local and SSH-connected conversations by human-readable title, and discover saved execution Hosts for creating a helper. Start with the user name or keywords. Inspect matches and disambiguate duplicate names before sending; never guess addresses. Use the address returned with the selected session.', { query: { type: 'string', description: 'Session name or partial title; omit to browse all.' } }, async (args, signal) => ({
       ...searchSessions(await client.call(`${PREFIX}sessions`, undefined, signal), args.query),
@@ -157,6 +166,7 @@ export async function apply(ctx, config = {}) {
       } while (Date.now() < until)
       return { events: [], cursor: args.after, timed_out: true }
     })
+    for (const tool of memoryTools) add(tool.name, tool.description, tool.parameters, (args, signal) => client.call(`${PREFIX}memory/tool`, { name: tool.name, arguments: args }, signal))
     entry.task = pump(entry)
   }
   async function pump(entry) {

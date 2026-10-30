@@ -35,7 +35,7 @@
 //!    backend 配置发生变化(比如用户手动 install / config 了),就重置语义,
 //!    重新提示一次。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap,HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -665,7 +665,8 @@ pub fn spawn_startup_probe(app: AppHandle) {
                 return;
             }
         };
-        let backends = app_state.ctx.backend_configs.read().clone();
+        let backends:HashMap<_,_> = app_state.ctx.backend_configs.read().clone().into_iter().filter(|(key,_)|!kode_memory::runtime_context::uses_shared_services(key)).collect();
+        if backends.is_empty(){return}
         // Migrate already-installed entries even when the user dismissed future
         // auto-setup prompts. This is an in-place compatibility repair, not a new
         // integration: it preserves the command, user policy, and custom env vars.
@@ -795,7 +796,7 @@ fn probe(
             BackendStatus {
                 command_available: which(&backend.command).is_some(),
                 setup_cli_available: spec.cli().map(|c| which(c).is_some()),
-                configured: is_configured_for_spec(spec),
+                configured: kode_memory::runtime_context::uses_shared_services(key) || is_configured_for_spec(spec),
                 setup_style: spec_style_label(spec).to_string(),
             },
         );
@@ -832,7 +833,7 @@ fn probe(
         .unwrap_or(false);
 
     CheckResult {
-        binary_available: bin.is_some(),
+        binary_available: bin.is_some() || backends.keys().any(|key|kode_memory::runtime_context::uses_shared_services(key)),
         binary_path: bin.as_ref().map(|p| p.display().to_string()),
         codebuddy_available: cb,
         configured_for_codebuddy: cb_configured,

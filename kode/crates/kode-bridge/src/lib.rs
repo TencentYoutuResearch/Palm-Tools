@@ -41,6 +41,9 @@ pub mod hook_relay;
 pub mod mobile_setup;
 pub mod model_usage;
 pub mod semantic;
+pub mod runtime;
+pub mod session_mcp;
+pub mod cloud_sync;
 
 pub use hook_relay::HookRelay;
 
@@ -48,6 +51,8 @@ const DEFAULT_PORT: u16 = 47870;
 
 #[derive(Clone)]
 pub struct Ctx {
+    pub cloud_sync: Arc<Mutex<std::sync::Weak<cloud_sync::Inner>>>,
+    pub runtimes: Arc<runtime::Registry>,
     pub agent_backends: Arc<parking_lot::RwLock<Option<messaging::agents::Catalog>>>,
     pub acp: Arc<acp::Registry>,
     pub config: Config,
@@ -325,6 +330,8 @@ pub async fn run() -> anyhow::Result<()> {
     let hook_relay_socket = hook_relay.as_ref().map(|r| r.socket_path().to_path_buf());
 
     let ctx = Arc::new(Ctx {
+        runtimes: Default::default(),
+        cloud_sync: Default::default(),
         agent_backends: Default::default(),
         acp: Arc::new(acp::Registry::default()),
         config,
@@ -443,6 +450,8 @@ fn build_session_env(
 pub fn build_runtime_ctx(config: Config, token: String) -> Arc<Ctx> {
     let (core_tx, core_rx) = mpsc::unbounded_channel();
     let ctx = Arc::new(Ctx {
+        runtimes: Default::default(),
+        cloud_sync: Default::default(),
         agent_backends: Default::default(),
         acp: Arc::new(acp::Registry::default()),
         config,
@@ -943,7 +952,8 @@ fn session_to_dto(s: &Session) -> SessionDto {
 }
 
 async fn list_sessions(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
-    let sessions: Vec<_> = ctx.sessions.lock().values().map(session_to_dto).collect();
+    let mut sessions: Vec<Value> = ctx.sessions.lock().values().map(|s|serde_json::to_value(session_to_dto(s)).unwrap_or_default()).collect();
+    sessions.extend(ctx.runtimes.snapshots().into_iter().map(|s|s["dto"].clone()));
     Json(json!({ "sessions": sessions }))
 }
 
@@ -995,6 +1005,9 @@ async fn create_session(
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("/"));
+    if std::env::var("KODE_GUI_RUNTIME").as_deref()==Ok("1") {
+        session_mcp::reserve_gui_session(id,&req.backend_key,&cwd,req.model.as_deref()).await.map_err(|e|ApiError::BadRequest(e.to_string()))?;
+    }
     let use_acp = req.transport.as_deref() == Some("acp")
         || (req.transport.is_none()
             && backend.protocol_key(&req.backend_key) == "codebuddy"
@@ -1017,6 +1030,7 @@ async fn create_session(
             Arc::clone(&ctx),
             id,
             &backend,
+            &req.backend_key,
             &cwd,
             req.permission_mode.as_deref(),
             req.model.as_deref(),
@@ -1229,9 +1243,7 @@ async fn get_history(
     Query(q): Query<HistoryQuery>,
 ) -> Json<Value> {
     let from = q.from.unwrap_or(0);
-    let events = ctx
-        .bus
-        .history_for(id, from, q.limit.unwrap_or(200).min(1000));
+    let events = if ctx.runtimes.contains(id) { ctx.runtimes.history(id,from,q.limit.unwrap_or(200).min(1000)).unwrap_or_default() } else { ctx.bus.history_for(id,from,q.limit.unwrap_or(200).min(1000)) };
     let next_from = events.last().map(|e| e.ts + 1).unwrap_or(from);
     Json(json!({ "events": events, "next_from": next_from }))
 }

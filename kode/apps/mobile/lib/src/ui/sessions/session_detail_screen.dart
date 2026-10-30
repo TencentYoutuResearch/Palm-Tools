@@ -13,6 +13,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'acp_form_card.dart';
 import 'session_model_sheet.dart';
 
@@ -358,7 +359,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
         break;
       case 'tool_use':
         // 同一 id 的事件 (running → ok/error) 合并
-        final id = env.payload['id'] as String? ?? 'tu-${env.ts}';
+        final id =
+            (env.payload['id'] ?? env.payload['tool_use_id']) as String? ??
+            'tu-${env.ts}';
         final key = 't-$id';
         final existing = _byKey[key];
         if (existing != null) {
@@ -777,7 +780,6 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
 
   Future<void> _switchMode(String desired) async {
     if (_modeBusy) return;
-    if (_mode == desired) return;
     final api = ref.read(apiClientProvider);
     if (api == null) return;
     setState(() => _modeBusy = true);
@@ -901,10 +903,15 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
             prominent: true,
             child: _buildInput(
               backendIdentity(backendKey).label,
+              permissionModes: summary?.permissionModes,
+              permissionMode: summary?.permissionMode,
               working: sessionStatus == 'busy',
               model: model,
               onModelTap: sessionStatus == 'idle' && !_modelBusy
-                  ? () => _chooseModel(backendKey, model)
+                  ? () => _chooseModel(
+                      summary?.runtimeBackendKey ?? backendKey,
+                      model,
+                    )
                   : null,
             ),
           ),
@@ -1083,6 +1090,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     String backendLabel, {
     required bool working,
     required String model,
+    List<Map<String, dynamic>>? permissionModes,
+    String? permissionMode,
     VoidCallback? onModelTap,
   }) {
     return ValueListenableBuilder<TextEditingValue>(
@@ -1179,7 +1188,8 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                             child: Row(
                               children: [
                                 _ModeChip(
-                                  mode: _mode,
+                                  mode: permissionMode ?? _mode,
+                                  options: permissionModes,
                                   busy: _modeBusy,
                                   onPick: (mode) {
                                     _closePermissionMenu();
@@ -1884,9 +1894,20 @@ class _ToolUseCardState extends State<_ToolUseCard> {
   Widget build(BuildContext context) {
     final p = widget.payload;
     final colors = Theme.of(context).colorScheme;
-    final tool = p['tool'] as String?;
+    final tool = (p['tool'] ?? p['name']) as String?;
     final summary = p['input_summary'] as String?;
-    final preview = p['output_preview'] as String?;
+    final preview =
+        p['output_preview'] as String? ??
+        [
+          if (p['input'] != null)
+            const JsonEncoder.withIndent('  ').convert(p['input']),
+          if (p['output'] != null)
+            p['output'] is String
+                ? p['output'] as String
+                : const JsonEncoder.withIndent('  ').convert(p['output']),
+          if (p['content'] != null)
+            const JsonEncoder.withIndent('  ').convert(p['content']),
+        ].join('\n\n');
     final status = p['status'] as String? ?? 'running';
 
     final dot = KillLaColors.toolStatus(status);
@@ -1933,7 +1954,7 @@ class _ToolUseCardState extends State<_ToolUseCard> {
               ),
             ),
           ),
-          if (_open && preview != null && preview.isNotEmpty)
+          if (_open && preview.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
               child: Container(
@@ -2186,7 +2207,7 @@ class _AskQuestionsCardState extends ConsumerState<_AskQuestionsCard> {
                   ? null
                   : _submit,
               child: Text(
-                _submitted
+                _submitted || widget.payloads.any((p) => p['resolved'] == true)
                     ? 'Submitted'
                     : _submitting
                     ? 'Submitting…'
@@ -2483,12 +2504,14 @@ class _ModeChip extends StatelessWidget {
   static const _menuHeight = 4 * _menuItemHeight + 2 * _menuVerticalPadding;
 
   final String? mode;
+  final List<Map<String, dynamic>>? options;
   final bool busy;
   final ValueChanged<String> onPick;
   final VoidCallback onOpened;
   final VoidCallback onCanceled;
   const _ModeChip({
     required this.mode,
+    this.options,
     required this.busy,
     required this.onPick,
     required this.onOpened,
@@ -2503,7 +2526,16 @@ class _ModeChip extends StatelessWidget {
       initialValue: mode,
       // Keep the menu above the composer while the software keyboard is open.
       position: PopupMenuPosition.under,
-      offset: const Offset(0, -(_menuHeight + 40 + _menuGap)),
+      offset: Offset(
+        0,
+        -((options == null
+                    ? _menuHeight
+                    : options!.length * _menuItemHeight +
+                          2 * _menuVerticalPadding)
+                .clamp(56, 320) +
+            40 +
+            _menuGap),
+      ),
       constraints: const BoxConstraints.tightFor(width: 224),
       menuPadding: const EdgeInsets.symmetric(vertical: _menuVerticalPadding),
       elevation: 16,
@@ -2512,49 +2544,64 @@ class _ModeChip extends StatelessWidget {
       ),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       borderRadius: BorderRadius.circular(8),
-      enabled: !busy,
+      enabled: !busy && (options == null || options!.isNotEmpty),
       requestFocus: false,
       onOpened: onOpened,
       onCanceled: onCanceled,
       onSelected: onPick,
-      itemBuilder: (_) => const [
-        PopupMenuItem(
-          value: 'default',
-          height: _menuItemHeight,
-          child: _ModeMenuItem(
-            icon: Icons.shield_outlined,
-            label: 'Default',
-            sub: '每个工具调用都要批准',
-          ),
-        ),
-        PopupMenuItem(
-          value: 'acceptEdits',
-          height: _menuItemHeight,
-          child: _ModeMenuItem(
-            icon: Icons.edit_note_rounded,
-            label: 'Auto-accept edits',
-            sub: '自动批准 file/edit',
-          ),
-        ),
-        PopupMenuItem(
-          value: 'plan',
-          height: _menuItemHeight,
-          child: _ModeMenuItem(
-            icon: Icons.account_tree_outlined,
-            label: 'Plan',
-            sub: '只规划不执行',
-          ),
-        ),
-        PopupMenuItem(
-          value: 'bypassPermissions',
-          height: _menuItemHeight,
-          child: _ModeMenuItem(
-            icon: Icons.lock_open_rounded,
-            label: 'Bypass permissions',
-            sub: '⚠️ 全部跳过批准',
-          ),
-        ),
-      ],
+      itemBuilder: (_) => options != null
+          ? options!
+                .map(
+                  (option) => PopupMenuItem<String>(
+                    value: option['id'] as String,
+                    height: _menuItemHeight,
+                    child: _ModeMenuItem(
+                      icon: _iconFor(option['id'] as String?),
+                      label:
+                          option['label'] as String? ?? option['id'] as String,
+                      sub: option['description'] as String? ?? '',
+                    ),
+                  ),
+                )
+                .toList()
+          : const [
+              PopupMenuItem(
+                value: 'default',
+                height: _menuItemHeight,
+                child: _ModeMenuItem(
+                  icon: Icons.shield_outlined,
+                  label: 'Default',
+                  sub: '每个工具调用都要批准',
+                ),
+              ),
+              PopupMenuItem(
+                value: 'acceptEdits',
+                height: _menuItemHeight,
+                child: _ModeMenuItem(
+                  icon: Icons.edit_note_rounded,
+                  label: 'Auto-accept edits',
+                  sub: '自动批准 file/edit',
+                ),
+              ),
+              PopupMenuItem(
+                value: 'plan',
+                height: _menuItemHeight,
+                child: _ModeMenuItem(
+                  icon: Icons.account_tree_outlined,
+                  label: 'Plan',
+                  sub: '只规划不执行',
+                ),
+              ),
+              PopupMenuItem(
+                value: 'bypassPermissions',
+                height: _menuItemHeight,
+                child: _ModeMenuItem(
+                  icon: Icons.lock_open_rounded,
+                  label: 'Bypass permissions',
+                  sub: '⚠️ 全部跳过批准',
+                ),
+              ),
+            ],
       child: Container(
         key: const ValueKey('session-permission-menu'),
         width: 40,
@@ -2589,7 +2636,11 @@ class _ModeChip extends StatelessWidget {
         'acceptEdits' => 'Auto',
         'plan' => 'Plan',
         'bypassPermissions' => 'Bypass',
-        _ => '—',
+        _ =>
+          options?.where((option) => option['id'] == m).firstOrNull?['label']
+                  as String? ??
+              m ??
+              '—',
       },
     );
   }

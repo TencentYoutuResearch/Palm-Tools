@@ -64,6 +64,9 @@ class SessionDto {
   final TokensDto tokens;
   final double? contextPct;
   final double? costUsd;
+  final String? runtimeBackendKey;
+  final String? permissionMode;
+  final List<Map<String, dynamic>>? permissionModes;
 
   SessionDto({
     required this.id,
@@ -76,6 +79,9 @@ class SessionDto {
     required this.tokens,
     this.contextPct,
     this.costUsd,
+    this.runtimeBackendKey,
+    this.permissionMode,
+    this.permissionModes,
   });
 
   factory SessionDto.fromJson(Map<String, dynamic> j) => SessionDto(
@@ -91,6 +97,11 @@ class SessionDto {
     ),
     contextPct: (j['context_pct'] as num?)?.toDouble(),
     costUsd: (j['cost_usd'] as num?)?.toDouble(),
+    runtimeBackendKey: j['runtime_backend_key'] as String?,
+    permissionMode: j['permission_mode'] as String?,
+    permissionModes: (j['permission_modes'] as List?)
+        ?.map((option) => Map<String, dynamic>.from(option as Map))
+        .toList(),
   );
 
   SessionDto copyWith({
@@ -111,6 +122,9 @@ class SessionDto {
     tokens: tokens ?? this.tokens,
     contextPct: contextPct ?? this.contextPct,
     costUsd: costUsd ?? this.costUsd,
+    runtimeBackendKey: runtimeBackendKey,
+    permissionMode: permissionMode,
+    permissionModes: permissionModes,
   );
 }
 

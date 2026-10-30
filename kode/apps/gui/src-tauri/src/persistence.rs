@@ -247,6 +247,7 @@ fn generate_token() -> String {
 /// 状态文件全路径(macOS: ~/Library/Application Support/kode/state.json)。
 /// `dirs::config_dir()` 在 macOS 即为 Application Support。
 pub fn state_file_path() -> Option<PathBuf> {
+    if let Some(path)=std::env::var_os("KODE_GUI_STATE_PATH"){return Some(PathBuf::from(path))}
     let base = dirs::config_dir()?;
     Some(base.join(APP_DIR_NAME).join(STATE_FILE))
 }

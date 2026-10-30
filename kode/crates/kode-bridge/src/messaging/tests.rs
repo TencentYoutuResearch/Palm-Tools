@@ -110,7 +110,7 @@ async fn workbench_configuration_is_durable_versioned_and_not_agent_accessible()
 async fn archived_legacy_gui_tabs_need_no_adapter_and_are_restorable_without_losing_metadata() {
     let s=server("cold-archive",vec![]).await;
     let native_id="session-kode-example";
-    let tab=json!({"backend_key":"removed-claude","session_id":"old-native-thread","cwd":"/srv/project","title":"Original title","endpoint_id":null});
+    let tab=json!({"backend_key":"removed-claude","session_id":"old-native-thread","cwd":"/srv/project","title":"Original title","endpoint_id":null,"transport_kind":"acp"});
     let mut native=tab.clone();native["dsh_session_id"]=json!(native_id);native["title"]=json!("Saved metadata title");
     let index=s.hub.store.document("session-index").unwrap();
     s.hub.store.save_document("session-index",index["revision"].as_u64().unwrap(),json!({"version":1,"gui":{"tabs":[tab],"endpoints":[]},"native_sessions":[native]})).unwrap();
@@ -125,6 +125,7 @@ async fn archived_legacy_gui_tabs_need_no_adapter_and_are_restorable_without_los
     let restored:Value=client.get(format!("{}/api/v1/messaging/workbench/catalog",s.url)).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     assert_eq!(restored["tabs"][0]["title"],"Saved metadata title");
     assert_eq!(restored["tabs"][0]["session_id"],"old-native-thread");
+    assert_eq!(restored["tabs"][0]["transport_kind"],"acp");
     assert_eq!(s.hub.store.document("session-index").unwrap()["value"]["gui"]["tabs"].as_array().unwrap().len(),1);
 }
 async fn register(s: &Server, id: &str) -> Registration {

@@ -29,3 +29,18 @@ test('dsh can start and stop its own backend without opening kode GUI', { skip: 
     await assert.rejects(client.call('/api/v1/messaging/node'), TypeError)
   } finally { await backend?.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+
+test('a shared backend survives the dsh frontend closing', { skip: !tokenFile }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-shared-backend-'))
+  const listener = net.createServer(); await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve))
+  const port = listener.address().port; await new Promise(resolve => listener.close(resolve))
+  const config = join(root, 'node.json'); await writeFile(config, JSON.stringify({ node_id: 'shared', database: join(root, 'messages.sqlite'), peers: [] }))
+  const client = new BackendClient(`http://127.0.0.1:${port}`, (await readFile(tokenFile, 'utf8')).trim())
+  let backend
+  try {
+    backend = await connectBackend(client, { sharedBackendState: true, tokenFile, serverConfig: config, serverCommand: resolve(fileURLToPath(new URL('../../..', import.meta.url)), 'target/debug/kode-session-server') })
+    assert.equal(backend.node.node_id, 'shared'); await backend.close()
+    assert.equal((await client.call('/api/v1/messaging/node')).node_id, 'shared')
+  } finally { if (backend?.servicePid) { process.kill(backend.servicePid, 'SIGINT'); await new Promise(resolve => setTimeout(resolve, 200)) }; await rm(root, { recursive: true, force: true }) }
+})

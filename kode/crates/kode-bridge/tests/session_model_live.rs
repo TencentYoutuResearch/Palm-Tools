@@ -25,6 +25,7 @@ async fn switches_model_in_isolated_cli_session() {
             ctx.clone(),
             991,
             &backend,
+            &backend_key,
             &cwd,
             None,
             Some(&initial),

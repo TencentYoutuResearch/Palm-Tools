@@ -160,6 +160,8 @@ impl AppState {
             memory: memory_handle,
         });
         let protocol_ctx = Arc::new(kode_bridge::Ctx {
+            runtimes: Default::default(),
+        cloud_sync: Default::default(),
             agent_backends: Default::default(),
             acp: Arc::new(kode_bridge::acp::Registry::default()),
             config: ctx.config.clone(),

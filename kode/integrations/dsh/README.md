@@ -448,10 +448,10 @@ checkouts can also use local compiled binaries.
 | New conversations in worktrees | Create a branch/checkout from a registered Git workspace and start the new session there, preserving draft and Agent/model. Moving an existing conversation back to the main checkout is not implemented. |
 | Mid-turn steering | Codex uses native `turn/steer` with the expected active turn. ACP Agents without protocol support explicitly require queueing. |
 | Queued-message steering | Native admission is checked before transferring a queued input. Rejection retains the queue item and content; unsupported Agents disable queue steering and submit busy composer inputs as queued followups. |
-| Shared memory UI and synchronization controls | Missing: desktop review queue, scope/relation editing, memory sync controls. Existing CLI MCP/hook configuration can still operate independently. |
+| Shared memory UI and synchronization controls | Shared backend switches are available in both frontends. The review queue, scope/relation editing and memory sync administration remain in the original GUI. |
 | Native plugin/Hook installation and management | Missing desktop management UI; dsh's own plugin page manages dsh bundles, not all native CLI plugins. |
 | Model usage and desktop floating monitor | Missing desktop-wide monitoring parity; dsh has its own per-session observations. |
-| Phone pairing, cloud sync deployment | Missing Kode desktop/mobile cloud-management flow. |
+| Phone pairing, cloud sync deployment | Settings → 会话互通与记忆 pairs the phone through the shared backend. Cloud-service deployment remains in the original GUI. |
 | Native screenshot tools, desktop window/tab actions, SpecOps window | Not ported; some are desktop-specific rather than Web-session requirements. |
 
 Managed service supervision is currently process based; automatic startup on OS
@@ -549,13 +549,45 @@ Kode workspace REST API. Its backend can run independently of either frontend;
 the GUI can start it without launching Tauri windows in service mode. Workspace
 ownership/CRUD and SSH node isolation have backend, registry and GUI-client tests.
 
-Mobile is not yet connected to the new native dsh session runtime. Existing
-mobile uses the GUI CoreEvent cloud-sync adapter, kode-sync-server and paired
-mobile REST/WebSocket access. Sharing Kode's workspace database does not publish
-dsh Agent sessions into that stream, and does not provide mobile input, interrupt
-or approval handling for them. The existing mobile protocol was not changed in
-this workspace change. A common backend session/event/control adapter is still
-required before claiming full desktop/dsh/mobile remote collaboration.
+The shared Kode backend now owns the runtime session directory, durable semantic
+history and control receipts. dsh publishes its existing Session controller and
+canonical events; it continues to own Agent execution, queuing, sandbox policies,
+approval audit, persistence and native CLI ownership. The GUI publishes its native
+bridge through the same adapter. No second Agent loop is created when another
+frontend opens an already running conversation.
+
+The phone uses the existing `kode-sync-server` pairing and authenticated
+REST/WebSocket protocol. Its backend/model catalog is provided by the attached
+runtime (`dsh:<profile-id>` / `gui:<backend-key>`), and create, input, interrupt,
+permission and human-response commands execute on that runtime. A stopped runtime
+retains its published history; new execution requires its Host to reconnect.
+Runtime history retains the latest 10,000 events per conversation. Shared session
+IDs and command results persist across backend restarts. An uncertain operation is
+never automatically submitted again with a new request ID.
+
+A GUI-first installation and dsh discover the same authenticated loopback service
+through `workbench-connection.json`. Existing native history remains available;
+when its GUI owner is alive, dsh attaches a shared view. Once that owner is closed,
+opening saved history uses the existing native import/resume path. Starting a
+separate isolated backend (explicit URL/token/config or `KODE_DSH_HOME`) intentionally
+creates a separate session directory.
+
+Both frontends expose shared communication and memory switches. In the original
+GUI use Settings → 会话互通与记忆 → Configure Agent access to register the managed
+MCP launcher, then start a new Agent session. No manual `KODE_MESSAGING_CONFIG`
+editing is required. dsh registers its scoped tools through the Host integration.
+The backend enforces both switches on each tool call. Agent memory proposals stay
+pending until reviewed through the original memory UI. MCP registration remains
+inactive outside a Kode-managed GUI session; backend admin credentials stay out of
+browser bundles and Agent tool arguments.
+
+For isolated acceptance testing, build the frontend and debug Rust binaries, then
+run `node integrations/dsh/scripts/test-mobile-sync.js` from the `kode` directory.
+It starts real backend, cloud, GUI and dsh processes with deterministic native CLI
+fixtures. It covers GUI-first attachment, mobile creation and replies through both
+runtimes, deduplicated sends, dsh permission execution, shared settings and custom
+ACP Agent restoration after a GUI restart. It does
+not invoke a model or change user Agent configuration.
 
 ### Native process history
 

@@ -1,4 +1,5 @@
 import { writable, get, derived } from 'svelte/store'
+import { invoke } from '@tauri-apps/api/core'
 import {
   ipc,
   endpointIpc,
@@ -23,6 +24,7 @@ import { currentTermTheme } from './terminal_settings'
 import { SessionMetadataBuffer, upsertSessionTab, sessionTabToPersisted } from './session_metadata'
 
 export interface TabInfo {
+  sharedRuntime?: boolean
   transportKind?: 'acp' | 'pty'
   id: SessionId
   backendKey: string
@@ -221,8 +223,33 @@ let turnFinishedUnlisten: (() => void) | null = null
 let statusUnlisten: (() => void) | null = null
 let focusUnlisten: (() => void) | null = null
 
+let sharedTimer: ReturnType<typeof setInterval> | null = null
+let sharedRefresh: Promise<void> | null = null
+type SharedSession = { id: number; runtime: string; runtime_session_id: string; native_thread_id?: string; backend_key: string; title: string; model: string; status: string; cwd?: string; tokens?: { total?: number } }
+async function sharedSessions(): Promise<SharedSession[]> { return (await invoke<{ sessions: SharedSession[] }>('shared_runtime_sessions')).sessions.filter(row => row.runtime === 'dsh') }
+function sharedTab(row: SharedSession): TabInfo { return { id: row.id, sharedRuntime: true, transportKind: 'acp', backendKey: row.backend_key, title: row.title, model: row.model, cwd: row.cwd, sessionId: row.native_thread_id ?? row.runtime_session_id, tokens: row.tokens?.total, status: row.status === 'busy' ? 'busy' : row.status === 'starting' ? 'starting' : 'idle', endpointId: ENDPOINT_LOCAL } }
+async function refreshSharedSessions() {
+  if (sharedRefresh) return sharedRefresh
+  sharedRefresh = (async () => {
+    const rows = await sharedSessions()
+    tabs.update(current => {
+      let next = current
+      for (const row of rows) {
+        if (row.status === 'exited') { next = next.filter(tab => tab.id !== row.id); continue }
+        const existing = next.find(tab => tab.id === row.id)
+        const tab = { ...sharedTab(row), ...(existing?.titlePinned ? { title: existing.title, titlePinned: true } : {}) }
+        next = upsertSessionTab(next, tab, sessionMetadata, true)
+      }
+      return next
+    })
+    if (get(activeId) == null && get(tabs).length) selectTab(get(tabs)[0].id)
+  })().finally(() => { sharedRefresh = null })
+  return sharedRefresh
+}
+
 export async function startEventSubscriptions() {
   if (metaUnlisten) return
+  if (!sharedTimer) sharedTimer = setInterval(() => { void refreshSharedSessions().catch(error => console.warn('Shared runtime unavailable:', error)) }, 2000)
   const subscribedAt = Date.now()
   const STARTUP_REPLAY_SUPPRESS_MS = 4_000
 
@@ -381,6 +408,8 @@ export async function startEventSubscriptions() {
 }
 
 export function stopEventSubscriptions() {
+  if (sharedTimer) clearInterval(sharedTimer)
+  sharedTimer = null
   metaUnlisten?.()
   createdUnlisten?.()
   exitUnlisten?.()
@@ -475,11 +504,19 @@ export async function restoreTabs(
   restoring = true
   failedRestoreTabs = [] // 清空上次的,本次重新记录
   const list = dedupePersistedTabs(persisted)
+  const shared = await sharedSessions().catch(() => [] as SharedSession[])
   let ok = 0
   try {
     for (const [index, p] of list.entries()) {
       onProgress?.({ current: index + 1, total: list.length, name: p.title || p.backend_key })
       try {
+        const owner = p.session_id && shared.find(row => (row.native_thread_id === p.session_id || row.runtime_session_id === p.session_id || row.runtime_session_id === p.dsh_session_id) && row.backend_key === p.backend_key && row.status !== 'exited')
+        if (owner) {
+          const tab = sharedTab(owner)
+          tabs.update(current => upsertSessionTab(current, tab, sessionMetadata, true))
+          selectTab(tab.id); onRestored?.(tab); ok++; continue
+        }
+        if (p.transport_kind === 'runtime') throw new Error('The owning runtime is unavailable. Reconnect it before reopening this shared session.')
         // permission_mode 在持久化字段里是 "default" | "bypass" | null;
         // 收窄到 PermissionMode 类型(字符串校验,其它值降级 null)。
         const mode = p.permission_mode === 'bypass' || p.permission_mode === 'default'

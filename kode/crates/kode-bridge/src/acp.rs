@@ -58,6 +58,7 @@ pub struct Client {
     response_lock: tokio::sync::Mutex<()>,
     stream: Mutex<Option<(String, String)>>,
     config_options: Mutex<Vec<Value>>,
+    modes: Mutex<Value>,
     legacy_models: AtomicBool,
 }
 impl Client {
@@ -65,6 +66,7 @@ impl Client {
         ctx: Arc<Ctx>,
         id: SessionId,
         backend: &kode_core::config::BackendConfig,
+        backend_key: &str,
         cwd: &Path,
         mode: Option<&str>,
         model: Option<&str>,
@@ -98,6 +100,9 @@ impl Client {
             .env("KODE_MEMORY_ROOT", crate::resolve_memory_root())
             .env_remove("KODE_HOOK_SOCK")
             .env_remove("KODE_SESSION_ID");
+        if std::env::var("KODE_GUI_RUNTIME").as_deref()==Ok("1") {
+            command.env("KODE_GUI_PROCESS_ID",std::process::id().to_string()).env("KODE_SESSION_ID",id.to_string()).env("KODE_BACKEND_KEY",backend_key);
+        }
         let mut child = command
             .spawn()
             .map_err(|e| format!("ACP spawn failed: {e}"))?;
@@ -118,6 +123,7 @@ impl Client {
             response_lock: tokio::sync::Mutex::new(()),
             stream: Mutex::new(None),
             config_options: Mutex::new(Vec::new()),
+            modes: Mutex::new(Value::Null),
             legacy_models: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&client);
@@ -153,9 +159,10 @@ impl Client {
             let sid = result["sessionId"].as_str().or(resume).filter(|s| !s.is_empty()).ok_or("ACP session id missing")?.to_string();
             *client.native_id.lock() = sid.clone();
             client.legacy_models.store(result["models"].is_object(), Ordering::Release);
+            *client.modes.lock() = result["modes"].clone();
             client.apply_config_options(&result);
             if let Some(mode) = mode.filter(|m| *m != "default") {
-                client.request("session/set_mode", json!({"sessionId":sid,"modeId": if mode == "bypass" { "bypassPermissions" } else { mode }}), Some(Duration::from_secs(30))).await?;
+                client.set_mode(mode).await?;
             }
             Ok::<(), String>(())
         }.await;
@@ -357,8 +364,17 @@ impl Client {
         }
     }
 
+    pub fn permission_snapshot(&self) -> Value {
+        let modes=self.modes.lock();
+        let Some(options)=modes["availableModes"].as_array() else {return json!({})};
+        json!({"permission_mode":modes["currentModeId"],"permission_modes":options.iter().map(|option|json!({"id":option["id"],"label":option["name"],"description":option.get("description").and_then(Value::as_str).unwrap_or("")})).collect::<Vec<_>>()})
+    }
     pub async fn set_mode(&self, mode: &str) -> Result<(), String> {
-        self.request("session/set_mode", json!({"sessionId":self.session_id(),"modeId":if mode == "bypass" {"bypassPermissions"} else {mode}}), Some(Duration::from_secs(30))).await.map(|_| ())
+        let mode=if mode=="bypass" {"bypassPermissions"} else {mode};
+        self.request("session/set_mode", json!({"sessionId":self.session_id(),"modeId":mode}), Some(Duration::from_secs(30))).await?;
+        {let mut modes=self.modes.lock();if modes.is_object() {modes["currentModeId"]=json!(mode);}}
+        self.emit("meta",json!({"mode":mode}));
+        Ok(())
     }
     pub fn cancel(&self) -> Result<(), String> {
         let interactions = self.interactions.lock().drain().collect::<Vec<_>>();
@@ -441,6 +457,12 @@ impl Client {
         }
         match update["sessionUpdate"].as_str() {
             Some("config_option_update") => self.apply_config_options(update),
+            Some("current_mode_update") => {
+                if let Some(mode)=update["currentModeId"].as_str() {
+                    {let mut modes=self.modes.lock();if modes.is_object() {modes["currentModeId"]=json!(mode);}}
+                    self.emit("meta",json!({"mode":mode}));
+                }
+            },
             Some("agent_message_chunk") => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     let mut stream = self.stream.lock();
@@ -452,7 +474,10 @@ impl Client {
             }
             Some("tool_call" | "tool_call_update") => {
                 self.flush_message();
-                self.emit("tool_use", json!({"tool_use_id":update["toolCallId"],"name":update["name"].as_str().or(update["title"].as_str()).unwrap_or("Tool"),"input":update["rawInput"],"status":update["status"],"content":update["content"]}));
+                let name=update["name"].as_str().or(update["title"].as_str());
+                let mut payload=json!({"id":update["toolCallId"],"tool_use_id":update["toolCallId"],"tool":name,"name":name,"input":update["rawInput"],"status":update["status"],"content":update["content"]});
+                payload.as_object_mut().unwrap().retain(|_,value|!value.is_null());
+                self.emit("tool_use",payload);
             }
             _ => {}
         }
@@ -937,6 +962,7 @@ for line in sys.stdin:
             ctx.clone(),
             991,
             &backend,
+            "codebuddy",
             Path::new("/tmp"),
             None,
             None,

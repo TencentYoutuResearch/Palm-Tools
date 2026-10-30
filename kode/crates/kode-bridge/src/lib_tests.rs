@@ -545,6 +545,8 @@ async fn memory_recent_returns_approved_facts() {
 
     let base = build_test_ctx(Config::default(), "t".into());
     let ctx = Arc::new(Ctx {
+        runtimes: Default::default(),
+        cloud_sync: Default::default(),
         agent_backends: Default::default(),
         acp: Arc::new(acp::Registry::default()),
         config: base.config.clone(),

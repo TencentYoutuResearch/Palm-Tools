@@ -2170,7 +2170,7 @@
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
         {#if tab?.transportKind === 'acp'}
-          <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} />
+          <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} agentName={tab?.backendKey === 'codebuddy' ? 'CodeBuddy' : tab?.backendKey ?? 'Agent'} />
         {:else}
         <Terminal
           sessionId={id}

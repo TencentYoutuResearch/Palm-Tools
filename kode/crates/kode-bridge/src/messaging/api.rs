@@ -65,6 +65,19 @@ fn owner(hub: &Hub, h: &HeaderMap, id: &str) -> Result<()> {
 }
 pub(super) fn router(hub: Arc<Hub>) -> Router {
     Router::new()
+        .route("/api/v1/messaging/integrations", get(integration_status).post(integration_configure))
+        .route("/api/v1/messaging/memory/tool", post(memory_tool))
+        .route("/api/v1/messaging/cloud/status", get(cloud_status))
+        .route("/api/v1/messaging/cloud/pair", post(cloud_pair))
+        .route("/api/v1/messaging/cloud/activate", post(cloud_activate))
+        .route("/api/v1/messaging/cloud/backend", post(cloud_backend))
+        .route("/api/v1/messaging/runtime/publish", post(runtime_publish).layer(axum::extract::DefaultBodyLimit::max(8*1024*1024)))
+        .route("/api/v1/messaging/runtime/claim", post(runtime_claim))
+        .route("/api/v1/messaging/runtime/release", post(runtime_release))
+        .route("/api/v1/messaging/runtime/settle", post(runtime_settle))
+        .route("/api/v1/messaging/runtime/command", post(runtime_command))
+        .route("/api/v1/messaging/runtime/sessions", get(runtime_sessions))
+        .route("/api/v1/messaging/runtime/history", get(runtime_history))
         .route("/api/v1/messaging/node", get(node))
         .route("/api/v1/messaging/workbench/peers", post(add_peer))
         .route("/api/v1/messaging/workbench/peers/remove", post(remove_peer))
@@ -76,6 +89,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/workbench/transcript", post(workbench_transcript))
         .route("/api/v1/messaging/workbench/documents/:key", get(workbench_document).post(save_workbench_document))
         .route("/api/v1/messaging/self", get(own_session))
+        .route("/api/v1/messaging/native/resolve", post(resolve_native))
         .route(
             "/api/v1/messaging/native/:id/credential",
             post(native_credential),
@@ -235,7 +249,7 @@ async fn native_credential(
     let live = hub
         .ctx
         .upgrade()
-        .is_some_and(|ctx| ctx.sessions.lock().contains_key(&id));
+        .is_some_and(|ctx| ctx.sessions.lock().contains_key(&id) || ctx.runtimes.contains(id));
     if !live {
         return Err(Error(
             StatusCode::NOT_FOUND,
@@ -428,4 +442,109 @@ async fn events(
     let events = hub.store.events(q.after, session.as_deref())?;
     let cursor = events.last().map_or(q.after, |e| e.seq);
     Ok(Json(json!({"events":events,"cursor":cursor})))
+}
+
+async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<crate::runtime::Publication>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let runtime=input.runtime.clone();
+    let result=ctx.runtimes.publish(&ctx,input)?;
+    if runtime=="gui" {
+        for row in result["sessions"].as_array().into_iter().flatten() {
+            if let Some(id)=row["id"].as_u64() {
+                let snapshot=ctx.runtimes.snapshots().into_iter().find(|s|s["local_id"]==id).unwrap_or_default();
+                let sid=format!("kode:runtime:gui:{id}");
+                hub.store.register(RegisterRequest{session_id:sid.clone(),title:snapshot["dto"]["title"].as_str().unwrap_or("Kode session").into(),runtime:"kode".into(),owner_token:hub.store.db_token(&sid)?})?;
+                hub.native.lock().insert(sid,id);
+            }
+        }
+    }
+    Ok(Json(result))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeClaim { runtime:String, boot_id:String }
+async fn runtime_claim(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<RuntimeClaim>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(ctx.runtimes.claim(&input.runtime,&input.boot_id)?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSettlement { runtime:String, boot_id:String, id:String, result:serde_json::Value }
+async fn runtime_settle(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<RuntimeSettlement>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    ctx.runtimes.settle(&input.runtime,&input.boot_id,&input.id,input.result)?; Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCommand { session_id:u64, kind:String, payload:serde_json::Value, request_id:String }
+async fn runtime_command(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<RuntimeCommand>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(ctx.runtimes.command(input.session_id,&input.kind,input.payload,&input.request_id).await?))
+}
+async fn runtime_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(json!({"sessions":ctx.runtimes.snapshots().into_iter().map(|s|s["dto"].clone()).collect::<Vec<_>>(),"runtimes":{"gui":ctx.runtimes.available("gui"),"dsh":ctx.runtimes.available("dsh")}})))
+}
+
+async fn cloud_status(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).status()))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudPair { server_url:String }
+async fn cloud_pair(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudPair>) -> Result<Json<crate::cloud_sync::CloudPairingPayload>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).configure_and_create_pairing(input.server_url).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+
+#[derive(Deserialize)]
+struct RuntimeHistory { id:u64, from:Option<u64>, limit:Option<usize> }
+async fn runtime_history(State(hub): State<Arc<Hub>>, h: HeaderMap, Query(query): Query<RuntimeHistory>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(json!({"events":ctx.runtimes.history(query.id,query.from.unwrap_or(0),query.limit.unwrap_or(10000))?})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudActivation { backend_id:String }
+async fn cloud_activate(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudActivation>) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).activate_backend(&input.backend_id).map_err(|e|Error(StatusCode::BAD_REQUEST,e))?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudBackend {name:String,server_url:String,ssh_host:String,ssh_port:u16,remote_port:u16,deployment_kind:String,remote_deploy_dir:Option<String>}
+async fn cloud_backend(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudBackend>) -> Result<Json<crate::cloud_sync::CloudBackendSummary>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).upsert_managed_backend(input.name,input.server_url,input.ssh_host,input.ssh_port,input.remote_port,input.deployment_kind,input.remote_deploy_dir).map_err(|e|Error(StatusCode::BAD_REQUEST,e))?))
+}
+
+async fn integration_status(State(hub): State<Arc<Hub>>, h: HeaderMap)->Result<Json<super::integrations::Settings>> {
+    auth(&hub,&h)?;Ok(Json(super::integrations::settings(&hub)?))
+}
+async fn integration_configure(State(hub): State<Arc<Hub>>, h: HeaderMap,Json(value):Json<super::integrations::Change>)->Result<Json<super::integrations::Settings>> {
+    admin(&hub,&h)?;Ok(Json(super::integrations::change(&hub,value)?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryTool {name:String,arguments:serde_json::Value}
+async fn memory_tool(State(hub): State<Arc<Hub>>, h: HeaderMap,Json(input):Json<MemoryTool>)->Result<Json<serde_json::Value>> {
+    let source=match auth(&hub,&h)? {Principal::Admin=>"owner".into(),Principal::Session(source)=>source};
+    Ok(Json(super::integrations::tool(&hub,&source,&input.name,input.arguments).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeResolution { native_id:u64, process_id:u64 }
+async fn resolve_native(State(hub):State<Arc<Hub>>,h:HeaderMap,Json(input):Json<NativeResolution>)->Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;
+    let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let id=ctx.runtimes.snapshots().iter().find(|row|row["dto"]["runtime"]=="gui" && row["dto"]["native_runtime_id"]==input.native_id && row["dto"]["native_process_id"]==input.process_id).and_then(|row|row["local_id"].as_u64()).ok_or_else(||Error(StatusCode::NOT_FOUND,"GUI session has not published yet".into()))?;
+    native_credential(State(hub),h,Path(id)).await
+}
+
+async fn runtime_release(State(hub):State<Arc<Hub>>,h:HeaderMap,Json(input):Json<RuntimeClaim>)->Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    ctx.runtimes.release(&input.runtime,&input.boot_id)?;Ok(Json(json!({"ok":true})))
 }

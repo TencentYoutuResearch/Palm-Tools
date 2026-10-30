@@ -51,6 +51,23 @@ test('explicit remote and disabled-auto configurations are not provisioned', asy
   assert.equal(explicit.stateFile, undefined)
 })
 
+test('GUI-first installations join the same backend without provisioning a second database', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'kode-gui-first-'))
+  const directory = join(home, 'Library', 'Application Support', 'kode')
+  await mkdir(directory, { recursive: true })
+  const shared = { url: 'http://127.0.0.1:49123', token_file: join(directory, 'token'), server_config: join(directory, 'server.json'), server_command: '/Applications/kode.app/Contents/MacOS/kode', server_args: ['--kode-workbench-server'] }
+  await writeFile(join(directory, 'workbench-connection.json'), JSON.stringify(shared))
+  try {
+    const result = await prepareRuntimeConfig({ url: 'http://127.0.0.1:47870' }, { home, platform: 'darwin', env: {} })
+    assert.equal(result.url, shared.url); assert.equal(result.tokenFile, shared.token_file); assert.equal(result.serverConfig, shared.server_config)
+    assert.deepEqual(result.serverArgs, shared.server_args); assert.equal(result.sharedBackendState, true)
+    assert.equal(result.publishWorkbenchConnection, undefined)
+    await assert.rejects(readFile(join(home, '.config/kode/dsh/messaging.json')), { code: 'ENOENT' })
+    const explicit = await prepareRuntimeConfig({ url: 'https://explicit.example', tokenFile: '/explicit/token' }, { home, platform: 'darwin', env: {} })
+    assert.equal(explicit.url, 'https://explicit.example')
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
 
 test('explicit paths take precedence and environment moves only generated state', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'kode-bundle-override-'))

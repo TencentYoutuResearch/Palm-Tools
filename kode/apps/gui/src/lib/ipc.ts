@@ -246,7 +246,8 @@ export interface SessionFocusRequestedEvent {
 }
 
 export interface PersistedTab {
-  transport_kind?: 'acp' | 'pty' | null
+  dsh_session_id?: string
+  transport_kind?: 'acp' | 'pty' | 'runtime' | null
   backend_key: string
   title: string
   /// 用户手动重命名过;为 true 时恢复后不让后端 ai title 覆盖。
@@ -295,7 +296,7 @@ export const ipc = {
     endpoint_id?: EndpointId | null,
     /// Kode xterm 当前主题,注入 TERM_THEME/COLORFGBG 给子 CLI。
     term_theme?: 'light' | 'dark' | null,
-    transport_kind?: 'acp' | 'pty' | null,
+    transport_kind?: 'acp' | 'pty' | 'runtime' | null,
   ) =>
     invoke<SpawnedSession>('spawn_session', {
       backendKey: backend_key,

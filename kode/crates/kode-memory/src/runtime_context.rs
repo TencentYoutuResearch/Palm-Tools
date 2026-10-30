@@ -153,3 +153,11 @@ mod tests {
         ));
     }
 }
+
+/// Whether this GUI backend has migrated from the legacy memory-only MCP to
+/// Kode's session-scoped backend services. Other CLI hosts stay unaffected.
+pub fn uses_shared_services(backend:&str)->bool {
+    let path=std::env::var_os("KODE_WORKBENCH_CONNECTION").and_then(|path|std::path::PathBuf::from(path).parent().map(|root|root.join("shared-mcp.json"))).or_else(||dirs::config_dir().map(|root|root.join("kode/shared-mcp.json")));
+    let Some(path)=path else {return false};
+    std::fs::read(path).ok().and_then(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).ok()).is_some_and(|value|value["backends"].as_array().is_some_and(|rows|rows.iter().any(|row|row.as_str()==Some(backend))))
+}

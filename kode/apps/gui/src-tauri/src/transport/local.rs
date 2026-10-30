@@ -105,6 +105,10 @@ impl SessionTransport for LocalTransport {
             .clone()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")));
 
+        if self.use_persisted_memory_prompt_flag {
+            crate::workbench_state::connection().await.map_err(|e|TransportError::BadRequest(e.to_string()))?;
+            kode_bridge::session_mcp::reserve_gui_session(id,&spec.backend_key,&cwd_path,spec.model.as_deref()).await.map_err(|e|TransportError::BadRequest(e.to_string()))?;
+        }
         // 构建 extra_env:
         // - KODE_HOST 是 memory/hook 的宿主激活开关；外部 CLI 不会拥有它。
         // - KODE_HOOK_SOCK 供 hook command 定位 GUI relay socket。
@@ -115,6 +119,7 @@ impl SessionTransport for LocalTransport {
         let memory_prompt_enabled = self.read_memory_prompt_flag();
         let mut extra_env: Vec<(String, String)> = Vec::new();
         extra_env.push(("KODE_HOST".to_string(), "1".to_string()));
+        extra_env.push(("KODE_GUI_PROCESS_ID".to_string(),std::process::id().to_string()));
         if let Some(sock) = self.hook_sock.as_deref() {
             extra_env.push(("KODE_HOOK_SOCK".to_string(), sock.to_string()));
         }

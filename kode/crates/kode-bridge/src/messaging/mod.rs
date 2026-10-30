@@ -1,6 +1,7 @@
 //! Opt-in durable session messaging. No Tauri dependencies and no PTY byte-path changes.
 //! `KODE_MESSAGING_CONFIG` selects a JSON config; disabled bridges behave as before.
 mod api;
+mod integrations;
 pub mod agents;
 mod codebuddy_registry;
 mod link;
@@ -50,6 +51,7 @@ pub struct Peer {
 }
 
 pub struct Hub {
+    memory: Mutex<Option<Arc<crate::MemoryHandle>>>,
     store: Store,
     config: Config,
     peers: Mutex<Vec<Peer>>,
@@ -83,8 +85,10 @@ impl Hub {
             }
         }
         let store = Store::open(&config.database, &config.node_id)?;
+        ctx.runtimes.open(&config.database.with_extension("runtime.sqlite"))?;
         let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
+            memory: Mutex::new(ctx.memory.clone()),
             store,
             config,
             peers: Mutex::new(peers),
@@ -148,6 +152,7 @@ impl Hub {
         Ok(all)
     }
     fn send(&self, source: &str, req: SendRequest) -> Result<Message> {
+        if !integrations::settings(self)?.messaging_enabled {bail!("Session communication is disabled in Kode settings")}
         let _guard = self.gate.lock();
         if !valid_id(&req.target.node_id)
             || !valid_id(&req.target.session_id)
@@ -362,7 +367,8 @@ impl Hub {
                 )
             })
             .collect();
-        let live_ids: std::collections::HashSet<_> = rows.iter().map(|row| row.0).collect();
+        let mut live_ids: std::collections::HashSet<_> = rows.iter().map(|row| row.0).collect();
+        live_ids.extend(ctx.runtimes.snapshots().iter().filter(|row|row["dto"]["status"]!="exited").filter_map(|row|row["local_id"].as_u64()));
         let removed: Vec<_> = self
             .native
             .lock()
@@ -439,6 +445,16 @@ impl Hub {
                 }
             }
             let _ = registration;
+        }
+        for snapshot in ctx.runtimes.snapshots().into_iter().filter(|row|row["dto"]["runtime"]=="gui" && row["dto"]["status"]=="idle") {
+            let Some(id)=snapshot["local_id"].as_u64() else {continue};
+            if !ctx.runtimes.available("gui") || crate::pending_interaction(&ctx,id).is_some(){continue}
+            let sid=format!("kode:runtime:gui:{id}");
+            if let Some(message)=self.claim(&sid)?.first(){
+                let text=format!("[Session message {} from {}/{}]\n{}",message.id,message.source.node_id,message.source.session_id,message.content);
+                let result=ctx.runtimes.command(id,"input",serde_json::json!({"text":text}),&message.id).await;
+                self.settle(&sid,&message.id,if result.is_ok(){Status::Accepted}else{Status::Uncertain},Some(if result.is_ok(){"submitted to runtime; processing is not confirmed"}else{"runtime submission unconfirmed; do not automatically retry"}.into()))?;
+            }
         }
         let _guard = self.gate.lock();
         let online: std::collections::HashSet<_> = self

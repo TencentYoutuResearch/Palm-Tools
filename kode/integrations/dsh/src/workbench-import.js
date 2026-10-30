@@ -85,6 +85,9 @@ export async function syncNativeTabs(controller, client, profiles, signal) {
 }
 export async function importSavedSession(ctx, client, tab) {
   if (!tab.session_id || !tab.cwd || !tab.backend_key) throw new Error('Saved session is missing its native identity')
+  const published = await client.call('/api/v1/messaging/runtime/sessions')
+  const live = (published.sessions ?? []).find(row => row.runtime === 'gui' && row.backend_key === tab.backend_key && row.session_uuid === tab.session_id && row.status !== 'exited' && (row.owner_alive ?? row.runtime_online))
+  if (live) return { sharedSession: live, imported: false }
   const runtime = ctx.get('kodeAgents'), controller = ctx.get('sessionController')
   const registry = ctx.get('workspaceRegistry')
   let workspace = await registry.resolveByPath(tab.cwd)

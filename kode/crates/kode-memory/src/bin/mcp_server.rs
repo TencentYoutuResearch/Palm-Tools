@@ -39,7 +39,8 @@ async fn main() -> Result<()> {
     // a directly launched external CLI receives a healthy, empty MCP server.
     // Existing installations gain this behavior when the sidecar is upgraded and
     // do not need their user configuration rewritten.
-    let kode_active = kode_memory::runtime_context::is_active(None);
+    let migrated=std::env::var_os("KODE_GUI_PROCESS_ID").is_some() && std::env::var("KODE_BACKEND_KEY").ok().is_some_and(|backend|kode_memory::runtime_context::uses_shared_services(&backend));
+    let kode_active = kode_memory::runtime_context::is_active(None) && !migrated;
     let state = if kode_active {
         let root = match std::env::var("KODE_MEMORY_ROOT") {
             Ok(v) => std::path::PathBuf::from(v),

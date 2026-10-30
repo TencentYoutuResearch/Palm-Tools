@@ -315,6 +315,44 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h(Failure, { text: navigationError || error }),
     )
   }
+  function IntegrationSettings() {
+    const { data: hosts } = useProjectHosts()
+    const [host, setHost] = useState(() => transport?.current ?? 'local')
+    const [data, setData] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [server, setServer] = useState(''), [pairing, setPairing] = useState(null)
+    const writing = React.useRef(false), revision = React.useRef(0)
+    const request = async body => {
+      const response = await fetchHost('/api/kode/integrations', body ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { credentials: 'same-origin' }, host)
+      const value = await parseHostJson(response)
+      if (!response.ok) throw new Error(value.error ?? '无法读取互通设置，请重试。')
+      return value
+    }
+    useEffect(() => {
+      let alive = true, pending = false, first = true
+      setData(null); setError(''); setPairing(null)
+      const refresh = async () => {
+        if (pending || writing.current) return
+        pending = true
+        const before = revision.current
+        try { const value = await request(); if (alive && !writing.current && revision.current === before) { setData(value); if (first) setServer(value.cloud.server_url); first = false } }
+        catch (error) { if (alive && first) setError(error.message) }
+        finally { pending = false }
+      }
+      void refresh(); const timer = setInterval(() => { void refresh() }, 5000)
+      return () => { alive = false; clearInterval(timer) }
+    }, [host])
+    const update = async body => { revision.current++; writing.current = true; setBusy(true); setError(''); try { const value = await request(body); if (value.settings) setData(prior => ({ ...prior, settings: value.settings })); if (value.pairing) setPairing(value.pairing) } catch (error) { setError(error.message) } finally { writing.current = false; setBusy(false) } }
+    return h('section', { className: 'kode-agent-settings' }, h('h2', null, '会话互通与记忆'),
+      h(SelectField, { label: '配置主机', value: host, options: hosts.hosts.map(row => ({ value: row.id, label: row.name })), onChange: setHost, disabled: busy }),
+      h('p', { className: 'kode-config-note' }, '设置保存在所选主机的 Kode 后端，与原 Kode GUI 共用。关闭通信或记忆不会删除已有内容。'),
+      !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在连接 Kode 后端…'),
+      data && h(React.Fragment, null,
+        ...[{ key: 'messaging_enabled', label: '跨会话通信', detail: '允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: '允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
+        h('h3', null, '手机访问'), h('p', { className: 'kode-config-note' }, data.cloud.connected ? '云同步服务已连接。配对后，手机可访问这台主机发布的会话。' : '填写手机可访问的同步服务地址，再生成一次性配对链接。'),
+        h('label', { className: 'kode-field' }, h('span', null, '同步服务地址'), h('input', { type: 'url', value: server, disabled: busy, placeholder: 'https://sync.example.com', onChange: event => setServer(event.target.value) })),
+        h(Button, { disabled: busy || !server.trim(), onClick: () => void update({ action: 'pair', server_url: server.trim() }) }, busy ? '正在保存…' : '生成手机配对链接'),
+        pairing && h('label', { className: 'kode-field' }, h('span', null, '在手机 App 的手动配对中粘贴此链接'), h('textarea', { readOnly: true, value: pairing.uri, rows: 4, onFocus: event => event.target.select() }), h('span', { className: 'kode-config-note' }, '链接仅可使用一次；过期后请重新生成。')),
+      ), h(Failure, { text: error }))
+  }
   function AgentSettings({ sessions, slots }) {
     const { data: hosts } = useProjectHosts()
     const [settingsHost, setSettingsHost] = useState(() => transport?.current ?? 'local')
@@ -723,10 +761,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       return () => { window.removeEventListener('kode-session-avatar', show); window.removeEventListener('kode-resume-session', resume) }
     }, [merged])
     const navigate = async (id, target) => { if (busy) return; setBusy(true); setError(''); setNotice(''); try {
-      if (target.sessionId?.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId }); id = imported.hostId; target = { ...target, sessionId: imported.sessionId }; if(imported.historyWindow?.truncated)setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`) }
+      if (target.sessionId?.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId }); if (imported.sharedSession) { if ((transport?.current ?? 'local') !== imported.hostId) await switchHost(imported.hostId); showShared({ session: imported.sharedSession, host: imported.hostId }); return true } showShared(null); id = imported.hostId; target = { ...target, sessionId: imported.sessionId }; if(imported.historyWindow?.truncated)setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`) }
       await switchHost(id, target); await refreshWorkspaceDirectory(); return true
     } catch (error) { setError(error.message) } finally { setBusy(false) } }
-    const open = id => { const route = merged.routes.get(id); if (route) void navigate(route.hostId, { sessionId: route.id }); else props.open(id) }
+    const open = id => { showShared(null); const route = merged.routes.get(id); if (route) void navigate(route.hostId, { sessionId: route.id }); else props.open(id) }
     const mutate = async (id, operation, args) => {
       const route = merged.routes.get(id)
       await projectCall({ action: 'host-operation', id: route.hostId, operation, args })
@@ -1031,6 +1069,82 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       } }, () => null))
     })
   }
+  let sharedTarget = null
+  const sharedListeners = new Set(), sharedDrafts = new Map()
+  const sharedStore = { subscribe: fn => { sharedListeners.add(fn); return () => sharedListeners.delete(fn) }, getSnapshot: () => sharedTarget }
+  const showShared = target => { sharedTarget = target; for (const notify of sharedListeners) notify() }
+  function SharedInteraction({ event, resolved, operate }) {
+    const p = event.payload, id = p.request_id ?? p.question_id ?? p.plan_id
+    const [values, setValues] = useState(() => Object.fromEntries(Object.entries(p.requested_schema?.properties ?? {}).filter(([, field]) => 'default' in field).map(([key, field]) => [key, field.default])))
+    const [busy, setBusy] = useState(false), [done, setDone] = useState(false), [error, setError] = useState('')
+    const keys = React.useRef(new Map())
+    const act = async (kind, payload) => {
+      if (busy || resolved || done) return
+      setBusy(true); setError('')
+      const fingerprint = JSON.stringify({ kind, payload })
+      if (!keys.current.has(fingerprint)) keys.current.set(fingerprint, window.crypto?.randomUUID?.() ?? `response-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+      try { await operate(kind, payload, keys.current.get(fingerprint)); setDone(true) } catch (error) { setError(error.message) } finally { setBusy(false) }
+    }
+    const respond = response => act('answer', { request_id: id, response })
+    const field = (key, spec) => {
+      const required = p.requested_schema.required?.includes(key), value = values[key]
+      const set = next => setValues(prior => ({ ...prior, [key]: next }))
+      const choices = (spec.oneOf ?? spec.enum?.map(value => ({ const: value, title: String(value) })) ?? []).map(choice => ({ value: choice.const, label: choice.title ?? String(choice.const) }))
+      return h('label', { className: 'kode-field', key }, h('span', null, `${spec.title ?? key}${required ? ' *' : ''}`), spec.description && h('span', { className: 'kode-config-note' }, spec.description),
+        spec.type === 'boolean' ? h('select', { value: value === undefined ? '' : String(value), required, onChange: event => set(event.target.value === '' ? undefined : event.target.value === 'true') }, h('option', { value: '' }, '请选择'), h('option', { value: 'true' }, '是'), h('option', { value: 'false' }, '否')) :
+        choices.length && !spec.allow_custom ? h('select', { value: value ?? '', required, onChange: event => set(event.target.value) }, h('option', { value: '' }, '请选择'), ...choices.map(choice => h('option', { value: choice.value, key: choice.value }, choice.label))) :
+        spec.type === 'number' || spec.type === 'integer' ? h('input', { type: 'number', step: spec.type === 'integer' ? 1 : 'any', min: spec.minimum, max: spec.maximum, required, value: value ?? '', onChange: event => set(event.target.value === '' ? undefined : Number(event.target.value)) }) :
+        h(React.Fragment, null, (choices.length || spec.items?.oneOf?.length) && h('p', { className: 'kode-config-note' }, `可选：${(choices.length ? choices.map(choice => choice.label) : spec.items.oneOf.map(choice => choice.title ?? choice.const)).join('；')}${spec.type === 'array' ? '（每行填写一项）' : ''}`), h('textarea', { rows: 2, required, minLength: spec.minLength, maxLength: spec.maxLength, value: Array.isArray(value) ? value.join('\n') : value ?? '', onChange: event => set(spec.type === 'array' ? event.target.value.split('\n').filter(value => value.trim()) : event.target.value) })))
+    }
+    return h('fieldset', { disabled: busy || done || resolved },
+      p.message && h(MarkdownText, { text: p.message, labels: markdownLabels }),
+      p.source === 'acp_permission' ? p.options.map(option => h(Button, { key: option.option_id, onClick: () => void respond({ optionId: option.option_id }) }, option.label)) :
+      p.requested_schema ? h('form', { onSubmit: event => { event.preventDefault(); void respond(p.source === 'acp_questions' ? { decision: 'allow', content: values } : { action: 'accept', content: values }) } }, ...Object.entries(p.requested_schema.properties ?? {}).map(([key, spec]) => field(key, spec)), h(Button, { type: 'submit', variant: 'primary' }, '提交回答'), h(Button, { type: 'button', onClick: () => void respond(p.source === 'acp_questions' ? { decision: 'deny' } : { action: 'cancel' }) }, '取消')) :
+      event.type === 'plan_proposed' ? h(React.Fragment, null, h(Button, { onClick: () => void act('plan_response', { plan_id: id, accept: true }) }, '批准计划'), h(Button, { onClick: () => void act('plan_response', { plan_id: id, accept: false }) }, '拒绝')) :
+      (p.options ?? []).map((option, index) => h(Button, { key: index, onClick: () => void act('answer', { question_id: id, choice_index: index, submit: true }) }, typeof option === 'string' ? option : option.label ?? option.text)),
+      (done || resolved) && h('p', { role: 'status', className: 'kode-config-note' }, '已处理'), h(Failure, { text: error }))
+  }
+  function SharedConversation({ target }) {
+    const { session, host } = target
+    const [events, setEvents] = useState([]), [draft, setDraft] = useState(() => sharedDrafts.get(`${host}:${session.id}`) ?? ''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+    const requestId = React.useRef(null), scroll = React.useRef(null)
+    const request = async body => {
+      const response = await fetchHost(body ? '/api/kode/shared-session' : `/api/kode/shared-session?id=${session.id}`, { credentials: 'same-origin', cache: 'no-store', ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) }, host)
+      const value = await parseHostJson(response)
+      if (!response.ok) throw new Error(value.error ?? '会话连接暂不可用，请重试。')
+      return value
+    }
+    useEffect(() => {
+      let alive = true, pending = false
+      const refresh = async () => { if (pending) return; pending = true; try { const value = await request(); if (alive) setEvents(value.events) } catch (error) { if (alive) setError(error.message) } finally { pending = false } }
+      void refresh(); const timer = setInterval(() => { void refresh() }, 500)
+      return () => { alive = false; clearInterval(timer) }
+    }, [host, session.id])
+    const resolved = new Set(events.filter(event => event.type === 'interaction.resolved').map(event => event.payload.request_id))
+    const operate = (kind, payload, request_id) => request({ session_id: session.id, kind, payload, request_id })
+    const rows = React.useMemo(() => {
+      const merged = new Map()
+      for (const event of events) {
+        if (!['message', 'tool_use', 'ask_user_question', 'plan_proposed'].includes(event.type)) continue
+        const key = `${event.type}:${event.payload.id ?? event.payload.tool_use_id ?? event.payload.question_id ?? event.payload.plan_id ?? event.ts}`
+        const prior = merged.get(key)
+        merged.set(key, { ...event, payload: { ...prior?.payload, ...event.payload } })
+      }
+      return [...merged.values()]
+    }, [events])
+    const send = async event => { event?.preventDefault(); if (busy || !draft.trim()) return; setBusy(true); setError(''); requestId.current ??= window.crypto?.randomUUID?.() ?? `web-${Date.now()}-${Math.random().toString(16).slice(2)}`; try { await request({ session_id: session.id, kind: 'input', payload: { text: draft }, request_id: requestId.current }); sharedDrafts.delete(`${host}:${session.id}`); setDraft(''); requestId.current = null } catch (error) { setError(error.message) } finally { setBusy(false) } }
+    const interrupt = async () => { setError(''); try { await request({ session_id: session.id, kind: 'interrupt', payload: {} }) } catch (error) { setError(error.message) } }
+    return h('section', { className: 'kode-shared-conversation', 'aria-label': session.title },
+      h('header', null, h('div', null, h('strong', null, session.title), h('p', { className: 'kode-config-note' }, '由 Kode GUI 持有的会话')), h(Button, { onClick: () => showShared(null) }, '返回 dsh 会话')),
+      h('div', { className: 'kode-shared-messages', ref: scroll, 'aria-live': 'polite' }, !rows.length && h('p', { className: 'kode-config-note' }, '等待会话消息…'), ...rows.map((event, index) => h('div', { className: 'kode-relay', key: `${event.type}:${event.payload.id ?? event.payload.tool_use_id ?? event.payload.question_id ?? index}` },
+        h('strong', null, event.type === 'message' ? event.payload.role === 'user' ? '你' : 'Agent' : event.type === 'tool_use' ? event.payload.name ?? '工具' : '需要回应'),
+        h(MarkdownText, { text: event.payload.text ?? event.payload.question ?? event.payload.plan ?? event.payload.output ?? '', labels: markdownLabels }),
+        ['ask_user_question', 'plan_proposed'].includes(event.type) && h(SharedInteraction, { event, resolved: event.payload.resolved === true || resolved.has(event.payload.request_id ?? event.payload.question_id ?? event.payload.plan_id), operate }),
+        event.type === 'tool_use' && event.payload.input && h('details', null, h('summary', null, '查看输入'), h('pre', null, typeof event.payload.input === 'string' ? event.payload.input : JSON.stringify(event.payload.input, null, 2))),
+      ))),
+      h('form', { className: 'kode-shared-composer', onSubmit: send }, h(Failure, { text: error }), h('label', { className: 'kode-field' }, '发送消息', h('textarea', { value: draft, rows: 3, disabled: busy, onChange: event => { const text = event.target.value; setDraft(text); sharedDrafts.set(`${host}:${session.id}`, text); requestId.current = null } })), h('div', null, h(Button, { type: 'button', onClick: interrupt }, '中断'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.trim() }, busy ? '正在发送…' : '发送'))),
+    )
+  }
   function InlineFileChat({native,...props}) {
     const openFile=React.useCallback((path,options)=>{
       if(typeof path!=='string'||/^[a-z][a-z\d+.-]*:\/\//i.test(path))return props.openFile(path,options)
@@ -1039,7 +1153,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       if(!match||!Number.isSafeInteger(line))return props.openFile(path,options)
       return props.openFile(match[1],{...options,line:options?.line??line})
     },[props.openFile])
-    return h(native,{...props,openFile})
+    const target = useSyncExternalStore(sharedStore.subscribe, sharedStore.getSnapshot)
+    return target ? h(SharedConversation, { key: `${target.host}:${target.session.id}`, target }) : h(native,{...props,openFile})
   }
   const internalTags = {
     subagent_notification: '子 Agent 通知', environment_context: '环境上下文',
@@ -1404,7 +1519,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-agent-avatar{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;overflow:hidden;border-radius:6px;color:var(--dsw-alias-label-primary)}.kode-agent-mask{display:block;width:100%;height:100%;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-agent-avatar img{display:block;width:100%;height:100%;object-fit:contain}.kode-agent-identity,.kode-agent-option{display:inline-flex;align-items:center;gap:8px;min-width:0}.kode-agent-identity{max-width:200px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}.kode-agent-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}span:has(>[data-slot="conversation.session.header.lineage"])>span:first-child{max-width:100%;font-size:16px;font-weight:600;line-height:24px}nav[aria-label="会话层级"]{flex:1 1 auto;min-width:0}nav[aria-label="会话层级"]~div:has(>[data-slot="conversation.session.header.actions"]){margin-left:auto;padding-left:16px}.kode-agent-option>.kode-option{flex:1}.kode-settings-group-title{font-size:13px;font-weight:500;color:var(--dsw-alias-label-secondary);margin:24px 0 8px}.kode-avatar-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100dvh - 48px)}.kode-avatar-dialog>:has(>.kode-avatar-editor){min-height:0;overflow-y:auto;overscroll-behavior:contain}.kode-avatar-editor{padding:12px 0}.kode-avatar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px;max-height:min(360px,50vh);overflow:auto;padding:4px}.kode-avatar-choice{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0;padding:8px;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer}.kode-avatar-choice>span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px}.kode-avatar-choice:hover,.kode-avatar-choice[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-choice[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary)}.kode-avatar-choice:disabled{opacity:.5;cursor:default}.kode-avatar-choice:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-option{display:flex;align-items:center;justify-content:space-between;gap:24px;min-width:200px}.kode-secondary{color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-menu-note{padding:8px 12px;max-width:260px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .kode-agent-settings{max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}.kode-agent-settings h2{margin:0;font-size:16px;font-weight:500;line-height:24px}.kode-agent-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}.kode-agent-rows{display:flex;flex-direction:column;gap:8px;margin:12px 0 0;padding:0;list-style:none}.kode-agent-row{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);padding:12px 14px;display:flex;flex-direction:column;gap:12px}.kode-agent-row-head{display:flex;align-items:center;gap:10px;min-width:0}.kode-agent-name{font-size:14px;font-weight:500;line-height:22px;overflow-wrap:anywhere;min-width:0}.kode-agent-tag{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);color:var(--dsw-alias-label-secondary);padding:1px 6px;font-size:11px;line-height:16px;flex-shrink:0}.kode-agent-edit{margin-left:auto;flex-shrink:0!important;height:28px!important;padding:0 10px!important;border-radius:var(--dsw-radius-sm)!important;font-size:12px!important;line-height:18px!important}.kode-agent-add{width:100%;min-height:44px!important;border:1px dashed var(--dsw-alias-border-l3)!important;border-radius:var(--dsw-radius-lg)!important;gap:6px!important}.kode-agent-editor{border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);padding:14px 16px;min-width:0}.kode-agent-editor .kode-field{gap:6px;margin-bottom:14px}.kode-agent-editor .kode-field>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-agent-models{min-width:0}.kode-settings-footer{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:14px}
-.kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}
+.kode-shared-conversation{display:flex;flex-direction:column;min-height:0;height:100%;color:var(--dsw-alias-label-primary)}.kode-shared-conversation>header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:16px 24px;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-shared-conversation>header p{margin:4px 0 0}.kode-shared-messages{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:24px}.kode-shared-composer{padding:16px 24px;border-top:1px solid var(--dsw-alias-border-l2)}.kode-shared-composer .kode-field{margin-bottom:12px}.kode-shared-composer>div:last-child{display:flex;justify-content:flex-end;gap:8px}.kode-integration-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-integration-row>span{display:grid;gap:6px;min-width:0}.kode-integration-row .kode-config-note{margin:0}.kode-integration-row input{flex:none;min-width:24px;min-height:24px;accent-color:var(--dsw-alias-state-business-primary)}.kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}
 .kode-field-select{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}.kode-field-select:hover{border-color:var(--dsw-alias-border-l1)}.kode-mode-control{display:inline-flex;align-items:center;position:relative}.kode-delete{color:var(--dsw-alias-state-error-primary);margin-right:auto}
 @media(max-width:600px){.kode-agent-row-head{flex-wrap:wrap}.kode-agent-editor{padding:12px}.kode-option{min-width:180px}.kode-trigger{max-width:180px}.kode-agent-identity{max-width:32px}.kode-agent-identity>span:last-child{display:none}}
 `
@@ -1422,6 +1537,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     ctx.effect(() => () => style.remove(), 'kode.agent-styles')
     ctx.slots.inject('conversation.hero.agentPreset', () => ctx.slots.register({ name: 'conversation.hero.agentPreset', id: 'kode-agent', inject: sessionId => ({ sessionId, sessions: ctx.sessions, remote: ctx.remote, slots: ctx.slots }) }, AgentControl))
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-agents', order: 5, label: () => 'Agent', inject: () => ({ sessions: ctx.sessions, slots: ctx.slots }) }, AgentSettings))
+    ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-integrations', order: 7, label: () => '会话互通与记忆' }, IntegrationSettings))
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-personalization', order: 6, label: () => '个性化', inject: () => ({ sessions: ctx.sessions }) }, PersonalizationSettings))
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'kode-ssh', order: 15, label: () => 'SSH 主机' }, SshSettings))
     ctx.slots.inject('conversation.input.model', () => ctx.slots.register({ name: 'conversation.input.model', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, ModelControl))

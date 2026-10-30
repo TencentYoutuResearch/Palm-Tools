@@ -5,7 +5,7 @@
   import { currentLocale, t } from './i18n'
   const tr = (key: string) => { $currentLocale; return t(key) }
   type Event = { type: string; ts: number; payload: Record<string, any> }
-  let { sessionId, visible }: { sessionId: number; visible: boolean } = $props()
+  let { sessionId, visible, agentName = 'Agent' }: { sessionId: number; visible: boolean; agentName?: string } = $props()
   let events: Event[] = $state([]), draft = $state(''), sending = $state(false), error = $state('')
   let composer: HTMLTextAreaElement | undefined = $state()
   export function insertReference(text: string) {
@@ -23,7 +23,14 @@
   let custom: Record<string, boolean> = $state({})
   let busy = $derived(events.filter(e => e.type === 'session.status').at(-1)?.payload.status === 'busy')
   let exited = $derived(events.some(e => e.type === 'session.exited'))
-  const call = (action: string, payload: Record<string, any> = {}) => invoke<any>('acp_session_action', { id: sessionId, action, payload })
+  const requestIds = new Map<string, string>()
+  const call = (action: string, payload: Record<string, any> = {}) => {
+    if (sessionId < 2 ** 40 || action === 'history') return invoke<any>('acp_session_action', { id: sessionId, action, payload })
+    const key = action + JSON.stringify(payload)
+    const requestId = requestIds.get(key) ?? crypto.randomUUID()
+    requestIds.set(key, requestId)
+    return invoke<any>('acp_session_action', { id: sessionId, action, payload: { ...payload, _client_request_id: requestId } }).then(value => { requestIds.delete(key); return value })
+  }
   async function refresh() {
     const history = await call('history') as Event[]
     applyEvents(history)
@@ -31,9 +38,9 @@
   function applyEvents(incoming: Event[]) {
     const unique = new Map<string, Event>()
     for (const e of [...events, ...incoming]) {
-      const key = e.type + '-' + (e.payload.id ?? e.payload.question_id ?? e.payload.plan_id ?? e.ts)
+      const key = e.type + '-' + (e.payload.id ?? e.payload.tool_use_id ?? e.payload.question_id ?? e.payload.plan_id ?? e.ts)
       const previous = unique.get(key)
-      if (!previous || (e.payload.revision ?? e.ts) >= (previous.payload.revision ?? previous.ts)) unique.set(key, e)
+      if (!previous || (e.payload.revision ?? e.ts) >= (previous.payload.revision ?? previous.ts)) unique.set(key, e.type === 'tool_use' && previous ? { ...e, ts: previous.ts, payload: { ...previous.payload, ...Object.fromEntries(Object.entries(e.payload).filter(([,value]) => value != null)) } } : e)
       if (e.payload.request_id && e.payload.requested_schema && !values[e.payload.request_id]) {
         values[e.payload.request_id] = Object.fromEntries(Object.entries(e.payload.requested_schema.properties).filter(([, f]) => 'default' in (f as any)).map(([k, f]) => [k, (f as any).default]))
       }
@@ -58,7 +65,8 @@
         applyEvents(buffered)
       } catch (e) { if (!stopped) error = String(e) }
     })()
-    return () => { stopped = true; unlisten?.() }
+    const replay = sessionId >= 2 ** 40 ? setInterval(() => { if (visible && !stopped) void refresh().catch(e => { if (!stopped) error = String(e) }) }, 500) : undefined
+    return () => { stopped = true; unlisten?.(); if (replay) clearInterval(replay) }
   })
   async function act(action: string, payload: Record<string, any>) {
     if (sending) return false
@@ -96,22 +104,27 @@
     return p.source === 'acp_questions' ? {decision:action === 'accept' ? 'allow' : 'deny', ...(action === 'accept' ? {content:values[p.request_id]} : {})} : {action, ...(action === 'accept' ? {content:values[p.request_id]} : {})}
   }
 </script>
-<section class="structured-session" aria-hidden={!visible} aria-label={tr('acp.conversation')}>
+<section class="structured-session" aria-hidden={!visible} aria-label={t('acp.conversation', { backend: agentName })}>
   <div class="transcript">
-    {#each events.filter(e => ['message','ask_user_question','plan_proposed','system'].includes(e.type)) as e (e.type + '-' + (e.payload.id ?? e.payload.question_id ?? e.payload.plan_id ?? e.ts))}
+    {#each events.filter(e => ['message','tool_use','ask_user_question','plan_proposed','system'].includes(e.type)) as e (e.type + '-' + (e.payload.id ?? e.payload.tool_use_id ?? e.payload.question_id ?? e.payload.plan_id ?? e.ts))}
       {@const p = e.payload}
       {#if e.type === 'message'}
-        <article class:user={p.role === 'user'}><strong>{p.role === 'user' ? tr('acp.you') : 'CodeBuddy'}</strong><div class="content">{p.text}</div></article>
+        <article class:user={p.role === 'user'}><strong>{p.role === 'user' ? tr('acp.you') : agentName}</strong><div class="content">{p.text}</div></article>
+      {:else if e.type === 'tool_use'}
+        <article><details><summary>{p.tool ?? p.name ?? 'Tool'} · {p.status ?? 'running'}</summary>
+          {#if p.input != null}<pre>{typeof p.input === 'string' ? p.input : JSON.stringify(p.input, null, 2)}</pre>{/if}
+          {#if p.output != null || p.content != null}<pre>{typeof p.output === 'string' ? p.output : JSON.stringify(p.output ?? p.content, null, 2)}</pre>{/if}
+        </details></article>
       {:else if e.type === 'system'}<p class="muted">{p.text}</p>
       {:else if e.type === 'plan_proposed'}
         <article><strong>{tr('acp.plan')}</strong><div class="content">{p.plan_md || tr('acp.noPlan')}</div><div class="actions">
           <button disabled={sending || exited || answered.includes(p.plan_id)} onclick={() => respond(p.plan_id,{decision:'allow'})}>{tr('acp.accept')}</button>
           <button disabled={sending || exited || answered.includes(p.plan_id)} onclick={() => respond(p.plan_id,{decision:'deny'})}>{tr('acp.reject')}</button></div></article>
       {:else if p.source === 'acp_permission'}
-        <article><strong>CodeBuddy · {tr('acp.permission')}</strong><p>{p.question}</p><pre>{p.context}</pre><div class="actions">
+        <article><strong>{agentName} · {tr('acp.permission')}</strong><p>{p.question}</p><pre>{p.context}</pre><div class="actions">
           {#each p.options as option}<button disabled={sending || exited || answered.includes(p.request_id)} onclick={() => respond(p.request_id,{optionId:option.option_id})}>{option.label}</button>{/each}</div></article>
       {:else if p.requested_schema}
-        <article><strong>CodeBuddy · {tr('acp.question')}</strong><p>{p.question}</p>
+        <article><strong>{agentName} · {tr('acp.question')}</strong><p>{p.question}</p>
           <form novalidate onsubmit={(e) => {e.preventDefault(); if (validForm(p)) void respond(p.request_id,formResponse(p,'accept'))}}><fieldset disabled={sending || exited || answered.includes(p.request_id)}>
             {#each Object.entries(p.requested_schema.properties) as [key, field] (key)}
               {@const f = field as any}{@const required = p.requested_schema.required?.includes(key)}
@@ -141,7 +154,7 @@
     {/each}
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-  <form novalidate class="composer" onsubmit={(e) => {e.preventDefault(); void send()}}><textarea class="resize-none" bind:this={composer} bind:value={draft} aria-label={tr('acp.message')} placeholder={tr('acp.message')} disabled={exited}></textarea>
+  <form novalidate class="composer" onsubmit={(e) => {e.preventDefault(); void send()}}><textarea class="resize-none" bind:this={composer} bind:value={draft} aria-label={t('acp.message', { backend: agentName })} placeholder={t('acp.message', { backend: agentName })} disabled={exited}></textarea>
     <button type="submit" disabled={sending || busy || exited || !draft.trim()}>{tr('acp.send')}</button>{#if busy}<button type="button" disabled={sending} onclick={() => void act('interrupt',{})}>{tr('acp.stop')}</button>{/if}</form>
 </section>
 <style>

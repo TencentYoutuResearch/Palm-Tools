@@ -2629,6 +2629,7 @@ dependencies = [
  "futures-util",
  "kode-core",
  "kode-memory",
+ "libc",
  "parking_lot",
  "portable-pty",
  "reqwest 0.12.28",
@@ -2640,6 +2641,7 @@ dependencies = [
  "tokio-tungstenite 0.23.1",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

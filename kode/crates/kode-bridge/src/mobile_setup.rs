@@ -27,11 +27,44 @@ pub async fn execute(ctx: Arc<Ctx>, kind: &str, payload: Value) -> (u16, Value) 
     }
 }
 
+/// Cloud creation must go to an attached frontend runtime. A standalone Kode
+/// service must not silently spawn a second CLI that neither frontend owns.
+pub async fn execute_hosted(ctx:Arc<Ctx>,kind:&str,mut payload:Value)->(u16,Value){
+    if kind=="backends"{
+        let mut rows=vec![];
+        for runtime in ["dsh","gui"].into_iter().filter(|runtime|ctx.runtimes.available(runtime)){
+            match ctx.runtimes.request(runtime,None,"backends",json!({}),&uuid::Uuid::new_v4().to_string()).await{
+                Ok(value)=>rows.extend(value["backends"].as_array().into_iter().flatten().cloned()),
+                Err(error)=>return (503,json!({"error":"runtime_unavailable","detail":error.to_string()})),
+            }
+        }
+        return (200,json!({"backends":rows,"home":dirs::home_dir().map(|path|path.to_string_lossy().into_owned())}));
+    }
+    if matches!(kind,"models"|"create_session"){
+        let key=payload["backend_key"].as_str().unwrap_or_default();
+        if !key.starts_with("dsh:") && !key.starts_with("gui:"){
+            if ctx.runtimes.available("gui"){payload["backend_key"]=json!(format!("gui:{key}"));}
+            else{return (503,json!({"error":"runtime_unavailable","detail":"Open Kode GUI or dsh on this Host before creating a session."}));}
+        }
+    }
+    execute(ctx,kind,payload).await
+}
+
 async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Value, ApiError> {
+    if matches!(kind,"models"|"create_session") {
+        let runtime=payload["backend_key"].as_str().and_then(|key|key.split_once(':')).map(|(runtime,_)|runtime).filter(|runtime|matches!(*runtime,"dsh"|"gui"));
+        if let Some(runtime)=runtime {
+            return ctx.runtimes.request(runtime,None,kind,payload.clone(),&uuid::Uuid::new_v4().to_string()).await.map_err(|e|ApiError::BadRequest(e.to_string()));
+        }
+    }
     match kind {
         "backends" => {
-            let Json(mut value) = list_backends(Extension(ctx)).await;
+            let Json(mut value) = list_backends(Extension(ctx.clone())).await;
             value["home"] = json!(dirs::home_dir().map(|path| path.to_string_lossy().into_owned()));
+            for runtime in ["dsh","gui"].into_iter().filter(|runtime|ctx.runtimes.available(runtime)) {
+                let external=ctx.runtimes.request(runtime,None,"backends",json!({}),&uuid::Uuid::new_v4().to_string()).await.map_err(|e|ApiError::BadRequest(e.to_string()))?;
+                if let (Some(current),Some(extra))=(value["backends"].as_array_mut(),external["backends"].as_array()) {current.extend(extra.iter().cloned());}
+            }
             Ok(value)
         }
         "models" => {
@@ -64,9 +97,7 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
         "create_session" => {
             let req: MobileCreate =
                 serde_json::from_value(payload).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-            let cfg = ctx
-                .config
-                .backend(&req.backend_key)
+            let cfg = ctx.backend_for_session(&req.backend_key, None).ok()
                 .filter(|cfg| cfg.is_enabled() && backend_probe::which(&cfg.command).is_some())
                 .ok_or_else(|| {
                     ApiError::BadRequest("Backend is unavailable on this desktop".into())

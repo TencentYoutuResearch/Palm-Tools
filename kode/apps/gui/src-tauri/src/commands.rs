@@ -638,19 +638,29 @@ pub async fn spawn_session(
 
     let model = sanitize_spawn_model(model);
 
-    let protocol = state
+    // A restored custom ACP Agent may not be present in the desktop cache yet.
+    // Resolve its canonical configuration before selecting the transport.
+    let acp_backend = if matches!(endpoint_id, EndpointId::Local)
+        && transport_kind.as_deref() == Some("acp")
+    {
+        Some(crate::shared_agents::configuration(&backend_key, resume_session_id.as_deref()).await?)
+    } else {
+        None
+    };
+    let protocol = acp_backend.as_ref().map(|backend| backend.protocol_key(&backend_key).to_owned()).unwrap_or_else(|| state
         .ctx
         .backend_configs
         .read()
         .get(&backend_key)
         .map(|backend| backend.protocol_key(&backend_key).to_owned())
-        .unwrap_or_else(|| backend_key.clone());
+        .unwrap_or_else(|| backend_key.clone()));
     let structured = uses_structured_transport(&endpoint_id, &protocol, transport_kind.as_deref());
     if structured {
-        let mut backend =
-            crate::shared_agents::configuration(&backend_key, resume_session_id.as_deref()).await?;
+        let mut backend = acp_backend.ok_or("Missing ACP Agent configuration")?;
         let id = state.protocol_ctx.alloc_id();
         let cwd = cwd_path.as_deref().ok_or("Working directory is required")?;
+        crate::workbench_state::connection().await.map_err(|e|e.to_string())?;
+        kode_bridge::session_mcp::reserve_gui_session(id,&backend_key,cwd,model.as_deref()).await.map_err(|e|e.to_string())?;
         backend.args = kode_core::session::inject_kode_memory_prompt(
             &backend.args,
             backend.protocol_key(&backend_key),
@@ -664,6 +674,7 @@ pub async fn spawn_session(
             Arc::clone(&state.protocol_ctx),
             id,
             &backend,
+            &backend_key,
             cwd,
             permission_mode.as_deref(),
             model.as_deref(),
@@ -965,6 +976,7 @@ pub async fn kill_session(
     endpoint_id: Option<EndpointId>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    if id >= (1u64 << 40) {crate::backend_runtime::shared_command(id,"delete",serde_json::json!({})).await?;return Ok(())}
     state.protocol_ctx.acp.remove(id);
     let endpoint_id = endpoint_id.unwrap_or(EndpointId::Local);
     let transport = get_transport(&state, &endpoint_id)?;
@@ -1192,6 +1204,11 @@ pub async fn acp_session_action(
     payload: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    if id >= (1u64 << 40) {
+        if action=="history" {return Ok(crate::backend_runtime::call(&format!("/runtime/history?id={id}"),None).await?["events"].clone());}
+        let kind=if action=="respond" {"answer"}else{action.as_str()};
+        return crate::backend_runtime::shared_command(id,kind,payload).await;
+    }
     let client = state
         .protocol_ctx
         .acp

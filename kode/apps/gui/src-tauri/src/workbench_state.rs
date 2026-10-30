@@ -7,7 +7,7 @@ use crate::persistence::PersistedState;
 struct Connection { url: String, token_file: std::path::PathBuf, server_command: Option<std::path::PathBuf>, server_config: Option<std::path::PathBuf>, #[serde(default)] server_args: Vec<String> }
 static START: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, String)> {
-    let path = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?.join("kode/workbench-connection.json");
+    let path = std::env::var_os("KODE_WORKBENCH_CONNECTION").map(std::path::PathBuf::from).or_else(||dirs::config_dir().map(|root|root.join("kode/workbench-connection.json"))).ok_or_else(||anyhow::anyhow!("config directory unavailable"))?;
     let _start=START.lock().await;
     if !tokio::fs::try_exists(&path).await? {
         let root=path.parent().unwrap();tokio::fs::create_dir_all(root).await?;

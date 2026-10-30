@@ -379,7 +379,7 @@ pub async fn deploy_cloud_sync(
         req.remote_port,
         deployment_kind.to_string(),
         remote_deploy_dir.map(|dir| dir.original),
-    )?;
+    ).await?;
     emit(&app, "SavingBackend", "done", "backend saved");
     emit(&app, "Done", "done", "deployment complete");
     Ok(CloudDeployResult { backend })

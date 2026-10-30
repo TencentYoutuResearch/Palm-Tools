@@ -33,7 +33,7 @@ async function receive(message) {
   if (method === 'thread/name/set') return result(id,{})
   if (method === 'thread/resume' && archived) return send({id,error:{code:-32600,message:`session ${params.threadId} is archived. Run codex unarchive ${params.threadId} to unarchive it first.`}})
   if (method === 'thread/unarchive') { archived=false;return result(id,{thread:{id:params.threadId}}) }
-  if (method === 'thread/start' || method === 'thread/resume') return result(id, { thread: { id: params.threadId ?? 'same-native-id' } })
+  if (method === 'thread/start' || method === 'thread/resume') return result(id, { thread: { id: params.threadId ?? (process.env.KODE_FIXTURE_UNIQUE_THREAD === '1' ? `fixture-${process.pid}` : 'same-native-id') } })
   if (method === 'turn/steer') {
     const turnId = `turn-${turn}`, threadId = params.threadId
     if (process.env.KODE_FIXTURE_STEER_DROP === '1') return process.exit(1)
