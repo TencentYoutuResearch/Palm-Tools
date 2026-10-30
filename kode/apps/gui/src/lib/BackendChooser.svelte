@@ -13,7 +13,8 @@
    * 默认值:
    *   - cwd 预填全局 session_cwd(从 ipc.getPathsConfig)— **仅 Local**;
    *     Remote backend 不预填(server 端的"默认 cwd"由用户手填或留空让 server 兜底)
-   *   - bypass = false(default mode)
+   *   - bypass = 该路径(cwd,不分 backend)勾选过则默认勾选;没记录则 false
+   *     (见 project_permission.ts;Session history 的 Resume 同样沿用)
    *
    * 行为约束:
    *   - cwd 不验证目录存在(后端 spawn 失败再报错;给用户写到尚未存在路径的自由)
@@ -35,6 +36,7 @@
     type SessionSummary,
   } from './ipc'
   import { modelsFor, type ModelOption } from './model_catalog'
+  import { rememberBypass, rememberedBypass } from './project_permission'
   import { onMount, onDestroy } from 'svelte'
   import { open } from '@tauri-apps/plugin-dialog'
   import RemoteCwdPicker from './RemoteCwdPicker.svelte'
@@ -48,7 +50,7 @@
     workspaceCwd?: string
     workspaceEndpoint?: EndpointId
     /// 提交回调。
-    /// quick-pick(1..9 数字键)时 cwd 仍是预填的默认,permissionMode = 'default',model = undefined。
+    /// quick-pick(1..9 数字键)时 cwd 仍是预填的默认,permissionMode 按项目记忆(默认 'default'),model = undefined。
     onSubmit: (opts: {
       backendKey: string
       cwd?: string
@@ -79,6 +81,8 @@
 
   let cwd = $state('')
   let bypass = $state(false)
+  /// 用户本轮 configure 手动改过 toggle 后,cwd 变化不再用项目记忆覆盖它。
+  let bypassTouched = $state(false)
   let submitting = $state(false)
   let defaultCwd = $state('') // 从 PathsConfig 拉的全局默认,用于 reset 按钮(仅 Local)
 
@@ -205,6 +209,12 @@
     }
   }
 
+  /// cwd 变化时(含切换 backend 重新进入 configure)按路径记忆回填 bypass 默认值(用户手动改过则不覆盖)。
+  $effect(() => {
+    if (phase !== 'configure' || bypassTouched) return
+    bypass = rememberedBypass(cwd)
+  })
+
   /// 当 cwd 变化时(debounce 500ms)查询该目录下的历史 session。
   /// Local 直接扫本机 jsonl;Remote 通过 endpoint 协议扫 server 侧 jsonl。
   $effect(() => {
@@ -301,6 +311,7 @@
     selected = b
     selectedEndpoint = ep
     bypass = false
+    bypassTouched = false
     modelOptions = modelsFor(b.key)
     modelLoading = false
     modelNotice = ''
@@ -353,12 +364,12 @@
       void pickBackend(b, ENDPOINT_LOCAL)
       return
     }
-    // 1..9 数字键直接启动:用全局默认 cwd / default mode / 不指定 model,跳过 Configure
+    // 1..9 数字键直接启动:用全局默认 cwd / 该目录记住的 permission / 不指定 model,跳过 Configure
     // **只对本地 backend 有效** — 远端 backend 没快捷键(也不预填 cwd)
     void submitOnce({
       backendKey: b.key,
       cwd: defaultCwd || undefined,
-      permissionMode: 'default',
+      permissionMode: rememberedBypass(defaultCwd) ? 'bypass' : 'default',
       endpointId: ENDPOINT_LOCAL,
     })
   }
@@ -456,6 +467,7 @@
       cwdHistoryIpc
         .push(currentBucket(), finalCwd)
         .catch((e) => console.warn('cwd_history_push failed:', e))
+      rememberBypass(finalCwd, bypass)
     }
     void submitOnce({
       backendKey: selected.key,
@@ -731,7 +743,10 @@
             <input
               type="checkbox"
               checked={bypass}
-              onchange={(e) => (bypass = (e.target as HTMLInputElement).checked)}
+              onchange={(e) => {
+                bypass = (e.target as HTMLInputElement).checked
+                bypassTouched = true
+              }}
             />
             <span class="toggle-label">Bypass permissions</span>
           </label>
