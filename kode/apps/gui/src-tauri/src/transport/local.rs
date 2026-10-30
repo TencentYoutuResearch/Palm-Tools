@@ -85,7 +85,7 @@ impl SessionTransport for LocalTransport {
     }
 
     async fn spawn(&self, spec: SpawnSpec) -> Result<SpawnedSession, TransportError> {
-        let backend: BackendConfig = self
+        let mut backend: BackendConfig = self
             .ctx
             .backend_configs
             .read()
@@ -94,6 +94,10 @@ impl SessionTransport for LocalTransport {
                 TransportError::BadRequest(format!("backend not configured: {}", spec.backend_key))
             })?
             .clone();
+        if self.use_persisted_memory_prompt_flag && spec.resume_session_uuid.is_some() {
+            backend = crate::shared_agents::configuration(&spec.backend_key,spec.resume_session_uuid.as_deref()).await
+                .map_err(TransportError::BadRequest)?;
+        }
 
         let id = self.ctx.alloc_id();
         let cwd_path = spec
@@ -101,6 +105,10 @@ impl SessionTransport for LocalTransport {
             .clone()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")));
 
+        if self.use_persisted_memory_prompt_flag {
+            crate::workbench_state::connection().await.map_err(|e|TransportError::BadRequest(e.to_string()))?;
+            kode_bridge::session_mcp::reserve_gui_session(id,&spec.backend_key,&cwd_path,spec.model.as_deref()).await.map_err(|e|TransportError::BadRequest(e.to_string()))?;
+        }
         // 构建 extra_env:
         // - KODE_HOST 是 memory/hook 的宿主激活开关；外部 CLI 不会拥有它。
         // - KODE_HOOK_SOCK 供 hook command 定位 GUI relay socket。
@@ -111,6 +119,7 @@ impl SessionTransport for LocalTransport {
         let memory_prompt_enabled = self.read_memory_prompt_flag();
         let mut extra_env: Vec<(String, String)> = Vec::new();
         extra_env.push(("KODE_HOST".to_string(), "1".to_string()));
+        extra_env.push(("KODE_GUI_PROCESS_ID".to_string(),std::process::id().to_string()));
         if let Some(sock) = self.hook_sock.as_deref() {
             extra_env.push(("KODE_HOOK_SOCK".to_string(), sock.to_string()));
         }
@@ -188,7 +197,7 @@ impl SessionTransport for LocalTransport {
         // Phase 9.1.4 jsonl 语义 tail
         if let (Some(sid), Some(backend_kind)) = (
             session_uuid.as_deref(),
-            kode_core::session::jsonl_tail::Backend::from_backend_key(&spec.backend_key),
+            kode_core::session::jsonl_tail::Backend::from_backend_key(backend.protocol_key(&spec.backend_key)),
         ) {
             let claimed = self
                 .ctx
@@ -272,14 +281,14 @@ impl SessionTransport for LocalTransport {
 
 fn apply_resume_meta_snapshot(
     session: &mut Session,
-    backend_key: &str,
+    _backend_key: &str,
     cwd: &Path,
     session_id: Option<&str>,
 ) {
     let Some(session_id) = session_id else {
         return;
     };
-    let Some(backend) = kode_core::session::jsonl_tail::Backend::from_backend_key(backend_key)
+    let Some(backend) = session.backend_kind()
     else {
         return;
     };
@@ -311,6 +320,7 @@ mod tests {
         backends.insert(
             "echo".to_string(),
             BackendConfig {
+                protocol: None,
                 command: "/bin/cat".to_string(),
                 args: vec![],
                 default_model: None,

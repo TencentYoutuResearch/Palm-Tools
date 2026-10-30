@@ -4,6 +4,8 @@
 //! the same catalogue. Unknown/custom backends deliberately return an error;
 //! callers should retain free-form model input as the compatibility fallback.
 
+use kode_core::config::BackendConfig;
+use kode_core::session::jsonl_tail::Backend;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::Stdio;
@@ -95,8 +97,13 @@ fn parse_codex_models(result: &Value) -> Vec<DiscoveredModel> {
         .collect()
 }
 
-async fn discover_codex(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
+async fn discover_codex(
+    backend: &str,
+    command: &str,
+    args: &[String],
+) -> Result<ModelDiscoveryResult, String> {
     let mut child = Command::new(command)
+        .args(args)
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -180,8 +187,9 @@ fn parse_codebuddy_models(result: &Value) -> Vec<DiscoveredModel> {
         .collect()
 }
 
-async fn discover_codebuddy(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
+async fn discover_codebuddy(backend: &str, command: &str, args: &[String]) -> Result<ModelDiscoveryResult, String> {
     let mut child = Command::new(command)
+        .args(args)
         .args([
             "--print",
             "--input-format",
@@ -274,12 +282,36 @@ async fn discover_claude(backend: &str, command: &str) -> Result<ModelDiscoveryR
 }
 
 pub async fn discover_models(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
-    match backend {
-        "codex" | "tcodex" => discover_codex(backend, command).await,
-        "codebuddy" => discover_codebuddy(backend, command).await,
-        "claude" | "claude-internal" => discover_claude(backend, command).await,
-        "tclaude" => discover_tclaude(command).await,
-        "cursor" => discover_cursor(backend, command).await,
+    discover_models_with_args(backend, backend, command, &[]).await
+}
+
+/// Probe the same command and Codex options used to launch this agent, including
+/// provider/profile selection and an optional `env ... codex` wrapper.
+pub async fn discover_models_with_config(
+    backend: &str,
+    config: &BackendConfig,
+) -> Result<ModelDiscoveryResult, String> {
+    discover_models_with_args(
+        backend,
+        config.protocol_key(backend),
+        &config.command,
+        &config.args,
+    )
+    .await
+}
+
+async fn discover_models_with_args(
+    backend: &str,
+    protocol: &str,
+    command: &str,
+    args: &[String],
+) -> Result<ModelDiscoveryResult, String> {
+    match Backend::from_backend_key(protocol) {
+        Some(Backend::Codex | Backend::Tcodex) => discover_codex(backend, command, args).await,
+        Some(Backend::Codebuddy) => discover_codebuddy(backend, command, args).await,
+        Some(Backend::Claude) => discover_claude(backend, command).await,
+        Some(Backend::Tclaude) => discover_tclaude(command).await,
+        Some(Backend::Cursor) => discover_cursor(backend, command).await,
         _ => Err(format!("model discovery is not supported for {backend}")),
     }
 }
@@ -398,6 +430,46 @@ async fn discover_cursor(backend: &str, command: &str) -> Result<ModelDiscoveryR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_agents_keep_their_profile_and_wrapper_environment() {
+        // The fixture rejects missing/misordered launch options. No installed
+        // CLI, login, global environment mutation, or model request is needed.
+        let script = r#"
+test "$1" = --profile && test "$2" = "$KODE_MODEL_FIXTURE" || exit 11
+test "$3" = app-server && test "$4" = --stdio || exit 12
+read -r initialize
+printf '%s\n' '{"id":1,"result":{}}'
+read -r initialized
+read -r list
+printf '{"id":2,"result":{"data":[{"id":"%s","isDefault":true}]}}\n' "$KODE_MODEL_FIXTURE"
+"#;
+        for (agent, profile) in [
+            ("native-codex", "native"),
+            ("gateway-codex", "gateway"),
+            ("tcodex", "tencent"),
+        ] {
+            let mut config = kode_core::config::Config::default()
+                .backend("codex")
+                .unwrap()
+                .clone();
+            config.command = "/usr/bin/env".into();
+            config.args = vec![
+                format!("KODE_MODEL_FIXTURE={profile}"),
+                "/bin/sh".into(),
+                "-c".into(),
+                script.into(),
+                "fixture".into(),
+                "--profile".into(),
+                profile.into(),
+            ];
+            let result = discover_models_with_config(agent, &config).await.unwrap();
+            assert_eq!(result.backend, agent);
+            assert_eq!(result.source, "codex-app-server");
+            assert_eq!(result.models[0].id, profile);
+        }
+    }
 
     #[tokio::test]
     async fn t_cli_model_discovery_routes_to_compatible_protocols() {

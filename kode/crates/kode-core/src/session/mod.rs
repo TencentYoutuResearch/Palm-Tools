@@ -6,6 +6,7 @@ mod codex_status;
 mod codex_title;
 pub mod cursor_tail;
 pub mod heuristic;
+mod invocation;
 pub mod jsonl_tail;
 pub mod opencode_tail;
 pub mod state;
@@ -29,6 +30,8 @@ pub type SessionId = u64;
 pub struct Session {
     pub id: SessionId,
     pub backend_key: String,
+    pub backend_protocol: String,
+    pub launch_config: BackendConfig,
     pub cwd: PathBuf,
     pub command: String,
     pub args: Vec<String>,
@@ -100,6 +103,13 @@ impl Session {
         // BEFORE any flag injection, so variadic flags like --add-dir don't consume it.
         initial_prompt: Option<&str>,
     ) -> Result<Self> {
+        let launch_config = backend.clone();
+        let (invocation, variables) = invocation::resolve(backend);
+        let backend = &invocation;
+        let protocol_key = backend.protocol_key(backend_key);
+        let mut launch_env = extra_env.to_vec();
+        launch_env.extend(variables);
+        let extra_env = launch_env.as_slice();
         // scrollback_lines 控制 vt100 内部环形缓冲行数,Scroll 模式下用 set_scrollback(N) 翻看
         let parser = vt100::Parser::new(rows, cols, scrollback_lines);
 
@@ -129,13 +139,13 @@ impl Session {
             backend.args.clone()
         };
         let args_with_prompt =
-            if backend::profile_for_key(backend_key).is_some_and(|p| p.kind().is_codex()) {
+            if backend::profile_for_key(protocol_key).is_some_and(|p| p.kind().is_codex_family()) {
                 codex_runtime::isolated_args(&backend.command, &args_with_prompt)?
             } else {
                 args_with_prompt
             };
         let flags_before_resume =
-            backend::profile_for_key(backend_key).is_some_and(|p| p.flags_before_resume());
+            backend::profile_for_key(protocol_key).is_some_and(|p| p.flags_before_resume());
         let (final_args_pre_prompt, session_id) = if let Some(sid) = resume_session_id {
             if flags_before_resume {
                 // Codex resume is a subcommand. Keep global/session options before
@@ -151,11 +161,11 @@ impl Session {
                     permission_mode,
                 );
                 (
-                    inject_resume_flag(backend_key, &args, sid),
+                    inject_resume_flag(protocol_key, &args, sid),
                     Some(sid.to_string()),
                 )
             } else {
-                let args = inject_resume_flag(backend_key, &args_with_prompt, sid);
+                let args = inject_resume_flag(protocol_key, &args_with_prompt, sid);
                 let args = inject_model_flag(
                     &args,
                     backend.model_flag.as_deref(),
@@ -170,7 +180,7 @@ impl Session {
             }
         } else {
             let (args, session_id) =
-                inject_session_id(&backend.command, &args_with_prompt, backend_key, None);
+                inject_session_id(&backend.command, &args_with_prompt, protocol_key, None);
             let args = inject_model_flag(
                 &args,
                 backend.model_flag.as_deref(),
@@ -193,7 +203,7 @@ impl Session {
         //    short-circuit(尊重)。enabled=false(GUI 关掉)也 short-circuit。
         let final_args = inject_kode_memory_prompt(
             &final_args_pre_prompt,
-            backend_key,
+            protocol_key,
             cwd,
             kode_memory_prompt_enabled,
             memory_context,
@@ -221,7 +231,7 @@ impl Session {
         // --session-id,按 cwd + mtime 认领本次启动后的文件,resume 则按 uuid 扫描。
         // retarget 通道:hook 给出 transcript_path 时通知 tail 切到正确文件。
         let mut retarget_tx: Option<tokio::sync::watch::Sender<Option<PathBuf>>> = None;
-        if let Some(profile) = backend::profile_for_key(backend_key) {
+        if let Some(profile) = backend::profile_for_key(protocol_key) {
             tracing::debug!(
                 ?cwd,
                 resume_session_id = ?resume_session_id,
@@ -244,6 +254,8 @@ impl Session {
         Ok(Self {
             id,
             backend_key: backend_key.to_string(),
+            backend_protocol: protocol_key.to_string(),
+            launch_config,
             cwd: cwd.to_path_buf(),
             command: backend.command.clone(),
             args: final_args,
@@ -252,7 +264,7 @@ impl Session {
             parser,
             state,
             busy: BusyHeuristic::new(idle_threshold).with_pty_activity_as_work(
-                !backend::profile_for_key(backend_key).is_some_and(|p| p.has_idle_animation()),
+                !backend::profile_for_key(protocol_key).is_some_and(|p| p.has_idle_animation()),
             ),
             active_turn_id: None,
             semantic_session_id: None,
@@ -280,6 +292,18 @@ impl Session {
         Self {
             id,
             backend_key: backend_key.into(),
+            backend_protocol: backend_key.into(),
+            launch_config: BackendConfig {
+                protocol: Some(backend_key.into()),
+                command: command.into(),
+                args: vec![],
+                default_model: None,
+                model_flag: Some("--model".into()),
+                permission_mode_flag: None,
+                mcp_setup: None,
+                acp: None,
+                enabled: Some(true),
+            },
             cwd: cwd.into(),
             command: command.into(),
             args: vec!["--acp".into()],
@@ -299,6 +323,10 @@ impl Session {
         }
     }
 
+    pub fn backend_kind(&self) -> Option<jsonl_tail::Backend> {
+        jsonl_tail::Backend::from_backend_key(&self.backend_protocol)
+    }
+
     /// 权威 retarget:SessionStart hook 给出新 session 的 jsonl/rollout 路径
     /// (transcript_path),通过它通知本 session 的 tail 切过去。
     /// 返回 false 表示本 session 不支持 tail retarget 或 tail 已退出。
@@ -316,7 +344,7 @@ impl Session {
     /// Cursor 的 meta watcher 与 semantic transcript watcher 不是同一个 tail，
     /// 因此 GUI 需要先校验路径，再单独启动 semantic tail。
     pub fn accepts_transcript_path(&self, transcript_path: &Path) -> bool {
-        let Some(backend) = jsonl_tail::Backend::from_backend_key(&self.backend_key) else {
+        let Some(backend) = self.backend_kind() else {
             return false;
         };
         if !backend.accepts_transcript_path(transcript_path) {
@@ -335,7 +363,7 @@ impl Session {
     /// 目标 jsonl 路径并通知 tail 切过去。目标文件可能尚未创建;jsonl_tail 会保留
     /// 这个 path 并在 EOF 轮询中重试。
     pub fn retarget_tail_to_session_id(&self, session_id: &str) -> bool {
-        let Some(profile) = backend::profile_for_key(&self.backend_key) else {
+        let Some(profile) = backend::profile_for_key(&self.backend_protocol) else {
             return false;
         };
         let Some(path) = profile
@@ -382,8 +410,11 @@ impl Session {
         }
         // Reconcile a locally cancelled hold against fresh terminal evidence.
         // No file reads or process polling; the existing tick drives this check.
-        if backend::profile_for_key(&self.backend_key)
-            .is_some_and(|profile| profile.kind().is_codex())
+        // Match the resolved backend kind rather than the raw key so wrapped
+        // codex CLIs (for example `tcodex`) get the same footer-driven recovery.
+        if self
+            .backend_kind()
+            .is_some_and(|kind| kind.is_codex_family())
             && self.active_turn_id.is_some()
             && !self.busy.is_turn_held()
             && self
@@ -420,7 +451,7 @@ impl Session {
     /// Codex reports task_started itself, so input and hook activity must not
     /// manufacture a second lifecycle owner.
     pub fn mark_turn_start_fallback(&mut self) {
-        let lifecycle_is_authoritative = backend::profile_for_key(&self.backend_key)
+        let lifecycle_is_authoritative = backend::profile_for_key(&self.backend_protocol)
             .is_some_and(|profile| profile.has_authoritative_turn_lifecycle());
         if !lifecycle_is_authoritative {
             self.mark_turn_start();
@@ -452,7 +483,7 @@ impl Session {
         // In particular, a delayed Stop must not release a newer Codex turn.
         if self.active_turn_id.is_some()
             && turn_id.is_none()
-            && backend::profile_for_key(&self.backend_key)
+            && backend::profile_for_key(&self.backend_protocol)
                 .is_some_and(|profile| profile.has_authoritative_turn_lifecycle())
         {
             return false;
@@ -477,7 +508,7 @@ impl Session {
     }
 
     pub fn write_input(&self, bytes: &[u8]) {
-        let lifecycle_is_authoritative = backend::profile_for_key(&self.backend_key)
+        let lifecycle_is_authoritative = backend::profile_for_key(&self.backend_protocol)
             .is_some_and(|profile| profile.has_authoritative_turn_lifecycle());
         if looks_like_turn_submit(bytes) && !lifecycle_is_authoritative {
             self.busy.hold_turn();
@@ -1138,6 +1169,85 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn t_cli_session_restore_keeps_uuid_model_and_requested_permission() {
+        let config = crate::config::Config::default();
+        let cwd = std::env::temp_dir();
+        let sid = "11111111-1111-4111-8111-111111111111";
+        for key in ["tcodex", "tclaude"] {
+            for mode in [None, Some("default"), Some("bypass")] {
+                let mut backend = config.backend(key).unwrap().clone();
+                // A shell fixture exits without starting a real agent or network call.
+                backend.command = "/bin/sh".into();
+                backend.args = vec!["-c".into(), "exit 0".into(), "--no-daemon".into()];
+                let (events, rx) = mpsc::unbounded_channel();
+                let mut session = Session::new(
+                    501,
+                    key,
+                    &backend,
+                    80,
+                    24,
+                    Duration::from_secs(30),
+                    100,
+                    &cwd,
+                    events,
+                    Some(sid),
+                    mode,
+                    Some("gpt-test"),
+                    false,
+                    None,
+                    &[],
+                    None,
+                )
+                .unwrap();
+                assert_eq!(session.session_id.as_deref(), Some(sid));
+                assert_eq!(session.state.model, "gpt-test");
+                let args = &session.args;
+                let resume = args
+                    .iter()
+                    .position(|arg| {
+                        arg == if key == "tcodex" {
+                            "resume"
+                        } else {
+                            "--resume"
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(args[resume + 1], sid);
+                let model = args.iter().position(|arg| arg == "--model").unwrap();
+                assert_eq!(args[model + 1], "gpt-test");
+                assert!(!args.iter().any(|arg| arg == "--session-id"));
+                if key == "tcodex" {
+                    assert!(model < resume);
+                }
+                if mode == Some("bypass") {
+                    if key == "tcodex" {
+                        let permission = args
+                            .iter()
+                            .position(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+                            .unwrap();
+                        assert!(permission < resume);
+                    } else {
+                        let permission = args
+                            .iter()
+                            .position(|arg| arg == "--permission-mode")
+                            .unwrap();
+                        assert_eq!(args[permission + 1], "bypassPermissions");
+                    }
+                } else {
+                    assert!(!args
+                        .iter()
+                        .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"
+                            || arg == "--permission-mode"
+                            || arg == "--ask-for-approval"));
+                }
+                session.pty.as_ref().unwrap().kill();
+                session.mark_exited(Some(0));
+                drop(rx);
+            }
+        }
+    }
+
     #[test]
     fn inject_model_flag_appends_when_not_present() {
         let out = inject_model_flag(
@@ -1646,10 +1756,18 @@ mod tests {
 
     #[test]
     fn codex_idle_redraw_preserves_idle_and_unread() {
-        let profile = backend::profile_for_key("codex").unwrap();
+        for key in ["codex", "tcodex"] {
+            assert_codex_idle_redraw_preserves_idle_and_unread(key);
+        }
+    }
+
+    fn assert_codex_idle_redraw_preserves_idle_and_unread(key: &str) {
+        let profile = backend::profile_for_key(key).unwrap();
         let mut s = Session {
             id: 1,
-            backend_key: "codex".into(),
+            backend_key: key.into(),
+            backend_protocol: key.into(),
+            launch_config: crate::config::Config::default().backends[key].clone(),
             cwd: PathBuf::from("/tmp"),
             command: String::new(),
             args: vec![],
@@ -1728,6 +1846,8 @@ mod tests {
         let mut s = Session {
             id: 1,
             backend_key: "tcodex".into(),
+            backend_protocol: "tcodex".into(),
+            launch_config: crate::config::Config::default().backends["tcodex"].clone(),
             cwd: PathBuf::from("/tmp"),
             command: String::new(),
             args: vec![],
@@ -1767,6 +1887,7 @@ mod tests {
             99,
             "test",
             &BackendConfig {
+                protocol: None,
                 command: "echo".into(),
                 args: vec![],
                 default_model: None,
@@ -1813,6 +1934,7 @@ mod tests {
             100,
             "test",
             &BackendConfig {
+                protocol: None,
                 command: "echo".into(),
                 args: vec![],
                 default_model: None,
@@ -1872,6 +1994,7 @@ mod tests {
             101,
             "test",
             &BackendConfig {
+                protocol: None,
                 command: "echo".into(),
                 args: vec![],
                 default_model: None,

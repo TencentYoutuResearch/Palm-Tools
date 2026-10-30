@@ -1,0 +1,88 @@
+/** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
+import { BackendDocument } from './backend-state.js'
+import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
+const sessionController = ctx => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用；工作区配置仍保留，请先恢复会话服务。'); return value }
+export const DIRECTORY_PATH = '/api/kode/host-directory'
+export async function hostDirectory(ctx, config = {}) {
+  const registry = ctx.get('workspaceRegistry')
+  if (!registry) throw new Error('工作区服务尚未就绪。')
+  const controller = sessionController(ctx)
+  const { items } = await controller.list({})
+  const runtime = ctx.get('kodeAgents'), profiles = runtime?.profiles
+  const presentation = profile => { const view = runtime?.appearance?.profileView(profile) ?? profile; return { id: view.id, name: view.name, type: view.type, ...(view.avatar ? { avatar: view.avatar } : {}) } }
+  const hiddenSessionIds = []
+  const sessions = items.flatMap(item => {
+    const values = item.projections?.values ?? {}, model = values.modelSelection
+    const binding = profiles?.binding(item.sessionId)
+    const recorded = values.kodeAgent
+    const profile = binding?.profile ?? (recorded ? { id: recorded.profileId, name: recorded.name, type: recorded.type } : undefined)
+    const provider = model?.next?.provider ?? model?.lastUsed?.provider
+    const dsh = binding ? binding.profile.type === 'dsh' : !provider?.startsWith('kode-agent-')
+    const type = binding?.profile.type ?? (dsh ? 'dsh' : undefined)
+    if (type && runtime?.hasRuntime && !runtime.hasRuntime(type) && !item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
+    if (item.blank) return []
+    return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running, ...(profile ? { agent: presentation(profile) } : {}), ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
+  })
+  const result = { archivedSessionIds: [...registry.archivedSessionIds], pinnedSessionIds: [...(registry.pinnedSessionIds ?? [])], hiddenSessionIds, sessions,
+    workspaces: registry.list().map(w => ({ id: w.id, title: w.title, path: w.path, sessionIds: [...w.sessionIds], createdAt: w.createdAt, updatedAt: w.updatedAt })) }
+  if (config.backendClient) {
+    const client = config.backendClient
+    const [index, workspaces, node] = await Promise.all([new BackendDocument(client, 'session-index').read(), new BackendDocument(client, 'workspaces').read(), client.call('/api/v1/messaging/node')])
+    for (const row of sessions) if (row.agent && runtime?.appearance) row.agent.avatar = runtime.appearance.avatarForSession(row.id, row.agent.type, index, row.agent.id)
+    if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
+    for (const tab of localSavedTabs(index)) {
+      const adopted = tab.dsh_session_id ?? importedSessionId(tab)
+      if (sessions.some(row => row.id === adopted || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))) continue
+      const id = savedDirectoryId(node.node_id, tab)
+      const profileId = tab.agent_id ?? Object.keys(profiles?.sharedState?.desktop_ids ?? {}).find(id => profiles.sharedState.desktop_ids[id] === tab.backend_key)
+      const profile = profiles?.list().find(profile => profile.id === profileId)
+      const agent = profile ? presentation(profile) : { id: profileId ?? tab.backend_key, name: tab.backend_key, type: 'custom' }
+      if (runtime?.appearance) agent.avatar = runtime.appearance.avatarForSession(adopted, agent.type, index, agent.id)
+      else if (tab.avatar_id) agent.avatar = { id: tab.avatar_id, url: `/api/kode/avatars/media?avatar=${encodeURIComponent(tab.avatar_id)}&state=idle` }
+      sessions.push({ id, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: savedSessionTime(tab), running: false, nativeThreadId: tab.session_id, savedTab: tab, agent })
+      const workspace = result.workspaces.find(workspace => workspace.path === tab.cwd)
+      if (workspace) workspace.sessionIds.push(id)
+      if (result.archivedSessionIds.includes(adopted)) result.archivedSessionIds.push(id)
+      if (result.pinnedSessionIds.includes(adopted)) result.pinnedSessionIds.push(id)
+    }
+  }
+  return result
+}
+export async function hostOperation(ctx, input, config = {}) {
+  if (input.nativeSession) {
+    if (!config.backendClient) throw new Error('Kode 会话存储尚未就绪。')
+    return savedSessionOperation(config.backendClient, input)
+  }
+  const args = input.args ?? {}
+  if (input.operation === 'session-avatar') {
+    const appearance = ctx.get('kodeAgents')?.appearance
+    if (!appearance) throw new Error('会话头像服务尚未就绪。')
+    const known = ctx.get('agents')?.get(args.sessionId) || (await sessionController(ctx).list({})).items.some(row => row.sessionId === args.sessionId)
+    if (!known) throw new Error('会话不存在，请刷新列表。')
+    return appearance.setSession(args.sessionId, args.avatarId ?? null)
+  }
+  const allowed = { 'rename-workspace': 'rename', 'delete-workspace': 'delete', 'reorder-workspace': 'insertBefore', 'archive-session': 'archiveSession', 'unarchive-session': 'unarchiveSession', 'pin-session': 'pinSession', 'unpin-session': 'unpinSession' }
+  if (input.operation === 'rename-session') return sessionController(ctx).rename({ sessionId: args.sessionId, title: args.title })
+  if (!Object.hasOwn(allowed, input.operation)) throw new Error('未知目录操作。')
+  const controller = ctx.get('workspaceController')
+  if (!controller) throw new Error('工作区服务尚未就绪。')
+  const request = input.operation.endsWith('workspace') ? { workspaceId: args.workspaceId, ...(input.operation === 'rename-workspace' ? { title: args.title } : {}), ...(input.operation === 'reorder-workspace' && args.beforeWorkspaceId ? { beforeWorkspaceId: args.beforeWorkspaceId } : {}) } : { sessionId: args.sessionId }
+  return controller[allowed[input.operation]](request)
+}
+export function registerHostDirectory(ctx, config) {
+  return ctx.webServer.register({ kind: 'exact', path: DIRECTORY_PATH, handler: async (req, res) => {
+    const send = (status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)) }
+    const admitted = ctx.connection.admit(req)
+    if ('rejection' in admitted) return send(admitted.rejection, { error: 'authentication required' })
+    if (admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
+    if (!['GET', 'POST'].includes(req.method)) return send(405, { error: 'GET or POST required' })
+    try {
+      if (req.method === 'POST') {
+        if (!(req.headers['content-type'] ?? '').startsWith('application/json')) return send(415, { error: 'JSON required' })
+        let body = ''; for await (const part of req) { body += part; if (Buffer.byteLength(body) > 16384) throw new Error('请求过长。') }
+        await hostOperation(ctx, JSON.parse(body), config)
+      }
+      send(200, await hostDirectory(ctx, config))
+    } catch (error) { send(503, { error: error.message }) }
+  } })
+}

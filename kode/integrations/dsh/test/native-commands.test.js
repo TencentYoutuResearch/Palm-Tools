@@ -1,0 +1,98 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { AcpSession } from '../src/acp-session.js'
+import { CodexSession } from '../src/codex-session.js'
+import { nativeToolDescriptor, acpToolItem } from '../src/native-tools.js'
+import { resolveAdvertisedModel } from '../src/model-alias.js'
+import { commandDescriptors, humanInput, modeAllowed } from '../src/native-commands.js'
+const collect = async stream => { const events=[]; for await(const event of stream)events.push(event); return events }
+test('ACP Terminal operations expose real commands, late inputs, read paths and file diffs',()=>{
+  const running=acpToolItem({id:'tool',type:'commandExecution'},{kind:'execute',title:'Terminal',rawInput:{command:'git status --short',cwd:'/srv/project'},status:'in_progress'})
+  assert.deepEqual(nativeToolDescriptor(running),{name:'exec_command',args:{cmd:'git status --short',cwd:'/srv/project'}})
+  const completed=acpToolItem(running,{status:'completed',rawOutput:{stdout:' M app.ts'}})
+  assert.equal(completed.input.command,'git status --short');assert.match(completed.aggregatedOutput,/ M app.ts/)
+  assert.equal(nativeToolDescriptor(acpToolItem({id:'read'},{kind:'read',title:'Read',rawInput:{file_path:'/srv/project/app.ts'}})).args.path,'/srv/project/app.ts')
+  const edited=acpToolItem({id:'edit'},{kind:'edit',content:[{type:'diff',path:'/srv/project/app.ts',oldText:'before',newText:'after'}]})
+  assert.equal(nativeToolDescriptor(edited).name,'apply_patch');assert.match(nativeToolDescriptor(edited).args.patch,/before\nafter/)
+})
+test('model aliases resolve only exact identities or unique advertised names',()=>{
+  const models=[{id:'deepseek-v4.1-flash',name:'DeepSeek-V4.1-Flash'},{id:'another-model',name:'Other'}]
+  assert.equal(resolveAdvertisedModel(models,'DeepSeek-V4.1-Flash'),'deepseek-v4.1-flash')
+  assert.equal(resolveAdvertisedModel(models,' DEEPSEEK-V4.1-FLASH '),'deepseek-v4.1-flash')
+  assert.throws(()=>resolveAdvertisedModel(models,'gpt-unsupported'),/未公布/)
+  assert.throws(()=>resolveAdvertisedModel([{id:'a',name:'same'},{id:'b',name:'same'}],'same'),/多个/)
+})
+test('native command discovery includes namespaced skills and excludes CLI identity/window commands',()=>{
+  const descriptors=commandDescriptors({commands:[{name:'team:review',description:'Project skill'},{name:'clear'},{name:'login'},{name:'context',description:'Native context'}]})
+  assert.equal(descriptors.find(row=>row.name==='team-review').nativeName,'team:review')
+  assert.ok(descriptors.some(row=>row.name==='context'));assert.ok(!descriptors.some(row=>row.name==='clear'||row.name==='login'))
+  assert.equal(humanInput({source:{kind:'agent-message'},content:[{type:'text',text:'!rm anything'}]}),undefined)
+  assert.equal(humanInput({source:{kind:'user'},content:[{type:'text',text:'!pwd'}]}),'!pwd')
+  assert.equal(modeAllowed('bypassPermissions','workspace-write'),false);assert.equal(modeAllowed('acceptEdits','read-only'),false);assert.equal(modeAllowed('plan','read-only'),true)
+})
+for(const late of [false,true])test(`ACP discovers commands ${late?'after':'before'} setup and dispatches the original skill spelling`,async()=>{
+  const root=await mkdtemp(join(tmpdir(),'kode-acp-commands-')),log=join(root,'wire.jsonl')
+  const session=new AcpSession({type:'custom',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-acp-server.js',import.meta.url))],env:{KODE_ACP_FIXTURE_LOG:log,...(late?{KODE_ACP_LATE_COMMANDS:'1'}:{})}},root)
+  try{
+    const catalog = await session.listModels(AbortSignal.timeout(5000),{model:'fixture-large'})
+    assert.deepEqual(catalog.find(model=>model.id==='fixture-large').reasoningEfforts.map(row=>row.id),['medium','high'])
+    assert.ok(session.commands.some(row=>row.name==='fixture:skill'))
+    const events=await collect(session.turn([{type:'text',text:'/fixture:skill review this'}],{model:'Large fixture',effort:'high',command:{name:'fixture:skill',input:'review this'}}))
+    assert.match(events.find(event=>event.method==='item/agentMessage/delta').params.delta,/\/fixture:skill review this/)
+    const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(rows.some(row=>row.method==='session/set_config_option'&&row.params.value==='fixture-large'))
+    assert.ok(rows.some(row=>row.method==='session/set_config_option'&&row.params.configId==='effort'&&row.params.value==='high'))
+  }finally{await session.close();await rm(root,{recursive:true,force:true})}
+})
+test('Codex commands use native RPCs and $skills become typed inputs with discovered workspace paths',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'kode-codex-commands-')),log=join(root,'wire.jsonl')
+  const session=new CodexSession({executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:log}},root,{policy:()=>({mode:'read-only'}),collaborationMode:()=>true})
+  try{
+    await session.open({},[],AbortSignal.timeout(5000))
+    await session.rename('Native renamed conversation',AbortSignal.timeout(5000))
+    for(const name of ['compact','review','mcp','skills']){
+      const events=await collect(session.turn([{type:'text',text:`/${name}`}],{signal:AbortSignal.timeout(5000),command:{name,input:''}}))
+      assert.ok(events.some(event=>event.method==='turn/completed'))
+    }
+    await collect(session.turn([{type:'text',text:'Use $fixture-skill to review'}],{skillNames:['fixture-skill'],effort:'high',model:'fixture',signal:AbortSignal.timeout(5000)}))
+    await collect(session.turn([{type:'text',text:'/fixture-skill inspect'}],{command:{name:'fixture-skill',input:'inspect'},signal:AbortSignal.timeout(5000)}))
+    const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
+    assert.equal(rows.filter(row=>row.method==='turn/start').length,2,'native control commands must not be ordinary model prompts')
+    assert.ok(rows.some(row=>row.method==='thread/compact/start'));assert.ok(rows.some(row=>row.method==='review/start'&&row.params.delivery==='inline'))
+    assert.ok(rows.some(row=>row.method==='thread/name/set'&&row.params.name==='Native renamed conversation'))
+    assert.equal(rows.find(row=>row.method==='turn/start').params.effort,'high');assert.equal(rows.find(row=>row.method==='turn/start').params.collaborationMode.mode,'plan')
+    assert.deepEqual(rows.filter(row=>row.method==='turn/start').at(-1).params.input,[{type:'text',text:'$fixture-skill inspect'},{type:'skill',name:'fixture-skill',path:join(root,'.agents/skills/fixture-skill/SKILL.md')}])
+    assert.deepEqual(rows.find(row=>row.method==='turn/start').params.input.at(-1),{type:'skill',name:'fixture-skill',path:join(root,'.agents/skills/fixture-skill/SKILL.md')})
+  }finally{await session.close();await rm(root,{recursive:true,force:true})}
+})
+
+test('native file changes retain their paths alongside patch-only hunks',()=>{
+ const value=nativeToolDescriptor({type:'fileChange',changes:[{path:'one.js',diff:'@@ -1 +1 @@\n-a\n+b'},{path:'two.js',diff:'@@ -2 +2 @@'}]})
+ assert.equal(value.args.path,'one.js');assert.deepEqual(value.args.paths,['one.js','two.js']);assert.match(value.args.patch,/@@/)
+})
+
+test('Codex goal controls use native state and preserve usage on pause/resume',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'kode-goal-controls-')),log=join(root,'wire.jsonl')
+ const session=new CodexSession({executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:log}},root)
+ try{
+  await session.open({},[],AbortSignal.timeout(5000))
+  assert.ok(commandDescriptors({commands:session.commands}).some(c=>c.name==='goal'&&c.input))
+  assert.match((await session.goal('')).text,/没有目标/)
+  assert.equal((await session.goal('Finish checks')).run,true)
+  assert.match((await session.goal('pause')).text,/已暂停/)
+  assert.match((await session.goal('edit Better checks')).text,/Better checks/)
+  assert.equal((await session.goal('resume')).run,true)
+  assert.match((await session.goal('clear')).text,/已清除/)
+  const rows=(await readFile(log,'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(rows.filter(r=>r.method==='turn/start').length,0)
+  const writes=rows.filter(r=>r.method==='thread/goal/set')
+  assert.equal(writes.length,4)
+  assert.deepEqual(writes.map(r=>r.params.origin),['user','user','user','user'])
+  assert.equal(writes[1].params.objective,undefined);assert.equal(writes[3].params.objective,undefined)
+  await assert.rejects(session.goal('x'.repeat(4001)),/4000/)
+ }finally{await session.close();await rm(root,{recursive:true,force:true})}
+})

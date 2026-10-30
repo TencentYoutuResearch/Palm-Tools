@@ -14,6 +14,29 @@ pub fn is_active(expected_backend: Option<&str>) -> bool {
     )
 }
 
+/// Return the actual backend only for a Kode-owned session in the allowed family.
+pub fn active_backend_for(allowed_backends: &[&str]) -> Option<String> {
+    active_backend_for_values(
+        std::env::var("KODE_HOST").ok().as_deref(),
+        std::env::var("KODE_SESSION_ID").ok().as_deref(),
+        std::env::var("KODE_BACKEND_KEY").ok().as_deref(),
+        allowed_backends,
+    )
+    .map(str::to_owned)
+}
+
+pub(crate) fn active_backend_for_values<'a>(
+    host: Option<&str>,
+    session_id: Option<&str>,
+    backend_key: Option<&'a str>,
+    allowed_backends: &[&str],
+) -> Option<&'a str> {
+    if !is_active_values(host, session_id, backend_key, None) {
+        return None;
+    }
+    backend_key.filter(|backend| allowed_backends.contains(backend))
+}
+
 fn is_active_values(
     host: Option<&str>,
     session_id: Option<&str>,
@@ -57,6 +80,39 @@ mod tests {
     }
 
     #[test]
+    fn family_detection_preserves_backend_identity_and_requires_ownership() {
+        let allowed = &["codex", "tcodex"];
+        for backend in ["codex", "tcodex"] {
+            assert_eq!(
+                active_backend_for_values(Some("1"), Some("42"), Some(backend), allowed),
+                Some(backend)
+            );
+            assert_eq!(
+                active_backend_for_values(None, Some("42"), Some(backend), allowed),
+                None
+            );
+            assert_eq!(
+                active_backend_for_values(Some("1"), Some(" "), Some(backend), allowed),
+                None
+            );
+        }
+        for backend in ["claude", "custom-codex", "unknown", " "] {
+            assert_eq!(
+                active_backend_for_values(Some("1"), Some("42"), Some(backend), allowed),
+                None
+            );
+        }
+        // Family-level checks accept tcodex while the allowlist above returns
+        // its exact identity for authorship and independent hook storage.
+        assert!(is_active_values(
+            Some("1"),
+            Some("42"),
+            Some("tcodex"),
+            Some("codex")
+        ));
+    }
+
+    #[test]
     fn kode_session_requires_matching_backend_when_requested() {
         assert!(is_active_values(Some("1"), Some("42"), Some("codex"), None));
         assert!(is_active_values(
@@ -96,4 +152,12 @@ mod tests {
             None
         ));
     }
+}
+
+/// Whether this GUI backend has migrated from the legacy memory-only MCP to
+/// Kode's session-scoped backend services. Other CLI hosts stay unaffected.
+pub fn uses_shared_services(backend:&str)->bool {
+    let path=std::env::var_os("KODE_WORKBENCH_CONNECTION").and_then(|path|std::path::PathBuf::from(path).parent().map(|root|root.join("shared-mcp.json"))).or_else(||dirs::config_dir().map(|root|root.join("kode/shared-mcp.json")));
+    let Some(path)=path else {return false};
+    std::fs::read(path).ok().and_then(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).ok()).is_some_and(|value|value["backends"].as_array().is_some_and(|rows|rows.iter().any(|row|row.as_str()==Some(backend))))
 }

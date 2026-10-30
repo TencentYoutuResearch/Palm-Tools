@@ -1,0 +1,79 @@
+{
+  "name": "@kode/dsh",
+  "version": "0.1.0",
+  "description": "Kode Agent profiles, persistent CLI conversations and local/SSH session messaging for DeepSeek Harness",
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/host.js",
+    "./client-api": "./src/backend-client.js",
+    "./client": "./src/agent-client.js",
+    "./native-factory": "./src/native-agent-factory.js",
+    "./dsh-conversation": "./src/dsh-conversation.js",
+    "./package.json": "./package.json",
+    "./workspace-backend": "./src/workspace-backend.js",
+    "./workspace-registry": "./src/workspace-registry.js"
+  },
+  "files": [
+    "src",
+    "assets",
+    "packages",
+    "scripts/build-remote.js",
+    "scripts/build-bundle.js",
+    "README.md",
+    "cordis.patch.yml",
+    "cordis.remote.patch.yml"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": "0.2.1-rc.2"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build:browser": "node scripts/build-browser.js",
+    "build:remote": "node scripts/build-remote.js",
+    "build:transport": "node scripts/build-transport.js",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node scripts/test-integration.js",
+    "test:ssh": "python3 scripts/test-ssh.py",
+    "build:bundle": "node scripts/build-bundle.js",
+    "build:directory-browse": "node scripts/build-directory-browse.js",
+    "build:chat": "node scripts/build-chat.js"
+  },
+  "bin": {
+    "kode-sessions-mcp": "./src/mcp.js"
+  },
+  "dependencies": {
+    "@kode/dsh-browser": "file:packages/browser",
+    "@kode/dsh-transport": "file:packages/transport",
+    "@agentclientprotocol/claude-agent-acp": "0.96.0",
+    "@agentclientprotocol/sdk": "2.0.2",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@kode/dsh-directory-browse": "file:packages/directory-browse",
+    "zod": "4.6.7",
+    "js-yaml": "4.3.2",
+    "@kode/dsh-chat": "file:packages/chat"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis-plugin-include": "^1.0.10",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-web-app": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-storage": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-workspace": "0.2.1-rc.2",
+    "@deepseek-ai/cordis": "4.0.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}

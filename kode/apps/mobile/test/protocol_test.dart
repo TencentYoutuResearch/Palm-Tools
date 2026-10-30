@@ -3,6 +3,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kode_mobile/src/protocol/protocol.dart';
 
 void main() {
+  test('runtime permission options survive snapshot updates', () {
+    final session = SessionDto.fromJson({
+      'id': 8,
+      'permission_mode': 'reviewed',
+      'permission_modes': [
+        {
+          'id': 'reviewed',
+          'label': 'Reviewed',
+          'description': 'Review changes',
+        },
+      ],
+    });
+    final updated = session.copyWith(status: 'busy');
+    expect(updated.permissionMode, 'reviewed');
+    expect(updated.permissionModes!.single['id'], 'reviewed');
+  });
   group('AskUserQuestion grouping', () {
     test('groups expanded questions from one tool call', () {
       expect(askQuestionGroupId('tooluse-abc-0'), 'tooluse-abc');

@@ -35,7 +35,7 @@
 //!    backend 配置发生变化(比如用户手动 install / config 了),就重置语义,
 //!    重新提示一次。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap,HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -585,6 +585,9 @@ pub fn install_managed_hooks(app_state: &AppState) {
     // 其它 command hooks 需要 socket 才有实际作用，仅在 relay 可用时注入。
     let relay_cmd = kode_memory::hook_setup::build_codebuddy_hook_command();
     for (label, path) in kode_memory::hook_setup::target_settings() {
+        if let Err(e) = kode_memory::hook_setup::remove_pretooluse_hooks(&path) {
+            tracing::warn!("pretooluse hook cleanup failed for {label}: {e}");
+        }
         if let Err(e) = kode_memory::hook_setup::inject_stop_hook(&path, &relay_cmd) {
             tracing::warn!("stop hook inject failed for {label}: {e}");
         }
@@ -596,9 +599,6 @@ pub fn install_managed_hooks(app_state: &AppState) {
                 kode_memory::hook_setup::inject_user_prompt_submit_hook(&path, &relay_cmd)
             {
                 tracing::warn!("user_prompt_submit hook inject failed for {label}: {e}");
-            }
-            if let Err(e) = kode_memory::hook_setup::inject_pretooluse_hook(&path, &relay_cmd) {
-                tracing::warn!("pretooluse hook inject failed for {label}: {e}");
             }
             if let Err(e) = kode_memory::hook_setup::inject_session_start_hook(&path, &relay_cmd) {
                 tracing::warn!("session_start hook inject failed for {label}: {e}");
@@ -613,11 +613,11 @@ pub fn install_managed_hooks(app_state: &AppState) {
         }
     }
 
-    // Codex hooks are command-only and live in ~/.codex/hooks.json.
-    if let Some(path) = kode_memory::hook_setup::codex_hooks_path() {
-        let cmd = kode_memory::hook_setup::build_codex_hook_command();
+    // Codex-family hooks are command-only and use separate user-level files.
+    let cmd = kode_memory::hook_setup::build_codex_hook_command();
+    for (label, path) in kode_memory::hook_setup::codex_hook_targets() {
         if let Err(e) = kode_memory::hook_setup::inject_codex_hooks(&path, &cmd) {
-            tracing::warn!("codex hook inject failed: {e}");
+            tracing::warn!("codex hook inject failed for {label}: {e}");
         }
     }
     if let Some(path) = kode_memory::hook_setup::tcodex_hooks_path() {
@@ -672,7 +672,8 @@ pub fn spawn_startup_probe(app: AppHandle) {
                 return;
             }
         };
-        let backends = app_state.ctx.backend_configs.read().clone();
+        let backends:HashMap<_,_> = app_state.ctx.backend_configs.read().clone().into_iter().filter(|(key,_)|!kode_memory::runtime_context::uses_shared_services(key)).collect();
+        if backends.is_empty(){return}
         // Migrate already-installed entries even when the user dismissed future
         // auto-setup prompts. This is an in-place compatibility repair, not a new
         // integration: it preserves the command, user policy, and custom env vars.
@@ -802,7 +803,7 @@ fn probe(
             BackendStatus {
                 command_available: which(&backend.command).is_some(),
                 setup_cli_available: spec.cli().map(|c| which(c).is_some()),
-                configured: is_configured_for_spec(spec),
+                configured: kode_memory::runtime_context::uses_shared_services(key) || is_configured_for_spec(spec),
                 setup_style: spec_style_label(spec).to_string(),
             },
         );
@@ -839,7 +840,7 @@ fn probe(
         .unwrap_or(false);
 
     CheckResult {
-        binary_available: bin.is_some(),
+        binary_available: bin.is_some() || backends.keys().any(|key|kode_memory::runtime_context::uses_shared_services(key)),
         binary_path: bin.as_ref().map(|p| p.display().to_string()),
         codebuddy_available: cb,
         configured_for_codebuddy: cb_configured,

@@ -7,7 +7,7 @@ description = "Headless kode remote bridge server without Tauri/WebKit"
 [dependencies]
 kode-core = { path = "../kode-core" }
 kode-memory = { path = "../kode-memory" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util", "process", "signal", "io-std"] }
 axum = { version = "0.7", features = ["ws", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,10 +20,31 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 portable-pty = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+fs2 = "0.4"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [[bin]]
 name = "kode-bridge"
 path = "src/main.rs"
+
+[[bin]]
+name = "kode-session-server"
+path = "src/messaging/main.rs"
+
+[[bin]]
+name = "kode-ssh-tunnel"
+path = "src/messaging/tunnel_main.rs"
+
+[[bin]]
+name = "kode-session-mcp"
+path = "src/messaging/mcp_main.rs"

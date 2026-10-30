@@ -396,10 +396,15 @@ impl BackendProfile for CodexProfile {
         (page, has_more)
     }
     fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
-        let _ = home;
-        jsonl_tail::codex_home(self.0)
-            .map(|codex_home| vec![codex_home.join("sessions")])
-            .unwrap_or_default()
+        let codex_home = if self.0 == Backend::Codex {
+            std::env::var_os("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.0.codex_home(home))
+        } else {
+            self.0.codex_home(home)
+        };
+        vec![codex_home.join("sessions")]
     }
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
         codex_file_events(path, self.usage_key(), fallback_ms)
@@ -1182,6 +1187,12 @@ mod tests {
             .has_authoritative_turn_lifecycle());
         assert!(profile_for_key("tcodex").unwrap().has_idle_animation());
         assert!(profile_for_key("codex").unwrap().resume_style() == ResumeStyle::Subcommand);
+        // tcodex keeps Codex resume syntax but has an isolated storage identity.
+        assert_eq!(profile_for_key("tcodex").unwrap().kind(), Backend::Tcodex);
+        assert_eq!(
+            profile_for_key("tcodex").unwrap().resume_style(),
+            ResumeStyle::Subcommand
+        );
         assert!(!profile_for_key("cursor")
             .unwrap()
             .supports_session_id_flag());
@@ -1191,6 +1202,105 @@ mod tests {
         );
         assert!(profile_for_key("foo").is_none());
         assert_eq!(all_profiles().len(), 7);
+    }
+
+    #[test]
+    fn tcodex_resume_lookup_and_history_use_the_separate_root() {
+        let root = std::env::temp_dir().join(format!("kode-tcodex-home-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::set_var("HOME", &root);
+        std::env::remove_var("CODEX_HOME");
+        let sid = "11111111-1111-4111-8111-111111111111";
+        let cwd = Path::new("/tmp/example-workspace");
+        for (kind, model, name) in [
+            (Backend::Codex, "gpt-codex", "Codex title"),
+            (Backend::Tcodex, "gpt-tcodex", "Tcodex title"),
+        ] {
+            let home = kind.codex_home(&root);
+            fs::create_dir_all(home.join("sessions/2026")).unwrap();
+            fs::write(home.join(format!("sessions/2026/rollout-{sid}.jsonl")), format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{sid}\",\"cwd\":\"/tmp/example-workspace\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"{model}\"}}}}\n"
+            )).unwrap();
+            let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT)", [])
+                .unwrap();
+            db.execute(
+                "INSERT INTO threads (id, name) VALUES (?1, ?2)",
+                [sid, name],
+            )
+            .unwrap();
+        }
+        let tcodex = profile_for_key("tcodex").unwrap();
+        let codex = profile_for_key("codex").unwrap();
+        let actual_path = tcodex.find_session_path(cwd, sid);
+        let tcodex_history = tcodex.list_sessions(cwd);
+        let codex_history = codex.list_sessions(cwd);
+        let name = codex_title::read_thread_name(&root.join(".tcodex/state_5.sqlite"), sid);
+        // Restore HOME before asserting, so failures don't leak into other tests.
+        match old_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_codex_home {
+            Some(home) => std::env::set_var("CODEX_HOME", home),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        assert_eq!(
+            actual_path.unwrap(),
+            root.join(format!(".tcodex/sessions/2026/rollout-{sid}.jsonl"))
+        );
+        assert_eq!(tcodex_history.len(), 1);
+        assert_eq!(tcodex_history[0].session_id, sid);
+        assert_eq!(tcodex_history[0].model.as_deref(), Some("gpt-tcodex"));
+        assert_eq!(tcodex_history[0].title.as_deref(), Some("Tcodex title"));
+        assert_eq!(codex_history[0].title.as_deref(), Some("Codex title"));
+        assert_eq!(name.flatten().as_deref(), Some("Tcodex title"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_usage_respects_custom_home_without_redirecting_tcodex() {
+        let old_home = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", "/tmp/example-codex-home");
+        let home = Path::new("/tmp/example-home");
+        let codex = profile_for_key("codex").unwrap().usage_roots(home);
+        let tcodex = profile_for_key("tcodex").unwrap().usage_roots(home);
+        match old_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        assert_eq!(
+            codex,
+            vec![PathBuf::from("/tmp/example-codex-home/sessions")]
+        );
+        assert_eq!(
+            tcodex,
+            vec![PathBuf::from("/tmp/example-home/.tcodex/sessions")]
+        );
+    }
+
+    #[test]
+    fn tcodex_usage_uses_its_own_root_and_backend_label() {
+        let profile = profile_for_key("tcodex").unwrap();
+        assert_eq!(
+            profile.usage_roots(Path::new("/tmp/example-home")),
+            vec![PathBuf::from("/tmp/example-home/.tcodex/sessions")]
+        );
+        let root = std::env::temp_dir().join(format!("kode-tcodex-usage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("rollout.jsonl");
+        fs::write(&file, concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-test"}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":7,"total_tokens":37}}}}"#, "\n"
+        )).unwrap();
+        let events = profile.parse_usage_file(&file, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].backend, "tcodex");
+        assert_eq!(events[0].model, "gpt-test");
+        assert_eq!(events[0].usage.total, 37);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -35,11 +35,15 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
 pub mod acp;
+pub mod messaging;
 pub mod backend_probe;
 pub mod hook_relay;
 pub mod mobile_setup;
 pub mod model_usage;
 pub mod semantic;
+pub mod runtime;
+pub mod session_mcp;
+pub mod cloud_sync;
 
 pub use hook_relay::HookRelay;
 
@@ -47,6 +51,9 @@ const DEFAULT_PORT: u16 = 47870;
 
 #[derive(Clone)]
 pub struct Ctx {
+    pub cloud_sync: Arc<Mutex<std::sync::Weak<cloud_sync::Inner>>>,
+    pub runtimes: Arc<runtime::Registry>,
+    pub agent_backends: Arc<parking_lot::RwLock<Option<messaging::agents::Catalog>>>,
     pub acp: Arc<acp::Registry>,
     pub config: Config,
     pub sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
@@ -287,6 +294,15 @@ pub fn now_ms() -> u64 {
 }
 
 impl Ctx {
+    pub fn backend_for_session(&self, key: &str, thread: Option<&str>) -> anyhow::Result<BackendConfig> {
+        if let Some(catalog)=self.agent_backends.read().as_ref() { return messaging::agents::resolve(catalog,key,thread); }
+        self.config.backend(key).cloned().ok_or_else(||anyhow::anyhow!("Agent is not configured"))
+    }
+
+    pub fn backends(&self) -> HashMap<String, BackendConfig> {
+        self.agent_backends.read().as_ref().map(|catalog|catalog.backends.clone()).unwrap_or_else(|| self.config.backends.clone())
+    }
+
     pub fn alloc_id(&self) -> SessionId {
         let mut g = self.next_id.lock();
         let id = *g;
@@ -314,6 +330,9 @@ pub async fn run() -> anyhow::Result<()> {
     let hook_relay_socket = hook_relay.as_ref().map(|r| r.socket_path().to_path_buf());
 
     let ctx = Arc::new(Ctx {
+        runtimes: Default::default(),
+        cloud_sync: Default::default(),
+        agent_backends: Default::default(),
         acp: Arc::new(acp::Registry::default()),
         config,
         sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -340,6 +359,14 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 注入 settings.json hook(幂等)。仅当 HookRelay 启用时才有意义 ——
     // 否则 hook command 会引用一个没人监听的 socket,codebuddy/claude hook 静默失败。
+    for (label, path) in kode_memory::hook_setup::target_settings()
+        .into_iter()
+        .chain(kode_memory::hook_setup::codex_hook_targets())
+    {
+        if let Err(e) = kode_memory::hook_setup::remove_pretooluse_hooks(&path) {
+            tracing::warn!(label, error = %e, "pretooluse hook cleanup failed");
+        }
+    }
     if ctx.hook_relay_socket.is_some() {
         inject_hooks_into_settings();
     }
@@ -369,9 +396,6 @@ fn inject_hooks_into_settings() {
         if let Err(e) = kode_memory::hook_setup::inject_user_prompt_submit_hook(&path, &relay_cmd) {
             tracing::warn!(label, error = %e, "user_prompt_submit hook inject failed");
         }
-        if let Err(e) = kode_memory::hook_setup::inject_pretooluse_hook(&path, &relay_cmd) {
-            tracing::warn!(label, error = %e, "pretooluse hook inject failed");
-        }
         if let Err(e) = kode_memory::hook_setup::inject_session_start_hook(&path, &relay_cmd) {
             tracing::warn!(label, error = %e, "session_start hook inject failed");
         }
@@ -381,10 +405,10 @@ fn inject_hooks_into_settings() {
             }
         }
     }
-    if let Some(path) = kode_memory::hook_setup::codex_hooks_path() {
+    for (label, path) in kode_memory::hook_setup::codex_hook_targets() {
         let cmd = kode_memory::hook_setup::build_codex_hook_command();
         if let Err(e) = kode_memory::hook_setup::inject_codex_hooks(&path, &cmd) {
-            tracing::warn!(error = %e, "codex hook inject failed");
+            tracing::warn!(label, error = %e, "codex family hook inject failed");
         }
     }
 }
@@ -421,10 +445,14 @@ fn build_session_env(
     env
 }
 
-#[doc(hidden)]
-pub fn build_test_ctx(config: Config, token: String) -> Arc<Ctx> {
+/// Construct the shared runtime without installing hooks or changing GUI state.
+/// Used by the messaging service and isolated protocol tests.
+pub fn build_runtime_ctx(config: Config, token: String) -> Arc<Ctx> {
     let (core_tx, core_rx) = mpsc::unbounded_channel();
     let ctx = Arc::new(Ctx {
+        runtimes: Default::default(),
+        cloud_sync: Default::default(),
+        agent_backends: Default::default(),
         acp: Arc::new(acp::Registry::default()),
         config,
         sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -441,6 +469,11 @@ pub fn build_test_ctx(config: Config, token: String) -> Arc<Ctx> {
     spawn_status_ticker(Arc::clone(&ctx));
     spawn_memory_pending_watcher(Arc::clone(&ctx));
     ctx
+}
+
+#[doc(hidden)]
+pub fn build_test_ctx(config: Config, token: String) -> Arc<Ctx> {
+    build_runtime_ctx(config, token)
 }
 
 fn bridge_bind() -> SocketAddr {
@@ -536,9 +569,7 @@ pub fn spawn_event_router(ctx: Arc<Ctx>, mut rx: mpsc::UnboundedReceiver<CoreEve
                                 let should_start_semantic = s.claim_semantic_session(sid);
                                 s.session_id = Some(sid.clone());
                                 if should_start_semantic {
-                                    kode_core::session::jsonl_tail::Backend::from_backend_key(
-                                        &s.backend_key,
-                                    )
+                                    s.backend_kind()
                                     .map(|backend| (backend, s.cwd.clone(), sid.clone()))
                                 } else {
                                     None
@@ -723,6 +754,7 @@ fn spawn_memory_pending_watcher(ctx: Arc<Ctx>) {
 }
 
 pub fn build_router(ctx: Arc<Ctx>) -> Router {
+    let messaging = messaging::configured_router(&ctx).expect("invalid KODE_MESSAGING_CONFIG");
     let protected = Router::new()
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route("/api/v1/sessions/history", get(list_sessions_history))
@@ -769,6 +801,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(protected)
+        .merge(messaging)
         .layer(Extension(ctx))
 }
 
@@ -919,7 +952,8 @@ fn session_to_dto(s: &Session) -> SessionDto {
 }
 
 async fn list_sessions(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
-    let sessions: Vec<_> = ctx.sessions.lock().values().map(session_to_dto).collect();
+    let mut sessions: Vec<Value> = ctx.sessions.lock().values().map(|s|serde_json::to_value(session_to_dto(s)).unwrap_or_default()).collect();
+    sessions.extend(ctx.runtimes.snapshots().into_iter().map(|s|s["dto"].clone()));
     Json(json!({ "sessions": sessions }))
 }
 
@@ -956,13 +990,8 @@ async fn create_session(
     Extension(ctx): Extension<Arc<Ctx>>,
     Json(req): Json<CreateSessionReq>,
 ) -> Result<Json<SessionDto>, ApiError> {
-    let mut backend: BackendConfig = ctx
-        .config
-        .backend(&req.backend_key)
-        .ok_or_else(|| {
-            ApiError::BadRequest(format!("backend not configured: {}", req.backend_key))
-        })?
-        .clone();
+    let mut backend = ctx.backend_for_session(&req.backend_key,req.resume_session_uuid.as_deref())
+        .map_err(|error|ApiError::BadRequest(error.to_string()))?;
     // Append extra_args to the backend args (e.g. --add-dir for directory trust).
     if let Some(extra) = &req.extra_args {
         backend.args.extend(extra.iter().cloned());
@@ -976,6 +1005,12 @@ async fn create_session(
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("/"));
+    if std::env::var("KODE_GUI_RUNTIME").as_deref()==Ok("1") {
+        session_mcp::reserve_gui_session(id,&req.backend_key,&cwd,req.model.as_deref()).await.map_err(|e|ApiError::BadRequest(e.to_string()))?;
+    }
+    if backend.acp.is_none() && backend.protocol_key(&req.backend_key) == "codebuddy" {
+        backend.acp = Some(kode_core::config::AcpSpec::flag());
+    }
     let use_acp = req.transport.as_deref() == Some("acp")
         || (req.transport.is_none()
             && backend.acp.is_some()
@@ -989,7 +1024,7 @@ async fn create_session(
         }
         backend.args = kode_core::session::inject_kode_memory_prompt(
             &backend.args,
-            &req.backend_key,
+            backend.protocol_key(&req.backend_key),
             &cwd,
             true,
             req.memory_context.as_deref(),
@@ -998,6 +1033,7 @@ async fn create_session(
             Arc::clone(&ctx),
             id,
             &backend,
+            &req.backend_key,
             &cwd,
             req.permission_mode.as_deref(),
             req.model.as_deref(),
@@ -1005,7 +1041,7 @@ async fn create_session(
         )
         .await
         .map_err(ApiError::BadRequest)?;
-        let session = Session::structured(
+        let mut session = Session::structured(
             id,
             &req.backend_key,
             &backend.command,
@@ -1017,6 +1053,8 @@ async fn create_session(
                 .or(backend.default_model.clone())
                 .unwrap_or_else(|| "auto".into()),
         );
+        session.backend_protocol=backend.protocol_key(&req.backend_key).into();
+        session.launch_config=backend.clone();
         let dto = session_to_dto(&session);
         ctx.sessions.lock().insert(id, session);
         ctx.acp.insert(id, client.clone());
@@ -1056,7 +1094,7 @@ async fn create_session(
         req.prompt.as_deref(),
     )
     .map_err(|e| ApiError::Internal(format!("spawn failed: {e}")))?;
-    let resume_meta = resume_meta_snapshot(&req.backend_key, &cwd, session.session_id.as_deref());
+    let resume_meta = resume_meta_snapshot(backend.protocol_key(&req.backend_key), &cwd, session.session_id.as_deref());
     if let Some(meta) = &resume_meta {
         if let Some(title) = &meta.title {
             session.state.title = title.clone();
@@ -1069,7 +1107,7 @@ async fn create_session(
     ctx.sessions.lock().insert(id, session);
     if let (Some(sid), Some(backend_kind)) = (
         dto.session_uuid.as_deref(),
-        kode_core::session::jsonl_tail::Backend::from_backend_key(&req.backend_key),
+        kode_core::session::jsonl_tail::Backend::from_backend_key(backend.protocol_key(&req.backend_key)),
     ) {
         let claimed = ctx
             .sessions
@@ -1209,9 +1247,7 @@ async fn get_history(
     Query(q): Query<HistoryQuery>,
 ) -> Json<Value> {
     let from = q.from.unwrap_or(0);
-    let events = ctx
-        .bus
-        .history_for(id, from, q.limit.unwrap_or(200).min(1000));
+    let events = if ctx.runtimes.contains(id) { ctx.runtimes.history(id,from,q.limit.unwrap_or(200).min(1000)).unwrap_or_default() } else { ctx.bus.history_for(id,from,q.limit.unwrap_or(200).min(1000)) };
     let next_from = events.last().map(|e| e.ts + 1).unwrap_or(from);
     Json(json!({ "events": events, "next_from": next_from }))
 }
@@ -1231,7 +1267,7 @@ async fn get_transcript(
         guard.get(&id).and_then(|s| {
             let uuid = s.session_id.clone()?;
             let backend =
-                kode_core::session::jsonl_tail::Backend::from_backend_key(&s.backend_key)?;
+                s.backend_kind()?;
             Some((backend, s.cwd.clone(), uuid))
         })
     };
@@ -1295,6 +1331,20 @@ fn parse_transcript_lines<S: AsRef<str>>(lines: impl IntoIterator<Item = S>) -> 
             Err(_) => continue,
         };
         let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        // Codex rollouts and Claude's native JSONL keep messages in envelopes.
+        // Do not interpret tools, system instructions or reasoning as dialogue.
+        let native = match ty {
+            "response_item" if v["payload"]["type"]=="message" => Some(&v["payload"]),
+            "user" | "assistant" if v["message"].is_object() => Some(&v["message"]),
+            _ => None,
+        };
+        if let Some(message)=native {
+            let role=match message["role"].as_str(){Some("user")=>"user",Some("assistant")=>"agent",_=>continue};
+            if let Some(text)=json_content_to_text(&message["content"]) {
+                if !is_control_line(role,text.trim()) {messages.push(json!({"role":role,"text":text.trim(),"kind":"text"}));}
+            }
+            continue;
+        }
         match ty {
             // codebuddy/claude conversation lines: type=="message" with a role.
             "message" => {
@@ -2380,7 +2430,7 @@ async fn list_backends(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
     // 响应时即时探测一次,行为与本地一致:装了的才显示。
     //
     // PATH 扫描是 stat 调用,backend 数量通常 <10,放 spawn_blocking 不阻塞 runtime。
-    let backends_snapshot = ctx.config.backends.clone();
+    let backends_snapshot = ctx.backends();
     let out: Vec<BackendInfo> = tokio::task::spawn_blocking(move || {
         let mut v: Vec<BackendInfo> = backends_snapshot
             .iter()
@@ -2408,12 +2458,11 @@ async fn list_backend_models(
     Extension(ctx): Extension<Arc<Ctx>>,
     Path(key): Path<String>,
 ) -> Result<Json<model_discovery::ModelDiscoveryResult>, ApiError> {
-    let cfg = ctx
-        .config
-        .backends
+    let backends = ctx.backends();
+    let cfg = backends
         .get(&key)
         .ok_or_else(|| ApiError::NotFound(format!("backend {key}")))?;
-    model_discovery::discover_models(&key, &cfg.command)
+    model_discovery::discover_models_with_config(&key, cfg)
         .await
         .map(Json)
         .map_err(ApiError::BadRequest)
@@ -2440,13 +2489,16 @@ struct SessionSummary {
 }
 
 async fn list_sessions_history(
+    Extension(ctx): Extension<Arc<Ctx>>,
     Query(q): Query<SessionHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let cwd = PathBuf::from(&q.cwd);
     if !cwd.is_absolute() {
         return Err(ApiError::BadRequest("cwd must be absolute".into()));
     }
-    let profile = kode_core::session::backend::profile_for_key(&q.backend_key)
+    let backends = ctx.backends();
+    let protocol = backends.get(&q.backend_key).map(|config|config.protocol_key(&q.backend_key)).unwrap_or(&q.backend_key);
+    let profile = kode_core::session::backend::profile_for_key(protocol)
         .ok_or_else(|| ApiError::BadRequest(format!("unsupported backend: {}", q.backend_key)))?;
     let (page, has_more) =
         profile.list_sessions_page(&cwd, q.offset.unwrap_or(0), q.limit.unwrap_or(usize::MAX));

@@ -8,6 +8,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 export type SessionId = number
 
 export interface BackendInfo {
+  name?: string
   key: string
   command: string
   default_model: string | null
@@ -33,6 +34,12 @@ export interface ModelDiscoveryResult {
 /// Settings 面板用的 backend 列表项 —— 比 BackendInfo 多 enabled 字段,
 /// 因为 Settings 要展示全部(含被关掉的)backend 及其开关状态。
 export interface BackendListItem {
+  read_only?: boolean
+  name?: string
+  protocol?: string | null
+  args?: string[]
+  model_flag?: string | null
+  permission_mode_flag?: string | null
   key: string
   command: string
   default_model: string | null
@@ -239,12 +246,14 @@ export interface SessionFocusRequestedEvent {
 }
 
 export interface PersistedTab {
-  transport_kind?: 'acp' | 'pty' | null
+  dsh_session_id?: string
+  transport_kind?: 'acp' | 'pty' | 'runtime' | null
   backend_key: string
   title: string
   /// 用户手动重命名过;为 true 时恢复后不让后端 ai title 覆盖。
   title_pinned?: boolean
   cwd: string
+  workspace_title?: string | null
   session_id?: string | null
   /// 上次保存时的 model(jsonl 自动同步;用户在子进程里 `/model` 切换会触发回写)
   model?: string | null
@@ -287,7 +296,7 @@ export const ipc = {
     endpoint_id?: EndpointId | null,
     /// Kode xterm 当前主题,注入 TERM_THEME/COLORFGBG 给子 CLI。
     term_theme?: 'light' | 'dark' | null,
-    transport_kind?: 'acp' | 'pty' | null,
+    transport_kind?: 'acp' | 'pty' | 'runtime' | null,
   ) =>
     invoke<SpawnedSession>('spawn_session', {
       backendKey: backend_key,
@@ -598,6 +607,8 @@ export interface DetectedBackend {
 
 /// 保存 backend 用的扁平表单结构(后端 `backend_admin::BackendSaveRequest` 镜像)。
 export interface BackendSaveRequest {
+  name?: string | null
+  protocol?: string | null
   key: string
   command: string
   args: string[]

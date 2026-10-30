@@ -17,6 +17,8 @@ mod backend_admin;
 mod bridge;
 mod cloud_deploy;
 mod cloud_sync;
+mod backend_runtime;
+mod shared_services;
 mod commands;
 mod deploy;
 mod endpoints;
@@ -33,6 +35,8 @@ mod state;
 mod term_theme;
 mod transport;
 mod workspace;
+mod workbench_state;
+mod shared_agents;
 
 // 集成测试入口(`tests/bridge_e2e.rs` 等)。生产代码请用 `run()` 启动。
 #[doc(hidden)]
@@ -52,6 +56,7 @@ use kode_bridge::HookRelay;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::env::set_var("KODE_GUI_RUNTIME","1");
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -115,12 +120,13 @@ pub fn run() {
             }
             // CodeBuddy / Claude 启动时只读取一次 hooks；必须在前端能 spawn tab 前
             // 完成注入，不能等下面延迟 800ms 的 MCP probe。
-            crate::memory_mcp::install_managed_hooks(&app_state);
+            if std::env::var("KODE_DISABLE_AUTO_SETUP").as_deref()!=Ok("1"){crate::memory_mcp::install_managed_hooks(&app_state);}
             let ctx_for_bridge = std::sync::Arc::clone(&app_state.protocol_ctx);
             let cloud_sync = crate::cloud_sync::CloudSyncManager::new(std::sync::Arc::clone(
                 &app_state.protocol_ctx,
             ));
             cloud_sync.start_saved();
+            if std::env::var("KODE_DISABLE_AUTO_SETUP").as_deref()!=Ok("1"){shared_services::start_saved(app_state.ctx.backend_configs.read().clone());}
             app.manage(app_state);
             app.manage(cloud_sync);
             app.manage(shell_pty::ShellPtyManager::new());
@@ -139,7 +145,7 @@ pub fn run() {
             // M4.1:启动后 800ms 检测 codebuddy MCP 配置;没配且未 dismiss 就 emit
             // banner 事件让前端弹横幅。stdio 模型下 kode 不主动 spawn server —
             // codebuddy 各 tab 自己 spawn,生命周期跟 tab 一致。
-            crate::memory_mcp::spawn_startup_probe(handle.clone());
+            if std::env::var("KODE_DISABLE_AUTO_SETUP").as_deref()!=Ok("1"){crate::memory_mcp::spawn_startup_probe(handle.clone());}
 
             // 2026-06:首次启动把 enabled==None 的 backend 按 PATH 探测落地为
             // Some(true/false)。只改 None 项,用户手改过的 Some 不动。冷快照限制下
@@ -179,6 +185,9 @@ pub fn run() {
             commands::specops_init_git_workspace,
             commands::specops_close,
             commands::get_pairing_payload,
+            backend_runtime::integration_action,
+            backend_runtime::shared_runtime_sessions,
+            shared_services::setup_shared_services,
             cloud_sync::cloud_sync_status,
             cloud_sync::cloud_sync_create_pairing,
             cloud_sync::cloud_sync_activate_backend,

@@ -143,6 +143,9 @@
   let renameOpen = $state(false)
   /** 显式弹出后端选择器(Cmd+T 触发,或主区域为空时常驻) */
   let chooserOpen = $state(false)
+  $effect(() => {
+    if (chooserOpen) void ipc.listBackends().then(rows => { backends = rows }).catch(error => console.warn('refresh shared Agents:', error))
+  })
   let chooserWorkspace = $state<WsGroup | null>(null)
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
@@ -435,7 +438,7 @@
       const first = tabs[0]
       const cwd = first.cwd ?? '(no cwd)'
       const endpoint = wsEndpointInfo(first)
-      const name = cwd === '(no cwd)' ? 'Other' : wsBasename(cwd)
+      const name = first.workspaceTitle || (cwd === '(no cwd)' ? 'Other' : wsBasename(cwd))
       return {
         id: key,
         cwd,
@@ -2167,7 +2170,7 @@
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
         {#if tab?.transportKind === 'acp'}
-          <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} />
+          <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} agentName={tab?.backendKey === 'codebuddy' ? 'CodeBuddy' : tab?.backendKey ?? 'Agent'} />
         {:else}
         <Terminal
           sessionId={id}

@@ -83,6 +83,11 @@ class _PairScreenState extends ConsumerState<PairScreen> {
   }
 
   Future<void> _claimManual() async {
+    final invite = PairingInvite.tryParseUri(_serverCtrl.text.trim());
+    if (invite != null) {
+      await _claim(invite);
+      return;
+    }
     final serverUrl = _serverCtrl.text.trim().replaceAll(RegExp(r'/+$'), '');
     final pairingId = _pairingIdCtrl.text.trim();
     final secret = _secretCtrl.text.trim();
@@ -93,7 +98,8 @@ class _PairScreenState extends ConsumerState<PairScreen> {
         pairingId.isEmpty ||
         secret.isEmpty) {
       setState(() {
-        _error = 'Enter the HTTPS server URL, pairing ID, and one-time secret.';
+        _error =
+            'Paste a pairing link, or enter the server URL, pairing ID, and one-time secret.';
       });
       return;
     }
@@ -137,7 +143,7 @@ class _PairScreenState extends ConsumerState<PairScreen> {
             _buildPermissionCard(colors),
             const SizedBox(height: 20),
             Text(
-              'Enter a one-time code',
+              'Paste a pairing link or enter a code',
               style: TextStyle(
                 color: colors.primary,
                 fontWeight: FontWeight.w700,
@@ -146,10 +152,20 @@ class _PairScreenState extends ConsumerState<PairScreen> {
             ),
             const SizedBox(height: 8),
             _input(
-              label: 'Sync server URL',
+              label: 'Sync server URL or pairing link',
               controller: _serverCtrl,
               hint: 'https://sync.example.com',
               keyboardType: TextInputType.url,
+              onChanged: (value) {
+                final invite = PairingInvite.tryParseUri(value.trim());
+                if (invite == null) return;
+                setState(() {
+                  _serverCtrl.text = invite.serverUrl;
+                  _pairingIdCtrl.text = invite.pairingId;
+                  _secretCtrl.text = invite.secret;
+                  _error = null;
+                });
+              },
             ),
             _input(
               label: 'Pairing ID',
@@ -310,12 +326,14 @@ class _PairScreenState extends ConsumerState<PairScreen> {
     required TextEditingController controller,
     required String hint,
     TextInputType? keyboardType,
+    ValueChanged<String>? onChanged,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: TextField(
         controller: controller,
         keyboardType: keyboardType,
+        onChanged: onChanged,
         autocorrect: false,
         decoration: InputDecoration(
           labelText: label,

@@ -101,6 +101,120 @@ Future<void> _pumpFrames(WidgetTester tester, [int count = 24]) async {
 }
 
 void main() {
+  testWidgets('resolved approval stays submitted after history replay', (
+    tester,
+  ) async {
+    final api = _FakeApiClient()
+      ..history = [
+        Envelope(
+          protocolVersion: 'v1',
+          schemaVersion: 1,
+          sessionId: 7,
+          ts: 1,
+          type: 'ask_user_question',
+          payload: {
+            'request_id': 'approval',
+            'question_id': 'approval',
+            'source': 'acp_permission',
+            'question': 'Fixture approval',
+            'options': [
+              {'label': 'Deny', 'option_id': 'deny'},
+            ],
+          },
+        ),
+        Envelope(
+          protocolVersion: 'v1',
+          schemaVersion: 1,
+          sessionId: 7,
+          ts: 2,
+          type: 'interaction.resolved',
+          payload: {'request_id': 'approval'},
+        ),
+      ];
+    final events = StreamController<Envelope>();
+    addTearDown(events.close);
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(api),
+        eventStreamProvider.overrideWith((ref) => events.stream),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: KillLaTheme.light(),
+          home: const SessionDetailScreen(sessionId: 7),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Submitted'), findsOneWidget);
+    expect(find.text('Submit answer'), findsNothing);
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Submitted'))
+          .onPressed,
+      isNull,
+    );
+  });
+  testWidgets(
+    'native tool status updates merge into one card and keep input details',
+    (tester) async {
+      final api = _FakeApiClient()
+        ..history = [
+          Envelope(
+            protocolVersion: 'v1',
+            schemaVersion: 1,
+            sessionId: 7,
+            ts: 1,
+            type: 'tool_use',
+            payload: {
+              'tool_use_id': 'operation',
+              'name': 'Fixture command',
+              'input': {'command': 'fixture operation'},
+              'status': 'pending',
+            },
+          ),
+          Envelope(
+            protocolVersion: 'v1',
+            schemaVersion: 1,
+            sessionId: 7,
+            ts: 2,
+            type: 'tool_use',
+            payload: {'tool_use_id': 'operation', 'status': 'failed'},
+          ),
+        ];
+      final events = StreamController<Envelope>();
+      addTearDown(events.close);
+      final container = ProviderContainer(
+        overrides: [
+          apiClientProvider.overrideWithValue(api),
+          eventStreamProvider.overrideWith((ref) => events.stream),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: KillLaTheme.light(),
+            home: const SessionDetailScreen(sessionId: 7),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Fixture command · failed'), findsOneWidget);
+      expect(find.text('Fixture command · pending'), findsNothing);
+      await tester.tap(find.text('Fixture command · failed'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('fixture operation'), findsOneWidget);
+      events.add(api.history.last);
+      await tester.pump();
+      expect(find.text('Fixture command · failed'), findsOneWidget);
+    },
+  );
   test('semantic message id matches bridge UTF-8 FNV-1a', () {
     expect(sessionSemanticMessageId(7, 'hello'), '7-1335831723');
     expect(sessionSemanticMessageId(7, '发送消息'), '7-4277896786');
