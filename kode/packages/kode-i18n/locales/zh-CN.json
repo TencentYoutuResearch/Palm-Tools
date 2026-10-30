@@ -334,6 +334,8 @@
   "command.view.hideWorkspace": { "message": "隐藏 workspace 检查器" },
   "command.view.showTerminal": { "message": "显示终端面板" },
   "command.view.hideTerminal": { "message": "隐藏终端面板" },
+  "command.view.terminalToBottom": { "message": "将终端面板移到对话区下方" },
+  "command.view.terminalToRight": { "message": "将终端面板移到 workspace 检查器" },
   "command.memory.review": { "message": "Memory 审核队列..." },
   "command.memory.reviewPending": { "message": "Memory 审核队列（{count} 条待审）..." },
   "command.memory.sync": { "message": "Memory：同步设置..." },
