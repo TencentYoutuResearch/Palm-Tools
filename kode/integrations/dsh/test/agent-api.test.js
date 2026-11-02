@@ -18,7 +18,7 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-test-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : req.headers['x-test-role'] === 'guest' ? { peer: { principal: { kind: 'guest' } } } : { rejection: 401 } },
     agents: { get: () => agent }, agentDefaultModel: { currentSelection: () => selection },
-    sessionProjections: { stateOf: (_session, key) => key === 'turnBoundary' ? { lastTurn: turns } : { pending: selection } },
+    sessionProjections: { stateOf: (_session, key) => key === 'kodeTurnBoundary' ? { lastTurn: agent.isKodeNativeAgent ? turns : 999 } : key === 'turnBoundary' ? { lastTurn: agent.isKodeNativeAgent ? 0 : turns } : { pending: selection } },
     sessionController: {
       resolveAgent: async () => ({ agent }),
       modelCatalog: async () => ({ default: selection, groups: [{ id: 'native-llm', models: [{ id: 'fixture' }] }, ...profiles.list().filter(p => p.type === 'codex').map(p => ({ id: `kode-agent-${p.id}`, models: [{ id: 'default' }, { id: 'fixture' }] }))] }),
@@ -38,6 +38,10 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     const one = await (await request({ action: 'save', profile: { name: 'Codex', type: 'codex' } })).json()
     const two = await (await request({ action: 'save', profile: { name: 'Tcodex', type: 'codex', executable: 'tcodex' } })).json()
     assert.notEqual(one.profile.id, two.profile.id)
+    const officialDefault = ctx.agentDefaultModel.currentSelection()
+    assert.equal((await request({action:'set-default',profileId:one.profile.id})).status,200)
+    assert.equal(profiles.defaultProfileId,one.profile.id)
+    assert.deepEqual(ctx.agentDefaultModel.currentSelection(),officialDefault)
     const beforeDiscovery=service.adapter.listModels
     service.adapter.listModels=async()=>{throw new Error('configuration listing must not discover models')}
     const configuration=await (await fetch(endpoint+'?configuration=1',{headers:{'x-test-role':'owner'}})).json()
@@ -49,7 +53,22 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     const catalog = await (await request()).json()
     assert.deepEqual(catalog.models.map(m => m.id), ['fixture'])
     assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id, model: 'nonexistent' })).status, 400)
+    assert.equal(catalog.canChangeAgent, true, 'official sessions ignore Kode turn boundaries')
     turns = 1
+    agent.isKodeNativeAgent = true
+    const nativeView = await (await request()).json()
+    assert.equal(nativeView.canChangeAgent, false, 'completed native sessions keep their Agent header visible')
+    assert.equal(nativeView.currentProfile.id, two.profile.id)
+    const liveGet = ctx.agents.get
+    ctx.agents.get = () => undefined
+    let coldBlank = false
+    ctx.sessionController.list = async () => ({ items: [{ sessionId: agent.id, blank: coldBlank, projections: { values: { modelSelection: { lastUsed: selection } } } }] })
+    assert.equal((await (await request()).json()).canChangeAgent, false, 'unloading a historical session never unlocks its Agent')
+    coldBlank = true
+    assert.equal((await (await request()).json()).canChangeAgent, true, 'a saved blank draft can still choose its Agent')
+    ctx.sessionController.list = async () => ({ items: [] })
+    assert.equal((await (await request()).json()).canChangeAgent, false, 'unknown sessions cannot inherit blank-session privileges')
+    ctx.agents.get = liveGet
     const failed = await request({ action: 'select', profileId: one.profile.id, sessionId: agent.id })
     assert.equal(failed.status, 400)
     assert.match((await failed.json()).error, /new conversation/)

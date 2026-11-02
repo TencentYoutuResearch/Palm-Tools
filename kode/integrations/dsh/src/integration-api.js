@@ -1,3 +1,5 @@
+import QRCode from 'qrcode'
+
 /** Host-owner UI proxy. Browser clients never receive backend credentials. */
 export function registerIntegrationApi(ctx, backend) {
   return ctx.webServer.register({ kind: 'exact', path: '/api/kode/integrations', handler: async (req, res) => {
@@ -10,10 +12,23 @@ export function registerIntegrationApi(ctx, backend) {
       let body = ''
       for await (const chunk of req) { body += chunk; if (body.length > 8192) return send(413, { error: 'Request too large' }) }
       const input = JSON.parse(body)
-      if (input.action === 'pair') return send(200, { pairing: await backend.call('/api/v1/messaging/cloud/pair', { server_url: input.server_url }) })
+      if (input.action === 'pair') {
+        const pairing = await backend.call('/api/v1/messaging/cloud/pair', { server_url: input.server_url })
+        // Encode the existing one-time invite locally; never send its secret to a QR service.
+        try {
+          pairing.qr_data_url = await QRCode.toDataURL(pairing.uri, { errorCorrectionLevel: 'M', margin: 4, scale: 6 })
+        } catch {
+          // The invite is already valid. Keep manual pairing available if rendering fails.
+          pairing.qr_error = '二维码生成失败，请使用下方配对链接，或重新生成。'
+        }
+        return send(200, { pairing })
+      }
       if (input.action !== 'configure') return send(400, { error: 'Unknown integration action' })
       return send(200, { settings: await backend.call('/api/v1/messaging/integrations', input.settings) })
-    } catch (error) { return send(400, { error: error.message }) }
+    } catch (error) {
+      if (error.status === 404) return send(503, { code: 'KODE_SERVICE_UPDATE_REQUIRED', error: '所选主机的 Kode 服务版本较旧，需要更新并重启。' })
+      return send(400, { error: error.message })
+    }
   } })
 }
 

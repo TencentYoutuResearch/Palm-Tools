@@ -15,6 +15,7 @@ import { importSavedSession } from './workbench-import.js'
 import { deployRemote, deploymentHost, DEPLOY_STEPS } from './remote-deploy.js'
 import { registerWorktreeApi } from './worktree-api.js'
 import { registerBrowserApi } from './browser-host.js'
+import { prepareLocalRecovery, localRecoverySupported } from './service-recovery.js'
 const PATH = '/api/kode/project-hosts'
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
 const equal = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b))
@@ -85,7 +86,7 @@ export class ProjectHosts {
     }
     return Promise.all([view('此计算机', 'local', nodes.local_node_id), ...this.hosts.map(host => view(host.name, 'ssh', nodes.hosts.find(node => normalize(node.ssh_host) === normalize(host.host))?.node_id))])
   }
-  view(current = 'local') { return { current, deploymentSupported: Boolean(this.config.backendClient), hosts: [{ id: 'local', name: '此计算机' }, ...this.hosts.map(({ id, name, host, port }) => ({ id, name, host, port, connected: this.portals.has(id) }))] } }
+  view(current = 'local') { return { current, localRecoverySupported: localRecoverySupported(this.ctx), deploymentSupported: Boolean(this.config.backendClient), hosts: [{ id: 'local', name: '此计算机' }, ...this.hosts.map(({ id, name, host, port }) => ({ id, name, host, port, connected: this.portals.has(id) }))] } }
   save() {
     this.saving = this.saving.then(async () => {
       if (this.document) { await this.document.write(this.hosts); return }
@@ -149,6 +150,21 @@ export class ProjectHosts {
       let text = ''
       for await (const chunk of req) { text += chunk; if (Buffer.byteLength(text) > 16384) throw new Error('配置过长。') }
       const input = JSON.parse(text)
+      if (input.action === 'recover-service') {
+        if (input.id !== 'local') {
+          const host = this.hosts.find(row => row.id === input.id)
+          if (!host) throw new Error('主机不存在，请刷新后重试。')
+          return json(res, 202, this.startDeployment({ id: host.id, name: host.name, host: host.host, port: host.port, configFile: host.config_file }))
+        }
+        if (this.recovering) throw new Error('服务正在准备重启，请稍候。')
+        this.recovering = true
+        try {
+          const recovery = await prepareLocalRecovery(this.ctx, this.config)
+          res.once('finish', () => recovery.commit())
+          res.once('close', () => { if (!res.writableFinished) { this.recovering = false; void recovery.cancel() } })
+          return json(res, 202, { status: 'restarting' })
+        } catch (error) { this.recovering = false; throw error }
+      }
       if (input.action === 'deploy') {
         if (current !== 'local') throw new Error('请返回此计算机后添加或部署 SSH 主机。')
         return json(res, 202, this.startDeployment(input))

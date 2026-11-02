@@ -65,6 +65,8 @@ fn owner(hub: &Hub, h: &HeaderMap, id: &str) -> Result<()> {
 }
 pub(super) fn router(hub: Arc<Hub>) -> Router {
     Router::new()
+        .route("/api/v1/messaging/workbench/agent-hub", get(agent_hub).post(change_agent_hub))
+        .route("/api/v1/messaging/workbench/handoff", post(handoff))
         .route("/api/v1/messaging/integrations", get(integration_status).post(integration_configure))
         .route("/api/v1/messaging/memory/tool", post(memory_tool))
         .route("/api/v1/messaging/cloud/status", get(cloud_status))
@@ -565,4 +567,17 @@ async fn resolve_native(State(hub):State<Arc<Hub>>,h:HeaderMap,Json(input):Json<
 async fn runtime_release(State(hub):State<Arc<Hub>>,h:HeaderMap,Json(input):Json<RuntimeClaim>)->Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     ctx.runtimes.release(&input.runtime,&input.boot_id)?;Ok(Json(json!({"ok":true})))
+}
+
+async fn agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap)->Result<Json<serde_json::Value>>{
+    admin(&hub,&h)?;
+    Ok(Json(tokio::task::spawn_blocking(move||hub.extensions.view(&hub)).await.map_err(anyhow::Error::from)??))
+}
+async fn change_agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):Json<serde_json::Value>)->Result<Json<serde_json::Value>>{
+    admin(&hub,&h)?;
+    Ok(Json(tokio::task::spawn_blocking(move||hub.extensions.change(&hub,input)).await.map_err(anyhow::Error::from)??))
+}
+async fn handoff(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):Json<super::handoff::Request>)->Result<Json<serde_json::Value>>{
+    admin(&hub,&h)?;
+    Ok(Json(super::handoff::execute(hub,input).await?))
 }

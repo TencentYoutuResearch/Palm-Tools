@@ -20,7 +20,7 @@ export function projectSessionEvent(event, messageId) {
   if (event.type === 'user/message' || event.type === 'assistant/message') {
     const message = event.type === 'user/message' ? data : data.message
     if (!message) return []
-    return [{ key, kind: 'message', payload: { id: messageId ?? message.id ?? key, role: event.type === 'user/message' ? 'user' : 'assistant', text: textOf(message.content), content: message.content, streaming: false } }]
+    return [{ key, kind: 'message', payload: { id: messageId ?? message.id ?? key, role: event.type === 'user/message' ? 'user' : 'assistant', text: textOf(message.content), content: message.content, source_kind: message.source?.kind, streaming: false } }]
   }
   if (event.type === 'tool/call') return [{ key, kind: 'tool_use', payload: { id: data.callId, name: data.name, input: data.arguments, status: 'running' } }]
   if (event.type === 'tool/result') return [{ key, kind: 'tool_use', payload: { id: data.callId, output: textOf(data.message?.content ?? data.content), status: data.message?.isError || data.isError ? 'error' : 'ok' } }]
@@ -44,7 +44,12 @@ export class RuntimeBridge {
     const profile = binding?.profile
     return { runtime_backend_key: profile ? `dsh:${profile.id}` : undefined, ...permissionSnapshot(this.service('permissionPresets'), agent?.session, row), native_thread_id: binding?.threadId, backend_key: this.service('kodeAgents').profiles.sharedState?.desktop_ids?.[profile?.id] ?? profile?.name ?? 'dsh', title: row.projections?.values?.title ?? row.title ?? '未命名会话', model: selection.model ?? profile?.defaultModel ?? '', status: agent?.status === 'running' ? 'busy' : 'idle', cwd: row.cwd ?? agent?.session.header.cwd, session_uuid: row.sessionId, tokens: { total: 0, input: 0, output: 0, cached: 0 } }
   }
-  async publish() {
+  publish() {
+    const task = (this.publishing ?? Promise.resolve()).then(() => this.publishSnapshot())
+    this.publishing = task.catch(() => {})
+    return task
+  }
+  async publishSnapshot() {
     const controller = this.service('sessionController'), { items } = await controller.list({}, this.stop.signal)
     if (!this.known) {
       const saved = await this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)

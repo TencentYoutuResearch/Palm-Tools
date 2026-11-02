@@ -187,6 +187,8 @@ pub fn run() {
             commands::get_pairing_payload,
             backend_runtime::integration_action,
             backend_runtime::shared_runtime_sessions,
+            backend_runtime::agent_hub_action,
+            backend_runtime::shared_session_handoff,
             shared_services::setup_shared_services,
             cloud_sync::cloud_sync_status,
             cloud_sync::cloud_sync_create_pairing,

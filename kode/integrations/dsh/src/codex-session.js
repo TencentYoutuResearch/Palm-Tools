@@ -25,6 +25,7 @@ export class CodexSession {
     this.rpc = new RpcProcess(this.profile, this.cwd)
     this.rpc.on('notification', message => {
       if (message.params?.threadId && this.threadId && message.params.threadId !== this.threadId) return
+      if (message.method === 'thread/goal/updated' || message.method === 'thread/goal/cleared') this.handlers.goal?.(message.method.endsWith('/cleared') ? null : message.params.goal)
       if (message.method === 'thread/goal/cleared' || message.method === 'thread/goal/updated' && message.params.goal.status !== 'active') this.goalStopped = true
       if (message.method === 'thread/goal/updated' && message.params.goal.status === 'active') this.goalStopped = false
       if (this.active) this.active.push(message)
@@ -101,6 +102,7 @@ export class CodexSession {
       ? await this.resumeThread({ ...params, threadId: binding.threadId }, signal)
       : await this.rpc.request('thread/start', { ...params, dynamicTools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.parameters })), developerInstructions: 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.' }, { signal })
     this.threadId = result.thread.id
+    try { const { goal } = await this.rpc.request('thread/goal/get', { threadId: this.threadId }, { signal }); this.handlers.goal?.(goal) } catch (error) { if (signal?.aborted) throw error }
     return this.threadId
   }
   async listModels(signal) {

@@ -1384,3 +1384,30 @@ export const workspaceFiles = {
     : invoke<string[]>('workspace_edit', { request }),
   copyText: (text: string) => invoke<void>('workspace_copy_text', { text }),
 }
+
+/** The same authoritative service used by dsh. No browser-local configuration. */
+export interface AgentHubSource {
+  id: string
+  kind: 'git' | 'local'
+  location: string
+  subdir: string
+  targets: string[]
+  skills?: string[]
+  nativeStatus?: Record<string, string>
+  updatedAt?: number
+  error?: string
+}
+export interface AgentHubState {
+  revision: number
+  version: number
+  keepAwake: boolean
+  power: { enabled: boolean; active: boolean; supported: boolean; error: string }
+  sources: AgentHubSource[]
+  targets: Record<string, string>
+}
+export const agentHub = {
+  status: () => invoke<AgentHubState>('agent_hub_action'),
+  change: (payload: Record<string, unknown>) => invoke<AgentHubState>('agent_hub_action', { payload }),
+  handoff: (payload: { source_session_id: string; source_runtime: 'gui' | 'dsh'; profile_id: string; target_runtime: 'gui' | 'dsh'; request_id: string }) =>
+    invoke<{ sessionId: string; runtime: 'gui' | 'dsh'; id: number; sourceId: number }>('shared_session_handoff', { payload }),
+}

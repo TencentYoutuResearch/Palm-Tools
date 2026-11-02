@@ -9,14 +9,21 @@ export class BackendClient {
   }
   async call(path, body, signal) {
     if (!path.startsWith('/api/v1/messaging/')) throw new Error('unsupported backend path')
+    const timeoutMs = path === '/api/v1/messaging/workbench/agent-hub' ? 600000 : path === '/api/v1/messaging/workbench/handoff' ? 75000 : 15000
     const response = await this.fetch(`${this.url}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       redirect: 'error',
     })
-    const result = await response.json()
+    const text = await response.text()
+    if (response.status === 404) throw Object.assign(new Error(`Kode backend is missing ${path} (HTTP 404); update the shared Kode backend and reconnect`), { status: 404 })
+    let result
+    try { result = text ? JSON.parse(text) : undefined } catch {
+      throw new Error(`Kode backend returned invalid JSON (HTTP ${response.status}, ${path})`)
+    }
+    if (result === undefined) throw new Error(`Kode backend returned an empty response (HTTP ${response.status}, ${path})`)
     if (!response.ok) throw new Error(`kode backend (${response.status}): ${result.error ?? 'request failed'}`)
     return result
   }

@@ -18,7 +18,7 @@ pub async fn call(path: &str, body: Option<Value>) -> Result<Value, String> {
     };
     let response = request
         .bearer_auth(token.trim())
-        .timeout(Duration::from_secs(50))
+        .timeout(Duration::from_secs(if path == "/workbench/agent-hub" { 600 } else if path == "/workbench/handoff" { 75 } else { 50 }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -270,4 +270,14 @@ pub async fn shared_command(id: u64, kind: &str, mut payload: Value) -> Result<V
         Some(json!({"session_id":id,"kind":kind,"payload":payload,"request_id":request_id})),
     )
     .await
+}
+
+/// Shared service controls: the GUI owns no plugin filesystem or handoff state.
+#[tauri::command]
+pub async fn agent_hub_action(payload: Option<Value>) -> Result<Value, String> {
+    call("/workbench/agent-hub", payload).await
+}
+#[tauri::command]
+pub async fn shared_session_handoff(payload: Value) -> Result<Value, String> {
+    call("/workbench/handoff", Some(payload)).await
 }

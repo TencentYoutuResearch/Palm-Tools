@@ -9,7 +9,7 @@ function replace(from, to) { if (!source.includes(from)) throw new Error(`Pinned
 replace('id: "@deepseek-ai/dsh-client-ui-chat",','id: "@kode/dsh-chat",')
 // Stable user-bubble seat for scene-aware appearance without matching generated classes.
 replace('className: MessageItem_module_css_default.bubble,', 'className: MessageItem_module_css_default.bubble, "data-kode-user-bubble": true,')
-replace('const CHAT_SETTINGS_NAMESPACE = "ui-chat";', 'const CHAT_SETTINGS_NAMESPACE = "kode-chat";')
+// Keep ui-chat settings compatible with the official chat UI.
 replace('function activity(name) {', 'function activity(name) {\n if (name === "kode_native_commandExecution") return "commands";\n if (name === "kode_native_fileChange") return "edit";')
 // Keep running commentary visible, but fold completed process even after steering.
 replace('const alwaysOpen = liveProcess || interleavedInput || turnProcessAlwaysOpen(routedNode);', 'const alwaysOpen = liveProcess || turnProcessAlwaysOpen(routedNode);')

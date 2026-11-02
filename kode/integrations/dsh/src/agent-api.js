@@ -10,6 +10,7 @@ export function registerAgentApi(ctx, service) {
   const controller = () => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用，请稍后重试。'); return value }
   const { profiles, adapter } = service
   const available = profile => service.hasRuntime ? service.hasRuntime(profile.type) : Object.hasOwn(service.types ?? AGENT_TYPES, profile.type)
+  const positionOf = agent => ctx.sessionProjections.stateOf(agent.session, agent.isKodeNativeAgent ? 'kodeTurnBoundary' : 'turnBoundary')
   const selected = agent => {
     const state = ctx.sessionProjections.stateOf(agent.session, 'modelSelection')
     return state?.pending ?? state?.next ?? state?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
@@ -42,10 +43,11 @@ export function registerAgentApi(ctx, service) {
         const configurationOnly = query.get('configuration') === '1'
         const agent = sessionId ? ctx.agents.get(sessionId) : undefined
         const binding = sessionId ? profiles.binding(sessionId) : undefined
-        const stored = sessionId && !agent ? (await controller().list?.({}))?.items.find(row => row.sessionId === sessionId)?.projections?.values?.modelSelection : undefined
+        const storedRow = sessionId && !agent ? (await controller().list?.({}))?.items.find(row => row.sessionId === sessionId) : undefined
+        const stored = storedRow?.projections?.values?.modelSelection
         const selection = agent ? selected(agent) : stored?.pending ?? stored?.next ?? stored?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
         const inferred = profiles.list().find(p => profileRoute(p.id) === selection?.provider)
-        const configuredDefault = profiles.list().find(p => profileRoute(p.id) === ctx.agentDefaultModel.currentSelection()?.provider && available(p))
+        const configuredDefault = profiles.list().find(p => p.id === profiles.defaultProfileId && available(p))
         const selectedProfileId = binding?.profile.id ?? (!sessionId ? configuredDefault?.id : undefined) ?? inferred?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
         const profile = binding?.profile ?? profiles.list().find(p => p.id === selectedProfileId)
         const catalog = { groups: [] }
@@ -58,7 +60,7 @@ export function registerAgentApi(ctx, service) {
         const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
           selectedProfileId, selection, catalog, models, modelError, ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
-          canChangeAgent: !agent || (agent.status === 'idle' && !(ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')?.lastTurn > 0)),
+          canChangeAgent: agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true,
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
       }
@@ -67,6 +69,11 @@ export function registerAgentApi(ctx, service) {
       let body = ''
       for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) throw new Error('Agent configuration exceeds 128 KiB') }
       const input = JSON.parse(body)
+      if (input.action === 'set-default') {
+        const id = input.profileId ?? null
+        if (id !== null && !available(profiles.get(id))) throw new Error('此 Agent 的执行插件尚未安装。')
+        json(res, 200, await profiles.setDefaultProfile(id)); return
+      }
       if (input.action === 'agent-avatar') {
         if (!service.appearance) throw new Error('头像配置服务尚未就绪。')
         await service.appearance.setAgent(input.profileId, input.avatarId ?? null); json(res, 200, { ok: true }); return
@@ -84,11 +91,12 @@ export function registerAgentApi(ctx, service) {
       if (input.action !== 'select') throw new Error('unknown Agent operation')
       const found = await controller().resolveAgent(input.sessionId)
       if (found.error) throw new Error(found.error.message)
-      const agent = found.agent, binding = profiles.binding(agent.id)
+      let agent = found.agent
+      const binding = profiles.binding(agent.id)
       const profile = binding?.profile.id === input.profileId ? binding.profile : profiles.get(input.profileId)
       if (!available(profile)) throw new Error('此 Agent 的执行插件已拔出。')
       if (!SUPPORTED_AGENT_TYPES.includes(profile.type)) throw new Error(`Persistent ${profile.type} adapter is not installed`)
-      const position = ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
+      const position = positionOf(agent)
       const currentProfileId = binding?.profile.id ?? profiles.list().find(p => profileRoute(p.id) === selected(agent)?.provider)?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
       if (currentProfileId !== profile.id) {
         if (position?.lastTurn > 0 || agent.status !== 'idle') throw new Error('Start a new conversation to change its Agent; the current conversation retains its history and runtime.')
@@ -111,11 +119,19 @@ export function registerAgentApi(ctx, service) {
       }
       // Verify the route before committing the profile binding; no executable is
       // launched by changing the selector (only bounded model discovery runs).
-      const selection = agent.selectModel({provider,model,...(reasoningEffort ? { reasoningEffort } : {})})
+      const selectedRoute = {provider,model,...(reasoningEffort ? { reasoningEffort } : {})}
+      let rebound = false
+      if (typeof agent.selectModel !== 'function') {
+        const factory = ctx.get?.('kodeNativeFactory')
+        if (!factory?.promote) throw new Error('Kode Agent 执行器尚未就绪。')
+        agent = await factory.promote(agent, selectedRoute)
+        rebound = true
+      }
+      const selection = agent.selectModel(selectedRoute)
       await agent.ctx?.parallel?.('session/flush',agent.session)
       await profiles.bind(agent.id, profile.id)
       service.recordBinding?.(agent, profile)
-      json(res, 200, selection)
+      json(res, 200, { ...selection, ...(rebound ? {rebound:true} : {}) })
     } catch (error) { json(res, 400, { error: error.message }) }
   } })
   return () => { for (const res of streams) res.end(); disposeApi(); disposeUpdates() }

@@ -451,7 +451,7 @@ checkouts can also use local compiled binaries.
 | Shared memory UI and synchronization controls | Shared backend switches are available in both frontends. The review queue, scope/relation editing and memory sync administration remain in the original GUI. |
 | Native plugin/Hook installation and management | Missing desktop management UI; dsh's own plugin page manages dsh bundles, not all native CLI plugins. |
 | Model usage and desktop floating monitor | Missing desktop-wide monitoring parity; dsh has its own per-session observations. |
-| Phone pairing, cloud sync deployment | Settings → 会话互通与记忆 pairs the phone through the shared backend. Cloud-service deployment remains in the original GUI. |
+| Phone pairing, cloud sync deployment | Settings → 手机与同步 shows a one-time pairing QR code and a manual pairing link through the shared backend. Cloud-service deployment remains in the original GUI. |
 | Native screenshot tools, desktop window/tab actions, SpecOps window | Not ported; some are desktop-specific rather than Web-session requirements. |
 
 Managed service supervision is currently process based; automatic startup on OS
@@ -555,6 +555,13 @@ canonical events; it continues to own Agent execution, queuing, sandbox policies
 approval audit, persistence and native CLI ownership. The GUI publishes its native
 bridge through the same adapter. No second Agent loop is created when another
 frontend opens an already running conversation.
+
+Phone pairing has its own **Settings → 手机与同步** section. Select the Host,
+enter a sync-server URL reachable from the phone, and choose **生成配对二维码**.
+Scan it with Kode Mobile, or paste the displayed link into manual pairing. The QR
+is generated locally from the same one-time invite; expired invites are hidden
+and can be regenerated. **集成** contains only the Agent communication
+and shared-memory integration switches.
 
 The phone uses the existing `kode-sync-server` pairing and authenticated
 REST/WebSocket protocol. Its backend/model catalog is provided by the attached
@@ -744,3 +751,95 @@ The edit icon beside the preview name renames the actual gallery directory. The 
 Gallery assets live on the browser entry Host, including when the conversation executes over SSH. Generation requires a local conversation so that its agent can write to the entry Host’s gallery. Each `gallery/<avatar-id>/` can contain `background.png`, `background.jpg`, `background.jpeg`, or `background.webp`; the selected avatar determines the conversation backdrop. Older galleries without a background continue to render normally. Backgrounds are subdued behind the conversation to preserve text contrast and can be disabled in the picker.
 
 The picker previews idle frames; running conversations animate their avatar’s running frames at 180 ms per frame. Idle conversations remain still. Animation pauses offscreen, on hidden pages, or when reduced motion is requested. The owner-authenticated artwork API serves bounded frame sequences and optional backgrounds, checks real paths against the configured gallery, and never forwards local artwork through an SSH agent runtime.
+
+### Recovering a missing settings API
+
+Settings → 主机与服务 owns the service status and recovery controls for the selected local or saved SSH Host, alongside SSH connection management. 集成 and 手机与同步 show **前往主机与服务** when either the Web Host route or its Kode backend returns HTTP 404; the link selects the failing Host without switching the active workspace. `KODE_SERVICE_UPDATE_REQUIRED` identifies an older backend behind a current Host.
+
+- **重启服务** restarts a local CLI Web Host and its verified, configured loopback Kode backend using installed files. Requests are rejected while sessions run or queue. A detached worker waits for graceful Host exit, verifies the backend command again before signalling it, and relaunches the original Web command with its original environment. It never force-kills an unidentified process.
+- **更新并部署服务** updates the selected saved SSH Host through the existing deployment job, retaining SSH settings and busy-session checks. Progress is shown and settings are retried after deployment.
+- **重新连接** retries settings without restarting. Desktop and unsupported launchers explain how to restart manually. A Host predating the recovery API needs one manual update/restart first. Local recovery uses installed files; it does not download a newer plugin.
+
+Recovery is owner-authenticated. Duplicate requests are disabled; failures and readiness timeouts remain visible. `node --test test/service-recovery.test.js` exercises isolated recovery-worker processes without restarting the user's service.
+
+
+### Compatibility with other Host plugins
+
+Kode routes only sessions with an explicit `kode-agent-*` model route, the
+`kode-native` preset, or an existing Kode binding to its native execution driver.
+Other providers continue through the official AgentLoop, including third-party
+plugins such as QQ bots. Official prompts, tools, presets and the Host default
+preset remain enabled. Kode's default Agent is stored in its own registry and
+does not rewrite the Host's `agent-default-model` settings.
+
+The Kode browser workspace switches a blank conversation to the native driver
+only when its Agent selector chooses a Kode route. Host-side plugin calls retain
+their original creation/resume options.
+The UI, transport and workspace catalog still share the Host; this is not a
+blanket compatibility guarantee for arbitrary plugins that replace those same
+services. Regression tests exercise official and Kode factories side by side.
+
+### Kode 设置
+
+全局设置中只新增一个 **Kode** 入口。页内导航可直达 Agent、集成、手机与同步、主机与服务、头像与背景；其他插件继续使用各自的设置入口。
+
+前四个分区共享“配置主机”选择，修改配置不会切换当前工作区。头像与背景应用到当前打开的会话。会话中的 Agent 配置、主机管理和服务恢复快捷入口会打开 Kode 页内对应分区；dsh 模型设置仍打开原有模型页面。
+
+### Agent sharing, extensions and screen-off execution
+
+Open **Settings → Kode → Agent 共享** on the desired Host. Configuration and handoff receipts are owned by the Kode backend SQLite store.
+Extension snapshots live beside that database in its `.agent-hub` directory.
+Local and SSH Hosts keep separate configuration. dsh is an authenticated API
+adapter and holds no independent extension configuration.
+
+- **息屏后继续运行** persists a Host setting. macOS uses an owned `caffeinate -i -w`
+  process; Linux uses `systemd-inhibit` when available. The display can turn off.
+  Disabling the setting or stopping the Kode backend releases the inhibitor. Lid close,
+  explicit sleep, shutdown and unsupported system power services remain governed
+  by the OS. A failed inhibitor is shown in settings.
+- A native Codex `/goal` produces a durable strip above the composer. Click its
+  objective to edit, or use **暂停 / 继续**. Native notifications, including model
+  goal updates and completion, update the same session projection. Existing dsh
+  goal UI continues to handle dsh's own goal protocol. Agents without a native
+  goal protocol do not advertise this control.
+- Add an HTTPS/SSH Git repository or an absolute local directory, optionally
+  select a subdirectory and choose targets, then click **更新并同步**. Packages are
+  snapshotted with their relative resources intact. Portable skills are linked
+  under `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`,
+  `~/.codebuddy/skills`, and `~/.cursor/skills`, named `<source>--<relative-skill>`.
+  Existing unmanaged files cause a visible conflict. Failed file commits restore
+  previous links; removed skills/targets remove only the links Kode still owns.
+- Native `.claude-plugin`, `.codebuddy-plugin` and `.cursor-plugin` manifests
+  add repeatable `--plugin-dir` arguments to subsequent Kode runtime launches.
+  `.codex-plugin` packages use a generated local marketplace and the native
+  `codex plugin` installer, including cleanup on source removal. Native hooks
+  and MCP definitions stay in their original package; they are not translated
+  between incompatible agent formats. Missing target manifests mean skill-only
+  synchronization. Each target's status and native installation errors are shown.
+  Outside Kode, the portable skill directories and installed Codex plugins are
+  available normally; the other native plugin launch arguments apply in Kode.
+  Existing processes may require a new session to discover changed packages.
+- **换 Agent 续接** in the conversation header creates a new conversation on the
+  same Host/workspace using the selected Agent and continues the latest user
+  request with its readable transcript as context. The original stays intact.
+  It transfers at most the latest 48,000 characters of user/assistant text,
+  excluding hidden reasoning, tool lifecycles, peer messages and attachments.
+  Backend-owned request identities and frozen source snapshots make network retries reuse the
+  same target instead of sending work twice. This is a context handoff, not a
+  conversion of proprietary native thread files. Existing shared directories,
+  native session imports and `kode_sessions_*` messaging remain the unified
+  discovery and collaboration paths across Agents and SSH Hosts.
+
+Extension releases are kept while older runtime processes may still reference
+those snapshots. Native plugin packages must provide manifests compatible with
+any selected native targets; arbitrary proprietary plugin code is not portable.
+All hub endpoints are owner-only; configuration and handoff transcripts are
+stored in the private backend SQLite store. The GUI can use the same service
+through `agent_hub_action` and `shared_session_handoff` IPC adapters. Managed
+plugin launch arguments are returned separately from editable Agent configuration.
+Native installer checks run through an isolated backend without inference or
+changes to a real account:
+
+```sh
+KODE_TEST_NATIVE_PLUGIN_CLI=1 node scripts/test-integration.js
+```

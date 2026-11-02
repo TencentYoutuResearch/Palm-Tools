@@ -52,13 +52,14 @@ export async function writePrivateJson(path, value) {
 }
 
 export class AgentProfiles {
-  constructor(path) { this.path = path; this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
+  constructor(path) { this.path = path; this.defaultProfileId = null; this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
   async open(initial = []) {
     let fresh = false
     try {
       const stored = JSON.parse(await readFile(this.path, 'utf8'))
       if (stored.version !== 1 || !Array.isArray(stored.profiles) || !stored.bindings || typeof stored.bindings !== 'object' || Array.isArray(stored.bindings)) throw new Error('unsupported Agent profile file')
       this.profiles = stored.profiles.map(p => ({ ...normalizeProfile(p), ...(p.origin === 'builtin' && p.id === `builtin-${p.type}` && p.type !== 'custom' ? { origin: 'builtin' } : {}) }))
+      this.defaultProfileId = stored.defaultProfileId ?? null
       this.bindings = Object.assign(Object.create(null), stored.bindings)
     } catch (e) {
       if (e.code !== 'ENOENT') throw e
@@ -75,14 +76,19 @@ export class AgentProfiles {
   binding(sessionId) { return this.bindings[sessionId] ? structuredClone(this.bindings[sessionId]) : undefined }
   update(operation) {
     const task = this.chain.then(async () => {
-      const state = { version: 1, profiles: this.list(), bindings: structuredClone(this.bindings) }
+      const state = { version: 1, defaultProfileId: this.defaultProfileId, profiles: this.list(), bindings: structuredClone(this.bindings) }
       const result = operation(state)
       await writePrivateJson(this.path, state)
+      this.defaultProfileId = state.defaultProfileId ?? null
       this.profiles = state.profiles; this.bindings = Object.assign(Object.create(null), state.bindings)
       return structuredClone(result)
     })
     this.chain = task.catch(() => {})
     return task
+  }
+  setDefaultProfile(id) {
+    if (id !== null) this.get(id)
+    return this.update(state => { state.defaultProfileId = id; return { defaultProfileId: id } })
   }
   save(input) {
     const p = normalizeProfile(input)

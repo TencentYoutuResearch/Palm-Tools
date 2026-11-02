@@ -17,15 +17,30 @@ impl Drop for Server {
     }
 }
 async fn server(node: &str, peers: Vec<Peer>) -> Server {
+    server_with_config(node, peers, kode_core::config::Config::default()).await
+}
+// Registry tests declare their available Agents rather than probing developer CLI installs.
+fn fixture_agent_config(kinds: &[&str]) -> kode_core::config::Config {
+    let mut config = kode_core::config::Config::default();
+    config.backends.retain(|key, _| kinds.contains(&key.as_str()));
+    for (key, backend) in &mut config.backends {
+        backend.enabled = Some(true);
+        backend.protocol = Some(key.clone());
+        backend.command = "fixture-agent-not-executed".into();
+    }
+    config
+}
+async fn server_with_config(node: &str, peers: Vec<Peer>, config: kode_core::config::Config) -> Server {
     let root = tempfile::tempdir().unwrap();
-    let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "admin-test".into());
-    let hub = Hub::open(
+    let ctx = crate::build_test_ctx(config, "admin-test".into());
+    let hub = Hub::open_with_agent_home(
         Config {
             node_id: node.into(),
             database: root.path().join("messages.sqlite"),
             peers,
         },
         &ctx,
+        root.path().join("agent-home"),
     )
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -932,4 +947,110 @@ async fn workspace_operations_route_to_the_ssh_peer_node_and_cannot_use_local_id
     assert!(local.hub.store.document("workspaces").unwrap()["value"]["tables"]["workspaces"].as_object().unwrap().is_empty());
     let wrong=client.post(&url).bearer_auth("admin-test").json(&json!({"action":"rename","node_id":"workspace-remote","id":"local-only-workspace","title":"Wrong"})).send().await.unwrap();assert_eq!(wrong.status(),400);
     let viewed:Value=client.get(&url).query(&[("node_id","workspace-remote")]).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();assert_eq!(viewed["workspaces"][0]["path"],json!(std::fs::canonicalize(&remote_path).unwrap()));
+}
+
+#[tokio::test]
+async fn agent_hub_is_backend_owned_owner_only_and_shared_by_independent_clients(){
+    let s=server("agent-hub",vec![]).await;let first=reqwest::Client::new();let second=reqwest::Client::new();
+    let url=format!("{}/api/v1/messaging/workbench/agent-hub",s.url);
+    assert_eq!(first.get(&url).send().await.unwrap().status(),401);
+    let agent=register(&s,"extension-reader").await;
+    assert_eq!(first.get(&url).bearer_auth(&agent.owner_token).send().await.unwrap().status(),403);
+    assert_eq!(first.post(&url).bearer_auth(&agent.owner_token).json(&json!({"action":"power","enabled":true})).send().await.unwrap().status(),403);
+    let source=s._root.path().join("fixtures");std::fs::create_dir_all(source.join("skills/example/references")).unwrap();
+    std::fs::write(source.join("skills/example/SKILL.md"),"---\nname: example\ndescription: Fixture\n---\nTest").unwrap();
+    std::fs::write(source.join("skills/example/references/guide.md"),"original").unwrap();
+    let saved=first.post(&url).bearer_auth("admin-test").json(&json!({"action":"save-source","source":{"id":"team","kind":"local","location":source,"targets":["dsh","codex","claude","codebuddy","cursor"]}})).send().await.unwrap();assert!(saved.status().is_success(),"{}",saved.text().await.unwrap());
+    let synced=second.post(&url).bearer_auth("admin-test").json(&json!({"action":"sync-source","id":"team"})).send().await.unwrap();assert!(synced.status().is_success(),"{}",synced.text().await.unwrap());
+    let state:Value=first.get(&url).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();
+    assert_eq!(state["sources"][0]["skills"],json!(["skills--example"]));
+    for(_,target)in super::extension_files::TARGETS{
+        assert_eq!(std::fs::read_to_string(s.hub.extensions.home.join(target).join("team--skills--example/references/guide.md")).unwrap(),"original");
+    }
+    let stored=s.hub.store.document("agent-hub").unwrap();assert!(stored["revision"].as_u64().unwrap()>=2);assert_eq!(stored["value"]["sources"][0]["id"],"team");
+    std::fs::write(source.join("skills/example/references/guide.md"),"updated").unwrap();
+    assert!(first.post(&url).bearer_auth("admin-test").json(&json!({"action":"sync-source","id":"team"})).send().await.unwrap().status().is_success());
+    assert_eq!(std::fs::read_to_string(s.hub.extensions.home.join(".claude/skills/team--skills--example/references/guide.md")).unwrap(),"updated");
+    assert!(second.post(&url).bearer_auth("admin-test").json(&json!({"action":"remove-source","id":"team"})).send().await.unwrap().status().is_success());
+    assert!(!s.hub.extensions.home.join(".claude/skills/team--skills--example").exists());
+}
+#[tokio::test]
+async fn backend_extension_conflicts_preserve_every_previous_target_and_foreign_files(){
+    let s=server("extension-conflict",vec![]).await;let source=s._root.path().join("source");std::fs::create_dir_all(source.join("one")).unwrap();std::fs::write(source.join("one/SKILL.md"),"first").unwrap();
+    let ext=&s.hub.extensions;ext.change(&s.hub,json!({"action":"save-source","source":{"id":"team","kind":"local","location":source}})).unwrap();ext.change(&s.hub,json!({"action":"sync-source","id":"team"})).unwrap();
+    let path=ext.home.join(".agents/skills/team--one");let prior=std::fs::read_link(&path).unwrap();
+    std::fs::create_dir_all(source.join("new")).unwrap();std::fs::write(source.join("new/SKILL.md"),"new").unwrap();
+    let foreign=ext.home.join(".cursor/skills/team--new");std::fs::create_dir_all(&foreign).unwrap();
+    assert!(ext.change(&s.hub,json!({"action":"sync-source","id":"team"})).unwrap_err().to_string().contains("同步冲突"));
+    assert_eq!(std::fs::read_link(path).unwrap(),prior);assert!(!ext.home.join(".agents/skills/team--new").exists());assert!(foreign.is_dir());
+    ext.change(&s.hub,json!({"action":"remove-source","id":"team"})).unwrap();assert!(foreign.is_dir());
+}
+#[tokio::test]
+async fn backend_extension_launch_args_are_available_to_gui_and_match_native_target_manifests(){
+    let s=server_with_config("native-plugins",vec![],fixture_agent_config(&["claude","codebuddy","cursor"])).await;let source=s._root.path().join("source");
+    for target in ["claude","codebuddy","cursor"]{std::fs::create_dir_all(source.join(format!(".{target}-plugin"))).unwrap();std::fs::write(source.join(format!(".{target}-plugin/plugin.json")),r#"{"name":"fixture","version":"0.0.1"}"#).unwrap();}
+    let ext=&s.hub.extensions;ext.change(&s.hub,json!({"action":"save-source","source":{"id":"native","kind":"local","location":source,"targets":["claude","codebuddy","cursor"]}})).unwrap();
+    ext.change(&s.hub,json!({"action":"sync-source","id":"native"})).unwrap();
+    let state=ext.view(&s.hub).unwrap();assert_eq!(state["sources"][0]["nativeStatus"]["claude"],"ready");
+    for target in ["claude","codebuddy","cursor"]{let args=super::extensions::launch_args(&s.hub,target).unwrap();assert_eq!(args[0],"--plugin-dir");assert!(std::path::Path::new(&args[1]).join(format!(".{target}-plugin/plugin.json")).is_file());}
+    let catalog=super::agents::catalog(&s.hub).unwrap();
+    assert!(catalog.extension_args.values().any(|args|args.iter().any(|arg|arg=="--plugin-dir")),"GUI catalog must receive backend-owned native launch arguments");
+    for(key,args)in &catalog.extension_args{if !args.is_empty(){assert!(super::agents::resolve(&catalog,key,None).unwrap().args.contains(&"--plugin-dir".into()));assert!(!catalog.backends[key].args.contains(&"--plugin-dir".into()),"managed arguments must not pollute editable launch configuration");}}
+}
+#[tokio::test]
+async fn backend_extension_validation_rejects_escaping_paths_and_links(){
+    let s=server("extension-paths",vec![]).await;let ext=&s.hub.extensions;
+    for source in [json!({"id":"../escape","kind":"local","location":"/srv/fixtures"}),json!({"id":"valid","kind":"git","location":"--upload-pack=fixture"}),json!({"id":"valid","kind":"local","location":"/srv/fixtures","subdir":"../escape"}),json!({"id":"valid","kind":"local","location":"/srv/fixtures","targets":["unknown"]})]{assert!(ext.change(&s.hub,json!({"action":"save-source","source":source})).is_err());}
+    #[cfg(unix)]{
+        let source=s._root.path().join("source");std::fs::create_dir_all(source.join("skill")).unwrap();std::fs::write(source.join("skill/SKILL.md"),"fixture").unwrap();
+        let outside=s._root.path().join("outside");std::fs::write(&outside,"outside").unwrap();std::os::unix::fs::symlink(outside,source.join("skill/reference")).unwrap();
+        ext.change(&s.hub,json!({"action":"save-source","source":{"id":"escape","kind":"local","location":source}})).unwrap();assert!(ext.change(&s.hub,json!({"action":"sync-source","id":"escape"})).unwrap_err().to_string().contains("超出包目录"));
+    }
+}
+#[tokio::test]
+async fn backend_handoff_routes_between_runtimes_and_retries_without_duplicate_work(){
+    backend_handoff_case("gui","dsh").await;
+    backend_handoff_case("dsh","gui").await;
+}
+async fn backend_handoff_case(source_runtime:&str,target_runtime:&str){
+    let s=server_with_config("handoff-test",vec![],fixture_agent_config(&["codex"])).await;let client=reqwest::Client::new();let ctx=s._ctx.clone();
+    let publication=|runtime:&str,sid:&str,events:Vec<Value>|serde_json::from_value::<crate::runtime::Publication>(json!({"runtime":runtime,"boot_id":format!("{runtime}-boot"),"sessions":[{"session_id":sid,"dto":{"title":"Fixture conversation","cwd":s._root.path(),"status":"idle"},"events":events}]})).unwrap();
+    ctx.runtimes.publish(&ctx,publication(source_runtime,"original",vec![json!({"key":"one","kind":"message","payload":{"id":"u1","role":"user","text":"Do the fixture task","source_kind":"user"}}),json!({"key":"two","kind":"message","payload":{"id":"a1","role":"assistant","text":"Prior answer","content":[{"type":"reasoning","text":"HIDDEN REASONING"}]}}),json!({"key":"three","kind":"message","payload":{"id":"p1","role":"user","text":"PRIVATE PEER","source_kind":"agent-message"}})])).unwrap();
+    ctx.runtimes.publish(&ctx,publication(target_runtime,"existing",vec![])).unwrap();
+    let registry=s.hub.store.document("agents").unwrap();let profile=registry["value"]["profiles"].as_array().unwrap().iter().find(|profile|profile["type"]=="codex").unwrap();
+    let input=json!({"source_session_id":"original","source_runtime":source_runtime,"profile_id":profile["id"],"target_runtime":target_runtime,"request_id":"fixture-request"});let url=format!("{}/api/v1/messaging/workbench/handoff",s.url);
+    assert_eq!(client.post(&url).json(&input).send().await.unwrap().status(),401);
+    let agent=register(&s,"handoff-agent").await;assert_eq!(client.post(&url).bearer_auth(&agent.owner_token).json(&input).send().await.unwrap().status(),403);
+    let request={let client=client.clone();let url=url.clone();let input=input.clone();tokio::spawn(async move{client.post(url).bearer_auth("admin-test").json(&input).send().await.unwrap()})};
+    let mut operations=vec![];
+    tokio::time::timeout(std::time::Duration::from_secs(5),async{
+        while operations.len()<2{
+            let claimed=ctx.runtimes.claim(target_runtime,&format!("{target_runtime}-boot")).unwrap();
+            for command in claimed["commands"].as_array().unwrap(){
+                let kind=command["kind"].as_str().unwrap();operations.push(kind.to_string());
+                let value=if kind=="create_session"{
+                    assert_eq!(command["payload"]["cwd"],json!(s._root.path()));assert!(command["payload"]["backend_key"].as_str().unwrap().starts_with(&format!("{target_runtime}:")));
+                    let mapped=ctx.runtimes.publish(&ctx,publication(target_runtime,"target",vec![])).unwrap();let id=mapped["sessions"][0]["id"].as_u64().unwrap();json!({"id":id,"runtime_session_id":"target"})
+                }else{
+                    assert_eq!(kind,"input");let text=command["payload"]["text"].as_str().unwrap();assert!(text.contains("Do the fixture task")&&text.contains("Prior answer"));assert!(!text.contains("PRIVATE PEER")&&!text.contains("HIDDEN REASONING"));json!({"accepted":true})
+                };
+                ctx.runtimes.settle(target_runtime,&format!("{target_runtime}-boot"),command["id"].as_str().unwrap(),json!({"value":value})).unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let response=request.await.unwrap();assert!(response.status().is_success(),"{}",response.text().await.unwrap());let result:Value=response.json().await.unwrap();assert_eq!(result["sessionId"],"target");
+    let repeated:Value=client.post(&url).bearer_auth("admin-test").json(&input).send().await.unwrap().json().await.unwrap();assert_eq!(result,repeated);
+    assert!(ctx.runtimes.claim(target_runtime,&format!("{target_runtime}-boot")).unwrap()["commands"].as_array().unwrap().is_empty());
+    let mut conflict=input.clone();conflict["source_session_id"]=json!("different");assert_eq!(client.post(&url).bearer_auth("admin-test").json(&conflict).send().await.unwrap().status(),400);
+    let record=s.hub.store.document("agent-handoffs").unwrap();assert!(record["value"]["fixture-request"]["task"].is_null());assert_eq!(record["value"]["fixture-request"]["result"],result);
+}
+#[test]
+#[cfg(unix)]
+fn backend_extension_commit_failure_restores_updated_and_pruned_links(){
+    let root=tempfile::tempdir().unwrap();let old=root.path().join("old");let new=root.path().join("new");std::fs::create_dir(&old).unwrap();std::fs::create_dir(&new).unwrap();
+    let one=root.path().join("one");let two=root.path().join("two");std::os::unix::fs::symlink(&old,&one).unwrap();std::os::unix::fs::symlink(&old,&two).unwrap();
+    let previous=vec![json!({"path":one,"to":old}),json!({"path":two,"to":old})];let next=vec![json!({"path":one,"to":new})];
+    assert!(super::extension_files::replace(&previous,&next,||anyhow::bail!("fixture commit failed")).is_err());
+    assert_eq!(std::fs::read_link(one).unwrap(),old);assert_eq!(std::fs::read_link(two).unwrap(),old);
 }
