@@ -73,7 +73,15 @@ export class AgentRuntimeAdapter {
     }
     return this.catalogs.get(key)
   }
-  async listModels(provider, profile, modelHint) { return (await this.capabilities(provider, profile, process.cwd(), modelHint)).models }
+  async listModels(provider, profile, modelHint) {
+    const { models } = await this.capabilities(provider, profile, process.cwd(), modelHint)
+    // The UI uses flat effort fields, while dsh validates the canonical ModelInfo.
+    // Publish both from the same advertised capabilities; never invent support.
+    return models.map(model => model.reasoning || !model.reasoningEfforts?.length ? model : {
+      ...model,
+      reasoning: { efforts: model.reasoningEfforts, ...(model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}) },
+    })
+  }
   async listCommands(provider, profile) { return (await this.capabilities(provider, profile)).commands }
   async listSkills(provider, profile, cwd) {
     if (profile.type !== 'codex' && profile.protocol !== 'codex') return { skills: [], errors: [] }
