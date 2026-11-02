@@ -17,8 +17,22 @@ impl Drop for Server {
     }
 }
 async fn server(node: &str, peers: Vec<Peer>) -> Server {
+    server_with_config(node, peers, kode_core::config::Config::default()).await
+}
+// Registry tests declare their available Agents rather than probing developer CLI installs.
+fn fixture_agent_config(kinds: &[&str]) -> kode_core::config::Config {
+    let mut config = kode_core::config::Config::default();
+    config.backends.retain(|key, _| kinds.contains(&key.as_str()));
+    for (key, backend) in &mut config.backends {
+        backend.enabled = Some(true);
+        backend.protocol = Some(key.clone());
+        backend.command = "fixture-agent-not-executed".into();
+    }
+    config
+}
+async fn server_with_config(node: &str, peers: Vec<Peer>, config: kode_core::config::Config) -> Server {
     let root = tempfile::tempdir().unwrap();
-    let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "admin-test".into());
+    let ctx = crate::build_test_ctx(config, "admin-test".into());
     let hub = Hub::open_with_agent_home(
         Config {
             node_id: node.into(),
@@ -973,7 +987,7 @@ async fn backend_extension_conflicts_preserve_every_previous_target_and_foreign_
 }
 #[tokio::test]
 async fn backend_extension_launch_args_are_available_to_gui_and_match_native_target_manifests(){
-    let s=server("native-plugins",vec![]).await;let source=s._root.path().join("source");
+    let s=server_with_config("native-plugins",vec![],fixture_agent_config(&["claude","codebuddy","cursor"])).await;let source=s._root.path().join("source");
     for target in ["claude","codebuddy","cursor"]{std::fs::create_dir_all(source.join(format!(".{target}-plugin"))).unwrap();std::fs::write(source.join(format!(".{target}-plugin/plugin.json")),r#"{"name":"fixture","version":"0.0.1"}"#).unwrap();}
     let ext=&s.hub.extensions;ext.change(&s.hub,json!({"action":"save-source","source":{"id":"native","kind":"local","location":source,"targets":["claude","codebuddy","cursor"]}})).unwrap();
     ext.change(&s.hub,json!({"action":"sync-source","id":"native"})).unwrap();
@@ -999,7 +1013,7 @@ async fn backend_handoff_routes_between_runtimes_and_retries_without_duplicate_w
     backend_handoff_case("dsh","gui").await;
 }
 async fn backend_handoff_case(source_runtime:&str,target_runtime:&str){
-    let s=server("handoff-test",vec![]).await;let client=reqwest::Client::new();let ctx=s._ctx.clone();
+    let s=server_with_config("handoff-test",vec![],fixture_agent_config(&["codex"])).await;let client=reqwest::Client::new();let ctx=s._ctx.clone();
     let publication=|runtime:&str,sid:&str,events:Vec<Value>|serde_json::from_value::<crate::runtime::Publication>(json!({"runtime":runtime,"boot_id":format!("{runtime}-boot"),"sessions":[{"session_id":sid,"dto":{"title":"Fixture conversation","cwd":s._root.path(),"status":"idle"},"events":events}]})).unwrap();
     ctx.runtimes.publish(&ctx,publication(source_runtime,"original",vec![json!({"key":"one","kind":"message","payload":{"id":"u1","role":"user","text":"Do the fixture task","source_kind":"user"}}),json!({"key":"two","kind":"message","payload":{"id":"a1","role":"assistant","text":"Prior answer","content":[{"type":"reasoning","text":"HIDDEN REASONING"}]}}),json!({"key":"three","kind":"message","payload":{"id":"p1","role":"user","text":"PRIVATE PEER","source_kind":"agent-message"}})])).unwrap();
     ctx.runtimes.publish(&ctx,publication(target_runtime,"existing",vec![])).unwrap();
