@@ -50,10 +50,14 @@ app.onRequest('_session/steering', { parse: value => value }, async ({ params, c
   return { outcome: 'injected' }
 })
 app.onRequest('session/prompt', async ({ params, client, signal }) => {
-  await record('session/prompt', params)
   const text = params.prompt[0]?.text ?? ''
+  // Establish ownership before asynchronous logging; cancel may arrive while
+  // the first prompt record is still being written.
+  const waiting = text.includes('WAIT') ? new Promise(resolve => { pending.set(params.sessionId, resolve); signal.addEventListener('abort', () => resolve(), { once: true }) }) : undefined
+  if (process.env.KODE_ACP_PROMPT_LOG_DELAY) await new Promise(resolve => setTimeout(resolve, Number(process.env.KODE_ACP_PROMPT_LOG_DELAY)))
+  await record('session/prompt', params)
   if (text.includes('WAIT_TOOL')) await client.notify('session/update', { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'waiting-operation', title: 'Pending operation', kind: 'execute', status: 'in_progress', rawInput: { command: 'waiting' } } })
-  if (text.includes('WAIT')) { const reason = await new Promise(resolve => { pending.set(params.sessionId, resolve); signal.addEventListener('abort', () => resolve(), { once: true }) }); pending.delete(params.sessionId); return { stopReason: reason ?? 'cancelled' } }
+  if (waiting) { const reason = await waiting; pending.delete(params.sessionId); return { stopReason: reason ?? 'cancelled' } }
   if (text.includes('APPROVAL')) {
     const toolCall = { toolCallId: 'operation', title: 'Fixture command', kind: 'execute', rawInput: { command: 'fixture operation' }, status: 'pending' }
     await client.notify('session/update', { sessionId, update: { ...toolCall, sessionUpdate: 'tool_call' } })

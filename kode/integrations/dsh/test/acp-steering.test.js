@@ -10,7 +10,7 @@ const collect = async stream => { const events = []; for await (const event of s
 for (const type of ['claude', 'cursor', 'codebuddy']) for (const extension of [true, false]) test(`${type} steering via ${extension ? 'extension' : 'cancel and continue'} retains the native session`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-acp-steer-')), log = join(root, 'wire.jsonl')
   // Launch the real ACP transport fixture; Claude's production launcher is tested separately.
-  const session = new AcpSession({ type: 'custom', executable: process.execPath, args: [fixture], env: { KODE_ACP_FIXTURE_LOG: log, KODE_ACP_STEERING: extension ? '1' : '0' } }, root)
+  const session = new AcpSession({ type: 'custom', executable: process.execPath, args: [fixture], env: { KODE_ACP_FIXTURE_LOG: log, KODE_ACP_STEERING: extension ? '1' : '0', KODE_ACP_PROMPT_LOG_DELAY: '30' } }, root)
   try {
     await session.open({}, [])
     session.profile.type = type
