@@ -1,3 +1,4 @@
+import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 /** Multiplex existing dsh human interactions across its UI and a paired phone.
  * Policy and audit remain in the original services. Only a private request
  * copy receives the cancellable UI-branch signal; callers are never mutated.
@@ -51,7 +52,7 @@ export function installRuntimeInteractions(ctx, bridge) {
         request_id: id, question_id: id, source: 'acp_permission', question: request.reason ?? request.toolName,
         options: [{ label: 'Allow once', option_id: 'allowed-once' }, { label: 'Reject', option_id: 'rejected' }],
       } : { request_id: id, question_id: id, source: 'acp_form', message: '请回答 Agent 的问题', requested_schema: questionSchema(request.questions) }
-      const record = (state, extra = {}) => request.agent.session.append('plugin:kode/shared-interaction', { id, kind: 'ask_user_question', payload, state, ...extra })
+      const record = (state, extra = {}) => appendPluginRecord(request.agent.session, 'plugin:kode/shared-interaction', { id, kind: 'ask_user_question', payload, state, ...extra })
       const cancel = () => {
         if (approval) resolveMobile('cancelled')
         else { const error = new Error('Question cancelled'); error.code = 'ASK_ABORTED'; rejectMobile(error) }

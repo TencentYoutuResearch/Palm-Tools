@@ -1,3 +1,4 @@
+import { resolveAdvertisedModel } from './model-alias.js'
 /** Project the existing dsh runtime into Kode. Never run a second Agent loop. */
 import { randomUUID, createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -139,14 +140,23 @@ export class RuntimeBridge {
       const workspace = await registry.resolveByPath(payload.cwd) ?? await registry.create(payload.cwd)
       // The backend request id also names the session. An uncertain creation is
       // inspected/reused, never replaced by a fresh CLI thread.
-      const created = await controller.create({ sessionId: `mobile-${createHash('sha256').update(id).digest('hex')}`, workspaceId: workspace.id, agentPreset: 'kode-native' })
-      const { agent, error } = await controller.resolveAgent(created.sessionId)
+      const sessionId = `mobile-${createHash('sha256').update(id).digest('hex')}`
+      const existing = this.service('agents')?.get(sessionId) ?? (await controller.list({})).items.find(row => row.sessionId === sessionId)
+      const created = existing ? { sessionId } : await controller.create({ sessionId, workspaceId: workspace.id, agentPreset: 'kode-native' })
+      if (created.sessionId !== sessionId) throw new Error('Session identity changed during creation')
+      const { agent: resolved, error } = await controller.resolveAgent(sessionId)
       if (error) throw new Error(error.message)
+      if (resolved.status === 'running' || resolved.session.snapshotEvents?.().some(event => ['turn/start', 'user/message', 'request/header'].includes(event.type))) throw new Error('Partial session already has activity; inspect it before retrying creation')
+      const provider = profileRoute(profile.id), models = await runtime.adapter.listModels(provider, profile, payload.model)
+      const model = resolveAdvertisedModel(models, payload.model || profile.defaultModel || models.find(model => model.isDefault)?.id || models[0]?.id)
+      let agent = resolved
+      if (typeof agent.selectModel !== 'function') {
+        const factory = this.service('kodeNativeFactory')
+        if (!factory?.promote) throw new Error('Kode Agent executor is not ready')
+        agent = await factory.promote(agent, { provider, model })
+      }
+      agent.selectModel({ provider, model })
       await runtime.profiles.bind(agent.id, profile.id); runtime.recordBinding(agent, profile)
-      const models = await runtime.adapter.listModels(profileRoute(profile.id), profile)
-      const model = payload.model || profile.defaultModel || models.find(model => model.isDefault)?.id || models[0]?.id
-      if (!model) throw new Error('Agent returned no models')
-      agent.selectModel({ provider: profileRoute(profile.id), model })
       await agent.ctx.sessions.flush(agent.session)
       await this.publish()
       const snapshots = await this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)
