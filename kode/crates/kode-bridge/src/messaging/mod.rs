@@ -8,6 +8,7 @@ mod link;
 mod peers;
 pub mod model;
 mod ssh;
+pub use api::server_binary;
 pub use ssh::SshConfig;
 pub use ssh::Tunnel as SshTunnel;
 mod store;

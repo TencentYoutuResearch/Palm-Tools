@@ -20,12 +20,29 @@ pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, Str
         tokio::fs::write(&path,serde_json::to_vec(&initial)?).await?;
         #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;for file in [&path,&token_file,&server_config] {tokio::fs::set_permissions(file,std::fs::Permissions::from_mode(0o600)).await?;}}
     }
-    let config: Connection = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    let mut config: Connection = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    // A self-managed service runs from this app's own binary. The connection
+    // file keeps the path of whichever build created it (often a dev build).
+    let managed = config.server_args == ["--kode-workbench-server"];
+    let own = std::env::current_exe()?;
+    if managed && config.server_command.as_deref() != Some(own.as_path()) {
+        config.server_command = Some(own.clone());
+        tokio::fs::write(&path, serde_json::to_vec(&config)?).await?;
+    }
     let url = reqwest::Url::parse(&config.url)?;
     if url.scheme() != "http" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1")) || !url.username().is_empty() { anyhow::bail!("workbench backend must use an authenticated loopback origin") }
     let token = tokio::fs::read_to_string(&config.token_file).await?;
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4)).redirect(reqwest::redirect::Policy::none()).build()?;
-    if client.get(format!("{}/api/v1/messaging/node",config.url.trim_end_matches('/'))).bearer_auth(token.trim()).send().await.is_err() {
+    let node = format!("{}/api/v1/messaging/node",config.url.trim_end_matches('/'));
+    if managed {
+        if let Ok(response) = client.get(&node).bearer_auth(token.trim()).send().await {
+            let running: Value = response.json().await.unwrap_or_default();
+            if replace_running_service(&running, &own) {
+                stop_service(&client, &node, token.trim(), &running).await;
+            }
+        }
+    }
+    if client.get(&node).bearer_auth(token.trim()).send().await.is_err() {
         let command=config.server_command.as_ref().ok_or_else(||anyhow::anyhow!("Kode backend is not running; start its configured service"))?;
         let args=config.server_config.as_ref().ok_or_else(||anyhow::anyhow!("Kode backend service config is missing"))?;
         std::process::Command::new(command).args(&config.server_args).args(["--config",&args.to_string_lossy(),"--token-file",&config.token_file.to_string_lossy(),"--bind",&format!("{}:{}",url.host_str().unwrap(),url.port().unwrap_or(80))]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
@@ -34,6 +51,28 @@ pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, Str
         if !ready {anyhow::bail!("Kode backend could not start")}
     }
     Ok((client, format!("{}/api/v1/messaging/workbench/documents/session-index", config.url.trim_end_matches('/')), token.trim().into()))
+}
+/// Replace a running self-managed service only when it comes from another,
+/// older binary, so a newer build wins and two installs never ping-pong.
+fn replace_running_service(running: &Value, own: &std::path::Path) -> bool {
+    let (_, own_built) = kode_bridge::messaging::server_binary();
+    match (running["executable"].as_str(), running["built_at"].as_u64(), own_built) {
+        (Some(path), _, _) if std::path::Path::new(path) == own => false,
+        (Some(_), Some(theirs), Some(ours)) => theirs < ours,
+        // Services predating these fields report no pid and cannot be stopped.
+        _ => false,
+    }
+}
+async fn stop_service(client: &reqwest::Client, node: &str, token: &str, running: &Value) {
+    let Some(pid) = running["pid"].as_u64() else { return };
+    tracing::info!(pid, executable = ?running["executable"], "replacing workbench service from an older build");
+    // SIGINT runs the service's graceful shutdown and releases its store lock.
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill").args(["-INT", &pid.to_string()]).status();
+    for _ in 0..50 {
+        if client.get(node).bearer_auth(token).send().await.is_err() { break }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 pub async fn load_tabs(fallback: &mut PersistedState) {
     let Ok((client,url,token)) = connection().await else { return };
@@ -118,5 +157,22 @@ mod tests {
         assert_eq!(rows["workspaces"][0]["path"],path);
         assert!(workspace_paths_from(&client,&url,token,"unknown-ssh-host").await.is_err());
         hub.shutdown();task.abort();
+    }
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+
+    #[test]
+    fn only_older_services_from_other_binaries_are_replaced() {
+        let own = std::env::current_exe().unwrap();
+        let (_, built) = kode_bridge::messaging::server_binary();
+        let built = built.unwrap();
+        let other = |at: u64| json!({"pid":1,"executable":"/other/kode-gui","built_at":at});
+        assert!(replace_running_service(&other(built - 1), &own));
+        assert!(!replace_running_service(&other(built + 1), &own));
+        assert!(!replace_running_service(&json!({"pid":1,"executable":own,"built_at":0}), &own));
+        assert!(!replace_running_service(&json!({"node_id":"n"}), &own));
     }
 }

@@ -109,7 +109,25 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
 }
 async fn node(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     auth(&hub, &h)?;
-    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"managed_peers":true})))
+    let (executable, built_at) = server_binary();
+    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"managed_peers":true,
+        "pid":std::process::id(),"executable":executable,"built_at":built_at})))
+}
+/// Executable path and its modification time (Unix seconds), so a host app
+/// can replace a service started from an older build.
+pub fn server_binary() -> (Option<String>, Option<u64>) {
+    static BINARY: std::sync::OnceLock<(Option<String>, Option<u64>)> = std::sync::OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            let path = std::env::current_exe().ok();
+            let built_at = path
+                .as_ref()
+                .and_then(|path| std::fs::metadata(path).ok()?.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|age| age.as_secs());
+            (path.map(|path| path.to_string_lossy().into_owned()), built_at)
+        })
+        .clone()
 }
 async fn add_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(peer): Json<super::Peer>) -> Result<Json<serde_json::Value>> {
     admin(&hub, &h)?;
