@@ -510,6 +510,15 @@ permission policy (remote admission never grants full access), and submits the
 task as a durable peer message. The new helper can return its result to the
 requesting conversation. A persisted creation key prevents duplicate sessions
 or task replay; an uncertain submission requires inspecting the saved session.
+The optional `model` field selects an exact model advertised by that Agent (for
+example `agent: "CodeBuddy", model: "deepseek-v4.1-flash"`). The Host validates
+it before creating a session and returns the resolved `model`; unsupported models
+fail explicitly instead of selecting a default. This is session-local and does
+not change the shared Agent configuration. Keep all creation parameters and the
+same `idempotency_key` on retry. A legacy `prepared` request from a tool version
+without `model` may add it once while preserving its existing session and input
+identities. Completed or ambiguously submitted requests cannot change model.
+
 Receipts are distinct from task results. Replies that complete a request require
 no acknowledgement; a meaningful follow-up question remains possible.
 
