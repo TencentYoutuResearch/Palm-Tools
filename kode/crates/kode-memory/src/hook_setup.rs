@@ -956,6 +956,29 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn global_stop_has_no_gatekeeper_and_session_settings_are_prompt_only() {
+        let tmp = write_tmp("{}");
+        inject_stop_hook(tmp.path(), "kode-memory codebuddy-hook").unwrap();
+        let global: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path()).unwrap()).unwrap();
+        assert_eq!(
+            global["hooks"]["Stop"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(global["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
+        let scoped: serde_json::Value = serde_json::from_str(&session_settings_json()).unwrap();
+        assert_eq!(scoped["hooks"]["Stop"][0]["hooks"][0]["type"], "prompt");
+        assert_eq!(
+            scoped["hooks"]["Stop"][0]["hooks"][0]["continueOnBlock"],
+            true
+        );
+        assert!(STOP_HOOK_PROMPT.contains("只输出一行裸 JSON"));
+    }
+
+    #[test]
     fn tencent_hook_targets_use_independent_config_directories() {
         let home = std::path::Path::new("/home/test");
         assert_eq!(

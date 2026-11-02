@@ -707,6 +707,9 @@ fn spawn_turn_hold_from_bus(ctx: Arc<Ctx>) {
                     }
                 }
                 Ok(env) if env.r#type == "session.turn_finished" => {
+                    if env.payload["lifecycle_applied"] == true {
+                        continue;
+                    }
                     if let Some(s) = ctx.sessions.lock().get_mut(&env.session_id) {
                         s.mark_turn_end_with_id(env.payload["turn_id"].as_str());
                     }
