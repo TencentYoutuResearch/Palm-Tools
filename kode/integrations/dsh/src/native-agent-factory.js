@@ -95,16 +95,20 @@ export function installNativeFactoryRouting(ctx, native) {
     const id = options.resumeSessionId ?? options.sessionId
     if (ctx.kodeAgents.profiles?.binding?.(id)) return true
     const provider = options.agentOptions?.provider
-    if (provider) return provider.startsWith('kode-agent-')
-    if (options.meta?.agentPreset === 'kode-native') return true
-    if (!restoring) return false
+    if (!restoring) {
+      if (provider) return provider.startsWith('kode-agent-')
+      return options.meta?.agentPreset === 'kode-native'
+    }
     let handle
     try {
       handle = await ctx.sessionPersistence.open(id, 'read')
       const stored = await handle.read()
       const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
         ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
+      // Cold resume callers may carry global defaults. Durable ownership wins
+      // before those defaults, including when the profile binding is unavailable.
       if (selected?.provider) return selected.provider.startsWith('kode-agent-')
+      if (provider) return provider.startsWith('kode-agent-')
       return (stored.header ?? handle.header)?.agentPreset === 'kode-native'
     } finally { await handle?.close() }
   }

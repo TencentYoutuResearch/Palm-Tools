@@ -381,3 +381,32 @@ test('unloading Kode restores the official factory without disposing third-party
     await next.dispose(); await qq.dispose()
   } finally { await h.ctx.fiber.dispose() }
 })
+
+test('cold native restore uses durable model ownership instead of caller defaults', async () => {
+  const routes = []
+  const h = await host({ async *stream(request) { routes.push(request.provider); yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} }, true)
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'cold-native-owner' })
+    first.agent.followup(message('before-restart', 'First turn')); await first.agent.whenIdle(); await first.dispose()
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: 'cold-native-owner', agentOptions: { provider: 'deepseek-official', model: 'fallback' } })
+    assert.equal(resumed.agent.isKodeNativeAgent, true)
+    resumed.agent.followup(message('after-restart', 'Continue the same conversation')); await resumed.agent.whenIdle()
+    assert.deepEqual(routes, [options.agentOptions.provider, options.agentOptions.provider])
+    assert.equal(h.stored.get(resumed.agent.id).events.at(-1).data.reason.kind, 'completed')
+    await resumed.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+test('cold third-party restore is not captured by a Kode caller default', async () => {
+  const h = await host({ closeSession: async () => {} }, true)
+  try {
+    const route = { provider: 'deepseek-official', model: 'test-model' }
+    const first = await h.ctx.agents.create({ sessionId: 'cold-official-owner', agentOptions: route })
+    first.agent.session.append('model/selection', route)
+    await first.dispose()
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: 'cold-official-owner', agentOptions: options.agentOptions })
+    assert.notEqual(resumed.agent.isKodeNativeAgent, true)
+    assert.equal(resumed.agent.assertSteeringAvailable, undefined)
+    await resumed.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
