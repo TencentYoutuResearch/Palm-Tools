@@ -7,13 +7,14 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { AgentProfiles } from '../src/agent-profiles.js'
 import { registerAgentApi } from '../src/agent-api.js'
+import { Session } from '@deepseek-ai/dsh-session'
 
 test('Agent configuration API admits only the dsh owner and preserves identity when selecting models', async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-agent-api-'))
   const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'native', name: 'dsh', type: 'dsh' }])
   let handler, selection = { provider: 'native-llm', model: 'fixture' }, turns = 0
-  const selected = []
-  const agent = { id: 'conversation', status: 'idle', session: {},selectModel:request=>{selected.push(request);selection={provider:request.provider,model:request.model,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{})};return{selected:selection}} }
+  const selected = [], session = Session.create('conversation')
+  const agent = { id: 'conversation', status: 'idle', session,selectModel:request=>{selected.push(request);selection={provider:request.provider,model:request.model,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{})};return{selected:selection}} }
   const ctx = {
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-test-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : req.headers['x-test-role'] === 'guest' ? { peer: { principal: { kind: 'guest' } } } : { rejection: 401 } },
