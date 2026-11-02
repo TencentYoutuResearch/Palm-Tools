@@ -18,10 +18,12 @@ export async function runGoalCommand(session, input, signal) {
   try {
     if (parsed.action === 'clear') {
       const result = await session.rpc.request('thread/goal/clear', { ...params, origin: 'user' }, options)
+      session.handlers?.goal?.(null)
       return { text: result.cleared ? '已清除当前目标。' : '当前没有目标。', run: false }
     }
     if (parsed.action === 'get' || parsed.action === 'edit-help') {
       const { goal } = await session.rpc.request('thread/goal/get', params, options)
+      session.handlers?.goal?.(goal)
       return { text: formatGoal(goal) + (parsed.action === 'edit-help' ? '\n使用 /goal edit 新目标描述 修改。' : ''), run: false }
     }
     let status = parsed.action === 'pause' ? 'paused' : 'active'
@@ -31,6 +33,7 @@ export async function runGoalCommand(session, input, signal) {
       status = goal.status === 'active' ? 'active' : 'paused'
     }
     const { goal } = await session.rpc.request('thread/goal/set', { ...params, origin: 'user', status, ...(parsed.objective ? { objective: parsed.objective } : {}) }, options)
+    session.handlers?.goal?.(goal)
     return { text: formatGoal(goal), run: goal.status === 'active' }
   } catch (error) {
     if (error.rpcCode === -32601) throw new Error('此 Codex 版本未提供原生目标接口，请更新所选 Agent 的 Codex。')

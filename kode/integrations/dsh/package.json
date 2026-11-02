@@ -76,6 +76,8 @@
     "@deepseek-ai/cordis": "4.0.5"
   },
   "devDependencies": {
-    "esbuild": "^0.25.12"
+    "esbuild": "^0.25.12",
+    "@deepseek-ai/dsh-bash-local": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.2"
   }
 }

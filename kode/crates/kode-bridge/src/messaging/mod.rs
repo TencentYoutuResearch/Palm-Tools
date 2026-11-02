@@ -1,6 +1,9 @@
 //! Opt-in durable session messaging. No Tauri dependencies and no PTY byte-path changes.
 //! `KODE_MESSAGING_CONFIG` selects a JSON config; disabled bridges behave as before.
 mod api;
+mod extensions;
+mod extension_files;
+mod handoff;
 mod integrations;
 pub mod agents;
 mod codebuddy_registry;
@@ -51,6 +54,8 @@ pub struct Peer {
 }
 
 pub struct Hub {
+    extensions: extensions::Extensions,
+    handoff_gate: tokio::sync::Mutex<()>,
     memory: Mutex<Option<Arc<crate::MemoryHandle>>>,
     store: Store,
     config: Config,
@@ -65,6 +70,10 @@ pub struct Hub {
 }
 impl Hub {
     pub fn open(config: Config, ctx: &Arc<crate::Ctx>) -> Result<Arc<Self>> {
+        let home = std::env::var_os("KODE_AGENT_HUB_HOME").map(PathBuf::from).or_else(dirs::home_dir).ok_or_else(||anyhow::anyhow!("Host home unavailable"))?;
+        Self::open_with_agent_home(config, ctx, home)
+    }
+    fn open_with_agent_home(config: Config, ctx: &Arc<crate::Ctx>, home: PathBuf) -> Result<Arc<Self>> {
         let mut names = std::collections::HashSet::new();
         for p in &config.peers {
             if !valid_id(&p.node_id)
@@ -88,6 +97,8 @@ impl Hub {
         ctx.runtimes.open(&config.database.with_extension("runtime.sqlite"))?;
         let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
+            extensions: extensions::Extensions::new(config.database.with_extension("agent-hub"), home),
+            handoff_gate: tokio::sync::Mutex::new(()),
             memory: Mutex::new(ctx.memory.clone()),
             store,
             config,
@@ -101,6 +112,7 @@ impl Hub {
             stopped: AtomicBool::new(false),
         });
         agents::initialize(&hub)?;
+        hub.extensions.restore(&hub)?;
         Ok(hub)
     }
     pub fn start(self: &Arc<Self>) {
@@ -124,6 +136,7 @@ impl Hub {
     }
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+        self.extensions.close();
     }
     pub fn node_id(&self) -> &str {
         &self.config.node_id

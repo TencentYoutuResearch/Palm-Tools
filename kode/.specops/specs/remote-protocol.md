@@ -566,3 +566,33 @@ REST 一律 JSON:
 每方实现都需带:
 1. 单元测试覆盖事件 schema 序列化往返
 2. 一份 `wscat` + `curl` 端到端验收脚本(`docs/protocol-smoke.sh` 之类)
+
+
+## Kode workbench Agent hub
+
+The shared Kode backend owns these additive administration endpoints. They use
+its existing administrator bearer; session-scoped agent credentials receive 403.
+
+- `GET /api/v1/messaging/workbench/agent-hub`: extension sources, native target
+  status, managed plugin paths, portable skill targets and backend power state.
+- `POST /api/v1/messaging/workbench/agent-hub`: JSON action `save-source`
+  (`source: {id, kind: git|local, location, subdir, targets}`), `sync-source`
+  (`id`), `remove-source` (`id`), or `power` (`enabled`). These mutations are
+  serialized by the backend and persist to its SQLite document. Sync conflicts
+  preserve foreign files and restore prior managed links on a failed commit.
+- `POST /api/v1/messaging/workbench/handoff`: JSON
+  `{source_session_id, source_runtime, profile_id, target_runtime, request_id}`.
+  Runtime values are `gui` or `dsh`; IDs belong to this backend/Host. The backend
+  freezes a bounded readable transcript from its published history, dispatches
+  `create_session` and `input` using separate durable runtime mailbox identities,
+  and returns `{sessionId, runtime, id, sourceId}`. Repeat the identical request
+  ID after a timeout. A conflicting reuse fails; an uncertain claimed runtime
+  operation is never automatically re-executed with another identity. Source
+  history is preserved. Tools, hidden reasoning and peer-originated input are
+  excluded; attachments are not transferred.
+
+Both GUI IPC and dsh owner HTTP routes are adapters to these same APIs. Native
+CLI execution remains owned by its attached runtime. A disconnected target
+runtime reports unavailable rather than spawning an unowned Agent process.
+`workbench/agents` additionally publishes `extension_args` keyed by backend;
+these arguments are applied at launch and do not rewrite editable Agent defaults.

@@ -9,6 +9,8 @@ import { searchSessions } from './session-search.js'
 import { installAgentRuntime } from './agent-runtime.js'
 import { prepareRuntimeConfig } from './bundle-runtime.js'
 import { registerIntegrationApi, memoryTools } from './integration-api.js'
+import { ExtensionHub } from './extension-hub.js'
+import { registerAgentHubApi } from './agent-hub-api.js'
 import { registerSharedSessionApi } from './shared-session-api.js'
 
 export const name = 'kode'
@@ -241,9 +243,14 @@ export async function apply(ctx, config = {}) {
   // Minimal/headless Hosts may omit the model and Web capabilities entirely.
   if (runtimeConfig.agentRuntime !== false && ctx.inject) ctx.inject(['llm', 'sessionProjections'], async runtimeCtx => {
     const service = await installAgentRuntime(runtimeCtx, { ...runtimeConfig, backendClient: admin, agentProfilesFile: runtimeConfig.agentProfilesFile ?? join(dirname(stateFile), `agents-${node.node_id}.json`) }).catch(error => { console.error('Kode Agent runtime initialization failed:', error.stack); throw error })
+    const hub = new ExtensionHub(admin)
+    service.adapter.extensionRevision = async () => (await hub.read()).revision
+    const resolveProfile = service.adapter.resolveProfile
+    service.adapter.resolveProfile = async (profile, agent) => hub.nativeProfile(await resolveProfile(profile, agent))
     runtimeReady = true
     runtimeCtx.inject(['webServer', 'connection', 'agentDefaultModel'], async webCtx => {
       const { registerAgentApi } = await import('./agent-api.js')
+      webCtx.effect(() => registerAgentHubApi(webCtx, { hub, backend: admin, service }), 'kode.agent-hub-api')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
       if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
       if (runtimeConfig.sharedBackendState) webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {

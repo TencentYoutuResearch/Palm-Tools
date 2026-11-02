@@ -11,7 +11,7 @@ function fixture(open = () => {}) {
     useState: value => [typeof value === 'function' ? value() : value, () => {}], useEffect(fn) { fn() },
     transport: { current: 'local' }, requestedServiceHost: undefined, requestedSettingsSection: undefined,
     window: { dispatchEvent() {}, addEventListener() {}, removeEventListener() {} }, CustomEvent: class {}, requestAnimationFrame() {},
-    AgentSettingsBody: 'agents', PersonalizationSettings: 'personalization',
+    HubSettings: 'hub', AgentSettingsBody: 'agents', PersonalizationSettings: 'personalization',
     useProjectHosts: () => ({ data: { current: 'local', hosts: [{ id: 'local', name: 'This computer' }, { id: 'worker', name: 'Worker' }] } }),
     useIntegrationSettings: () => ({ data: null, busy: false, error: 'Missing API', recoveryNeeded: true }),
     Button: 'button', Failure: 'failure', SelectField: 'select', RemoteComputerIcon: 'icon', IconPlusOutlineRegular: 'plus',

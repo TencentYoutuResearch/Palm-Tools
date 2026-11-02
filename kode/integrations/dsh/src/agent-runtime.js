@@ -51,7 +51,8 @@ export class AgentRuntimeAdapter {
     this.stop.signal.throwIfAborted()
     const profile = profileOverride ?? this.profile(provider)
     if (profile.type === 'codex' || profile.protocol === 'codex') modelHint = undefined
-    const key = `${provider}:${profileRevision(profile)}:${cwd}:${modelHint ?? ''}`
+    const extensionRevision = await this.extensionRevision?.() ?? 0
+    const key = `${provider}:${profileRevision(profile)}:${cwd}:${modelHint ?? ''}:${extensionRevision}`
     if (!this.catalogs.has(key)) {
       const task = (async () => {
         const session = await createNativeSession(await this.resolveProfile(profile), cwd)
@@ -116,6 +117,12 @@ export class AgentRuntimeAdapter {
         return row && row.policy === agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })?.mode ? row.mode : undefined
       },
       commands: commands => { void classifyCommands(commands, binding.profile, agent.session.header.cwd ?? process.cwd()).then(rows => { if (!this.stop.signal.aborted) this.onCommands?.(agent, rows) }).catch(error => this.ctx.logger?.warn('Native command classification failed: %s', error.message)) },
+      goal: goal => {
+        const previous = agent.session.snapshotEvents().findLast(event => event.type === 'plugin:kode/goal-state')?.data.goal
+        if (JSON.stringify(previous) === JSON.stringify(goal)) return
+        appendPluginRecord(agent.session, 'plugin:kode/goal-state', { goal })
+        void agent.ctx.sessions.flush(agent.session).catch(error => this.ctx.logger?.warn('Goal persistence failed: %s', error.message))
+      },
       continuation: () => queueMicrotask(() => agent.wake?.()),
       collaborationMode: () => agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/collaboration-mode')?.data.enabled,
       tool: async (request, signal) => {
@@ -335,6 +342,11 @@ export class AgentRuntimeAdapter {
 }
 
 export async function installAgentRuntime(ctx, config) {
+  const goalSchema = z.object({ objective: z.string(), status: z.string() }).passthrough().nullable()
+  ctx.effect(() => ctx.sessionProjections.register({ key: 'kodeGoal', stateVersion: 1, stateSchema: goalSchema, init: () => null,
+    apply: (state, event) => event.type === 'plugin:kode/goal-state' ? event.data.goal : state,
+    wire: { viewSchema: goalSchema, view: state => state },
+  }), 'kode.goal-projection')
   const bindingSchema = z.object({ profileId: z.string(), name: z.string(), type: z.string(), uiChannel: z.string() }).nullable()
   ctx.effect(() => ctx.sessionProjections.register({ key: 'kodeAgent', stateVersion: 1, stateSchema: bindingSchema, init: () => null,
     apply: (state, event) => event.type === 'plugin:kode/agent-binding' ? event.data : state,

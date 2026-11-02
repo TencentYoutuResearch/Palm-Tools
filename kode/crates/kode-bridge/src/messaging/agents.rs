@@ -16,6 +16,8 @@ pub struct Catalog {
     #[serde(default)]
     pub bindings: Value,
     #[serde(default)]
+    pub extension_args: HashMap<String, Vec<String>>,
+    #[serde(default)]
     pub read_only: std::collections::HashSet<String>,
 }
 
@@ -223,7 +225,16 @@ pub(super) fn initialize(hub: &Hub) -> Result<()> {
 }
 
 pub(super) fn catalog(hub: &Hub) -> Result<Catalog> {
-    catalog_value(&hub.store.document("agents")?["value"])
+    let value=hub.store.document("agents")?["value"].clone();
+    let mut catalog=catalog_value(&value)?;
+    for profile in value["profiles"].as_array().into_iter().flatten(){
+        if let (Some(id),Some(kind))=(profile["id"].as_str(),profile["type"].as_str()){
+            if let Some(key)=catalog.ids.get(id){
+                catalog.extension_args.insert(key.clone(),super::extensions::launch_args(hub,kind)?);
+            }
+        }
+    }
+    Ok(catalog)
 }
 
 fn catalog_value(value: &Value) -> Result<Catalog> {
@@ -248,16 +259,16 @@ fn catalog_value(value: &Value) -> Result<Catalog> {
         names,
         ids: serde_json::from_value(value["desktop_ids"].clone())?,
         bindings: value["bindings"].clone(),
+        extension_args: HashMap::new(),
         read_only,
     })
 }
 
-fn publish(hub: &Hub, value: &Value) -> Result<()> {
-    if let Some(ctx) = hub.ctx.upgrade() {
-        *ctx.agent_backends.write() = Some(catalog_value(value)?);
-    }
+pub(super) fn refresh_launch_catalog(hub: &Hub) -> Result<()> {
+    if let Some(ctx) = hub.ctx.upgrade() { *ctx.agent_backends.write() = Some(catalog(hub)?); }
     Ok(())
 }
+fn publish(hub: &Hub, _value: &Value) -> Result<()> { refresh_launch_catalog(hub) }
 
 /// dsh edits the same document. Keep desktop projections and opaque migration
 /// metadata server-owned even when an older client submits only profiles/bindings.
@@ -387,11 +398,9 @@ pub fn resolve(catalog: &Catalog, key: &str, thread_id: Option<&str>) -> Result<
             return backend(&binding["profile"], catalog.backends.get(key));
         }
     }
-    catalog
-        .backends
-        .get(key)
-        .cloned()
-        .context("Agent is not configured")
+    let mut config=catalog.backends.get(key).cloned().context("Agent is not configured")?;
+    config.args.extend(catalog.extension_args.get(key).cloned().unwrap_or_default());
+    Ok(config)
 }
 
 pub(super) fn change(hub: &Hub, command: Change) -> Result<Catalog> {

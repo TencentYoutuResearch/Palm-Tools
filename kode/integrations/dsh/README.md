@@ -784,3 +784,62 @@ services. Regression tests exercise official and Kode factories side by side.
 全局设置中只新增一个 **Kode** 入口。页内导航可直达 Agent、集成、手机与同步、主机与服务、头像与背景；其他插件继续使用各自的设置入口。
 
 前四个分区共享“配置主机”选择，修改配置不会切换当前工作区。头像与背景应用到当前打开的会话。会话中的 Agent 配置、主机管理和服务恢复快捷入口会打开 Kode 页内对应分区；dsh 模型设置仍打开原有模型页面。
+
+### Agent sharing, extensions and screen-off execution
+
+Open **Settings → Kode → Agent 共享** on the desired Host. Configuration and handoff receipts are owned by the Kode backend SQLite store.
+Extension snapshots live beside that database in its `.agent-hub` directory.
+Local and SSH Hosts keep separate configuration. dsh is an authenticated API
+adapter and holds no independent extension configuration.
+
+- **息屏后继续运行** persists a Host setting. macOS uses an owned `caffeinate -i -w`
+  process; Linux uses `systemd-inhibit` when available. The display can turn off.
+  Disabling the setting or stopping the Kode backend releases the inhibitor. Lid close,
+  explicit sleep, shutdown and unsupported system power services remain governed
+  by the OS. A failed inhibitor is shown in settings.
+- A native Codex `/goal` produces a durable strip above the composer. Click its
+  objective to edit, or use **暂停 / 继续**. Native notifications, including model
+  goal updates and completion, update the same session projection. Existing dsh
+  goal UI continues to handle dsh's own goal protocol. Agents without a native
+  goal protocol do not advertise this control.
+- Add an HTTPS/SSH Git repository or an absolute local directory, optionally
+  select a subdirectory and choose targets, then click **更新并同步**. Packages are
+  snapshotted with their relative resources intact. Portable skills are linked
+  under `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`,
+  `~/.codebuddy/skills`, and `~/.cursor/skills`, named `<source>--<relative-skill>`.
+  Existing unmanaged files cause a visible conflict. Failed file commits restore
+  previous links; removed skills/targets remove only the links Kode still owns.
+- Native `.claude-plugin`, `.codebuddy-plugin` and `.cursor-plugin` manifests
+  add repeatable `--plugin-dir` arguments to subsequent Kode runtime launches.
+  `.codex-plugin` packages use a generated local marketplace and the native
+  `codex plugin` installer, including cleanup on source removal. Native hooks
+  and MCP definitions stay in their original package; they are not translated
+  between incompatible agent formats. Missing target manifests mean skill-only
+  synchronization. Each target's status and native installation errors are shown.
+  Outside Kode, the portable skill directories and installed Codex plugins are
+  available normally; the other native plugin launch arguments apply in Kode.
+  Existing processes may require a new session to discover changed packages.
+- **换 Agent 续接** in the conversation header creates a new conversation on the
+  same Host/workspace using the selected Agent and continues the latest user
+  request with its readable transcript as context. The original stays intact.
+  It transfers at most the latest 48,000 characters of user/assistant text,
+  excluding hidden reasoning, tool lifecycles, peer messages and attachments.
+  Backend-owned request identities and frozen source snapshots make network retries reuse the
+  same target instead of sending work twice. This is a context handoff, not a
+  conversion of proprietary native thread files. Existing shared directories,
+  native session imports and `kode_sessions_*` messaging remain the unified
+  discovery and collaboration paths across Agents and SSH Hosts.
+
+Extension releases are kept while older runtime processes may still reference
+those snapshots. Native plugin packages must provide manifests compatible with
+any selected native targets; arbitrary proprietary plugin code is not portable.
+All hub endpoints are owner-only; configuration and handoff transcripts are
+stored in the private backend SQLite store. The GUI can use the same service
+through `agent_hub_action` and `shared_session_handoff` IPC adapters. Managed
+plugin launch arguments are returned separately from editable Agent configuration.
+Native installer checks run through an isolated backend without inference or
+changes to a real account:
+
+```sh
+KODE_TEST_NATIVE_PLUGIN_CLI=1 node scripts/test-integration.js
+```

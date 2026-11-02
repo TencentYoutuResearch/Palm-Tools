@@ -9,11 +9,12 @@ export class BackendClient {
   }
   async call(path, body, signal) {
     if (!path.startsWith('/api/v1/messaging/')) throw new Error('unsupported backend path')
+    const timeoutMs = path === '/api/v1/messaging/workbench/agent-hub' ? 600000 : path === '/api/v1/messaging/workbench/handoff' ? 75000 : 15000
     const response = await this.fetch(`${this.url}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       redirect: 'error',
     })
     const text = await response.text()
