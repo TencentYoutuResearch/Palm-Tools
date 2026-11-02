@@ -391,6 +391,7 @@ test('cold native restore uses durable model ownership instead of caller default
     const resumed = await h.ctx.agents.resume({ resumeSessionId: 'cold-native-owner', agentOptions: { provider: 'deepseek-official', model: 'fallback' } })
     assert.equal(resumed.agent.isKodeNativeAgent, true)
     resumed.agent.followup(message('after-restart', 'Continue the same conversation')); await resumed.agent.whenIdle()
+    assert.equal(h.stored.get(resumed.agent.id).events.at(-1).data.reason.kind, 'completed', JSON.stringify(h.stored.get(resumed.agent.id).events.at(-1)))
     assert.deepEqual(routes, [options.agentOptions.provider, options.agentOptions.provider])
     assert.equal(h.stored.get(resumed.agent.id).events.at(-1).data.reason.kind, 'completed')
     await resumed.dispose()
