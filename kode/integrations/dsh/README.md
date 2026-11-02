@@ -446,13 +446,15 @@ checkouts can also use local compiled binaries.
 | Files, Git preview, manual terminal | Official dsh services, including terminal font preferences. |
 | Sidebar browser | Official chrome with a private Chromium page provider; internal MR browsing. See input/accessibility limitations above. |
 | New conversations in worktrees | Create a branch/checkout from a registered Git workspace and start the new session there, preserving draft and Agent/model. Moving an existing conversation back to the main checkout is not implemented. |
-| Mid-turn steering | Codex uses native `turn/steer` with the expected active turn. ACP Agents without protocol support explicitly require queueing. |
-| Queued-message steering | Native admission is checked before transferring a queued input. Rejection retains the queue item and content; unsupported Agents disable queue steering and submit busy composer inputs as queued followups. |
+| Mid-turn steering | Codex uses native `turn/steer`. Claude, Cursor and CodeBuddy use the advertised ACP `_session/steering` extension when available; otherwise they cancel the active prompt, wait for its terminal response, and continue with the new input in the same native session. |
+| Queued-message steering | Native admission is checked before transferring a queued input. The original queue occurrence is removed before insertion so every persisted prefix has unique pending IDs. Synchronous failure restores the original position; rejected native delivery returns the input to the queue. |
 | Shared memory UI and synchronization controls | Shared backend switches are available in both frontends. The review queue, scope/relation editing and memory sync administration remain in the original GUI. |
 | Native plugin/Hook installation and management | Missing desktop management UI; dsh's own plugin page manages dsh bundles, not all native CLI plugins. |
 | Model usage and desktop floating monitor | Missing desktop-wide monitoring parity; dsh has its own per-session observations. |
 | Phone pairing, cloud sync deployment | Settings → 手机与同步 shows a one-time pairing QR code and a manual pairing link through the shared backend. Cloud-service deployment remains in the original GUI. |
 | Native screenshot tools, desktop window/tab actions, SpecOps window | Not ported; some are desktop-specific rather than Web-session requirements. |
+
+For older logs failing with `invalid persisted inbox splice`, run `python3 scripts/repair-inbox-history.py --home <dsh-home> --session-id <id> --runtime-modules <released-node_modules> --node <node-24.22+>`. It reports changes by default. Add `--apply` to repair under the session writer lock, back up the artifact and projection cache, and invalidate the stale cache. Event sequence IDs and input content are retained; ambiguous transfers are refused.
 
 Managed service supervision is currently process based; automatic startup on OS
 boot and general service-manager integration are not included. Native Agent forks,

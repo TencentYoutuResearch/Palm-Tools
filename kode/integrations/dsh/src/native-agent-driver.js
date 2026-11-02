@@ -39,6 +39,12 @@ class Inbox {
   splice(target, start, count, inserted, canceled = false) {
     const rows = this.state[target], index = start < 0 ? Math.max(0, rows.length + start) : Math.min(start, rows.length)
     const removed = rows.slice(index, index + count)
+    const next = rows.toSpliced(index, count, ...inserted)
+    const ids = new Set()
+    for (const message of [...next, ...this.state[target === 'next-turn' ? 'next-step' : 'next-turn']]) {
+      if (ids.has(message.id)) throw new Error(`message "${message.id}" is already pending`)
+      ids.add(message.id)
+    }
     const event = this.agent.session.append('agent/inbox/spliced', { target, start: index, removedCount: removed.length, inserted, ...(canceled ? { outcome: 'canceled' } : {}) })
     for (const message of removed) if (canceled) this.agent.events.emit('agent/inbox/discarded', { message })
     for (const message of event.data.inserted) this.agent.events.emit('agent/inbox/inserted', { message })

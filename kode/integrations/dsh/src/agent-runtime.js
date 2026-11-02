@@ -275,16 +275,18 @@ export class AgentRuntimeAdapter {
   async closeSession(id) { const runtime = this.live.get(id); this.live.delete(id); await runtime?.close() }
   supportsSteering(agent) {
     const profile = this.profiles.binding(agent.id)?.profile ?? this.profiles.list().find(profile => profileRoute(profile.id) === agent.options?.provider)
-    return Boolean(profile && (profile.type === 'codex' || profile.protocol === 'codex') && !this.live.get(agent.id)?.steeringUnsupported)
+    return Boolean(profile && (['codex', 'claude', 'cursor', 'codebuddy'].includes(profile.type) || profile.protocol === 'codex' || this.live.get(agent.id)?.supportsSteering?.()) && !this.live.get(agent.id)?.steeringUnsupported)
   }
   canSteer(id) { return this.live.get(id)?.canSteer?.() === true }
   async steer(agent, message, signal, { admit, accepted }) {
     const runtime = this.live.get(agent.id)
     if (!runtime?.canSteer?.()) return { status: 'not-ready' }
-    let input = await nativeInput([message], { codex: true, signal, attachments: agent.ctx.get?.('attachments') ?? this.ctx.get?.('attachments') })
+    const profile = this.profiles.binding(agent.id)?.profile
+    const codex = profile?.type === 'codex' || profile?.protocol === 'codex'
+    let input = await nativeInput([message], { codex, signal, attachments: agent.ctx.get?.('attachments') ?? this.ctx.get?.('attachments') })
     const text = ['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : ''
     const names = [...text.matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1])
-    if (names.length) {
+    if (codex && names.length) {
       const { skills } = await runtime.listSkills(signal)
       for (const name of new Set(names)) {
         const matches = skills.filter(skill => skill.name === name)

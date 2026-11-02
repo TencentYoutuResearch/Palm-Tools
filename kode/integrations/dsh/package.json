@@ -20,6 +20,8 @@
     "packages",
     "scripts/build-remote.js",
     "scripts/build-bundle.js",
+    "scripts/repair-inbox-history.js",
+    "scripts/repair-inbox-history.py",
     "README.md",
     "cordis.patch.yml",
     "cordis.remote.patch.yml"

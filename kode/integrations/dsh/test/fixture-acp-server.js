@@ -21,7 +21,7 @@ const sessionId = 'same-native-session', clients = new Map(), pending = new Map(
 const modes = { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'plan', name: 'Plan' }] }
 const configOptions = [{ id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: 'fixture-fast', options: [{ value: 'fixture-fast', name: 'Fast fixture' }, { value: 'fixture-large', name: 'Large fixture' }] }, { id: 'effort', category: 'thought_level', name: 'Effort', type: 'select', currentValue: 'medium', options: [{ value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }] }]
 const record = async (method, params) => { if (process.env.KODE_ACP_FIXTURE_LOG) await appendFile(process.env.KODE_ACP_FIXTURE_LOG, JSON.stringify({ method, params, label: process.env.KODE_ACP_FIXTURE_LABEL }) + '\n') }
-app.onRequest('initialize', async ({ params }) => { await record('initialize', params); return { protocolVersion: 1, agentCapabilities: { loadSession: process.env.KODE_ACP_NO_RESUME !== '1', promptCapabilities: { image: process.env.KODE_ACP_IMAGES === '1' } }, agentInfo: { name: 'Fixture', version: '1' }, authMethods: [] } })
+app.onRequest('initialize', async ({ params }) => { await record('initialize', params); return { protocolVersion: 1, _meta: { steering: { supported: process.env.KODE_ACP_STEERING === '1' } }, agentCapabilities: { loadSession: process.env.KODE_ACP_NO_RESUME !== '1', promptCapabilities: { image: process.env.KODE_ACP_IMAGES === '1' } }, agentInfo: { name: 'Fixture', version: '1' }, authMethods: [] } })
 async function configureServers(params) {
   for (const spec of params.mcpServers) {
     const client = new Client({ name: 'fixture-acp-agent', version: '1' })
@@ -41,11 +41,19 @@ app.onRequest('session/load', async ({ params, client }) => {
 })
 app.onRequest('session/set_mode', async ({ params }) => { await record('session/set_mode', params); modes.currentModeId = params.modeId; return {} })
 app.onRequest('session/set_config_option', async ({ params }) => { await record('session/set_config_option', params); configOptions.find(option => option.id === params.configId).currentValue = params.value; return { configOptions } })
-app.onNotification('session/cancel', ({ params }) => pending.get(params.sessionId)?.())
+app.onNotification('session/cancel', async ({ params }) => { await record('session/cancel', params); pending.get(params.sessionId)?.() })
+app.onRequest('_session/steering', { parse: value => value }, async ({ params, client }) => {
+  await record('_session/steering', params)
+  if (!pending.has(params.sessionId)) return { outcome: 'promptRequired', reason: 'noRunningTurn' }
+  await client.notify('session/update', { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: params.prompt[0].text } } })
+  const finish = pending.get(params.sessionId); pending.delete(params.sessionId); finish('end_turn')
+  return { outcome: 'injected' }
+})
 app.onRequest('session/prompt', async ({ params, client, signal }) => {
   await record('session/prompt', params)
   const text = params.prompt[0]?.text ?? ''
-  if (text.includes('WAIT')) { await new Promise(resolve => { pending.set(params.sessionId, resolve); signal.addEventListener('abort', resolve, { once: true }) }); return { stopReason: 'cancelled' } }
+  if (text.includes('WAIT_TOOL')) await client.notify('session/update', { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'waiting-operation', title: 'Pending operation', kind: 'execute', status: 'in_progress', rawInput: { command: 'waiting' } } })
+  if (text.includes('WAIT')) { const reason = await new Promise(resolve => { pending.set(params.sessionId, resolve); signal.addEventListener('abort', () => resolve(), { once: true }) }); pending.delete(params.sessionId); return { stopReason: reason ?? 'cancelled' } }
   if (text.includes('APPROVAL')) {
     const toolCall = { toolCallId: 'operation', title: 'Fixture command', kind: 'execute', rawInput: { command: 'fixture operation' }, status: 'pending' }
     await client.notify('session/update', { sessionId, update: { ...toolCall, sessionUpdate: 'tool_call' } })

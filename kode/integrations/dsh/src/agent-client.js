@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const catalogBlank = (sessions, id) => sessions.list.getSnapshot().byId[id]?.blank === true
   function SteeringControls({ native, seat, ...props }) {
     const binding = props.useProjection('kodeAgent')
-    const capable = binding?.type === 'codex'
+    const capable = ['codex', 'claude', 'cursor', 'codebuddy'].includes(binding?.type)
     if (seat === 'conversation.composer.bar' || props.keyboard) {
       const keyboard = capable || !props.keyboard ? props.keyboard : Object.assign(Object.create(props.keyboard), {
         submit: (mode, ...args) => props.keyboard.submit(mode === 'steer' ? 'queue' : mode, ...args),

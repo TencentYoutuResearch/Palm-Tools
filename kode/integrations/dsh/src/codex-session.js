@@ -72,6 +72,9 @@ export class CodexSession {
     }
   }
   async resumeThread(params, signal) {
+    // dsh owns historical display. Hydrating every native turn can exceed the
+    // transport frame limit on long conversations without helping continuation.
+    params = { ...params, excludeTurns: true }
     try { return await this.rpc.request('thread/resume', params, { signal }) }
     catch (error) {
       // Continuing a specific conversation restores only that native thread.
