@@ -239,23 +239,36 @@ final sessionsProvider =
 
 /// Merge one authoritative full session snapshot without duplicating rows.
 /// `session.created` and `session.updated` intentionally share this reducer.
+///
+/// Rows are keyed by cloud id. A row with the same native conversation id
+/// (`session_uuid`) under another cloud id is the same conversation
+/// republished by the desktop, so it is replaced rather than duplicated.
 List<SessionDto> mergeSessionSnapshot(
   List<SessionDto> current,
   SessionDto incoming,
 ) {
+  final uuid = incoming.sessionUuid;
+  bool same(SessionDto session) =>
+      session.id == incoming.id ||
+      (uuid != null &&
+          uuid.isNotEmpty &&
+          session.sessionUuid == uuid &&
+          session.backendKey == incoming.backendKey);
   if (incoming.status == 'exited') {
     return current
         .where((session) => session.id != incoming.id)
         .toList(growable: false);
   }
   var replaced = false;
-  final merged = current
-      .map((session) {
-        if (session.id != incoming.id) return session;
-        replaced = true;
-        return incoming;
-      })
-      .toList(growable: true);
+  final merged = <SessionDto>[];
+  for (final session in current) {
+    if (!same(session)) {
+      merged.add(session);
+    } else if (!replaced) {
+      replaced = true;
+      merged.add(incoming);
+    }
+  }
   if (!replaced) merged.add(incoming);
   return merged;
 }
@@ -282,7 +295,12 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
           case 'session.created':
           case 'session.updated':
             try {
-              final s = SessionDto.fromJson(env.payload);
+              // The envelope carries the cloud id; an older relay may leave a
+              // desktop-local id in the payload, which would add a ghost row.
+              final s = SessionDto.fromJson({
+                ...env.payload,
+                'id': env.sessionId,
+              });
               state = AsyncData(
                 mergeSessionSnapshot(state.value ?? const [], s),
               );

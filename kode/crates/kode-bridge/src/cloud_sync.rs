@@ -891,7 +891,7 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
                 kode_core::session::state::Status::Busy => "busy",
                 kode_core::session::state::Status::Exited(_) => "exited",
             };
-            json!({
+            let mut snapshot = json!({
                 "local_id": session.id,
                 "dto": {
                     "id": session.id,
@@ -911,7 +911,11 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
                     "context_pct": Value::Null,
                     "cost_usd": session.state.cost_usd,
                 }
-            })
+            });
+            if let Some(fields) = crate::permission_snapshot(ctx, session).as_object() {
+                snapshot["dto"].as_object_mut().unwrap().extend(fields.clone());
+            }
+            snapshot
         })
         .collect();
     snapshots.extend(

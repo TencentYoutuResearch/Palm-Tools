@@ -41,6 +41,7 @@
     | 'bell'
     | 'trash-2'
     | 'panel-right'
+    | 'panel-bottom'
     | 'panel-right-open'
     | 'refresh-cw'
     | 'chevron-down'
@@ -171,6 +172,10 @@
     'panel-right':
       '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
       '<path d="M15 3v18"/>',
+    // lucide:panel-bottom
+    'panel-bottom':
+      '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
+      '<path d="M3 15h18"/>',
     // panel-right(open):右侧分区填充,表示 inspector 已展开
     'panel-right-open':
       '<rect x="3" y="3" width="18" height="18" rx="2"/>' +

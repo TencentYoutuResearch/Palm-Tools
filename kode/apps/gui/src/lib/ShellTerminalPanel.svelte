@@ -1,6 +1,31 @@
+<script lang="ts" module>
+  import type { EndpointId, ShellId } from './ipc'
+
+  export type ShellTerminalPosition = 'right' | 'bottom'
+
+  type ShellTerminalTab = {
+    id: ShellId
+    title: string
+    cwd: string
+    endpointId: EndpointId
+  }
+  type ShellTerminalState = {
+    terminals: ShellTerminalTab[]
+    activeId: ShellId | null
+  }
+
+  /// 按 workspace(endpoint + cwd)缓存终端面板状态。
+  /// 同一路径下的不同 kode session 共享 shell tabs;不同 endpoint 的同名路径隔离。
+  /// 只缓存"终端列表 + activeId",shell PTY 在 Rust 后端保持存活,
+  /// 切回时重新 subscribe(ring buffer 回放最近输出)。
+  /// 放在 module 作用域:面板关闭或在右侧/底部之间切换位置会重新挂载组件,
+  /// 实例级缓存会丢失已有 shell 列表(PTY 仍活着但前端再也找不回来)。
+  const shellStateCache = new Map<string, ShellTerminalState>()
+</script>
+
 <script lang="ts">
   /**
-   * ShellTerminalPanel.svelte —— 工作区检查器底部的 shell 终端面板。
+   * ShellTerminalPanel.svelte —— shell 终端面板,可停靠在工作区检查器底部或对话区下方。
    *
    * 独立于主终端 session 系统:用 shellIpc 管理轻量 shell PTY,
    * 不走 kode-core 的 Session/CoreEvent/jsonl 体系。
@@ -19,7 +44,7 @@
    */
   import { onDestroy, onMount } from 'svelte'
   import { handleWindowsClipboard } from './terminal_clipboard'
-  import { ENDPOINT_LOCAL, ipc, shellIpc, type EndpointId, type ShellId } from './ipc'
+  import { ENDPOINT_LOCAL, ipc, shellIpc } from './ipc'
   import type { TabInfo } from './sessions'
   import Icon from './Icon.svelte'
   import {
@@ -40,26 +65,11 @@
     tab: TabInfo | null
     isDark: boolean
     onClose: () => void
+    position: ShellTerminalPosition
+    onTogglePosition: () => void
     ensureTerminalToken?: number
   }
-  let { tab, isDark, onClose, ensureTerminalToken = 0 }: Props = $props()
-
-  type ShellTerminalTab = {
-    id: ShellId
-    title: string
-    cwd: string
-    endpointId: EndpointId
-  }
-  type ShellTerminalState = {
-    terminals: ShellTerminalTab[]
-    activeId: ShellId | null
-  }
-
-  /// 按 workspace(endpoint + cwd)缓存终端面板状态。
-  /// 同一路径下的不同 kode session 共享 shell tabs;不同 endpoint 的同名路径隔离。
-  /// 只缓存"终端列表 + activeId",shell PTY 在 Rust 后端保持存活,
-  /// 切回时重新 subscribe(ring buffer 回放最近输出)。
-  const shellStateCache = new Map<string, ShellTerminalState>()
+  let { tab, isDark, onClose, position, onTogglePosition, ensureTerminalToken = 0 }: Props = $props()
 
   let terminals = $state<ShellTerminalTab[]>([])
   let activeTerminalId = $state<ShellId | null>(null)
@@ -440,7 +450,9 @@
       fontFamily = settings.fontFamily
       applyAppearance(settings)
     })
-    if (terminals.length === 0 && tab?.cwd) {
+    // 重新挂载(切换位置 / 重新打开)时,缓存里已有的 shell 由下方 $effect 恢复,不再多开。
+    const cached = shellStateCache.get(workspaceKeyFor(tab) ?? '')
+    if (terminals.length === 0 && !cached?.terminals.length && tab?.cwd) {
       newTerminal().catch((e) => console.error('[shell-term] auto-spawn failed:', e))
     }
   })
@@ -552,6 +564,12 @@
 
   onDestroy(() => {
     destroyed = true
+    if (prevWorkspaceKey != null) {
+      shellStateCache.set(prevWorkspaceKey, {
+        terminals: [...terminals],
+        activeId: activeTerminalId,
+      })
+    }
     for (const { unsub, resizeObs, term } of termInstances.values()) {
       resizeObs?.disconnect()
       unsub?.().catch(() => {})
@@ -596,6 +614,19 @@
       {/each}
       <button class="tab-action-btn tab-add-btn" onclick={newTerminal} title="New terminal">
         <Icon name="plus" size={13} />
+      </button>
+    </div>
+    <div class="tab-bar-actions">
+      <button
+        class="tab-action-btn"
+        onclick={onTogglePosition}
+        title={position === 'bottom' ? 'Move terminal to workspace inspector' : 'Move terminal below conversation'}
+        aria-label={position === 'bottom' ? 'Move terminal to workspace inspector' : 'Move terminal below conversation'}
+      >
+        <Icon name={position === 'bottom' ? 'panel-right' : 'panel-bottom'} size={13} />
+      </button>
+      <button class="tab-action-btn" onclick={onClose} title="Hide terminal" aria-label="Hide terminal">
+        <Icon name="x" size={13} />
       </button>
     </div>
   </div>
@@ -651,6 +682,13 @@
     scrollbar-width: none;
   }
   .tabs-scroll::-webkit-scrollbar { display: none; }
+  .tab-bar-actions {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+  }
   .tab-item {
     flex: 0 0 auto;
     display: inline-flex;

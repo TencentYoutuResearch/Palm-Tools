@@ -102,9 +102,16 @@ impl Backend {
             }
             Backend::Claude | Backend::Tclaude => {
                 // ~/.claude/projects/<slug>/<sid>.jsonl
-                // slug:**前导 dash** + / 换成 -(实测格式:"-Users-foo-bar")
-                let raw = cwd.to_string_lossy();
-                let slug = format!("-{}", raw.trim_start_matches('/').replace('/', "-"));
+                // Claude Code replaces every non-alphanumeric UTF-16 unit with
+                // `-` (`/[^a-zA-Z0-9]/g`), so `/a/palm_link` → `-a-palm-link`.
+                let slug: String = cwd
+                    .to_string_lossy()
+                    .chars()
+                    .flat_map(|c| {
+                        let units = if c.is_ascii_alphanumeric() { 0 } else { c.len_utf16() };
+                        std::iter::repeat('-').take(units).chain((units == 0).then_some(c))
+                    })
+                    .collect();
                 Some(
                     home.join(if self == Backend::Tclaude {
                         ".tclaude"
@@ -1730,6 +1737,20 @@ mod tests {
             s.contains("/.claude/projects/-Users-tester-Projects-example-kode/abc.jsonl"),
             "got {s}"
         );
+    }
+
+    #[test]
+    fn claude_slug_replaces_every_non_alphanumeric_character() {
+        let p = PathBuf::from("/Users/tester/Projects/app/palm_link.v2/中文 dir😀");
+        let path = Backend::Tclaude.session_path(&p, "abc").unwrap();
+        assert!(
+            path.ends_with(".tclaude/projects/-Users-tester-Projects-app-palm-link-v2----dir--/abc.jsonl"),
+            "got {}",
+            path.display()
+        );
+        // CodeBuddy keeps underscores in its project directories.
+        let path = Backend::Codebuddy.session_path(&PathBuf::from("/a/palm_link"), "abc").unwrap();
+        assert!(path.ends_with(".codebuddy/projects/a-palm_link/abc.jsonl"));
     }
 
     #[test]

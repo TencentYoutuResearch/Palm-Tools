@@ -68,6 +68,71 @@ void main() {
     expect(merged.map((session) => session.id), [7, 8]);
   });
 
+  test('a republished conversation replaces its row by session uuid', () {
+    SessionDto row(int id, String? uuid) => SessionDto(
+      id: id,
+      backendKey: 'codex',
+      title: 't$id',
+      model: 'gpt-test',
+      status: 'idle',
+      sessionUuid: uuid,
+      tokens: TokensDto(),
+    );
+    final merged = mergeSessionSnapshot([
+      row(7, 'native-a'),
+      row(8, null),
+    ], row(9, 'native-a'));
+    expect(merged.map((session) => session.id), [9, 8]);
+    // Sessions without a native id are never merged with each other.
+    expect(mergeSessionSnapshot(merged, row(10, null)), hasLength(3));
+  });
+
+  test(
+    'session.updated keys rows by the envelope id, not the payload id',
+    () async {
+      final api = _FakeApiClient([
+        [_session(id: 7, title: 'before')],
+      ]);
+      final events = StreamController<Envelope>();
+      final container = ProviderContainer(
+        overrides: [
+          apiClientProvider.overrideWithValue(api),
+          eventStreamProvider.overrideWith((ref) => events.stream),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await events.close();
+      });
+
+      await container.read(sessionsProvider.future);
+      // An older relay forwards the desktop-local runtime id in the payload.
+      events.add(
+        Envelope(
+          protocolVersion: 'v1',
+          schemaVersion: 1,
+          sessionId: 7,
+          ts: 1,
+          type: 'session.updated',
+          payload: {
+            'id': 1099511627779,
+            'backend_key': 'codex',
+            'title': 'busy now',
+            'model': 'gpt-test',
+            'status': 'busy',
+            'tokens': <String, int>{},
+          },
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final sessions = container.read(sessionsProvider).valueOrNull!;
+      expect(sessions, hasLength(1));
+      expect(sessions.single.id, 7);
+      expect(sessions.single.title, 'busy now');
+    },
+  );
+
   test('session.updated replaces the cached DTO in the provider', () async {
     final api = _FakeApiClient([
       [_session(id: 7, title: '')],

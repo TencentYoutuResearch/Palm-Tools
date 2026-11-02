@@ -8,6 +8,8 @@ struct MobileCreate {
     backend_key: String,
     cwd: Option<String>,
     model: Option<String>,
+    #[serde(default)]
+    permission_mode: Option<String>,
 }
 
 pub async fn execute(ctx: Arc<Ctx>, kind: &str, payload: Value) -> (u16, Value) {
@@ -97,6 +99,11 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
         "create_session" => {
             let req: MobileCreate =
                 serde_json::from_value(payload).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            if req.permission_mode.as_deref().is_some_and(|mode| {
+                !matches!(mode, "default" | "acceptEdits" | "plan" | "bypass" | "bypassPermissions")
+            }) {
+                return Err(ApiError::BadRequest("Unsupported permission mode".into()));
+            }
             let cfg = ctx.backend_for_session(&req.backend_key, None).ok()
                 .filter(|cfg| cfg.is_enabled() && backend_probe::which(&cfg.command).is_some())
                 .ok_or_else(|| {
@@ -131,7 +138,7 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
                     rows: None,
                     cwd: Some(cwd.to_string_lossy().into_owned()),
                     resume_session_uuid: None,
-                    permission_mode: None,
+                    permission_mode: req.permission_mode,
                     model: req.model,
                     memory_context: None,
                     extra_args: None,
@@ -187,7 +194,7 @@ mod tests {
             json!({"backend_key":"demo","cwd":dir.path().join("file.txt")}),
             json!({"backend_key":"demo","cwd":dir.path().join("missing")}),
             json!({"backend_key":"missing","cwd":dir.path()}),
-            json!({"backend_key":"demo","cwd":dir.path(),"permission_mode":"bypassPermissions"}),
+            json!({"backend_key":"demo","cwd":dir.path(),"permission_mode":"--yolo"}),
             json!({"backend_key":"demo","cwd":dir.path(),"extra_args":["--unsafe"]}),
         ] {
             assert_eq!(execute(ctx.clone(), "create_session", payload).await.0, 400);
@@ -206,6 +213,19 @@ mod tests {
         let id = dto["id"].as_u64().unwrap();
         assert!(ctx.sessions.lock().contains_key(&id));
         assert!(events.try_recv().is_ok());
+        kill_session(Extension(ctx.clone()), Path(id)).await.unwrap();
+        let (status, dto) = execute(
+            ctx.clone(),
+            "create_session",
+            json!({"backend_key":"demo","cwd":dir.path(),"permission_mode":"bypassPermissions"}),
+        )
+        .await;
+        assert_eq!(status, 200, "{dto}");
+        let id = dto["id"].as_u64().unwrap();
+        assert_eq!(
+            ctx.sessions.lock()[&id].permission_mode.as_deref(),
+            Some("bypassPermissions")
+        );
         kill_session(Extension(ctx), Path(id)).await.unwrap();
     }
 }

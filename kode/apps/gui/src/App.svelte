@@ -46,7 +46,7 @@
   import DeployPanel from './lib/DeployPanel.svelte'
   import MetricsHoverCard from './lib/MetricsHoverCard.svelte'
   import WorkspacePanel from './lib/WorkspacePanel.svelte'
-  import ShellTerminalPanel from './lib/ShellTerminalPanel.svelte'
+  import ShellTerminalPanel, { type ShellTerminalPosition } from './lib/ShellTerminalPanel.svelte'
   import Icon from './lib/Icon.svelte'
   import BackendIcon from './lib/BackendIcon.svelte'
   import AvatarSprite from './lib/AvatarSprite.svelte'
@@ -187,12 +187,23 @@
   let inspectorWidth = $state(420)
   let inspectorResizing = $state(false)
 
-  // 终端面板(工作区检查器底部)
+  // 终端面板:停靠在工作区检查器底部(right)或对话区下方(bottom,类似 VSCode Panel)
+  const TERMINAL_POSITION_KEY = 'kode.shellTerminal.position'
+  function loadTerminalPosition(): ShellTerminalPosition {
+    try {
+      return localStorage.getItem(TERMINAL_POSITION_KEY) === 'bottom' ? 'bottom' : 'right'
+    } catch {
+      return 'right'
+    }
+  }
   let terminalPanelOpen = $state(false)
+  let terminalPosition = $state<ShellTerminalPosition>(loadTerminalPosition())
   let terminalEnsureToken = $state(0)
   let terminalHeight = $state(280)
   const TERMINAL_MIN_H = 80
   const TERMINAL_MAX_H = 800
+  /** 底部停靠时给对话区至少保留的高度(含 44px 标题栏) */
+  const MAIN_MIN_H_WITH_TERMINAL = 220
 
   async function refreshEndpoints() {
     try {
@@ -332,7 +343,20 @@
     }
     terminalPanelOpen = true
     terminalEnsureToken += 1
+    // 右侧停靠时终端挂在 inspector 里,inspector 关着就看不到
+    if (terminalPosition === 'right') workspacePanelOpen = true
   }
+
+  function toggleTerminalPosition() {
+    terminalPosition = terminalPosition === 'right' ? 'bottom' : 'right'
+    try { localStorage.setItem(TERMINAL_POSITION_KEY, terminalPosition) } catch { /* 静默 */ }
+    if (terminalPosition === 'right') workspacePanelOpen = true
+  }
+
+  /** 底部停靠只在有会话的对话区显示;welcome / chooser 页面没有可附着的 workspace */
+  let bottomTerminalVisible = $derived(
+    terminalPanelOpen && terminalPosition === 'bottom' && $tabs.length > 0 && !chooserOpen,
+  )
 
   function startInspectorResize(e: PointerEvent) {
     e.preventDefault()
@@ -360,10 +384,14 @@
     e.preventDefault()
     const startY = e.clientY
     const startH = terminalHeight
+    const container = (e.currentTarget as HTMLElement | null)?.closest<HTMLElement>('.main, .inspector-content')
+    const upper = container
+      ? Math.max(TERMINAL_MIN_H, Math.min(TERMINAL_MAX_H, container.clientHeight - MAIN_MIN_H_WITH_TERMINAL))
+      : TERMINAL_MAX_H
     const onMove = (ev: PointerEvent) => {
       // 把手在终端面板上缘:向上拖(clientY 变小)→ 变高
       const next = startH + (startY - ev.clientY)
-      terminalHeight = Math.min(TERMINAL_MAX_H, Math.max(TERMINAL_MIN_H, next))
+      terminalHeight = Math.min(upper, Math.max(TERMINAL_MIN_H, next))
     }
     const onUp = () => {
       window.removeEventListener('pointermove', onMove)
@@ -1605,6 +1633,21 @@
       group: 'view',
       run: () => { workspacePanelOpen = !workspacePanelOpen },
     },
+    {
+      id: 'toggle-terminal-panel',
+      label: terminalPanelOpen ? t('command.view.hideTerminal') : t('command.view.showTerminal'),
+      group: 'view',
+      run: () => toggleTerminalPanel(),
+    },
+    {
+      id: 'toggle-terminal-position',
+      label: terminalPosition === 'right' ? t('command.view.terminalToBottom') : t('command.view.terminalToRight'),
+      group: 'view',
+      run: () => {
+        toggleTerminalPosition()
+        if (!terminalPanelOpen) toggleTerminalPanel()
+      },
+    },
     // ── Memory ──
     {
       id: 'memory-review',
@@ -2040,7 +2083,7 @@
     </div>
   </aside>
 
-  <main class="main" class:drag-over={dragOver} data-workspace-reference-target use:workspaceReferenceTarget={{ hover: (active) => { dragOver = active }, drop: receiveWorkspaceReference }} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
+  <main class="main" class:drag-over={dragOver} style={bottomTerminalVisible ? `--bottom-terminal-h:${terminalHeight}px` : ''} data-workspace-reference-target use:workspaceReferenceTarget={{ hover: (active) => { dragOver = active }, drop: receiveWorkspaceReference }} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
     <!-- 拖拽中覆盖终端区:捕获 drop 事件,防止 xterm.js 消费 -->
     {#if dragOver}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2068,6 +2111,18 @@
       <div class="titlebar-actions">
         <UpdateButton />
         <EventCenter />
+        {#if terminalPosition === 'bottom' && $tabs.length > 0}
+          <button
+            class="titlebar-tool"
+            class:active={terminalPanelOpen}
+            title={terminalPanelOpen ? 'Hide terminal' : 'Show terminal'}
+            aria-label={terminalPanelOpen ? 'Hide terminal' : 'Show terminal'}
+            aria-pressed={terminalPanelOpen}
+            onclick={toggleTerminalPanel}
+          >
+            <Icon name="terminal" size={15} />
+          </button>
+        {/if}
         <!-- 打开 inspector 的按钮只在关闭时显示;收起由右边栏顶部那一排的关闭按钮负责 -->
         {#if !workspacePanelOpen}
           <button
@@ -2158,6 +2213,7 @@
             console.error('session start failed:', e)
             sessionStartError = friendlySessionStartError(e)
             chooserOpen = true
+            return false
           }
         }}
       />
@@ -2182,6 +2238,29 @@
         {/if}
       </div>
     {/each}
+    {#if bottomTerminalVisible}
+      <div class="bottom-terminal" style="height: {terminalHeight}px">
+        <div
+          class="terminal-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize terminal panel"
+          title="Drag to resize"
+          onpointerdown={startTerminalResize}
+          ondblclick={() => (terminalHeight = 280)}
+        ></div>
+        <div class="bottom-terminal-body">
+          <ShellTerminalPanel
+            tab={$activeTab}
+            isDark={theme === 'dark' || (theme === 'system' && systemPrefersDark)}
+            onClose={() => (terminalPanelOpen = false)}
+            position="bottom"
+            onTogglePosition={toggleTerminalPosition}
+            ensureTerminalToken={terminalEnsureToken}
+          />
+        </div>
+      </div>
+    {/if}
   </main>
 
   <!-- 常驻渲染(不再 {#if} 挂载/卸载),让 grid 列宽过渡可以平滑展开/收起;
@@ -2210,7 +2289,7 @@
             onReference={insertWorkspaceReference}
           />
         </div>
-        {#if terminalPanelOpen}
+        {#if terminalPanelOpen && terminalPosition === 'right'}
           <div
             class="terminal-resizer"
             role="separator"
@@ -2225,6 +2304,8 @@
               tab={$activeTab}
               isDark={theme === 'dark' || (theme === 'system' && systemPrefersDark)}
               onClose={() => (terminalPanelOpen = false)}
+              position="right"
+              onTogglePosition={toggleTerminalPosition}
               ensureTerminalToken={terminalEnsureToken}
             />
           </div>
@@ -3745,6 +3826,23 @@
   .terminal-resizer:hover {
     background: color-mix(in srgb, var(--acc) 12%, transparent);
   }
+  /* 底部停靠:浮在对话区底部,.term-wrapper 通过 --bottom-terminal-h 让出同等高度 */
+  .bottom-terminal {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--bg-base);
+  }
+  .bottom-terminal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
   .inspector-terminal {
     flex: 0 0 auto;
     min-height: 0;
@@ -3782,6 +3880,7 @@
   .term-wrapper {
     position: absolute;
     inset: 0;
+    bottom: var(--bottom-terminal-h, 0px);
     /*
      * 左侧留白:终端内容与 sidebar 分隔线之间留一点呼吸空间,
      * 避免首列字符紧贴边界。padding 而非 margin —— xterm 的 .term-host

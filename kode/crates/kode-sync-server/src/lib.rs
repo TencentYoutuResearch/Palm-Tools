@@ -804,9 +804,19 @@ fn sync_session_snapshot(
 ) -> Result<(), ApiError> {
     let mut created = Vec::new();
     let mut updated = Vec::new();
+    let mut vanished = Vec::new();
     {
         let mut db = state.inner.db.lock();
         let tx = db.transaction()?;
+        // Phones keep their list in memory; every session this snapshot drops
+        // must be announced, or a reconnecting runtime's new ids duplicate it.
+        let live: Vec<i64> = tx
+            .prepare(
+                "SELECT id FROM sessions
+                 WHERE device_id=?1 AND json_extract(dto_json, '$.status')<>'exited'",
+            )?
+            .query_map(params![device_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
         // A hello snapshot is authoritative for this device. Mark every
         // previously known session exited inside the transaction, then the
         // following upserts restore the sessions that are still present.
@@ -816,9 +826,11 @@ fn sync_session_snapshot(
              WHERE device_id=?2 AND json_extract(dto_json, '$.status')<>'exited'",
             params![now_ms() as i64, device_id],
         )?;
+        let mut present = std::collections::HashSet::new();
         for session in sessions {
             let (cloud_id, was_created, dto) =
                 upsert_session_tx(&tx, device_id, boot_id, session.local_id, session.dto)?;
+            present.insert(cloud_id);
             if was_created {
                 created.push((cloud_id, dto));
             } else {
@@ -829,7 +841,14 @@ fn sync_session_snapshot(
                 updated.push((cloud_id, dto));
             }
         }
+        vanished.extend(live.into_iter().filter(|id| !present.contains(id)));
         tx.commit()?;
+    }
+    for cloud_id in vanished {
+        state.publish(
+            device_id,
+            CloudEnvelope::new(cloud_id, "session.exited", json!({})),
+        );
     }
     for (cloud_id, dto) in created {
         state.publish(
@@ -1888,6 +1907,42 @@ mod tests {
         let stored:String=state.inner.db.lock().query_row("SELECT dto_json FROM sessions WHERE id=?1",[update.session_id],|row|row.get(0)).unwrap();
         let stored:Value=serde_json::from_str(&stored).unwrap();
         assert_eq!(stored["title"],"Live runtime update");assert_eq!(stored["tokens"]["total"],99);
+    }
+
+    #[test]
+    fn snapshot_announces_sessions_it_drops_so_mobile_lists_do_not_duplicate() {
+        let (_dir, state) = state();
+        state
+            .inner
+            .db
+            .lock()
+            .execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES('d','i','desktop','x',1,1)",
+                [],
+            )
+            .unwrap();
+        let mut mobile = state.mobile_bus("d").subscribe();
+        let tab = |local_id: u64| AgentSession {
+            local_id,
+            dto: json!({"id":local_id,"backend_key":"claude","title":"tab","model":"auto","status":"idle","tokens":{}}),
+        };
+        // A restarted GUI republishes the same tab under a new runtime id.
+        sync_session_snapshot(&state, "d", "boot", vec![tab(1099511627777)]).unwrap();
+        let old = mobile.try_recv().unwrap();
+        assert_eq!(old.kind, "session.created");
+        sync_session_snapshot(&state, "d", "boot", vec![tab(1099511627779)]).unwrap();
+        let mut kinds = vec![];
+        while let Ok(env) = mobile.try_recv() {
+            kinds.push((env.kind.clone(), env.session_id == old.session_id));
+        }
+        assert!(kinds.contains(&("session.exited".to_string(), true)), "{kinds:?}");
+        assert!(kinds.contains(&("session.created".to_string(), false)), "{kinds:?}");
+        // A session that is still present is not announced as exited.
+        sync_session_snapshot(&state, "d", "boot", vec![tab(1099511627779)]).unwrap();
+        while let Ok(env) = mobile.try_recv() {
+            assert_ne!(env.kind, "session.exited");
+        }
     }
 
     #[test]
