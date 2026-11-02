@@ -843,3 +843,20 @@ changes to a real account:
 ```sh
 KODE_TEST_NATIVE_PLUGIN_CLI=1 node scripts/test-integration.js
 ```
+
+### Optional plugin history records
+
+Kode metadata writers must use `appendPluginRecord` from the installed dsh
+Session package. A raw `session.append('plugin:…', …)` creates a required unknown
+event and can block every session listing, resume, and handoff after reload.
+Regression checks must include `validateStoredEvents` from the released
+persistence package; relationship checks alone do not enforce event vocabulary.
+
+For older Fast/shared-interaction metadata written without `ignorable`, run
+`scripts/repair-plugin-records.py --home <dsh-home> --session-id <id>
+--runtime-modules <released-node-modules> --node <node-24.22+>` to report first.
+`--apply` requires the kernel writer lock, validates with the released reader,
+backs up the original log and projection cache, and atomically replaces the log.
+Only the two known optional Kode record types are admitted; their sequence,
+timestamp, payload and all other events stay intact. Other unknown required
+events still fail validation. Stop the owning session before applying repairs.
