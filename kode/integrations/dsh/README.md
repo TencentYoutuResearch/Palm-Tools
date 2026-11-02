@@ -454,7 +454,7 @@ checkouts can also use local compiled binaries.
 | Phone pairing, cloud sync deployment | Settings → 手机与同步 shows a one-time pairing QR code and a manual pairing link through the shared backend. Cloud-service deployment remains in the original GUI. |
 | Native screenshot tools, desktop window/tab actions, SpecOps window | Not ported; some are desktop-specific rather than Web-session requirements. |
 
-For older logs failing with `invalid persisted inbox splice`, run `python3 scripts/repair-inbox-history.py --home <dsh-home> --session-id <id> --runtime-modules <released-node_modules> --node <node-24.22+>`. It reports changes by default. Add `--apply` to repair under the session writer lock, back up the artifact and projection cache, and invalidate the stale cache. Event sequence IDs and input content are retained; ambiguous transfers are refused.
+For older logs failing with `invalid persisted inbox splice` or a non-ignorable `plugin:kode/model-fast` record, run `python3 scripts/repair-inbox-history.py --home <dsh-home> --session-id <id> --runtime-modules <released-node_modules> --node <node-24.22+>`. It reports changes by default. Add `--apply` to repair under the session writer lock, back up the artifact and projection cache, and invalidate the stale cache. Event sequence IDs and input content are retained; ambiguous transfers are refused.
 
 Managed service supervision is currently process based; automatic startup on OS
 boot and general service-manager integration are not included. Native Agent forks,

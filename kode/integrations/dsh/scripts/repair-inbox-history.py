@@ -1,4 +1,4 @@
-"""Repair legacy queue transfers under the session writer's flock. Default: report only."""
+"""Repair legacy queue transfers and optional Kode records under the session writer's flock. Default: report only."""
 import argparse
 import fcntl
 import json

@@ -15,6 +15,7 @@ test('maintenance repairs under writer lock, backs up log/cache, preserves input
   const cache = join(home, 'storages/session_projcache/sessions', id + '.json')
   const session = Session.create(id), input = { id: 'pending', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Original input' }] }
   const events = ['next-turn', 'next-step'].map((target, seq) => ({ type: 'agent/inbox/spliced', seq, time: seq, data: { target, start: 0, removedCount: 0, inserted: [input] } }))
+  events.push({ type: 'plugin:kode/model-fast', seq: events.length, time: 2, data: { provider: 'fixture', model: 'fixture', fast: true } })
   const original = encodeHistoryArtifact({ type: 'session', ...session.header }, events)
   const modules = resolve(dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-session'))), '../../..')
   const args = [fileURLToPath(new URL('../scripts/repair-inbox-history.py', import.meta.url)), '--home', home, '--session-id', id, '--runtime-modules', modules, '--node', process.execPath]
