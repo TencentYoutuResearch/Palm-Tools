@@ -1091,6 +1091,8 @@ fn _ensure_traits() {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PersistedTabDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsh_session_id: Option<String>,
     #[serde(default)]
     pub transport_kind: Option<String>,
     pub backend_key: String,
@@ -1142,6 +1144,7 @@ pub async fn get_persisted_tabs() -> Vec<PersistedTabDto> {
         s.tabs
             .into_iter()
             .map(|t| PersistedTabDto {
+                dsh_session_id: t.dsh_session_id,
                 transport_kind: t.transport_kind,
                 backend_key: t.backend_key,
                 title: t.title,
@@ -1178,6 +1181,7 @@ pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Resu
     persisted.tabs = dedupe_persisted_tabs(tabs)
         .into_iter()
         .map(|t| crate::persistence::PersistedTab {
+            dsh_session_id: t.dsh_session_id,
             transport_kind: t.transport_kind,
             backend_key: t.backend_key,
             title: t.title,

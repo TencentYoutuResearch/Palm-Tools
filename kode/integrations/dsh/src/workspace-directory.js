@@ -1,5 +1,6 @@
 /** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
 import { BackendDocument } from './backend-state.js'
+import { classifyEmptySessions } from './empty-session.js'
 import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
 const sessionController = ctx => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用；工作区配置仍保留，请先恢复会话服务。'); return value }
 export const DIRECTORY_PATH = '/api/kode/host-directory'
@@ -7,7 +8,7 @@ export async function hostDirectory(ctx, config = {}) {
   const registry = ctx.get('workspaceRegistry')
   if (!registry) throw new Error('工作区服务尚未就绪。')
   const controller = sessionController(ctx)
-  const { items } = await controller.list({})
+  const items = await classifyEmptySessions(controller, (await controller.list({})).items)
   const runtime = ctx.get('kodeAgents'), profiles = runtime?.profiles
   const presentation = profile => { const view = runtime?.appearance?.profileView(profile) ?? profile; return { id: view.id, name: view.name, type: view.type, ...(view.avatar ? { avatar: view.avatar } : {}) } }
   const hiddenSessionIds = []
@@ -20,7 +21,7 @@ export async function hostDirectory(ctx, config = {}) {
     const dsh = binding ? binding.profile.type === 'dsh' : !provider?.startsWith('kode-agent-')
     const type = binding?.profile.type ?? (dsh ? 'dsh' : undefined)
     if (type && runtime?.hasRuntime && !runtime.hasRuntime(type) && !item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
-    if (item.blank) return []
+    if (item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
     return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running, ...(profile ? { agent: presentation(profile) } : {}), ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
   })
   const result = { archivedSessionIds: [...registry.archivedSessionIds], pinnedSessionIds: [...(registry.pinnedSessionIds ?? [])], hiddenSessionIds, sessions,
@@ -31,6 +32,9 @@ export async function hostDirectory(ctx, config = {}) {
     for (const row of sessions) if (row.agent && runtime?.appearance) row.agent.avatar = runtime.appearance.avatarForSession(row.id, row.agent.type, index, row.agent.id)
     if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
     for (const tab of localSavedTabs(index)) {
+      // Older GUI builds persisted empty runtime placeholders as native tabs.
+      // Keep their files, but do not resurrect them under a new saved: alias.
+      if (items.some(item => item.blank && (item.sessionId === tab.session_id || item.sessionId === tab.dsh_session_id || profiles?.binding(item.sessionId)?.threadId === tab.session_id))) continue
       const adopted = tab.dsh_session_id ?? importedSessionId(tab)
       if (sessions.some(row => row.id === adopted || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))) continue
       const id = savedDirectoryId(node.node_id, tab)

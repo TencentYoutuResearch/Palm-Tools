@@ -40,6 +40,14 @@ test('shared directory refresh removes archived rows and restores them with the 
   assert.deepEqual(reconcileSharedSessionTabs(restored, [], pending), [local])
 })
 
+test('saved shared tab keeps the dsh identity separate from its native CLI thread', () => {
+  const saved = sessionTabToPersisted(tab({ sharedRuntime: true, dshSessionId: 'session-example', sessionId: 'native-thread' }))
+  assert.equal(saved.dsh_session_id, 'session-example')
+  assert.equal(saved.session_id, 'native-thread')
+  assert.equal(saved.transport_kind, 'runtime')
+  assert.equal(sessionTabToPersisted(tab()).dsh_session_id, undefined)
+})
+
 test('tclaude actual response model replaces auto before and after stale spawn DTO', () => {
   for (const metaFirst of [false, true]) {
     const pending = new SessionMetadataBuffer()

@@ -25,6 +25,7 @@ import { SessionMetadataBuffer, upsertSessionTab, sessionTabToPersisted, reconci
 
 export interface TabInfo {
   sharedRuntime?: boolean
+  dshSessionId?: string
   transportKind?: 'acp' | 'pty'
   id: SessionId
   backendKey: string
@@ -227,7 +228,7 @@ let sharedTimer: ReturnType<typeof setInterval> | null = null
 let sharedRefresh: Promise<void> | null = null
 type SharedSession = { id: number; runtime: string; runtime_session_id: string; native_thread_id?: string; backend_key: string; title: string; model: string; status: string; cwd?: string; tokens?: { total?: number } }
 async function sharedSessions(): Promise<SharedSession[]> { return (await invoke<{ sessions: SharedSession[] }>('shared_runtime_sessions')).sessions.filter(row => row.runtime === 'dsh') }
-function sharedTab(row: SharedSession): TabInfo { return { id: row.id, sharedRuntime: true, transportKind: 'acp', backendKey: row.backend_key, title: row.title, model: row.model, cwd: row.cwd, sessionId: row.native_thread_id ?? row.runtime_session_id, tokens: row.tokens?.total, status: row.status === 'busy' ? 'busy' : row.status === 'starting' ? 'starting' : 'idle', endpointId: ENDPOINT_LOCAL } }
+function sharedTab(row: SharedSession): TabInfo { return { id: row.id, sharedRuntime: true, dshSessionId: row.runtime_session_id, transportKind: 'acp', backendKey: row.backend_key, title: row.title, model: row.model, cwd: row.cwd, sessionId: row.native_thread_id ?? row.runtime_session_id, tokens: row.tokens?.total, status: row.status === 'busy' ? 'busy' : row.status === 'starting' ? 'starting' : 'idle', endpointId: ENDPOINT_LOCAL } }
 async function refreshSharedSessions() {
   if (sharedRefresh) return sharedRefresh
   sharedRefresh = (async () => {

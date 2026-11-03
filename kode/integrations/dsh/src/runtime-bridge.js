@@ -1,4 +1,5 @@
 import { resolveAdvertisedModel } from './model-alias.js'
+import { needsEmptySessionCheck, setupOnlySession } from './empty-session.js'
 /** Project the existing dsh runtime into Kode. Never run a second Agent loop. */
 import { randomUUID, createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -51,7 +52,10 @@ export class RuntimeBridge {
     return task
   }
   async publishSnapshot() {
-    const controller = this.service('sessionController'), { items } = await controller.list({}, this.stop.signal)
+    const controller = this.service('sessionController'), directory = await controller.list({}, this.stop.signal)
+    // Empty composer placeholders are not saved conversations. Retire older
+    // publications too, so another frontend cannot persist and reimport them.
+    const items = directory.items.filter(row => !row.blank)
     if (!this.known) {
       const saved = await this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)
       this.known = new Map(saved.sessions.filter(row => row.runtime === this.runtime).map(row => [row.runtime_session_id, row]))
@@ -65,6 +69,14 @@ export class RuntimeBridge {
       this.stop.signal.throwIfAborted()
       const agent = this.service('agents').get(row.sessionId)
       const observed = agent ? { events: agent.session.snapshotEvents() } : await controller.inspect(row.sessionId, this.stop.signal)
+      if (!agent && needsEmptySessionCheck(row) && setupOnlySession(observed)) {
+        const previous = this.known.get(row.sessionId)
+        if (previous && previous.status !== 'exited') {
+          await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [{ session_id: row.sessionId, dto: { ...previous, status: 'exited' }, events: [] }] })
+          this.known.set(row.sessionId, { ...previous, status: 'exited' })
+        }
+        continue
+      }
       const events = observed.events.filter(event => event.seq > (this.cursors.get(row.sessionId) ?? -1))
       const segments = new Map(), interactions = new Set()
       const projected = observed.events.flatMap(event => {

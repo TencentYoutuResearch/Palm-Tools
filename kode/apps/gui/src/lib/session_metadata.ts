@@ -146,6 +146,7 @@ export function sessionTabToPersisted(tab: TabInfo): PersistedTab {
     cwd: tab.cwd ?? '',
     workspace_title: tab.workspaceTitle ?? null,
     session_id: tab.sessionId ?? null,
+    ...(tab.dshSessionId ? { dsh_session_id: tab.dshSessionId } : {}),
     model: tab.model ?? null,
     permission_mode: tab.permissionMode ?? null,
     endpoint_id: tab.endpointId?.kind === 'remote' ? tab.endpointId : null,
