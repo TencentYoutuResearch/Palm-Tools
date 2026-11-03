@@ -467,3 +467,26 @@ test('existing session identity remains visible when its runtime is idle or unlo
  scope.catalogBlank=()=>true;assert.equal(scope.AgentIdentity(props),null,'draft identity belongs to the Agent picker')
  scope.catalogBlank=()=>false;scope.useDirectory=()=>({data:null});assert.equal(scope.AgentIdentity(props),null,'wait for actual identity instead of guessing')
 })
+
+test('goal dock reuses the queued composer width and panel presentation',()=>{
+ assert.match(source,/className: 'kode-goal-panel'/)
+ assert.match(source,/\.kode-goal-bar\{box-sizing:border-box;width:calc\(100% - var\(--dsh-composer-side-clearance\)/)
+ assert.match(source,/max-width:calc\(var\(--dsh-composer-card-max-width\)/)
+ assert.match(source,/\.kode-goal-panel\{[^}]*border-radius:var\(--dsw-radius-lg\) var\(--dsw-radius-lg\) 0 0/)
+ assert.match(source,/IconPauseOutlineRegular/)
+ assert.match(source,/IconPlayOutlineRegular/)
+ assert.match(source,/IconCloseOutlineRegular/)
+ assert.match(source,/operate\('clear'\)/)
+})
+
+test('goal dock pause, resume and clear controls retain the current session identity',async()=>{
+ const c=client(),render=c.entryById('kode-goal-bar')
+ const walk=node=>Array.isArray(node)?node.flatMap(walk):node&&typeof node==='object'?[node,...walk(node.children??[])]:[]
+ const view=status=>render({sessionId:'session-goal-fixture',useProjection:()=>({objective:'Fixture goal',status})})
+ for(const [status,label,command] of [['active','暂停 Goal','pause'],['paused','继续 Goal','resume'],['active','清除 Goal','clear']]){
+  const button=walk(view(status)).find(row=>row.props?.['aria-label']===label)
+  assert.ok(button);button.props.onClick();await new Promise(resolve=>setImmediate(resolve))
+  assert.deepEqual(c.requests.at(-1),{action:'goal',sessionId:'session-goal-fixture',command})
+ }
+ assert.equal(render({sessionId:'session-goal-fixture',useProjection:()=>null}),null)
+})
