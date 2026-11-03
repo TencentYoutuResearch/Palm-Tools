@@ -1277,8 +1277,8 @@
     border-top: 1px solid var(--bd-default);
     padding-top: var(--sp-2);
     margin-top: var(--sp-1);
-    height: 236px;
-    min-height: 236px;
+    height: 208px;
+    min-height: 208px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;

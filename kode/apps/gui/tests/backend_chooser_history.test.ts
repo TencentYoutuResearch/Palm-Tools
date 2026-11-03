@@ -10,8 +10,8 @@ const chooserSource = await readFile(
 test('session history reserves stable space before asynchronous results arrive', () => {
   const historyStyles = chooserSource.match(/\.session-history\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? ''
 
-  assert.match(historyStyles, /height:\s*236px/)
-  assert.match(historyStyles, /min-height:\s*236px/)
+  assert.match(historyStyles, /height:\s*208px/)
+  assert.match(historyStyles, /min-height:\s*208px/)
   assert.match(historyStyles, /overflow:\s*hidden/)
 })
 
