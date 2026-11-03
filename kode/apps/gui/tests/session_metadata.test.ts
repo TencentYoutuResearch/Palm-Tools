@@ -6,6 +6,7 @@ import {
   SessionMetadataBuffer,
   sessionTabToPersisted,
   upsertSessionTab,
+  reconcileSharedSessionTabs,
 } from '../src/lib/session_metadata.ts'
 import type { TabInfo } from '../src/lib/sessions.ts'
 
@@ -24,6 +25,20 @@ const usage = { tokens: 100, inputTokens: 60, outputTokens: 40, cachedTokens: 20
 const assertNoUsage = (value: TabInfo) => {
   for (const field of Object.keys(usage)) assert.equal(field in value, false, field)
 }
+
+test('shared directory refresh removes archived rows and restores them with the same identity', () => {
+  const pending = new SessionMetadataBuffer()
+  const local = tab({ id: 1 })
+  const archived = tab({ id: 2, sharedRuntime: true })
+  const visible = tab({ id: 3, sharedRuntime: true, title: 'Pinned', titlePinned: true })
+  const remaining = reconcileSharedSessionTabs([local, archived, visible], [tab({ id: 3, sharedRuntime: true, title: 'Backend title', status: 'busy' })], pending)
+  assert.deepEqual(remaining.map(tab => tab.id), [1, 3])
+  assert.equal(remaining[1].title, 'Pinned')
+  assert.equal(remaining[1].status, 'busy')
+  const restored = reconcileSharedSessionTabs(remaining, [archived, visible], pending)
+  assert.deepEqual(restored.map(tab => tab.id).sort(), [1, 2, 3])
+  assert.deepEqual(reconcileSharedSessionTabs(restored, [], pending), [local])
+})
 
 test('tclaude actual response model replaces auto before and after stale spawn DTO', () => {
   for (const metaFirst of [false, true]) {

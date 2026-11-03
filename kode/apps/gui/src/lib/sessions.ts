@@ -21,7 +21,7 @@ import {
 } from './app_events'
 import { pushToast } from './toast'
 import { currentTermTheme } from './terminal_settings'
-import { SessionMetadataBuffer, upsertSessionTab, sessionTabToPersisted } from './session_metadata'
+import { SessionMetadataBuffer, upsertSessionTab, sessionTabToPersisted, reconcileSharedSessionTabs } from './session_metadata'
 
 export interface TabInfo {
   sharedRuntime?: boolean
@@ -232,17 +232,11 @@ async function refreshSharedSessions() {
   if (sharedRefresh) return sharedRefresh
   sharedRefresh = (async () => {
     const rows = await sharedSessions()
-    tabs.update(current => {
-      let next = current
-      for (const row of rows) {
-        if (row.status === 'exited') { next = next.filter(tab => tab.id !== row.id); continue }
-        const existing = next.find(tab => tab.id === row.id)
-        const tab = { ...sharedTab(row), ...(existing?.titlePinned ? { title: existing.title, titlePinned: true } : {}) }
-        next = upsertSessionTab(next, tab, sessionMetadata, true)
-      }
-      return next
-    })
-    if (get(activeId) == null && get(tabs).length) selectTab(get(tabs)[0].id)
+    tabs.update(current => reconcileSharedSessionTabs(current, rows.filter(row => row.status !== 'exited').map(sharedTab), sessionMetadata))
+    if (!get(tabs).some(tab => tab.id === get(activeId))) {
+      if (get(tabs).length) selectTab(get(tabs)[0].id)
+      else activeId.set(null)
+    }
   })().finally(() => { sharedRefresh = null })
   return sharedRefresh
 }

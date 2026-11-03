@@ -596,3 +596,10 @@ CLI execution remains owned by its attached runtime. A disconnected target
 runtime reports unavailable rather than spawning an unowned Agent process.
 `workbench/agents` additionally publishes `extension_args` keyed by backend;
 these arguments are applied at launch and do not rewrite editable Agent defaults.
+
+`runtime/sessions` applies `workspaces.global.archivedSessionIds` to dsh runtime
+identities, including offline records. Archiving changes directory visibility,
+while runtime identity and history remain available for unarchive. Clients must
+reconcile removals after a successful full directory refresh; a failed request
+must preserve the last successful list. GUI adapters apply the same backend
+archive index when connecting to an older standalone service during an upgrade.
