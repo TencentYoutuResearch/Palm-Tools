@@ -358,10 +358,12 @@ fn spawn_event_router(
                     cost_usd,
                     context_pct,
                 } => {
+                    let mut title_pinned = false;
                     let semantic_retarget = {
                         let mut g = sessions.lock();
                         match g.get_mut(&id) {
                             Some(s) => {
+                                title_pinned = s.state.title_pinned;
                                 let binding_changed = session_uuid
                                     .as_ref()
                                     .is_some_and(|sid| s.session_id.as_deref() != Some(sid));
@@ -434,9 +436,11 @@ fn spawn_event_router(
                     if let Some(a) = &app {
                         let _ = a.emit("session-meta", payload.clone());
                     }
-                    let mut bus_payload = payload;
-                    bus_payload.as_object_mut().map(|o| o.remove("id"));
-                    bus.emit(EventEnvelope::new(id, "meta", bus_payload));
+                    bus.emit(EventEnvelope::new(
+                        id,
+                        "meta",
+                        jsonl_meta_bus_payload(payload, title_pinned),
+                    ));
                 }
                 CoreEvent::BusEvent {
                     id,
@@ -1218,6 +1222,21 @@ fn simple_hash(s: &str) -> u32 {
     h
 }
 
+/// `meta` bus 事件(云同步/手机消费)的 payload。
+///
+/// 用户手动改名后 `title_pinned=true`:桌面端不再采纳 jsonl 里的 AI title,bus 上也不能
+/// 继续广播它,否则手机端会被稍后到达的 AI title 覆盖回旧名字。title 置 null 表示
+/// "不变"(sync-server 与手机 reducer 都按 null=unchanged 处理)。
+fn jsonl_meta_bus_payload(mut payload: serde_json::Value, title_pinned: bool) -> serde_json::Value {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("id");
+        if title_pinned {
+            obj.insert("title".into(), serde_json::Value::Null);
+        }
+    }
+    payload
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1300,5 +1319,22 @@ mod tests {
             extract_change_session_uuid_from_text("change session not-a-uuid"),
             None
         );
+    }
+    #[test]
+    fn jsonl_meta_bus_payload_strips_id_and_keeps_unpinned_title() {
+        let payload = serde_json::json!({"id": 3, "title": "AI title", "model": "m"});
+        let out = jsonl_meta_bus_payload(payload, false);
+        assert!(out.get("id").is_none());
+        assert_eq!(out["title"], "AI title");
+        assert_eq!(out["model"], "m");
+    }
+
+    #[test]
+    fn jsonl_meta_bus_payload_masks_title_for_pinned_sessions() {
+        let payload = serde_json::json!({"id": 3, "title": "AI title", "tokens": 42});
+        let out = jsonl_meta_bus_payload(payload, true);
+        assert!(out.get("id").is_none());
+        assert!(out["title"].is_null());
+        assert_eq!(out["tokens"], 42);
     }
 }
