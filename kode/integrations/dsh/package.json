@@ -22,6 +22,8 @@
     "scripts/build-bundle.js",
     "scripts/repair-inbox-history.js",
     "scripts/repair-inbox-history.py",
+    "scripts/repair-plugin-records.js",
+    "scripts/repair-plugin-records.py",
     "README.md",
     "cordis.patch.yml",
     "cordis.remote.patch.yml"

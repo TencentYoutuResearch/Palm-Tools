@@ -863,6 +863,11 @@ event and can block every session listing, resume, and handoff after reload.
 Regression checks must include `validateStoredEvents` from the released
 persistence package; relationship checks alone do not enforce event vocabulary.
 
+Upgrading the plugin fixes future writes; it does not rewrite existing session
+artifacts. If a history still reports an unknown non-ignorable Kode record after
+upgrading, repair that stored history once using the commands below. No Host
+restart is needed for the offline repair; retry loading the history afterward.
+
 For older Fast/shared-interaction metadata written without `ignorable`, run
 `scripts/repair-plugin-records.py --home <dsh-home> --session-id <id>
 --runtime-modules <released-node-modules> --node <node-24.22+>` to report first.
