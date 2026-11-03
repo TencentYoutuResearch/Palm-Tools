@@ -36,7 +36,7 @@ export async function hostDirectory(ctx, config = {}) {
       // Keep their files, but do not resurrect them under a new saved: alias.
       if (items.some(item => item.blank && (item.sessionId === tab.session_id || item.sessionId === tab.dsh_session_id || profiles?.binding(item.sessionId)?.threadId === tab.session_id))) continue
       const adopted = tab.dsh_session_id ?? importedSessionId(tab)
-      if (sessions.some(row => row.id === adopted || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))) continue
+      if (sessions.some(row => row.id === adopted || tab.transport_kind === 'runtime' && row.id === tab.session_id || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))) continue
       const id = savedDirectoryId(node.node_id, tab)
       const profileId = tab.agent_id ?? Object.keys(profiles?.sharedState?.desktop_ids ?? {}).find(id => profiles.sharedState.desktop_ids[id] === tab.backend_key)
       const profile = profiles?.list().find(profile => profile.id === profileId)
