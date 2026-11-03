@@ -65,7 +65,8 @@ for (const outcome of ['accepted', 'rejected', 'uncertain']) test(`Codex steerin
   try {
     const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
     agent.followup(message('initial', 'WAIT'))
-    for (let i = 0; i < 100 && !adapter.canSteer(agent.id); i++) await new Promise(resolve => setTimeout(resolve, 10))
+    const readyBy = Date.now() + 5000
+    while (!adapter.canSteer(agent.id) && Date.now() < readyBy) await new Promise(resolve => setTimeout(resolve, 10))
     assert.ok(adapter.canSteer(agent.id))
     const input = message('steering-input', 'Focus on the new task')
     agent.followup(input)
@@ -94,7 +95,8 @@ for (const type of ['claude', 'cursor', 'codebuddy']) for (const extension of [t
   try {
     const { agent } = await h.ctx.agents.create({ ...options, agentOptions: { ...options.agentOptions, model: 'fixture-fast' }, meta: { cwd: root } })
     agent.followup(message('initial', extension ? 'WAIT' : 'WAIT_TOOL'))
-    for (let i = 0; i < 100 && !adapter.live.get(agent.id)?.active?.ready; i++) await new Promise(resolve => setTimeout(resolve, 10))
+    const readyBy = Date.now() + 5000
+    while (!adapter.live.get(agent.id)?.active?.ready && Date.now() < readyBy) await new Promise(resolve => setTimeout(resolve, 10))
     const runtime = adapter.live.get(agent.id)
     assert.ok(runtime?.active?.ready)
     runtime.profile.type = type
@@ -388,8 +390,9 @@ test('cold native restore uses durable model ownership instead of caller default
   try {
     const first = await h.ctx.agents.create({ ...options, sessionId: 'cold-native-owner' })
     first.agent.followup(message('before-restart', 'First turn')); await first.agent.whenIdle(); await first.dispose()
-    const resumed = await h.ctx.agents.resume({ resumeSessionId: 'cold-native-owner', agentOptions: { provider: 'deepseek-official', model: 'fallback' } })
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: 'cold-native-owner', agentOptions: { provider: 'deepseek-official', model: 'fallback', reasoningEffort: 'high' } })
     assert.equal(resumed.agent.isKodeNativeAgent, true)
+    assert.equal(resumed.agent.options.reasoningEffort, undefined, 'caller defaults cannot add effort to a saved native model')
     resumed.agent.followup(message('after-restart', 'Continue the same conversation')); await resumed.agent.whenIdle()
     assert.equal(h.stored.get(resumed.agent.id).events.at(-1).data.reason.kind, 'completed', JSON.stringify(h.stored.get(resumed.agent.id).events.at(-1)))
     assert.deepEqual(routes, [options.agentOptions.provider, options.agentOptions.provider])
