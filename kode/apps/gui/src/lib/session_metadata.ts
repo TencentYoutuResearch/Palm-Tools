@@ -119,6 +119,24 @@ export function upsertSessionTab(
     : [...tabs, next]
 }
 
+/** A successful directory refresh owns shared rows, including removals. */
+export function reconcileSharedSessionTabs(tabs: TabInfo[], incoming: TabInfo[], pending: SessionMetadataBuffer): TabInfo[] {
+  const visible = new Set(incoming.map(tab => tab.id))
+  let next = tabs.filter(tab => {
+    if (!tab.sharedRuntime || visible.has(tab.id)) return true
+    pending.delete(tab.id)
+    return false
+  })
+  for (const row of incoming) {
+    const existing = next.find(tab => tab.id === row.id)
+    const updated = pending.consume({ ...existing, ...row,
+      ...(existing?.titlePinned ? { title: existing.title, titlePinned: true } : {}),
+    })
+    next = existing ? next.map(tab => tab.id === row.id ? updated : tab) : [...next, updated]
+  }
+  return next
+}
+
 export function sessionTabToPersisted(tab: TabInfo): PersistedTab {
   return {
     backend_key: tab.backendKey,
@@ -128,6 +146,7 @@ export function sessionTabToPersisted(tab: TabInfo): PersistedTab {
     cwd: tab.cwd ?? '',
     workspace_title: tab.workspaceTitle ?? null,
     session_id: tab.sessionId ?? null,
+    ...(tab.dshSessionId ? { dsh_session_id: tab.dshSessionId } : {}),
     model: tab.model ?? null,
     permission_mode: tab.permissionMode ?? null,
     endpoint_id: tab.endpointId?.kind === 'remote' ? tab.endpointId : null,

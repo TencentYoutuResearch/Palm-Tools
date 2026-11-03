@@ -503,7 +503,9 @@ async fn runtime_command(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input):
 }
 async fn runtime_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
-    Ok(Json(json!({"sessions":ctx.runtimes.snapshots().into_iter().map(|s|s["dto"].clone()).collect::<Vec<_>>(),"runtimes":{"gui":ctx.runtimes.available("gui"),"dsh":ctx.runtimes.available("dsh")}})))
+    let mut result = json!({"sessions":ctx.runtimes.snapshots().into_iter().map(|s|s["dto"].clone()).collect::<Vec<_>>(),"runtimes":{"gui":ctx.runtimes.available("gui"),"dsh":ctx.runtimes.available("dsh")}});
+    super::filter_visible_runtime_sessions(&mut result, &hub.store.document("workspaces")?);
+    Ok(Json(result))
 }
 
 async fn cloud_status(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {

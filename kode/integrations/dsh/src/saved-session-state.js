@@ -35,7 +35,7 @@ async function edit(client, key, change) {
   const document = new BackendDocument(client, key)
   for (let attempt = 0; attempt < 6; attempt++) {
     const value = await document.read()
-    change(value)
+    await change(value)
     try { return await document.write(value) } catch (error) { if (attempt === 5 || !/configuration changed/.test(error.message)) throw error }
   }
 }
@@ -43,10 +43,19 @@ export async function savedSessionOperation(client, input) {
   const { backend_key, session_id } = input.nativeSession ?? {}, operation = input.operation
   if (!['archive-session', 'unarchive-session', 'pin-session', 'unpin-session', 'rename-session', 'session-avatar'].includes(operation)) throw new Error('不支持此历史会话操作。')
   let id
-  await edit(client, 'session-index', index => {
+  await edit(client, 'session-index', async index => {
     const tab = localSavedTabs(index).find(tab => tab.backend_key === backend_key && tab.session_id === session_id)
     if (!tab) throw new Error('当前主机没有此历史会话。')
     id = tab.dsh_session_id ?? importedSessionId(tab)
+    if (!tab.dsh_session_id && tab.transport_kind === 'runtime') {
+      // Old GUI snapshots omitted the dsh id. Resolve the actual owner rather
+      // than archiving a second synthetic identity for the same conversation.
+      const directory = await client.call('/api/v1/messaging/runtime/sessions')
+      const owners = directory.sessions.filter(row => row.runtime === 'dsh' && row.backend_key === tab.backend_key
+        && (row.runtime_session_id === tab.session_id || row.native_thread_id === tab.session_id))
+      if (owners.length > 1) throw new Error('会话存在多个运行时身份，请刷新后重试。')
+      if (owners[0]) id = owners[0].runtime_session_id
+    }
     // Allocate the same metadata identity a future import would use. This
     // creates no transcript, runtime, profile, or native CLI process.
     index.native_sessions ??= []

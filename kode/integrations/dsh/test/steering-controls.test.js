@@ -20,7 +20,7 @@ test('unsupported Agent disables only the queue steering button without changing
     { type: 'span', props: { children: text } },
     ...['edit', 'remove', 'steer'].map(action => ({ type: 'button', props: { 'aria-label': action, onClick: click } })),
   ] } }
-  const tree = render({ native: () => original, useProjection: () => ({ type: 'codebuddy' }), t: key => key.split('.').at(-1) })
+  const tree = render({ native: () => original, useProjection: () => ({ type: 'custom' }), t: key => key.split('.').at(-1) })
   const children = tree.props.children
   assert.equal(children[0].props.children, text)
   assert.equal(children[1].props.onClick, click)
@@ -30,9 +30,9 @@ test('unsupported Agent disables only the queue steering button without changing
   assert.equal(original.props.children[3].props.disabled, undefined)
 })
 
-test('Codex keeps the original queue controls unchanged', () => {
+for (const type of ['codex', 'claude', 'cursor', 'codebuddy']) test(`${type} keeps the original queue controls unchanged`, () => {
   const tree = { type: 'button', props: { 'aria-label': 'steer', onClick() {} } }
-  assert.equal(controls()({ native: () => tree, useProjection: () => ({ type: 'codex' }), t: () => 'steer' }), tree)
+  assert.equal(controls()({ native: () => tree, useProjection: () => ({ type }), t: () => 'steer' }), tree)
 })
 
 test('the inert composer retains its component and does not invoke a memo component as a function', () => {
@@ -45,7 +45,7 @@ test('the inert composer retains its component and does not invoke a memo compon
 test('unsupported composer coerces steering to queue and blocks empty-draft queue steering without modifying its input', () => {
   const calls = [], input = { draft: 'Unfinished draft', queue: [{ id: 'queued' }], attachmentIds: ['image'] }
   const keyboard = { submit: (...args) => calls.push(args), steerQueue: () => calls.push('steerQueue'), editor: {} }
-  const props = { native() {}, keyboard, useProjection: () => ({ type: 'claude' }),
+  const props = { native() {}, keyboard, useProjection: () => ({ type: 'custom' }),
     useInput: select => select(input), useBusyEnter: select => select('steer') }
   const view = controls()(props)
   view.props.keyboard.submit('steer', 'enter')

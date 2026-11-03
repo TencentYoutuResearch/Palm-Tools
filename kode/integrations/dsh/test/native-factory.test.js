@@ -58,14 +58,15 @@ const options = { sessionId: 'session-native-check', agentOptions: { provider: '
 
 for (const outcome of ['accepted', 'rejected', 'uncertain']) test(`Codex steering ${outcome}: original active turn and input admission stay consistent`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-steering-')), wire = join(root, 'wire.jsonl')
-  const h = await host({ closeSession: async () => {} })
+  const h = await host({ closeSession: async () => {} }, true)
   const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))], env: { KODE_FIXTURE_RPC_LOG: wire, ...(outcome === 'rejected' ? { KODE_FIXTURE_STEER_REJECT: '1' } : outcome === 'uncertain' ? { KODE_FIXTURE_STEER_DROP: '1' } : {}) } }])
   const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
   Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
   try {
     const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
     agent.followup(message('initial', 'WAIT'))
-    for (let i = 0; i < 100 && !adapter.canSteer(agent.id); i++) await new Promise(resolve => setTimeout(resolve, 10))
+    const readyBy = Date.now() + 5000
+    while (!adapter.canSteer(agent.id) && Date.now() < readyBy) await new Promise(resolve => setTimeout(resolve, 10))
     assert.ok(adapter.canSteer(agent.id))
     const input = message('steering-input', 'Focus on the new task')
     agent.followup(input)
@@ -81,6 +82,45 @@ for (const outcome of ['accepted', 'rejected', 'uncertain']) test(`Codex steerin
     assert.equal(h.stored.get(agent.id).events.filter(event => event.type === 'user/message' && event.data.id === 'steering-input').length, 1)
     assert.equal(agent.inbox.nextStep.length + agent.inbox.nextTurn.length, 0)
     assert.ok(profiles.binding(agent.id).seenInputs.includes('steering-input'))
+  } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+for (const type of ['claude', 'cursor', 'codebuddy']) for (const extension of [true, false]) test(`${type} queued steering persists a replayable official inbox (${extension ? 'inject' : 'restart'})`, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-acp-factory-')), wire = join(root, 'wire.jsonl')
+  const h = await host({ closeSession: async () => {} }, true)
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type, executable: process.execPath, args: [fileURLToPath(new URL('./fixture-acp-server.js', import.meta.url))], env: { KODE_ACP_FIXTURE_LOG: wire, KODE_ACP_STEERING: extension ? '1' : '0' } }])
+  // Exercise each real binding and adapter route without invoking an installed CLI.
+  const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {}, resolveProfile: async profile => ({ ...profile, type: 'custom' }) })
+  Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, agentOptions: { ...options.agentOptions, model: 'fixture-fast' }, meta: { cwd: root } })
+    agent.followup(message('initial', extension ? 'WAIT' : 'WAIT_TOOL'))
+    const readyBy = Date.now() + 5000
+    while (!adapter.live.get(agent.id)?.active?.ready && Date.now() < readyBy) await new Promise(resolve => setTimeout(resolve, 10))
+    const runtime = adapter.live.get(agent.id)
+    assert.ok(runtime?.active?.ready)
+    runtime.profile.type = type
+    const input = message('steered', 'New requirement $fixture')
+    agent.followup(input)
+    const controller = { updateQueue() { throw new Error('Unexpected upstream transfer') } }
+    const dispose = installQueueSteering(h.ctx, controller)
+    try { await controller.updateQueue({ sessionId: agent.id, itemId: input.id, action: { kind: 'steer' } }) }
+    finally { dispose() }
+    await Promise.race([agent.whenIdle(), new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('ACP steering timed out')), 5000); timer.unref() })])
+    const events = h.stored.get(agent.id).events
+    assert.equal(events.filter(row => row.type === 'user/message' && row.data.id === input.id).length, 1)
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    if (!extension) {
+      assert.equal(events.filter(row => row.type === 'tool/result').length, 1)
+      assert.equal(events.find(row => row.type === 'tool/result').data.message.isError, true)
+    }
+    assert.equal(agent.inbox.nextTurn.length + agent.inbox.nextStep.length, 0)
+    assert.deepEqual(h.ctx.sessionProjections.stateOf(agent.session, 'inbox'), { 'next-turn': [], 'next-step': [] })
+    const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+    assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
+    const rows = (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.equal(rows.filter(row => row.method === 'session/new').length, 1)
+    assert.equal(rows.filter(row => row.method === 'session/prompt').length, extension ? 1 : 2)
   } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
 
@@ -341,5 +381,36 @@ test('unloading Kode restores the official factory without disposing third-party
     const next = await h.ctx.agents.create({...options,sessionId:'qq-after-unload'})
     assert.equal(next.agent.assertSteeringAvailable,undefined)
     await next.dispose(); await qq.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+test('cold native restore uses durable model ownership instead of caller defaults', async () => {
+  const routes = []
+  const h = await host({ async *stream(request) { routes.push(request.provider); yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} }, true)
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'cold-native-owner' })
+    first.agent.followup(message('before-restart', 'First turn')); await first.agent.whenIdle(); await first.dispose()
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: 'cold-native-owner', agentOptions: { provider: 'deepseek-official', model: 'fallback', reasoningEffort: 'high' } })
+    assert.equal(resumed.agent.isKodeNativeAgent, true)
+    assert.equal(resumed.agent.options.reasoningEffort, undefined, 'caller defaults cannot add effort to a saved native model')
+    resumed.agent.followup(message('after-restart', 'Continue the same conversation')); await resumed.agent.whenIdle()
+    assert.equal(h.stored.get(resumed.agent.id).events.at(-1).data.reason.kind, 'completed', JSON.stringify(h.stored.get(resumed.agent.id).events.at(-1)))
+    assert.deepEqual(routes, [options.agentOptions.provider, options.agentOptions.provider])
+    assert.equal(h.stored.get(resumed.agent.id).events.at(-1).data.reason.kind, 'completed')
+    await resumed.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+test('cold third-party restore is not captured by a Kode caller default', async () => {
+  const h = await host({ closeSession: async () => {} }, true)
+  try {
+    const route = { provider: 'deepseek-official', model: 'test-model' }
+    const first = await h.ctx.agents.create({ sessionId: 'cold-official-owner', agentOptions: route })
+    first.agent.session.append('model/selection', route)
+    await first.dispose()
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: 'cold-official-owner', agentOptions: options.agentOptions })
+    assert.notEqual(resumed.agent.isKodeNativeAgent, true)
+    assert.equal(resumed.agent.assertSteeringAvailable, undefined)
+    await resumed.dispose()
   } finally { await h.ctx.fiber.dispose() }
 })

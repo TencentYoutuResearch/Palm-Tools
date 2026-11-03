@@ -44,7 +44,7 @@ export class AcpSession {
     app.onRequest('session/request_permission', ({ params, signal }) => this.permission(params, signal))
     app.onRequest('elicitation/create', ({ params, signal }) => {
       if (!this.active || (params.sessionId && params.sessionId !== this.threadId)) return { action: 'cancel' }
-      return askAcpForm(params, (request, signal) => this.handlers.question?.(request, signal), AbortSignal.any([signal, this.active.signal]))
+      return askAcpForm(params, (request, signal) => this.handlers.question?.(request, signal), AbortSignal.any([signal, this.active.promptSignal ?? this.active.signal]))
     })
     app.onRequest('*', context => this.extension(context))
     this.connection = app.connect(ndJsonStream(Writable.toWeb(this.process.child.stdin), Readable.toWeb(this.process.child.stdout)))
@@ -72,7 +72,7 @@ export class AcpSession {
     if (tools.length) {
       this.proxy = await createToolProxy(tools, async (name, args) => {
         if (!this.active) throw new Error('Agent tools require an active conversation turn')
-        return this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.signal)
+        return this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.promptSignal ?? this.active.signal)
       })
       mcpServers.push(this.proxy.definition)
     }
@@ -165,14 +165,16 @@ export class AcpSession {
   async permission(params, requestSignal) {
     if (!this.active || params.sessionId !== this.threadId) return { outcome: { outcome: 'cancelled' } }
     const request = { threadId: this.threadId, turnId: this.active.turnId, itemId: params.toolCall.toolCallId, reason: params.toolCall.title ?? 'ACP Agent requests permission', command: JSON.stringify(params.toolCall.rawInput ?? {}) }
-    const signal = requestSignal ? AbortSignal.any([requestSignal, this.active.signal]) : this.active.signal
+    const turnSignal = this.active.promptSignal ?? this.active.signal
+    const signal = requestSignal ? AbortSignal.any([requestSignal, turnSignal]) : turnSignal
     const allowed = await this.handlers.approve?.(params.toolCall.kind === 'edit' ? 'item/fileChange/requestApproval' : 'item/commandExecution/requestApproval', request, signal)
     const option = params.options.find(o => o.kind === (allowed ? 'allow_once' : 'reject_once'))
     return { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } }
   }
   async extension({ method, params, signal: requestSignal }) {
     if (!this.active) throw new Error('ACP interaction has no active turn')
-    const signal = requestSignal ? AbortSignal.any([requestSignal, this.active.signal]) : this.active.signal
+    const turnSignal = this.active.promptSignal ?? this.active.signal
+    const signal = requestSignal ? AbortSignal.any([requestSignal, turnSignal]) : turnSignal
     if (method === 'cursor/create_plan') {
       const allowed = await this.handlers.approve?.('item/fileChange/requestApproval', { threadId: this.threadId, turnId: this.active.turnId, itemId: params.toolCallId, reason: params.plan }, signal)
       return { outcome: { outcome: allowed ? 'accepted' : 'rejected' } }
@@ -183,6 +185,59 @@ export class AcpSession {
       return { outcome: { outcome: 'answered', answers: params.questions.map(q => ({ questionId: q.id, selectedOptionIds: q.options.filter(o => result.answers[q.id]?.answers.includes(o.label)).map(o => o.id) })) } }
     }
     throw new Error(`Unsupported ACP interaction: ${method}`)
+  }
+  supportsSteering() { return this.info?._meta?.steering?.supported === true || ['claude', 'cursor', 'codebuddy'].includes(this.profile.type) }
+  canSteer() { return Boolean(this.supportsSteering() && this.active?.ready && !this.active.done && !this.active.restarting && !this.rpc.closed) }
+  validateInput(input) {
+    if (input.some(part => part.type === 'image') && !this.info.agentCapabilities?.promptCapabilities?.image && this.profile.type !== 'claude') throw Object.assign(new Error('此 Agent 未声明支持图片输入，请选择支持图片的 Agent。'), { rpcRejected: true })
+  }
+  startPrompt(active, input) {
+    active.promptAbort = new AbortController()
+    active.promptSignal = AbortSignal.any([active.signal, active.promptAbort.signal])
+    active.promptTask = this.request('session/prompt', { sessionId: this.threadId, prompt: input }, active.signal, 0)
+    active.ready = true
+    const task = active.promptTask.then(result => {
+      if (active.restarting) return
+      if (result.stopReason !== 'end_turn') active.end(new Error(`ACP turn stopped: ${result.stopReason}`)); else active.end()
+    }, error => { if (!active.restarting) active.end(error) })
+    this.requests.add(task); void task.finally(() => this.requests.delete(task))
+  }
+  async steer(input, signal = this.lifetime.signal) {
+    if (!this.canSteer()) throw Object.assign(new Error('当前原生轮次已结束。'), { rpcRejected: true })
+    this.validateInput(input)
+    const active = this.active
+    if (this.info?._meta?.steering?.supported === true) {
+      let result
+      try {
+        result = await this.request('_session/steering', { sessionId: this.threadId, prompt: input, _meta: { steering: { idleBehavior: 'promptRequired' } } }, signal)
+      } catch (error) {
+        // Protocol errors reject admission; transport failures remain uncertain.
+        if (typeof error.code === 'number' && [-32601, -32602, -32600].includes(error.code)) error.rpcRejected = true
+        throw error
+      }
+      if (result?.outcome === 'promptRequired') throw Object.assign(new Error('原生轮次已结束，输入将排队发送。'), { rpcRejected: true })
+      if (result?.outcome !== 'injected') throw new Error(`ACP steering outcome is uncertain: ${result?.outcome}`)
+      return { turnId: active.turnId }
+    }
+    // ACP v1 has no standard injection request. Stop the owning prompt, wait for
+    // its terminal response, then continue in the same native session.
+    active.restarting = true; active.ready = false
+    try {
+      active.promptAbort.abort(new Error('ACP prompt interrupted by new input'))
+      await this.connection.agent.notify('session/cancel', { sessionId: this.threadId })
+      await abortable(active.promptTask, AbortSignal.any([active.signal, signal, AbortSignal.timeout(15000)]))
+      active.signal.throwIfAborted(); signal.throwIfAborted()
+      const base = { threadId: this.threadId, turnId: active.turnId }
+      for (const item of active.tools.values()) active.push({ method: 'item/completed', params: { ...base, item: { ...item, status: 'failed', aggregatedOutput: 'Operation interrupted by new input; its outcome may be uncertain.' } } })
+      active.tools.clear()
+      active.push({ method: 'item/completed', params: { ...base, item: { id: 'answer', type: 'agentMessage' } } })
+      active.turnId = randomUUID()
+      active.restarting = false
+      this.startPrompt(active, input)
+      active.push({ method: 'turn/started', params: { threadId: this.threadId, turn: { id: active.turnId } } })
+      return { turnId: active.turnId }
+    } catch (error) { active.end(error); throw error }
+    finally { active.restarting = false }
   }
   async *turn(input, { model, signal = this.lifetime.signal, command, effort } = {}) {
     if (this.active) throw new Error('ACP conversation already has an active turn')
@@ -196,14 +251,12 @@ export class AcpSession {
     const abort = () => { void this.connection.agent.notify('session/cancel', { sessionId: this.threadId }).catch(() => {}); active.end(fused.reason ?? new Error('ACP turn cancelled')) }
     fused.addEventListener('abort', abort, { once: true })
     try {
-      if (input.some(part => part.type === 'image') && !this.info.agentCapabilities?.promptCapabilities?.image && this.profile.type !== 'claude') throw new Error('此 Agent 未声明支持图片输入，请选择支持图片的 Agent。')
+      this.validateInput(input)
       await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort)
       if (command) await this.waitForCommands(fused)
       if (command && !this.commands.some(row => row.name === command.name)) throw new Error(`此 Agent 未公布 /${command.name}，请使用 /help 查看可用命令。`)
-      const task = this.request('session/prompt', { sessionId: this.threadId, prompt: input }, fused, 0).then(result => {
-        if (result.stopReason !== 'end_turn') active.end(new Error(`ACP turn stopped: ${result.stopReason}`)); else active.end()
-      }, error => active.end(error))
-      this.requests.add(task); void task.finally(() => this.requests.delete(task))
+      this.startPrompt(active, input)
+      yield { method: 'turn/started', params: { threadId: this.threadId, turn: { id: active.turnId } } }
       while (!active.done || queue.length) {
         if (!queue.length && !active.done) await new Promise(resolve => { active.wake = resolve })
         if (active.error) throw active.error

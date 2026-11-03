@@ -143,6 +143,33 @@ async fn archived_legacy_gui_tabs_need_no_adapter_and_are_restorable_without_los
     assert_eq!(restored["tabs"][0]["transport_kind"],"acp");
     assert_eq!(s.hub.store.document("session-index").unwrap()["value"]["gui"]["tabs"].as_array().unwrap().len(),1);
 }
+
+#[tokio::test]
+async fn runtime_directory_applies_archive_without_losing_history_or_identity() {
+    let s = server("runtime-archive", vec![]).await;
+    let publication = serde_json::from_value::<crate::runtime::Publication>(json!({
+        "runtime":"dsh","boot_id":"archive-test","sessions":[{"session_id":"session-archive-example",
+        "dto":{"title":"Archive fixture","status":"idle"},
+        "events":[{"key":"one","kind":"message","payload":{"role":"user","text":"Retained history"}}]}]
+    })).unwrap();
+    let published = s._ctx.runtimes.publish(&s._ctx, publication).unwrap();
+    let id = published["sessions"][0]["id"].as_u64().unwrap();
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/runtime/sessions", s.url);
+    let initial: Value = client.get(&url).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(initial["sessions"][0]["id"], id);
+    let document = super::workspaces::ensure(&s.hub).unwrap();
+    let mut value = document["value"].clone();
+    value["global"]["archivedSessionIds"] = json!(["session-archive-example"]);
+    let saved = s.hub.store.save_document("workspaces", document["revision"].as_u64().unwrap(), value.clone()).unwrap();
+    let archived: Value = client.get(&url).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert!(archived["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(s._ctx.runtimes.history(id, 0, 100).unwrap().len(), 1);
+    value["global"]["archivedSessionIds"] = json!([]);
+    s.hub.store.save_document("workspaces", saved["revision"].as_u64().unwrap(), value).unwrap();
+    let restored: Value = client.get(&url).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(restored["sessions"][0]["id"], id);
+}
 async fn register(s: &Server, id: &str) -> Registration {
     reqwest::Client::new()
         .post(format!("{}/api/v1/messaging/sessions", s.url))

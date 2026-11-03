@@ -33,6 +33,9 @@ const DEBOUNCE_MS: u64 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedTab {
+    /// Stable dsh identity, distinct from the native CLI thread identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsh_session_id: Option<String>,
     #[serde(default)]
     pub transport_kind: Option<String>,
     pub backend_key: String,
@@ -396,6 +399,7 @@ mod tests {
         let s = PersistedState {
             version: 1,
             tabs: vec![PersistedTab {
+                dsh_session_id: Some("session-example".into()),
                 transport_kind: None,
                 backend_key: "codebuddy".into(),
                 title: "Test".into(),
@@ -427,6 +431,7 @@ mod tests {
         assert_eq!(back.tabs[0].backend_key, "codebuddy");
         assert!(back.tabs[0].title_pinned);
         assert_eq!(back.tabs[0].session_id.as_deref(), Some("abc-123"));
+        assert_eq!(back.tabs[0].dsh_session_id.as_deref(), Some("session-example"));
         assert_eq!(back.tabs[0].model.as_deref(), Some("claude-opus-4.7"));
         assert_eq!(back.tabs[0].permission_mode.as_deref(), Some("bypass"));
         assert_eq!(back.bridge_token.as_deref(), Some("deadbeef"));

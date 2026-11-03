@@ -8,8 +8,11 @@ export function installQueueSteering(ctx, controller) {
     const message = agent.inbox.nextTurn[index]
     if (!message || agent.status !== 'running') return original.call(this, request)
     agent.assertSteeringAvailable(message)
-    agent.steer(message)
+    // Every persisted prefix must have unique pending IDs across both queues.
+    // Validation happens before removal; a synchronous admission failure restores it.
     agent.inbox.splice('next-turn', index, 1, [])
+    try { agent.steer(message) }
+    catch (error) { agent.inbox.splice('next-turn', index, 0, [message]); throw error }
     return { accepted: true }
   }
   controller.updateQueue = wrapper

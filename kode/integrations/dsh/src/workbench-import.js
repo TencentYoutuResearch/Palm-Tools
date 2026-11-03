@@ -53,7 +53,12 @@ export async function saveNativeTab(client, profiles, agent, title) {
     const updatedAt = agent.updatedAt ?? agent.session.snapshotEvents?.().at(-1)?.time ?? saved?.updated_at ?? state.native_sessions[index]?.updated_at
     const row = { ...(Number.isFinite(updatedAt) && updatedAt > 0 ? { updated_at: updatedAt } : {}), backend_key: backend, agent_id: profile.id, title: title?.trim() || saved?.title || state.native_sessions[index]?.title || '未命名会话', title_pinned: true, cwd: agent.session.header.cwd, session_id: binding.threadId, dsh_session_id: agent.id, ...(model?{model}:{}), transport_kind: 'pty', endpoint_id: null }
     const pendingAvatars = state.presentation?.sessionAvatars
-    if (pendingAvatars && Object.hasOwn(pendingAvatars, agent.id)) { row.avatar_id = pendingAvatars[agent.id]; delete pendingAvatars[agent.id] }
+    if (pendingAvatars && Object.hasOwn(pendingAvatars, agent.id)) {
+      row.avatar_id = pendingAvatars[agent.id]
+      // Preserve explicit default-icon intent; row nulls alone also occur in
+      // imported GUI snapshots and must otherwise inherit the Agent avatar.
+      if (pendingAvatars[agent.id] !== null) delete pendingAvatars[agent.id]
+    }
     if (index >= 0) state.native_sessions[index] = { ...state.native_sessions[index], ...row }; else state.native_sessions.push(row)
     try { await document.write(state); return } catch (error) { if (attempt === 3 || !/configuration changed/.test(error.message)) throw error }
   }

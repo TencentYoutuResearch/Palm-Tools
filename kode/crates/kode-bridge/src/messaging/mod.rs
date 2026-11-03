@@ -16,6 +16,8 @@ pub use ssh::SshConfig;
 pub use ssh::Tunnel as SshTunnel;
 mod store;
 mod session_catalog;
+mod session_visibility;
+pub use session_visibility::filter_visible_runtime_sessions;
 mod transcript;
 pub mod workspaces;
 pub mod server;

@@ -291,19 +291,32 @@ impl Registry {
         {
             let guard = self.db.lock();
             let db = guard.as_ref().context("runtime unavailable")?;
-            let prior: Option<(String, String, Option<String>)> = db
+            let prior: Option<(String, String, Option<String>, String)> = db
                 .query_row(
-                    "SELECT fingerprint,status,result FROM runtime_commands WHERE id=?1",
+                    "SELECT fingerprint,status,result,boot FROM runtime_commands WHERE id=?1",
                     [request_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            if let Some((prior, status, result)) = prior {
+            if let Some((prior, status, result, prior_boot)) = prior {
                 if prior != fingerprint {
                     bail!("request identity conflicts with another operation")
                 };
                 if status == "done" {
-                    return decode_result(result.as_deref().context("missing runtime result")?);
+                    let raw = result.as_deref().context("missing runtime result")?;
+                    let failed = serde_json::from_str::<Value>(raw)?["error"].is_string();
+                    if runtime == "dsh" && kind == "create_session" && failed {
+                        // Creation submits no task and dsh derives its session ID from
+                        // this request ID. Only a new Host boot can recover a partial
+                        // creation; successful receipts and other commands never replay.
+                        let (boot, seen): (String, u64) = db.query_row("SELECT boot,seen FROM runtime_hosts WHERE runtime=?1", [runtime], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                        if boot == prior_boot || crate::now_ms().saturating_sub(seen) > 15000 {
+                            return decode_result(raw);
+                        }
+                        db.execute("UPDATE runtime_commands SET boot=?2,body=?3,status='queued',result=NULL WHERE id=?1", params![request_id, boot, serde_json::to_string(&body)?])?;
+                    } else {
+                        return decode_result(raw);
+                    }
                 }
             } else {
                 let host: Option<(String, u64)> = db
@@ -562,6 +575,41 @@ mod tests {
             true
         );
         assert!(ctx.runtimes.claim("dsh", "boot-1").is_err());
+    }
+
+    #[tokio::test]
+    async fn only_failed_dsh_creation_can_recover_after_a_new_host_boot() {
+        for kind in ["create_session", "input"] {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = crate::build_test_ctx(Default::default(), "test".into());
+            ctx.runtimes.open(&root.path().join("runtime.sqlite")).unwrap();
+            ctx.runtimes.publish(&ctx, publication("old")).unwrap();
+            let first_ctx = ctx.clone();
+            let first = tokio::spawn(async move { first_ctx.runtimes.request("dsh", None, kind, json!({}), "recover-request").await });
+            loop {
+                if !ctx.runtimes.claim("dsh", "old").unwrap()["commands"].as_array().unwrap().is_empty() { break; }
+                tokio::task::yield_now().await;
+            }
+            ctx.runtimes.settle("dsh", "old", "recover-request", json!({"error":"fixture creation failed"})).unwrap();
+            assert!(first.await.unwrap().is_err());
+            assert!(ctx.runtimes.request("dsh", None, kind, json!({}), "recover-request").await.is_err());
+            ctx.runtimes.release("dsh", "old").unwrap();
+            ctx.runtimes.publish(&ctx, publication("new")).unwrap();
+            if kind == "input" {
+                assert!(ctx.runtimes.request("dsh", None, kind, json!({}), "recover-request").await.is_err());
+                assert!(ctx.runtimes.claim("dsh", "new").unwrap()["commands"].as_array().unwrap().is_empty());
+                continue;
+            }
+            let retry_ctx = ctx.clone();
+            let retry = tokio::spawn(async move { retry_ctx.runtimes.request("dsh", None, kind, json!({}), "recover-request").await });
+            loop {
+                if !ctx.runtimes.claim("dsh", "new").unwrap()["commands"].as_array().unwrap().is_empty() { break; }
+                tokio::task::yield_now().await;
+            }
+            ctx.runtimes.settle("dsh", "new", "recover-request", json!({"value":{"sessionId":"same-session"}})).unwrap();
+            assert_eq!(retry.await.unwrap().unwrap()["sessionId"], "same-session");
+            assert_eq!(ctx.runtimes.request("dsh", None, kind, json!({}), "recover-request").await.unwrap()["sessionId"], "same-session");
+        }
     }
 
     #[tokio::test]
