@@ -1277,6 +1277,12 @@
     border-top: 1px solid var(--bd-default);
     padding-top: var(--sp-2);
     margin-top: var(--sp-1);
+    height: 236px;
+    min-height: 236px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
   .sh-label {
     display: block;
@@ -1303,7 +1309,8 @@
     list-style: none;
     padding: 0;
     margin: 0;
-    max-height: 220px;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
   }
   .sh-item {
