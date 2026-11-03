@@ -646,6 +646,8 @@ Saved native tabs can be pinned, renamed, archived, and restored through canonic
 
 SSH forwarding retains the saved tab's native backend/thread identity when applying these metadata operations on its owning Host. Foreign conversations without project membership remain under that Host in the sidebar instead of leaking into this computer's ungrouped sessions. Opening saved history resolves stable profile IDs and desktop backend aliases before unique legacy display names; an explicit missing or ambiguous Agent is never replaced with another configuration.
 
+Packaged Desktop installations resolve their bundled `kode-ssh-tunnel` by absolute path before falling back to PATH. An explicit `sshTunnelCommand` still takes precedence.
+
 ### Native conversation presentation
 
 These extensions live entirely in this plugin; they do not require editing dsh

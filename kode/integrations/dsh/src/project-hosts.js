@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { once } from 'node:events'
 import { hostDirectory, hostOperation, registerHostDirectory, DIRECTORY_PATH } from './workspace-directory.js'
 import { BackendDocument } from './backend-state.js'
+import { resolveBundledSshTunnel } from './bundle-runtime.js'
 import { createHash } from 'node:crypto'
 import { importSavedSession } from './workbench-import.js'
 import { deployRemote, deploymentHost, DEPLOY_STEPS } from './remote-deploy.js'
@@ -271,7 +272,8 @@ export class ProjectHosts {
   async createPortal(id) {
     const host = this.hosts.find(row => row.id === id)
     if (!host) throw new Error('远端主机不存在。')
-    const tunnel = await this.tunnel(this.config.sshTunnelCommand ?? 'kode-ssh-tunnel', host)
+    const command = this.config.sshTunnelCommand ?? await resolveBundledSshTunnel() ?? 'kode-ssh-tunnel'
+    const tunnel = await this.tunnel(command, host)
     let server
     try {
       const login = await fetch(`${tunnel.url}/?token=${encodeURIComponent(host.token)}`, { redirect: 'manual', signal: AbortSignal.timeout(10000) })
