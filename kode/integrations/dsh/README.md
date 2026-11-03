@@ -855,6 +855,18 @@ changes to a real account:
 KODE_TEST_NATIVE_PLUGIN_CLI=1 node scripts/test-integration.js
 ```
 
+### Exact model reasoning capabilities
+
+ACP Agents may advertise thought-level options only for the model currently
+selected in their protocol session. Both selector discovery and runtime exact
+model resolution must select the requested model before reading its capabilities;
+the generic default-model catalog is not authoritative for another model. The
+probe cache is scoped by profile revision, workspace, requested model and
+extension revision, and refresh invalidates all model entries for that provider.
+Canonical reasoning metadata is published from the same advertised effort list.
+Unsupported effort values remain errors; saved user choices are never silently
+downgraded. Cold resume and prepared calls use the same exact resolution path.
+
 ### Optional plugin history records
 
 Kode metadata writers must use `appendPluginRecord` from the installed dsh

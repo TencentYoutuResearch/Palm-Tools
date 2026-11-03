@@ -38,7 +38,10 @@ export class AgentRuntimeAdapter {
   imageRequestPricing() {}
   imageRequestTarget(_provider, _model, image) { return { width: image.width, height: image.height, maxBytes: image.bytes } }
   async resolveModel(provider, model) {
-    const profile = this.profile(provider), models = await this.listModels(provider)
+    // ACP capabilities are scoped to the selected model. A generic catalog
+    // advertises effort choices only for its default model; resolve the exact
+    // requested model before the harness validates request controls.
+    const profile = this.profile(provider), models = await this.listModels(provider, profile, model)
     const listed = models.find(row => row.id === model)
     // Native harnesses own model routing (including aliases and image tools).
     // Missing/stale outer model metadata must not block a supported input type.
