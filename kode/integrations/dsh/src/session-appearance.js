@@ -32,7 +32,10 @@ export class SessionAppearance {
     const gui = sessionId && index?.gui?.tabs?.find(row => local(row) && (row.dsh_session_id === sessionId || importedSessionId(row) === sessionId || native && row.backend_key === native.backend_key && row.session_id === native.session_id))
     const pending = index?.presentation?.sessionAvatars
     const fallback = index?.presentation?.agentAvatars?.[profileId] ?? null
-    const id = gui && Object.hasOwn(gui, 'avatar_id') ? gui.avatar_id : native && Object.hasOwn(native, 'avatar_id') ? native.avatar_id : Object.hasOwn(pending ?? {}, sessionId) ? pending[sessionId] : fallback
+    // GUI snapshots serialize an unset optional avatar as null. It is not an
+    // explicit reset of the Agent default; only the per-session choice map
+    // records that intent. Non-null native/GUI artwork remains authoritative.
+    const id = gui?.avatar_id ?? native?.avatar_id ?? (Object.hasOwn(pending ?? {}, sessionId) ? pending[sessionId] : fallback)
     return { id, url: `/api/kode/avatars/media?${id ? `avatar=${encodeURIComponent(id)}` : `type=${encodeURIComponent(type)}`}&state=idle` }
   }
   profileView(profile, sessionId, index) { return { ...profilePresentations([profile], this.profiles.sharedState)[0], avatar: this.avatarForSession(sessionId, profile.type, index, profile.id) } }
@@ -161,7 +164,11 @@ export class SessionAppearance {
       const native = (value.native_sessions ?? []).filter(row => local(row) && (row.dsh_session_id === sessionId || importedSessionId(row) === sessionId))
       const gui = (value.gui?.tabs ?? []).filter(row => local(row) && (row.dsh_session_id === sessionId || importedSessionId(row) === sessionId || native.some(tab => tab.backend_key === row.backend_key && tab.session_id === row.session_id)))
       value.presentation ??= {}; value.presentation.sessionAvatars ??= {}
-      if (native.length || gui.length) { for (const row of [...native, ...gui]) row.avatar_id = avatarId; delete value.presentation.sessionAvatars[sessionId] }
+      if (native.length || gui.length) {
+        for (const row of [...native, ...gui]) row.avatar_id = avatarId
+        if (avatarId === null) value.presentation.sessionAvatars[sessionId] = null
+        else delete value.presentation.sessionAvatars[sessionId]
+      }
       else value.presentation.sessionAvatars[sessionId] = avatarId
       try { this.index = await document.write(value); return } catch (error) { if (attempt === 5 || !/configuration changed/.test(error.message)) throw error }
     }

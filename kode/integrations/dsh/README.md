@@ -667,6 +667,12 @@ the gallery ID in canonical session-index metadata; an unbound conversation
 temporarily uses `presentation.sessionAvatars` until its native identity is
 saved. Agent launch bindings are unchanged.
 
+Missing or nullable imported GUI avatar fields inherit the Agent default. A
+non-null conversation choice overrides that default. An explicit choice of the
+built-in icon is retained as a null entry in `presentation.sessionAvatars`, so
+native catalog synchronization and cold restore cannot confuse user intent
+with an unset optional GUI field.
+
 Appearance (`ui-theme`, including native font roles) belongs to the entry Host,
 so switching SSH execution does not change the window theme. Execution settings
 remain owned by their selected Host. Native model discovery carries published
