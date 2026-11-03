@@ -304,13 +304,17 @@ impl Registry {
                 };
                 if status == "done" {
                     let raw = result.as_deref().context("missing runtime result")?;
-                    let failed = serde_json::from_str::<Value>(raw)?["error"].is_string();
+                    let receipt: Value = serde_json::from_str(raw)?;
+                    let malformed = invalid_dsh_creation(runtime, kind, &receipt["value"]);
+                    let failed = receipt["error"].is_string() || malformed;
                     if runtime == "dsh" && kind == "create_session" && failed {
                         // Creation submits no task and dsh derives its session ID from
                         // this request ID. Only a new Host boot can recover a partial
-                        // creation; successful receipts and other commands never replay.
+                        // creation, including legacy empty receipts. Complete successful
+                        // receipts and all other commands never replay.
                         let (boot, seen): (String, u64) = db.query_row("SELECT boot,seen FROM runtime_hosts WHERE runtime=?1", [runtime], |r| Ok((r.get(0)?, r.get(1)?)))?;
                         if boot == prior_boot || crate::now_ms().saturating_sub(seen) > 15000 {
+                            if malformed { bail!("Incomplete dsh creation receipt; update and reconnect the Host, then retry the same request identity") }
                             return decode_result(raw);
                         }
                         db.execute("UPDATE runtime_commands SET boot=?2,body=?3,status='queued',result=NULL WHERE id=?1", params![request_id, boot, serde_json::to_string(&body)?])?;
@@ -352,7 +356,9 @@ impl Registry {
                     |r| r.get(0),
                 )?;
                 if let Some(result) = result {
-                    return decode_result(&result);
+                    let value = decode_result(&result)?;
+                    if invalid_dsh_creation(runtime, kind, &value) { bail!("runtime did not return the created session identity; retry with the same request after updating the Host") }
+                    return Ok(value);
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -448,6 +454,11 @@ impl Registry {
         if db.execute("UPDATE runtime_commands SET status='done',result=?4 WHERE id=?1 AND runtime=?2 AND boot=?3 AND status='claimed'",params![id,runtime,boot,encoded])?!=1 {bail!("unknown or unclaimed runtime command")};
         Ok(())
     }
+}
+fn invalid_dsh_creation(runtime: &str, kind: &str, value: &Value) -> bool {
+    runtime == "dsh" && kind == "create_session"
+        && (value["id"].as_u64().is_none_or(|id| id == 0)
+            || value["runtime_session_id"].as_str().is_none_or(|id| id.is_empty()))
 }
 fn decode_result(raw: &str) -> Result<Value> {
     let value: Value = serde_json::from_str(raw)?;
@@ -606,9 +617,45 @@ mod tests {
                 if !ctx.runtimes.claim("dsh", "new").unwrap()["commands"].as_array().unwrap().is_empty() { break; }
                 tokio::task::yield_now().await;
             }
-            ctx.runtimes.settle("dsh", "new", "recover-request", json!({"value":{"sessionId":"same-session"}})).unwrap();
-            assert_eq!(retry.await.unwrap().unwrap()["sessionId"], "same-session");
-            assert_eq!(ctx.runtimes.request("dsh", None, kind, json!({}), "recover-request").await.unwrap()["sessionId"], "same-session");
+            ctx.runtimes.settle("dsh", "new", "recover-request", json!({"value":{"id":42,"runtime_session_id":"same-session"}})).unwrap();
+            assert_eq!(retry.await.unwrap().unwrap()["runtime_session_id"], "same-session");
+            assert_eq!(ctx.runtimes.request("dsh", None, kind, json!({}), "recover-request").await.unwrap()["runtime_session_id"], "same-session");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_dsh_creation_receipts_recover_only_on_a_new_boot() {
+        for receipt in [json!({}), json!({"value":null}), json!({"value":{}}), json!({"value":{"id":42}})] {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = crate::build_test_ctx(Default::default(), "test".into());
+            ctx.runtimes.open(&root.path().join("runtime.sqlite")).unwrap();
+            ctx.runtimes.publish(&ctx, publication("old")).unwrap();
+            let first_ctx = ctx.clone();
+            let first = tokio::spawn(async move { first_ctx.runtimes.request("dsh", None, "create_session", json!({}), "same-create").await });
+            loop {
+                if !ctx.runtimes.claim("dsh", "old").unwrap()["commands"].as_array().unwrap().is_empty() { break }
+                tokio::task::yield_now().await;
+            }
+            ctx.runtimes.settle("dsh", "old", "same-create", receipt).unwrap();
+            assert!(first.await.unwrap().is_err());
+            assert!(ctx.runtimes.request("dsh", None, "create_session", json!({}), "same-create").await.is_err());
+            assert!(ctx.runtimes.claim("dsh", "old").unwrap()["commands"].as_array().unwrap().is_empty());
+            ctx.runtimes.release("dsh", "old").unwrap();
+            ctx.runtimes.publish(&ctx, publication("new")).unwrap();
+            let retry_ctx = ctx.clone();
+            let retry = tokio::spawn(async move { retry_ctx.runtimes.request("dsh", None, "create_session", json!({}), "same-create").await });
+            loop {
+                let commands = ctx.runtimes.claim("dsh", "new").unwrap();
+                if !commands["commands"].as_array().unwrap().is_empty() {
+                    assert_eq!(commands["commands"][0]["id"], "same-create"); break
+                }
+                tokio::task::yield_now().await;
+            }
+            let value = json!({"id":42,"runtime_session_id":"same-native-session"});
+            ctx.runtimes.settle("dsh", "new", "same-create", json!({"value":value})).unwrap();
+            assert_eq!(retry.await.unwrap().unwrap(), value);
+            assert_eq!(ctx.runtimes.request("dsh", None, "create_session", json!({}), "same-create").await.unwrap(), value);
+            assert!(ctx.runtimes.claim("dsh", "new").unwrap()["commands"].as_array().unwrap().is_empty());
         }
     }
 
