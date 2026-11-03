@@ -644,6 +644,8 @@ Codex `$skill` completion reads `skills/list` for the current profile and worksp
 
 Saved native tabs can be pinned, renamed, archived, and restored through canonical Kode metadata even if their Agent configuration or adapter is gone. These actions allocate no Agent, import no transcript, and never rewrite CLI logs. Archive state stays in the workspace document; the session index retains the identity a future import would use. Kode's catalog respects that archive state too.
 
+SSH forwarding retains the saved tab's native backend/thread identity when applying these metadata operations on its owning Host. Foreign conversations without project membership remain under that Host in the sidebar instead of leaking into this computer's ungrouped sessions. Opening saved history resolves stable profile IDs and desktop backend aliases before unique legacy display names; an explicit missing or ambiguous Agent is never replaced with another configuration.
+
 ### Native conversation presentation
 
 These extensions live entirely in this plugin; they do not require editing dsh

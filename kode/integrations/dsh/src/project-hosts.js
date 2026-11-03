@@ -337,7 +337,7 @@ export class ProjectHosts {
         const response = await fetch(`${tunnel.url}/api/kode/session-create`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(input), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000) })
         const value = await response.json(); if (!response.ok) throw new Error(value.error ?? 'Remote session creation failed'); return value
       }, operation: async input => {
-        const response = await fetch(`${tunnel.url}${DIRECTORY_PATH}`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ operation: input.operation, args: input.args }), signal: AbortSignal.timeout(15000) })
+        const response = await fetch(`${tunnel.url}${DIRECTORY_PATH}`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ operation: input.operation, args: input.args, ...(input.nativeSession ? { nativeSession: { backend_key: input.nativeSession.backend_key, session_id: input.nativeSession.session_id } } : {}) }), signal: AbortSignal.timeout(15000) })
         const value = await response.json(); if (!response.ok) throw new Error(value.error ?? '远端操作失败。'); return value
       }, directory: async () => {
         const response = await fetch(`${tunnel.url}${DIRECTORY_PATH}`, { headers: { cookie }, signal: AbortSignal.timeout(8000) })
