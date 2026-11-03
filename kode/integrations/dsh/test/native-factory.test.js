@@ -414,3 +414,26 @@ test('cold third-party restore is not captured by a Kode caller default', async 
     await resumed.dispose()
   } finally { await h.ctx.fiber.dispose() }
 })
+
+
+test('unloading and reloading Kode never falls through to an official loop for native history', async () => {
+  const h = await host({ async *stream() { yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} }, true)
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'native-reload-barrier' })
+    first.agent.followup(message('first', 'Native turn')); await first.agent.whenIdle(); await first.dispose()
+    const eventCount = h.stored.get(first.agent.id).events.length
+    await h.fiber.dispose()
+    await assert.rejects(h.ctx.agents.resume({ resumeSessionId: first.agent.id, agentOptions: { provider: 'deepseek-official', model: 'fallback' } }), /保护历史/)
+    await assert.rejects(h.ctx.agents.create({ ...options, sessionId: 'native-during-reload' }), /保护历史/)
+    assert.equal(h.stored.get(first.agent.id).events.length, eventCount)
+    const other = await h.ctx.agents.create({ sessionId: 'official-during-reload', agentOptions: { provider: 'deepseek-official', model: 'fixture' } })
+    other.agent.session.append('model/selection', { provider: 'deepseek-official', model: 'fixture' }); await other.dispose()
+    const restoredOther = await h.ctx.agents.resume({ resumeSessionId: 'official-during-reload', agentOptions: options.agentOptions }); await restoredOther.dispose()
+    const reloaded = await h.ctx.plugin(factoryPlugin)
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: first.agent.id, agentOptions: { provider: 'deepseek-official', model: 'fallback' } })
+    assert.equal(resumed.agent.isKodeNativeAgent, true)
+    resumed.agent.followup(message('next', 'Continue')); await resumed.agent.whenIdle()
+    assert.equal(h.stored.get(first.agent.id).events.some(event => event.type === 'system/message'), false)
+    await resumed.dispose(); await reloaded.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})

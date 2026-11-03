@@ -14,6 +14,7 @@ test('npm package includes the Python entry points and their JavaScript workers'
     env,
   })
   const paths = new Set(JSON.parse(stdout)[0].files.map(file => file.path))
+  assert.ok(paths.has('scripts/audit-history.js'), 'Published package is missing the fresh history audit')
   for (const entry of ['repair-inbox-history', 'repair-plugin-records']) {
     for (const extension of ['py', 'js']) {
       const path = `scripts/${entry}.${extension}`
