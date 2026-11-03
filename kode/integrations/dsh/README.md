@@ -894,3 +894,27 @@ backs up the original log and projection cache, and atomically replaces the log.
 Only the two known optional Kode record types are admitted; their sequence,
 timestamp, payload and all other events stay intact. Other unknown required
 events still fail validation. Stop the owning session before applying repairs.
+
+
+### Native executor reload and misplaced system heads
+
+A native CLI history does not contain the harness-owned protected system head.
+During a Kode plugin reload its durable sessions must fail closed until their
+native executor is available. The routing sentinel preserves this distinction
+while allowing ordinary dsh sessions to keep using their official executor.
+
+The inbox maintenance script also recognizes a late harness `system/message`
+after proven native CLI history. It preserves the entire misplaced event as an
+ignorable `plugin:kode/system-head-repair` record, retaining its sequence and
+original prompt, and validates the full result with the released V4 reader.
+It never rewrites normal protected system heads or unproven/foreign histories.
+Repairs still require the writer lock, exact artifact/cache backup and atomic
+replacement. Applying a repair does not replay any user input.
+
+
+Run `node scripts/audit-history.js --home <dsh-home> --runtime-modules
+<released-node_modules>` (Node 24.22+) for a read-only audit. It enumerates current
+session folders every time, including conversations created since the last
+scan, and validates released V4 envelopes, relationships, fork cuts and inbox
+prefixes. It reports artifacts changing during a read and exits nonzero on
+validation failures. It never repairs a log or replays a prompt.

@@ -84,7 +84,17 @@ export class NativeAgentFactory {
 /** Route only explicit Kode selections; other plugins retain the official factory. */
 export function installNativeFactoryRouting(ctx, native) {
   const upstream = ctx.agents.requireFactory().target
-  const create = upstream.createAgent, resume = upstream.resume
+  // Keep a fail-closed sentinel through Kode plugin reloads. The official
+  // factory remains usable for its own models while native ownership cannot
+  // fall through to a loop that would inject a system head into native history.
+  const routingKey = Symbol.for('kode.native-factory.upstream')
+  const previous = upstream[routingKey]
+  const create = previous?.wrappedCreate === upstream.createAgent ? previous.create : upstream.createAgent
+  const resume = previous?.wrappedResume === upstream.resume ? previous.resume : upstream.resume
+  const routing = upstream[routingKey] = { create, resume }
+  const persistence = ctx.sessionPersistence
+  const nativeIds = new Set(Object.keys(ctx.kodeAgents.profiles?.bindings ?? {}))
+  const nativeUnavailable = () => new Error('Kode 原生 Agent 执行器正在重载，请稍后重试；为保护历史，不会改用普通 dsh 执行器。')
   const officialHandles = new Map()
   ctx.on('agent/disposed', ({agent}) => { if (officialHandles.get(agent.id)?.handle.agent === agent) officialHandles.delete(agent.id) })
   native.promote = async (agent, selection) => {
@@ -119,10 +129,11 @@ export function installNativeFactoryRouting(ctx, native) {
     } finally { await handle?.close() }
   }
   const createRouter = async function(owner, options) {
-    return await owns(options, false) ? native.createAgent(owner, options) : remember(owner, await create.call(this, owner, options))
+    if (await owns(options, false)) { nativeIds.add(options.sessionId); return native.createAgent(owner, options) }
+    return remember(owner, await create.call(this, owner, options))
   }
   const resumeRouter = async function(owner, options) {
-    if (await owns(options, true)) return native.resume(owner, options)
+    if (await owns(options, true)) { nativeIds.add(options.resumeSessionId); return native.resume(owner, options) }
     // Earlier Kode releases tagged third-party sessions with the empty Kode
     // preset. Repair only failed, never-executed sessions; preserve real history.
     if (ctx.agentPresets.resolve && options.agentOptions?.provider) {
@@ -143,10 +154,25 @@ export function installNativeFactoryRouting(ctx, native) {
     }
     return remember(owner, await resume.call(this, owner, options))
   }
-  upstream.createAgent = createRouter; upstream.resume = resumeRouter
+  upstream.createAgent = routing.wrappedCreate = createRouter; upstream.resume = routing.wrappedResume = resumeRouter
   return () => {
-    if (upstream.createAgent === createRouter) upstream.createAgent = create
-    if (upstream.resume === resumeRouter) upstream.resume = resume
+    if (upstream.createAgent === createRouter) upstream.createAgent = routing.wrappedCreate = function(owner, options) {
+      if (nativeIds.has(options.sessionId) || options.agentOptions?.provider?.startsWith('kode-agent-') || !options.agentOptions?.provider && options.meta?.agentPreset === 'kode-native') throw nativeUnavailable()
+      return create.call(this, owner, options)
+    }
+    if (upstream.resume === resumeRouter) upstream.resume = routing.wrappedResume = async function(owner, options) {
+      const id = options.resumeSessionId
+      if (nativeIds.has(id)) throw nativeUnavailable()
+      let handle
+      try {
+        handle = await persistence.open(id, 'read')
+        const stored = await handle.read()
+        const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
+          ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
+        if (selected?.provider?.startsWith('kode-agent-') || !selected?.provider && ((stored.header ?? handle.header)?.agentPreset === 'kode-native' || options.agentOptions?.provider?.startsWith('kode-agent-'))) throw nativeUnavailable()
+      } finally { await handle?.close() }
+      return resume.call(this, owner, options)
+    }
   }
 }
 export async function apply(ctx) {
