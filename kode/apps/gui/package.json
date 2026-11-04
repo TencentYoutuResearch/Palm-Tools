@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json && pnpm test:git-graph && pnpm test:terminal-theme && pnpm test:terminal-output && pnpm test:terminal-settings && pnpm test:terminal-mouse && pnpm test:updates && pnpm test:session-input && pnpmtest:chooser-history && pnpm test:file-drop && pnpm test:rename-sync",
+    "check": "svelte-check --tsconfig ./tsconfig.json && pnpm test:git-graph && pnpm test:terminal-theme && pnpm test:terminal-output && pnpm test:terminal-settings && pnpm test:terminal-mouse && pnpm test:updates && pnpm test:session-input && pnpm test:chooser-history && pnpm test:file-drop && pnpm test:rename-sync",
     "test:git-graph": "node --experimental-strip-types --test tests/git_graph_layout.test.ts",
     "test:updates": "node --experimental-strip-types --test tests/app_updates.test.ts",
     "test:terminal-theme": "node --experimental-strip-types --test tests/terminal_ansi_theme.test.ts",
