@@ -259,12 +259,34 @@ test('workspace menu reads the bound native source and adopts the picked directo
 
 
 test('Agent list keeps editors collapsed until requested', () => {
-  const c = client(), render = c.entry('settings.section')
-  const tree = render({ sessions: c.ctx.sessions })
+  const c = client(undefined, {}, { layout: { selectPanel() {} } }), render = c.entry('main', 'kode-settings')
+  const wrapper = render(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /配置主机/)
   const body = findNode(tree, child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
   assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
+  assert.equal(findNode(body, child => child?.props?.label === '默认 Agent')?.props.labelHeading, true)
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
+})
+
+test('default Agent settings persist model, effort and Fast as new-session defaults', async () => {
+  const agentDirectory = {
+    currentProfile: { id: 'codex', name: 'Codex', type: 'codex' }, profiles: [{ id: 'codex', name: 'Codex', type: 'codex' }], selectedProfileId: 'codex', configuredDefaultProfileId: 'codex', supportedTypes: ['codex'], types: { codex: { name: 'Codex', executable: 'codex' } },
+    defaultModelSelection: { model: 'fixture', reasoningEffort: 'high', fast: false },
+    models: [{ id: 'fixture', name: 'Fixture', reasoningEfforts: [{ id: 'high', name: 'High' }, { id: 'medium', name: 'Medium' }], fastCapability: { transport: 'service-tier', defaultEnabled: false } }, { id: 'plain', name: 'Plain' }],
+  }
+  const c = client(undefined, { agentDirectory }, { layout: { selectPanel() {} } }), wrapper = c.entry('main', 'kode-settings')(), panel = wrapper.children[0], outer = panel.type(panel.props)
+  const component = findNode(outer, node => node?.props?.settingsHost).type, props = { sessions: c.ctx.sessions, settingsHost: 'local' }
+  component(props); await new Promise(resolve => setImmediate(resolve))
+  const body = component(props), settings = findNode(body, node => node.type?.name === 'DefaultModelSettings'), tree = settings.type(settings.props)
+  findNode(tree, node => node.props?.label === '默认模型').props.onChange('plain')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(c.requests.at(-1), { action: 'set-default-model', profileId: 'codex', model: 'plain' })
+  findNode(tree, node => node.props?.label === '推理强度').props.onChange('medium')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(c.requests.at(-1), { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'medium', fast: false })
+  const fast = findNode(tree, node => node.type?.name === 'FastSwitch')
+  fast.props.onChange(true); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(c.requests.at(-1), { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'high', fast: true })
 })
 
 test('model menu owns model, effort and Fast selection in one trigger', async () => {
@@ -278,9 +300,18 @@ test('model menu owns model, effort and Fast selection in one trigger', async ()
   const tree = render({ sessionId: 'native', sessions: c.ctx.sessions }), menu = findNode(tree, node => node.type === 'Menu')
   assert.deepEqual(Array.from(menu.props.items.filter(item => item.id), item => item.id), ['models', 'effort', 'fast', 'reload'])
   assert.match(menu.props.anchor.props.label, /Fixture · High/)
-  menu.props.onSelect('fast'); await new Promise(resolve => setImmediate(resolve))
+  const fastSwitch = findNode(menu.props.items.find(item => item.id === 'fast').label, node => node.type?.name === 'FastSwitch')
+  assert.ok(fastSwitch)
+  menu.props.onSelect('fast'); assert.equal(c.requests.length, 0, 'the outer row has no text-toggle action')
+  const button = fastSwitch.type(fastSwitch.props)
+  assert.equal(button.props.role, 'switch'); assert.equal(button.props['aria-checked'], false)
+  let prevented = 0, stopped = 0
+  button.props.onClick({ preventDefault: () => prevented++, stopPropagation: () => stopped++ })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(prevented, 1); assert.equal(stopped, 1); assert.equal(c.requests.length, 1, 'the switch must not also select the outer menu row')
   const request = c.requests.at(-1)
   assert.equal(request.action, 'select'); assert.equal(request.profileId, 'codex'); assert.equal(request.model, 'fixture'); assert.equal(request.reasoningEffort, 'high'); assert.equal(request.fast, true)
+  assert.match(source, /\.kode-fast-switch\[aria-checked=true\]>\.kode-fast-switch-thumb\{transform:translateX\(16px\)\}/)
 })
 
 test('handoff uses a compact action and excludes the current Agent from targets', async () => {
@@ -296,27 +327,73 @@ test('handoff uses a compact action and excludes the current Agent from targets'
   assert.deepEqual(Array.from(select.props.options, option => option.value), ['', 'claude'])
 })
 
-test('Plugin and Skills sources stay a multi-item list with an on-demand editor',()=>{
+test('Plugin and Skills sources stay a multi-item list with an on-demand editor and detail preview',()=>{
  const slots=[];let index=0
- const scope={React:{Fragment:'fragment'},Button:'button',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',h:(type,props,...children)=>({type,props,children}),useEffect(){},useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
+ const scope={React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
  vm.runInNewContext(source.slice(source.indexOf('  function HubSettings'),source.indexOf('  function GoalBar')),scope)
  const render=()=>{index=0;return scope.HubSettings({host:'local'})}
- render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote'},{id:'local',kind:'local',location:'/tmp/skills'}],targets:{codex:{}}}
+ render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote',subdir:'plugins/remote',targets:['dsh'],nativeStatus:{dsh:'skills-only'},updatedAt:1,release:'r1',packages:[{name:'remote',path:'.',displayName:'Remote Toolkit',description:'Remote summary',longDescription:'Long remote summary',version:'1.2.3',author:'team',category:'Engineering',logo:'assets/logo.png',skills:[{name:'example-skill',description:'Skill summary'}],agents:[{name:'reviewer',description:'Reviews changes'}],hooks:[{name:'PreToolUse',description:'Hook summary'}],commands:[{name:'build',description:'Build summary'}],rules:[{name:'discipline',description:'Rule summary'}],mcp:[{name:'remote-mcp',type:'http'}]}]},{id:'local',kind:'local',location:'/tmp/skills',targets:['dsh'],skills:['skills--local']}],targets:{dsh:{}}}
  const closed=render(),text=JSON.stringify(closed)
- assert.match(text,/remote/);assert.match(text,/local/);assert.match(text,/Plugin \/ Skills 来源列表/);assert.doesNotMatch(text,/Git 地址/)
+ assert.match(text,/Remote Toolkit/);assert.match(text,/Remote summary/);assert.match(text,/local/);assert.match(text,/Plugin \/ Skills 来源列表/);assert.doesNotMatch(text,/Git 地址/)
+ assert.doesNotMatch(visibleText(closed),/nativeStatus|kode-agent-tag/)
+ const logoNode=findNode(closed,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img');assert.match(logo.props.src,/logo=remote&package=0&v=1/)
+ const imageStyle={display:''};logo.props.onError({currentTarget:{style:imageStyle}});assert.equal(imageStyle.display,'none')
+ const refreshedLogo=findNode(scope.SourceLogo({...logoNode.props,source:{...logoNode.props.source,updatedAt:2}}),node=>node.type==='img');assert.notEqual(refreshedLogo.props.key,logo.props.key);refreshedLogo.props.onLoad({currentTarget:{style:imageStyle}});assert.equal(imageStyle.display,'')
+ const actions=findNode(closed,node=>node.props?.className==='kode-source-actions')
+ assert.ok(actions);assert.deepEqual(actions.children.map(node=>node.children[0]),['编辑','更新并同步','移除'])
+ assert.equal(actions.children[2].props.className,'kode-source-remove')
+ assert.match(source,/\.kode-source-actions\{[^}]*justify-content:flex-end/)
+ assert.match(source,/\.kode-source-remove\{[^}]*color:var\(--dsw-alias-state-error-primary\)/)
+ const summary=findNode(closed,node=>node.props?.className==='kode-source-summary');summary.props.onClick()
+ const preview=render(),dialog=findNode(preview,node=>node.type==='modal'&&node.props.open);assert.ok(dialog)
+ const details=visibleText(dialog);assert.match(details,/Agent 同步/);assert.match(details,/DeepSeek Harness/);assert.match(details,/Skills 已同步/);assert.match(details,/example-skill/);assert.match(details,/Skill summary/);assert.match(details,/Subagents/);assert.match(details,/reviewer/);assert.match(details,/Reviews changes/);assert.match(details,/PreToolUse/);assert.match(details,/Hook summary/);assert.match(details,/\/build/);assert.match(details,/discipline/);assert.match(details,/Rule summary/);assert.match(details,/remote-mcp/);assert.match(details,/Long remote summary/);assert.match(details,/https:\/\/example.test\/remote/)
+ const previewNode=findNode(dialog,node=>node.type===scope.SourcePreview),previewTree=previewNode.type(previewNode.props)
+ const syncSection=findNode(previewTree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步');const syncTree=syncSection.type(syncSection.props);assert.ok(findNode(syncTree,node=>node.type==='check'&&node.props.className==='kode-source-sync-icon'))
+ assert.match(source,/\.kode-source-dialog\{[^}]*max-height:min\(640px,calc\(100dvh - 64px\)\)/);assert.match(source,/\.kode-source-dialog :has\(>\.kode-source-preview\)\{[^}]*overflow-y:auto/)
+ dialog.props.onClose();assert.equal(findNode(render(),node=>node.type==='modal').props.open,false)
  findNode(closed,node=>node.type==='button'&&node.children.includes('添加来源')).props.onClick()
- assert.match(JSON.stringify(render()),/Git 地址/)
+ const editor=findNode(render(),node=>node.props?.className==='kode-agent-editor kode-source-editor');assert.ok(editor)
+ assert.ok(findNode(editor,node=>node.props?.className==='kode-field kode-source-field-location'))
+ assert.equal(findNode(editor,node=>node.props?.className==='kode-source-editor-actions').children.length,2)
+ assert.match(source,/\.kode-source-editor\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
+ assert.match(source,/\.kode-source-field-location,\.kode-source-field-subdir,\.kode-source-editor>\.kode-hub-targets,\.kode-source-editor-actions\{grid-column:1\/-1\}/)
+ assert.match(source,/@media\(max-width:600px\)\{\.kode-source-editor\{grid-template-columns:minmax\(0,1fr\)\}/)
 })
 
-test('official settings shell, model navigation and plugin inventory remain untouched', () => {
-  const c = client()
-  assert.equal(c.ctx.slots.entries('settings.section').length, 1)
-  assert.equal(c.ctx.slots.entries('settings.section')[0].options.id, 'kode')
-  assert.equal(c.ctx.slots.entries('settings.section')[0].options.label(), 'Kode')
-  assert.equal(c.shell.component, c.native)
-  assert.equal(c.shell.locale, 'settings')
-  assert.ok(c.shell.children['settings.section'])
-  for (const dispose of c.disposers) dispose()
+test('plugin detail selection follows a stable package path when polling reorders packages',()=>{
+ const scope={React:{Fragment:'fragment'},SelectField:'select',transport:null,h:(type,props,...children)=>({type,props,children})}
+ vm.runInNewContext(source.slice(source.indexOf('  function sourcePresentation'),source.indexOf('  function GoalSidebar')),scope)
+ const multi={id:'multi',skills:[],targets:['codex','claude'],nativeStatus:{codex:'installed',claude:'ready'},packages:[{name:'one',path:'plugins/one',displayName:'One',logo:'one.png',skills:[{name:'one-skill'}]},{name:'two',path:'plugins/two',displayName:'Two',logo:'two.png',skills:[{name:'two-skill'}]}]}
+ let tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},host:'local'})
+ assert.equal(findNode(tree,node=>node.type==='select').props.value,'plugins/two')
+ assert.equal(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Skills').props.items[0].name,'two-skill')
+ assert.deepEqual(Array.from(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步').props.items,item=>item.description),['已安装并完成同步','已同步，下次启动会话时加载'])
+ multi.packages.reverse();tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},host:'local'})
+ assert.equal(findNode(tree,node=>node.type==='select').props.value,'plugins/two')
+ assert.equal(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Skills').props.items[0].name,'two-skill')
+ const logoNode=findNode(tree,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img')
+ assert.match(logo.props.src,/logo=multi&package=0/)
+})
+
+test('Kode settings keep both the native settings section and sidebar panel entries', () => {
+  const selected = [], c = client(undefined, {}, { layout: { selectPanel: id => selected.push(id) } })
+  const settings = c.ctx.slots.entries('settings.section').find(row => row.options.id === 'agent-presets')
+  assert.ok(settings, JSON.stringify(c.ctx.slots.entries('settings.section').map(row => row.options)))
+  assert.equal(settings.options.name, 'settings.section'); assert.equal(settings.options.label(), 'Kode')
+  assert.equal(c.ctx.slots.entries('settings.trigger').length, 0)
+  const sidebar = c.ctx.slots.entries('sidebar.panellist').find(row => row.options.id === 'kode-settings')
+  assert.ok(sidebar, JSON.stringify(c.ctx.slots.entries('sidebar.panellist').map(row => row.options)))
+  assert.equal(sidebar.options.name, 'sidebar.panellist'); assert.equal(sidebar.options.label, 'Kode')
+  assert.equal(sidebar.component, 'IconAgentPresetOutlineRegular')
+  const main = c.entry('main', 'kode-settings'), wrapper = main(), panel = wrapper.children[0], tree = panel.type(panel.props)
+  assert.match(JSON.stringify(tree), /插件与集成/); assert.doesNotMatch(JSON.stringify(tree), /Agent 共享/)
+  assert.match(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/)
+  assert.match(findNode(tree, node => node.type === 'img' && node.props.src?.includes('type=kode'))?.props.src, /\/api\/kode\/avatars\/media\?type=kode&state=idle/)
+  assert.match(source,/\.kode-settings-scope \.kode-field\{[^}]*width:100%;max-width:none/)
+  assert.match(source,/\.kode-settings-brand-avatar\{[^}]*width:32px;height:32px/)
+  assert.match(source,/\.kode-settings-brand p\{[^}]*font-size:12px;line-height:18px/)
+  c.ctx.layout.selectPanel('kode-settings')
+  assert.deepEqual(selected, ['kode-settings'])
   assert.equal(c.shell.component, c.native)
 })
 
@@ -408,8 +485,8 @@ test('directory browsing keeps injected callbacks stable across unrelated rerend
 test('remote Agent configuration and default writes stay on the selected Host without changing the active workspace', async () => {
  const calls=[],agents={profiles:[{id:'remote-codex',name:'Remote Codex',type:'codex',executable:'codex'}],types:{codex:{name:'Codex'}},selection:{provider:'kode-agent-remote-codex',model:'default'},configuredDefaultProfileId:'remote-codex'}
  const transport={current:'local',subscribe:()=>()=>{},path:url=>url,select:()=>{throw new Error('settings must not switch execution Host')},fetch:async(url,options,host)=>{calls.push({url,host,body:options?.body&&JSON.parse(options.body)});return{ok:true,json:async()=>url.includes('/settings/')?{result:{ok:true,value:{}}}:agents}}}
- const c=client(undefined,{}, {kodeTransport:transport})
- const outer=c.entry('settings.section')({sessions:c.ctx.sessions,slots:c.ctx.slots})
+ const c=client(undefined,{}, {kodeTransport:transport,layout:{selectPanel(){}}})
+ const wrapper=c.entry('main','kode-settings')(),panel=wrapper.children[0],outer=panel.type(panel.props)
  const component=findNode(outer,node=>node?.props?.settingsHost).type
  component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
  await new Promise(resolve=>setImmediate(resolve))
@@ -551,8 +628,33 @@ test('goal dock reuses the queued composer width and panel presentation',()=>{
 test('connected service uses a success icon and hover details with compact Agent groups',()=>{
  assert.match(source,/IconCheckOutlineRegular, \{ size: 14, className: 'kode-service-connected-icon'/)
  assert.match(source,/className: 'kode-service-recovery-actions', title: hint/)
- assert.match(source,/\.kode-settings-group-title\{[^}]*margin:0 0 -4px/)
+ assert.match(source,/\.kode-settings-group-title\{font-size:14px;font-weight:600;line-height:20px;color:var\(--dsw-alias-label-primary\);margin:4px 0 -4px/)
+ assert.match(source,/\.kode-settings-section \.kode-agent-settings>\.kode-field:first-child\{margin-bottom:0\}/)
  assert.match(source,/\.kode-agent-rows\{[^}]*margin:0;padding:0/)
+})
+
+test('mobile pairing uses one structured form and centers its QR invitation',()=>{
+ assert.match(source,/className: 'kode-mobile-pairing', 'aria-label': '手机配对'/)
+ assert.match(source,/className: 'kode-mobile-pairing-form', onSubmit:/)
+ assert.match(source,/type: 'submit', variant: 'primary', disabled: busy \|\| !server\.trim\(\)/)
+ assert.match(source,/\.kode-mobile-pairing-form \.kode-field\{margin:0\}/)
+ assert.match(source,/\.kode-pairing-qr\{display:flex;flex-direction:column;align-items:center;gap:12px;margin:0;text-align:center\}/)
+ assert.doesNotMatch(source,/同步服务已连接。生成二维码后/)
+})
+
+test('Agent avatar edit marks use a small offset badge instead of covering the artwork',()=>{
+ assert.match(source,/kode-avatar-edit-mark'[^\n]*IconEditOutlineRegular, \{ size: 8 \}/)
+ assert.match(source,/\.kode-avatar-edit-mark\{position:absolute;right:-6px;bottom:-5px;[^}]*width:12px;height:12px/)
+})
+
+test('service status and personalization use explicit labeled cards and fill the settings content width',()=>{
+ assert.match(source,/className: 'kode-host-service', 'aria-label': '服务状态'/)
+ assert.match(source,/className: 'kode-host-service-body'/)
+ assert.match(source,/\.kode-mobile-pairing,\.kode-host-service\{display:flex;flex-direction:column;gap:12px;padding:16px/)
+ assert.match(source,/className: 'kode-personalization-session-label' \}, '当前会话'/)
+ assert.match(source,/\.kode-personalization-session strong\{[^}]*font-size:14px;font-weight:500/)
+ assert.match(source,/\.kode-settings-page \.kode-settings-section>\.kode-agent-settings\{width:100%;max-width:none;min-width:0;box-sizing:border-box\}/)
+ assert.match(source,/\.kode-settings-page \.kode-personalization \.kode-avatar-content,\.kode-settings-page \.kode-personalization \.kode-avatar-grid,\.kode-settings-page \.kode-personalization \.kode-avatar-preview\{width:100%;min-width:0;box-sizing:border-box\}/)
 })
 
 test('goal dock pause, resume and clear controls retain the current session identity',async()=>{

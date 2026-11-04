@@ -1,5 +1,5 @@
 /** Shared Kode backend documents. Browser storage and frontend lifetimes own no configuration. */
-import { AgentProfiles } from './agent-profiles.js'
+import { AgentProfiles, normalizeModelDefaults } from './agent-profiles.js'
 export class BackendDocument {
   constructor(client, key) { this.client = client; this.key = key; this.revision = 0 }
   async read() { const row = await this.client.call(`/api/v1/messaging/workbench/documents/${this.key}`); this.revision = row.revision; return row.value }
@@ -10,6 +10,7 @@ export class BackendAgentProfiles extends AgentProfiles {
   adopt(state) {
     if (state?.version !== 1 || !Array.isArray(state.profiles) || !state.bindings || typeof state.bindings !== 'object') throw new Error('Invalid Kode Agent document')
     this.defaultProfileId = state.defaultProfileId ?? null
+    this.modelDefaults = normalizeModelDefaults(state.modelDefaults)
     this.sharedState = structuredClone(state)
     this.profiles = state.profiles; this.bindings = Object.assign(Object.create(null), state.bindings)
   }
@@ -22,7 +23,7 @@ export class BackendAgentProfiles extends AgentProfiles {
       const existing = state?.profiles ?? []
       state = await this.document.write({ ...state, version: 1,
         profiles: [...existing.filter(profile => !migrated.some(row => row.id === profile.id) && !names.has(`${profile.type}:${profile.name.toLocaleLowerCase()}`)), ...migrated],
-        bindings: { ...structuredClone(this.bindings), ...state?.bindings }, dsh_migrated: true })
+        bindings: { ...structuredClone(this.bindings), ...state?.bindings }, modelDefaults: { ...this.modelDefaults, ...normalizeModelDefaults(state?.modelDefaults) }, dsh_migrated: true })
     }
     this.adopt(state); return this
   }
@@ -30,7 +31,7 @@ export class BackendAgentProfiles extends AgentProfiles {
   update(operation) {
     const task = this.chain.then(async () => {
       await this.reload()
-      const state = { ...structuredClone(this.sharedState), version: 1, profiles: this.list(), bindings: structuredClone(this.bindings) }
+      const state = { ...structuredClone(this.sharedState), version: 1, modelDefaults: structuredClone(this.modelDefaults), profiles: this.list(), bindings: structuredClone(this.bindings) }
       const result = operation(state)
       this.adopt(await this.document.write(state))
       return structuredClone(result)

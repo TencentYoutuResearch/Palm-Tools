@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Session } from '@deepseek-ai/dsh-session'
 import { appendFastPreference, cursorFastVariant, effectiveFast, fastPreference, fastProjection, fastServiceTier, withModelVariantFast } from '../src/model-fast.js'
+import { resolveDefaultSelection } from '../src/model-alias.js'
 
 test('Fast preferences are session-local, model-local and preserve explicit false', () => {
   let state = fastProjection.init()
@@ -39,6 +40,16 @@ test('Cursor Fast toggles only between advertised model variants', () => {
   assert.equal(cursorFastVariant(bracket, false), standard)
   assert.equal(withModelVariantFast([{ id: bracket }])[0].fastCapability, undefined)
   assert.deepEqual(withModelVariantFast([{ id: bracket }, { id: standard }])[0].fastCapability, { transport: 'model-variant', defaultEnabled: true, fastModelId: bracket, standardModelId: standard })
+})
+
+test('default model resolution validates effort and handles both Fast transports', () => {
+  const service = [{ id: 'fixture', reasoningEfforts: [{ id: 'medium' }, { id: 'high' }], defaultReasoningEffort: 'medium', fastCapability: { transport: 'service-tier', tier: 'priority', defaultEnabled: false } }]
+  assert.deepEqual(resolveDefaultSelection(service, { model: 'fixture', reasoningEffort: 'high', fast: true }), { model: 'fixture', reasoningEffort: 'high', fast: true })
+  assert.throws(() => resolveDefaultSelection(service, { model: 'fixture', reasoningEffort: 'invalid' }), /推理强度/)
+  assert.throws(() => resolveDefaultSelection([{ id: 'plain' }], { model: 'plain', fast: true }), /Fast/)
+  const variants = withModelVariantFast([{ id: 'grok', reasoningEfforts: [{ id: 'high' }], defaultReasoningEffort: 'high' }, { id: 'grok-fast', reasoningEfforts: [{ id: 'high' }], defaultReasoningEffort: 'high' }])
+  assert.deepEqual(resolveDefaultSelection(variants, { model: 'grok', fast: true }), { model: 'grok-fast', reasoningEffort: 'high', fast: true })
+  assert.deepEqual(resolveDefaultSelection(variants, { model: 'grok-fast', fast: false }), { model: 'grok', reasoningEffort: 'high', fast: false })
 })
 
 test('Fast preference records can be restored by the released session reader', () => {

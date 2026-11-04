@@ -10,7 +10,7 @@ import { importedSessionId } from './saved-session-state.js'
 import { writePrivateJson } from './agent-profiles.js'
 
 const states = new Set(['idle', 'running', 'awaiting', 'error'])
-const icons = { codex: 'codex.png', claude: 'claudecode.png', codebuddy: 'codebuddy.png', cursor: 'cursor.png' }
+const icons = { kode: 'kode.png', codex: 'codex.png', claude: 'claudecode.png', codebuddy: 'codebuddy.png', cursor: 'cursor.png' }
 const validAvatarId = id => typeof id === 'string' && /^gallery\/[^/\\\x00]+$/.test(id) && !id.includes('..')
 function resolveGalleryId(id, catalog) {
   const seen = new Set()

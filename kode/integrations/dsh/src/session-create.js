@@ -3,7 +3,8 @@ import { randomUUID, createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import { BackendDocument } from './backend-state.js'
 import { profileRoute } from './agent-profiles.js'
-import { resolveAdvertisedModel } from './model-alias.js'
+import { resolveDefaultSelection } from './model-alias.js'
+import { appendFastPreference } from './model-fast.js'
 const required = (value, name, max = 4096) => { if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new Error(`Invalid ${name}`); return value.trim() }
 export function installSessionCreator(ctx, backend, nodeId) {
   const document = new BackendDocument(backend, 'session-index')
@@ -56,7 +57,7 @@ export function installSessionCreator(ctx, backend, nodeId) {
       const matches = wanted ? exact.length ? exact : profiles.filter(profile => profile.name.toLocaleLowerCase().includes(wanted)) : []
       if (wanted && matches.length !== 1) throw new Error(`Agent configuration is ${matches.length ? 'ambiguous' : 'unavailable'}; available names: ${profiles.map(profile => profile.name).join(', ')}`)
       const inherited = source && runtime.profiles.binding(source.id)?.profile
-      const profile = matches[0] ?? (inherited && runtime.hasRuntime(inherited.type) ? inherited : profiles.find(profile => profile.type === 'codex') ?? profiles[0])
+      const profile = matches[0] ?? (inherited && runtime.hasRuntime(inherited.type) ? inherited : profiles.find(profile => profile.id === runtime.profiles.defaultProfileId) ?? profiles.find(profile => profile.type === 'codex') ?? profiles[0])
       if (!profile) throw new Error('No installed Agent runtime is available')
       let workspace
       const registry = ctx.get('workspaceRegistry')
@@ -86,10 +87,10 @@ export function installSessionCreator(ctx, backend, nodeId) {
       if (mode === 'danger-full-access' && policy?.mode !== 'danger-full-access') throw new Error('New sessions cannot escalate the caller permission')
       const provider = profileRoute(profile.id)
       const models = (await runtime.adapter.listModels(provider, profile, modelRequest)).filter(row => row.id !== 'default')
-      const requestedModel = modelRequest ?? record.model ?? profile.defaultModel ?? models.find(row => row.isDefault)?.id ?? models[0]?.id
-      if (!requestedModel) throw new Error('The selected Agent returned no model')
-      const model = resolveAdvertisedModel(models, requestedModel)
-      await update(state => { state.creations[key].model = model })
+      const preference = modelRequest ? { model: modelRequest } : record.selection ?? (record.model ? { model: record.model } : runtime.profiles.defaultModelFor?.(profile.id))
+      const selection = resolveDefaultSelection(models, preference, record.model ?? profile.defaultModel), model = selection.model
+      const selectedModel = models.find(row => row.id === model), route = { provider, model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) }
+      await update(state => { state.creations[key].model = model; state.creations[key].selection = selection })
       const controller = ctx.get('sessionController')
       if (registry.archivedSessionIds?.includes(record.sessionId)) throw new Error('The partial session was archived; inspect it before retrying')
       // Reuse partial sessions directly: controller.create may mint another ID
@@ -110,10 +111,11 @@ export function installSessionCreator(ctx, backend, nodeId) {
       if (typeof agent.selectModel !== 'function') {
         const factory = ctx.get('kodeNativeFactory')
         if (!factory?.promote) throw new Error('Kode Agent executor is not ready; retry this creation key after Host initialization')
-        agent = await factory.promote(agent, { provider, model })
+        agent = await factory.promote(agent, route)
         ctx.get('permissionPresets')?.set(agent.session, mode)
       }
-      agent.selectModel({ provider, model })
+      agent.selectModel(route)
+      if (selection.fast !== undefined && selectedModel.fastCapability.transport !== 'model-variant') appendFastPreference(agent.session, route, selection.fast, selectedModel.fastCapability.tier)
       await runtime.profiles.bind(agent.id, profile.id); runtime.recordBinding(agent, profile)
       await ctx.get('sessionController').rename({ sessionId: agent.id, title })
       const delegated = Boolean(source || input.requester)

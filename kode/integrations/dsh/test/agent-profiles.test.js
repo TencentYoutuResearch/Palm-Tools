@@ -44,3 +44,21 @@ test('type chooses defaults without inferring a type from an executable name', (
   assert.equal(normalizeProfile({ name: 'Codex wrapper', type: 'custom', executable: 'my-agent', protocol: 'codex' }).protocol, 'codex')
   assert.throws(() => normalizeProfile({ name: 'Unknown wire', type: 'custom', executable: 'my-agent', protocol: 'terminal' }), /protocol/)
 })
+
+test('default model selections persist independently of built-in executable profiles', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-model-defaults-')), file = join(root, 'profiles.json')
+  try {
+    const profiles = await new AgentProfiles(file).open([{ id: 'worker', name: 'Worker', type: 'codex' }])
+    await profiles.setDefaultModel('worker', { model: 'fixture', reasoningEffort: 'high', fast: true })
+    assert.throws(() => profiles.setDefaultModel('worker', { model: 'fixture', fast: 'yes' }), /Fast/)
+    const reopened = await new AgentProfiles(file).open()
+    assert.deepEqual(reopened.defaultModelFor('worker'), { model: 'fixture', reasoningEffort: 'high', fast: true })
+    const builtin = { id: 'builtin-codex', name: 'Codex', type: 'codex' }
+    await reopened.ensureBuiltins([builtin])
+    await reopened.setDefaultModel('builtin-codex', { model: 'builtin-model', reasoningEffort: 'medium', fast: false })
+    await reopened.ensureBuiltins([builtin])
+    assert.deepEqual(reopened.defaultModelFor('builtin-codex'), { model: 'builtin-model', reasoningEffort: 'medium', fast: false })
+    await reopened.remove('worker')
+    assert.equal(reopened.defaultModelFor('worker'), undefined)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

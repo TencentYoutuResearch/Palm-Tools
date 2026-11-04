@@ -14,3 +14,15 @@ test('valid backend payloads and error messages retain their behavior', async ()
   assert.deepEqual(await client(Response.json({sessions:[]})).call(path), {sessions:[]})
   await assert.rejects(client(Response.json({error:'denied'}, {status:403})).call(path), /kode backend \(403\): denied/)
 })
+test('binary backend assets retain authentication, content type and byte payloads', async () => {
+  let request
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47])
+  const binary = new BackendClient('http://localhost:47870', 'test-token', { fetch: async (url, options) => {
+    request = { url, options }
+    return new Response(bytes, { headers: { 'content-type': 'image/png', 'content-length': String(bytes.length) } })
+  } })
+  const result = await binary.asset('/api/v1/messaging/workbench/agent-hub?logo=team&package=0')
+  assert.equal(request.options.headers.authorization, 'Bearer test-token'); assert.equal(request.options.redirect, 'error')
+  assert.equal(result.contentType, 'image/png'); assert.deepEqual([...result.body], [...bytes])
+  await assert.rejects(client(new Response('<html></html>', { headers: { 'content-type': 'text/html' } })).asset(path), /image/)
+})

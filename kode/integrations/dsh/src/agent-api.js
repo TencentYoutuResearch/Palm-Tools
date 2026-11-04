@@ -2,7 +2,7 @@
 import { AGENT_TYPES } from './agent-profiles.js'
 import { profileRoute } from './agent-runtime.js'
 import { SUPPORTED_AGENT_TYPES } from './native-session.js'
-import { resolveAdvertisedModel } from './model-alias.js'
+import { resolveAdvertisedModel, resolveDefaultSelection } from './model-alias.js'
 import { appendFastPreference, effectiveFast } from './model-fast.js'
 const PATH = '/api/kode/agents'
 const json = (res, status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
@@ -53,8 +53,12 @@ export function registerAgentApi(ctx, service) {
         const profile = binding?.profile ?? profiles.list().find(p => p.id === selectedProfileId)
         const catalog = { groups: [] }
         if (query.get('refresh') === '1' && profile) adapter.invalidateModels?.(profileRoute(profile.id))
-        let models = [], modelError
-        try { if (!configurationOnly && profile && available(profile)) models = await modelsFor(profile, catalog, selection?.provider === profileRoute(profile.id) ? selection.model : undefined) } catch (error) { modelError = error.message }
+        let models = [], modelError, defaultModelSelection
+        try { if (profile && available(profile)) models = await modelsFor(profile, catalog, selection?.provider === profileRoute(profile.id) ? selection.model : undefined) } catch (error) { modelError = error.message }
+        if (configurationOnly && profile && models.length) {
+          try { defaultModelSelection = resolveDefaultSelection(models, profiles.defaultModelFor?.(profile.id), profile.defaultModel) }
+          catch (error) { modelError = error.message }
+        }
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })
         const installed = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
         const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
@@ -63,7 +67,7 @@ export function registerAgentApi(ctx, service) {
         const selectedModel = models.find(row => row.id === selection?.model)
         const fast = effectiveFast(fastState, selection, selectedModel)
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
-          selectedProfileId, selection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
+          selectedProfileId, selection, defaultModelSelection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
           canChangeAgent: agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true,
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
@@ -77,6 +81,14 @@ export function registerAgentApi(ctx, service) {
         const id = input.profileId ?? null
         if (id !== null && !available(profiles.get(id))) throw new Error('此 Agent 的执行插件尚未安装。')
         json(res, 200, await profiles.setDefaultProfile(id)); return
+      }
+      if (input.action === 'set-default-model') {
+        const profile = profiles.get(input.profileId)
+        if (!available(profile)) throw new Error('此 Agent 的执行插件尚未安装。')
+        const models = await modelsFor(profile, { groups: [] }, input.model)
+        if (!models.length) throw new Error('无法读取此 Agent 的模型，请检查可执行文件和登录状态后重试。')
+        const selection = resolveDefaultSelection(models, { model: input.model, reasoningEffort: input.reasoningEffort, fast: input.fast }, profile.defaultModel)
+        json(res, 200, await profiles.setDefaultModel(profile.id, selection)); return
       }
       if (input.action === 'agent-avatar') {
         if (!service.appearance) throw new Error('头像配置服务尚未就绪。')
@@ -106,30 +118,32 @@ export function registerAgentApi(ctx, service) {
         if (position?.lastTurn > 0 || agent.status !== 'idle') throw new Error('Start a new conversation to change its Agent; the current conversation retains its history and runtime.')
         await profiles.clearUnusedBinding(agent.id)
       }
-      let provider, model, reasoningEffort, selectedModel, fast
+      let provider, model, reasoningEffort, selectedModel, fast, requestedFast
       {
         provider = profileRoute(profile.id)
-        const prior = selected(agent)
+        const prior = selected(agent), inheritDefaults = input.model === undefined && (!binding || currentProfileId !== profile.id || prior?.provider !== provider || !prior.model || prior.model === 'default')
+        const defaults = inheritDefaults ? profiles.defaultModelFor?.(profile.id) : undefined
+        requestedFast = input.fast ?? defaults?.fast
         const models = await modelsFor(profile, { groups: [] }, input.model ?? (prior?.provider === provider ? prior.model : undefined))
         if (!models.length) throw new Error('无法读取此 Agent 的模型，请检查可执行文件和登录状态后重试。')
-        model = input.model ?? (prior?.provider === provider && prior.model !== 'default' ? prior.model : undefined) ?? profile.defaultModel ?? models.find(m => m.isDefault)?.id ?? models[0].id
+        model = input.model ?? (prior?.provider === provider && prior.model !== 'default' ? prior.model : undefined) ?? defaults?.model ?? profile.defaultModel ?? models.find(m => m.isDefault)?.id ?? models[0].id
         model = resolveAdvertisedModel(models, model)
         selectedModel = models.find(row => row.id === model)
-        if (input.fast !== undefined) {
-          if (typeof input.fast !== 'boolean') throw new Error('Fast 必须是布尔值。')
+        if (requestedFast !== undefined) {
+          if (typeof requestedFast !== 'boolean') throw new Error('Fast 必须是布尔值。')
           const capability = selectedModel.fastCapability
           if (!capability) throw new Error('此模型未公布 Fast 模式。')
           if (capability.transport === 'model-variant') {
-            model = resolveAdvertisedModel(models, input.fast ? capability.fastModelId : capability.standardModelId)
+            model = resolveAdvertisedModel(models, requestedFast ? capability.fastModelId : capability.standardModelId)
             selectedModel = models.find(row => row.id === model)
           }
         }
         const efforts = selectedModel.reasoningEfforts ?? []
-        const sameModel = prior?.provider === provider && (prior.model === model || input.fast !== undefined && prior.model === input.model)
-        reasoningEffort = input.reasoningEffort ?? (sameModel ? prior.reasoningEffort : undefined) ?? selectedModel.defaultReasoningEffort
+        const sameModel = !inheritDefaults && prior?.provider === provider && (prior.model === model || requestedFast !== undefined && prior.model === input.model)
+        reasoningEffort = input.reasoningEffort ?? (sameModel ? prior.reasoningEffort : undefined) ?? defaults?.reasoningEffort ?? selectedModel.defaultReasoningEffort
         if (reasoningEffort && !efforts.some(row => row.id === reasoningEffort)) {
           if (input.reasoningEffort) throw new Error('此模型未公布该推理强度，请重新选择。')
-          reasoningEffort = undefined
+          reasoningEffort = selectedModel.defaultReasoningEffort
         }
         fast = effectiveFast(ctx.sessionProjections.stateOf(agent.session, 'kodeFast'), { provider, model }, selectedModel)
       }
@@ -144,8 +158,8 @@ export function registerAgentApi(ctx, service) {
         rebound = true
       }
       const selection = agent.selectModel(selectedRoute)
-      if (typeof input.fast === 'boolean' && selectedModel.fastCapability.transport !== 'model-variant') appendFastPreference(agent.session, selectedRoute, input.fast, selectedModel.fastCapability.tier)
-      fast = input.fast ?? fast
+      if (typeof requestedFast === 'boolean' && selectedModel.fastCapability.transport !== 'model-variant') appendFastPreference(agent.session, selectedRoute, requestedFast, selectedModel.fastCapability.tier)
+      fast = requestedFast ?? fast
       await agent.ctx?.parallel?.('session/flush',agent.session)
       await profiles.bind(agent.id, profile.id)
       service.recordBinding?.(agent, profile)

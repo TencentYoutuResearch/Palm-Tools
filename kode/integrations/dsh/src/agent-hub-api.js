@@ -12,6 +12,15 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(res, 403, { error: 'Host owner required' })
     try {
       const query = new URL(req.url, 'http://localhost').searchParams
+      if (req.method === 'GET' && query.has('logo')) {
+        const asset = await hub.logo(query.get('logo'), query.get('package'))
+        res.statusCode = 200
+        res.setHeader('content-type', asset.contentType)
+        res.setHeader('content-length', asset.body.length)
+        res.setHeader('cache-control', 'private, max-age=60')
+        res.setHeader('x-content-type-options', 'nosniff')
+        return res.end(asset.body)
+      }
       if (req.method === 'GET' && !query.get('session_id')) return send(res, 200, await hub.read())
       let input
       if (req.method === 'POST') {
@@ -61,6 +70,6 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
         await agent.ctx.sessions.flush(agent.session)
       }
       return send(res, 200, { supported: true, goal: goalSnapshot(agent.session) })
-    } catch (error) { return send(res, 400, { error: error.message }) }
+    } catch (error) { return send(res, error.status ?? 400, { error: error.message }) }
   } })
 }

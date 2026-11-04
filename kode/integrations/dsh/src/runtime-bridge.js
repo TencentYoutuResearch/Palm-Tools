@@ -1,4 +1,5 @@
-import { resolveAdvertisedModel } from './model-alias.js'
+import { resolveDefaultSelection } from './model-alias.js'
+import { appendFastPreference } from './model-fast.js'
 import { needsEmptySessionCheck, setupOnlySession } from './empty-session.js'
 /** Project the existing dsh runtime into Kode. Never run a second Agent loop. */
 import { randomUUID, createHash } from 'node:crypto'
@@ -160,14 +161,16 @@ export class RuntimeBridge {
       if (error) throw new Error(error.message)
       if (resolved.status === 'running' || resolved.session.snapshotEvents?.().some(event => ['turn/start', 'user/message', 'request/header'].includes(event.type))) throw new Error('Partial session already has activity; inspect it before retrying creation')
       const provider = profileRoute(profile.id), models = await runtime.adapter.listModels(provider, profile, payload.model)
-      const model = resolveAdvertisedModel(models, payload.model || profile.defaultModel || models.find(model => model.isDefault)?.id || models[0]?.id)
+      const selection = resolveDefaultSelection(models, payload.model ? { model: payload.model } : runtime.profiles.defaultModelFor?.(profile.id), profile.defaultModel), model = selection.model
+      const selectedModel = models.find(row => row.id === model), route = { provider, model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) }
       let agent = resolved
       if (typeof agent.selectModel !== 'function') {
         const factory = this.service('kodeNativeFactory')
         if (!factory?.promote) throw new Error('Kode Agent executor is not ready')
-        agent = await factory.promote(agent, { provider, model })
+        agent = await factory.promote(agent, route)
       }
-      agent.selectModel({ provider, model })
+      agent.selectModel(route)
+      if (selection.fast !== undefined && selectedModel.fastCapability.transport !== 'model-variant') appendFastPreference(agent.session, route, selection.fast, selectedModel.fastCapability.tier)
       await runtime.profiles.bind(agent.id, profile.id); runtime.recordBinding(agent, profile)
       await agent.ctx.sessions.flush(agent.session)
       await this.publish()

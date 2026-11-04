@@ -45,13 +45,25 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     assert.equal(profiles.defaultProfileId,one.profile.id)
     assert.deepEqual(ctx.agentDefaultModel.currentSelection(),officialDefault)
     const beforeDiscovery=service.adapter.listModels
-    service.adapter.listModels=async()=>{throw new Error('configuration listing must not discover models')}
-    const configuration=await (await fetch(endpoint+'?configuration=1',{headers:{'x-test-role':'owner'}})).json()
-    assert.equal(configuration.modelError,undefined);assert.deepEqual(configuration.models,[])
+    service.adapter.listModels=async()=>{throw new Error('configuration model discovery failed')}
+    const failedConfiguration=await (await fetch(endpoint+'?configuration=1',{headers:{'x-test-role':'owner'}})).json()
+    assert.equal(failedConfiguration.modelError,'configuration model discovery failed');assert.deepEqual(failedConfiguration.models,[])
     service.adapter.listModels=beforeDiscovery
+    const configuration=await (await fetch(endpoint+'?configuration=1',{headers:{'x-test-role':'owner'}})).json()
+    assert.equal(configuration.modelError,undefined);assert.deepEqual(configuration.models.map(model=>model.id),['fixture'])
+    assert.deepEqual(configuration.defaultModelSelection,{model:'fixture',reasoningEffort:'medium',fast:false})
+    const savedDefault=await (await request({action:'set-default-model',profileId:one.profile.id,model:'fixture',reasoningEffort:'high',fast:true})).json()
+    assert.deepEqual(savedDefault.defaultModelSelection,{model:'fixture',reasoningEffort:'high',fast:true})
+    assert.deepEqual(profiles.defaultModelFor(one.profile.id),{model:'fixture',reasoningEffort:'high',fast:true})
+    assert.equal((await request({action:'set-default-model',profileId:one.profile.id,model:'fixture',reasoningEffort:'invalid'})).status,400)
+    assert.deepEqual(profiles.defaultModelFor(one.profile.id),{model:'fixture',reasoningEffort:'high',fast:true})
+    assert.equal((await request({action:'set-default-model',profileId:two.profile.id,model:'fixture',reasoningEffort:'high',fast:true})).status,200)
+    selection={provider:`kode-agent-${two.profile.id}`,model:'fixture',reasoningEffort:'medium'}
     assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id })).status, 200)
     assert.equal(profiles.binding(agent.id).profile.executable, 'tcodex')
     assert.equal(selected.at(-1).model, 'fixture', 'select an advertised model instead of a synthetic CLI default')
+    assert.equal(selected.at(-1).reasoningEffort,'high','an unbound draft inherits configured defaults even when the global provider already matches')
+    assert.equal(fastEvents().at(-1).fast,true)
     const catalog = await (await request()).json()
     assert.deepEqual(catalog.models.map(m => m.id), ['fixture'])
     assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id, model: 'nonexistent' })).status, 400)
