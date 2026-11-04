@@ -561,7 +561,7 @@ fn read_git_summary(path: &Path, commit_limit: usize) -> WorkspaceGitSummary {
         ..Default::default()
     };
 
-    if let Ok(status) = run_git_raw(path, &["status", "--porcelain=v1", "--branch", "-z"]) {
+    if let Ok(status) = run_git_raw(path, &["status", "--porcelain=v1", "--branch", "--untracked-files=all", "-z"]) {
         parse_git_status(&status, &mut summary, "");
     }
     // porcelain v1 把 submodule 折叠成单个 M 条目,内部文件不可见。
@@ -731,7 +731,7 @@ fn collect_submodule_changes(root: &Path, summary: &mut WorkspaceGitSummary) {
             continue;
         }
         if let Ok(sub_status) =
-            run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "-z"])
+            run_git_raw(&sub_abs, &["status", "--porcelain=v1", "--branch", "--untracked-files=all", "-z"])
         {
             parse_git_status(&sub_status, summary, &format!("{sub_path}/"));
         }
