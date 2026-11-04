@@ -1654,6 +1654,16 @@ pub struct SessionPage {
     pub has_more: bool,
 }
 
+async fn run_session_history_task<T, F>(task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("session history task failed: {error}"))
+}
+
 /// 新建 tab 时列出 cwd 下的历史 session,按最近修改倒序分页。
 /// 只解析当前页的 transcript:目录里 session 很多时首屏也只读 `limit` 个文件。
 #[tauri::command]
@@ -1673,30 +1683,40 @@ pub async fn list_sessions_for_cwd(
     let protocol = backends
         .get(&backend_key)
         .map(|config| config.protocol_key(&backend_key))
-        .unwrap_or(&backend_key);
-    let Some(profile) = kode_core::session::backend::profile_for_key(protocol) else {
-        return Ok(SessionPage {
-            sessions: Vec::new(),
-            has_more: false,
-        });
-    };
-    let pinned_titles = crate::persistence::load().session_titles;
-    let (page, has_more) =
-        profile.list_sessions_page(cwd_path, offset.unwrap_or(0), limit.unwrap_or(usize::MAX));
-    let mut sessions: Vec<SessionSummary> = page
-        .into_iter()
-        .map(|s| SessionSummary {
-            session_id: s.session_id.clone(),
-            title: session_title_with_override(&s.session_id, s.title, &pinned_titles),
-            model: s.model,
-            total_tokens: s.total_tokens,
-            last_modified_secs: s.last_modified_secs,
-        })
-        .collect();
+        .unwrap_or(&backend_key)
+        .to_string();
+    let cwd = cwd_path.to_path_buf();
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(usize::MAX);
 
-    dedupe_session_summaries(&mut sessions);
+    // Codex/tcodex history discovery recursively scans every rollout under the
+    // backend's sessions root before it can filter by cwd. Keep that filesystem
+    // walk and the selected transcript parsing off the async runtime so a large
+    // history cannot delay a concurrent "New session" command.
+    run_session_history_task(move || {
+        let Some(profile) = kode_core::session::backend::profile_for_key(&protocol) else {
+            return SessionPage {
+                sessions: Vec::new(),
+                has_more: false,
+            };
+        };
+        let pinned_titles = crate::persistence::load().session_titles;
+        let (page, has_more) = profile.list_sessions_page(&cwd, offset, limit);
+        let mut sessions: Vec<SessionSummary> = page
+            .into_iter()
+            .map(|s| SessionSummary {
+                session_id: s.session_id.clone(),
+                title: session_title_with_override(&s.session_id, s.title, &pinned_titles),
+                model: s.model,
+                total_tokens: s.total_tokens,
+                last_modified_secs: s.last_modified_secs,
+            })
+            .collect();
 
-    Ok(SessionPage { sessions, has_more })
+        dedupe_session_summaries(&mut sessions);
+        SessionPage { sessions, has_more }
+    })
+    .await
 }
 
 /// 按最新修改时间保留每个逻辑 session 的一个 rollout。
@@ -1864,8 +1884,25 @@ mod specops_bridge_tests {
     use parking_lot::Mutex;
 
     use super::{
-        dedupe_session_summaries, extract_session_meta, wait_for_bridge_addr, SessionSummary,
+        dedupe_session_summaries, extract_session_meta, run_session_history_task,
+        wait_for_bridge_addr, SessionSummary,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_history_task_does_not_block_the_async_runtime() {
+        let history = run_session_history_task(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            7
+        });
+        tokio::pin!(history);
+
+        tokio::select! {
+            result = &mut history => panic!("history finished before the runtime timer: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+
+        assert_eq!(history.await.unwrap(), 7);
+    }
 
     #[test]
     fn extract_session_meta_uses_latest_codebuddy_usage_tokens() {
