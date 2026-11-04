@@ -38,13 +38,12 @@ async function executable(path) {
   }
 }
 
-export async function resolveBundledServer({
+async function resolveBundledExecutable(name, {
   root = pluginRoot,
   platform = process.platform,
   arch = process.arch,
 } = {}) {
   const target = runtimePlatform(platform, arch)
-  const name = platform === 'win32' ? 'kode-session-server.exe' : 'kode-session-server'
   const candidates = [
     join(root, 'assets', 'remote', target, name),
     join(root, '..', '..', 'target', 'release', name),
@@ -55,6 +54,9 @@ export async function resolveBundledServer({
     if (found) return found
   }
 }
+
+export const resolveBundledServer = options => resolveBundledExecutable('kode-session-server', options)
+export const resolveBundledSshTunnel = options => resolveBundledExecutable('kode-ssh-tunnel', options)
 
 async function ensurePrivateFile(path, content) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })

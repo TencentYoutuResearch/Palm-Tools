@@ -4,6 +4,83 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { RuntimeBridge, projectSessionEvent, permissionSnapshot } from '../src/runtime-bridge.js'
 import { BackendClient } from '../src/backend-client.js'
+import { tmpdir } from 'node:os'
+
+test('intentional blank creation returns a durable routing identity without publishing a visible empty conversation', async () => {
+  const agents = new Map(), rows = [], publications = []
+  let creates = 0, allocations = 0
+  const profile = { id: 'fixture', name: 'Fixture Claude', type: 'claude', defaultModel: 'fixture-model' }
+  const services = {
+    agents: { get: id => agents.get(id) },
+    workspaceRegistry: { resolveByPath: async () => ({ id: 'fixture-workspace' }) },
+    kodeAgents: { hasRuntime: () => true, profiles: { list: () => [profile], bind: async () => {}, binding: () => ({ profile }) }, adapter: { listModels: async () => [{ id: 'fixture-model' }] }, recordBinding() {} },
+    sessionController: {
+      list: async () => ({ items: rows }),
+      create: async ({ sessionId }) => {
+        creates++; rows.push({ sessionId, cwd: tmpdir(), blank: true })
+        agents.set(sessionId, { id: sessionId, status: 'idle', session: { snapshotEvents: () => [], header: { cwd: tmpdir() } }, selectModel() {}, ctx: { sessions: { flush: async () => {} } } })
+        return { sessionId }
+      },
+      resolveAgent: async id => ({ agent: agents.get(id) }),
+    },
+  }
+  const backend = { call: async (path, body) => {
+    if (path.endsWith('/sessions')) return { sessions: [] }
+    publications.push(body)
+    if (body.sessions.length && allocations++ === 0) return { sessions: [] }
+    return { sessions: body.sessions.map(row => ({ session_id: row.session_id, id: 101 })) }
+  } }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, backend)
+  const command = { id: 'handoff:fixture:create', kind: 'create_session', payload: { cwd: tmpdir(), backend_key: 'dsh:fixture' } }
+  await assert.rejects(bridge.execute(command), /did not allocate.*identity/)
+  const result = await bridge.execute(command)
+  assert.equal(result.id, 101)
+  assert.equal(result.runtime_session_id, rows[0].sessionId)
+  assert.equal(publications.flatMap(row => row.sessions).find(row => row.session_id === result.runtime_session_id).dto.status, 'exited')
+  assert.deepEqual(await bridge.execute(command), result)
+  assert.equal(creates, 1)
+})
+
+test('backend handoff to a blank Claude target creates and delivers exactly once through the real runtime bridge', { skip: !process.env.KODE_TEST_BACKEND_URL }, async () => {
+  const backend = new BackendClient(process.env.KODE_TEST_BACKEND_URL, (await readFile(process.env.KODE_TEST_TOKEN_FILE, 'utf8')).trim())
+  await backend.call('/api/v1/messaging/workbench/agents')
+  const registry = await backend.call('/api/v1/messaging/workbench/documents/agents')
+  const configured = registry.value.profiles.find(row => row.type === 'claude')
+  assert.ok(configured, 'fixture backend must advertise a Claude profile')
+  const profile = { ...configured, defaultModel: 'fixture-model' }, agents = new Map(), rows = []
+  const sourceId = `handoff-source-${randomUUID()}`, sourceEvents = [{ type: 'user/message', seq: 0, data: { id: 'fixture-user', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue the fixture task' }] } }]
+  rows.push({ sessionId: sourceId, cwd: tmpdir(), blank: false, title: 'Original fixture' })
+  let creates = 0, inputs = 0
+  const services = {
+    agents: { get: id => agents.get(id) },
+    workspaceRegistry: { resolveByPath: async () => ({ id: 'fixture-workspace' }) },
+    kodeAgents: { hasRuntime: () => true, profiles: { list: () => [profile], bind: async () => {}, binding: () => ({ profile }) }, adapter: { listModels: async () => [{ id: 'fixture-model' }] }, recordBinding() {} },
+    sessionController: {
+      list: async () => ({ items: rows }), inspect: async () => ({ events: sourceEvents }),
+      create: async ({ sessionId }) => {
+        creates++; rows.push({ sessionId, cwd: tmpdir(), blank: true })
+        agents.set(sessionId, { id: sessionId, status: 'idle', session: { snapshotEvents: () => [], header: { cwd: tmpdir() } }, selectModel() {}, ctx: { sessions: { flush: async () => {} } } })
+        return { sessionId }
+      },
+      resolveAgent: async id => ({ agent: agents.get(id) }),
+      prompt: async ({ sessionId, content }) => {
+        inputs++; assert.ok(content[0].text.includes('Continue the fixture task'))
+        rows.find(row => row.sessionId === sessionId).blank = false
+        return { accepted: true }
+      },
+    },
+  }
+  const bridge = new RuntimeBridge({ get: key => services[key], logger: { warn() {} } }, backend, { intervalMs: 20 }).start()
+  try {
+    await bridge.publish()
+    const request = { source_session_id: sourceId, source_runtime: 'dsh', target_runtime: 'dsh', profile_id: profile.id, request_id: `fixture-${randomUUID()}` }
+    const result = await backend.call('/api/v1/messaging/workbench/handoff', request)
+    assert.ok(Number.isSafeInteger(result.id))
+    assert.equal(result.sessionId, rows[1].sessionId)
+    assert.deepEqual(await backend.call('/api/v1/messaging/workbench/handoff', request), result)
+    assert.equal(creates, 1); assert.equal(inputs, 1)
+  } finally { await bridge.close() }
+})
 
 test('empty ungrouped placeholders retire old publications without being inspected or republished',async()=>{
   const publications=[]

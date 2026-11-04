@@ -644,6 +644,12 @@ Codex `$skill` completion reads `skills/list` for the current profile and worksp
 
 Saved native tabs can be pinned, renamed, archived, and restored through canonical Kode metadata even if their Agent configuration or adapter is gone. These actions allocate no Agent, import no transcript, and never rewrite CLI logs. Archive state stays in the workspace document; the session index retains the identity a future import would use. Kode's catalog respects that archive state too.
 
+SSH forwarding retains the saved tab's native backend/thread identity when applying these metadata operations on its owning Host. Foreign conversations without project membership remain under that Host in the sidebar instead of leaking into this computer's ungrouped sessions. Opening saved history resolves stable profile IDs and desktop backend aliases before unique legacy display names; an explicit missing or ambiguous Agent is never replaced with another configuration.
+
+Packaged Desktop installations resolve their bundled `kode-ssh-tunnel` by absolute path before falling back to PATH. An explicit `sshTunnelCommand` still takes precedence.
+
+Explicit runtime creation reserves a backend routing ID before the target receives its first prompt. Its empty DTO remains retired until content is published, so this does not reintroduce blank catalog entries. Creation returns both that numeric ID and the native runtime session ID. Legacy empty creation receipts can recover after a new Host boot using the same request ID and deterministic session identity; complete receipts and input submissions are never replayed.
+
 ### Native conversation presentation
 
 These extensions live entirely in this plugin; they do not require editing dsh
@@ -894,3 +900,27 @@ backs up the original log and projection cache, and atomically replaces the log.
 Only the two known optional Kode record types are admitted; their sequence,
 timestamp, payload and all other events stay intact. Other unknown required
 events still fail validation. Stop the owning session before applying repairs.
+
+
+### Native executor reload and misplaced system heads
+
+A native CLI history does not contain the harness-owned protected system head.
+During a Kode plugin reload its durable sessions must fail closed until their
+native executor is available. The routing sentinel preserves this distinction
+while allowing ordinary dsh sessions to keep using their official executor.
+
+The inbox maintenance script also recognizes a late harness `system/message`
+after proven native CLI history. It preserves the entire misplaced event as an
+ignorable `plugin:kode/system-head-repair` record, retaining its sequence and
+original prompt, and validates the full result with the released V4 reader.
+It never rewrites normal protected system heads or unproven/foreign histories.
+Repairs still require the writer lock, exact artifact/cache backup and atomic
+replacement. Applying a repair does not replay any user input.
+
+
+Run `node scripts/audit-history.js --home <dsh-home> --runtime-modules
+<released-node_modules>` (Node 24.22+) for a read-only audit. It enumerates current
+session folders every time, including conversations created since the last
+scan, and validates released V4 envelopes, relationships, fork cuts and inbox
+prefixes. It reports artifacts changing during a read and exits nonzero on
+validation failures. It never repairs a log or replays a prompt.

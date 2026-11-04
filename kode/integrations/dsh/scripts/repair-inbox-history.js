@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 import { repairNativeInboxSplices } from '../src/repair-inbox-splices.js'
 import { repairOptionalPluginRecords } from '../src/repair-plugin-records.js'
+import { repairNativeSystemHeads } from '../src/repair-system-heads.js'
 import { encodeHistoryArtifact } from '../src/native-history.js'
 const [path, modules, output] = process.argv.slice(2)
 if (!path || !modules) throw new Error('Expected artifact and released runtime modules paths')
@@ -16,7 +17,8 @@ const { restoreReleasedV4Artifact } = await import(pathToFileURL(join(modules, '
 const [wireHeader, ...events] = zstdDecompressSync(await readFile(path)).toString().trim().split('\n').map(JSON.parse)
 const inbox = repairNativeInboxSplices(events)
 const optional = repairOptionalPluginRecords(inbox.events)
-const repaired = optional.events, changes = [...inbox.changes, ...optional.changes]
+const systemHeads = repairNativeSystemHeads(optional.events)
+const repaired = systemHeads.events, changes = [...inbox.changes, ...optional.changes, ...systemHeads.changes]
 const header = { ...wireHeader }; delete header.type
 validateStoredEvents(header, structuredClone(repaired))
 // The final inherited marker is the released format's authoritative fork cut.

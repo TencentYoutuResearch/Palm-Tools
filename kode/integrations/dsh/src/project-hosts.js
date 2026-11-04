@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { once } from 'node:events'
 import { hostDirectory, hostOperation, registerHostDirectory, DIRECTORY_PATH } from './workspace-directory.js'
 import { BackendDocument } from './backend-state.js'
+import { resolveBundledSshTunnel } from './bundle-runtime.js'
 import { createHash } from 'node:crypto'
 import { importSavedSession } from './workbench-import.js'
 import { deployRemote, deploymentHost, DEPLOY_STEPS } from './remote-deploy.js'
@@ -271,7 +272,8 @@ export class ProjectHosts {
   async createPortal(id) {
     const host = this.hosts.find(row => row.id === id)
     if (!host) throw new Error('远端主机不存在。')
-    const tunnel = await this.tunnel(this.config.sshTunnelCommand ?? 'kode-ssh-tunnel', host)
+    const command = this.config.sshTunnelCommand ?? await resolveBundledSshTunnel() ?? 'kode-ssh-tunnel'
+    const tunnel = await this.tunnel(command, host)
     let server
     try {
       const login = await fetch(`${tunnel.url}/?token=${encodeURIComponent(host.token)}`, { redirect: 'manual', signal: AbortSignal.timeout(10000) })
@@ -337,7 +339,7 @@ export class ProjectHosts {
         const response = await fetch(`${tunnel.url}/api/kode/session-create`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(input), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000) })
         const value = await response.json(); if (!response.ok) throw new Error(value.error ?? 'Remote session creation failed'); return value
       }, operation: async input => {
-        const response = await fetch(`${tunnel.url}${DIRECTORY_PATH}`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ operation: input.operation, args: input.args }), signal: AbortSignal.timeout(15000) })
+        const response = await fetch(`${tunnel.url}${DIRECTORY_PATH}`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ operation: input.operation, args: input.args, ...(input.nativeSession ? { nativeSession: { backend_key: input.nativeSession.backend_key, session_id: input.nativeSession.session_id } } : {}) }), signal: AbortSignal.timeout(15000) })
         const value = await response.json(); if (!response.ok) throw new Error(value.error ?? '远端操作失败。'); return value
       }, directory: async () => {
         const response = await fetch(`${tunnel.url}${DIRECTORY_PATH}`, { headers: { cookie }, signal: AbortSignal.timeout(8000) })

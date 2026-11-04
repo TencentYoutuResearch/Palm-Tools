@@ -1,4 +1,5 @@
 import { savedImportIdentity } from './saved-session-state.js'
+import { savedSessionProfile } from './saved-session-profile.js'
 /** Kode saved CLI sessions: import display history once, retain the original native thread. */
 import { BackendDocument } from './backend-state.js'
 import { buildHistorySeed } from './native-history.js'
@@ -98,9 +99,7 @@ export async function importSavedSession(ctx, client, tab) {
   const runtime = ctx.get('kodeAgents'), controller = ctx.get('sessionController')
   const registry = ctx.get('workspaceRegistry')
   let workspace = await registry.resolveByPath(tab.cwd)
-  const profile = runtime.profiles.list().find(row => row.id === (tab.agent_id ?? `kode-${tab.backend_key}`))
-    ?? runtime.profiles.list().find(row => row.name.toLocaleLowerCase() === tab.backend_key.toLocaleLowerCase())
-    ?? Object.values(runtime.profiles.bindings ?? {}).find(row => row.threadId === tab.session_id && row.profile.id === tab.agent_id)?.profile
+  const profile = savedSessionProfile(runtime.profiles, tab)
   if (!profile) throw new Error(`This saved ${tab.backend_key} session has no installed inline protocol adapter`)
   const id = savedImportIdentity(tab, profile.id, runtime.profiles.bindings, registry.archivedSessionIds)
   const priorBinding = runtime.profiles.binding?.(id)
