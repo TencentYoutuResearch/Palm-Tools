@@ -265,6 +265,7 @@ test('Agent list keeps editors collapsed until requested', () => {
   const body = findNode(tree, child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
   assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
   assert.equal(findNode(body, child => child?.props?.label === '默认 Agent')?.props.labelHeading, true)
+  assert.ok(findNode(body, child => child?.props?.className === 'kode-settings-scope' && child.children?.some(row => row?.props?.label === '默认 Agent')), 'default Agent uses the same framed scope as the configuration Host')
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
 
@@ -497,7 +498,7 @@ test('remote Agent configuration and default writes stay on the selected Host wi
  component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
  await new Promise(resolve=>setImmediate(resolve))
  const body=component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
- const selector=body.children.find(node=>node?.props?.label==='默认 Agent')
+ const selector=findNode(body,node=>node?.props?.label==='默认 Agent')
  assert.equal(selector.props.value,'remote-codex')
  selector.props.onChange('remote-codex')
  await new Promise(resolve=>setImmediate(resolve))
