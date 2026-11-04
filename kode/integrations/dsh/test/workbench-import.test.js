@@ -52,6 +52,22 @@ function importFixture({ registered = false, cached = false, available = true, p
 }
 import { createHash } from 'node:crypto'
 import { importSavedSession } from '../src/workbench-import.js'
+test('builtin backend IDs resolve the configured profile without matching its display name',async()=>{
+ const h=importFixture({cached:true});h.tab.backend_key='builtin-dsh'
+ h.tab.dsh_session_id=h.id
+ h.ctx.get('kodeAgents').profiles.list=()=>[{id:'builtin-dsh',name:'DeepSeek Harness',type:'dsh'}]
+ const result=await importSavedSession(h.ctx,h.client,h.tab)
+ assert.equal(result.sessionId,h.id)
+ assert.ok(!h.calls.some(row=>row[0]==='seed'||row[0]==='session'))
+})
+test('desktop backend aliases resolve a renamed configured profile',async()=>{
+ const h=importFixture({cached:true});h.tab.backend_key='team-backend';h.tab.dsh_session_id=h.id
+ const profiles=h.ctx.get('kodeAgents').profiles
+ profiles.list=()=>[{id:'configured-worker',name:'Renamed worker',type:'codex'}]
+ profiles.sharedState={desktop_ids:{'configured-worker':'team-backend'}}
+ const result=await importSavedSession(h.ctx,h.client,h.tab)
+ assert.equal(result.sessionId,h.id)
+})
 test('opening a saved session registers its existing original directory before creating the session', async () => {
   const h=importFixture();const result=await importSavedSession(h.ctx,h.client,h.tab)
   assert.equal(result.sessionId,h.id)

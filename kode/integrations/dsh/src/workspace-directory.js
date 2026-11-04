@@ -1,6 +1,7 @@
 /** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
 import { BackendDocument } from './backend-state.js'
 import { classifyEmptySessions } from './empty-session.js'
+import { savedSessionProfile } from './saved-session-profile.js'
 import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
 const sessionController = ctx => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用；工作区配置仍保留，请先恢复会话服务。'); return value }
 export const DIRECTORY_PATH = '/api/kode/host-directory'
@@ -38,9 +39,8 @@ export async function hostDirectory(ctx, config = {}) {
       const adopted = tab.dsh_session_id ?? importedSessionId(tab)
       if (sessions.some(row => row.id === adopted || tab.transport_kind === 'runtime' && row.id === tab.session_id || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))) continue
       const id = savedDirectoryId(node.node_id, tab)
-      const profileId = tab.agent_id ?? Object.keys(profiles?.sharedState?.desktop_ids ?? {}).find(id => profiles.sharedState.desktop_ids[id] === tab.backend_key)
-      const profile = profiles?.list().find(profile => profile.id === profileId)
-      const agent = profile ? presentation(profile) : { id: profileId ?? tab.backend_key, name: tab.backend_key, type: 'custom' }
+      const profile = savedSessionProfile(profiles, tab)
+      const agent = profile ? presentation(profile) : { id: tab.agent_id ?? tab.backend_key, name: tab.backend_key, type: 'custom' }
       if (runtime?.appearance) agent.avatar = runtime.appearance.avatarForSession(adopted, agent.type, index, agent.id)
       else if (tab.avatar_id) agent.avatar = { id: tab.avatar_id, url: `/api/kode/avatars/media?avatar=${encodeURIComponent(tab.avatar_id)}&state=idle` }
       sessions.push({ id, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: savedSessionTime(tab), running: false, nativeThreadId: tab.session_id, savedTab: tab, agent })

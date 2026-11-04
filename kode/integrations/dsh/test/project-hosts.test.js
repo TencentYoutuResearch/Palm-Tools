@@ -59,11 +59,16 @@ test('SSH settings edits retain private credentials, persist changes, and protec
 })
 test('SSH portal isolates authentication, preserves streams, rejects CSRF, and closes owned tunnel', async t => {
   const upstreamRequests = []
-  const upstream = createServer((req, res) => {
+  const upstream = createServer(async (req, res) => {
     upstreamRequests.push({ url: req.url, cookie: req.headers.cookie, origin: req.headers.origin })
     if (req.url === '/?token=upstream-secret') { res.writeHead(303, { 'set-cookie': 'upstream=owner; HttpOnly', location: './' }); res.end(); return }
     if (req.headers.cookie !== 'upstream=owner') { res.writeHead(401); res.end(); return }
     if (req.url === '/api/kode/project-hosts') { res.end('{}'); return }
+    if (req.url === '/api/kode/host-directory') {
+      let body=''; for await (const chunk of req) body+=chunk
+      upstreamRequests.at(-1).body=JSON.parse(body)
+      res.writeHead(200,{'content-type':'application/json'});res.end('{}');return
+    }
     res.writeHead(200, { 'content-type': 'text/plain' }); res.write('remote:'); req.pipe(res)
   })
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
@@ -88,5 +93,7 @@ test('SSH portal isolates authentication, preserves streams, rejects CSRF, and c
   assert.equal((await fetch(`${portal.origin}/api/terminal`, { ...options, headers: { cookie, origin: 'http://evil.example' } })).status, 401)
   const directory = await (await fetch(`${portal.origin}/api/kode/project-hosts`, { headers: { cookie } })).json()
   assert.equal(directory.current, 'build'); assert.doesNotMatch(JSON.stringify(directory), /upstream-secret/)
+  await portal.operation({operation:'archive-session',args:{sessionId:'saved:local-alias'},nativeSession:{backend_key:'builtin-dsh',session_id:'original-thread'}})
+  assert.deepEqual(upstreamRequests.at(-1).body,{operation:'archive-session',args:{sessionId:'saved:local-alias'},nativeSession:{backend_key:'builtin-dsh',session_id:'original-thread'}})
   await manager.disconnect('build'); assert.equal(closed, 1)
 })

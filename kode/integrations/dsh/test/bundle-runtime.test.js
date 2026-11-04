@@ -3,7 +3,22 @@ import assert from 'node:assert/strict'
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { prepareRuntimeConfig, runtimePlatform } from '../src/bundle-runtime.js'
+import { prepareRuntimeConfig, runtimePlatform, resolveBundledSshTunnel } from '../src/bundle-runtime.js'
+
+test('Desktop resolves the packaged SSH helper without relying on its PATH', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-bundle-tunnel-'))
+  const tunnel = join(root, 'assets', 'remote', 'darwin-arm64', 'kode-ssh-tunnel')
+  const options = { root, platform: 'darwin', arch: 'arm64' }
+  try {
+    assert.equal(await resolveBundledSshTunnel(options), undefined)
+    await mkdir(join(tunnel, '..'), { recursive: true })
+    await writeFile(tunnel, '#!/bin/sh\n')
+    await chmod(tunnel, 0o600)
+    assert.equal(await resolveBundledSshTunnel(options), undefined)
+    await chmod(tunnel, 0o755)
+    assert.equal(await resolveBundledSshTunnel(options), tunnel)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('one-command startup provisions a private backend and bundled server', async () => {
   const home = await mkdtemp(join(tmpdir(), 'kode-bundle-home-'))

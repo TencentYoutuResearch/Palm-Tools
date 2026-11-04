@@ -988,11 +988,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           routes.set(id, { hostId: host.id, id: workspace.id })
           if (host.id !== 'local') remoteRows.push({ id, name: host.name })
         }
-        if (!host.workspaces?.length) {
+        const accounted = new Set((host.workspaces ?? []).flatMap(workspace => workspace.sessionIds))
+        const ungrouped = (host.sessions ?? []).filter(session => !accounted.has(session.id))
+        if (!host.workspaces?.length || ungrouped.length) {
           const id = `kode-host-status:${encodeURIComponent(host.id)}`
-          items.push({ workspaceId: id, title: host.name, path: '', sessionIds: [], createdAt: 0, updatedAt: 0 })
+          items.push({ workspaceId: id, title: host.name, path: '', sessionIds: ungrouped.map(session => key(session.id)), createdAt: 0, updatedAt: 0 })
           routes.set(id, { hostId: host.id, placeholder: true })
-          remoteRows.push({ id, name: host.status === 'online' ? '添加项目' : host.status === 'connecting' ? '正在连接…' : '连接失败', placeholder: host.status ?? 'offline' })
+          remoteRows.push({ id, name: host.status === 'online' ? (ungrouped.length ? '未分组' : '添加项目') : host.status === 'connecting' ? '正在连接…' : '连接失败', placeholder: host.status ?? 'offline' })
         }
         archivedSessionIds.push(...(host.archivedSessionIds ?? []).map(key)); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []).map(key))
       }

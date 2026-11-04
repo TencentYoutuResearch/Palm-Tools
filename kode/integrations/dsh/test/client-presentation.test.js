@@ -323,6 +323,17 @@ test('saved legacy tab archive controls work without importing or starting the s
  assert.ok(!c.requests.some(row=>row.action==='import-saved'))
 })
 
+test('foreign conversations without project metadata stay grouped under their owning Host',async()=>{
+ const c=client({current:'local',hosts:[{id:'local',sessions:[],workspaces:[]},{id:'ssh',name:'Build host',status:'offline',sessions:[{id:'saved:remote',title:'Remote history'}],workspaces:[]}]})
+ const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:[],byId:{}}),useWorkspaces:select=>select({items:[],archivedSessionIds:[],pinnedSessionIds:[]})})
+ wrapper.type(wrapper.props);await new Promise(resolve=>setImmediate(resolve))
+ const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
+ const groups=native.props.useWorkspaces(state=>state.items)
+ assert.equal(groups.length,1)
+ assert.equal(groups[0].title,'Build host')
+ assert.deepEqual(Array.from(groups[0].sessionIds),['kode-host:ssh/saved%3Aremote'])
+})
+
 test('/resume filters by execution host and Agent and retains original native identities', () => {
   const context = { window: { __ModuleLoader__: { load() {} } } }
   vm.runInNewContext(source, context)

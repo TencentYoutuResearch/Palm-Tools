@@ -171,8 +171,20 @@ export class RuntimeBridge {
       await runtime.profiles.bind(agent.id, profile.id); runtime.recordBinding(agent, profile)
       await agent.ctx.sessions.flush(agent.session)
       await this.publish()
-      const snapshots = await this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)
-      return snapshots.sessions.find(row => row.id === this.ids.get(created.sessionId))
+      let publicId = this.ids.get(created.sessionId)
+      if (!Number.isSafeInteger(publicId) || publicId <= 0) {
+        const row = (await controller.list({})).items.find(row => row.sessionId === created.sessionId)
+        if (!row) throw new Error('Created session is no longer available')
+        // Reserve routing before the first prompt without exposing a blank
+        // conversation. Normal content publication revives this retired DTO.
+        const dto = { ...this.projection(row, agent), status: 'exited' }
+        const mapped = await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [{ session_id: created.sessionId, dto, events: [] }] })
+        publicId = mapped.sessions?.find(row => row.session_id === created.sessionId)?.id
+        if (!Number.isSafeInteger(publicId) || publicId <= 0) throw new Error('Backend did not allocate the created session routing identity')
+        this.ids.set(created.sessionId, publicId)
+        this.known.set(created.sessionId, dto)
+      }
+      return { id: publicId, runtime_session_id: created.sessionId }
     }
     if (!sessionId) throw new Error('Session identity required')
     if (kind === 'input') {
