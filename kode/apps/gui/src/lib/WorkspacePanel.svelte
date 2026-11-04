@@ -646,6 +646,22 @@
     }
   }
 
+  // agent 在终端里 commit / 改文件不会通知面板:每轮结束(busy → idle)和窗口重新聚焦时
+  // 静默重拉 snapshot(已有 snapshot 时 loading 不会切换成加载态,不闪屏)。
+  let lastTabStatus: { key: string | null; status: TabInfo['status'] } = { key: null, status: undefined }
+  $effect(() => {
+    const key = workspaceKeyFor(tab)
+    const status = tab?.status
+    const prev = lastTabStatus
+    lastTabStatus = { key, status }
+    if (prev.key === key && prev.status === 'busy' && status === 'idle') void refresh()
+  })
+  $effect(() => {
+    const onFocus = () => { if (cwd && !loading) void refresh() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  })
+
   async function loadMoreCommits() {
     if (loadingMoreCommits || loading || !cwd) return
     const request = ++commitRequest
@@ -995,6 +1011,8 @@
         truncated: data.truncated,
         path: change.path.startsWith('/') ? change.path : `${cwd.replace(/\/$/, '')}/${change.path}`,
       }
+      // 列表里有、diff 却为空 → 改动多半已在面板外被提交/还原,顺手刷新列表
+      if (!data.content && !loading) void refresh()
     } catch (e) {
       preview = {
         kind: 'error',
