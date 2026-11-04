@@ -7,6 +7,7 @@ import { ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { AssistantStreamAccumulator, BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
+import { fastPreference, fastServiceTier } from './model-fast.js'
 
 export const boundaryProjection = {
   key: 'kodeTurnBoundary', stateVersion: 3,
@@ -156,6 +157,8 @@ export class NativeAgentDriver {
         if (!messages.length && !nativeContinuation) continue
         const state = this.ctx.sessionProjections.stateOf(this.session, 'modelSelection')
         const selection = state?.pending ?? state?.next ?? state?.lastUsed ?? this.options
+        const fastState = this.ctx.sessionProjections.stateOf(this.session, 'kodeFast')
+        const fast = fastPreference(fastState, selection), fastTier = fastServiceTier(fastState, selection)
         if (!selection.provider?.startsWith('kode-agent-')) throw new Error('Select an installed Agent before sending a message')
         const human = messages.length === 1 ? humanInput(messages[0]) : undefined
         if (human?.startsWith('!')) {
@@ -187,7 +190,7 @@ export class NativeAgentDriver {
           stream = new AssistantStreamAccumulator(); assembler = new BlockAssembler(); chunkCount = 0; started = false; attemptId = `kode-native:${randomUUID()}`
         }
         try {
-          for await (const chunk of this.runtime.adapter.stream({ ...selection, sessionId: this.id, messages, tools, signal, nativeContinuation, prepareStep, onNativeTurnReady: () => this.scheduleSteering(), onAssistantMessageBoundary: () => commitSegment() })) {
+          for await (const chunk of this.runtime.adapter.stream({ ...selection, ...(fast === undefined ? {} : { fast }), ...(fastTier ? { fastTier } : {}), sessionId: this.id, messages, tools, signal, nativeContinuation, prepareStep, onNativeTurnReady: () => this.scheduleSteering(), onAssistantMessageBoundary: () => commitSegment() })) {
             if (chunk.type === 'finish' && !started) continue
             if (!started) { prepareStep(); this.events.emit('agent/assistant-stream', { frame: { type: 'start', attemptId, revision: ++this.revision, turn, step } }); started = true }
             const time = Date.now(), index = chunkCount++

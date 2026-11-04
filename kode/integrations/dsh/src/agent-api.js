@@ -3,6 +3,7 @@ import { AGENT_TYPES } from './agent-profiles.js'
 import { profileRoute } from './agent-runtime.js'
 import { SUPPORTED_AGENT_TYPES } from './native-session.js'
 import { resolveAdvertisedModel } from './model-alias.js'
+import { appendFastPreference, effectiveFast } from './model-fast.js'
 const PATH = '/api/kode/agents'
 const json = (res, status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
 export function registerAgentApi(ctx, service) {
@@ -16,7 +17,7 @@ export function registerAgentApi(ctx, service) {
     return state?.pending ?? state?.next ?? state?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
   }
   const modelsFor = async (profile, catalog, modelHint) => profile
-    ? (adapter.listModels ? await adapter.listModels(profileRoute(profile.id), profile, modelHint) : catalog.groups.find(g => g.id === profileRoute(profile.id))?.models ?? []).filter(m => m.id !== 'default')
+    ? (adapter.listModels ? await adapter.listModels(profileRoute(profile.id), profile, modelHint) : catalog.groups.find(g => g.id === profileRoute(profile.id))?.models ?? []).filter(m => m.id !== 'default' || m.fastCapability)
     : catalog.groups.filter(g => !g.id.startsWith('kode-agent-')).flatMap(g => g.models.map(m => ({ ...m, provider: g.id })))
   const disposeUpdates = ctx.webServer.register({ kind: 'exact', path: `${PATH}/runtimes`, handler: (req, res) => {
     const admitted = ctx.connection.admit(req)
@@ -58,8 +59,11 @@ export function registerAgentApi(ctx, service) {
         const installed = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
         const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
         const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
+        const fastState = agent ? ctx.sessionProjections.stateOf(agent.session, 'kodeFast') : storedRow?.projections?.values?.kodeFast
+        const selectedModel = models.find(row => row.id === selection?.model)
+        const fast = effectiveFast(fastState, selection, selectedModel)
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
-          selectedProfileId, selection, catalog, models, modelError, ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
+          selectedProfileId, selection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
           canChangeAgent: agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true,
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
@@ -102,7 +106,7 @@ export function registerAgentApi(ctx, service) {
         if (position?.lastTurn > 0 || agent.status !== 'idle') throw new Error('Start a new conversation to change its Agent; the current conversation retains its history and runtime.')
         await profiles.clearUnusedBinding(agent.id)
       }
-      let provider, model, reasoningEffort
+      let provider, model, reasoningEffort, selectedModel, fast
       {
         provider = profileRoute(profile.id)
         const prior = selected(agent)
@@ -110,12 +114,24 @@ export function registerAgentApi(ctx, service) {
         if (!models.length) throw new Error('无法读取此 Agent 的模型，请检查可执行文件和登录状态后重试。')
         model = input.model ?? (prior?.provider === provider && prior.model !== 'default' ? prior.model : undefined) ?? profile.defaultModel ?? models.find(m => m.isDefault)?.id ?? models[0].id
         model = resolveAdvertisedModel(models, model)
-        const selectedModel = models.find(row => row.id === model), efforts = selectedModel.reasoningEfforts ?? []
-        reasoningEffort = input.reasoningEffort ?? (prior?.provider === provider && prior.model === model ? prior.reasoningEffort : undefined) ?? selectedModel.defaultReasoningEffort
+        selectedModel = models.find(row => row.id === model)
+        if (input.fast !== undefined) {
+          if (typeof input.fast !== 'boolean') throw new Error('Fast 必须是布尔值。')
+          const capability = selectedModel.fastCapability
+          if (!capability) throw new Error('此模型未公布 Fast 模式。')
+          if (capability.transport === 'model-variant') {
+            model = resolveAdvertisedModel(models, input.fast ? capability.fastModelId : capability.standardModelId)
+            selectedModel = models.find(row => row.id === model)
+          }
+        }
+        const efforts = selectedModel.reasoningEfforts ?? []
+        const sameModel = prior?.provider === provider && (prior.model === model || input.fast !== undefined && prior.model === input.model)
+        reasoningEffort = input.reasoningEffort ?? (sameModel ? prior.reasoningEffort : undefined) ?? selectedModel.defaultReasoningEffort
         if (reasoningEffort && !efforts.some(row => row.id === reasoningEffort)) {
           if (input.reasoningEffort) throw new Error('此模型未公布该推理强度，请重新选择。')
           reasoningEffort = undefined
         }
+        fast = effectiveFast(ctx.sessionProjections.stateOf(agent.session, 'kodeFast'), { provider, model }, selectedModel)
       }
       // Verify the route before committing the profile binding; no executable is
       // launched by changing the selector (only bounded model discovery runs).
@@ -128,10 +144,12 @@ export function registerAgentApi(ctx, service) {
         rebound = true
       }
       const selection = agent.selectModel(selectedRoute)
+      if (typeof input.fast === 'boolean' && selectedModel.fastCapability.transport !== 'model-variant') appendFastPreference(agent.session, selectedRoute, input.fast, selectedModel.fastCapability.tier)
+      fast = input.fast ?? fast
       await agent.ctx?.parallel?.('session/flush',agent.session)
       await profiles.bind(agent.id, profile.id)
       service.recordBinding?.(agent, profile)
-      json(res, 200, { ...selection, ...(rebound ? {rebound:true} : {}) })
+      json(res, 200, { ...selection, ...(fast === undefined ? {} : { fast }), ...(rebound ? {rebound:true} : {}) })
     } catch (error) { json(res, 400, { error: error.message }) }
   } })
   return () => { for (const res of streams) res.end(); disposeApi(); disposeUpdates() }

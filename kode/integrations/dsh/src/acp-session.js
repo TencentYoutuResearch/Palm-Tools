@@ -15,6 +15,13 @@ import { modeAllowed } from './native-commands.js'
 
 const flattenOptions = options => (options ?? []).flatMap(o => o.options ?? [o])
 const effortOption = state => state?.configOptions?.find(option => option.type === 'select' && (option.category === 'thought_level' || /(?:^|[_-])effort(?:$|[_-])/i.test(option.id)))
+const fastOption = state => state?.configOptions?.find(option => /^(?:fast|fast[_-]mode)$/i.test(option.id))
+const fastValue = value => [true, 'true', 'on', 'fast', 'enabled'].includes(value) ? true : [false, 'false', 'off', 'standard', 'disabled'].includes(value) ? false : undefined
+function requestedFastValue(option, fast) {
+  if (option.type === 'boolean') return fast
+  const rows = flattenOptions(option.options)
+  return rows.find(row => fastValue(row.value) === fast)?.value
+}
 function abortable(task, signal) {
   signal.throwIfAborted()
   let abort
@@ -96,9 +103,9 @@ export class AcpSession {
     await this.waitForCommands(signal)
     if (model && model !== 'default') await this.selectModel(model, signal)
     const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
-    const effort = effortOption(this.state), current = option?.currentValue ?? this.state.models?.currentModelId
+    const effort = effortOption(this.state), fast = fastOption(this.state), current = option?.currentValue ?? this.state.models?.currentModelId
     const models = option ? flattenOptions(option.options).map(m => ({ id: m.value, model: m.value, displayName: m.name, isDefault: m.value === current })) : (this.state.models?.availableModels ?? []).map(m => ({ id: m.modelId, model: m.modelId, displayName: m.name, isDefault: m.modelId === current }))
-    return models.map(row => ({ ...row, inputModalities: this.info.agentCapabilities?.promptCapabilities?.image || this.profile.type === 'claude' ? ['text', 'image'] : ['text'], ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}) }))
+    return models.map(row => ({ ...row, inputModalities: this.info.agentCapabilities?.promptCapabilities?.image || this.profile.type === 'claude' ? ['text', 'image'] : ['text'], ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}), ...(fast && row.id === current ? { fastCapability: { transport: 'config-option', defaultEnabled: fastValue(fast.currentValue) ?? false } } : {}) }))
   }
   async waitForCommands(signal = this.lifetime.signal) {
     // Claude sends its authoritative commands after the setup response.
@@ -106,7 +113,7 @@ export class AcpSession {
     try { await abortable(Promise.race([this.commandsReady.promise, new Promise(resolve => { timer = setTimeout(resolve, 1500) })]), signal ?? this.lifetime.signal) }
     finally { clearTimeout(timer) }
   }
-  async configure(model, signal, effort) {
+  async configure(model, signal, effort, fast) {
     const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
     if (this.profile.fixedPolicy && (policy.mode !== this.profile.fixedPolicy.mode || (this.handlers.approvalPolicy?.() ?? 'ask') !== this.profile.fixedPolicy.approval)) throw new Error('此 dsh ACP 版本不支持运行中修改权限，请新建会话应用新的权限。')
     const available = this.state.modes?.availableModes ?? []
@@ -125,6 +132,15 @@ export class AcpSession {
       const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value: effort }, signal)
       if (result.configOptions) this.state.configOptions = result.configOptions
       else option.currentValue = effort
+    }
+    if (fast !== undefined) {
+      const option = fastOption(this.state), value = option && requestedFastValue(option, fast)
+      if (!option || value === undefined) throw new Error('当前 Agent 未公布此 Fast 模式，请刷新模型列表。')
+      if (fastValue(option.currentValue) !== fast) {
+        const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value }, signal)
+        if (result.configOptions) this.state.configOptions = result.configOptions
+        else option.currentValue = value
+      }
     }
   }
   async selectModel(model, signal) {
@@ -239,7 +255,7 @@ export class AcpSession {
     } catch (error) { active.end(error); throw error }
     finally { active.restarting = false }
   }
-  async *turn(input, { model, signal = this.lifetime.signal, command, effort } = {}) {
+  async *turn(input, { model, signal = this.lifetime.signal, command, effort, fast } = {}) {
     if (this.active) throw new Error('ACP conversation already has an active turn')
     const fused = AbortSignal.any([signal, this.lifetime.signal]), queue = []
     const active = { turnId: randomUUID(), signal: fused, tools: new Map(), done: false, error: undefined,
@@ -252,7 +268,7 @@ export class AcpSession {
     fused.addEventListener('abort', abort, { once: true })
     try {
       this.validateInput(input)
-      await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort)
+      await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort, fast)
       if (command) await this.waitForCommands(fused)
       if (command && !this.commands.some(row => row.name === command.name)) throw new Error(`此 Agent 未公布 /${command.name}，请使用 /help 查看可用命令。`)
       this.startPrompt(active, input)

@@ -1002,6 +1002,44 @@ async fn agent_hub_is_backend_owned_owner_only_and_shared_by_independent_clients
     assert!(!s.hub.extensions.home.join(".claude/skills/team--skills--example").exists());
 }
 #[tokio::test]
+async fn backend_extension_preview_catalog_and_logo_are_safe_and_owner_only(){
+    let s=server("extension-preview",vec![]).await;let client=reqwest::Client::new();
+    let url=format!("{}/api/v1/messaging/workbench/agent-hub",s.url);let source=s._root.path().join("source");
+    std::fs::create_dir_all(source.join(".codex-plugin")).unwrap();std::fs::create_dir_all(source.join("skills/example")).unwrap();
+    std::fs::create_dir_all(source.join("commands")).unwrap();std::fs::create_dir_all(source.join("assets")).unwrap();std::fs::create_dir_all(source.join("config")).unwrap();
+    std::fs::create_dir_all(source.join("hooks")).unwrap();std::fs::create_dir_all(source.join("rules")).unwrap();std::fs::create_dir_all(source.join("agents")).unwrap();
+    std::fs::write(source.join("plugin.meta.json"),r#"{"id":"fixture","displayName":"Fixture Toolkit","version":"1.2.3","description":"Fixture description","author":{"name":"fixture-team"},"category":"Engineering"}"#).unwrap();
+    std::fs::write(source.join(".codex-plugin/plugin.json"),r#"{"name":"fixture","version":"1.2.3","mcpServers":"./config/servers.json","hooks":"./hooks/hooks.test.json","interface":{"displayName":"Fixture Toolkit","shortDescription":"Short fixture","longDescription":"Long fixture","logo":"./assets/logo.png"}}"#).unwrap();
+    std::fs::write(source.join("skills/example/SKILL.md"),"---\nname: example-skill\ndescription: Example skill description\n---\nBody must not be published").unwrap();
+    std::fs::write(source.join("commands/build.md"),"---\nname: build\ndescription: Build fixture\n---\nCommand body").unwrap();
+    std::fs::write(source.join("agents/reviewer.md"),"---\nname: reviewer\ndescription: Reviews fixture changes\n---\nAgent body must not be published").unwrap();
+    std::fs::write(source.join("commands/multiline.md"),"---\nname: multiline\ndescription: >-\n  First folded line\n  Second folded line\n---\nBody").unwrap();
+    std::fs::write(source.join("config/servers.json"),r#"{"mcpServers":{"remote":{"type":"http","url":"https://example.test/?token=SECRET","headers":{"Authorization":"SECRET"}},"local":{"command":"SECRET"}}}"#).unwrap();
+    std::fs::write(source.join("mcp.json"),r#"{"mcpServers":{"unreferenced":{"type":"http","url":"https://example.test"}}}"#).unwrap();
+    std::fs::write(source.join("hooks/hooks.test.json"),r#"{"description":"Fixture hooks","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"SECRET"}]}],"SessionStart":[{"hooks":[]}]}}"#).unwrap();
+    std::fs::write(source.join("rules/discipline.md"),"---\ndescription: Fixture rule\n---\nRule body must not be published").unwrap();
+    std::fs::write(source.join("rules/discipline.mdc"),"---\ndescription: Duplicate cursor rule\n---\nDuplicate body").unwrap();
+    let png=[0x89,b'P',b'N',b'G',0x0d,0x0a,0x1a,0x0a,1,2,3];std::fs::write(source.join("assets/logo.png"),png).unwrap();
+    let saved=client.post(&url).bearer_auth("admin-test").json(&json!({"action":"save-source","source":{"id":"team","kind":"local","location":source,"targets":["dsh"]}})).send().await.unwrap();assert!(saved.status().is_success(),"{}",saved.text().await.unwrap());
+    let synced=client.post(&url).bearer_auth("admin-test").json(&json!({"action":"sync-source","id":"team"})).send().await.unwrap();assert!(synced.status().is_success(),"{}",synced.text().await.unwrap());
+    let state:Value=client.get(&url).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();let row=&state["sources"][0];let package=&row["packages"][0];
+    assert_eq!(row["skills"],json!(["skills--example"]));assert_eq!(package["path"],".");assert_eq!(package["displayName"],"Fixture Toolkit");
+    assert_eq!(package["description"],"Short fixture");assert_eq!(package["longDescription"],"Long fixture");assert_eq!(package["author"],"fixture-team");
+    assert_eq!(package["skills"][0]["name"],"example-skill");assert_eq!(package["skills"][0]["description"],"Example skill description");
+    assert_eq!(package["commands"][0]["name"],"build");assert_eq!(package["commands"][0]["description"],"Build fixture");
+    assert_eq!(package["agents"],json!([{"name":"reviewer","description":"Reviews fixture changes"}]));
+    assert_eq!(package["commands"][1]["name"],"multiline");assert_eq!(package["commands"][1]["description"],"First folded line Second folded line");
+    assert_eq!(package["hooks"],json!([{"name":"PreToolUse","description":"Fixture hooks"},{"name":"SessionStart","description":"Fixture hooks"}]));
+    assert_eq!(package["rules"],json!([{"name":"discipline","description":"Fixture rule"}]));
+    assert_eq!(package["mcp"],json!([{"name":"local","type":"stdio"},{"name":"remote","type":"http"}]));
+    let serialized=row.to_string();assert!(!serialized.contains("SECRET"));assert!(!serialized.contains("Body must not"));assert!(!serialized.contains("Command body"));assert!(!serialized.contains("Rule body"));assert!(!serialized.contains("Duplicate body"));assert!(!serialized.contains("Agent body"));
+    let logo=format!("{url}?logo=team&package=0");assert_eq!(client.get(&logo).send().await.unwrap().status(),401);
+    let agent=register(&s,"logo-reader").await;assert_eq!(client.get(&logo).bearer_auth(&agent.owner_token).send().await.unwrap().status(),403);
+    assert_eq!(client.get(format!("{url}?logo=team&package=99")).bearer_auth("admin-test").send().await.unwrap().status(),404);
+    let response=client.get(&logo).bearer_auth("admin-test").send().await.unwrap();assert_eq!(response.status(),200);
+    assert_eq!(response.headers().get("content-type").unwrap(),"image/png");assert_eq!(response.bytes().await.unwrap().as_ref(),png);
+}
+#[tokio::test]
 async fn backend_extension_conflicts_preserve_every_previous_target_and_foreign_files(){
     let s=server("extension-conflict",vec![]).await;let source=s._root.path().join("source");std::fs::create_dir_all(source.join("one")).unwrap();std::fs::write(source.join("one/SKILL.md"),"first").unwrap();
     let ext=&s.hub.extensions;ext.change(&s.hub,json!({"action":"save-source","source":{"id":"team","kind":"local","location":source}})).unwrap();ext.change(&s.hub,json!({"action":"sync-source","id":"team"})).unwrap();

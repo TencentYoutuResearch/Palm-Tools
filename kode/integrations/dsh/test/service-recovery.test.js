@@ -47,8 +47,10 @@ test('recovery buttons target the selected Host, disable during work, and reconn
   panel.pending[0]({ settings: {} }); await new Promise(resolve => setImmediate(resolve))
   assert.equal(panel.retried(), 1); assert.equal(panel.render().props['aria-busy'], false)
   assert.match(textOf(recoveryPanel('ssh-1', { deploymentSupported: true }).render()), /更新并部署服务/)
-  const unsupported = textOf(recoveryPanel('local', { localRecoverySupported: false }).render())
-  assert.match(unsupported, /退出并重新打开 Desktop/); assert.doesNotMatch(unsupported, /重启服务/)
+  const unsupportedPanel = recoveryPanel('local', { localRecoverySupported: false }), unsupported = unsupportedPanel.render()
+  assert.doesNotMatch(textOf(unsupported), /退出并重新打开 Desktop/)
+  assert.match(descendants(unsupported).find(node => node.props.title)?.props.title, /退出并重新打开 Desktop/)
+  assert.doesNotMatch(textOf(unsupported), /重启服务/)
 })
 
 test('missing UI and backend routes both carry a recoverable code, including JSON and plain-text 404s', async () => {

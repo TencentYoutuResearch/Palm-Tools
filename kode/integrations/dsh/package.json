@@ -27,11 +27,13 @@
     "scripts/repair-plugin-records.py",
     "README.md",
     "cordis.patch.yml",
-    "cordis.remote.patch.yml"
+    "cordis.remote.patch.yml",
+    "scripts/repair-inbox-history.js",
+    "scripts/repair-inbox-history.py"
   ],
   "engines": {
     "node": ">=24.9.0",
-    "dsh": "0.2.1-rc.2"
+    "dsh": "0.2.1-rc.5"
   },
   "dsh": {
     "client": {
@@ -69,20 +71,20 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-include": "^1.0.10",
-    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-web-app": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-storage": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-workspace": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-web-app": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-storage": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-workspace": "0.2.1-rc.5",
     "@deepseek-ai/cordis": "4.0.5"
   },
   "devDependencies": {
     "esbuild": "^0.25.12",
-    "@deepseek-ai/dsh-bash-local": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.2"
+    "@deepseek-ai/dsh-bash-local": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.5"
   }
 }

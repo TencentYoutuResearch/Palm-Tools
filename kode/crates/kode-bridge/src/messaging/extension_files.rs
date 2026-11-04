@@ -2,7 +2,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -202,6 +202,357 @@ fn validate_tree(root: &Path, path: &Path, count: &mut usize, depth: usize) -> R
     }
     Ok(())
 }
+fn display_text(value: &Value, limit: usize) -> Option<String> {
+    let text = value.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(limit).collect())
+}
+fn at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(value, |current, key| current.get(*key))
+}
+fn display_at(value: &Value, path: &[&str], limit: usize) -> Option<String> {
+    display_text(at(value, path)?, limit)
+}
+fn first_display(values: &[Option<String>]) -> Option<String> {
+    values.iter().find_map(|value| value.clone())
+}
+fn optional_json(path: &Path) -> Option<Value> {
+    if fs::metadata(path).ok()?.len() > 256 * 1024 {
+        return None;
+    }
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+fn frontmatter(path: &Path) -> (Option<String>, Option<String>) {
+    let Some(bytes) = fs::read(path).ok() else { return (None, None) };
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]);
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return (None, None);
+    }
+    let mut name = None;
+    let mut description = None;
+    let mut folded = false;
+    let mut folded_lines = vec![];
+    for line in lines {
+        let line = line.trim_end();
+        if folded {
+            if line.trim() == "---" {
+                break;
+            }
+            if line.starts_with(char::is_whitespace) {
+                if !line.trim().is_empty() {
+                    folded_lines.push(line.trim().to_string());
+                }
+                continue;
+            }
+            folded = false;
+        }
+        if line.trim() == "---" {
+            break;
+        }
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else { continue };
+        if key.trim() == "description" && matches!(value.trim(), ">" | ">-" | ">+" | "|" | "|-" | "|+") {
+            folded = true;
+            description = None;
+            continue;
+        }
+        let value = Value::String(value.trim().trim_matches(['"', '\'']).to_string());
+        match key.trim() {
+            "name" => name = display_text(&value, 128),
+            "description" => description = display_text(&value, 2000),
+            _ => {}
+        }
+    }
+    if !folded_lines.is_empty() {
+        description = display_text(&Value::String(folded_lines.join(" ")), 2000);
+    }
+    (name, description)
+}
+fn safe_relative(path: &Path) -> Option<String> {
+    let mut parts = vec![];
+    for part in path.components() {
+        match part {
+            Component::Normal(value) => parts.push(value.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(if parts.is_empty() { ".".into() } else { parts.join("/") })
+}
+fn package_logo(path: &Path, mut candidates: Vec<Option<String>>) -> Option<String> {
+    candidates.push(Some("./assets/logo.png".into()));
+    let root = fs::canonicalize(path).ok()?;
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.contains('\\') || candidate.contains('\0') {
+            continue;
+        }
+        let Some(relative) = safe_relative(Path::new(&candidate)) else { continue };
+        if relative == "." {
+            continue;
+        }
+        let file = root.join(&relative);
+        let Ok(real) = fs::canonicalize(&file) else { continue };
+        if !real.starts_with(&root) {
+            continue;
+        }
+        let extension = real.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !["png", "jpg", "jpeg", "webp"].contains(&extension.as_str()) {
+            continue;
+        }
+        let Ok(meta) = fs::metadata(&real) else { continue };
+        if meta.is_file() && meta.len() <= 4 * 1024 * 1024 {
+            return Some(relative);
+        }
+    }
+    None
+}
+fn collect_mcp(value: &Value, rows: &mut BTreeMap<String, String>) {
+    let servers = value.get("mcpServers").unwrap_or(value);
+    let Some(servers) = servers.as_object() else { return };
+    for (name, config) in servers {
+        if rows.len() >= 64 || name.is_empty() || name.len() > 128 || !config.is_object() {
+            continue;
+        }
+        let transport = display_text(&config["type"], 32).unwrap_or_else(|| {
+            if config.get("url").is_some() {
+                "http".into()
+            } else if config.get("command").is_some() {
+                "stdio".into()
+            } else {
+                "unknown".into()
+            }
+        });
+        rows.entry(name.clone()).or_insert(transport);
+    }
+}
+fn referenced_json(path: &Path, reference: &str) -> Option<Value> {
+    if reference.contains('\\') || reference.contains('\0') {
+        return None;
+    }
+    let relative = safe_relative(Path::new(reference))?;
+    if relative == "." {
+        return None;
+    }
+    let root = fs::canonicalize(path).ok()?;
+    let file = fs::canonicalize(root.join(relative)).ok()?;
+    if !file.starts_with(root) {
+        return None;
+    }
+    optional_json(&file)
+}
+fn mcp_preview(path: &Path, manifests: &[Value]) -> Value {
+    let mut rows = BTreeMap::new();
+    let mut referenced = false;
+    for manifest in manifests {
+        let Some(servers) = manifest.get("mcpServers") else { continue };
+        if let Some(reference) = servers.as_str() {
+            referenced = true;
+            if let Some(value) = referenced_json(path, reference) {
+                collect_mcp(&value, &mut rows);
+            }
+        } else {
+            collect_mcp(manifest, &mut rows);
+        }
+    }
+    if !referenced {
+        for name in ["mcp.json", ".mcp.json"] {
+            if let Some(value) = optional_json(&path.join(name)) {
+                collect_mcp(&value, &mut rows);
+            }
+        }
+    }
+    rows.into_iter().map(|(name, kind)| json!({"name":name,"type":kind})).collect()
+}
+fn collect_hooks(value: &Value, rows: &mut BTreeMap<String, Option<String>>) {
+    let Some(hooks) = value.get("hooks").and_then(Value::as_object) else { return };
+    let description = display_text(&value["description"], 2000);
+    for (event, entries) in hooks {
+        if rows.len() >= 128 || event.is_empty() || event.len() > 128 || !entries.is_array() {
+            continue;
+        }
+        rows.entry(event.clone()).or_insert_with(|| description.clone());
+    }
+}
+fn hooks_preview(path: &Path, manifests: &[Value]) -> Value {
+    let mut rows = BTreeMap::new();
+    let mut referenced = false;
+    for manifest in manifests {
+        let Some(hooks) = manifest.get("hooks") else { continue };
+        if let Some(reference) = hooks.as_str() {
+            referenced = true;
+            if let Some(value) = referenced_json(path, reference) {
+                collect_hooks(&value, &mut rows);
+            }
+        } else {
+            collect_hooks(manifest, &mut rows);
+        }
+    }
+    if !referenced {
+        if let Some(value) = optional_json(&path.join("hooks/hooks.json")) {
+            collect_hooks(&value, &mut rows);
+        }
+    }
+    rows.into_iter().map(|(name, description)| json!({"name":name,"description":description})).collect()
+}
+fn rules_preview(path: &Path) -> Value {
+    let Ok(entries) = fs::read_dir(path.join("rules")) else { return json!([]) };
+    let mut rows = BTreeMap::new();
+    for path in entries.filter_map(|entry| entry.ok().map(|entry| entry.path())) {
+        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+        if !["md", "mdc"].contains(&extension)
+            || path.file_name().and_then(|value| value.to_str()).unwrap_or("").starts_with('.')
+        {
+            continue;
+        }
+        let fallback = path.file_stem().and_then(|value| value.to_str()).unwrap_or("rule").to_string();
+        let (name, description) = frontmatter(&path);
+        rows.entry(fallback.clone()).or_insert_with(|| {
+            json!({"name":name.unwrap_or(fallback),"description":description})
+        });
+    }
+    rows.into_values().take(500).collect()
+}
+fn agents_preview(path: &Path) -> Value {
+    let Ok(entries) = fs::read_dir(path.join("agents")) else { return json!([]) };
+    let mut files = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension().and_then(|value| value.to_str()) == Some("md")
+                && !path.file_name().and_then(|value| value.to_str()).unwrap_or("").starts_with('.')
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+        .into_iter()
+        .take(500)
+        .map(|path| {
+            let fallback = path.file_stem().and_then(|value| value.to_str()).unwrap_or("agent");
+            let (name, description) = frontmatter(&path);
+            json!({"name":name.unwrap_or_else(||fallback.into()),"description":description})
+        })
+        .collect()
+}
+fn commands_preview(path: &Path) -> Value {
+    let Ok(entries) = fs::read_dir(path.join("commands")) else { return json!([]) };
+    let mut files = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension().and_then(|value| value.to_str()) == Some("md")
+                && !path.file_name().and_then(|value| value.to_str()).unwrap_or("").starts_with('.')
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+        .into_iter()
+        .take(500)
+        .map(|path| {
+            let fallback = path.file_stem().and_then(|value| value.to_str()).unwrap_or("command");
+            let (name, description) = frontmatter(&path);
+            json!({"name":name.unwrap_or_else(||fallback.into()),"description":description})
+        })
+        .collect()
+}
+fn author_text(value: &Value) -> Option<String> {
+    display_text(value, 128).or_else(|| display_at(value, &["name"], 128))
+}
+fn package_preview(path: &Path, manifests: &[Value]) -> Value {
+    let meta = optional_json(&path.join("plugin.meta.json")).unwrap_or(Value::Null);
+    let codex = optional_json(&path.join(".codex-plugin/plugin.json")).unwrap_or(Value::Null);
+    let cursor = optional_json(&path.join(".cursor-plugin/plugin.json")).unwrap_or(Value::Null);
+    let interface = &codex["interface"];
+    let meta_interface = &meta["codex"]["interface"];
+    let fallback = |key: &str| manifests.iter().find_map(|row| display_text(&row[key], 2000));
+    let name = first_display(&[
+        display_at(&meta, &["id"], 128),
+        fallback("name"),
+        path.file_name().and_then(|value| value.to_str()).map(|value| value.to_string()),
+    ]).unwrap_or_else(|| "plugin".into());
+    let display_name = first_display(&[
+        display_at(&meta, &["displayName"], 128),
+        display_at(interface, &["displayName"], 128),
+        display_at(meta_interface, &["displayName"], 128),
+        Some(name.clone()),
+    ]);
+    let description = first_display(&[
+        display_at(interface, &["shortDescription"], 2000),
+        display_at(meta_interface, &["shortDescription"], 2000),
+        display_at(&meta, &["description"], 2000),
+        fallback("description"),
+    ]);
+    let long_description = first_display(&[
+        display_at(interface, &["longDescription"], 2000),
+        display_at(meta_interface, &["longDescription"], 2000),
+        display_at(&meta, &["description"], 2000),
+        fallback("description"),
+    ]);
+    let version = first_display(&[display_at(&meta, &["version"], 64), fallback("version")]);
+    let author = first_display(&[
+        author_text(&meta["author"]),
+        display_at(interface, &["developerName"], 128),
+        display_at(meta_interface, &["developerName"], 128),
+        manifests.iter().find_map(|row| author_text(&row["author"])),
+    ]);
+    let category = first_display(&[
+        display_at(&meta, &["category"], 128),
+        display_at(interface, &["category"], 128),
+        display_at(meta_interface, &["category"], 128),
+    ]);
+    let logo = package_logo(path, vec![
+        display_at(interface, &["logo"], 4096),
+        display_at(interface, &["composerIcon"], 4096),
+        display_at(meta_interface, &["logo"], 4096),
+        display_at(meta_interface, &["composerIcon"], 4096),
+        display_at(&cursor, &["logo"], 4096),
+    ]);
+    json!({
+        "name":name,"path":path.to_string_lossy(),"displayName":display_name,
+        "description":description,"longDescription":long_description,"version":version,
+        "author":author,"category":category,"logo":logo,"skills":[],"commands":commands_preview(path),
+        "agents":agents_preview(path),"hooks":hooks_preview(path, manifests),"rules":rules_preview(path),"mcp":mcp_preview(path, manifests),
+    })
+}
+pub fn logo(root: &Path, source: &Value, package_index: usize) -> Result<(Vec<u8>, &'static str)> {
+    let source_id = source["id"].as_str().context("source id missing")?;
+    if !id(source_id) {
+        bail!("invalid source id")
+    }
+    let release = source["release"].as_str().context("release missing")?;
+    if safe_relative(Path::new(release)).as_deref() != Some(release) || release == "." {
+        bail!("invalid release")
+    }
+    let package = source["packages"].as_array().and_then(|rows| rows.get(package_index)).context("package missing")?;
+    let package_path = safe_relative(Path::new(package["path"].as_str().context("package path missing")?)).context("invalid package path")?;
+    let logo_path = safe_relative(Path::new(package["logo"].as_str().context("logo missing")?)).context("invalid logo path")?;
+    if logo_path == "." {
+        bail!("invalid logo path")
+    }
+    let base = root.join("sources").join(source_id).join("releases").join(release).join("package");
+    let base = fs::canonicalize(base)?;
+    let package_root = fs::canonicalize(base.join(package_path))?;
+    if !package_root.starts_with(&base) {
+        bail!("package escapes release")
+    }
+    let file = fs::canonicalize(package_root.join(logo_path))?;
+    if !file.starts_with(&package_root) || !fs::metadata(&file)?.is_file() || fs::metadata(&file)?.len() > 4 * 1024 * 1024 {
+        bail!("logo escapes package or is too large")
+    }
+    let bytes = fs::read(file)?;
+    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        bail!("unsupported logo content")
+    };
+    Ok((bytes, mime))
+}
 fn scan(
     root: &Path,
     path: &Path,
@@ -209,11 +560,14 @@ fn scan(
     count: &mut usize,
     skills: &mut Vec<Value>,
     plugins: &mut Value,
+    packages: &mut Vec<Value>,
+    current_package: Option<usize>,
 ) -> Result<()> {
     *count += 1;
     if depth > 8 || *count > 5000 {
         bail!("插件目录过大，请缩小子目录")
     }
+    let mut manifests = vec![];
     for target in ["claude", "codebuddy", "cursor", "codex"] {
         let manifest = path.join(format!(".{target}-plugin/plugin.json"));
         if manifest.exists() {
@@ -231,8 +585,15 @@ fn scan(
                 .as_array_mut()
                 .unwrap()
                 .push(json!({"name":name,"path":path}));
+            manifests.push(value);
         }
     }
+    let current_package = if !manifests.is_empty() || path.join("plugin.meta.json").is_file() {
+        packages.push(package_preview(path, &manifests));
+        Some(packages.len() - 1)
+    } else {
+        current_package
+    };
     let skill = path.join("SKILL.md");
     if skill.is_file() {
         let rel = path.strip_prefix(root)?;
@@ -251,6 +612,13 @@ fn scan(
             bail!("invalid skill directory name")
         }
         skills.push(json!({"name":name,"path":path}));
+        if let Some(index) = current_package {
+            let (display_name, description) = frontmatter(&skill);
+            let fallback = path.file_name().and_then(|value| value.to_str()).unwrap_or("skill");
+            packages[index]["skills"].as_array_mut().unwrap().push(json!({
+                "name":display_name.unwrap_or_else(||fallback.into()),"description":description,
+            }));
+        }
         return Ok(());
     }
     for entry in fs::read_dir(path)? {
@@ -261,18 +629,19 @@ fn scan(
             && !name.starts_with('.')
             && !["node_modules", "target"].contains(&name.as_ref())
         {
-            scan(root, &entry.path(), depth + 1, count, skills, plugins)?
+            scan(root, &entry.path(), depth + 1, count, skills, plugins, packages, current_package)?
         }
     }
     Ok(())
 }
-pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Option<String>)> {
+pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Option<String>, String, Vec<Value>)> {
     let name = source["id"].as_str().context("source id missing")?;
+    let release_id = uuid::Uuid::new_v4().to_string();
     let release = root
         .join("sources")
         .join(name)
         .join("releases")
-        .join(uuid::Uuid::new_v4().to_string());
+        .join(&release_id);
     fs::create_dir_all(&release)?;
     let package = release.join("package");
     let location = source["location"]
@@ -320,7 +689,8 @@ pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Optio
     }
     let mut skills = vec![];
     let mut plugins = json!({"claude":[],"codebuddy":[],"cursor":[],"codex":[]});
-    scan(&selected, &selected, 0, &mut 0, &mut skills, &mut plugins)?;
+    let mut packages = vec![];
+    scan(&selected, &selected, 0, &mut 0, &mut skills, &mut plugins, &mut packages, None)?;
     if skills.is_empty()
         && plugins
             .as_object()
@@ -330,7 +700,13 @@ pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Optio
     {
         bail!("未找到 SKILL.md 或原生插件清单")
     }
-    Ok((skills, plugins, revision))
+    for row in &mut packages {
+        let path = PathBuf::from(row["path"].as_str().context("package preview path missing")?);
+        row["path"] = json!(safe_relative(path.strip_prefix(&package)?).context("invalid package preview path")?);
+        row["skills"].as_array_mut().unwrap().sort_by_key(|skill| skill["name"].as_str().unwrap_or("").to_string());
+    }
+    packages.sort_by_key(|row| row["path"].as_str().unwrap_or("").to_string());
+    Ok((skills, plugins, revision, release_id, packages))
 }
 fn link_path(link: &Value, key: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(
@@ -453,6 +829,10 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
     } else {
         vec![]
     };
+    if plugins.is_empty() {
+        native_remove(root, source)?;
+        return Ok(());
+    }
     let selectors = plugins
         .iter()
         .map(|plugin| json!(format!("{}@kode-{name}", plugin["name"].as_str().unwrap())))
@@ -478,9 +858,6 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
                 .unwrap()
                 .retain(|v| v != &selector);
         }
-    }
-    if plugins.is_empty() {
-        return Ok(());
     }
     let marketplace_root = root.join("sources").join(&name);
     let canonical = fs::canonicalize(&marketplace_root)?;

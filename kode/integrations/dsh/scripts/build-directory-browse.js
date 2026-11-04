@@ -12,4 +12,4 @@ for (const name of ['conversation.hero.workspace.directoryFlow', 'sidebar.worksp
   if (source.split(pattern).length !== 2) throw new Error('Unsupported dsh directory browser: slot contract changed')
   source = source.replace(pattern, `${pattern}\n                    priority: 20,`)
 }
-await writeFile(new URL('../packages/directory-browse/client.js', import.meta.url), '// Generated from the MIT-licensed @deepseek-ai/dsh-client-ui-directory-picker-browse, 0.2.1-rc.2.\n// Run npm run build:directory-browse.\n' + source)
+await writeFile(new URL('../packages/directory-browse/client.js', import.meta.url), '// Generated from the MIT-licensed @deepseek-ai/dsh-client-ui-directory-picker-browse, 0.2.1-rc.5.\n// Run npm run build:directory-browse.\n' + source)

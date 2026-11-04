@@ -116,6 +116,18 @@ test('continuing an archived Codex binding restores the same thread and resumes 
  }finally{await session.close();await rm(root,{recursive:true,force:true})}
 })
 
+test('Codex Fast applies a per-turn service tier without changing thread or global settings', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-codex-fast-')), log = join(root, 'wire.jsonl')
+  const session = new CodexSession({ executable: process.execPath, args: [fixture], env: { KODE_FIXTURE_RPC_LOG: log } }, root)
+  try {
+    await session.open({}, [])
+    await collect(session.turn([{ type: 'text', text: 'fast on' }], { serviceTier: 'fast' }))
+    await collect(session.turn([{ type: 'text', text: 'fast off' }], { serviceTier: 'default' }))
+    const records = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.deepEqual(records.filter(row => row.method === 'turn/start').map(row => row.params.serviceTierForTurn), ['fast', 'default'])
+    assert.ok(records.filter(row => row.method === 'thread/start').every(row => !('serviceTier' in row.params)))
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
+})
 test('unrelated resume errors never restore other threads or create a replacement conversation',async()=>{
  const threadId='01a18080-9adf-7920-906f-6bbbc7f2d971'
  for(const message of ['permission denied','session 00000000-0000-0000-0000-000000000000 is archived']){

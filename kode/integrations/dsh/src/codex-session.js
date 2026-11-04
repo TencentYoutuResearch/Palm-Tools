@@ -150,7 +150,7 @@ export class CodexSession {
     }
     return runGoalCommand(this, input, signal)
   }
-  async *turn(input, { model, effort, signal, command, skillNames = [], observe = false } = {}) {
+  async *turn(input, { model, effort, serviceTier, signal, command, skillNames = [], observe = false } = {}) {
     if (!this.threadId) throw new Error('Agent session has not been opened')
     if (this.active) throw new Error('Agent already has an active turn')
     signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
@@ -239,7 +239,7 @@ export class CodexSession {
       } else {
         const plan = this.handlers.collaborationMode?.()
         const collaborationMode = typeof plan === 'boolean' ? { mode: plan ? 'plan' : 'default', settings: { model: model ?? this.profile.defaultModel, reasoning_effort: effort ?? null, developer_instructions: null } } : undefined
-        result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}), ...(collaborationMode ? { collaborationMode } : {}) }, { signal })
+        result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTierForTurn: serviceTier } : {}), ...(collaborationMode ? { collaborationMode } : {}) }, { signal })
       }
       turnId = result?.turn?.id; active.turnId = turnId
       if (cancelled) { if (!this.rpc.closed) void this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId }).catch(() => {}); signal.throwIfAborted() }

@@ -13,9 +13,22 @@ import { pendingShellContext } from './native-shell.js'
 import { classifyCommands } from './command-skills.js'
 import { nativeInput } from './native-input.js'
 import { SessionAppearance } from './session-appearance.js'
+import { fastPreference, withModelVariantFast } from './model-fast.js'
 
 export { profileRoute } from './agent-profiles.js'
 export { nativeToolDescriptor } from './native-tools.js'
+function codexFastCapability(model) {
+  const rows = Array.isArray(model.serviceTiers) ? model.serviceTiers : []
+  const additional = Array.isArray(model.additionalSpeedTiers) ? model.additionalSpeedTiers : []
+  const fastRow = rows.find(row => {
+    const id = typeof row === 'string' ? row : row.id ?? row.serviceTier, name = typeof row === 'string' ? row : row.name
+    return id === 'fast' || name?.toLowerCase() === 'fast' || additional.includes(id)
+  })
+  const tier = fastRow ? typeof fastRow === 'string' ? fastRow : fastRow.id ?? fastRow.serviceTier : additional.includes('fast') ? 'fast' : undefined
+  if (!tier) return undefined
+  const defaultTier = typeof model.defaultServiceTier === 'string' ? model.defaultServiceTier : model.defaultServiceTier?.serviceTier
+  return { transport: 'service-tier', tier, standardTier: 'default', defaultEnabled: defaultTier === tier || defaultTier === 'fast' }
+}
 export class AgentRuntimeAdapter {
   constructor(ctx, profiles, { recordNative = (session, data) => appendPluginRecord(session, 'plugin:kode/native-event', data), resolveProfile = async profile => profile, onThread = async () => {} } = {}) {
     this.ctx = ctx; this.profiles = profiles; this.live = new Map(); this.busy = new Set(); this.catalogs = new Map(); this.positions = new WeakMap(); this.stop = new AbortController(); this.probes = new Set()
@@ -69,7 +82,8 @@ export class AgentRuntimeAdapter {
               commands.push(...skills.map(skill => ({ name: skill.name, description: skill.description, kind: 'skill', input: { hint: '技能参数或任务' } })))
             } catch (error) { this.stop.signal.throwIfAborted(); this.ctx.logger?.warn('Codex skill discovery failed: %s', error.message) }
           }
-          return { models: models.filter(m => (m.model ?? m.id) !== 'default').map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: profile.type === 'codex' || profile.protocol === 'codex' || profile.type === 'claude' ? ['text', 'image'] : m.inputModalities ?? ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}) })), commands, modes: session.state?.modes?.availableModes ?? [] }
+          const rows = models.filter(m => (m.model ?? m.id) !== 'default' || m.fastCapability).map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: profile.type === 'codex' || profile.protocol === 'codex' || profile.type === 'claude' ? ['text', 'image'] : m.inputModalities ?? ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}), ...(m.fastCapability ? { fastCapability: m.fastCapability } : {}), ...(profile.type === 'codex' || profile.protocol === 'codex' ? { fastCapability: codexFastCapability(m) } : {}) }))
+          return { models: profile.type === 'cursor' ? withModelVariantFast(rows) : rows, commands, modes: session.state?.modes?.availableModes ?? [] }
         } finally { this.probes.delete(session); await session.close() }
       })().catch(error => { if (this.catalogs.get(key) === task) this.catalogs.delete(key); throw error })
       this.catalogs.set(key, task)
@@ -84,6 +98,16 @@ export class AgentRuntimeAdapter {
       ...model,
       reasoning: { efforts: model.reasoningEfforts, ...(model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}) },
     })
+  }
+  async compatibleEffort(profile, options) {
+    if (!options.reasoningEffort) return options
+    const models = await this.listModels(options.provider, profile, options.model)
+    const selected = models.find(row => row.id === options.model)
+    if (!selected) return options
+    const efforts = selected.reasoningEfforts ?? []
+    if (efforts.some(row => row.id === options.reasoningEffort)) return options
+    const fallback = selected.defaultReasoningEffort
+    return { ...options, reasoningEffort: fallback && efforts.some(row => row.id === fallback) ? fallback : undefined }
   }
   async listCommands(provider, profile) { return (await this.capabilities(provider, profile)).commands }
   async listSkills(provider, profile, cwd) {
@@ -190,6 +214,7 @@ export class AgentRuntimeAdapter {
     let runtime, completed = false
     try {
       const profile = this.profile(options.provider)
+      options = await this.compatibleEffort(profile, options)
       const binding = await this.profiles.bind(agent.id, profile.id)
       const seen = new Set(binding.seenInputs)
       const messages = options.messages.filter(m => m.role === 'user' && m.id && !seen.has(m.id))
@@ -206,6 +231,10 @@ export class AgentRuntimeAdapter {
       if (runtime?.rpc.closed) { this.live.delete(agent.id); runtime = undefined }
       if (!runtime && options.nativeContinuation) throw new Error('原生目标连接已关闭，不能重放继续事件。')
       if (!runtime) { runtime = await this.createRuntime(agent, binding, tools, signal); this.live.set(agent.id, runtime) }
+      const explicitFast = options.fast ?? fastPreference(this.ctx.sessionProjections?.stateOf(agent.session, 'kodeFast'), options)
+      const codex = profile.type === 'codex' || profile.protocol === 'codex'
+      const fast = codex ? undefined : explicitFast
+      const serviceTier = codex && explicitFast !== undefined ? explicitFast ? options.fastTier ?? 'fast' : 'default' : undefined
       const skillNames = messages.flatMap(message => [...(['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1]))
       if (command?.name === 'resume') throw new Error('请在 dsh 的 /resume 菜单中选择要恢复的原生会话。')
       if (command && terminalOnlyCommands.has(command.name)) throw new Error(`/${command.name} 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。`)
@@ -224,7 +253,7 @@ export class AgentRuntimeAdapter {
         text = ''; reasoning = ''; textIndex = undefined; reasoningIndex = undefined; textItemId = undefined
         if (options.onAssistantMessageBoundary) nextIndex = 0
       }
-      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, signal, command, skillNames, observe: options.nativeContinuation })) {
+      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, fast, serviceTier, signal, command, skillNames, observe: options.nativeContinuation })) {
         const { method, params } = event
         if (method === 'turn/started') options.onNativeTurnReady?.()
         const messageOutput = method === 'item/agentMessage/delta' && params.delta || method === 'item/completed' && params.item?.type === 'agentMessage' && !streamed.has(params.item.id) && params.item.text

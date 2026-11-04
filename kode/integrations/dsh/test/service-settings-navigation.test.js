@@ -35,9 +35,13 @@ test('service recovery navigation selects the failing Host without switching the
   assert.equal(nodes(page).find(node => node.type === 'select').props.value, 'worker')
   const service = nodes(page).find(node => node.type === scope.SshSettings)
   assert.equal(nodes(scope.SshSettings(service.props)).find(node => node.type === scope.HostServiceStatus).props.host, 'worker')
-  for (const type of ['agents', scope.IntegrationSettingsBody, scope.MobileSettingsBody]) {
-    const body = nodes(page).find(node => node.type === type)
+  for (const [section, type] of [['agents', 'agents'], ['integrations', scope.IntegrationSettingsBody], ['mobile', scope.MobileSettingsBody]]) {
+    scope.requestedServiceHost = 'worker'; scope.requestedSettingsSection = section
+    const scoped = scope.KodeSettings({ slots })
+    const body = nodes(scoped).find(node => node.type === type)
     assert.equal(body.props.host ?? body.props.settingsHost, 'worker')
+    assert.equal(nodes(scoped).filter(node => node.type === 'section').length, 1, 'only the active settings panel mounts')
+    assert.equal(nodes(scoped).filter(node => node.type === 'h3').length, 0, 'tabs do not repeat their own visible heading')
   }
   assert.equal(scope.transport.current, 'local')
   assert.equal(scope.requestedServiceHost, undefined, 'consume the navigation target once')

@@ -1,4 +1,4 @@
-// Generated from the MIT-licensed @deepseek-ai/dsh-client-ui-directory-picker-browse, 0.2.1-rc.2.
+// Generated from the MIT-licensed @deepseek-ai/dsh-client-ui-directory-picker-browse, 0.2.1-rc.5.
 // Run npm run build:directory-browse.
 window.__ModuleLoader__.load({
 	id: "@kode/dsh-directory-browse",
