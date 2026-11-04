@@ -268,25 +268,31 @@ test('Agent list keeps editors collapsed until requested', () => {
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
 
-test('default Agent settings persist model, effort and Fast as new-session defaults', async () => {
+test('every Agent owns independent model, effort and Fast defaults while the default Agent only selects a profile', async () => {
   const agentDirectory = {
-    currentProfile: { id: 'codex', name: 'Codex', type: 'codex' }, profiles: [{ id: 'codex', name: 'Codex', type: 'codex' }], selectedProfileId: 'codex', configuredDefaultProfileId: 'codex', supportedTypes: ['codex'], types: { codex: { name: 'Codex', executable: 'codex' } },
+    currentProfile: { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }, profiles: [{ id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }], selectedProfileId: 'codex', configuredDefaultProfileId: 'codex', supportedTypes: ['codex'], types: { codex: { name: 'Codex', executable: 'codex' } },
     defaultModelSelection: { model: 'fixture', reasoningEffort: 'high', fast: false },
     models: [{ id: 'fixture', name: 'Fixture', reasoningEfforts: [{ id: 'high', name: 'High' }, { id: 'medium', name: 'Medium' }], fastCapability: { transport: 'service-tier', defaultEnabled: false } }, { id: 'plain', name: 'Plain' }],
   }
   const c = client(undefined, { agentDirectory }, { layout: { selectPanel() {} } }), wrapper = c.entry('main', 'kode-settings')(), panel = wrapper.children[0], outer = panel.type(panel.props)
   const component = findNode(outer, node => node?.props?.settingsHost).type, props = { sessions: c.ctx.sessions, settingsHost: 'local' }
   component(props); await new Promise(resolve => setImmediate(resolve))
-  const body = component(props), settings = findNode(body, node => node.type?.name === 'DefaultModelSettings'), tree = settings.type(settings.props)
-  findNode(tree, node => node.props?.label === '默认模型').props.onChange('plain')
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(c.requests.at(-1), { action: 'set-default-model', profileId: 'codex', model: 'plain' })
-  findNode(tree, node => node.props?.label === '推理强度').props.onChange('medium')
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(c.requests.at(-1), { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'medium', fast: false })
-  const fast = findNode(tree, node => node.type?.name === 'FastSwitch')
-  fast.props.onChange(true); await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(c.requests.at(-1), { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'high', fast: true })
+  const body = component(props)
+  assert.ok(findNode(body, node => node.props?.['aria-label'] === '设置 Codex 默认模型'))
+  assert.equal(findNode(body, node => node.type?.name === 'DefaultModelSettings'), undefined, 'no shared model editor is attached to the default Agent selector')
+  const calls = [], scope = {
+    h: (type, props, ...children) => ({ type, props: props ?? {}, children }), SelectField: 'select', FastSwitch: 'switch', Failure: 'failure', useEffect() {},
+    useSyncExternalStore: (_subscribe, get) => get(), directory: (...args) => { calls.push(args); return { subscribe() {}, getSnapshot: () => ({ data: agentDirectory, busy: false, error: '' }), operate: async body => calls.push(body) } },
+  }
+  vm.runInNewContext(source.slice(source.indexOf('  function DefaultModelSettings'), source.indexOf('  function AgentSettingsBody')), scope)
+  const modelPanel = scope.AgentModelDefaults({ profile: agentDirectory.profiles[0], settingsHost: 'ssh-test' }), settings = findNode(modelPanel, node => node.type === scope.DefaultModelSettings), tree = settings.type(settings.props)
+  assert.deepEqual(calls[0], [undefined, 'ssh-test', true, 'codex'])
+  findNode(tree, node => node.props?.label === '默认模型').props.onChange('plain'); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual({ ...calls.at(-1) }, { action: 'set-default-model', profileId: 'codex', model: 'plain' })
+  findNode(tree, node => node.props?.label === '推理强度').props.onChange('medium'); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual({ ...calls.at(-1) }, { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'medium', fast: false })
+  findNode(tree, node => node.type === 'switch').props.onChange(true); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual({ ...calls.at(-1) }, { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'high', fast: true })
 })
 
 test('model menu owns model, effort and Fast selection in one trigger', async () => {
@@ -524,6 +530,8 @@ test('avatar animation subscribes to native running and interaction facts indepe
  assert.equal(scope.useAvatarStatus('running'),'running');assert.equal(scope.useAvatarStatus('awaiting'),'awaiting');assert.equal(scope.useAvatarStatus('idle'),'idle');assert.equal(scope.useAvatarStatus('not-loaded'),undefined)
  Object.assign(scope,{transport:null,useState:value=>[value,()=>{}],useEffect(){},React:{useRef:value=>({current:value})},useAvatarLibrary:()=>({avatars:[{id:'person',animations:{idle:['idle-1'],running:['running-1','running-2'],awaiting:['awaiting-1','awaiting-2'],done:['done-1','done-2']}}]}),h:(type,props,...children)=>({type,props,children})})
  for(const status of ['running','awaiting','done']) assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status}).children[0].props.src,`${status==='running'?'awaiting':status}-1`,'reuse the original awaiting/done animations for every state')
+ const nativeKode=scope.AgentAvatar({profile:{type:'dsh',avatar:{id:null,url:'/api/kode/avatars/media?type=dsh&state=idle'}}}).children[0]
+ assert.equal(nativeKode.type,'img');assert.equal(nativeKode.props.src,'/api/kode/avatars/media?type=dsh&state=idle','native Kode conversations must render the packaged Kode icon')
  scope.avatarContext.sessions={list:{subscribe:()=>()=>{},getSnapshot:()=>({byId:{'not-loaded':{running:true}}})}}
  assert.equal(scope.useAvatarStatus('not-loaded'),'running','cold artwork directories must not delay the native running state')
 })

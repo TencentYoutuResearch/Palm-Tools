@@ -49,7 +49,9 @@ export function registerAgentApi(ctx, service) {
         const selection = agent ? selected(agent) : stored?.pending ?? stored?.next ?? stored?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
         const inferred = profiles.list().find(p => profileRoute(p.id) === selection?.provider)
         const configuredDefault = profiles.list().find(p => p.id === profiles.defaultProfileId && available(p))
-        const selectedProfileId = binding?.profile.id ?? (!sessionId ? configuredDefault?.id : undefined) ?? inferred?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
+        const requestedProfileId = configurationOnly && !sessionId ? query.get('profile_id') : null
+        if (requestedProfileId && !profiles.list().some(profile => profile.id === requestedProfileId)) throw new Error('unknown Agent profile')
+        const selectedProfileId = binding?.profile.id ?? requestedProfileId ?? (!sessionId ? configuredDefault?.id : undefined) ?? inferred?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
         const profile = binding?.profile ?? profiles.list().find(p => p.id === selectedProfileId)
         const catalog = { groups: [] }
         if (query.get('refresh') === '1' && profile) adapter.invalidateModels?.(profileRoute(profile.id))
