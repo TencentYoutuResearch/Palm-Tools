@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json && pnpm test:git-graph && pnpm test:terminal-theme && pnpm test:terminal-output && pnpm test:terminal-settings && pnpm test:terminal-mouse && pnpm test:updates && pnpm test:session-input && pnpm test:chooser-history && pnpm test:file-drop",
+    "check": "svelte-check --tsconfig ./tsconfig.json && pnpm test:git-graph && pnpm test:terminal-theme && pnpm test:terminal-output && pnpm test:terminal-settings && pnpm test:terminal-mouse && pnpm test:updates && pnpm test:session-input && pnpmtest:chooser-history && pnpm test:file-drop && pnpm test:rename-sync",
     "test:git-graph": "node --experimental-strip-types --test tests/git_graph_layout.test.ts",
     "test:updates": "node --experimental-strip-types --test tests/app_updates.test.ts",
     "test:terminal-theme": "node --experimental-strip-types --test tests/terminal_ansi_theme.test.ts",
@@ -17,6 +17,7 @@
     "test:session-input": "node --experimental-strip-types --test tests/consecutive_ctrl_c_guard.test.ts tests/conpty_cursor.test.ts tests/terminal_clipboard.test.ts tests/remote_attachments.test.ts tests/session_metadata.test.ts tests/model_alias.test.ts tests/session_launch_model.test.ts tests/project_permission.test.ts tests/chooser_preferences.test.ts",
     "test:chooser-history": "node --experimental-strip-types --test tests/backend_chooser_history.test.ts",
     "test:file-drop": "node --experimental-strip-types --test tests/file_drop.test.ts tests/workspace_drop.test.ts tests/workspace_drag.test.ts",
+    "test:rename-sync": "node --experimental-strip-types --test tests/rename_sync.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

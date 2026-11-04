@@ -98,6 +98,10 @@ also refreshes `GET /api/v1/sessions` after `connection.hello`, because mobile
 operating systems may suspend the incremental WebSocket while backgrounded.
 Desktop title changes additionally emit sparse `meta { title }` events so a
 live mobile view updates without waiting for either reconnect.
+Every desktop rename entry point (dialog and sidebar inline edit) must call
+`set_title`; a frontend-only rename never reaches the bus. Once a title is
+pinned by the user, JSONL-derived `meta` events carry `title: null` so a late
+AI title cannot overwrite the user's name on mobile.
 
 Snapshots contain active sessions only. Exited sessions remain server-side for
 audit/history retention but are excluded from the mobile list, and a live

@@ -98,3 +98,15 @@ test('saved sessions already owned by a live dsh runtime reuse its shared view w
   assert.deepEqual(await importSavedSession(h.ctx, h.client, h.tab), {sharedSession:live, imported:false})
   assert.deepEqual(h.calls, [])
 })
+
+test('native catalog synchronization retains an explicit default-icon choice across repeated saves', async () => {
+  const h = fixture(), agent = { id: 'inline-session', session: { header: { cwd: '/srv/project' }, requestHeader: () => ({ config: { model: 'model-a' } }) } }
+  const doc = await h.client.call('/api/v1/messaging/workbench/documents/session-index')
+  doc.value.presentation = { sessionAvatars: { [agent.id]: null } }
+  await h.client.call('/api/v1/messaging/workbench/documents/session-index', { expected_revision: doc.revision, value: doc.value })
+  await saveNativeTab(h.client, h.profiles, agent, 'Default icon')
+  await saveNativeTab(h.client, h.profiles, agent, 'Default icon')
+  assert.equal(h.state().native_sessions[0].avatar_id, null)
+  assert.ok(Object.hasOwn(h.state().presentation.sessionAvatars, agent.id))
+  assert.equal(h.state().presentation.sessionAvatars[agent.id], null)
+})

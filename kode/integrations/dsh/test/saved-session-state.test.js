@@ -40,3 +40,20 @@ test('registered saved IDs are preserved rather than replaced with a newly deriv
  assert.equal(savedImportIdentity({session_id:'thread',backend_key:'codex',dsh_session_id:'registered'},'p',{}),'registered')
  assert.equal(savedImportIdentity({session_id:'thread',backend_key:'codex'},'p',{'other-profile':{threadId:'thread',profile:{id:'other'}},'matching':{threadId:'thread',profile:{id:'p'}}}),'matching')
 })
+
+test('archive and unarchive of a saved shared conversation use its original dsh identity',async()=>{
+ const client=backend();client.documents['session-index'].native_sessions[0]={...tab,dsh_session_id:'session-original',transport_kind:'runtime'}
+ const input={nativeSession:{backend_key:tab.backend_key,session_id:tab.session_id}}
+ await savedSessionOperation(client,{...input,operation:'archive-session'})
+ assert.deepEqual(client.documents.workspaces.global.archivedSessionIds,['session-original'])
+ await savedSessionOperation(client,{...input,operation:'unarchive-session'})
+ assert.deepEqual(client.documents.workspaces.global.archivedSessionIds,[])
+})
+
+test('legacy runtime snapshots without dsh IDs archive the actual owner instead of a new alias',async()=>{
+ const client=backend();client.documents['session-index'].native_sessions[0]={...tab,transport_kind:'runtime'}
+ const call=client.call.bind(client);client.call=async(path,body)=>path.endsWith('/runtime/sessions')?{sessions:[{runtime:'dsh',runtime_session_id:'session-original',native_thread_id:tab.session_id,backend_key:tab.backend_key}]}:call(path,body)
+ await savedSessionOperation(client,{nativeSession:{backend_key:tab.backend_key,session_id:tab.session_id},operation:'archive-session'})
+ assert.deepEqual(client.documents.workspaces.global.archivedSessionIds,['session-original'])
+ assert.equal(client.documents['session-index'].native_sessions[0].dsh_session_id,'session-original')
+})

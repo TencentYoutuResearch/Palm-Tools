@@ -7,13 +7,14 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { AgentProfiles } from '../src/agent-profiles.js'
 import { registerAgentApi } from '../src/agent-api.js'
+import { Session } from '@deepseek-ai/dsh-session'
 
 test('Agent configuration API admits only the dsh owner and preserves identity when selecting models', async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-agent-api-'))
   const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'native', name: 'dsh', type: 'dsh' }])
   let handler, selection = { provider: 'native-llm', model: 'fixture' }, turns = 0
-  const selected = []
-  const agent = { id: 'conversation', status: 'idle', session: {},selectModel:request=>{selected.push(request);selection={provider:request.provider,model:request.model,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{})};return{selected:selection}} }
+  const selected = [], session = Session.create('conversation')
+  const agent = { id: 'conversation', status: 'idle', session,selectModel:request=>{selected.push(request);selection={provider:request.provider,model:request.model,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{})};return{selected:selection}} }
   const ctx = {
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-test-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : req.headers['x-test-role'] === 'guest' ? { peer: { principal: { kind: 'guest' } } } : { rejection: 401 } },
@@ -76,6 +77,19 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     assert.equal(selected.at(-1).model, 'fixture')
     assert.equal((await request({action:'select',profileId:two.profile.id,sessionId:agent.id,model:'fixture',reasoningEffort:'high'})).status,200)
     assert.equal(selected.at(-1).reasoningEffort,'high')
+    const committed = selected.length
+    assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id, model: 'fixture', reasoningEffort: 'invalid' })).status, 400)
+    assert.equal(selected.length, committed, 'invalid effort must not change the durable selection')
+    const originalModels = service.adapter.listModels
+    service.adapter.listModels = async () => [
+      { id: 'fixture', reasoningEfforts: [{ id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }], defaultReasoningEffort: 'medium' },
+      { id: 'plain', reasoningEfforts: [] },
+    ]
+    assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id, model: 'plain' })).status, 200)
+    assert.equal(selected.at(-1).reasoningEffort, undefined, 'switching models clears an effort the new model does not advertise')
+    assert.equal((await request({ action: 'select', profileId: two.profile.id, sessionId: agent.id, model: 'fixture' })).status, 200)
+    assert.equal(selected.at(-1).reasoningEffort, 'medium', 'switching back uses the advertised default, not a stale high value')
+    service.adapter.listModels = originalModels
     assert.equal((await request({action:'select',profileId:two.profile.id,sessionId:agent.id,model:'fixture',reasoningEffort:'not-advertised'})).status,400)
     assert.equal(selected.at(-1).provider, `kode-agent-${two.profile.id}`)
     assert.equal(profiles.binding(agent.id).profile.id, two.profile.id)

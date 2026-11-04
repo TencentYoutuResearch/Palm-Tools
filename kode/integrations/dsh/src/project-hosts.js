@@ -127,7 +127,8 @@ export class ProjectHosts {
         if (!host) continue
         const key = `saved:${createHash('sha256').update(`${hostId}:${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0,32)}`
         const adopted = tab.dsh_session_id ?? `session-kode-${createHash('sha256').update(`${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0,32)}`
-        if (host.sessions.some(row => row.id === adopted || row.nativeThreadId === tab.session_id)) continue
+        if (host.hiddenSessionIds?.includes(adopted) || host.hiddenSessionIds?.includes(tab.session_id)) continue
+        if (host.sessions.some(row => row.id === adopted || tab.transport_kind === 'runtime' && row.id === tab.session_id || row.nativeThreadId === tab.session_id)) continue
         this.saved.set(key, { tab, hostId })
         host.sessions = [...host.sessions, { id: key, title: tab.title || '已保存的会话', cwd: tab.cwd, updatedAt: savedSessionTime(tab), running: false, nativeThreadId: tab.session_id }]
         if (host.archivedSessionIds?.includes(adopted)) host.archivedSessionIds.push(key)

@@ -180,3 +180,22 @@ test('failed avatar metadata updates restore the original folder and gallery cat
   assert.deepEqual(JSON.parse(await readFile(join(root,'.dsh-gallery.json'),'utf8')),{version:1,hidden:['gallery/hidden']})
  }finally{await rm(root,{recursive:true,force:true})}
 })
+
+
+test('nullable imported avatar fields inherit the Agent while explicit icon choices remain durable', async () => {
+  let value = { version: 1, native_sessions: [{ backend_key: 'codex', session_id: 'native', dsh_session_id: 'session-avatar-inherit', avatar_id: null }], gui: { tabs: [{ backend_key: 'codex', session_id: 'native', avatar_id: null }] }, presentation: { agentAvatars: { work: 'gallery/person' } } }, revision = 0
+  const client = { async call(_path, body) { if (body) { assert.equal(body.expected_revision, revision); value = structuredClone(body.value); revision++ } return { value: structuredClone(value), revision } } }
+  const profiles = { list: () => [{ id: 'work', type: 'codex' }] }
+  let appearance = new SessionAppearance(client, profiles)
+  await appearance.load()
+  assert.equal(appearance.avatarForSession('session-avatar-inherit', 'codex', undefined, 'work').id, 'gallery/person')
+  await appearance.setSession('session-avatar-inherit', null)
+  assert.equal(appearance.avatarForSession('session-avatar-inherit', 'codex', undefined, 'work').id, null, 'an explicit default-icon choice must still override the Agent')
+  appearance = new SessionAppearance(client, profiles); await appearance.load()
+  assert.equal(appearance.avatarForSession('session-avatar-inherit', 'codex', undefined, 'work').id, null, 'the explicit choice survives cold restore')
+  await appearance.setSession('session-avatar-inherit', 'gallery/other')
+  assert.equal(appearance.avatarForSession('session-avatar-inherit', 'codex', undefined, 'work').id, 'gallery/other')
+  value.gui.tabs[0].avatar_id = null
+  await appearance.load()
+  assert.equal(appearance.avatarForSession('session-avatar-inherit', 'codex', undefined, 'work').id, 'gallery/other', 'an unset GUI avatar must not hide a native conversation override')
+})

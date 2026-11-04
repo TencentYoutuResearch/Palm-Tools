@@ -32,6 +32,7 @@
   import StructuredSession from './lib/StructuredSession.svelte'
   import CommandPalette, { type Command } from './lib/CommandPalette.svelte'
   import RenameDialog from './lib/RenameDialog.svelte'
+  import { applyTabRename } from './lib/rename_sync'
   import ConfirmDialog from './lib/ConfirmDialog.svelte'
   import BackendChooser from './lib/BackendChooser.svelte'
   import PairingDialog from './lib/PairingDialog.svelte'
@@ -714,8 +715,14 @@
   }
   function commitRename(id: SessionId) {
     const v = editValue.trim()
-    if (v) renameTab(id, v)
+    // 行内重命名也必须通知后端,否则云同步/手机端收不到 meta { title }。
+    if (v) void renameTabAndSync(id, v)
     editingId = null
+  }
+  /** 重命名 tab:乐观更新前端,本地会话再同步到后端(set_title → bus meta → 手机)。 */
+  function renameTabAndSync(id: SessionId, title: string) {
+    const tab = $tabs.find((t) => t.id === id)
+    return applyTabRename(id, tab?.endpointId, title, { renameTab, setTitle: ipc.setTitle })
   }
   function cancelRename() {
     editingId = null
@@ -2499,15 +2506,7 @@
       const id = $activeId
       renameOpen = false
       if (id == null) return
-      const tab = $activeTab
-      renameTab(id, next)
-      try {
-        if (!tab?.endpointId || tab.endpointId.kind === 'local') {
-          await ipc.setTitle(id, next)
-        }
-      } catch (e) {
-        console.error(e)
-      }
+      await renameTabAndSync(id, next)
     }}
   />
 {/if}

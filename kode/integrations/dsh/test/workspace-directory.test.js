@@ -12,9 +12,31 @@ test('directory hides dsh history and blanks, preserves archive metadata, withou
   const ctx=context(false), before=await ctx.sessionController.list({})
   const value=await hostDirectory(ctx)
   assert.deepEqual(value.sessions.map(s=>s.id),['codex','archived'])
-  assert.deepEqual(value.hiddenSessionIds,['native'])
+  assert.deepEqual(value.hiddenSessionIds,['native','blank'])
   assert.deepEqual(await ctx.sessionController.list({}),before)
   assert.deepEqual((await hostDirectory(context(true))).sessions.map(s=>s.id),['native','codex','archived'])
+})
+
+test('blank ungrouped runtime placeholders cannot return as saved native conversations',async()=>{
+  const ctx=context(),index={native_sessions:[{backend_key:'dsh',session_id:'blank',cwd:'/work/project',transport_kind:'runtime',title:'Old empty placeholder'}]}
+  const backendClient={call:async path=>path.endsWith('/node')?{node_id:'fixture-node'}:{revision:1,value:path.endsWith('/session-index')?index:{global:{archivedSessionIds:[],pinnedSessionIds:[]}}}}
+  const value=await hostDirectory(ctx,{backendClient})
+  assert.ok(value.hiddenSessionIds.includes('blank'))
+  assert.equal(value.sessions.some(row=>row.savedTab?.session_id==='blank'),false)
+  assert.equal(index.native_sessions.length,1,'the placeholder artifact is retained')
+})
+
+test('federated catalog does not re-add placeholders hidden by the host directory',async()=>{
+  const ctx=context(),blankTab={backend_key:'dsh',session_id:'blank',cwd:'/work/project',transport_kind:'runtime'}
+  const backendClient={call:async path=>{
+    if(path.endsWith('/node'))return{node_id:'fixture-node'}
+    if(path.endsWith('/catalog'))return{tabs:[blankTab],endpoints:[]}
+    return{revision:1,value:path.endsWith('/session-index')?{native_sessions:[]}:{global:{archivedSessionIds:[],pinnedSessionIds:[]}}}
+  }}
+  const manager=new ProjectHosts(ctx,{backendClient})
+  const directory=await manager.directory()
+  assert.ok(directory.hosts[0].hiddenSessionIds.includes('blank'))
+  assert.equal(directory.hosts[0].sessions.some(row=>row.nativeThreadId==='blank'),false)
 })
 test('aggregate preserves host identity with duplicate session IDs and isolates offline hosts',async()=>{
   const manager=new ProjectHosts(context(false),{})

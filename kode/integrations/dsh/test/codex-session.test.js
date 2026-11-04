@@ -54,6 +54,7 @@ test('two Codex profiles run concurrently with independent environments, followu
     assert.ok(records.every(r => r.hostCredentialPresent === false), 'Host admin credentials and native parent IDs must not reach CLI children')
     assert.equal(records.filter(r => r.method === 'thread/start').length, 2)
     assert.equal(records.find(r => r.method === 'thread/resume').params.threadId, one)
+    assert.equal(records.find(r => r.method === 'thread/resume').params.excludeTurns, true)
     assert.deepEqual(records.filter(r => r.method === 'turn/start' && r.label === 'codex').map(r => r.params.input[0].text), ['TOOL first', 'followup', 'after restart'])
   } finally {
     if (previousToken === undefined) delete process.env.KODE_BRIDGE_TOKEN; else process.env.KODE_BRIDGE_TOKEN = previousToken
@@ -110,6 +111,7 @@ test('continuing an archived Codex binding restores the same thread and resumes 
   assert.deepEqual(restore.map(row=>row.method),['thread/resume','thread/unarchive','thread/resume'])
   assert.ok(restore.every(row=>row.params.threadId===threadId))
   assert.deepEqual(restore[0].params,restore[2].params)
+  assert.equal(restore[0].params.excludeTurns,true)
   assert.equal(records.find(row=>row.method==='turn/start').params.threadId,threadId)
  }finally{await session.close();await rm(root,{recursive:true,force:true})}
 })
@@ -122,4 +124,21 @@ test('unrelated resume errors never restore other threads or create a replacemen
   await assert.rejects(session.resumeThread({threadId}),error=>error.message===message)
   assert.deepEqual(calls,['thread/resume'])
  }
+})
+
+
+test('long-thread resume excludes native history larger than the transport frame cap and continues the original thread', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-long-resume-')), log = join(root, 'rpc.jsonl')
+  const threadId = 'fixture-long-thread'
+  const profile = { executable: process.execPath, args: [fixture], env: { KODE_FIXTURE_LARGE_RESUME: '1', KODE_FIXTURE_RPC_LOG: log } }
+  const session = new CodexSession(profile, root)
+  try {
+    assert.equal(await session.open({ threadId }, []), threadId)
+    const events = await collect(session.turn([{ type: 'text', text: 'Continue without replaying old history' }]))
+    assert.equal(events.at(-1).method, 'turn/completed')
+    const records = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.equal(records.filter(row => row.method === 'thread/start').length, 0)
+    assert.equal(records.find(row => row.method === 'thread/resume').params.excludeTurns, true)
+    assert.equal(records.find(row => row.method === 'turn/start').params.threadId, threadId)
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
 })

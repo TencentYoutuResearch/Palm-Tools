@@ -30,7 +30,7 @@ try {
     backend.stdout.on('data', bytes => { text += bytes; const match = text.match(/kode-session-server integration (127\.0\.0\.1:\d+)/); if (match) { clearTimeout(timer); resolve(match[1]) } })
   })
   const files = (await readdir(resolve(directory, '../test'))).filter(f => f.endsWith('.test.js')).map(f => resolve(directory, '../test', f))
-  await run(process.execPath, ['--test', ...files], { ...process.env, KODE_TEST_BACKEND_URL: `http://${address}`, KODE_TEST_TOKEN_FILE: tokenFile })
+  await run(process.execPath, ['--test', '--test-concurrency=1', ...files], { ...process.env, KODE_TEST_BACKEND_URL: `http://${address}`, KODE_TEST_TOKEN_FILE: tokenFile })
 } finally {
   const exited = once(backend, 'exit'); backend.kill('SIGINT'); await exited
   await rm(root, { recursive: true, force: true })

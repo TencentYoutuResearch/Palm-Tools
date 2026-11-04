@@ -257,7 +257,11 @@ pub fn start(ctx: Arc<kode_bridge::Ctx>) {
 
 #[tauri::command]
 pub async fn shared_runtime_sessions() -> Result<Value, String> {
-    call("/runtime/sessions", None).await
+    let mut result = call("/runtime/sessions", None).await?;
+    // Older standalone services can remain active during a GUI-only update.
+    let workspaces = call("/workbench/documents/workspaces", None).await?;
+    kode_bridge::messaging::filter_visible_runtime_sessions(&mut result, &workspaces);
+    Ok(result)
 }
 pub async fn shared_command(id: u64, kind: &str, mut payload: Value) -> Result<Value, String> {
     let request_id = payload

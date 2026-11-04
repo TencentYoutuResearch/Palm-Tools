@@ -27,6 +27,9 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
   try {
     await apply(ctx, { url, tokenFile, stateFile: join(root, 'state.json'), pollMs: 20 })
     const admin = new BackendClient(url, (await readFile(tokenFile, 'utf8')).trim())
+    const creationSchema = tools.get('kode_sessions_create').parameters
+    assert.equal(creationSchema.properties.model.type, 'string')
+    assert.ok(!creationSchema.required.includes('model'))
     const directory = await tools.get('kode_sessions_list').execute({}, { agent })
     const own = directory.sessions.find(s => s.address.session_id === id)
     assert.equal(own.runtime, 'dsh')

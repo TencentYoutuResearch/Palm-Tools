@@ -5,6 +5,23 @@ import { readFile } from 'node:fs/promises'
 import { RuntimeBridge, projectSessionEvent, permissionSnapshot } from '../src/runtime-bridge.js'
 import { BackendClient } from '../src/backend-client.js'
 
+test('empty ungrouped placeholders retire old publications without being inspected or republished',async()=>{
+  const publications=[]
+  const controller={list:async()=>({items:[{sessionId:'blank',blank:true}]}),inspect:async()=>{throw new Error('empty placeholder must not be inspected')}}
+  const services={sessionController:controller}
+  const backend={call:async(path,body)=>{
+    if(path.endsWith('/sessions'))return{sessions:[{runtime:'dsh',runtime_session_id:'blank',status:'idle'}]}
+    publications.push(body);return{sessions:[]}
+  }}
+  const bridge=new RuntimeBridge({get:key=>services[key]},backend)
+  await bridge.publish()
+  assert.equal(publications.flatMap(row=>row.sessions).length,1)
+  assert.equal(publications[0].sessions[0].session_id,'blank')
+  assert.equal(publications[0].sessions[0].dto.status,'exited')
+  await bridge.publish()
+  assert.equal(publications.flatMap(row=>row.sessions).length,1)
+})
+
 test('canonical messages, native tools and turn boundaries retain identities and content', () => {
   const content = [{ type: 'text', text: 'A reply' }, { type: 'image', attachment: { id: 'image-1' } }]
   const [message] = projectSessionEvent({ seq: 5, type: 'assistant/message', data: { message: { id: 'native-message', content } } }, 'shared-message')

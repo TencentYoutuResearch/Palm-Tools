@@ -38,7 +38,10 @@ export class AgentRuntimeAdapter {
   imageRequestPricing() {}
   imageRequestTarget(_provider, _model, image) { return { width: image.width, height: image.height, maxBytes: image.bytes } }
   async resolveModel(provider, model) {
-    const profile = this.profile(provider), models = await this.listModels(provider)
+    // ACP capabilities are scoped to the selected model. A generic catalog
+    // advertises effort choices only for its default model; resolve the exact
+    // requested model before the harness validates request controls.
+    const profile = this.profile(provider), models = await this.listModels(provider, profile, model)
     const listed = models.find(row => row.id === model)
     // Native harnesses own model routing (including aliases and image tools).
     // Missing/stale outer model metadata must not block a supported input type.
@@ -73,7 +76,15 @@ export class AgentRuntimeAdapter {
     }
     return this.catalogs.get(key)
   }
-  async listModels(provider, profile, modelHint) { return (await this.capabilities(provider, profile, process.cwd(), modelHint)).models }
+  async listModels(provider, profile, modelHint) {
+    const { models } = await this.capabilities(provider, profile, process.cwd(), modelHint)
+    // The UI uses flat effort fields, while dsh validates the canonical ModelInfo.
+    // Publish both from the same advertised capabilities; never invent support.
+    return models.map(model => model.reasoning || !model.reasoningEfforts?.length ? model : {
+      ...model,
+      reasoning: { efforts: model.reasoningEfforts, ...(model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}) },
+    })
+  }
   async listCommands(provider, profile) { return (await this.capabilities(provider, profile)).commands }
   async listSkills(provider, profile, cwd) {
     if (profile.type !== 'codex' && profile.protocol !== 'codex') return { skills: [], errors: [] }
@@ -275,16 +286,18 @@ export class AgentRuntimeAdapter {
   async closeSession(id) { const runtime = this.live.get(id); this.live.delete(id); await runtime?.close() }
   supportsSteering(agent) {
     const profile = this.profiles.binding(agent.id)?.profile ?? this.profiles.list().find(profile => profileRoute(profile.id) === agent.options?.provider)
-    return Boolean(profile && (profile.type === 'codex' || profile.protocol === 'codex') && !this.live.get(agent.id)?.steeringUnsupported)
+    return Boolean(profile && (['codex', 'claude', 'cursor', 'codebuddy'].includes(profile.type) || profile.protocol === 'codex' || this.live.get(agent.id)?.supportsSteering?.()) && !this.live.get(agent.id)?.steeringUnsupported)
   }
   canSteer(id) { return this.live.get(id)?.canSteer?.() === true }
   async steer(agent, message, signal, { admit, accepted }) {
     const runtime = this.live.get(agent.id)
     if (!runtime?.canSteer?.()) return { status: 'not-ready' }
-    let input = await nativeInput([message], { codex: true, signal, attachments: agent.ctx.get?.('attachments') ?? this.ctx.get?.('attachments') })
+    const profile = this.profiles.binding(agent.id)?.profile
+    const codex = profile?.type === 'codex' || profile?.protocol === 'codex'
+    let input = await nativeInput([message], { codex, signal, attachments: agent.ctx.get?.('attachments') ?? this.ctx.get?.('attachments') })
     const text = ['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : ''
     const names = [...text.matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1])
-    if (names.length) {
+    if (codex && names.length) {
       const { skills } = await runtime.listSkills(signal)
       for (const name of new Set(names)) {
         const matches = skills.filter(skill => skill.name === name)

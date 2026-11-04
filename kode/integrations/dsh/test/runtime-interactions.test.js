@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
+import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { installRuntimeInteractions, questionAnswer } from '../src/runtime-interactions.js'
@@ -33,6 +34,8 @@ test('mobile approval preserves the real dsh policy and its audit outcome', asyn
     assert.equal(h.session.snapshotEvents().findLast(event => event.type === 'approval/decided').data.outcome, 'allowed-once')
     assert.equal(h.session.snapshotEvents().findLast(event => event.type === 'plugin:kode/shared-interaction').data.state, 'closed')
     assert.ok(!h.bridge.pending.has(id))
+    assert.ok(h.session.snapshotEvents().filter(event => event.type === 'plugin:kode/shared-interaction').every(event => event.ignorable === true))
+    assert.doesNotThrow(() => validateStoredEvents(h.session.header, structuredClone(h.session.snapshotEvents())))
   } finally { await h.close() }
   const confined = await fixture('never')
   try { assert.equal(await confined.ctx.approval.request({ agent: confined.agent, toolName: 'shell' }), 'rejected'); assert.equal(confined.bridge.pending.size, 0) }

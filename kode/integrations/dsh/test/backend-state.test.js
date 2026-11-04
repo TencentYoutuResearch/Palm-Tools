@@ -6,11 +6,15 @@ import { join } from 'node:path'
 import { BackendClient } from '../src/backend-client.js'
 import { BackendAgentProfiles, BackendDocument } from '../src/backend-state.js'
 const url = process.env.KODE_TEST_BACKEND_URL, tokenFile = process.env.KODE_TEST_TOKEN_FILE
-test('Kode backend configuration migrates once and shares immutable CLI bindings across frontend adapters', { skip: !url || !tokenFile }, async () => {
+test('Kode backend configuration shares immutable CLI bindings across frontend adapters', { skip: !url || !tokenFile }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-shared-state-'))
   const client = new BackendClient(url, (await readFile(tokenFile, 'utf8')).trim())
   try {
-    const first = await new BackendAgentProfiles(client, join(root, 'old.json')).open([{ id: 'shared-profile', name: 'Portable Codex', type: 'codex', executable: 'tcodex' }])
+    // Other integration tests may already have migrated this shared backend.
+    // Initial defaults are intentionally ignored after migration; save this
+    // test's profile explicitly instead of depending on an empty registry.
+    const first = await new BackendAgentProfiles(client, join(root, 'old.json')).open([])
+    await first.save({ id: 'shared-profile', name: 'Portable Codex', type: 'codex', executable: 'tcodex' })
     await first.bind('saved-native-session', 'shared-profile')
     await first.patchBinding('saved-native-session', { threadId: 'native-thread' })
     const second = await new BackendAgentProfiles(client, join(root, 'another-frontend.json')).open([])
