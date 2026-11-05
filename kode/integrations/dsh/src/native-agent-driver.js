@@ -8,6 +8,7 @@ import { AssistantStreamAccumulator, BlockAssembler } from '@deepseek-ai/dsh-llm
 import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
 import { fastPreference, fastServiceTier } from './model-fast.js'
+import { AcpTurnCancelledError } from './acp-session.js'
 
 export const boundaryProjection = {
   key: 'kodeTurnBoundary', stateVersion: 3,
@@ -204,8 +205,8 @@ export class NativeAgentDriver {
           throw error
         }
       } catch (error) {
-        reason = signal.aborted ? { kind: 'aborted', reason: signal.reason?.kind ? signal.reason : { kind: 'disposed' } } : { kind: 'error', error: { code: 'NATIVE_AGENT', message: error.message } }
-        if (!signal.aborted) this.events.emit('agent/error', { turn, step, error })
+        reason = signal.aborted ? { kind: 'aborted', reason: signal.reason?.kind ? signal.reason : { kind: 'disposed' } } : error instanceof AcpTurnCancelledError ? { kind: 'interrupted' } : { kind: 'error', error: { code: 'NATIVE_AGENT', message: error.message } }
+        if (reason.kind === 'error') this.events.emit('agent/error', { turn, step, error })
       } finally {
         await this.steeringTask
         stop()

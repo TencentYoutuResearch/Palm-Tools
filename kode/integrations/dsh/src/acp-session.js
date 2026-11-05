@@ -28,6 +28,9 @@ function abortable(task, signal) {
   const cancelled = new Promise((_, reject) => { abort = () => reject(signal.reason ?? new Error('ACP request cancelled')); signal.addEventListener('abort', abort, { once: true }) })
   return Promise.race([task, cancelled]).finally(() => signal.removeEventListener('abort', abort))
 }
+export class AcpTurnCancelledError extends Error {
+  constructor() { super('ACP turn cancelled'); this.name = 'AcpTurnCancelledError' }
+}
 export class AcpSession {
   constructor(profile, cwd, handlers = {}) {
     this.profile = profile; this.cwd = cwd; this.handlers = handlers
@@ -214,7 +217,9 @@ export class AcpSession {
     active.ready = true
     const task = active.promptTask.then(result => {
       if (active.restarting) return
-      if (result.stopReason !== 'end_turn') active.end(new Error(`ACP turn stopped: ${result.stopReason}`)); else active.end()
+      if (result.stopReason === 'cancelled') active.end(new AcpTurnCancelledError())
+      else if (result.stopReason !== 'end_turn') active.end(new Error(`ACP turn stopped: ${result.stopReason}`))
+      else active.end()
     }, error => { if (!active.restarting) active.end(error) })
     this.requests.add(task); void task.finally(() => this.requests.delete(task))
   }
