@@ -39,7 +39,7 @@ test('cold reconciliation retains known titles and models when projection caches
  assert.equal(h.state().native_sessions[0].title,'Original title');assert.equal(h.state().native_sessions[0].model,'original-model')
 })
 
-function importFixture({ registered = false, cached = false, available = true, profile = true } = {}) {
+function importFixture({ registered = false, cached = false, persisted = cached, available = true, profile = true } = {}) {
   const tab = { backend_key: 'codex', session_id: 'saved-thread', cwd: '/srv/saved-project', title: 'Saved work' }
   const id = `session-kode-${createHash('sha256').update('codex:saved-thread').digest('hex').slice(0,32)}`
   let workspace = registered ? { id: 'workspace', attachSession: async () => {} } : undefined
@@ -47,7 +47,7 @@ function importFixture({ registered = false, cached = false, available = true, p
   const registry = { resolveByPath: async path => { calls.push(['resolve',path]); return workspace }, create: async path => { calls.push(['register',path]); return workspace ??= { id: 'workspace', attachSession: async id => calls.push(['attach',id]) } } }
   const client = { call: async (path, update) => path.endsWith('/transcript') ? { available, messages: [] } : { revision: 1, value: update?.value ?? state } }
   const agent = { selectModel() {}, session: {}, ctx: { sessions: { flush: async () => {} } } }
-  const services = { workspaceRegistry: registry, kodeAgents: { profiles: { list: () => profile ? [{ id: 'kode-codex', name: 'codex' }] : [], bindNative: async () => {} }, recordBinding() {} }, kodeNativeFactory: { importHistory: async (...args) => calls.push(['seed', ...args]) }, sessionController: { list: async () => ({ items: [] }), create: async request => { calls.push(['session',request]); return {sessionId:request.sessionId} }, resolveAgent: async () => ({agent}), rename: async () => {} } }
+  const services = { workspaceRegistry: registry, kodeAgents: { profiles: { list: () => profile ? [{ id: 'kode-codex', name: 'codex' }] : [], bindNative: async () => {} }, recordBinding() {} }, kodeNativeFactory: { importHistory: async (...args) => calls.push(['seed', ...args]) }, sessionController: { list: async () => ({ items: persisted ? [{ sessionId: id }] : [] }), create: async request => { persisted = true; calls.push(['session',request]); return {sessionId:request.sessionId} }, resolveAgent: async () => ({agent}), rename: async () => {} } }
   return { tab, id, calls, client, ctx: { get: key => services[key] } }
 }
 import { createHash } from 'node:crypto'
@@ -125,4 +125,36 @@ test('native catalog synchronization retains an explicit default-icon choice acr
   assert.equal(h.state().native_sessions[0].avatar_id, null)
   assert.ok(Object.hasOwn(h.state().presentation.sessionAvatars, agent.id))
   assert.equal(h.state().presentation.sessionAvatars[agent.id], null)
+})
+
+test('shared import markers rebuild a missing local session before attaching it', async () => {
+  for (const bound of [false, true]) {
+    const h = importFixture({ cached: true, persisted: false })
+    if (bound) h.ctx.get('kodeAgents').profiles.binding = () => ({ threadId: h.tab.session_id, profile: { id: 'kode-codex' } })
+    const result = await importSavedSession(h.ctx, h.client, h.tab)
+    assert.equal(result.sessionId, h.id)
+    assert.equal(h.calls.filter(row => row[0] === 'seed').length, 1)
+    assert.equal(h.calls.filter(row => row[0] === 'session').length, 1)
+    assert.ok(h.calls.findIndex(row => row[0] === 'session') < h.calls.findIndex(row => row[0] === 'attach'))
+    const seed = h.calls.find(row => row[0] === 'seed')
+    assert.equal(seed[1], h.id)
+    assert.equal(seed[3], h.tab.cwd)
+  }
+})
+
+test('missing local imports with unavailable native history leave the workspace untouched', async () => {
+  const h = importFixture({ cached: true, persisted: false, available: false })
+  await assert.rejects(importSavedSession(h.ctx, h.client, h.tab), /transcript is unavailable/)
+  assert.equal(h.calls.filter(row => ['register', 'seed', 'session', 'attach'].includes(row[0])).length, 0)
+})
+
+test('cold saved runtime projections do not bypass local history recovery', async () => {
+  const h = importFixture({ cached: true, persisted: false }), call = h.client.call
+  h.client.call = async (path, body) => path.endsWith('/runtime/sessions') ? { sessions: [{
+    runtime: 'dsh', backend_key: h.tab.backend_key, native_thread_id: h.tab.session_id,
+    runtime_saved: true, runtime_online: true, status: 'idle',
+  }] } : call(path, body)
+  const result = await importSavedSession(h.ctx, h.client, h.tab)
+  assert.equal(result.sessionId, h.id)
+  assert.ok(h.calls.some(row => row[0] === 'seed'))
 })
