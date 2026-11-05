@@ -83,8 +83,8 @@ test('real ACP discovery and exact runtime validation agree for non-default mode
       }
       const config = { provider, model: 'fixture-large', reasoningEffort: 'high' }
       assert.equal((await ctx.llm.resolveCallConfig(config)).reasoningEffort, 'high')
-      const prepared = await adapter.prepareCall(provider, config.model)
-      assert.ok(prepared.model.reasoning.efforts.some(row => row.id === 'high'))
+      const resolved = await adapter.resolveModel(provider, config.model)
+      assert.ok(resolved.reasoning.efforts.some(row => row.id === 'high'))
       adapter.invalidateModels(provider)
       assert.equal((await ctx.llm.resolveCallConfig(config)).reasoningEffort, 'high')
       assert.equal((await ctx.llm.resolveCallConfig({ provider, model: 'fixture-fast', reasoningEffort: 'medium' })).reasoningEffort, 'medium')

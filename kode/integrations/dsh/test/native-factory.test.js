@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import SessionStore, { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
@@ -21,7 +23,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-async function host(adapter, official = false) {
+async function host(adapter, official = false, requests = false) {
   const ctx = new Context(), stored = new Map(), writers = new Map()
   await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(ProjectionRegistry)
   ctx.provide('tools', { schemas: () => [] })
@@ -43,8 +45,8 @@ async function host(adapter, official = false) {
   ctx.on('session/event', (session, event) => { const row = stored.get(session.id); if (row && writers.has(session.id)) { assert.equal(event.seq, row.events.length); row.events.push(event) } })
   ctx.on('session/flush', async () => {})
   if (official) {
-    ctx.provide('llm', {})
-    ctx.provide('systemPrompt', { variable: () => () => {} })
+    if (requests) { await ctx.plugin(LlmRuntime); await ctx.plugin(SystemPrompt) }
+    else { ctx.provide('llm', {}); ctx.provide('systemPrompt', { variable: () => () => {} }) }
     await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
   } else {
     ctx.agents.setFactory({ createAgent() { throw new Error('official create') }, resume() { throw new Error('official resume') } })
@@ -436,4 +438,31 @@ test('unloading and reloading Kode never falls through to an official loop for n
     assert.equal(h.stored.get(first.agent.id).events.some(event => event.type === 'system/message'), false)
     await resumed.dispose(); await reloaded.dispose()
   } finally { await h.ctx.fiber.dispose() }
+})
+
+
+test('direct official restore cannot write a system head into native history before factory readiness', async () => {
+  const h = await host({ closeSession: async () => {} }, true, true)
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
+  let streams = 0
+  adapter.stream = async function* () { streams++; yield { type: 'finish', reason: { kind: 'stop' } } }
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'direct-official-restore' })
+    first.agent.session.append('user/message', message('historical', 'Native history'), { surfaceOp: 'append' })
+    await first.dispose()
+    // Configured AgentLoop restores can enter resumeWith directly, bypassing
+    // createAgent/resume wrappers. Exercise the released loop's actual path.
+    const restored = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, { resumeSessionId: first.agent.id, agentOptions: options.agentOptions })
+    assert.notEqual(restored.agent.isKodeNativeAgent, true)
+    restored.agent.followup(message('followup', 'Continue'))
+    await restored.agent.whenIdle()
+    const events = h.stored.get(first.agent.id).events
+    assert.equal(events.some(event => event.type === 'system/message'), false)
+    assert.equal(streams, 0)
+    assert.match(events.findLast(event => event.type === 'turn/end').data.reason.error.message, /写入系统提示前停止/)
+    const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+    assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(first.agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
+    await restored.dispose()
+  } finally { unregister(); await adapter.close(); await h.ctx.fiber.dispose() }
 })
