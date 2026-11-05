@@ -630,6 +630,9 @@ impl CloudSyncManager {
                     }
                 }
                 _ = heartbeat.tick() => {
+                    if sync_enabled {
+                        snapshotted_session_ids = self.send_snapshot(&mut socket).await?;
+                    }
                     send_json(&mut socket, &json!({"type":"ping"})).await?;
                 }
             }

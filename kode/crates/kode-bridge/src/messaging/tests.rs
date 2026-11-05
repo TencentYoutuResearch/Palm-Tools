@@ -3,6 +3,30 @@ use super::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 const SECRET: &str = "test-peer-secret-at-least-32-bytes";
+#[tokio::test]
+async fn archive_document_changes_retire_projections_without_host_publication() {
+    let server = server("archive-test", vec![]).await;
+    let ctx = &server._ctx;
+    let publication = serde_json::from_value(json!({
+        "runtime":"dsh","boot_id":"test",
+        "sessions":[{"session_id":"removed","dto":{"status":"idle"},
+            "events":[{"key":"1","kind":"message","payload":{"text":"kept"}}]}]
+    })).unwrap();
+    let result = ctx.runtimes.publish(ctx, publication).unwrap();
+    let id = result["sessions"][0]["id"].as_u64().unwrap();
+    let mut revision = None;
+    server.hub.reconcile_archive_visibility(&mut revision).unwrap();
+    let document = server.hub.store.document("workspaces").unwrap();
+    server.hub.store.save_document("workspaces", document["revision"].as_u64().unwrap(),
+        json!({"global":{"archivedSessionIds":["removed"]}})).unwrap();
+    server.hub.reconcile_archive_visibility(&mut revision).unwrap();
+    assert_eq!(ctx.runtimes.snapshots()[0]["dto"]["status"], "exited");
+    assert_eq!(ctx.runtimes.history(id, 0, 10).unwrap().len(), 1);
+    let mut events = ctx.bus.subscribe();
+    server.hub.reconcile_archive_visibility(&mut revision).unwrap();
+    assert!(events.try_recv().is_err());
+}
+
 struct Server {
     hub: Arc<Hub>,
     url: String,
