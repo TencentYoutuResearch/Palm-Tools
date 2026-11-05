@@ -57,10 +57,15 @@ export class AcpSession {
       return askAcpForm(params, (request, signal) => this.handlers.question?.(request, signal), AbortSignal.any([signal, this.active.promptSignal ?? this.active.signal]))
     })
     app.onRequest('*', context => this.extension(context))
-    this.connection = app.connect(ndJsonStream(Writable.toWeb(this.process.child.stdin), Readable.toWeb(this.process.child.stdout)))
-    this.connection.closed.then(() => { this.rpc.closed = true; this.active?.end(this.process.error ?? new Error('ACP connection closed')) })
-    this.process.child.on('error', error => this.connection.close(error))
-    this.process.child.on('exit', () => this.connection.close(this.process.error))
+    const agentProcess = this.process
+    const connection = this.connection = app.connect(ndJsonStream(Writable.toWeb(agentProcess.child.stdin), Readable.toWeb(agentProcess.child.stdout)))
+    connection.closed.then(() => {
+      if (this.connection !== connection) return
+      this.rpc.closed = true
+      if (!this.active?.restarting) this.active?.end(agentProcess.error ?? new Error('ACP connection closed'))
+    })
+    agentProcess.child.on('error', error => connection.close(error))
+    agentProcess.child.on('exit', () => connection.close(agentProcess.error))
   }
   request(method, params, signal = this.lifetime.signal, timeoutMs = 15000) {
     const fused = AbortSignal.any([this.lifetime.signal, signal, ...(timeoutMs ? [AbortSignal.timeout(timeoutMs)] : [])])
@@ -78,6 +83,7 @@ export class AcpSession {
   async open(binding, tools, signal = this.lifetime.signal) {
     signal.throwIfAborted()
     await this.initialize(signal)
+    this.tools = tools
     const mcpServers = []
     if (tools.length) {
       this.proxy = await createToolProxy(tools, async (name, args) => {
@@ -211,17 +217,49 @@ export class AcpSession {
     if (input.some(part => part.type === 'image') && !this.info.agentCapabilities?.promptCapabilities?.image && this.profile.type !== 'claude') throw Object.assign(new Error('此 Agent 未声明支持图片输入，请选择支持图片的 Agent。'), { rpcRejected: true })
   }
   startPrompt(active, input) {
+    const prompt = {}
+    active.prompt = prompt
     active.promptAbort = new AbortController()
     active.promptSignal = AbortSignal.any([active.signal, active.promptAbort.signal])
     active.promptTask = this.request('session/prompt', { sessionId: this.threadId, prompt: input }, active.signal, 0)
     active.ready = true
     const task = active.promptTask.then(result => {
-      if (active.restarting) return
+      if (active.restarting || active.prompt !== prompt) return
       if (result.stopReason === 'cancelled') active.end(new AcpTurnCancelledError())
       else if (result.stopReason !== 'end_turn') active.end(new Error(`ACP turn stopped: ${result.stopReason}`))
       else active.end()
-    }, error => { if (!active.restarting) active.end(error) })
+    }, error => { if (!active.restarting && active.prompt === prompt) active.end(error) })
     this.requests.add(task); void task.finally(() => this.requests.delete(task))
+  }
+  async restartAfterCancel(active, signal) {
+    const connection = this.connection
+    const agentProcess = this.process
+    const proxy = this.proxy
+    const launchRoot = this.launchRoot
+    try { connection?.close() } catch {}
+    await Promise.allSettled([agentProcess?.close(), proxy?.close()])
+    if (launchRoot) await rm(launchRoot, { recursive: true, force: true })
+
+    this.lifetime = new AbortController()
+    this.rpc = { closed: false }
+    this.requests = new Set()
+    this.initialized = undefined
+    this.info = undefined
+    this.state = undefined
+    this.commands = []
+    this.setupUpdates = []
+    this.commandsReady = Promise.withResolvers()
+    this.proxy = undefined
+    this.process = undefined
+    this.launchRoot = undefined
+    this.connection = undefined
+    this.opening = false
+
+    const threadId = this.threadId
+    await this.open({ threadId }, this.tools ?? [], signal)
+    const rebound = AbortSignal.any([active.turnSignal, this.lifetime.signal])
+    active.rebind(rebound)
+    rebound.throwIfAborted()
   }
   async steer(input, signal = this.lifetime.signal) {
     if (!this.canSteer()) throw Object.assign(new Error('当前原生轮次已结束。'), { rpcRejected: true })
@@ -248,6 +286,9 @@ export class AcpSession {
       await this.connection.agent.notify('session/cancel', { sessionId: this.threadId })
       await abortable(active.promptTask, AbortSignal.any([active.signal, signal, AbortSignal.timeout(15000)]))
       active.signal.throwIfAborted(); signal.throwIfAborted()
+      // CodeBuddy reuses the cancelled prompt's terminal response for the next
+      // prompt in the same process, so reconnect and resume the native thread.
+      if (this.profile.type === 'codebuddy') await this.restartAfterCancel(active, signal)
       const base = { threadId: this.threadId, turnId: active.turnId }
       for (const item of active.tools.values()) active.push({ method: 'item/completed', params: { ...base, item: { ...item, status: 'failed', aggregatedOutput: 'Operation interrupted by new input; its outcome may be uncertain.' } } })
       active.tools.clear()
@@ -263,14 +304,25 @@ export class AcpSession {
   async *turn(input, { model, signal = this.lifetime.signal, command, effort, fast } = {}) {
     if (this.active) throw new Error('ACP conversation already has an active turn')
     const fused = AbortSignal.any([signal, this.lifetime.signal]), queue = []
-    const active = { turnId: randomUUID(), signal: fused, tools: new Map(), done: false, error: undefined,
+    const active = { turnId: randomUUID(), turnSignal: signal, signal: fused, tools: new Map(), done: false, error: undefined,
       push: event => { if (queue.length >= 4096) { active.end(new Error('ACP update queue overflow')); return } queue.push(event); active.wake?.(); active.wake = undefined },
       end: error => { active.done = true; active.error ??= error; active.wake?.(); active.wake = undefined },
     }
     this.active = active
     let completed = false
-    const abort = () => { void this.connection.agent.notify('session/cancel', { sessionId: this.threadId }).catch(() => {}); active.end(fused.reason ?? new Error('ACP turn cancelled')) }
-    fused.addEventListener('abort', abort, { once: true })
+    let abortSignal = fused
+    const abort = () => {
+      if (active.restarting) return
+      void this.connection?.agent.notify('session/cancel', { sessionId: this.threadId }).catch(() => {})
+      active.end(active.signal.reason ?? new Error('ACP turn cancelled'))
+    }
+    active.rebind = next => {
+      abortSignal.removeEventListener('abort', abort)
+      abortSignal = next
+      active.signal = next
+      next.addEventListener('abort', abort, { once: true })
+    }
+    active.rebind(fused)
     try {
       this.validateInput(input)
       await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort, fast)
@@ -287,7 +339,7 @@ export class AcpSession {
       completed = true
       yield { method: 'turn/completed', params: { threadId: this.threadId, turn: { id: active.turnId, status: 'completed' } } }
     } finally {
-      fused.removeEventListener('abort', abort)
+      abortSignal.removeEventListener('abort', abort)
       if (!completed) await this.close()
       this.active = undefined
     }

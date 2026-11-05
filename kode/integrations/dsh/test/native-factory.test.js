@@ -190,7 +190,9 @@ for (const type of ['claude', 'cursor', 'codebuddy']) for (const extension of [t
     const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
     assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
     const rows = (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse)
+    const restarted = type === 'codebuddy' && !extension
     assert.equal(rows.filter(row => row.method === 'session/new').length, 1)
+    assert.equal(rows.filter(row => row.method === 'session/load').length, restarted ? 1 : 0)
     assert.equal(rows.filter(row => row.method === 'session/prompt').length, extension ? 1 : 2)
   } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })

@@ -23,3 +23,21 @@ for (const stopReason of ['cancelled', 'max_tokens', 'refusal', 'end_turn']) tes
   }
   assert.equal(session.active, undefined)
 })
+
+test('a late response from an interrupted ACP prompt cannot end its replacement', async () => {
+  const session = new AcpSession({ type: 'codebuddy' }, '/tmp')
+  const requests = []
+  session.request = () => new Promise((resolve, reject) => requests.push({ resolve, reject }))
+  const active = { signal: new AbortController().signal, done: false, error: undefined, end(error) { active.done = true; active.error ??= error } }
+
+  session.startPrompt(active, [{ type: 'text', text: 'Old task' }])
+  session.startPrompt(active, [{ type: 'text', text: 'New task' }])
+  requests[0].resolve({ stopReason: 'cancelled' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(active.done, false)
+
+  requests[1].reject(new AcpTurnCancelledError())
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(active.done, true)
+  assert.ok(active.error instanceof AcpTurnCancelledError)
+})
