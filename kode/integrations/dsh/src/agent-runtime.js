@@ -48,7 +48,12 @@ export class AgentRuntimeAdapter {
     const acceptsImages = profile.type === 'codex' || profile.protocol === 'codex' || profile.type === 'claude' || models.some(row => row.inputModalities?.includes('image'))
     return { ...(listed ?? { provider, id: model, name: model }), inputModalities: acceptsImages ? ['text', 'image'] : listed?.inputModalities ?? ['text'] }
   }
-  async prepareCall(provider, model, signal) { return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options) } }
+  async prepareCall() {
+    // The native driver calls stream directly. The ordinary harness loop calls
+    // prepareCall before admitting its system prompt, including restores that
+    // bypass our factory router during startup or service replacement.
+    throw new Error('Kode 原生 Agent 会话被普通 dsh 执行器接管，已在写入系统提示前停止。请等待原生执行器就绪后重新打开会话。')
+  }
   invalidateModels(provider) { for (const key of this.catalogs.keys()) if (key === provider || key.startsWith(`${provider}:`)) this.catalogs.delete(key) }
   async capabilities(provider, profileOverride, cwd = process.cwd(), modelHint) {
     this.stop.signal.throwIfAborted()

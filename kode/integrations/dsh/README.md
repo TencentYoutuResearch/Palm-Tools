@@ -898,6 +898,13 @@ events still fail validation. Stop the owning session before applying repairs.
 
 ### Native executor reload and misplaced system heads
 
+The native model adapter also rejects ordinary-loop `prepareCall` admission.
+Configured restores can enter the released loop through `resumeWith`, bypassing
+the factory wrappers. The rejection runs before the loop commits its system
+prompt. Model discovery uses `resolveModel`, and the native driver dispatches
+through `stream`. The direct-restore regression exercises the released loop,
+checks that native execution never starts, and validates the resulting history.
+
 A native CLI history does not contain the harness-owned protected system head.
 During a Kode plugin reload its durable sessions must fail closed until their
 native executor is available. The routing sentinel preserves this distinction
