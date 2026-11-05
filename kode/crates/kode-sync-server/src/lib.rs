@@ -714,8 +714,11 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
     }
 
     let (mut sink, mut source) = socket.split();
+    let idle_timeout = tokio::time::sleep(Duration::from_secs(60));
+    tokio::pin!(idle_timeout);
     loop {
         tokio::select! {
+            _ = &mut idle_timeout => break,
             outbound = rx.recv() => {
                 let Some(outbound) = outbound else { break; };
                 let Ok(raw) = serde_json::to_string(&outbound) else { continue; };
@@ -723,6 +726,7 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
             }
             inbound = source.next() => {
                 let Some(Ok(inbound)) = inbound else { break; };
+                idle_timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60));
                 match inbound {
                     Message::Text(raw) => match serde_json::from_str::<AgentFrame>(&raw) {
                         Ok(frame) => {

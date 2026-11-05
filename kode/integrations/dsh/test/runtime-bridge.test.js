@@ -99,6 +99,27 @@ test('empty ungrouped placeholders retire old publications without being inspect
   assert.equal(publications.flatMap(row=>row.sessions).length,1)
 })
 
+test('archived sessions retire old publications without inspecting or starting an Agent', async () => {
+  const publications = []
+  const services = {
+    workspaceRegistry: { archivedSessionIds: ['archived'] },
+    sessionController: {
+      list: async () => ({ items: [{ sessionId: 'archived', blank: false }] }),
+      inspect: async () => { throw new Error('Archived history must not be inspected') },
+    },
+  }
+  const backend = { call: async (path, body) => {
+    if (path.endsWith('/sessions')) return { sessions: [{ runtime: 'dsh', runtime_session_id: 'archived', status: 'idle' }] }
+    publications.push(body); return { sessions: [] }
+  } }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, backend)
+  await Promise.all([bridge.publish(), bridge.publish()])
+  const rows = publications.flatMap(row => row.sessions)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].session_id, 'archived')
+  assert.equal(rows[0].dto.status, 'exited')
+})
+
 test('canonical messages, native tools and turn boundaries retain identities and content', () => {
   const content = [{ type: 'text', text: 'A reply' }, { type: 'image', attachment: { id: 'image-1' } }]
   const [message] = projectSessionEvent({ seq: 5, type: 'assistant/message', data: { message: { id: 'native-message', content } } }, 'shared-message')
