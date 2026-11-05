@@ -136,13 +136,17 @@ test('a retry retains its resolved default model when the profile default change
 })
 
 test('new sessions apply the configured default model, effort and Fast preference', async () => {
-  const h = fixture(), profiles = h.services.kodeAgents.profiles
+  const h = fixture(), profiles = h.services.kodeAgents.profiles, probes = []
   profiles.defaultProfileId = 'worker'
   profiles.defaultModelFor = () => ({ model: 'fast-model', reasoningEffort: 'high', fast: true })
-  h.services.kodeAgents.adapter.listModels = async () => [{ id: 'real-model', isDefault: true }, { id: 'fast-model', reasoningEfforts: [{ id: 'medium' }, { id: 'high' }], defaultReasoningEffort: 'medium', fastCapability: { transport: 'service-tier', tier: 'priority', defaultEnabled: false } }]
+  h.services.kodeAgents.adapter.listModels = async (...args) => {
+    probes.push(args)
+    return [{ id: 'real-model', isDefault: true }, { id: 'fast-model', ...(args[2] === 'fast-model' ? { reasoningEfforts: [{ id: 'medium' }, { id: 'high' }], defaultReasoningEffort: 'medium', fastCapability: { transport: 'service-tier', tier: 'priority', defaultEnabled: false } } : {}) }]
+  }
   h.agent.session = Session.create('default-model-session')
   h.agent.session = Session.create('default-model-session', [], { ...h.agent.session.header, cwd: '/example/project' })
   const result = await h.create({ title: 'Helper', task: 'Inspect', idempotency_key: 'default-model' })
+  assert.equal(probes[0][2], 'fast-model', 'ACP discovery receives the configured default model')
   assert.equal(result.model, 'fast-model')
   assert.deepEqual(h.selections, [{ provider: 'kode-agent-worker', model: 'fast-model', reasoningEffort: 'high' }])
   const fast = h.agent.session.snapshotEvents().find(event => event.type === 'plugin:kode/model-fast')

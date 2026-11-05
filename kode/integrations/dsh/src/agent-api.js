@@ -55,10 +55,12 @@ export function registerAgentApi(ctx, service) {
         const profile = binding?.profile ?? profiles.list().find(p => p.id === selectedProfileId)
         const catalog = { groups: [] }
         if (query.get('refresh') === '1' && profile) adapter.invalidateModels?.(profileRoute(profile.id))
+        const defaultPreference = configurationOnly && profile ? profiles.defaultModelFor?.(profile.id) : undefined
+        const modelHint = configurationOnly ? defaultPreference?.model ?? profile?.defaultModel : selection?.provider === profileRoute(profile?.id) ? selection.model : undefined
         let models = [], modelError, defaultModelSelection
-        try { if (profile && available(profile)) models = await modelsFor(profile, catalog, selection?.provider === profileRoute(profile.id) ? selection.model : undefined) } catch (error) { modelError = error.message }
+        try { if (profile && available(profile)) models = await modelsFor(profile, catalog, modelHint) } catch (error) { modelError = error.message }
         if (configurationOnly && profile && models.length) {
-          try { defaultModelSelection = resolveDefaultSelection(models, profiles.defaultModelFor?.(profile.id), profile.defaultModel) }
+          try { defaultModelSelection = resolveDefaultSelection(models, defaultPreference, profile.defaultModel) }
           catch (error) { modelError = error.message }
         }
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })

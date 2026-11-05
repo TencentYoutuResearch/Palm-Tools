@@ -86,8 +86,9 @@ export function installSessionCreator(ctx, backend, nodeId) {
       if (!['read-only', 'workspace-write', 'danger-full-access'].includes(mode)) throw new Error('Unknown permission mode')
       if (mode === 'danger-full-access' && policy?.mode !== 'danger-full-access') throw new Error('New sessions cannot escalate the caller permission')
       const provider = profileRoute(profile.id)
-      const models = (await runtime.adapter.listModels(provider, profile, modelRequest)).filter(row => row.id !== 'default')
       const preference = modelRequest ? { model: modelRequest } : record.selection ?? (record.model ? { model: record.model } : runtime.profiles.defaultModelFor?.(profile.id))
+      const modelHint = preference?.model ?? record.model ?? profile.defaultModel
+      const models = (await runtime.adapter.listModels(provider, profile, modelHint)).filter(row => row.id !== 'default')
       const selection = resolveDefaultSelection(models, preference, record.model ?? profile.defaultModel), model = selection.model
       const selectedModel = models.find(row => row.id === model), route = { provider, model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) }
       await update(state => { state.creations[key].model = model; state.creations[key].selection = selection })

@@ -55,6 +55,22 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     const otherConfiguration=await (await fetch(endpoint+`?configuration=1&profile_id=${two.profile.id}`,{headers:{'x-test-role':'owner'}})).json()
     assert.equal(otherConfiguration.selectedProfileId,two.profile.id)
     assert.deepEqual(otherConfiguration.defaultModelSelection,{model:'fixture',reasoningEffort:'medium',fast:false})
+    const globalSelection = selection, acpHints = []
+    selection = { provider: 'native-llm', model: 'global-model', reasoningEffort: 'high' }
+    service.adapter.listModels = async (_provider, _profile, hint) => {
+      acpHints.push(hint)
+      return [
+        { id: 'default-model', isDefault: true },
+        { id: 'selected-model', ...(hint === 'selected-model' ? { reasoningEfforts: [{ id: 'high' }], defaultReasoningEffort: 'high' } : {}) },
+      ]
+    }
+    assert.equal((await request({action:'set-default-model',profileId:two.profile.id,model:'selected-model',reasoningEffort:'high'})).status,200)
+    const acpConfiguration = await (await fetch(endpoint+`?configuration=1&profile_id=${two.profile.id}`,{headers:{'x-test-role':'owner'}})).json()
+    assert.equal(acpConfiguration.modelError,undefined)
+    assert.deepEqual(acpConfiguration.defaultModelSelection,{model:'selected-model',reasoningEffort:'high'})
+    assert.equal(acpHints.at(-1),'selected-model','ACP defaults probe their own model instead of the global selection')
+    service.adapter.listModels = beforeDiscovery
+    selection = globalSelection
     const savedDefault=await (await request({action:'set-default-model',profileId:one.profile.id,model:'fixture',reasoningEffort:'high',fast:true})).json()
     assert.deepEqual(savedDefault.defaultModelSelection,{model:'fixture',reasoningEffort:'high',fast:true})
     assert.deepEqual(profiles.defaultModelFor(one.profile.id),{model:'fixture',reasoningEffort:'high',fast:true})

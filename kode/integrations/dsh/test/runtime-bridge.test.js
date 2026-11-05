@@ -166,12 +166,12 @@ test('permission changes preserve the deployment preset catalog and flush durabl
 })
 
 test('mobile session creation applies the shared default model, effort and Fast', async () => {
-  const profile = { id: 'worker', name: 'Worker', type: 'codex' }, selections = [], rows = []
+  const profile = { id: 'worker', name: 'Worker', type: 'codex' }, selections = [], rows = [], probes = []
   const initial = Session.create('mobile-defaults'), session = Session.create('mobile-defaults', [], { ...initial.header, cwd: '/tmp' })
   const agent = { id: 'mobile-defaults', session, selectModel: route => selections.push(route), ctx: { sessions: { flush: async () => {} } } }
   const runtime = {
     profiles: { list: () => [profile], defaultModelFor: () => ({ model: 'fast-model', reasoningEffort: 'high', fast: true }), bind: async () => {}, binding: () => ({ profile }) },
-    hasRuntime: () => true, recordBinding() {}, adapter: { listModels: async () => [{ id: 'fast-model', reasoningEfforts: [{ id: 'high' }], defaultReasoningEffort: 'high', fastCapability: { transport: 'service-tier', tier: 'priority', defaultEnabled: false } }] },
+    hasRuntime: () => true, recordBinding() {}, adapter: { listModels: async (...args) => { probes.push(args); return [{ id: 'fast-model', ...(args[2] === 'fast-model' ? { reasoningEfforts: [{ id: 'high' }], defaultReasoningEffort: 'high', fastCapability: { transport: 'service-tier', tier: 'priority', defaultEnabled: false } } : {}) }] } },
   }
   const services = {
     kodeAgents: runtime, agents: { get: () => undefined },
@@ -181,6 +181,7 @@ test('mobile session creation applies the shared default model, effort and Fast'
   const backend = { call: async (path, body) => path.endsWith('/sessions') ? { sessions: [] } : { sessions: body.sessions.map(row => ({ session_id: row.session_id, id: 100 })) } }
   const bridge = new RuntimeBridge({ get: key => services[key] }, backend)
   await bridge.execute({ id: 'create-defaults', kind: 'create_session', payload: { backend_key: 'dsh:worker', cwd: '/tmp' } })
+  assert.equal(probes[0][2], 'fast-model', 'mobile ACP discovery receives the configured default model')
   assert.deepEqual(selections, [{ provider: 'kode-agent-worker', model: 'fast-model', reasoningEffort: 'high' }])
   const fast = session.snapshotEvents().find(event => event.type === 'plugin:kode/model-fast')
   assert.equal(fast.data.fast, true); assert.equal(fast.data.serviceTier, 'priority')

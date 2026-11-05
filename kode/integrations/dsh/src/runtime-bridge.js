@@ -160,8 +160,9 @@ export class RuntimeBridge {
       const { agent: resolved, error } = await controller.resolveAgent(sessionId)
       if (error) throw new Error(error.message)
       if (resolved.status === 'running' || resolved.session.snapshotEvents?.().some(event => ['turn/start', 'user/message', 'request/header'].includes(event.type))) throw new Error('Partial session already has activity; inspect it before retrying creation')
-      const provider = profileRoute(profile.id), models = await runtime.adapter.listModels(provider, profile, payload.model)
-      const selection = resolveDefaultSelection(models, payload.model ? { model: payload.model } : runtime.profiles.defaultModelFor?.(profile.id), profile.defaultModel), model = selection.model
+      const provider = profileRoute(profile.id), preference = payload.model ? { model: payload.model } : runtime.profiles.defaultModelFor?.(profile.id)
+      const models = await runtime.adapter.listModels(provider, profile, preference?.model ?? profile.defaultModel)
+      const selection = resolveDefaultSelection(models, preference, profile.defaultModel), model = selection.model
       const selectedModel = models.find(row => row.id === model), route = { provider, model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) }
       let agent = resolved
       if (typeof agent.selectModel !== 'function') {
