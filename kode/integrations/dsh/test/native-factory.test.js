@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import SessionStore, { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
@@ -16,12 +18,13 @@ import { AgentProfiles } from '../src/agent-profiles.js'
 import { mountNativeCommands } from '../src/native-commands.js'
 import { pendingShellContext } from '../src/native-shell.js'
 import { installQueueSteering } from '../src/queue-steering.js'
+import { AcpTurnCancelledError } from '../src/acp-session.js'
 import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-async function host(adapter, official = false) {
+async function host(adapter, official = false, requests = false) {
   const ctx = new Context(), stored = new Map(), writers = new Map()
   await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(ProjectionRegistry)
   ctx.provide('tools', { schemas: () => [] })
@@ -43,8 +46,8 @@ async function host(adapter, official = false) {
   ctx.on('session/event', (session, event) => { const row = stored.get(session.id); if (row && writers.has(session.id)) { assert.equal(event.seq, row.events.length); row.events.push(event) } })
   ctx.on('session/flush', async () => {})
   if (official) {
-    ctx.provide('llm', {})
-    ctx.provide('systemPrompt', { variable: () => () => {} })
+    if (requests) { await ctx.plugin(LlmRuntime); await ctx.plugin(SystemPrompt) }
+    else { ctx.provide('llm', {}); ctx.provide('systemPrompt', { variable: () => () => {} }) }
     await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
   } else {
     ctx.agents.setFactory({ createAgent() { throw new Error('official create') }, resume() { throw new Error('official resume') } })
@@ -55,6 +58,74 @@ async function host(adapter, official = false) {
 }
 const message = (id, text) => ({ id, role: 'user', source: { kind: 'human' }, content: [{ type: 'text', text }] })
 const options = { sessionId: 'session-native-check', agentOptions: { provider: 'kode-agent-fixture', model: 'fixture' }, meta: { cwd: '/tmp' } }
+
+for (const cancelled of [true, false]) test(`native cancellation ${cancelled ? 'interrupts quietly' : 'does not hide genuine failures'} and preserves partial output`, async () => {
+  let runs = 0
+  const h = await host({
+    async *stream() {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Partial answer' }
+      if (++runs === 1) throw cancelled ? new AcpTurnCancelledError() : new Error('ACP transport failed')
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Partial answer' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+    closeSession: async () => {},
+  })
+  const errors = []
+  h.ctx.on('agent/error', payload => errors.push(payload.error))
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.followup(message('initial', 'Task')); await agent.whenIdle()
+    const events = h.stored.get(agent.id).events
+    assert.equal(events.at(-1).data.reason.kind, cancelled ? 'interrupted' : 'error')
+    assert.equal(errors.length, cancelled ? 0 : 1)
+    const answer = events.find(event => event.type === 'assistant/message')
+    assert.equal(answer.data.interrupted, true)
+    assert.equal(answer.data.message.content[0].text, 'Partial answer')
+    assert.equal(agent.status, 'idle')
+    agent.followup(message('followup', 'Continue')); await agent.whenIdle()
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    assert.equal(runs, 2)
+  } finally { await h.fiber.dispose() }
+})
+
+for (const local of [false, true]) test(`CodeBuddy ${local ? 'user stop' : 'ACP cancelled response'} settles tools without a turn error and restores for followup`, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-acp-cancelled-')), wire = join(root, 'wire.jsonl')
+  const h = await host({ closeSession: async () => {} }, true)
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'CodeBuddy fixture', type: 'codebuddy', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-acp-server.js', import.meta.url))], env: { KODE_ACP_FIXTURE_LOG: wire } }])
+  const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
+  Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+  const errors = []
+  h.ctx.on('agent/error', payload => errors.push(payload.error))
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, agentOptions: { ...options.agentOptions, model: 'fixture-fast' }, meta: { cwd: root } })
+    agent.followup(message('initial', 'WAIT_TOOL'))
+    const events = h.stored.get(agent.id).events
+    for (let i = 0; i < 200 && !events.some(event => event.type === 'tool/call'); i++) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.ok(events.some(event => event.type === 'tool/call'))
+    const runtime = adapter.live.get(agent.id), threadId = runtime.threadId
+    if (local) agent.cancel({ kind: 'user' })
+    else await runtime.connection.agent.notify('session/cancel', { sessionId: threadId })
+    await agent.whenIdle()
+    assert.equal(events.at(-1).data.reason.kind, local ? 'aborted' : 'interrupted')
+    assert.equal(errors.length, 0)
+    assert.equal(events.filter(event => event.type === 'tool/result').length, 1)
+    assert.equal(events.find(event => event.type === 'tool/result').data.message.isError, true)
+    assert.equal(profiles.binding(agent.id).inFlight, null)
+    assert.equal(profiles.binding(agent.id).lastOutcome, 'uncertain')
+    assert.equal(runtime.rpc.closed, true)
+    agent.followup(message('followup', 'Continue')); await agent.whenIdle()
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    assert.equal(adapter.live.get(agent.id).threadId, threadId)
+    assert.equal(errors.length, 0)
+    const rows = (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.equal(rows.filter(row => row.method === 'session/new').length, 1)
+    assert.equal(rows.filter(row => row.method === 'session/load').length, 1)
+    assert.equal(rows.filter(row => row.method === 'session/prompt').length, 2)
+    const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+    assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
+  } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
 
 for (const outcome of ['accepted', 'rejected', 'uncertain']) test(`Codex steering ${outcome}: original active turn and input admission stay consistent`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-steering-')), wire = join(root, 'wire.jsonl')
@@ -119,7 +190,9 @@ for (const type of ['claude', 'cursor', 'codebuddy']) for (const extension of [t
     const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
     assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
     const rows = (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse)
+    const restarted = type === 'codebuddy' && !extension
     assert.equal(rows.filter(row => row.method === 'session/new').length, 1)
+    assert.equal(rows.filter(row => row.method === 'session/load').length, restarted ? 1 : 0)
     assert.equal(rows.filter(row => row.method === 'session/prompt').length, extension ? 1 : 2)
   } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
@@ -436,4 +509,31 @@ test('unloading and reloading Kode never falls through to an official loop for n
     assert.equal(h.stored.get(first.agent.id).events.some(event => event.type === 'system/message'), false)
     await resumed.dispose(); await reloaded.dispose()
   } finally { await h.ctx.fiber.dispose() }
+})
+
+
+test('direct official restore cannot write a system head into native history before factory readiness', async () => {
+  const h = await host({ closeSession: async () => {} }, true, true)
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
+  let streams = 0
+  adapter.stream = async function* () { streams++; yield { type: 'finish', reason: { kind: 'stop' } } }
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'direct-official-restore' })
+    first.agent.session.append('user/message', message('historical', 'Native history'), { surfaceOp: 'append' })
+    await first.dispose()
+    // Configured AgentLoop restores can enter resumeWith directly, bypassing
+    // createAgent/resume wrappers. Exercise the released loop's actual path.
+    const restored = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, { resumeSessionId: first.agent.id, agentOptions: options.agentOptions })
+    assert.notEqual(restored.agent.isKodeNativeAgent, true)
+    restored.agent.followup(message('followup', 'Continue'))
+    await restored.agent.whenIdle()
+    const events = h.stored.get(first.agent.id).events
+    assert.equal(events.some(event => event.type === 'system/message'), false)
+    assert.equal(streams, 0)
+    assert.match(events.findLast(event => event.type === 'turn/end').data.reason.error.message, /写入系统提示前停止/)
+    const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+    assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(first.agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
+    await restored.dispose()
+  } finally { unregister(); await adapter.close(); await h.ctx.fiber.dispose() }
 })

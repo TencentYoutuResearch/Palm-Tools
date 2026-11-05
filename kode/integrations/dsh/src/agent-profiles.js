@@ -51,8 +51,22 @@ export async function writePrivateJson(path, value) {
   await rename(temporary, path)
 }
 
+export function normalizeModelDefaults(input) {
+  if (input === undefined) return {}
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('invalid default model configuration')
+  return Object.fromEntries(Object.entries(input).map(([id, value]) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(id) || !value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid default model configuration')
+    const selection = { model: text(value.model, 'default model', 256) }
+    if (value.reasoningEffort !== undefined) selection.reasoningEffort = text(value.reasoningEffort, 'default reasoning effort', 128)
+    if (value.fast !== undefined) {
+      if (typeof value.fast !== 'boolean') throw new Error('Fast 必须是布尔值。')
+      selection.fast = value.fast
+    }
+    return [id, selection]
+  }))
+}
 export class AgentProfiles {
-  constructor(path) { this.path = path; this.defaultProfileId = null; this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
+  constructor(path) { this.path = path; this.defaultProfileId = null; this.modelDefaults = {}; this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
   async open(initial = []) {
     let fresh = false
     try {
@@ -60,6 +74,7 @@ export class AgentProfiles {
       if (stored.version !== 1 || !Array.isArray(stored.profiles) || !stored.bindings || typeof stored.bindings !== 'object' || Array.isArray(stored.bindings)) throw new Error('unsupported Agent profile file')
       this.profiles = stored.profiles.map(p => ({ ...normalizeProfile(p), ...(p.origin === 'builtin' && p.id === `builtin-${p.type}` && p.type !== 'custom' ? { origin: 'builtin' } : {}) }))
       this.defaultProfileId = stored.defaultProfileId ?? null
+      this.modelDefaults = normalizeModelDefaults(stored.modelDefaults)
       this.bindings = Object.assign(Object.create(null), stored.bindings)
     } catch (e) {
       if (e.code !== 'ENOENT') throw e
@@ -68,7 +83,7 @@ export class AgentProfiles {
     }
     const ids = new Set()
     for (const p of this.profiles) { if (ids.has(p.id)) throw new Error(`duplicate Agent profile ID: ${p.id}`); ids.add(p.id) }
-    if (fresh) await writePrivateJson(this.path, { version: 1, profiles: this.profiles, bindings: this.bindings })
+    if (fresh) await writePrivateJson(this.path, { version: 1, profiles: this.profiles, bindings: this.bindings, modelDefaults: this.modelDefaults })
     return this
   }
   list() { return structuredClone(this.profiles) }
@@ -76,10 +91,11 @@ export class AgentProfiles {
   binding(sessionId) { return this.bindings[sessionId] ? structuredClone(this.bindings[sessionId]) : undefined }
   update(operation) {
     const task = this.chain.then(async () => {
-      const state = { version: 1, defaultProfileId: this.defaultProfileId, profiles: this.list(), bindings: structuredClone(this.bindings) }
+      const state = { version: 1, defaultProfileId: this.defaultProfileId, modelDefaults: structuredClone(this.modelDefaults), profiles: this.list(), bindings: structuredClone(this.bindings) }
       const result = operation(state)
       await writePrivateJson(this.path, state)
       this.defaultProfileId = state.defaultProfileId ?? null
+      this.modelDefaults = structuredClone(state.modelDefaults ?? {})
       this.profiles = state.profiles; this.bindings = Object.assign(Object.create(null), state.bindings)
       return structuredClone(result)
     })
@@ -90,6 +106,17 @@ export class AgentProfiles {
     if (id !== null) this.get(id)
     return this.update(state => { state.defaultProfileId = id; return { defaultProfileId: id } })
   }
+  setDefaultModel(id, selection) {
+    this.get(id)
+    const normalized = selection === null ? null : normalizeModelDefaults({ [id]: selection })[id]
+    return this.update(state => {
+      state.modelDefaults ??= {}
+      if (normalized) state.modelDefaults[id] = normalized
+      else delete state.modelDefaults[id]
+      return { profileId: id, defaultModelSelection: normalized }
+    })
+  }
+  defaultModelFor(id) { const selection = this.modelDefaults[id]; return selection ? structuredClone(selection) : undefined }
   save(input) {
     const p = normalizeProfile(input)
     return this.update(state => {
@@ -104,6 +131,7 @@ export class AgentProfiles {
     if (!profile) throw new Error('此自定义 Agent 配置不存在或已删除。')
     if (profile.origin === 'builtin') throw new Error('内置 Agent 不能删除。')
     state.profiles = state.profiles.filter(p => p.id !== id)
+    delete state.modelDefaults?.[id]
     return { removed: id }
   }) }
   ensureBuiltins(profiles) { return this.update(state => {

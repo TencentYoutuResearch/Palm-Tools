@@ -20,7 +20,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
   vm.runInNewContext(source, { window: { addEventListener() {}, removeEventListener() {}, ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
-    setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
+    setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
   const ctx = { sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
@@ -39,6 +39,12 @@ function internalTree(c,kind,text,extra={}) {
   const node={key:'node-1',kind,data:{content:[{type:'text',text}],...extra}}
   const element=c.nodeSeat(kind).component({node})
   return {node,tree:element.type(element.props)}
+}
+function findNode(node, predicate) {
+  if (node == null || typeof node !== 'object') return undefined
+  if (predicate(node)) return node
+  for (const child of node.children ?? []) { const found = findNode(child, predicate); if (found) return found }
+  return undefined
 }
 function visibleText(node) {
   if(node==null || typeof node==='boolean')return ''
@@ -253,23 +259,148 @@ test('workspace menu reads the bound native source and adopts the picked directo
 
 
 test('Agent list keeps editors collapsed until requested', () => {
-  const c = client(), render = c.entry('settings.section')
-  const tree = render({ sessions: c.ctx.sessions })
+  const c = client(undefined, {}, { layout: { selectPanel() {} } }), render = c.entry('main', 'kode-settings')
+  const wrapper = render(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /配置主机/)
-  const body = tree.children.flatMap(child => child?.children ?? []).find(child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
+  const body = findNode(tree, child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
   assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
+  assert.equal(findNode(body, child => child?.props?.label === '默认 Agent')?.props.labelHeading, true)
+  assert.ok(findNode(body, child => child?.props?.className === 'kode-settings-scope' && child.children?.some(row => row?.props?.label === '默认 Agent')), 'default Agent uses the same framed scope as the configuration Host')
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
 
-test('official settings shell, model navigation and plugin inventory remain untouched', () => {
-  const c = client()
-  assert.equal(c.ctx.slots.entries('settings.section').length, 1)
-  assert.equal(c.ctx.slots.entries('settings.section')[0].options.id, 'kode')
-  assert.equal(c.ctx.slots.entries('settings.section')[0].options.label(), 'Kode')
-  assert.equal(c.shell.component, c.native)
-  assert.equal(c.shell.locale, 'settings')
-  assert.ok(c.shell.children['settings.section'])
-  for (const dispose of c.disposers) dispose()
+test('every Agent owns independent model, effort and Fast defaults while the default Agent only selects a profile', async () => {
+  const agentDirectory = {
+    currentProfile: { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }, profiles: [{ id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }], selectedProfileId: 'codex', configuredDefaultProfileId: 'codex', supportedTypes: ['codex'], types: { codex: { name: 'Codex', executable: 'codex' } },
+    defaultModelSelection: { model: 'fixture', reasoningEffort: 'high', fast: false },
+    models: [{ id: 'fixture', name: 'Fixture', reasoningEfforts: [{ id: 'high', name: 'High' }, { id: 'medium', name: 'Medium' }], fastCapability: { transport: 'service-tier', defaultEnabled: false } }, { id: 'plain', name: 'Plain' }],
+  }
+  const c = client(undefined, { agentDirectory }, { layout: { selectPanel() {} } }), wrapper = c.entry('main', 'kode-settings')(), panel = wrapper.children[0], outer = panel.type(panel.props)
+  const component = findNode(outer, node => node?.props?.settingsHost).type, props = { sessions: c.ctx.sessions, settingsHost: 'local' }
+  component(props); await new Promise(resolve => setImmediate(resolve))
+  const body = component(props)
+  assert.ok(findNode(body, node => node.props?.['aria-label'] === '设置 Codex 默认模型'))
+  assert.equal(findNode(body, node => node.type?.name === 'DefaultModelSettings'), undefined, 'no shared model editor is attached to the default Agent selector')
+  const calls = [], scope = {
+    h: (type, props, ...children) => ({ type, props: props ?? {}, children }), SelectField: 'select', FastSwitch: 'switch', Failure: 'failure', useEffect() {},
+    useSyncExternalStore: (_subscribe, get) => get(), directory: (...args) => { calls.push(args); return { subscribe() {}, getSnapshot: () => ({ data: agentDirectory, busy: false, error: '' }), operate: async body => calls.push(body) } },
+  }
+  vm.runInNewContext(source.slice(source.indexOf('  function DefaultModelSettings'), source.indexOf('  function AgentSettingsBody')), scope)
+  const modelPanel = scope.AgentModelDefaults({ profile: agentDirectory.profiles[0], settingsHost: 'ssh-test' }), settings = findNode(modelPanel, node => node.type === scope.DefaultModelSettings), tree = settings.type(settings.props)
+  assert.deepEqual(calls[0], [undefined, 'ssh-test', true, 'codex'])
+  findNode(tree, node => node.props?.label === '默认模型').props.onChange('plain'); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual({ ...calls.at(-1) }, { action: 'set-default-model', profileId: 'codex', model: 'plain' })
+  findNode(tree, node => node.props?.label === '推理强度').props.onChange('medium'); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual({ ...calls.at(-1) }, { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'medium', fast: false })
+  findNode(tree, node => node.type === 'switch').props.onChange(true); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual({ ...calls.at(-1) }, { action: 'set-default-model', profileId: 'codex', model: 'fixture', reasoningEffort: 'high', fast: true })
+})
+
+test('model menu owns model, effort and Fast selection in one trigger', async () => {
+  const agentDirectory = {
+    currentProfile: { id: 'codex', name: 'Codex', type: 'codex' }, profiles: [{ id: 'codex', name: 'Codex', type: 'codex' }], selectedProfileId: 'codex', supportedTypes: ['codex'],
+    selection: { provider: 'kode-agent-codex', model: 'fixture', reasoningEffort: 'high' }, fast: false,
+    models: [{ id: 'fixture', provider: 'kode-agent-codex', name: 'Fixture', reasoningEfforts: [{ id: 'high', name: 'High' }, { id: 'medium', name: 'Medium' }], fastCapability: { transport: 'service-tier', defaultEnabled: false } }],
+  }
+  const c = client(undefined, { agentDirectory }), render = c.ctx.slots.entries('conversation.input.model')[0].component
+  render({ sessionId: 'native', sessions: c.ctx.sessions }); await new Promise(resolve => setImmediate(resolve))
+  const tree = render({ sessionId: 'native', sessions: c.ctx.sessions }), menu = findNode(tree, node => node.type === 'Menu')
+  assert.deepEqual(Array.from(menu.props.items.filter(item => item.id), item => item.id), ['models', 'effort', 'fast', 'reload'])
+  assert.match(menu.props.anchor.props.label, /Fixture · High/)
+  const fastSwitch = findNode(menu.props.items.find(item => item.id === 'fast').label, node => node.type?.name === 'FastSwitch')
+  assert.ok(fastSwitch)
+  menu.props.onSelect('fast'); assert.equal(c.requests.length, 0, 'the outer row has no text-toggle action')
+  const button = fastSwitch.type(fastSwitch.props)
+  assert.equal(button.props.role, 'switch'); assert.equal(button.props['aria-checked'], false)
+  let prevented = 0, stopped = 0
+  button.props.onClick({ preventDefault: () => prevented++, stopPropagation: () => stopped++ })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(prevented, 1); assert.equal(stopped, 1); assert.equal(c.requests.length, 1, 'the switch must not also select the outer menu row')
+  const request = c.requests.at(-1)
+  assert.equal(request.action, 'select'); assert.equal(request.profileId, 'codex'); assert.equal(request.model, 'fixture'); assert.equal(request.reasoningEffort, 'high'); assert.equal(request.fast, true)
+  assert.match(source, /\.kode-fast-switch\[aria-checked=true\]>\.kode-fast-switch-thumb\{transform:translateX\(16px\)\}/)
+})
+
+test('handoff uses a compact action and excludes the current Agent from targets', async () => {
+  const agentDirectory = {
+    currentProfile: { id: 'codex', name: 'Codex', type: 'codex' }, selectedProfileId: 'codex', supportedTypes: ['codex', 'claude'],
+    profiles: [{ id: 'codex', name: 'Codex', type: 'codex' }, { id: 'claude', name: 'Claude', type: 'claude' }], selection: { provider: 'kode-agent-codex', model: 'fixture' }, models: [],
+  }
+  const c = client(undefined, { agentDirectory }), render = c.entryById('kode-handoff')
+  render({ sessionId: 'native', sessions: c.ctx.sessions }); await new Promise(resolve => setImmediate(resolve))
+  const tree = render({ sessionId: 'native', sessions: c.ctx.sessions })
+  assert.match(visibleText(tree), /交接/); assert.doesNotMatch(visibleText(tree), /换 Agent 续接/)
+  const select = findNode(tree, node => node.props?.label === '目标 Agent')
+  assert.deepEqual(Array.from(select.props.options, option => option.value), ['', 'claude'])
+})
+
+test('Plugin and Skills sources stay a multi-item list with an on-demand editor and detail preview',()=>{
+ const slots=[];let index=0
+ const scope={React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
+ vm.runInNewContext(source.slice(source.indexOf('  function HubSettings'),source.indexOf('  function GoalBar')),scope)
+ const render=()=>{index=0;return scope.HubSettings({host:'local'})}
+ render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote',subdir:'plugins/remote',targets:['dsh'],nativeStatus:{dsh:'skills-only'},updatedAt:1,release:'r1',packages:[{name:'remote',path:'.',displayName:'Remote Toolkit',description:'Remote summary',longDescription:'Long remote summary',version:'1.2.3',author:'team',category:'Engineering',logo:'assets/logo.png',skills:[{name:'example-skill',description:'Skill summary'}],agents:[{name:'reviewer',description:'Reviews changes'}],hooks:[{name:'PreToolUse',description:'Hook summary'}],commands:[{name:'build',description:'Build summary'}],rules:[{name:'discipline',description:'Rule summary'}],mcp:[{name:'remote-mcp',type:'http'}]}]},{id:'local',kind:'local',location:'/tmp/skills',targets:['dsh'],skills:['skills--local']}],targets:{dsh:{}}}
+ const closed=render(),text=JSON.stringify(closed)
+ assert.match(text,/Remote Toolkit/);assert.match(text,/Remote summary/);assert.match(text,/local/);assert.match(text,/Plugin \/ Skills 来源列表/);assert.doesNotMatch(text,/Git 地址/)
+ assert.doesNotMatch(visibleText(closed),/nativeStatus|kode-agent-tag/)
+ const logoNode=findNode(closed,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img');assert.match(logo.props.src,/logo=remote&package=0&v=1/)
+ const imageStyle={display:''};logo.props.onError({currentTarget:{style:imageStyle}});assert.equal(imageStyle.display,'none')
+ const refreshedLogo=findNode(scope.SourceLogo({...logoNode.props,source:{...logoNode.props.source,updatedAt:2}}),node=>node.type==='img');assert.notEqual(refreshedLogo.props.key,logo.props.key);refreshedLogo.props.onLoad({currentTarget:{style:imageStyle}});assert.equal(imageStyle.display,'')
+ const actions=findNode(closed,node=>node.props?.className==='kode-source-actions')
+ assert.ok(actions);assert.deepEqual(actions.children.map(node=>node.children[0]),['编辑','更新并同步','移除'])
+ assert.equal(actions.children[2].props.className,'kode-source-remove')
+ assert.match(source,/\.kode-source-actions\{[^}]*justify-content:flex-end/)
+ assert.match(source,/\.kode-source-remove\{[^}]*color:var\(--dsw-alias-state-error-primary\)/)
+ const summary=findNode(closed,node=>node.props?.className==='kode-source-summary');summary.props.onClick()
+ const preview=render(),dialog=findNode(preview,node=>node.type==='modal'&&node.props.open);assert.ok(dialog)
+ const details=visibleText(dialog);assert.match(details,/Agent 同步/);assert.match(details,/DeepSeek Harness/);assert.match(details,/Skills 已同步/);assert.match(details,/example-skill/);assert.match(details,/Skill summary/);assert.match(details,/Subagents/);assert.match(details,/reviewer/);assert.match(details,/Reviews changes/);assert.match(details,/PreToolUse/);assert.match(details,/Hook summary/);assert.match(details,/\/build/);assert.match(details,/discipline/);assert.match(details,/Rule summary/);assert.match(details,/remote-mcp/);assert.match(details,/Long remote summary/);assert.match(details,/https:\/\/example.test\/remote/)
+ const previewNode=findNode(dialog,node=>node.type===scope.SourcePreview),previewTree=previewNode.type(previewNode.props)
+ const syncSection=findNode(previewTree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步');const syncTree=syncSection.type(syncSection.props);assert.ok(findNode(syncTree,node=>node.type==='check'&&node.props.className==='kode-source-sync-icon'))
+ assert.match(source,/\.kode-source-dialog\{[^}]*max-height:min\(640px,calc\(100dvh - 64px\)\)/);assert.match(source,/\.kode-source-dialog :has\(>\.kode-source-preview\)\{[^}]*overflow-y:auto/)
+ dialog.props.onClose();assert.equal(findNode(render(),node=>node.type==='modal').props.open,false)
+ findNode(closed,node=>node.type==='button'&&node.children.includes('添加来源')).props.onClick()
+ const editor=findNode(render(),node=>node.props?.className==='kode-agent-editor kode-source-editor');assert.ok(editor)
+ assert.ok(findNode(editor,node=>node.props?.className==='kode-field kode-source-field-location'))
+ assert.equal(findNode(editor,node=>node.props?.className==='kode-source-editor-actions').children.length,2)
+ assert.match(source,/\.kode-source-editor\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
+ assert.match(source,/\.kode-source-field-location,\.kode-source-field-subdir,\.kode-source-editor>\.kode-hub-targets,\.kode-source-editor-actions\{grid-column:1\/-1\}/)
+ assert.match(source,/@media\(max-width:600px\)\{\.kode-source-editor\{grid-template-columns:minmax\(0,1fr\)\}/)
+})
+
+test('plugin detail selection follows a stable package path when polling reorders packages',()=>{
+ const scope={React:{Fragment:'fragment'},SelectField:'select',transport:null,h:(type,props,...children)=>({type,props,children})}
+ vm.runInNewContext(source.slice(source.indexOf('  function sourcePresentation'),source.indexOf('  function GoalSidebar')),scope)
+ const multi={id:'multi',skills:[],targets:['codex','claude'],nativeStatus:{codex:'installed',claude:'ready'},packages:[{name:'one',path:'plugins/one',displayName:'One',logo:'one.png',skills:[{name:'one-skill'}]},{name:'two',path:'plugins/two',displayName:'Two',logo:'two.png',skills:[{name:'two-skill'}]}]}
+ let tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},host:'local'})
+ assert.equal(findNode(tree,node=>node.type==='select').props.value,'plugins/two')
+ assert.equal(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Skills').props.items[0].name,'two-skill')
+ assert.deepEqual(Array.from(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步').props.items,item=>item.description),['已安装并完成同步','已同步，下次启动会话时加载'])
+ multi.packages.reverse();tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},host:'local'})
+ assert.equal(findNode(tree,node=>node.type==='select').props.value,'plugins/two')
+ assert.equal(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Skills').props.items[0].name,'two-skill')
+ const logoNode=findNode(tree,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img')
+ assert.match(logo.props.src,/logo=multi&package=0/)
+})
+
+test('Kode settings keep both the native settings section and sidebar panel entries', () => {
+  const selected = [], c = client(undefined, {}, { layout: { selectPanel: id => selected.push(id) } })
+  const settings = c.ctx.slots.entries('settings.section').find(row => row.options.id === 'agent-presets')
+  assert.ok(settings, JSON.stringify(c.ctx.slots.entries('settings.section').map(row => row.options)))
+  assert.equal(settings.options.name, 'settings.section'); assert.equal(settings.options.label(), 'Kode')
+  assert.equal(c.ctx.slots.entries('settings.trigger').length, 0)
+  const sidebar = c.ctx.slots.entries('sidebar.panellist').find(row => row.options.id === 'kode-settings')
+  assert.ok(sidebar, JSON.stringify(c.ctx.slots.entries('sidebar.panellist').map(row => row.options)))
+  assert.equal(sidebar.options.name, 'sidebar.panellist'); assert.equal(sidebar.options.label, 'Kode')
+  assert.equal(sidebar.component, 'IconAgentPresetOutlineRegular')
+  const main = c.entry('main', 'kode-settings'), wrapper = main(), panel = wrapper.children[0], tree = panel.type(panel.props)
+  assert.match(JSON.stringify(tree), /插件与集成/); assert.doesNotMatch(JSON.stringify(tree), /Agent 共享/)
+  assert.match(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/)
+  assert.match(findNode(tree, node => node.type === 'img' && node.props.src?.includes('type=kode'))?.props.src, /\/api\/kode\/avatars\/media\?type=kode&state=idle/)
+  assert.match(source,/\.kode-settings-scope \.kode-field\{[^}]*width:100%;max-width:none/)
+  assert.match(source,/\.kode-settings-brand-avatar\{[^}]*width:32px;height:32px/)
+  assert.match(source,/\.kode-settings-brand p\{[^}]*font-size:12px;line-height:18px/)
+  c.ctx.layout.selectPanel('kode-settings')
+  assert.deepEqual(selected, ['kode-settings'])
   assert.equal(c.shell.component, c.native)
 })
 
@@ -361,13 +492,13 @@ test('directory browsing keeps injected callbacks stable across unrelated rerend
 test('remote Agent configuration and default writes stay on the selected Host without changing the active workspace', async () => {
  const calls=[],agents={profiles:[{id:'remote-codex',name:'Remote Codex',type:'codex',executable:'codex'}],types:{codex:{name:'Codex'}},selection:{provider:'kode-agent-remote-codex',model:'default'},configuredDefaultProfileId:'remote-codex'}
  const transport={current:'local',subscribe:()=>()=>{},path:url=>url,select:()=>{throw new Error('settings must not switch execution Host')},fetch:async(url,options,host)=>{calls.push({url,host,body:options?.body&&JSON.parse(options.body)});return{ok:true,json:async()=>url.includes('/settings/')?{result:{ok:true,value:{}}}:agents}}}
- const c=client(undefined,{}, {kodeTransport:transport})
- const outer=c.entry('settings.section')({sessions:c.ctx.sessions,slots:c.ctx.slots})
- const component=outer.children.flatMap(node=>node?.children??[]).find(node=>node?.props?.settingsHost).type
+ const c=client(undefined,{}, {kodeTransport:transport,layout:{selectPanel(){}}})
+ const wrapper=c.entry('main','kode-settings')(),panel=wrapper.children[0],outer=panel.type(panel.props)
+ const component=findNode(outer,node=>node?.props?.settingsHost).type
  component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
  await new Promise(resolve=>setImmediate(resolve))
  const body=component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
- const selector=body.children.find(node=>node?.props?.label==='默认 Agent')
+ const selector=findNode(body,node=>node?.props?.label==='默认 Agent')
  assert.equal(selector.props.value,'remote-codex')
  selector.props.onChange('remote-codex')
  await new Promise(resolve=>setImmediate(resolve))
@@ -396,36 +527,40 @@ test('avatar animation subscribes to native running and interaction facts indepe
  const states=new Map([['running',{running:true}],['awaiting',{running:true,pendingInteraction:{kind:'approval'}}],['idle',{running:false}]])
  const statusSource={subscribe:()=>()=>{},getSnapshot:()=>states}
  const scope={avatarContext:{get:name=>name==='uiSession'?{sessionStatus:statusSource}:undefined},useSyncExternalStore:(_subscribe,getSnapshot)=>getSnapshot()}
- vm.runInNewContext(source.slice(source.indexOf('  const emptyAvatarStatuses'),source.indexOf('  function AgentAvatar')),scope)
+ vm.runInNewContext(source.slice(source.indexOf('  const emptyAvatarStatuses'),source.indexOf('  async function stageAvatarPrompt')),scope)
  assert.equal(scope.useAvatarStatus('running'),'running');assert.equal(scope.useAvatarStatus('awaiting'),'awaiting');assert.equal(scope.useAvatarStatus('idle'),'idle');assert.equal(scope.useAvatarStatus('not-loaded'),undefined)
+ Object.assign(scope,{transport:null,useState:value=>[value,()=>{}],useEffect(){},React:{useRef:value=>({current:value})},useAvatarLibrary:()=>({avatars:[{id:'person',animations:{idle:['idle-1'],running:['running-1','running-2'],awaiting:['awaiting-1','awaiting-2'],done:['done-1','done-2']}}]}),h:(type,props,...children)=>({type,props,children})})
+ for(const status of ['running','awaiting','done']) assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status}).children[0].props.src,`${status==='running'?'awaiting':status}-1`,'reuse the original awaiting/done animations for every state')
+ const nativeKode=scope.AgentAvatar({profile:{type:'dsh',avatar:{id:null,url:'/api/kode/avatars/media?type=dsh&state=idle'}}}).children[0]
+ assert.equal(nativeKode.type,'img');assert.equal(nativeKode.props.src,'/api/kode/avatars/media?type=dsh&state=idle','native Kode conversations must render the packaged Kode icon')
  scope.avatarContext.sessions={list:{subscribe:()=>()=>{},getSnapshot:()=>({byId:{'not-loaded':{running:true}}})}}
  assert.equal(scope.useAvatarStatus('not-loaded'),'running','cold artwork directories must not delay the native running state')
 })
 
-test('the sidebar status overlay preserves animated avatars while retaining its native running and completion signals',()=>{
- const h=(type,props,...children)=>({type,props,children}),targets=[{id:'busy',seat:{},state:'ongoing'},{id:'done',seat:{},state:'done'}]
+test('the sidebar status overlay preserves base avatars and maps running, awaiting and completion states',()=>{
+ const h=(type,props,...children)=>({type,props,children}),targets=[{id:'busy',seat:{},state:'ongoing'},{id:'review',seat:{},state:'awaiting'},{id:'done',seat:{},state:'done'}]
  const scope={React:{Fragment:'fragment'},h,AgentAvatar:'avatar',createPortal:element=>element,useState:()=>[targets.splice(0),()=>{}],useEffect:()=>{}}
- vm.runInNewContext(source.slice(source.indexOf('  function SessionStatusAvatars'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
- const tree=scope.SessionStatusAvatars({root:{current:null},rows:{busy:{agent:{type:'codex',avatar:{id:'gallery/person'}}},done:{agent:{type:'codex',avatar:{id:'gallery/person'}}}}})
+ vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
+ const tree=scope.SessionStatusAvatars({root:{current:null},rows:{busy:{agent:{type:'codex',avatar:{id:'gallery/person'}}},review:{agent:{type:'codex',avatar:{id:'gallery/person'}}},done:{agent:{type:'codex',avatar:{id:'gallery/person'}}}}})
  const avatars=tree.children.map(overlay=>overlay.children[0].children[0])
- assert.deepEqual(avatars.map(avatar=>avatar.props.status),['running','idle'])
+ assert.deepEqual(avatars.map(avatar=>avatar.props.status),['running','awaiting','done'])
  assert.ok(avatars.every(avatar=>avatar.props.profile.avatar.id==='gallery/person'&&avatar.props.size===20))
 })
 
-test('workspace status survives collapsed session rows and gives completed sessions visual priority',()=>{
- const scope={};vm.runInNewContext(source.slice(source.indexOf('  function sessionStateMap'),source.indexOf('  function SessionStatusAvatars')),scope)
- const collapsed=scope.sessionStateMap({busy:{running:false},done:{},idle:{}},new Map([['busy',{running:true}],['done',{completionUnread:true}],['idle',{running:false}]]))
- assert.equal(collapsed.get('busy'),'ongoing');assert.equal(collapsed.get('done'),'done');assert.equal(collapsed.has('idle'),false)
- const statuses=new Map([['busy','ongoing'],['done','done'],['idle','idle']])
- assert.deepEqual({...scope.workspaceStatusSummary(['busy','done','idle'],statuses)},{ongoing:1,done:1})
- assert.deepEqual({...scope.workspaceStatusSummary(['done','idle'],statuses)},{ongoing:0,done:1})
- assert.deepEqual({...scope.workspaceStatusSummary(['idle','missing'],statuses)},{ongoing:0,done:0})
- const h=(type,props,...children)=>({type,props,children}),workspace={id:'project',seat:{},ongoing:1,done:2},states=[[],[workspace]]
+test('workspace status gives awaiting highest priority, then completion, then running',()=>{
+ const scope={};vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function SessionStatusAvatars')),scope)
+ const collapsed=scope.sessionStateMap({busy:{running:false},done:{},review:{},idle:{}},new Map([['busy',{running:true}],['done',{running:true,completionUnread:true}],['review',{running:true,completionUnread:true,pendingInteraction:{kind:'approval'}}],['idle',{running:false}]]))
+ assert.equal(collapsed.get('busy'),'ongoing');assert.equal(collapsed.get('done'),'done');assert.equal(collapsed.get('review'),'awaiting');assert.equal(collapsed.has('idle'),false)
+ const statuses=new Map([['busy','ongoing'],['done','done'],['review','awaiting'],['idle','idle']])
+ assert.deepEqual({...scope.workspaceStatusSummary(['busy','done','review','idle'],statuses)},{ongoing:1,done:1,awaiting:1})
+ assert.deepEqual({...scope.workspaceStatusSummary(['done','idle'],statuses)},{ongoing:0,done:1,awaiting:0})
+ assert.deepEqual({...scope.workspaceStatusSummary(['idle','missing'],statuses)},{ongoing:0,done:0,awaiting:0})
+ const h=(type,props,...children)=>({type,props,children}),workspace={id:'project',seat:{},ongoing:1,done:2,awaiting:1},states=[[],[workspace]]
  Object.assign(scope,{React:{Fragment:'fragment'},h,createPortal:element=>element,useState:()=>[states.shift(),()=>{}],useEffect:()=>{}})
  vm.runInNewContext(source.slice(source.indexOf('  function SessionStatusAvatars'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
  const tree=scope.SessionStatusAvatars({root:{current:null},rows:{}}),indicator=tree.children[0]
- assert.equal(indicator.props['data-status'],'done')
- assert.equal(indicator.props['aria-label'],'1 个会话进行中 · 2 个会话已完成')
+ assert.equal(indicator.props['data-status'],'awaiting')
+ assert.equal(indicator.props['aria-label'],'1 个会话等待审核 · 2 个会话已完成 · 1 个会话进行中')
 })
 
 test('avatar and background generation each open a dedicated named session without editing or submitting the source draft',async()=>{
@@ -484,10 +619,51 @@ test('goal dock reuses the queued composer width and panel presentation',()=>{
  assert.match(source,/\.kode-goal-bar\{box-sizing:border-box;width:calc\(100% - var\(--dsh-composer-side-clearance\)/)
  assert.match(source,/max-width:calc\(var\(--dsh-composer-card-max-width\)/)
  assert.match(source,/\.kode-goal-panel\{[^}]*border-radius:var\(--dsw-radius-lg\) var\(--dsw-radius-lg\) 0 0/)
- assert.match(source,/IconPauseOutlineRegular/)
- assert.match(source,/IconPlayOutlineRegular/)
+ assert.match(source,/goal\.status === 'active' \? IconPlayOutlineRegular : IconPauseOutlineRegular/)
  assert.match(source,/IconCloseOutlineRegular/)
  assert.match(source,/operate\('clear'\)/)
+ assert.match(source,/IconGoalOutlineRegular/)
+ assert.match(source,/IconPanelLeftOutlineRegular/)
+ assert.match(source,/sidebarRightTabs\.register\(\{ id: 'kode-goal', kind: 'kode-goal'/)
+ assert.match(source,/sidebar\.openTab\('kode-goal'\)/)
+ assert.doesNotMatch(source,/replaceTab: true/)
+ assert.match(source,/function GoalSidebar\(/)
+ assert.match(source,/name: 'sidebar\.right\.pane\.tab', key: 'kode-goal'/)
+ const tabs=[]
+ client({}, {}, { sidebarRightTabs: { register: tab => { tabs.push(tab); return () => {} } } })
+ assert.equal(tabs.find(tab => tab.id === 'kode-goal')?.kind, 'kode-goal')
+})
+
+test('connected service uses a success icon and hover details with compact Agent groups',()=>{
+ assert.match(source,/IconCheckOutlineRegular, \{ size: 14, className: 'kode-service-connected-icon'/)
+ assert.match(source,/className: 'kode-service-recovery-actions', title: hint/)
+ assert.match(source,/\.kode-settings-group-title\{font-size:14px;font-weight:600;line-height:20px;color:var\(--dsw-alias-label-primary\);margin:4px 0 -4px/)
+ assert.match(source,/\.kode-settings-section \.kode-agent-settings>\.kode-field:first-child\{margin-bottom:0\}/)
+ assert.match(source,/\.kode-agent-rows\{[^}]*margin:0;padding:0/)
+})
+
+test('mobile pairing uses one structured form and centers its QR invitation',()=>{
+ assert.match(source,/className: 'kode-mobile-pairing', 'aria-label': '手机配对'/)
+ assert.match(source,/className: 'kode-mobile-pairing-form', onSubmit:/)
+ assert.match(source,/type: 'submit', variant: 'primary', disabled: busy \|\| !server\.trim\(\)/)
+ assert.match(source,/\.kode-mobile-pairing-form \.kode-field\{margin:0\}/)
+ assert.match(source,/\.kode-pairing-qr\{display:flex;flex-direction:column;align-items:center;gap:12px;margin:0;text-align:center\}/)
+ assert.doesNotMatch(source,/同步服务已连接。生成二维码后/)
+})
+
+test('Agent avatar edit marks use a small offset badge instead of covering the artwork',()=>{
+ assert.match(source,/kode-avatar-edit-mark'[^\n]*IconEditOutlineRegular, \{ size: 8 \}/)
+ assert.match(source,/\.kode-avatar-edit-mark\{position:absolute;right:-6px;bottom:-5px;[^}]*width:12px;height:12px/)
+})
+
+test('service status and personalization use explicit labeled cards and fill the settings content width',()=>{
+ assert.match(source,/className: 'kode-host-service', 'aria-label': '服务状态'/)
+ assert.match(source,/className: 'kode-host-service-body'/)
+ assert.match(source,/\.kode-mobile-pairing,\.kode-host-service\{display:flex;flex-direction:column;gap:12px;padding:16px/)
+ assert.match(source,/className: 'kode-personalization-session-label' \}, '当前会话'/)
+ assert.match(source,/\.kode-personalization-session strong\{[^}]*font-size:14px;font-weight:500/)
+ assert.match(source,/\.kode-settings-page \.kode-settings-section>\.kode-agent-settings\{width:100%;max-width:none;min-width:0;box-sizing:border-box\}/)
+ assert.match(source,/\.kode-settings-page \.kode-personalization \.kode-avatar-content,\.kode-settings-page \.kode-personalization \.kode-avatar-grid,\.kode-settings-page \.kode-personalization \.kode-avatar-preview\{width:100%;min-width:0;box-sizing:border-box\}/)
 })
 
 test('goal dock pause, resume and clear controls retain the current session identity',async()=>{

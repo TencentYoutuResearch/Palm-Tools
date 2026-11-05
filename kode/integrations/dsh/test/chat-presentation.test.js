@@ -63,6 +63,13 @@ test('parallel-step history reuses the native assistant renderer without losing 
  assert.equal(definition.match['assistant/message']({...event,data:{message:{content:[{type:'tool-call'}]}}}),null)
 })
 
+test('activity sits immediately before the model seat while usage remains in the composer dock',()=>{
+ const activity=source.indexOf('id: "activity"'),usage=source.indexOf('id: "usage"')
+ assert.ok(activity>=0&&usage>=0)
+ assert.match(source.slice(source.lastIndexOf('ctx.slots.inject(',activity),activity),/conversation\.input\.right/)
+ assert.match(source.slice(source.lastIndexOf('ctx.slots.inject(',usage),usage),/conversation\.composer\.dock/)
+})
+
 test('reasoning and unknown surfaces between commands remain in the same process group',()=>{
  for(const middle of [
   {key:'middle',kind:'assistant-step',location:{kind:'step',turn:{turn:1}},data:{blocks:[{kind:'reasoning',text:'checking'}]}},

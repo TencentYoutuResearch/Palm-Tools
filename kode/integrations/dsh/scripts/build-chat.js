@@ -80,6 +80,39 @@ const icon = (0, react_jsx_runtime.jsxs)("svg", { width: 18, height: 18, viewBox
 }
 replace('"stats.dialog.title": "会话统计",', '"stats.contextUnavailable": "Agent 尚未上报上下文用量",\n "stats.contextCompacted": "压缩后用量待更新",\n "stats.dialog.context": "上下文用量（最近上报）",\n "stats.dialog.title": "会话统计",')
 replace('"stats.dialog.title": "Session statistics",', '"stats.contextUnavailable": "Context usage not reported by Agent",\n "stats.contextCompacted": "Awaiting usage after compaction",\n "stats.dialog.context": "Context usage (latest report)",\n "stats.dialog.title": "Session statistics",')
+replace(`\t\t\tctx.slots.inject("conversation.composer.dock", function* () {
+\t\t\t\tyield ctx.slots.register({
+\t\t\t\t\tname: "conversation.composer.dock",
+\t\t\t\t\tid: "activity",
+\t\t\t\t\torder: 0,
+\t\t\t\t\tlocale: NS,
+\t\t\t\t\tinject: statPillInject
+\t\t\t\t}, ActivityPill);
+\t\t\t\tyield ctx.slots.register({
+\t\t\t\t\tname: "conversation.composer.dock",
+\t\t\t\t\tid: "usage",
+\t\t\t\t\torder: 1,
+\t\t\t\t\tlocale: NS,
+\t\t\t\t\tinject: statPillInject
+\t\t\t\t}, UsagePill);
+\t\t\t});`, `\t\t\tctx.slots.inject("conversation.input.right", function* () {
+\t\t\t\tyield ctx.slots.register({
+\t\t\t\t\tname: "conversation.input.right",
+\t\t\t\t\tid: "activity",
+\t\t\t\t\torder: 0,
+\t\t\t\t\tlocale: NS,
+\t\t\t\t\tinject: statPillInject
+\t\t\t\t}, ActivityPill);
+\t\t\t});
+\t\t\tctx.slots.inject("conversation.composer.dock", function* () {
+\t\t\t\tyield ctx.slots.register({
+\t\t\t\t\tname: "conversation.composer.dock",
+\t\t\t\t\tid: "usage",
+\t\t\t\t\torder: 1,
+\t\t\t\t\tlocale: NS,
+\t\t\t\t\tinject: statPillInject
+\t\t\t\t}, UsagePill);
+\t\t\t});`)
 source = source.replace(/\/\/# sourceMappingURL=.*$/m, '').replace(/^[ \t]+$/gm, '').trimEnd() + '\n'
-await writeFile(new URL('../packages/chat/client.js', import.meta.url), '// Generated from dsh-client-ui-chat 0.2.1-rc.2 (MIT); run npm run build:chat.\n' + source)
+await writeFile(new URL('../packages/chat/client.js', import.meta.url), '// Generated from dsh-client-ui-chat 0.2.1-rc.5 (MIT); run npm run build:chat.\n' + source)
 await copyFile(join(dirname(dirname(upstream)), 'LICENSE'), new URL('../packages/chat/LICENSE.upstream', import.meta.url))

@@ -27,5 +27,20 @@ export class BackendClient {
     if (!response.ok) throw new Error(`kode backend (${response.status}): ${result.error ?? 'request failed'}`)
     return result
   }
+  async asset(path, signal) {
+    if (!path.startsWith('/api/v1/messaging/')) throw new Error('unsupported backend path')
+    const response = await this.fetch(`${this.url}${path}`, {
+      headers: { authorization: `Bearer ${this.token}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+      redirect: 'error',
+    })
+    if (!response.ok) throw Object.assign(new Error(`Kode backend asset unavailable (HTTP ${response.status})`), { status: response.status })
+    const contentType = (response.headers.get('content-type') ?? '').split(';')[0].toLowerCase()
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(contentType)) throw new Error('Kode backend returned a non-image asset')
+    if (Number(response.headers.get('content-length')) > 4 * 1024 * 1024) throw new Error('Kode backend asset is too large')
+    const body = Buffer.from(await response.arrayBuffer())
+    if (body.length > 4 * 1024 * 1024) throw new Error('Kode backend asset is too large')
+    return { contentType, body }
+  }
   forSession(token) { return new BackendClient(this.url, token, { fetch: this.fetch }) }
 }

@@ -81,6 +81,7 @@ test('backend handoff to a blank Claude target creates and delivers exactly once
     assert.equal(creates, 1); assert.equal(inputs, 1)
   } finally { await bridge.close() }
 })
+import { Session } from '@deepseek-ai/dsh-session'
 
 test('empty ungrouped placeholders retire old publications without being inspected or republished',async()=>{
   const publications=[]
@@ -162,6 +163,28 @@ test('permission changes preserve the deployment preset catalog and flush durabl
   assert.equal(changes.length, 0)
   assert.deepEqual(await bridge.execute({ id: 'ok', kind: 'mode', session_id: 'one', payload: { mode: 'reviewed' } }), { accepted: true, mode: 'reviewed' })
   assert.equal(flushed, 1)
+})
+
+test('mobile session creation applies the shared default model, effort and Fast', async () => {
+  const profile = { id: 'worker', name: 'Worker', type: 'codex' }, selections = [], rows = [], probes = []
+  const initial = Session.create('mobile-defaults'), session = Session.create('mobile-defaults', [], { ...initial.header, cwd: '/tmp' })
+  const agent = { id: 'mobile-defaults', session, selectModel: route => selections.push(route), ctx: { sessions: { flush: async () => {} } } }
+  const runtime = {
+    profiles: { list: () => [profile], defaultModelFor: () => ({ model: 'fast-model', reasoningEffort: 'high', fast: true }), bind: async () => {}, binding: () => ({ profile }) },
+    hasRuntime: () => true, recordBinding() {}, adapter: { listModels: async (...args) => { probes.push(args); return [{ id: 'fast-model', ...(args[2] === 'fast-model' ? { reasoningEfforts: [{ id: 'high' }], defaultReasoningEffort: 'high', fastCapability: { transport: 'service-tier', tier: 'priority', defaultEnabled: false } } : {}) }] } },
+  }
+  const services = {
+    kodeAgents: runtime, agents: { get: () => undefined },
+    workspaceRegistry: { resolveByPath: async path => ({ id: 'workspace', path, title: 'Workspace' }) },
+    sessionController: { create: async request => { agent.id = request.sessionId; rows.push({ sessionId: request.sessionId, cwd: '/tmp', blank: true }); return { sessionId: request.sessionId } }, resolveAgent: async () => ({ agent }), list: async () => ({ items: rows }) },
+  }
+  const backend = { call: async (path, body) => path.endsWith('/sessions') ? { sessions: [] } : { sessions: body.sessions.map(row => ({ session_id: row.session_id, id: 100 })) } }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, backend)
+  await bridge.execute({ id: 'create-defaults', kind: 'create_session', payload: { backend_key: 'dsh:worker', cwd: '/tmp' } })
+  assert.equal(probes[0][2], 'fast-model', 'mobile ACP discovery receives the configured default model')
+  assert.deepEqual(selections, [{ provider: 'kode-agent-worker', model: 'fast-model', reasoningEffort: 'high' }])
+  const fast = session.snapshotEvents().find(event => event.type === 'plugin:kode/model-fast')
+  assert.equal(fast.data.fast, true); assert.equal(fast.data.serviceTier, 'priority')
 })
 
 test('continued timed questions stay answerable through the original dsh service', async () => {

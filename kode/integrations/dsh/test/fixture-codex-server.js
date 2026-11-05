@@ -14,7 +14,7 @@ async function receive(message) {
   if (process.env.KODE_FIXTURE_RPC_LOG && method) await appendFile(process.env.KODE_FIXTURE_RPC_LOG, JSON.stringify({ method, params, label: process.env.KODE_FIXTURE_AGENT_LABEL, hostCredentialPresent: Boolean(process.env.KODE_BRIDGE_TOKEN || process.env.KODE_MESSAGING_ADMIN_TOKEN_FILE || process.env.KODE_SESSION_ID) }) + '\n')
   if (method === 'initialize') return result(id, { userAgent: 'fixture' })
   if (method === 'initialized') return
-  if (method === 'model/list') return result(id, { data: [{ id: 'fixture', model: 'fixture', displayName: 'Fixture', supportedReasoningEfforts:[{reasoningEffort:'medium',description:'Balanced'},{reasoningEffort:'high',description:'Deep'}],defaultReasoningEffort:'medium' }], nextCursor: null })
+  if (method === 'model/list') return result(id, { data: [{ id: 'fixture', model: 'fixture', displayName: 'Fixture', supportedReasoningEfforts:[{reasoningEffort:'medium',description:'Balanced'},{reasoningEffort:'high',description:'Deep'}],defaultReasoningEffort:'medium',serviceTiers:[{id:'priority',name:'Fast',description:'2x speed'}],additionalSpeedTiers:['fast'],defaultServiceTier:null }], nextCursor: null })
   if (method === 'collaborationMode/list') return result(id,{data:[{name:'Default',mode:'default'},{name:'Plan',mode:'plan'}]})
   if (method === 'thread/settings/update') return result(id, {})
   if (method === 'thread/goal/get') return result(id, {goal})

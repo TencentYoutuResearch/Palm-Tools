@@ -42,7 +42,7 @@ test('publications retain provenance for backend filtering and exclude hidden re
 test('HTTP adapter authenticates owners and delegates shared operations to the backend after publishing history', async t => {
   const calls = [], events = [{ type: 'plugin:kode/goal-state', data: { goal: { objective: 'durable', status: 'paused' } } }]
   let handler, resumed = 0, closed = 0, published = false; const controlled = []
-  const backend = { call: async (path, input) => { calls.push({ path, input }); if (path.endsWith('/handoff')) { assert.equal(published, true); return { sessionId: 'target' } } return { sources: [], keepAwake: false, power: { active: false } } } }
+  const backend = { call: async (path, input) => { calls.push({ path, input }); if (path.endsWith('/handoff')) { assert.equal(published, true); return { sessionId: 'target' } } return { sources: [], keepAwake: false, power: { active: false } } }, asset: async path => { calls.push({ path }); return { contentType: 'image/png', body: Buffer.from([0x89, 0x50, 0x4e, 0x47]) } } }
   const hub = new ExtensionHub(backend)
   const agent = { id: 'source', status: 'idle', session: { snapshotEvents: () => events }, ctx: { sessionProjections: { stateOf: () => ({ lastUsed: { model: 'fixture' } }) } } }
   const ctx = {
@@ -71,6 +71,11 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   assert.equal((await request({ action: 'goal', sessionId: 'source', command: 'pause' })).status, 200)
   assert.deepEqual(controlled, ['pause']); assert.equal(resumed, 1)
   assert.equal((await request({ action: 'goal', sessionId: 'source', command: 'x'.repeat(4001) })).status, 400)
+  assert.equal((await request(undefined, '?logo=team&package=0', 'guest')).status, 403)
+  const logo = await request(undefined, '?logo=team&package=0'); assert.equal(logo.status, 200)
+  assert.equal(logo.headers.get('content-type'), 'image/png'); assert.equal(logo.headers.get('x-content-type-options'), 'nosniff')
+  assert.deepEqual([...new Uint8Array(await logo.arrayBuffer())], [0x89, 0x50, 0x4e, 0x47])
+  assert.equal(calls.at(-1).path, HUB_PATH + '?logo=team&package=0')
 })
 
 test('real backend owns native plugin snapshots, installer updates, and removal without a running dsh Host', { skip: !process.env.KODE_TEST_BACKEND_URL || process.env.KODE_TEST_NATIVE_PLUGIN_CLI !== '1' }, async t => {

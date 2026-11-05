@@ -11,12 +11,13 @@ function fixture(open = () => {}) {
     useState: value => [typeof value === 'function' ? value() : value, () => {}], useEffect(fn) { fn() },
     transport: { current: 'local' }, requestedServiceHost: undefined, requestedSettingsSection: undefined,
     window: { dispatchEvent() {}, addEventListener() {}, removeEventListener() {} }, CustomEvent: class {}, requestAnimationFrame() {},
-    HubSettings: 'hub', AgentSettingsBody: 'agents', PersonalizationSettings: 'personalization',
+    HubSettings: 'hub', AgentSettingsBody: 'agents', PersonalizationSettings: 'personalization', PowerSettings: 'power',
     useProjectHosts: () => ({ data: { current: 'local', hosts: [{ id: 'local', name: 'This computer' }, { id: 'worker', name: 'Worker' }] } }),
     useIntegrationSettings: () => ({ data: null, busy: false, error: 'Missing API', recoveryNeeded: true }),
-    Button: 'button', Failure: 'failure', SelectField: 'select', RemoteComputerIcon: 'icon', IconPlusOutlineRegular: 'plus',
+    Button: 'button', Failure: 'failure', SelectField: 'select', RemoteComputerIcon: 'icon', IconPlusOutlineRegular: 'plus', IconAgentPresetOutlineRegular: 'agent-icon',
     RemoteHostForm: 'form', ServiceRecovery: 'recovery',
   }
+  scope.openKodeSettings = section => { scope.requestedSettingsSection = section; open(`kode-${section}`) }
   vm.createContext(scope)
   vm.runInContext(source.slice(source.indexOf('  function openSettings('), source.indexOf('  let requestedProfile')), scope)
   vm.runInContext(source.slice(source.indexOf('  function ServiceRecoveryLink('), source.indexOf('  function MobilePairingInvite(')), scope)
@@ -30,14 +31,21 @@ const nodes = tree => [tree, ...tree.children.filter(child => child && typeof ch
 test('service recovery navigation selects the failing Host without switching the workspace', () => {
   const opened = [], { scope, slots } = fixture(id => opened.push(id))
   nodes(scope.ServiceRecoveryLink({ host: 'worker', slots })).find(node => node.type === 'button').props.onClick()
-  assert.deepEqual(opened, ['kode'])
+  assert.deepEqual(opened, ['kode-ssh'])
   const page = scope.KodeSettings({ slots })
-  assert.equal(nodes(page).find(node => node.type === 'select').props.value, 'worker')
   const service = nodes(page).find(node => node.type === scope.SshSettings)
+  assert.equal(service.props.host, 'worker')
   assert.equal(nodes(scope.SshSettings(service.props)).find(node => node.type === scope.HostServiceStatus).props.host, 'worker')
-  for (const type of ['agents', scope.IntegrationSettingsBody, scope.MobileSettingsBody]) {
-    const body = nodes(page).find(node => node.type === type)
-    assert.equal(body.props.host ?? body.props.settingsHost, 'worker')
+  for (const [section, type, expectedHost] of [['agents', 'agents', 'worker'], ['integrations', scope.IntegrationSettingsBody, 'local'], ['mobile', scope.MobileSettingsBody, 'local']]) {
+    scope.requestedServiceHost = 'worker'; scope.requestedSettingsSection = section
+    const scoped = scope.KodeSettings({ slots })
+    const body = nodes(scoped).find(node => node.type === type)
+    assert.equal(body.props.host ?? body.props.settingsHost, expectedHost)
+    const hostSelector = nodes(scoped).filter(node => node.type === 'select' && node.props.label === '配置主机')
+    assert.equal(hostSelector.length, section === 'agents' ? 1 : 0, 'only Agent settings expose a Host selector')
+    if (section === 'agents') assert.equal(hostSelector[0].props.value, 'worker')
+    assert.equal(nodes(scoped).filter(node => node.type === 'section').length, 1, 'only the active settings panel mounts')
+    assert.equal(nodes(scoped).filter(node => node.type === 'h3').length, 0, 'tabs do not repeat their own visible heading')
   }
   assert.equal(scope.transport.current, 'local')
   assert.equal(scope.requestedServiceHost, undefined, 'consume the navigation target once')

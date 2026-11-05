@@ -152,13 +152,15 @@ impl Extensions {
                     .context("source not found")?;
                 let before = value["sources"][index].clone();
                 let operation = (|| -> Result<()> {
-                    let (skills, plugins, revision) = files::snapshot(&self.root, &before)?;
+                    let (skills, plugins, revision, release, packages) = files::snapshot(&self.root, &before)?;
                     let next = files::desired(&self.home, &before, &skills)?;
                     let previous = before["links"].as_array().cloned().unwrap_or_default();
                     value["sources"][index]["links"] = json!(next);
                     value["sources"][index]["skills"] =
                         json!(skills.iter().map(|s| &s["name"]).collect::<Vec<_>>());
                     value["sources"][index]["plugins"] = plugins;
+                    value["sources"][index]["release"] = json!(release);
+                    value["sources"][index]["packages"] = json!(packages);
                     value["sources"][index]["revision"] = json!(revision);
                     value["sources"][index]["updatedAt"] = json!(crate::now_ms());
                     value["sources"][index]

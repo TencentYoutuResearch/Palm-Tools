@@ -23,7 +23,9 @@ for (const type of ['claude', 'cursor', 'codebuddy']) for (const extension of [t
     assert.ok(events.some(event => event.method === 'item/agentMessage/delta' && event.params.delta.includes('new requirement')))
     assert.equal(session.rpc.closed, false)
     const rows = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    const restarted = !extension && type === 'codebuddy'
     assert.equal(rows.filter(row => row.method === 'session/new').length, 1)
+    assert.equal(rows.filter(row => row.method === 'session/load').length, restarted ? 1 : 0)
     assert.equal(rows.filter(row => row.method === 'session/prompt').length, extension ? 1 : 2)
     assert.equal(rows.filter(row => row.method === 'session/cancel').length, extension ? 0 : 1)
     if (extension) assert.equal(rows.find(row => row.method === '_session/steering').params._meta.steering.idleBehavior, 'promptRequired')

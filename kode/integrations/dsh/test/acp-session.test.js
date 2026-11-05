@@ -53,6 +53,19 @@ test('ACP cancellation closes the owned process and missing resume capability ne
     await assert.rejects(unsupported.open({ threadId: 'saved' }, []), /cannot restore/)
   } finally { await Promise.all([session.close(), unsupported.close()]); await rm(root, { recursive: true, force: true }) }
 })
+test('ACP Fast uses the advertised config option and supports explicit off', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-acp-fast-')), log = join(root, 'requests.jsonl')
+  const session = new AcpSession({ type: 'custom', executable: process.execPath, args: [fixture], env: { KODE_ACP_FIXTURE_LOG: log } }, root)
+  try {
+    await session.open({}, [])
+    const models = await session.listModels(AbortSignal.timeout(5000))
+    assert.deepEqual(models.find(row => row.id === 'fixture-fast').fastCapability, { transport: 'config-option', defaultEnabled: false })
+    await collect(session.turn([{ type: 'text', text: 'fast on' }], { fast: true }))
+    await collect(session.turn([{ type: 'text', text: 'fast off' }], { fast: false }))
+    const records = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.deepEqual(records.filter(row => row.method === 'session/set_config_option' && row.params.configId === 'fast').map(row => row.params.value), ['on', 'off'])
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
+})
 for (const type of ['claude', 'cursor','codebuddy']) test(`installed ${type} supports ACP models, MCP configuration and read-only mode without inference`, { skip: !process.env[`KODE_TEST_${type.toUpperCase()}_EXECUTABLE`] }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-native-acp-'))
   const env = type === 'claude' ? { CLAUDE_CONFIG_DIR: root, ANTHROPIC_API_KEY: 'local-protocol-fixture-only', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' } : {}

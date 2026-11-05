@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { installSessionCreator } from '../src/session-create.js'
 import { backendProfile } from '../src/workbench-import.js'
+import { Session } from '@deepseek-ai/dsh-session'
 function fixture() {
   let state = null, revision = 0, creator, starts = 0
   const selections = [], createdIds = []
@@ -132,6 +133,25 @@ test('a retry retains its resolved default model when the profile default change
   profile.defaultModel = 'new-default'
   assert.equal((await h.create(input)).model, 'real-model')
   assert.equal(h.starts(), 1)
+})
+
+test('new sessions apply the configured default model, effort and Fast preference', async () => {
+  const h = fixture(), profiles = h.services.kodeAgents.profiles, probes = []
+  profiles.defaultProfileId = 'worker'
+  profiles.defaultModelFor = () => ({ model: 'fast-model', reasoningEffort: 'high', fast: true })
+  h.services.kodeAgents.adapter.listModels = async (...args) => {
+    probes.push(args)
+    return [{ id: 'real-model', isDefault: true }, { id: 'fast-model', ...(args[2] === 'fast-model' ? { reasoningEfforts: [{ id: 'medium' }, { id: 'high' }], defaultReasoningEffort: 'medium', fastCapability: { transport: 'service-tier', tier: 'priority', defaultEnabled: false } } : {}) }]
+  }
+  h.agent.session = Session.create('default-model-session')
+  h.agent.session = Session.create('default-model-session', [], { ...h.agent.session.header, cwd: '/example/project' })
+  const result = await h.create({ title: 'Helper', task: 'Inspect', idempotency_key: 'default-model' })
+  assert.equal(probes[0][2], 'fast-model', 'ACP discovery receives the configured default model')
+  assert.equal(result.model, 'fast-model')
+  assert.deepEqual(h.selections, [{ provider: 'kode-agent-worker', model: 'fast-model', reasoningEffort: 'high' }])
+  const fast = h.agent.session.snapshotEvents().find(event => event.type === 'plugin:kode/model-fast')
+  assert.equal(fast.data.fast, true); assert.equal(fast.data.serviceTier, 'priority')
+  assert.deepEqual(Object.values(h.state().creations)[0].selection, { model: 'fast-model', reasoningEffort: 'high', fast: true })
 })
 
 test('a partial native session with new activity cannot replay the creation task', async () => {

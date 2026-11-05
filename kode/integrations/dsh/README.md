@@ -650,6 +650,8 @@ Packaged Desktop installations resolve their bundled `kode-ssh-tunnel` by absolu
 
 Explicit runtime creation reserves a backend routing ID before the target receives its first prompt. Its empty DTO remains retired until content is published, so this does not reintroduce blank catalog entries. Creation returns both that numeric ID and the native runtime session ID. Legacy empty creation receipts can recover after a new Host boot using the same request ID and deterministic session identity; complete receipts and input submissions are never replayed.
 
+A shared saved-session import marker is reused only when the current Host still lists its local persisted session. If that artifact is missing, opening the conversation reimports available native CLI history under the same session identity before attaching it to the workspace. Unavailable native history fails before workspace creation; cold runtime projections do not stand in for a live owner.
+
 ### Native conversation presentation
 
 These extensions live entirely in this plugin; they do not require editing dsh
@@ -903,6 +905,13 @@ events still fail validation. Stop the owning session before applying repairs.
 
 
 ### Native executor reload and misplaced system heads
+
+The native model adapter also rejects ordinary-loop `prepareCall` admission.
+Configured restores can enter the released loop through `resumeWith`, bypassing
+the factory wrappers. The rejection runs before the loop commits its system
+prompt. Model discovery uses `resolveModel`, and the native driver dispatches
+through `stream`. The direct-restore regression exercises the released loop,
+checks that native execution never starts, and validates the resulting history.
 
 A native CLI history does not contain the harness-owned protected system head.
 During a Kode plugin reload its durable sessions must fail closed until their

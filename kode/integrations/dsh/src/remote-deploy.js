@@ -137,7 +137,7 @@ export async function deployRemote(host, config, { signal, progress, run = runPr
     const stage = `"$HOME/.local/share/kode/dsh-host/staging/${jobId}"`
     await run('ssh', [...args, `umask 077; mkdir -p ${stage}; cat > ${stage}/payload.tar.gz`], { input: createReadStream(payload), signal })
     progress('upload', 'done', '安装包上传完成')
-    const request = { localNode: node.node_id, linkToken: randomBytes(32).toString('hex'), revision, dshVersion: '0.2.1-rc.2' }
+    const request = { localNode: node.node_id, linkToken: randomBytes(32).toString('hex'), revision, dshVersion: '0.2.1-rc.5' }
     await run('ssh', [...args, 'sh -s'], { input: bootstrapScript(jobId, digest, request), signal, timeout: 900000, onLine(line) {
       try {
         const event = JSON.parse(line)

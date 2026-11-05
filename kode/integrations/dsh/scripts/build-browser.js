@@ -13,5 +13,5 @@ if (source.split(marker).length !== 2 || source.split(factory).length !== 2) thr
 source = source.replaceAll('@deepseek-ai/dsh-client-ui-sidebar-browser', '@kode/dsh-browser')
 source = source.replace(marker, `const kodeBrowserPage = (() => { const module = {exports:{}}; const exports = module.exports;\n${provider.outputFiles[0].text}\nreturn module.exports; })();\n${marker}`)
 source = source.replace(factory, 'if (desktop === void 0) installFrames(ctx, () => kodeBrowserPage.createBrowserPage);')
-await writeFile(new URL('../packages/browser/client.js', import.meta.url), '// Generated from @deepseek-ai/dsh-client-ui-sidebar-browser 0.2.1-rc.2 (MIT). Run npm run build:browser.\n' + source)
+await writeFile(new URL('../packages/browser/client.js', import.meta.url), '// Generated from @deepseek-ai/dsh-client-ui-sidebar-browser 0.2.1-rc.5 (MIT). Run npm run build:browser.\n' + source)
 await copyFile(join(dirname(dirname(upstream)), 'LICENSE'), new URL('../packages/browser/LICENSE.upstream', import.meta.url))

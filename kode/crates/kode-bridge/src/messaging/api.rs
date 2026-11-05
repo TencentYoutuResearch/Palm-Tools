@@ -571,9 +571,29 @@ async fn runtime_release(State(hub):State<Arc<Hub>>,h:HeaderMap,Json(input):Json
     ctx.runtimes.release(&input.runtime,&input.boot_id)?;Ok(Json(json!({"ok":true})))
 }
 
-async fn agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap)->Result<Json<serde_json::Value>>{
+#[derive(Deserialize)]
+struct AgentHubQuery {
+    logo: Option<String>,
+    package: Option<usize>,
+}
+async fn agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Query(query):Query<AgentHubQuery>)->Result<Response>{
     admin(&hub,&h)?;
-    Ok(Json(tokio::task::spawn_blocking(move||hub.extensions.view(&hub)).await.map_err(anyhow::Error::from)??))
+    if let Some(source_id) = query.logo {
+        let owner = hub.clone();
+        let package = query.package.unwrap_or(0);
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let state = super::extensions::state(&owner)?;
+            let source = state["sources"].as_array().and_then(|rows| rows.iter().find(|row| row["id"].as_str() == Some(&source_id))).ok_or_else(|| anyhow::anyhow!("source not found"))?;
+            super::extension_files::logo(&owner.extensions.root, source, package)
+        }).await.map_err(anyhow::Error::from)?;
+        let (bytes, mime) = result.map_err(|_| Error(StatusCode::NOT_FOUND, "logo unavailable".into()))?;
+        return Ok(([
+            ("content-type", mime),
+            ("cache-control", "private, max-age=60"),
+            ("x-content-type-options", "nosniff"),
+        ], bytes).into_response())
+    }
+    Ok(Json(tokio::task::spawn_blocking(move||hub.extensions.view(&hub)).await.map_err(anyhow::Error::from)??).into_response())
 }
 async fn change_agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):Json<serde_json::Value>)->Result<Json<serde_json::Value>>{
     admin(&hub,&h)?;

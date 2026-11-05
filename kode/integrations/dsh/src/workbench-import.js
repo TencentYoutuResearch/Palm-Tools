@@ -94,7 +94,7 @@ export async function importSavedSession(ctx, client, tab) {
   const published = await client.call('/api/v1/messaging/runtime/sessions')
   const live = (published.sessions ?? []).find(row => row.backend_key === tab.backend_key
     && (row.runtime === 'gui' && row.session_uuid === tab.session_id || row.runtime === 'dsh' && row.native_thread_id === tab.session_id)
-    && row.status !== 'exited' && (row.owner_alive ?? row.runtime_online))
+    && !row.runtime_saved && row.status !== 'exited' && (row.owner_alive ?? row.runtime_online))
   if (live) return { sharedSession: live, imported: false }
   const runtime = ctx.get('kodeAgents'), controller = ctx.get('sessionController')
   const registry = ctx.get('workspaceRegistry')
@@ -105,12 +105,14 @@ export async function importSavedSession(ctx, client, tab) {
   const priorBinding = runtime.profiles.binding?.(id)
   if (priorBinding?.threadId && (priorBinding.threadId !== tab.session_id || priorBinding.profile.id !== profile.id)) throw new Error('Saved session identity conflicts with an existing native conversation')
   const doc = new BackendDocument(client, 'session-index'), state = await doc.read() ?? { version: 1 }
-  if (priorBinding?.threadId === tab.session_id && (await controller.list({})).items.some(row => row.sessionId === id)) {
+  const locallyStored = (await controller.list({})).items.some(row => row.sessionId === id)
+  if (locallyStored && priorBinding?.threadId === tab.session_id) {
     workspace ??= await registry.create(tab.cwd)
     await workspace.attachSession(id)
     return { sessionId: id, imported: false, historyWindow: state.imports?.[id]?.historyWindow }
   }
-  if (state.imports?.[id]?.formatVersion >= 2) {
+  // Shared import markers may outlive the local artifact or come from another Host.
+  if (locallyStored && state.imports?.[id]?.formatVersion >= 2) {
     workspace ??= await registry.create(tab.cwd)
     await workspace.attachSession(id)
     return { sessionId: id, imported: true, historyWindow: state.imports[id].historyWindow }

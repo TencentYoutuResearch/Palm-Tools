@@ -1,4 +1,5 @@
 import { contextUsageProjection } from './context-usage.js'
+import { fastProjection } from './model-fast.js'
 /** Cordis-owned Agent factory. Storage and lifecycle are independent of dsh's LLM loop. */
 import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import { NativeAgentDriver, boundaryProjection, inboxProjection } from './native-agent-driver.js'
@@ -207,6 +208,7 @@ export async function apply(ctx) {
     yield ctx.sessionProjections.register(boundaryProjection)
     yield ctx.sessionProjections.register(inboxProjection)
     yield ctx.sessionProjections.register(contextUsageProjection)
+    yield ctx.sessionProjections.register(fastProjection)
     yield installNativeFactoryRouting(ctx, factory)
     yield () => factory.close()
   }, 'kode.native-factory')

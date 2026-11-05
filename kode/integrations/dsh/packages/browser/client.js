@@ -1,4 +1,4 @@
-// Generated from @deepseek-ai/dsh-client-ui-sidebar-browser 0.2.1-rc.2 (MIT). Run npm run build:browser.
+// Generated from @deepseek-ai/dsh-client-ui-sidebar-browser 0.2.1-rc.5 (MIT). Run npm run build:browser.
 window.__ModuleLoader__.load({
 	id: "@kode/dsh-browser",
 	factory: (require) => {
