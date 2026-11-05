@@ -56,7 +56,8 @@ export class RuntimeBridge {
     const controller = this.service('sessionController'), directory = await controller.list({}, this.stop.signal)
     // Empty composer placeholders are not saved conversations. Retire older
     // publications too, so another frontend cannot persist and reimport them.
-    const items = directory.items.filter(row => !row.blank)
+    const archived = new Set(this.service('workspaceRegistry')?.archivedSessionIds ?? [])
+    const items = directory.items.filter(row => !row.blank && !archived.has(row.sessionId))
     if (!this.known) {
       const saved = await this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)
       this.known = new Map(saved.sessions.filter(row => row.runtime === this.runtime).map(row => [row.runtime_session_id, row]))

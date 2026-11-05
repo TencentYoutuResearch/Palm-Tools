@@ -464,8 +464,13 @@ async fn events(
     Ok(Json(json!({"events":events,"cursor":cursor})))
 }
 
-async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<crate::runtime::Publication>) -> Result<Json<serde_json::Value>> {
+async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(mut input): Json<crate::runtime::Publication>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let workspace_document = hub.store.document("workspaces")?;
+    enforce_archive_visibility(&mut input, &workspace_document["value"]);
+    let archived = workspace_document["value"]["global"]["archivedSessionIds"]
+        .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
+    ctx.runtimes.retire_archived(&ctx, &archived)?;
     let runtime=input.runtime.clone();
     let result=ctx.runtimes.publish(&ctx,input)?;
     if runtime=="gui" {
@@ -479,6 +484,42 @@ async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input):
         }
     }
     Ok(Json(result))
+}
+
+fn enforce_archive_visibility(input: &mut crate::runtime::Publication, workspaces: &serde_json::Value) {
+    let archived: std::collections::HashSet<&str> = workspaces["global"]["archivedSessionIds"]
+        .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
+    for session in &mut input.sessions {
+        if archived.contains(session.session_id.as_str())
+            || session.dto["session_uuid"].as_str().is_some_and(|id| archived.contains(id))
+        {
+            session.dto["status"] = json!("exited");
+            session.events.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod archive_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn old_hosts_cannot_republish_archived_sessions_or_history() {
+        let mut input: crate::runtime::Publication = serde_json::from_value(json!({
+            "runtime":"dsh","boot_id":"boot","sessions":[
+                {"session_id":"archived","dto":{"status":"idle"},"events":[{"key":"late","kind":"session.status","payload":{"status":"idle"}}]},
+                {"session_id":"alias","dto":{"status":"busy","session_uuid":"archived"},"events":[]},
+                {"session_id":"active","dto":{"status":"idle"},"events":[]}
+            ]
+        })).unwrap();
+        enforce_archive_visibility(&mut input, &json!({"global":{"archivedSessionIds":["archived"]}}));
+        assert_eq!(input.sessions[0].dto["status"], "exited");
+        assert!(input.sessions[0].events.is_empty());
+        assert_eq!(input.sessions[1].dto["status"], "exited");
+        assert_eq!(input.sessions[2].dto["status"], "idle");
+        enforce_archive_visibility(&mut input, &json!({}));
+        assert_eq!(input.sessions[2].dto["status"], "idle");
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
