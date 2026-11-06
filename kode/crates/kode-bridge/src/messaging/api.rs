@@ -73,6 +73,21 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/cloud/pair", post(cloud_pair))
         .route("/api/v1/messaging/cloud/activate", post(cloud_activate))
         .route("/api/v1/messaging/cloud/backend", post(cloud_backend))
+        .route("/api/v1/messaging/cloud/account/code", post(cloud_account_code))
+        .route("/api/v1/messaging/cloud/account/sign_in", post(cloud_account_sign_in))
+        .route("/api/v1/messaging/cloud/account/sign_out", post(cloud_account_sign_out))
+        .route("/api/v1/messaging/cloud/account/methods", post(cloud_account_methods))
+        .route("/api/v1/messaging/cloud/account/linked", post(cloud_account_linked))
+        .route("/api/v1/messaging/cloud/account/palmx/start", post(cloud_palmx_start))
+        .route("/api/v1/messaging/cloud/account/palmx/poll", post(cloud_palmx_poll))
+        .route("/api/v1/messaging/cloud/account/palmx/cancel", post(cloud_palmx_cancel))
+        .route("/api/v1/messaging/cloud/account/palmx/unbind", post(cloud_palmx_unbind))
+        .route("/api/v1/messaging/cloud/account/profile", post(cloud_account_profile))
+        .route("/api/v1/messaging/cloud/account/name", post(cloud_account_name))
+        .route("/api/v1/messaging/cloud/account/palm/sign_in", post(cloud_palm_sign_in))
+        .route("/api/v1/messaging/cloud/account/palm/start", post(cloud_palm_start))
+        .route("/api/v1/messaging/cloud/account/palm/poll", post(cloud_palm_poll))
+        .route("/api/v1/messaging/cloud/account/palm/cancel", post(cloud_palm_cancel))
         .route("/api/v1/messaging/runtime/publish", post(runtime_publish).layer(axum::extract::DefaultBodyLimit::max(8*1024*1024)))
         .route("/api/v1/messaging/runtime/claim", post(runtime_claim))
         .route("/api/v1/messaging/runtime/release", post(runtime_release))
@@ -540,6 +555,95 @@ struct CloudBackend {name:String,server_url:String,ssh_host:String,ssh_port:u16,
 async fn cloud_backend(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudBackend>) -> Result<Json<crate::cloud_sync::CloudBackendSummary>> {
     admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).upsert_managed_backend(input.name,input.server_url,input.ssh_host,input.ssh_port,input.remote_port,input.deployment_kind,input.remote_deploy_dir).map_err(|e|Error(StatusCode::BAD_REQUEST,e))?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudAccountCode { server_url:String, email:String }
+async fn cloud_account_code(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudAccountCode>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let expires_in=crate::cloud_sync::CloudSyncManager::new(ctx).account_send_code(input.server_url,input.email).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?;
+    Ok(Json(json!({"expires_in":expires_in})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudAccountSignIn { code:String }
+async fn cloud_account_sign_in(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudAccountSignIn>) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).account_sign_in(input.code).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+async fn cloud_account_sign_out(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudActivation>) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).account_sign_out(&input.backend_id).map_err(|e|Error(StatusCode::BAD_REQUEST,e))?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudServer { server_url:String }
+async fn cloud_account_methods(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudServer>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let methods=crate::cloud_sync::CloudSyncManager::new(ctx).account_login_methods(input.server_url).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?;
+    Ok(Json(json!({"methods":methods})))
+}
+async fn cloud_account_linked(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let linked=crate::cloud_sync::CloudSyncManager::new(ctx).account_linked_methods().await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?;
+    Ok(Json(json!({"linked":linked})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PalmxStart { server_url:Option<String>, purpose:crate::cloud_sync::PalmxPurpose }
+async fn cloud_palmx_start(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<PalmxStart>) -> Result<Json<crate::cloud_sync::PalmxProgress>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).palmx_start(input.server_url,input.purpose).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+async fn cloud_palmx_poll(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<crate::cloud_sync::PalmxProgress>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).palmx_poll().await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+async fn cloud_palmx_cancel(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    crate::cloud_sync::CloudSyncManager::new(ctx).palmx_cancel().await;
+    Ok(Json(json!({})))
+}
+async fn cloud_palmx_unbind(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    crate::cloud_sync::CloudSyncManager::new(ctx).palmx_unbind().await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?;
+    Ok(Json(json!({"linked":[]})))
+}
+async fn cloud_account_profile(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).account_profile().await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountName { name:String }
+async fn cloud_account_name(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<AccountName>) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).account_set_name(input.name).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PalmSignIn { server_url:String, session_id:String }
+async fn cloud_palm_sign_in(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<PalmSignIn>) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).palm_sign_in(input.server_url,input.session_id).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PalmStart { server_url:String }
+async fn cloud_palm_start(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<PalmStart>) -> Result<Json<crate::cloud_sync::PalmxProgress>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).palm_handoff_start(input.server_url).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+async fn cloud_palm_poll(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<crate::cloud_sync::PalmxProgress>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).palm_handoff_poll().await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+async fn cloud_palm_cancel(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    crate::cloud_sync::CloudSyncManager::new(ctx).palm_handoff_cancel().await;
+    Ok(Json(json!({})))
 }
 
 async fn integration_status(State(hub): State<Arc<Hub>>, h: HeaderMap)->Result<Json<super::integrations::Settings>> {

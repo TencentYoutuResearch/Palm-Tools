@@ -44,6 +44,7 @@ pub mod semantic;
 pub mod runtime;
 pub mod session_mcp;
 pub mod cloud_sync;
+pub mod account;
 
 pub use hook_relay::HookRelay;
 
