@@ -10,6 +10,13 @@ function groupProjectWorkspaces(items, parents = {}) {
   }
   return [...grouped].filter(([id]) => !hidden.has(id)).map(([, row]) => row)
 }
+// A saved SSH connection is not consent to pin its entire loose history.
+// Keep complete host directories for explicit resume/search; scope only the sidebar.
+function remoteSidebarSessions(host) {
+  const visible = new Set([...(host.workspaces ?? []).flatMap(row => row.sessionIds ?? []), ...(host.pinnedSessionIds ?? [])])
+  const hidden = new Set(host.hiddenSessionIds ?? [])
+  return (host.sessions ?? []).filter(row => visible.has(row.id) && !hidden.has(row.id))
+}
 function resumeCandidates(hosts, target, query = '') {
   if (!target?.profile) return []
   const text = query.trim().toLocaleLowerCase()
@@ -1171,7 +1178,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           continue
         }
         const key = id => foreignId(host.id, id)
-        for (const session of host.sessions ?? []) {
+        const visibleSessions = remoteSidebarSessions(host)
+        for (const session of visibleSessions) {
           const id = key(session.id)
           ids.push(id); byId[id] = { ...session, updatedAt: session.updatedAt ?? 0, id, displayTitle: session.title, retainedBy: {}, blank: false, projectionValues: {} }
           routes.set(id, { hostId: host.id, id: session.id })
@@ -1183,7 +1191,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           if (host.id !== 'local') remoteRows.push({ id, name: host.name })
         }
         const accounted = new Set((host.workspaces ?? []).flatMap(workspace => workspace.sessionIds))
-        const ungrouped = (host.sessions ?? []).filter(session => !accounted.has(session.id))
+        const ungrouped = visibleSessions.filter(session => !accounted.has(session.id))
         if (!host.workspaces?.length || ungrouped.length) {
           const id = `kode-host-status:${encodeURIComponent(host.id)}`
           items.push({ workspaceId: id, title: host.name, path: '', sessionIds: ungrouped.map(session => key(session.id)), createdAt: 0, updatedAt: 0 })
