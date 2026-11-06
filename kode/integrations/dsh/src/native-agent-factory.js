@@ -100,7 +100,8 @@ export function installNativeFactoryRouting(ctx, native) {
   const previous = upstream[routingKey]
   const create = previous?.wrappedCreate === upstream.createAgent ? previous.create : upstream.createAgent
   const resume = previous?.wrappedResume === upstream.resume ? previous.resume : upstream.resume
-  const routing = upstream[routingKey] = { create, resume }
+  const resumeWith = previous && previous.wrappedResumeWith === upstream.resumeWith ? previous.resumeWith : upstream.resumeWith
+  const routing = upstream[routingKey] = { create, resume, resumeWith }
   const persistence = ctx.sessionPersistence
   const nativeIds = new Set(Object.keys(ctx.kodeAgents.profiles?.bindings ?? {}))
   const nativeUnavailable = () => new Error('Kode 原生 Agent 执行器正在重载，请稍后重试；为保护历史，不会改用普通 dsh 执行器。')
@@ -116,9 +117,9 @@ export function installNativeFactoryRouting(ctx, native) {
     return opened.agent
   }
   const remember = (owner, handle) => { officialHandles.set(handle.agent.id, {owner,handle}); return handle }
-  const owns = async (options, restoring) => {
+  const owns = async (options, restoring, storage = persistence, checkBinding = true) => {
     const id = options.resumeSessionId ?? options.sessionId
-    if (ctx.kodeAgents.profiles?.binding?.(id)) return true
+    if (checkBinding && ctx.kodeAgents.profiles?.binding?.(id)) return true
     const provider = options.agentOptions?.provider
     if (!restoring) {
       if (provider) return provider.startsWith('kode-agent-')
@@ -126,7 +127,7 @@ export function installNativeFactoryRouting(ctx, native) {
     }
     let handle
     try {
-      handle = await ctx.sessionPersistence.open(id, 'read')
+      handle = await storage.open(id, 'read', { signal: options.signal })
       const stored = await handle.read()
       const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
         ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
@@ -164,6 +165,15 @@ export function installNativeFactoryRouting(ctx, native) {
     return remember(owner, await resume.call(this, owner, options))
   }
   upstream.createAgent = routing.wrappedCreate = createRouter; upstream.resume = routing.wrappedResume = resumeRouter
+  // Configured restores bypass resume() and pass their persistence service directly.
+  const resumeWithRouter = async function(owner, storage, options) {
+    if (await owns(options, true, storage)) {
+      nativeIds.add(options.resumeSessionId)
+      return native.resume(owner, options)
+    }
+    return resumeWith.call(this, owner, storage, options)
+  }
+  if (resumeWith) upstream.resumeWith = routing.wrappedResumeWith = resumeWithRouter
   return () => {
     if (upstream.createAgent === createRouter) upstream.createAgent = routing.wrappedCreate = function(owner, options) {
       if (nativeIds.has(options.sessionId) || options.agentOptions?.provider?.startsWith('kode-agent-') || !options.agentOptions?.provider && options.meta?.agentPreset === 'kode-native') throw nativeUnavailable()
@@ -181,6 +191,10 @@ export function installNativeFactoryRouting(ctx, native) {
         if (selected?.provider?.startsWith('kode-agent-') || !selected?.provider && ((stored.header ?? handle.header)?.agentPreset === 'kode-native' || options.agentOptions?.provider?.startsWith('kode-agent-'))) throw nativeUnavailable()
       } finally { await handle?.close() }
       return resume.call(this, owner, options)
+    }
+    if (resumeWith && upstream.resumeWith === resumeWithRouter) upstream.resumeWith = routing.wrappedResumeWith = async function(owner, storage, options) {
+      if (nativeIds.has(options.resumeSessionId) || await owns(options, true, storage, false)) throw nativeUnavailable()
+      return resumeWith.call(this, owner, storage, options)
     }
   }
 }

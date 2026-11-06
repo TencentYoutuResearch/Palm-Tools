@@ -535,12 +535,13 @@ test('unloading and reloading Kode never falls through to an official loop for n
 })
 
 
-test('direct official restore cannot write a system head into native history before factory readiness', async () => {
+test('configured resumeWith routes native history to the native driver', async () => {
   const h = await host({ closeSession: async () => {} }, true, true)
   const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
   const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
   let streams = 0
   adapter.stream = async function* () { streams++; yield { type: 'finish', reason: { kind: 'stop' } } }
+  h.ctx.kodeAgents.adapter = adapter
   try {
     const first = await h.ctx.agents.create({ ...options, sessionId: 'direct-official-restore' })
     first.agent.session.append('user/message', message('historical', 'Native history'), { surfaceOp: 'append' })
@@ -548,15 +549,59 @@ test('direct official restore cannot write a system head into native history bef
     // Configured AgentLoop restores can enter resumeWith directly, bypassing
     // createAgent/resume wrappers. Exercise the released loop's actual path.
     const restored = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, { resumeSessionId: first.agent.id, agentOptions: options.agentOptions })
-    assert.notEqual(restored.agent.isKodeNativeAgent, true)
+    assert.equal(restored.agent.isKodeNativeAgent, true)
     restored.agent.followup(message('followup', 'Continue'))
     await restored.agent.whenIdle()
     const events = h.stored.get(first.agent.id).events
     assert.equal(events.some(event => event.type === 'system/message'), false)
-    assert.equal(streams, 0)
-    assert.match(events.findLast(event => event.type === 'turn/end').data.reason.error.message, /写入系统提示前停止/)
+    assert.equal(streams, 1)
+    assert.equal(events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
     const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
     assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(first.agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
+    await restored.dispose()
+  } finally { unregister(); await adapter.close(); await h.ctx.fiber.dispose() }
+})
+
+test('configured resumeWith retains its native barrier across plugin reloads', async () => {
+  const h = await host({ async *stream() { yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} }, true)
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'configured-reload' })
+    first.agent.followup(message('first', 'Native turn')); await first.agent.whenIdle(); await first.dispose()
+    const count = h.stored.get(first.agent.id).events.length
+    const restore = { resumeSessionId: first.agent.id, agentOptions: { provider: 'deepseek-official', model: 'fallback' } }
+    await h.fiber.dispose()
+    await assert.rejects(h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, restore), /保护历史/)
+    assert.equal(h.stored.get(first.agent.id).events.length, count)
+    const other = await h.ctx.agents.create({ sessionId: 'configured-official', agentOptions: restore.agentOptions })
+    other.agent.session.append('model/selection', restore.agentOptions); await other.dispose()
+    const official = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, { resumeSessionId: other.agent.id, agentOptions: options.agentOptions })
+    assert.notEqual(official.agent.isKodeNativeAgent, true)
+    await official.dispose()
+    const reloaded = await h.ctx.plugin(factoryPlugin)
+    const resumed = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, restore)
+    assert.equal(resumed.agent.isKodeNativeAgent, true)
+    resumed.agent.followup(message('next', 'Continue')); await resumed.agent.whenIdle()
+    assert.equal(h.stored.get(first.agent.id).events.at(-1).data.reason.kind, 'completed')
+    await resumed.dispose(); await reloaded.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+test('bypassing native routing still rejects ordinary system prompt admission', async () => {
+  const h = await host({ closeSession: async () => {} }, true, true)
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
+  adapter.stream = async function* () { throw new Error('Ordinary loop must not reach native stream') }
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'unrouted-restore' })
+    first.agent.session.append('user/message', message('historical', 'Native history'), { surfaceOp: 'append' })
+    await first.dispose()
+    const loop = h.ctx.agents.requireFactory().target
+    const original = loop[Symbol.for('kode.native-factory.upstream')].resumeWith
+    const restored = await original.call(loop, h.ctx, h.ctx.sessionPersistence, { resumeSessionId: first.agent.id, agentOptions: options.agentOptions })
+    restored.agent.followup(message('next', 'Continue')); await restored.agent.whenIdle()
+    const events = h.stored.get(first.agent.id).events
+    assert.equal(events.some(event => event.type === 'system/message'), false)
+    assert.match(events.at(-1).data.reason.error.message, /写入系统提示前停止/)
     await restored.dispose()
   } finally { unregister(); await adapter.close(); await h.ctx.fiber.dispose() }
 })
