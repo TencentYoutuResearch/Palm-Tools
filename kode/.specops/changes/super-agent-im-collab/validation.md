@@ -12,7 +12,9 @@
 | 合并边界 Node 回归 | 102 通过、0 失败、8 跳过，退出 0。覆盖配置 API、默认模型、Fast、模型限制、持久创建、原生执行器和受控计量。 |
 | IM 客户端构建 | `npm run build:collab` 通过，提交生成的客户端与对应源码。 |
 | Hub 与 MCP 构建 | 当前 PR 源码的 `kode-session-server` 和 `kode-session-mcp` 构建通过。 |
-| rc.5 官方 Loop 与浏览器集成 | 正在复核，完成后在此更新结果。 |
+| rc.5 官方 Loop 与浏览器集成 | 108 项中 107 通过、0 失败、1 跳过，退出 0。包含自动工作流、缺陷模板、官方 Loop 持久化/崩溃恢复、创建助手、受控用量、共享配置与真实 dsh 桌面壳层。 |
+
+rc.5 初次集成发现浏览器测试外壳依赖 rc.2 的压缩变量名，导致静态脚本加载失败。测试支持代码现按稳定的 `dshDesktopBoot` 声明识别唯一启动边界，保留缺失或歧义拒绝。修复后两种 Builder 启动方式及上述完整选择集成均通过。
 
 Rust 初次以默认并行方式执行时，已有的 `tcodex_resume_lookup_and_history_use_the_separate_root` 用例失败。随后按仓库约定使用 `--test-threads=1` 执行，Core、Bridge、Memory 全部通过。
 
