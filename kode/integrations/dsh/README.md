@@ -2,7 +2,7 @@
 
 This integration adds **model-callable session communication** to DeepSeek Harness. It uses kode's Rust backend for durable local/SSH routing and dsh's original conversation, tool execution and inbox. It does not add a messaging page or replace kode's GUI.
 
-The initial integration targets `@deepseek-ai/dsh@0.2.1-rc.2` and Node >=24.9.0. The plugin is opt-in. Existing kode behavior is unchanged without `KODE_MESSAGING_CONFIG`.
+The integration declares `engines.dsh: "*"` and wildcard DSH peer dependencies, with Node >=24.9.0. New DSH versions are allowed without updating the manifest; runtime compatibility issues are fixed as they arise. The plugin is opt-in. Existing kode behavior is unchanged without `KODE_MESSAGING_CONFIG`.
 
 ## Components
 
@@ -657,11 +657,11 @@ A shared saved-session import marker is reused only when the current Host still 
 ### Native conversation presentation
 
 These extensions live entirely in this plugin; they do not require editing dsh
-source or its installed files. The supported release is pinned to
-`0.2.1-rc.2` with Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
+source or its installed files. DSH version declarations use `"*"`, with
+Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
 primitives provide the integration. A reversible presentation adapter wraps
-that release's `commandUi.candidates` and input controller to share the native
-menu for `/` and `$`; upgrading dsh requires checking those interfaces.
+dsh's `commandUi.candidates` and input controller to share the native
+menu for `/` and `$`; interface changes in new dsh versions are handled as they arise.
 Installation still requires the Kode backend and configured, authenticated
 Agent CLIs. `serverCommand`/`serverConfig` can start an existing backend binary;
 the plugin is not a standalone backend installer.
