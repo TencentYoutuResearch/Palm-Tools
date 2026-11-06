@@ -34,6 +34,7 @@ pub struct SessionState {
     pub status: Status,
     /// 后端推断的 model;从 jsonl 解析后会被覆盖为真实值
     pub model: String,
+    pub selection: Option<crate::selection::SelectionObservation>,
     /// 用户可见的 tab title(默认 "tab N · cmd",可被 Ctrl-b , 重命名或 jsonl 的 ai-title 覆盖)
     pub title: String,
     /// 用户是否手动重命名过(若手动改过,jsonl 的 ai-title 不再覆盖)
@@ -55,6 +56,7 @@ impl SessionState {
         Self {
             status: Status::Starting,
             model: model.into(),
+            selection: None,
             title: title.into(),
             title_pinned: false,
             unread: false,

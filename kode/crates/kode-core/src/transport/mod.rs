@@ -64,6 +64,7 @@ impl fmt::Display for EndpointId {
 ///   Phase 11.3 联调时若发现需要再补协议)
 #[derive(Debug, Clone)]
 pub struct SpawnSpec {
+    pub reasoning_effort: Option<String>,
     pub backend_key: String,
     pub cols: u16,
     pub rows: u16,

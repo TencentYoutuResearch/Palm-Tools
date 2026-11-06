@@ -193,6 +193,7 @@ fn meta_event(
     }
     let tokens = |v: u64| tokens_changed.then_some(v);
     Some(CoreEvent::JsonlMeta {
+        selection: None,
         id,
         model,
         title,

@@ -13,6 +13,14 @@ import { acpToolItem } from './native-tools.js'
 import { resolveAdvertisedModel } from './model-alias.js'
 import { modeAllowed } from './native-commands.js'
 
+function selectionFailure(field, requested, observed, prior = {}) {
+  const known = typeof observed === 'string' && observed.length > 0 && observed.length <= (field === 'model' ? 256 : 64) && !/[\u0000-\u001f\u007f]/.test(observed)
+  return Object.assign(new Error(known ? `ACP reported a different ${field === 'effort' ? 'reasoning effort' : 'model'} after selection` : `ACP did not confirm the requested ${field}`), { selectionEvidence: {
+    ...prior, [field]: { requested, observed: known ? observed : null, status: known ? 'mismatch' : 'unverifiable', source: 'session/set_config_option' },
+    admission: 'rejected', reason: known ? 'selection_mismatch' : 'selection_not_confirmed',
+  } })
+}
+
 const flattenOptions = options => (options ?? []).flatMap(o => o.options ?? [o])
 const effortOption = state => state?.configOptions?.find(option => option.type === 'select' && (option.category === 'thought_level' || /(?:^|[_-])effort(?:$|[_-])/i.test(option.id)))
 const fastOption = state => state?.configOptions?.find(option => /^(?:fast|fast[_-]mode)$/i.test(option.id))
@@ -134,13 +142,16 @@ export class AcpSession {
       await this.request('session/set_mode', { sessionId: this.threadId, modeId: mode.id }, signal)
       this.state.modes.currentModeId = mode.id
     }
-    await this.selectModel(model, signal)
+    const selection = { model: await this.selectModel(model, signal), effort: { requested: effort ?? null, status: 'unverifiable' } }
     if (effort) {
       const option = effortOption(this.state)
       if (!option || !flattenOptions(option.options).some(value => value.value === effort)) throw new Error('当前 Agent 未公布此推理强度，请刷新模型列表。')
       const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value: effort }, signal)
-      if (result.configOptions) this.state.configOptions = result.configOptions
-      else option.currentValue = effort
+      if (result.configOptions) {
+        this.state.configOptions = result.configOptions
+        if (effortOption(this.state)?.currentValue !== effort) throw selectionFailure('effort', effort, effortOption(this.state)?.currentValue, selection)
+        selection.effort = { requested: effort, observed: effort, status: 'reported', source: 'session/set_config_option' }
+      } else { option.currentValue = effort; selection.effort.status = 'acknowledged' }
     }
     if (fast !== undefined) {
       const option = fastOption(this.state), value = option && requestedFastValue(option, fast)
@@ -151,6 +162,7 @@ export class AcpSession {
         else option.currentValue = value
       }
     }
+    return selection
   }
   async selectModel(model, signal) {
     if (model && model !== 'default') {
@@ -158,14 +170,20 @@ export class AcpSession {
       if (option) {
         model = resolveAdvertisedModel(flattenOptions(option.options), model)
         const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value: model }, signal)
-        if (result.configOptions) this.state.configOptions = result.configOptions
-        else option.currentValue = model
+        if (result.configOptions) {
+          this.state.configOptions = result.configOptions
+          const selected = this.state.configOptions.find(o => o.category === 'model' || o.id === 'model')
+          if (selected?.currentValue !== model) throw selectionFailure('model', model, selected?.currentValue)
+          return { requested: model, observed: selected.currentValue, status: 'reported', source: 'session/set_config_option' }
+        } else option.currentValue = model
       } else if (this.state.models?.availableModels?.length) {
         model = resolveAdvertisedModel(this.state.models.availableModels, model)
         await this.request('session/set_model', { sessionId: this.threadId, modelId: model }, signal)
         this.state.models.currentModelId = model
       } else throw new Error('This ACP Agent does not advertise model selection')
+      return { requested: model, status: 'acknowledged' }
     }
+    return { requested: model ?? null, status: 'unverifiable' }
   }
   update({ sessionId, update }) {
     const metadata = ['available_commands_update', 'config_option_update', 'current_mode_update'].includes(update.sessionUpdate)
@@ -325,7 +343,18 @@ export class AcpSession {
     active.rebind(fused)
     try {
       this.validateInput(input)
-      await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort, fast)
+      let selection
+      try { selection = await this.configure(model === 'default' ? this.profile.defaultModel : model, fused, effort, fast) }
+      catch (error) {
+        if (error.selectionEvidence) yield { method: 'kode/selection_evidence', params: {
+          threadId: this.threadId, turnId: active.turnId, scope: 'executor_configuration', observed_at: Date.now(),
+          model: { requested: model ?? null, status: 'unverifiable' }, effort: { requested: effort ?? null, status: 'unverifiable' },
+          ...error.selectionEvidence,
+        } }
+        throw error
+      }
+      yield { method: 'kode/selection_evidence', params: { threadId: this.threadId, turnId: active.turnId, ...selection, scope: 'executor_configuration', observed_at: Date.now() } }
+      fused.throwIfAborted()
       if (command) await this.waitForCommands(fused)
       if (command && !this.commands.some(row => row.name === command.name)) throw new Error(`此 Agent 未公布 /${command.name}，请使用 /help 查看可用命令。`)
       this.startPrompt(active, input)
@@ -348,9 +377,10 @@ export class AcpSession {
     this.lifetime.abort(new Error('ACP session closed')); this.rpc.closed = true
     await this.initialized?.catch(() => {})
     this.connection?.close()
-    await this.process?.close()
+    const stopEvidence = await this.process?.close()
     await Promise.allSettled([...this.requests])
     await this.proxy?.close(); this.proxy = undefined
     if (this.launchRoot) await rm(this.launchRoot, { recursive: true, force: true })
+    return stopEvidence
   }
 }

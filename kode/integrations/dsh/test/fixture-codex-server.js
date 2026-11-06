@@ -14,6 +14,12 @@ async function receive(message) {
   if (process.env.KODE_FIXTURE_RPC_LOG && method) await appendFile(process.env.KODE_FIXTURE_RPC_LOG, JSON.stringify({ method, params, label: process.env.KODE_FIXTURE_AGENT_LABEL, hostCredentialPresent: Boolean(process.env.KODE_BRIDGE_TOKEN || process.env.KODE_MESSAGING_ADMIN_TOKEN_FILE || process.env.KODE_SESSION_ID) }) + '\n')
   if (method === 'initialize') return result(id, { userAgent: 'fixture' })
   if (method === 'initialized') return
+  if (method === 'account/rateLimits/read') {
+    result(id, { rateLimits: null })
+    if (process.env.KODE_FIXTURE_QUOTA === '1') setTimeout(() => notify('account/rateLimits/updated', { rateLimits: { limitId: 'fixture', primary: { usedPercent: 75, windowDurationMins: 60, resetsAt: 2000000000 }, ...(process.env.KODE_FIXTURE_QUOTA_COMPLETE === '1' ? { secondary: { usedPercent: 25, windowDurationMins: 10080, resetsAt: 2000000000 } } : {}) } }), 30)
+    if (process.env.KODE_FIXTURE_QUOTA_ACCOUNT_CHANGE === '1') setTimeout(() => notify('account/updated', { authMode: null }), 80)
+    return
+  }
   if (method === 'model/list') return result(id, { data: [{ id: 'fixture', model: 'fixture', displayName: 'Fixture', supportedReasoningEfforts:[{reasoningEffort:'medium',description:'Balanced'},{reasoningEffort:'high',description:'Deep'}],defaultReasoningEffort:'medium',serviceTiers:[{id:'priority',name:'Fast',description:'2x speed'}],additionalSpeedTiers:['fast'],defaultServiceTier:null }], nextCursor: null })
   if (method === 'collaborationMode/list') return result(id,{data:[{name:'Default',mode:'default'},{name:'Plan',mode:'plan'}]})
   if (method === 'thread/settings/update') return result(id, {})
@@ -70,6 +76,19 @@ async function receive(message) {
     result(id, { turn: { id: turnId, status: 'inProgress' } })
     notify('turn/started', { threadId, turn: { id: turnId } })
     const text = params.input[0]?.text ?? ''
+    if (process.env.KODE_FIXTURE_SELECTION_REROUTE === '1') {
+      notify('model/rerouted', { threadId, turnId: 'historical-turn', toModel: 'wrong-history' })
+      notify('model/rerouted', { threadId: 'foreign-thread', turnId, toModel: 'wrong-thread' })
+      notify('model/rerouted', { threadId, toModel: 'missing-turn' })
+      if (text.includes('CURRENT_REROUTE')) notify('model/rerouted', { threadId, turnId, fromModel: params.model, toModel: 'other' })
+    }
+
+    if (process.env.KODE_FIXTURE_USAGE === '1') {
+      const total = { inputTokens: turn * 10, cachedInputTokens: turn * 2, outputTokens: turn * 3, cacheWriteInputTokens: 0, totalTokens: turn * 13, reasoningOutputTokens: turn }
+      notify('thread/tokenUsage/updated', { threadId, turnId: 'foreign-turn', tokenUsage: { total: { ...total, inputTokens: 999 } } })
+      notify('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { total, last: total } })
+      if (text.includes('REROUTE')) notify('model/rerouted', { threadId, turnId, fromModel: 'fixture', toModel: 'other', reason: 'fixture' })
+    }
     const complete = () => {
       notify('item/agentMessage/delta', { threadId, turnId, itemId: 'answer', delta: `${process.env.KODE_FIXTURE_AGENT_LABEL ?? 'fixture'}: ${text}` })
       notify('item/completed', { threadId, turnId, item: { type: 'agentMessage', id: 'answer', text: `${process.env.KODE_FIXTURE_AGENT_LABEL ?? 'fixture'}: ${text}` } })

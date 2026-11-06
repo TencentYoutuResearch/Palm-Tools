@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { BackendClient } from './backend-client.js'
+import { eventPage, messagePage, lifecyclePage } from './message-pages.js'
 import { searchSessions } from './session-search.js'
 const prefix = '/api/v1/messaging/'
 const readToken = async file => (await readFile(file, 'utf8')).trim()
@@ -19,22 +20,43 @@ else if (process.env.KODE_MESSAGING_ADMIN_TOKEN_FILE && /^\d+$/.test(process.env
   client = client.forSession(credential.token)
 } else throw new Error('provide a session token file, or native KODE_SESSION_ID and an admin token file')
 await client.call(`${prefix}self`) // Refuse a broad admin token as an agent tool credential.
+const capabilities = await client.call(`${prefix}node`)
 const object = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) })
 const tools = [
+  ...(capabilities.lifecycle_events === true ? [{ name: 'kode_sessions_lifecycle_read', description: 'Read bounded delivery, consumption and cancellation audit records. This cursor is separate from message reads; continue until an empty page. Historical imports are not causal order. Consumed is not task completion.', inputSchema: object({ after: { type: 'integer', minimum: 0 } }) }] : []),
   { name: 'kode_sessions_list', description: 'Find local and SSH sessions by name or partial title. Inspect matches and disambiguate duplicate names, then send using the returned address; never guess an ID.', inputSchema: { type: 'object', additionalProperties: false, properties: { query: { type: 'string', description: 'Name or keywords from the user; omit to list all.' } } } },
   { name: 'kode_sessions_send', description: 'Send to an agent; delivery is not task completion. Reuse idempotency_key only for a retry. Reply with in_reply_to.', inputSchema: { ...object({ node_id: { type: 'string' }, session_id: { type: 'string' }, content: { type: 'string' }, idempotency_key: { type: 'string' } }), properties: { node_id: { type: 'string' }, session_id: { type: 'string' }, content: { type: 'string' }, idempotency_key: { type: 'string' }, in_reply_to: { type: 'string' } } } },
-  { name: 'kode_sessions_read', description: 'Read this session\'s message and receipt events.', inputSchema: object({ after: { type: 'integer', minimum: 0 } }) },
+  { name: 'kode_sessions_message_read', description: 'Read full persisted messages in bounded pages. Offset counts Unicode code points; follow next until null. A preview is not proof of consumption.', inputSchema: { type: 'object', additionalProperties: false, properties: { message_id: { type: 'string' }, offset: { type: 'integer', minimum: 0 } }, required: ['message_id'] } },
+  { name: 'kode_sessions_delivery_status', description: 'Read persisted input delivery evidence. Queued is not consumed; consumed is not task completion.', inputSchema: object({ message_id: { type: 'string' } }) },
+  ...(capabilities.input_cancellation === true ? [
+    { name: 'kode_sessions_cancel_input', description: 'Request cancellation of your own message. Queue removal is distinct from stopping execution; a request may remain cancel_unconfirmed.', inputSchema: object({ message_id: { type: 'string' } }) },
+    { name: 'kode_sessions_cancellation_status', description: 'Read the persisted cancellation result. A stop request does not prove termination.', inputSchema: object({ message_id: { type: 'string' } }) },
+  ] : []),
+  { name: 'kode_sessions_read', description: 'Read bounded message/receipt previews. Follow cursor until an empty page; truncated content includes full-message continuation.', inputSchema: object({ after: { type: 'integer', minimum: 0 } }) },
   { name: 'kode_sessions_wait', description: 'Wait up to 30 seconds for this session\'s message or receipt events.', inputSchema: object({ after: { type: 'integer', minimum: 0 }, timeout_seconds: { type: 'integer', minimum: 1, maximum: 30 } }) },
 ]
 async function execute(name, args, signal) {
+  if (name === 'kode_sessions_lifecycle_read') {
+    if (!tools.some(tool => tool.name === name)) throw new Error('Lifecycle audit is unsupported by this Hub')
+    const after = args.after ?? 0
+    if (!Number.isSafeInteger(after) || after < 0) throw new Error('Cursor must be a nonnegative integer')
+    return lifecyclePage(await client.call(`${prefix}lifecycle-events?after=${after}`, undefined, signal), after)
+  }
+  if (['kode_sessions_delivery_status', 'kode_sessions_cancel_input', 'kode_sessions_cancellation_status'].includes(name)) {
+    if (!tools.some(tool => tool.name === name)) throw new Error('Input cancellation is unsupported by this Hub')
+    if (typeof args.message_id !== 'string' || !args.message_id) throw new Error('Message ID required')
+    const suffix = name === 'kode_sessions_delivery_status' ? 'delivery' : 'cancellation'
+    return client.call(`${prefix}messages/${encodeURIComponent(args.message_id)}/${suffix}`, name === 'kode_sessions_cancel_input' ? {} : undefined, signal)
+  }
   if (name === 'kode_sessions_list') return searchSessions(await client.call(`${prefix}sessions`, undefined, signal), args.query)
   if (name === 'kode_sessions_send') return client.call(`${prefix}messages`, { target: { node_id: args.node_id, session_id: args.session_id }, content: args.content, idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null }, signal)
+  if (name === 'kode_sessions_message_read') return messagePage(await client.call(`${prefix}messages/${encodeURIComponent(args.message_id)}`, undefined, signal), args.offset ?? 0)
   if (name === 'kode_sessions_read' || name === 'kode_sessions_wait') {
     const until = Date.now() + (name.endsWith('wait') ? Math.min(30, Math.max(1, args.timeout_seconds ?? 15)) * 1000 : 0)
     do {
       signal.throwIfAborted()
       const result = await client.call(`${prefix}events?after=${Math.max(0, args.after ?? 0)}`, undefined, signal)
-      if (result.events.length || Date.now() >= until) return result
+      if (result.events.length || Date.now() >= until) return eventPage(result, args.after ?? 0)
       await new Promise(resolve => setTimeout(resolve, 250))
     } while (Date.now() < until)
     return { events: [], cursor: args.after ?? 0, timed_out: true }

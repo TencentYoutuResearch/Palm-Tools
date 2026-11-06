@@ -349,6 +349,7 @@ fn spawn_event_router(
                 }
                 CoreEvent::JsonlMeta {
                     id,
+                    selection,
                     model,
                     title,
                     session_uuid,
@@ -369,6 +370,12 @@ fn spawn_event_router(
                                 let binding_changed = session_uuid
                                     .as_ref()
                                     .is_some_and(|sid| s.session_id.as_deref() != Some(sid));
+                                if tokens_reset || binding_changed {
+                                    s.state.selection = None;
+                                }
+                                if let Some(observation) = &selection {
+                                    s.state.selection = Some(observation.clone());
+                                }
                                 if let Some(m) = model.as_ref() {
                                     s.state.model = m.clone();
                                 }
@@ -425,6 +432,7 @@ fn spawn_event_router(
                     let payload = serde_json::json!({
                         "id": id,
                         "model": model,
+                        "selection": selection,
                         "title": title,
                         "session_id": session_uuid,
                         "tokens_reset": tokens_reset,

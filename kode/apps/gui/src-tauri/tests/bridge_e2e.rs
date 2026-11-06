@@ -25,6 +25,7 @@ fn test_config() -> Config {
     backends.insert(
         "echo".to_string(),
         BackendConfig {
+            effort: None,
             protocol: None,
             #[cfg(windows)]
             command: r"C:\Program Files\Git\usr\bin\cat.exe".to_string(),

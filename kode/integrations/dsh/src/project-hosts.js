@@ -1,3 +1,24 @@
+import { registerWorkRunTrace } from './work-run-trace-route.js'
+import { registerWorkRunReceipt } from './work-run-receipt-route.js'
+import { registerWorkRunExecution } from './work-run-execution-route.js'
+import { registerVerificationReview } from './verification-review-route.js'
+import { registerTeamCapabilityUpdate } from './team-capability-update-route.js'
+import { registerTeamScheduling } from './team-scheduling-route.js'
+import { registerBuilderAccount } from './builder-account-route.js'
+import { registerBuilderStartPlan } from './builder-start-plan-route.js'
+import { registerBuilderFunding } from './builder-funding-route.js'
+import { registerBuilderSelection } from './builder-selection-route.js'
+import { registerCollabBudgets } from './collab-budgets-route.js'
+import { registerBuilderPatchStatus } from './builder-patch-status-route.js'
+import { registerBuilderWorkspaces } from './builder-workspaces-route.js'
+import { registerBuilderWorkspaceDirectory } from './builder-workspace-directory.js'
+import { registerBuilderCreate } from './builder-create-route.js'
+import { registerBuilderAnswers as registerBuilderAnswerBatch } from './builder-answers-route.js'
+import { registerBuilderDrafts } from './builder-drafts-route.js'
+import { registerExecutionEvidence } from './execution-evidence.js'
+import { createRemoteSession, lookupRemoteSessionCreation, registerSessionCreationRoutes } from './creation-capabilities.js'
+import { registerOperationControl } from './operation-control.js'
+import { registerStopControl } from './stop-control.js'
 import { savedSessionTime } from './saved-session-state.js'
 /** Kode owns SSH; the remote dsh Host owns all workspace and execution services. */
 import { createServer, request as httpRequest } from 'node:http'
@@ -9,6 +30,31 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { once } from 'node:events'
 import { hostDirectory, hostOperation, registerHostDirectory, DIRECTORY_PATH } from './workspace-directory.js'
+import { registerBuilderInspection } from './builder-inspection.js'
+import { registerBuilderDraftInspection } from './builder-draft-inspection.js'
+import { registerBuilderInterview } from './builder-interview.js'
+import { registerWorkRun } from './work-run-route.js'
+import { registerConversation } from './conversation-route.js'
+import { registerConversationStream } from './conversation-stream-route.js'
+import { registerWorkStageWaiver } from './work-stage-waiver-route.js'
+import { registerWorkDeliveryDecision } from './work-delivery-decision-route.js'
+import { registerConversationRead } from './conversation-read-route.js'
+import { registerCollabTeams, registerCollabRuns, registerCollabEvidence } from './collab-api.js'
+import { registerTeamActivation } from './team-activation-route.js'
+import { registerTeamBudget } from './team-budget-route.js'
+import { registerTeamAuthority } from './team-authority-route.js'
+import { registerTeamResource } from './team-resource-route.js'
+import { registerVerificationDefinition } from './verification-definition-route.js'
+import { registerBuilderWorkflowSetup } from './builder-workflow-setup.js'
+import { registerBuilderAccept } from './builder-accept-route.js'
+import { registerBuilderAnswers } from './builder-answers.js'
+import { registerBuilderContinue } from './builder-continue-route.js'
+import { registerBuilderClose } from './builder-close-route.js'
+import { registerBuilderAccounting } from './builder-accounting-route.js'
+import { registerBuilderStart } from './builder-start-route.js'
+import { registerCoordinatorStart, registerCoordinatorPlannedStart } from './coordinator-start-route.js'
+import { registerBuilderInput } from './builder-input-route.js'
+import { registerBuilderConversation } from './builder-conversation.js'
 import { BackendDocument } from './backend-state.js'
 import { resolveBundledSshTunnel } from './bundle-runtime.js'
 import { createHash } from 'node:crypto'
@@ -336,8 +382,9 @@ export class ProjectHosts {
         const response = await fetch(`${tunnel.url}/api/kode/session-import`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(tab), signal: AbortSignal.timeout(60000) })
         const value = await response.json(); if (!response.ok) throw new Error(value.error ?? 'Cannot import saved session'); return value
       }, createSession: async (input, signal) => {
-        const response = await fetch(`${tunnel.url}/api/kode/session-create`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(input), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000) })
-        const value = await response.json(); if (!response.ok) throw new Error(value.error ?? 'Remote session creation failed'); return value
+        return createRemoteSession(tunnel.url, cookie, input, signal)
+      }, lookupSessionCreation: async (input, signal) => {
+        return lookupRemoteSessionCreation(tunnel.url, cookie, input, signal)
       }, operation: async input => {
         const response = await fetch(`${tunnel.url}${DIRECTORY_PATH}`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ operation: input.operation, args: input.args, ...(input.nativeSession ? { nativeSession: { backend_key: input.nativeSession.backend_key, session_id: input.nativeSession.session_id } } : {}) }), signal: AbortSignal.timeout(15000) })
         const value = await response.json(); if (!response.ok) throw new Error(value.error ?? '远端操作失败。'); return value
@@ -361,22 +408,62 @@ export async function registerProjectHosts(ctx, config) {
   const manager = new ProjectHosts(ctx, config); await manager.load()
   ctx.provide('kodeProjectHosts', manager)
   ctx.effect(() => registerHostDirectory(ctx, config), 'kode.host-directory')
+  ctx.effect(() => registerBuilderInspection(ctx), 'kode.builder-inspection')
+  ctx.effect(() => registerBuilderDraftInspection(ctx, config), 'kode.builder-draft-inspection')
+  ctx.effect(() => registerBuilderInterview(ctx, config), 'kode.builder-interview')
+  ctx.effect(() => registerBuilderPatchStatus(ctx, config), 'kode.builder-patch-status')
+  ctx.effect(() => registerBuilderWorkspaces(ctx, config), 'kode.builder-workspaces')
+  ctx.effect(() => registerBuilderSelection(ctx, config), 'kode.builder-selection')
+  ctx.effect(() => registerBuilderFunding(ctx, config), 'kode.builder-funding')
+  ctx.effect(() => registerBuilderAccount(ctx, config), 'kode.builder-account')
+  ctx.effect(() => registerBuilderWorkspaceDirectory(ctx, config), 'kode.builder-workspace-directory')
+  ctx.effect(() => registerBuilderCreate(ctx, config), 'kode.builder-create')
+  ctx.effect(() => registerBuilderAnswerBatch(ctx, config), 'kode.builder-answers')
+  ctx.effect(() => registerBuilderAccept(ctx, config), 'kode.builder-accept')
+  ctx.effect(() => registerTeamActivation(ctx, config), 'kode.team-activation')
+  ctx.effect(() => registerTeamBudget(ctx, config), 'kode.team-budget')
+  ctx.effect(() => registerTeamAuthority(ctx, config), 'kode.team-authority')
+  ctx.effect(() => registerTeamScheduling(ctx, config), 'kode.team-scheduling')
+  ctx.effect(() => registerTeamCapabilityUpdate(ctx, config), 'kode.team-capability-update')
+  ctx.effect(() => registerTeamResource(ctx, config), 'kode.team-resource')
+  ctx.effect(() => registerVerificationDefinition(ctx), 'kode.verification-definitions')
+  ctx.effect(() => registerVerificationReview(ctx), 'kode.verification-review')
+  ctx.effect(() => registerBuilderWorkflowSetup(ctx, config), 'kode.builder-workflow-setup')
+  ctx.effect(() => registerBuilderAnswers(ctx, config), 'kode.builder-answer')
+  ctx.effect(() => registerBuilderDrafts(ctx, config), 'kode.builder-drafts')
+  ctx.effect(() => registerCollabBudgets(ctx, config), 'kode.collab-budgets')
+  ctx.effect(() => registerCollabTeams(ctx, config), 'kode.collab-teams')
+  ctx.effect(() => registerCollabRuns(ctx, config), 'kode.collab-runs')
+  ctx.effect(() => registerCollabEvidence(ctx, config), 'kode.collab-evidence')
+  ctx.effect(() => registerConversation(ctx, config), 'kode.conversation')
+  ctx.effect(() => registerConversationStream(ctx, config), 'kode.conversation-stream')
+  ctx.effect(() => registerConversationRead(ctx, config), 'kode.conversation-read')
+  ctx.effect(() => registerWorkDeliveryDecision(ctx, config), 'kode.work-delivery-decision')
+  ctx.effect(() => registerWorkStageWaiver(ctx, config), 'kode.work-stage-waiver')
+  ctx.effect(() => registerWorkRun(ctx, config), 'kode.work-run')
+  ctx.effect(() => registerWorkRunExecution(ctx, config), 'kode.work-run-execution')
+  ctx.effect(() => registerWorkRunReceipt(ctx, config), 'kode.work-run-receipt')
+  ctx.effect(() => registerWorkRunTrace(ctx, config), 'kode.work-run-trace')
+  ctx.effect(() => registerBuilderContinue(ctx, config), 'kode.builder-continue')
+  ctx.effect(() => registerBuilderStart(ctx), 'kode.builder-start')
+  ctx.effect(() => registerBuilderStartPlan(ctx), 'kode.builder-start-plan')
+  ctx.effect(() => registerBuilderAccounting(ctx, config), 'kode.builder-accounting')
+  ctx.effect(() => registerBuilderClose(ctx), 'kode.builder-close')
+  ctx.effect(() => registerCoordinatorStart(ctx), 'kode.coordinator-start')
+  ctx.effect(() => registerCoordinatorPlannedStart(ctx), 'kode.coordinator-bootstrap')
+  ctx.effect(() => registerBuilderInput(ctx, config), 'kode.builder-input')
+  ctx.effect(() => registerBuilderConversation(ctx, config), 'kode.builder-conversation')
   ctx.effect(() => () => manager.close(), 'kode.project-hosts')
+  ctx.effect(() => registerStopControl(ctx), 'kode.stop-control-api')
+  ctx.effect(() => registerOperationControl(ctx), 'kode.operation-control-api')
+  registerSessionCreationRoutes(ctx)
+  ctx.effect(() => registerExecutionEvidence(ctx), 'kode.execution-evidence-api')
   const owner = req => { const admitted = ctx.connection.admit(req); return !('rejection' in admitted) && admitted.peer.principal.kind === 'owner' }
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-import', handler: async (req, res) => {
     if (!owner(req)) return json(res, 403, { error: 'Host owner required' })
     if (req.method !== 'POST' || !(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 405, { error: 'JSON POST required' })
     try { let body = ''; for await (const part of req) { body += part; if (Buffer.byteLength(body) > 16384) throw new Error('Request too large') }; json(res, 200, await importSavedSession(ctx, config.backendClient, JSON.parse(body))) } catch (error) { json(res, 400, { error: error.message }) }
   } }), 'kode.session-import-api')
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-create', handler: async (req, res) => {
-    if (!owner(req)) return json(res, 403, { error: 'Host owner required' })
-    if (req.method !== 'POST' || !(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 405, { error: 'JSON POST required' })
-    try {
-      let body = ''; for await (const part of req) { body += part; if (Buffer.byteLength(body) > 65536) throw new Error('Request too large') }
-      const creator = ctx.get('kodeSessionCreator'); if (!creator) throw new Error('Session creator unavailable')
-      json(res, 200, await creator.create(JSON.parse(body)))
-    } catch (error) { json(res, 400, { error: error.message }) }
-  } }), 'kode.session-create-api')
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/api/kode/transport', handler: async (req, res) => {
     if (!owner(req)) return json(res, 403, { error: 'Host owner required' })
     const match = /^\/api\/kode\/transport\/([^/]+)(\/api(?:\/|\?|$).*)$/.exec(req.url ?? '')

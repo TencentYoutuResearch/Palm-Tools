@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BackendClient } from '../src/backend-client.js'
+import { isolatedHub } from './support/isolated-hub.js'
 import { BackendAgentProfiles } from '../src/backend-state.js'
 import { CodexSession } from '../src/codex-session.js'
 import { importBackendProfiles, saveNativeTab } from '../src/workbench-import.js'
@@ -39,10 +40,12 @@ test('shared registry reloads desktop edits without rewriting them through legac
 
 const url = process.env.KODE_SHARED_AGENT_TEST_URL
 const tokenFile = process.env.KODE_SHARED_AGENT_TEST_TOKEN_FILE
-test('desktop and dsh share Agent edits, native identities and immutable launch snapshots over the real backend', { skip: !url || !tokenFile }, async t => {
+test('desktop and dsh share Agent edits, native identities and immutable launch snapshots over the real backend', { skip: !(url && tokenFile) && !process.env.KODE_TEST_BACKEND_URL }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'kode-shared-agent-e2e-'))
   t.after(() => rm(root, { recursive: true, force: true }))
-  const client = new BackendClient(url, (await readFile(tokenFile, 'utf8')).trim())
+  const hub = url && tokenFile ? null : await isolatedHub('shared-agent-registry')
+  if (hub) t.after(() => hub.close())
+  const client = hub?.client ?? new BackendClient(url, (await readFile(tokenFile, 'utf8')).trim())
   const path = '/api/v1/messaging/workbench/agents'
   const fixture = fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))
   const config = { command: '/usr/bin/env', protocol: 'codex', enabled: true,

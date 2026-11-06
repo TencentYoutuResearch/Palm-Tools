@@ -1,0 +1,42 @@
+/** Owner actions through the real desktop forms; no direct setup writes to the Hub. */
+export async function desktopTeamSetup({page,wait,button,click}){
+ const fill=async(label,text)=>{
+  await wait(`document.querySelector('[aria-label=${JSON.stringify(label)}]')`)
+  await page.evaluate(`(()=>{const e=document.querySelector('[aria-label=${JSON.stringify(label)}]');e.focus();e.select()})()`)
+  await page.call('Input.insertText',{text})
+ }
+ const expires=async label=>{
+  await wait(`document.querySelector('[aria-label=${JSON.stringify(label)}]')`)
+  await page.evaluate(`(()=>{const e=document.querySelector('[aria-label=${JSON.stringify(label)}]'),date=new Date(Date.now()+3600000);date.setMinutes(date.getMinutes()-date.getTimezoneOffset());Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,date.toISOString().slice(0,16));e.dispatchEvent(new Event('input',{bubbles:true}))})()`)
+ }
+ await wait(button('核对团队方案'));await click('核对团队方案')
+ await wait(button('确认保存团队草案'));await click('确认保存团队草案')
+ await wait(button('核对激活条件'));await click('核对激活条件')
+ await wait(`document.querySelector('.kode-collab-initial-budget input')`)
+ for(const [label,text] of [['团队预算单位','credits'],['初始团队总额度','3000'],['单次工作预留上限','100']])await fill(label,text)
+ await expires('团队预算到期时间')
+ await page.evaluate(`document.querySelector('[aria-label="启用内部计价结算"]').click()`)
+ await click('核对初始团队预算');await wait(button('确认创建团队预算'));await click('确认创建团队预算')
+ await wait(`document.querySelector('.kode-collab-initial-budget').innerText.includes('初始团队预算与策略已保存')`)
+ await wait(button('读取调度资源'));await click('读取调度资源')
+ await wait(button('新增用户能力评价'));await click('新增用户能力评价')
+ for(const [label,text] of [['local 任务类型','development'],['local 能力评分','90'],['local 评价可信度','1'],['local 评价依据','Controlled fixture capability declared explicitly by the test owner']])await fill(label,text)
+ await expires('local 评价到期时间')
+ await click('核对用户能力评价');await wait(button('确认保存用户评价'));await click('确认保存用户评价')
+ await wait(`document.querySelector('[aria-label="local 的能力评价"]')?.value`)
+ await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-scheduling-form label')).find(e=>e.textContent==='额度未知时允许使用团队预算约束（不代表供应商余额充足）').querySelector('input').click()`)
+ await page.evaluate(`document.querySelector('[aria-label="owner-account 配置工作并发"]').click()`)
+ await fill('owner-account 工作并发上限','2')
+ await page.evaluate(`document.querySelector('[aria-label="local 配置内部计价"]').click()`)
+ for(const [label,text] of [['local 内部计价单位','credits'],['local 每百万输入 token 单价','1000000'],['local 每百万缓存输入 token 单价','1000000'],['local 每百万输出 token 单价','1000000']])await fill(label,text)
+ await click('核对调度偏好');await wait(button('确认保存调度策略'));await click('确认保存调度策略')
+ await wait(`document.querySelector('.kode-collab-scheduling-form').innerText.includes('调度策略已保存')`)
+ await click('核对激活条件')
+ await wait(`document.querySelector('.kode-collab-team-activation').innerText.includes('单次工作预留上限：100')`)
+ await expires('团队权限到期时间')
+ await wait(button('核对流程所需权限'));await click('核对流程所需权限')
+ await wait(button('确认保存流程权限'));await click('确认保存流程权限')
+ await wait(`document.querySelector('.kode-collab-authority-form').innerText.includes('权限配置已保存')`)
+ await click('核对激活条件');await wait(button('确认激活此版本团队'));await click('确认激活此版本团队')
+ await wait(`document.querySelector('.kode-collab-team-activation').innerText.includes('已有激活确认记录。')`)
+}

@@ -14,9 +14,11 @@
 pub mod config;
 pub mod context;
 pub mod cost;
+pub mod effort;
 pub mod event;
 pub mod model_alias;
 pub mod pty;
+pub mod selection;
 pub mod session;
 pub mod transport;
 

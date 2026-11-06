@@ -5,11 +5,95 @@ mod extensions;
 mod extension_files;
 mod handoff;
 mod integrations;
+mod conversation_read;
+mod contact_directory;
+mod work_delivery_decision;
+mod accounting_relay;
+mod activation_review;
 pub mod agents;
+mod artifact_archive;
+mod artifact_archive_format;
+mod artifact_evidence;
+mod assignment_accounting;
+mod assignment_admission;
+mod assignment_dispatch;
+mod assignment_final_input;
+mod assignment_inputs;
+mod assignment_mandate;
+mod assignment_outputs;
+mod assignment_clarification;
+mod assignment_answers;
+mod assignment_answer_progress;
+mod assignment_resources;
+mod assignment_exclusive_resources;
+mod assignment_scope;
+mod assignment_stop;
+mod assignment_workspace;
+mod assignment_task_workspace;
+mod assignment_task_prepare;
+mod assignment_task_input;
+mod budget_queries;
+mod budgets;
+mod builder_accept;
+mod builder_answers;
+mod builder_selection;
+mod builder_funding;
+mod builder_account;
+mod builder_authority;
+mod builder_catalog;
+mod builder_continue;
+mod builder_drafts;
+mod builder_facts;
+mod builder_input;
+mod builder_interview;
+mod builder_policy_details;
+mod builder_preflight;
+mod builder_resources;
+mod builder_start;
+mod builder_accounting;
+mod builder_close;
+mod builder_workflow_proposal;
+mod cancellation;
+mod capability_profiles;
 mod codebuddy_registry;
+mod conversations;
+mod coordinator_control;
+mod coordinator_close;
+mod coordinator_accounting;
+mod coordinator_input;
+mod coordinator_readiness;
+mod coordinator_recovery;
+mod coordinator_reply;
+mod coordinator_run;
+mod coordinator_start;
+mod coordinator_transfer;
+mod coordinator_update;
+mod delivery;
+mod diagnostics;
+mod health;
+mod lifecycle;
 mod link;
-mod peers;
+mod migrations;
 pub mod model;
+mod monetary_admission;
+mod monetary_quota;
+mod official_accounting;
+mod official_calls;
+mod prompt_provenance;
+mod operation_budget;
+mod operation_bundle;
+mod operation_grant;
+mod operation_relay;
+mod operations;
+mod peers;
+mod pricing;
+mod project_configs;
+mod quota;
+mod quota_evidence;
+mod resource_admission;
+mod resource_rank;
+mod resources;
+mod selection_evidence;
 mod ssh;
 pub use api::server_binary;
 pub use ssh::SshConfig;
@@ -20,6 +104,46 @@ mod session_visibility;
 pub use session_visibility::filter_visible_runtime_sessions;
 mod transcript;
 pub mod workspaces;
+mod stage_completion;
+mod stage_evidence;
+mod stage_plan;
+mod stage_escalation;
+mod stage_waiver;
+mod stage_rework;
+mod team_activation;
+mod team_authority_setup;
+mod team_bindings;
+mod team_budget_setup;
+mod team_scheduling_setup;
+mod team_capability_update;
+mod team_grants;
+mod team_policies;
+mod team_preflight;
+mod team_resource_setup;
+mod teams;
+mod tool_evidence;
+mod tool_resolution;
+mod verification_record;
+mod wire;
+mod work_assignments;
+mod work_delivery;
+mod work_run_cancel_final;
+mod work_run_cancellation;
+mod work_run_resolution;
+mod work_run_recheck;
+mod work_run_trace;
+mod work_run_trace_scope;
+mod work_run_accounting_status;
+mod trace_redaction;
+mod work_runs;
+mod work_run_intervention;
+mod work_run_diagnostics;
+mod work_schedule;
+mod workflow_evidence;
+mod workflow_store;
+mod workflows;
+mod workflow_input_artifact;
+mod workflow_dependencies;
 pub mod server;
 #[cfg(test)]
 mod tests;
@@ -66,8 +190,19 @@ pub struct Hub {
     ctx: Weak<crate::Ctx>,
     gate: Mutex<()>,
     remote: Mutex<HashMap<String, Vec<SessionInfo>>>,
+    link_observations: Mutex<HashMap<String, HashMap<String, health::Observation>>>,
     native: Mutex<HashMap<String, crate::SessionId>>,
-    workspace_pending: Mutex<HashMap<String, (String, workspaces::Command, tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>)>>,
+    operation_pending: Mutex<HashMap<String, operation_relay::Pending>>,
+    workspace_pending: Mutex<
+        HashMap<
+            String,
+            (
+                String,
+                workspaces::Command,
+                tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>,
+            ),
+        >,
+    >,
     boot: String,
     stopped: AtomicBool,
 }
@@ -97,7 +232,8 @@ impl Hub {
             }
         }
         let store = Store::open(&config.database, &config.node_id)?;
-        ctx.runtimes.open(&config.database.with_extension("runtime.sqlite"))?;
+        ctx.runtimes
+            .open(&config.database.with_extension("runtime.sqlite"))?;
         let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
             extensions: extensions::Extensions::new(config.database.with_extension("agent-hub"), home),
@@ -109,7 +245,9 @@ impl Hub {
             ctx: Arc::downgrade(ctx),
             gate: Mutex::new(()),
             remote: Mutex::new(HashMap::new()),
+            link_observations: Mutex::new(HashMap::new()),
             native: Mutex::new(HashMap::new()),
+            operation_pending: Mutex::new(HashMap::new()),
             workspace_pending: Mutex::new(HashMap::new()),
             boot: uuid::Uuid::new_v4().to_string(),
             stopped: AtomicBool::new(false),
@@ -163,18 +301,41 @@ impl Hub {
     pub fn router(self: &Arc<Self>) -> axum::Router {
         api::router(self.clone())
     }
-    async fn workspace(self: &Arc<Self>, node: &str, command: workspaces::Command) -> Result<serde_json::Value> {
-        if node == self.node_id() || node.is_empty() { return workspaces::execute(self.clone(), command).await }
-        if !self.peers().iter().any(|peer| peer.node_id == node) { bail!("unknown workspace execution node") }
+    async fn workspace(
+        self: &Arc<Self>,
+        node: &str,
+        command: workspaces::Command,
+    ) -> Result<serde_json::Value> {
+        if node == self.node_id() || node.is_empty() {
+            return workspaces::execute(self.clone(), command).await;
+        }
+        if !self.peers().iter().any(|peer| peer.node_id == node) {
+            bail!("unknown workspace execution node")
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let (send, receive) = tokio::sync::oneshot::channel();
-        { let mut pending = self.workspace_pending.lock(); if pending.len() >= 32 { bail!("too many workspace requests") }; pending.insert(id.clone(), (node.into(), command, send)); }
+        {
+            let mut pending = self.workspace_pending.lock();
+            if pending.len() >= 32 {
+                bail!("too many workspace requests")
+            };
+            pending.insert(id.clone(), (node.into(), command, send));
+        }
+        self.wake_peer(node);
         struct Cleanup<'a>(&'a Hub, String);
-        impl Drop for Cleanup<'_> { fn drop(&mut self) { self.0.workspace_pending.lock().remove(&self.1); } }
-        let _cleanup = Cleanup(self,id.clone());
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.workspace_pending.lock().remove(&self.1);
+            }
+        }
+        let _cleanup = Cleanup(self, id.clone());
         let response = tokio::time::timeout(std::time::Duration::from_secs(15), receive).await;
         self.workspace_pending.lock().remove(&id);
-        match response { Ok(Ok(Ok(value))) => Ok(value), Ok(Ok(Err(error))) => bail!(error), _ => bail!("workspace node is unavailable; no local directory fallback") }
+        match response {
+            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Ok(Err(error))) => bail!(error),
+            _ => bail!("workspace node is unavailable; no local directory fallback"),
+        }
     }
     fn directory(&self) -> Result<Vec<SessionInfo>> {
         let mut all = self.store.sessions()?;
@@ -184,7 +345,9 @@ impl Hub {
         Ok(all)
     }
     fn send(&self, source: &str, req: SendRequest) -> Result<Message> {
-        if !integrations::settings(self)?.messaging_enabled {bail!("Session communication is disabled in Kode settings")}
+        if !integrations::settings(self)?.messaging_enabled {
+            bail!("Session communication is disabled in Kode settings")
+        }
         let _guard = self.gate.lock();
         if !valid_id(&req.target.node_id)
             || !valid_id(&req.target.session_id)
@@ -204,10 +367,7 @@ impl Hub {
             bail!("unknown source session")
         }
         if req.target.node_id != self.node_id()
-            && !self
-                .peers()
-                .iter()
-                .any(|p| p.node_id == req.target.node_id)
+            && !self.peers().iter().any(|p| p.node_id == req.target.node_id)
         {
             bail!("unknown peer")
         }
@@ -323,7 +483,7 @@ impl Hub {
         let _guard = self.gate.lock();
         self.store.heartbeat(session)?;
         let mut pending = Vec::new();
-        for mut m in self.store.messages()? {
+        for mut m in self.store.inbox(session)? {
             if m.target.node_id == self.node_id()
                 && m.target.session_id == session
                 && m.status == Status::Received
@@ -376,6 +536,7 @@ impl Hub {
         Ok(m)
     }
     async fn tick(&self) -> Result<()> {
+        self.store.expire_operations(now())?;
         let Some(ctx) = self.ctx.upgrade() else {
             self.shutdown();
             return Ok(());
@@ -400,7 +561,13 @@ impl Hub {
             })
             .collect();
         let mut live_ids: std::collections::HashSet<_> = rows.iter().map(|row| row.0).collect();
-        live_ids.extend(ctx.runtimes.snapshots().iter().filter(|row|row["dto"]["status"]!="exited").filter_map(|row|row["local_id"].as_u64()));
+        live_ids.extend(
+            ctx.runtimes
+                .snapshots()
+                .iter()
+                .filter(|row| row["dto"]["status"] != "exited")
+                .filter_map(|row| row["local_id"].as_u64()),
+        );
         let removed: Vec<_> = self
             .native
             .lock()
@@ -413,9 +580,19 @@ impl Hub {
             self.store.offline(&old)?;
         }
         for (id, title, uuid, status, backend_key, has_pty, config, cwd, model) in rows {
-            if let Some(thread_id)=uuid.as_ref() {
-                let _gate=self.gate.lock();
-                agents::change(self,agents::Change::Bind{key:backend_key.clone(),thread_id:thread_id.clone(),config,cwd:cwd.to_string_lossy().into(),title:title.clone(),model:Some(model)})?;
+            if let Some(thread_id) = uuid.as_ref() {
+                let _gate = self.gate.lock();
+                agents::change(
+                    self,
+                    agents::Change::Bind {
+                        key: backend_key.clone(),
+                        thread_id: thread_id.clone(),
+                        config,
+                        cwd: cwd.to_string_lossy().into(),
+                        title: title.clone(),
+                        model: Some(model),
+                    },
+                )?;
             }
             // A backend config key is an independent identity, even when two CLI
             // installations happen to expose the same native session UUID.
@@ -478,14 +655,45 @@ impl Hub {
             }
             let _ = registration;
         }
-        for snapshot in ctx.runtimes.snapshots().into_iter().filter(|row|row["dto"]["runtime"]=="gui" && row["dto"]["status"]=="idle") {
-            let Some(id)=snapshot["local_id"].as_u64() else {continue};
-            if !ctx.runtimes.available("gui") || crate::pending_interaction(&ctx,id).is_some(){continue}
-            let sid=format!("kode:runtime:gui:{id}");
-            if let Some(message)=self.claim(&sid)?.first(){
-                let text=format!("[Session message {} from {}/{}]\n{}",message.id,message.source.node_id,message.source.session_id,message.content);
-                let result=ctx.runtimes.command(id,"input",serde_json::json!({"text":text}),&message.id).await;
-                self.settle(&sid,&message.id,if result.is_ok(){Status::Accepted}else{Status::Uncertain},Some(if result.is_ok(){"submitted to runtime; processing is not confirmed"}else{"runtime submission unconfirmed; do not automatically retry"}.into()))?;
+        for snapshot in ctx
+            .runtimes
+            .snapshots()
+            .into_iter()
+            .filter(|row| row["dto"]["runtime"] == "gui" && row["dto"]["status"] == "idle")
+        {
+            let Some(id) = snapshot["local_id"].as_u64() else {
+                continue;
+            };
+            if !ctx.runtimes.available("gui") || crate::pending_interaction(&ctx, id).is_some() {
+                continue;
+            }
+            let sid = format!("kode:runtime:gui:{id}");
+            if let Some(message) = self.claim(&sid)?.first() {
+                let text = format!(
+                    "[Session message {} from {}/{}]\n{}",
+                    message.id, message.source.node_id, message.source.session_id, message.content
+                );
+                let result = ctx
+                    .runtimes
+                    .command(id, "input", serde_json::json!({"text":text}), &message.id)
+                    .await;
+                self.settle(
+                    &sid,
+                    &message.id,
+                    if result.is_ok() {
+                        Status::Accepted
+                    } else {
+                        Status::Uncertain
+                    },
+                    Some(
+                        if result.is_ok() {
+                            "submitted to runtime; processing is not confirmed"
+                        } else {
+                            "runtime submission unconfirmed; do not automatically retry"
+                        }
+                        .into(),
+                    ),
+                )?;
             }
         }
         let _guard = self.gate.lock();
@@ -496,7 +704,7 @@ impl Hub {
             .filter(|s| s.online)
             .map(|s| s.address.session_id)
             .collect();
-        for mut m in self.store.messages()? {
+        for mut m in self.store.open_messages()? {
             if m.target.node_id == self.node_id()
                 && m.status == Status::Delivering
                 && !online.contains(&m.target.session_id)

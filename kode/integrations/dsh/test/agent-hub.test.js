@@ -117,7 +117,7 @@ test('real backend dispatches an idempotent handoff through the existing dsh run
     resolveAgent: async id => ({ agent: live.get(id) }),
     prompt: async input => { submitted++; const text = input.content[0].text; assert.match(text, /Original fixture task/); assert.match(text, /Original fixture answer/); assert.doesNotMatch(text, /PRIVATE REASONING|PRIVATE PEER/); return { accepted: true } },
   }
-  const services = { sessionController: controller, kodeNativeFactory: { promote: async agent => { agent.selectModel = () => {}; return agent } }, agents: { get: id => live.get(id) }, kodeAgents: { profiles, hasRuntime: () => true, adapter: { listModels: async () => [{ id: 'fixture', isDefault: true }] }, recordBinding() {} }, workspaceRegistry: { resolveByPath: async () => ({ id: 'fixture-workspace' }) } }
+  const services = { sessionController: controller, kodeNativeFactory: { promote: async agent => { agent.selectModel = () => {}; return agent } }, agents: { get: id => live.get(id) }, kodeAgents: { profiles, hasRuntime: () => true, adapter: { listModels: async () => [{ id: 'fixture', isDefault: true }] }, recordBinding() {} }, workspaceRegistry: { resolveByPath: async () => ({ id: 'fixture-workspace' }), archivedSessionIds: [], list: () => [{ id: 'fixture-workspace', path: root, sessionIds: [...events.keys()] }] } }
   const bridge = new RuntimeBridge({ get: key => services[key], logger: { warn() {} } }, backend, { intervalMs: 10 })
   await bridge.publish(); bridge.start(); t.after(() => bridge.close())
   const request = { source_session_id: sourceId, source_runtime: 'dsh', profile_id: profile.id, target_runtime: 'dsh', request_id: 'handoff-' + randomUUID() }

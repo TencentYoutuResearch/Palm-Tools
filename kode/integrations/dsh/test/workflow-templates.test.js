@@ -1,0 +1,27 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { builderWorkflowTemplates, readBuilderWorkflowTemplates } from '../src/builder-workflow-templates.js'
+test('supplied feature and bugfix methods are proposals with exact evidence and source bindings', () => {
+ const methods=builderWorkflowTemplates(), bug=methods.find(row=>row.id==='software-bugfix'), feature=methods.find(row=>row.id==='software-feature')
+ assert.equal(methods.length,2)
+ assert.deepEqual(feature.workflow.stages.map(row=>row.id),['implement','review','verify'])
+ assert.equal(feature.workflow.stages.some(row=>Object.hasOwn(row.execution,'input_artifact')),false,'feature retains the existing single-artifact hash format')
+ assert.deepEqual(feature.workflow.stages.map(row=>row.execution.task_tag),['implementation','review','verification'])
+ assert.equal(bug.pending_checks.includes('owner_confirmed_task_tags_and_current_capability_assessments'),true)
+ assert.match(bug.assessment_basis,/not capability or scheduling claims/)
+ assert.deepEqual(bug.workflow.stages.map(row=>row.id),['baseline','diagnose','implement','review','verify'])
+ assert.equal(bug.registered,false);assert.equal(Object.hasOwn(bug,'hash'),false)
+ assert.equal(bug.workflow.stages[0].execution.capabilities.includes('workspace_write'),true)
+ assert.equal(bug.workflow.stages[0].execution.tools.includes('kode_write_source'),false)
+ assert.deepEqual(bug.workflow.stages[1].waiver,{allow_delivery:true})
+ assert.deepEqual(bug.workflow.stages[1].on_reject,{target:'baseline',max_reworks:0})
+ assert.equal(feature.workflow.stages.find(row=>row.id==='review').on_reject.max_reworks,2)
+ assert.deepEqual(bug.workflow.stages[2].requires,['diagnose'])
+ assert.deepEqual(bug.workflow.stages[3].execution.input_artifact,{stage:'implement',output:'artifact'})
+ assert.equal(bug.workflow.evidence_rules.reproduction.command_binding,'reproduce')
+ assert.equal(bug.workflow.evidence_rules.checked.artifact_output,'artifact')
+ const first=readBuilderWorkflowTemplates({after_id:'',after_version:'',limit:1})
+ assert.equal(first.has_more,true)
+ const second=readBuilderWorkflowTemplates({...first.next_cursor,limit:1})
+ assert.equal(second.has_more,false);assert.notEqual(first.items[0].id,second.items[0].id)
+})

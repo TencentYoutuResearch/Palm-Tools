@@ -1,3 +1,4 @@
+import { checkMcpPages } from './support/mcp-pages.js'
 /** The desktop's bundled MCP uses the same backend as dsh, with a scoped identity. */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -35,6 +36,7 @@ test('GUI session MCP bootstraps its own identity and uses backend communication
     const sent = await call('tools/call', { name: 'kode_sessions_send', arguments: { ...target.session.address, content: 'GUI to dsh', idempotency_key: randomUUID() } })
     assert.equal(sent.result.isError, undefined)
     assert.equal(JSON.parse(sent.result.content[0].text).source.session_id, `kode:runtime:gui:${publicId}`)
+    await checkMcpPages(call, admin, JSON.parse(sent.result.content[0].text).source, target)
     const proposal = await call('tools/call', { name: 'memory_propose', arguments: { scope: 'shared', body: `Shared MCP fixture ${randomUUID()} keeps proposals pending until user review.` } })
     assert.equal(proposal.result.isError, undefined); assert.equal(JSON.parse(proposal.result.content[0].text).status, 'pending_review')
     const search = await call('tools/call', { name: 'memory_search', arguments: { query: 'Shared MCP fixture' } })

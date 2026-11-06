@@ -69,6 +69,13 @@ test('SSH portal isolates authentication, preserves streams, rejects CSRF, and c
       upstreamRequests.at(-1).body=JSON.parse(body)
       res.writeHead(200,{'content-type':'application/json'});res.end('{}');return
     }
+    if (req.url === '/api/kode/session-creation-status') {
+      let body = ''; req.on('data', part => { body += part }); req.on('end', () => {
+        const input = JSON.parse(body)
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ status: 'pending', requester: input.requester, key: input.idempotency_key }))
+      }); return
+    }
     res.writeHead(200, { 'content-type': 'text/plain' }); res.write('remote:'); req.pipe(res)
   })
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
@@ -79,6 +86,9 @@ test('SSH portal isolates authentication, preserves streams, rejects CSRF, and c
   t.after(() => manager.close())
   const [portal, same] = await Promise.all([manager.connect('build'), manager.connect('build')])
   assert.equal(portal, same); assert.equal(calls, 1)
+  assert.deepEqual(await portal.lookupSessionCreation({ requester: 'local.example/reader', idempotency_key: 'lost-response' }), { status: 'pending', requester: 'local.example/reader', key: 'lost-response' })
+  assert.equal(upstreamRequests.at(-1).url, '/api/kode/session-creation-status')
+  assert.equal(upstreamRequests.at(-1).cookie, 'upstream=owner')
   assert.equal((await fetch(portal.origin)).status, 401)
   portal.tickets.set('one-use', Date.now() + 10000)
   const login = await fetch(`${portal.origin}/?kode_ticket=one-use`, { redirect: 'manual' })

@@ -351,6 +351,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')
     useEffect(() => setOpen(false), [id])
     const current = data?.currentProfile ?? data?.profiles.find(p => p.id === data.selectedProfileId)
+    if (data?.managed) return h('span', { className: 'kode-agent-control', title: '此会话的执行资源由已激活流程管理。' }, current?.name ?? '受管会话')
     const rows = data?.profiles ?? [], firstCustom = rows.findIndex(profile => profile.origin !== 'builtin')
     const items = rows.flatMap((p, index) => [...(index === firstCustom && index > 0 ? [{ type: 'separator' }] : []), { id: p.id, disabled: busy || !id || (!data.canChangeAgent && p.id !== current?.id) || !data.supportedTypes.includes(p.type), label: h('span', { className: 'kode-agent-option' }, h(AgentAvatar, { profile: p }), h('span', { className: 'kode-option' }, h('span', null, p.name), p.origin !== 'builtin' && h('span', { className: 'kode-secondary' }, data.types[p.type]?.name))) }])
     items.push({ type: 'separator' }, { id: 'configure', label: '自定义 Agent…' })
@@ -1011,6 +1012,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions), [open, setOpen] = useState(false), [pane, setPane] = useState('root')
     useEffect(() => { setOpen(false); setPane('root') }, [id])
     const current = data?.currentProfile ?? data?.profiles.find(p => p.id === data.selectedProfileId)
+    if (data?.managed) return h('span', { className: 'kode-model-control', title: '此会话的模型与 effort 由已激活流程管理。' }, data.selection?.model ?? '模型记录待核对')
     const models = data?.models ?? []
     const selected = models.find(m => m.id === data?.selection?.model && (!m.provider || m.provider === data?.selection?.provider)) ?? (data?.selection?.model === 'default' ? models.find(m => m.isDefault) ?? models[0] : undefined)
     const efforts = selected?.reasoningEfforts ?? [], effort = data?.selection?.reasoningEffort ?? selected?.defaultReasoningEffort

@@ -14,6 +14,7 @@ pub enum CoreEvent {
     /// codebuddy session jsonl 解析出的元数据增量。任意字段可能为 None。
     JsonlMeta {
         id: SessionId,
+        selection: Option<crate::selection::SelectionObservation>,
         model: Option<String>,
         title: Option<String>,
         /// 子进程真实 session uuid。codebuddy `/clear` 会切到新 jsonl/session,

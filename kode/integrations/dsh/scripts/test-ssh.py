@@ -6,6 +6,7 @@ import pwd
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -53,7 +54,8 @@ LogLevel ERROR
                 except OSError:
                     time.sleep(.05)
             env = dict(os.environ, KODE_TEST_SSH_CONFIG=str(root / 'ssh.conf'), KODE_TEST_SSH_PORT=str(port))
-            subprocess.run(['cargo', 'test', '-p', 'kode-bridge', 'messaging::tests::ssh_link', '--', '--ignored', '--test-threads=1'], cwd=project, env=env, check=True)
+            command = sys.argv[1:] or ['cargo', 'test', '-p', 'kode-bridge', 'messaging::tests::ssh_link', '--', '--ignored', '--test-threads=1']
+            subprocess.run(command, cwd=project, env=env, check=True)
         finally:
             daemon.terminate()
             daemon.wait(timeout=10)

@@ -741,6 +741,11 @@ impl RemoteTransport {
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 let _ = self.core_tx.send(CoreEvent::JsonlMeta {
+                    selection: env
+                        .payload
+                        .get("selection")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
                     id: local_id,
                     model,
                     title,
@@ -845,6 +850,15 @@ impl SessionTransport for RemoteTransport {
             .ensure_tunnel()
             .await
             .map_err(|e| TransportError::Internal(format!("ssh tunnel: {e}")))?;
+        if spec.reasoning_effort.is_some() {
+            let capabilities = self.rest_get("/api/v1/capabilities", &[]).await
+                .map_err(|_| TransportError::BadRequest("Remote bridge cannot confirm reasoning-effort support; update it before requesting effort".into()))?;
+            if capabilities["session_reasoning_effort_v1"] != true {
+                return Err(TransportError::BadRequest(
+                    "Remote bridge does not support requested reasoning effort".into(),
+                ));
+            }
+        }
         let url = RemoteConfig::rest_url_for(&base, "/api/v1/sessions");
         let mut body = serde_json::Map::new();
         // The remote GUI currently renders a terminal. Do not silently create
@@ -873,6 +887,9 @@ impl SessionTransport for RemoteTransport {
         }
         if let Some(s) = spec.permission_mode.as_ref() {
             body.insert("permission_mode".into(), Value::String(s.clone()));
+        }
+        if let Some(value) = spec.reasoning_effort.as_ref() {
+            body.insert("reasoning_effort".into(), Value::String(value.clone()));
         }
         if let Some(s) = spec.model.as_ref() {
             body.insert("model".into(), Value::String(s.clone()));
@@ -1171,6 +1188,7 @@ mod tests {
         let t = RemoteTransport::new(cfg, tx, alloc);
         let err = t
             .spawn(SpawnSpec {
+                reasoning_effort: None,
                 backend_key: "echo".into(),
                 cols: 80,
                 rows: 24,
@@ -1206,5 +1224,43 @@ mod tests {
                 id: "myhost".into()
             }
         );
+    }
+    #[tokio::test]
+    async fn selection_observation_survives_remote_id_mapping_without_fabricating_old_peer_evidence(
+    ) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let transport = RemoteTransport::new(
+            RemoteConfig {
+                id: "fixture".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                token: "fixture".into(),
+                reconnect_backoff_secs: vec![],
+                ssh: None,
+            },
+            tx,
+            Arc::new(|| 9),
+        );
+        transport.session_id_map.lock().insert(3, 9);
+        let observation = json!({"source":"codex_turn_context","model":"fixture","effort":"high","turn_id":"turn","session_uuid":"native-fixture","historical":false});
+        for selection in [observation.clone(), Value::Null] {
+            transport.handle_envelope(EventEnvelope {
+                protocol_version: Some("v1".into()),
+                schema_version: Some(1),
+                session_id: 3,
+                ts: 1,
+                r#type: "meta".into(),
+                payload: json!({"model":"fixture","selection":selection}),
+            });
+            let CoreEvent::JsonlMeta {
+                id,
+                selection: actual,
+                ..
+            } = rx.recv().await.unwrap()
+            else {
+                panic!("expected metadata")
+            };
+            assert_eq!(id, 9);
+            assert_eq!(serde_json::to_value(actual).unwrap(), selection);
+        }
     }
 }

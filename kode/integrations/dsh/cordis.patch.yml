@@ -20,6 +20,8 @@
       config:
         transcriptView: standard
         collapseTiming: completion
+    - id: kode-collab
+      name: '@kode/dsh-collab'
     - id: kode-sidebar-browser
       name: '@kode/dsh-browser'
     - id: connection

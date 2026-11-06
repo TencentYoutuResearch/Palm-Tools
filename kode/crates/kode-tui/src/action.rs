@@ -101,6 +101,7 @@ impl From<CoreEvent> for Action {
             CoreEvent::PtyBytes { id, bytes } => Action::PtyBytes { id, bytes },
             CoreEvent::PtyExited { id, code } => Action::PtyExited { id, code },
             CoreEvent::JsonlMeta {
+                selection: _,
                 id,
                 model,
                 title,

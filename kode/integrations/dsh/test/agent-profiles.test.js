@@ -62,3 +62,41 @@ test('default model selections persist independently of built-in executable prof
     assert.equal(reopened.defaultModelFor('worker'), undefined)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('model restrictions and default effort survive editing and reopening, with explicit clearing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-selection-profile-'))
+  const file = join(root, 'profiles.json')
+  try {
+    const profiles = await new AgentProfiles(file).open()
+    const original = await profiles.save({ name: 'Restricted', type: 'codex', allowedModels: ['small', 'small'], defaultReasoningEffort: 'low' })
+    await profiles.bind('existing', original.id)
+    await profiles.save({ id: original.id, name: 'Renamed', type: 'codex' })
+    const reopened = await new AgentProfiles(file).open()
+    const edited = reopened.list().find(row => row.id === original.id)
+    assert.deepEqual(edited.allowedModels, ['small'])
+    assert.equal(edited.defaultReasoningEffort, 'low')
+    await reopened.save({ ...edited, allowedModels: null, defaultReasoningEffort: null })
+    const cleared = (await new AgentProfiles(file).open()).list().find(row => row.id === original.id)
+    assert.equal(cleared.allowedModels, undefined)
+    assert.equal(cleared.defaultReasoningEffort, undefined)
+    assert.deepEqual(reopened.binding('existing').profile.allowedModels, ['small'])
+    assert.throws(() => normalizeProfile({ name: 'Invalid', type: 'codex', allowedModels: [] }), /nonempty/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('unused binding cleanup cannot discard pending or acknowledged quota fences', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-fence-cleanup-'))
+  try {
+    const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'p', name: 'Fixture', type: 'codex' }])
+    for (const [id, patch] of Object.entries({ local: { quotaFenceRevision: 1 }, remote: { remoteQuotaFences: [{ home: 'home', profile: 'p', revision: 2, reconciled: false }] }, acknowledged: { remoteQuotaFences: [{ home: 'home', profile: 'p', revision: 3, reconciled: true }] } })) {
+      await profiles.bind(id, 'p')
+      await profiles.patchBinding(id, patch)
+      await assert.rejects(profiles.clearUnusedBinding(id), /new conversation/)
+      assert.ok(profiles.binding(id))
+    }
+    await profiles.bind('empty', 'p')
+    await profiles.clearUnusedBinding('empty')
+    assert.equal(profiles.binding('empty'), undefined)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

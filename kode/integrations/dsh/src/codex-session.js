@@ -1,5 +1,8 @@
+import { codexReroutedSelection } from './native-selection.js'
+import { usageCounters, turnUsage, zeroUsage } from './native-usage.js'
 /** One persistent Codex app-server connection per dsh Session and profile snapshot. */
 import { deduplicateSkillCopies } from './codex-skills.js'
+import { quotaObservation, mergeQuotaObservation } from './codex-quota.js'
 import { RpcProcess } from './rpc-process.js'
 import { createToolProxy } from './tool-proxy.js'
 import { randomUUID } from 'node:crypto'
@@ -13,6 +16,7 @@ export class CodexSession {
   constructor(profile, cwd, handlers = {}) {
     this.profile = profile; this.cwd = cwd; this.handlers = handlers
     this.lifetime = new AbortController(); this.requests = new Set()
+    this.quotaWrites = Promise.resolve(); this.quotaGeneration = 0; this.quotaReadAt = -Infinity
     this.pendingEvents = []; this.readerWaiters = []
     this.commands = [
       { name: 'goal', description: '管理 Codex 原生持久目标', input: { hint: '目标描述 | status | edit 新目标 | pause | resume | clear' } },
@@ -22,9 +26,14 @@ export class CodexSession {
       { name: 'skills', description: '列出此工作区的 Codex 技能' },
     ]
   }
+  usageBaselineAvailable() {
+    return Boolean(this.usageTotal && this.usageTotal.cache_write_input_tokens !== null)
+  }
   connectRpc() {
     this.rpc = new RpcProcess(this.profile, this.cwd)
     this.rpc.on('notification', message => {
+      if (message.method === 'account/rateLimits/updated') { this.quotaGeneration++; this.observeQuota(message.params, true); return }
+      if (message.method === 'account/updated') { this.quotaGeneration++; this.observeQuota(null, false, true); return }
       if (message.params?.threadId && this.threadId && message.params.threadId !== this.threadId) return
       if (message.method === 'thread/goal/updated' || message.method === 'thread/goal/cleared') this.handlers.goal?.(message.method.endsWith('/cleared') ? null : message.params.goal)
       if (message.method === 'thread/goal/cleared' || message.method === 'thread/goal/updated' && message.params.goal.status !== 'active') this.goalStopped = true
@@ -54,6 +63,31 @@ export class CodexSession {
       startup = this.ready.catch(() => {})
     }
     return this.ready
+  }
+  observeQuota(payload, incremental = false, accountChanged = false) {
+    const incoming = quotaObservation(payload)
+    const observation = { ...(incremental ? mergeQuotaObservation(this.quota, incoming) : incoming), ...(accountChanged ? { account_changed: true } : {}) }
+    this.quota = observation
+    this.quotaWrites = this.quotaWrites.then(() => this.handlers.quota?.(observation)).catch(() => { this.quotaPersistenceFailed = true })
+    return observation
+  }
+  async readQuota(signal) {
+    await this.initialize(signal)
+    if (this.quotaRead) return this.quotaRead
+    if (Date.now() - this.quotaReadAt < 60000) return this.quota
+    this.quotaReadAt = Date.now()
+    const generation = this.quotaGeneration
+    this.quotaRead = (async () => {
+      try {
+        const result = await this.rpc.request('account/rateLimits/read', {}, { signal: AbortSignal.any([this.lifetime.signal, ...(signal ? [signal] : []), AbortSignal.timeout(3000)]) })
+        if (generation === this.quotaGeneration) this.observeQuota(result)
+      } catch {
+        if (generation === this.quotaGeneration) this.observeQuota(null)
+      }
+      await this.quotaWrites
+      return this.quota
+    })()
+    try { return await this.quotaRead } finally { this.quotaRead = undefined }
   }
   async answer(message) {
     const { method, params = {}, id } = message
@@ -107,6 +141,8 @@ export class CodexSession {
       : await this.rpc.request('thread/start', { ...params, dynamicTools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.parameters })), developerInstructions: 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.' }, { signal })
     this.threadId = result.thread.id
     try { const { goal } = await this.rpc.request('thread/goal/get', { threadId: this.threadId }, { signal }); this.handlers.goal?.(goal) } catch (error) { if (signal?.aborted) throw error }
+    this.usageTotal = binding.threadId ? null : zeroUsage()
+    await this.readQuota(signal)
     return this.threadId
   }
   async listModels(signal) {
@@ -165,6 +201,8 @@ export class CodexSession {
       end(error) { this.done = true; this.error ??= error; this.wake?.(); this.wake = undefined },
     }
     active.threadId = this.threadId
+    let usageBaseline = !command && !observe ? this.usageTotal : null
+    let usageRerouted = false, usageSeen = false
     this.active = active
     for (const resolve of this.readerWaiters.splice(0)) resolve()
     let turnId, cancelled = false, completed = false
@@ -243,6 +281,7 @@ export class CodexSession {
         result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTierForTurn: serviceTier } : {}), ...(collaborationMode ? { collaborationMode } : {}) }, { signal })
       }
       turnId = result?.turn?.id; active.turnId = turnId
+      if (!command && !observe) yield { method: 'kode/selection_evidence', params: { threadId: this.threadId, turnId, scope: 'executor_configuration', model: { requested: model ?? null, status: model && model !== 'default' ? 'acknowledged' : 'unverifiable' }, effort: { requested: effort ?? null, status: effort ? 'acknowledged' : 'unverifiable' }, source: 'turn/start', observed_at: Date.now() } }
       if (cancelled) { if (!this.rpc.closed) void this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId }).catch(() => {}); signal.throwIfAborted() }
       while (true) {
         if (!queue.length && !active.done) await new Promise(resolve => { active.wake = resolve })
@@ -259,7 +298,24 @@ export class CodexSession {
           break
         }
         if (message.params?.turnId && message.params.turnId !== turnId) continue
+        if (message.method === 'model/rerouted') {
+          const selection = codexReroutedSelection(message.params, { threadId: this.threadId, turnId, model, effort })
+          if (selection) { usageRerouted = true; yield { method: 'kode/selection_evidence', params: selection } }
+        }
+        if (message.method === 'thread/tokenUsage/updated') {
+          // Require the exact thread and turn; never price unsolicited or historical totals.
+          if (message.params.threadId === this.threadId && message.params.turnId === turnId) {
+            const nextUsage = usageCounters(message.params.tokenUsage?.total)
+            if (!nextUsage || usageSeen && this.usageTotal && ['input_tokens', 'cached_input_tokens', 'output_tokens'].some(key => nextUsage[key] < this.usageTotal[key])) usageBaseline = null
+            this.usageTotal = nextUsage
+            usageSeen = true
+            yield { method: 'kode/usage_observation', params: turnUsage(usageBaseline, this.usageTotal, { threadId: this.threadId, turnId, model, rerouted: usageRerouted }) }
+          }
+        }
         if (message.method === 'turn/completed' && message.params.turn.id === turnId) {
+          if (!usageSeen) this.usageTotal = null
+          yield { method: 'kode/usage_observation', params: { ...turnUsage(usageBaseline, usageSeen ? this.usageTotal : null, { threadId: this.threadId, turnId, model, rerouted: usageRerouted }), turn_ended: true, outcome: message.params.turn.status } }
+
           if (message.params.turn.status !== 'completed' && !(this.goalStopped && message.params.turn.status === 'interrupted')) throw new Error(message.params.turn.error?.message ?? `Agent turn ${message.params.turn.status}`)
           completed = true
           if (command?.name === 'compact') yield { method: 'item/agentMessage/delta', params: { threadId: this.threadId, turnId, itemId: 'compact-result', delta: 'Codex 已完成上下文压缩。' } }
@@ -271,6 +327,7 @@ export class CodexSession {
     } finally {
       signal?.removeEventListener('abort', abort)
       this.active = undefined
+      if (!completed) this.usageTotal = null
       if (completed && !cancelled) {
         const start = queue.findIndex(event => event.method === 'turn/started')
         if (start >= 0) this.pendingEvents.push(...queue.slice(start))
@@ -285,8 +342,10 @@ export class CodexSession {
     this.lifetime.abort(new Error('Agent session closed'))
     for (const resolve of this.readerWaiters.splice(0)) resolve()
     await this.ready?.catch(() => {})
-    await this.rpc?.close()
+    const stopEvidence = await this.rpc?.close()
     await Promise.allSettled([...this.requests])
     await this.proxy?.close(); this.proxy = undefined
+    await this.quotaWrites
+    return stopEvidence
   }
 }

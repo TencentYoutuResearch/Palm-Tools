@@ -268,6 +268,7 @@ impl BackendSaveRequest {
     fn into_backend_config(self) -> Result<BackendConfig, String> {
         let spec = self.build_spec()?;
         let mut backend = BackendConfig {
+            effort: None,
             protocol: self.protocol,
             command: self.command,
             args: self.args,
@@ -299,6 +300,11 @@ pub async fn backend_save(
     let name = request.name.clone();
     let mut backend = request.into_backend_config()?;
     let catalog = crate::shared_agents::refresh(&state).await?;
+    // This legacy form has no effort editor. Preserve the configured transport.
+    backend.effort = catalog
+        .backends
+        .get(&key)
+        .and_then(|old| old.effort.clone());
     if backend.enabled.is_none() {
         backend.enabled = catalog.backends.get(&key).and_then(|old| old.enabled);
     }
@@ -482,6 +488,11 @@ fn upsert_backend_table(doc: &mut DocumentMut, key: &str, backend: &BackendConfi
     }
     t.insert("args", value(args_arr));
 
+    if let Some(effort) = &backend.effort {
+        let document =
+            toml_edit::ser::to_document(effort).expect("effort configuration is serializable");
+        t.insert("effort", Item::Table(document.as_table().clone()));
+    }
     if let Some(m) = &backend.default_model {
         t.insert("default_model", value(m.as_str()));
     }
@@ -657,6 +668,13 @@ sidebar_width = 30
 "#;
         let mut doc: DocumentMut = original.parse().unwrap();
         let new_backend = BackendConfig {
+            effort: Some(kode_core::effort::EffortConfig {
+                default: Some("high".into()),
+                levels: vec!["high".into()],
+                adapter: kode_core::effort::EffortAdapter::Flag {
+                    flag: "--effort".into(),
+                },
+            }),
             protocol: None,
             command: "/usr/local/bin/codex".into(),
             args: vec!["--no-banner".into()],
@@ -671,6 +689,8 @@ sidebar_width = 30
         };
         upsert_backend_table(&mut doc, "codex", &new_backend);
         let s = doc.to_string();
+        let decoded: kode_core::Config = toml_edit::de::from_str(&s).unwrap();
+        assert_eq!(decoded.backends["codex"].effort, new_backend.effort);
         // 用户的 header 注释保留
         assert!(s.contains("# user-written header comment"));
         // 用户的 backend 注释保留
@@ -701,6 +721,7 @@ model_flag = "--model"
 "#;
         let mut doc: DocumentMut = original.parse().unwrap();
         let updated = BackendConfig {
+            effort: None,
             protocol: None,
             command: "new-command".into(),
             args: vec![],
