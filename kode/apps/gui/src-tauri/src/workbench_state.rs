@@ -52,12 +52,13 @@ pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, Str
     }
     Ok((client, format!("{}/api/v1/messaging/workbench/documents/session-index", config.url.trim_end_matches('/')), token.trim().into()))
 }
-/// Replace a running self-managed service only when it comes from another,
-/// older binary, so a newer build wins and two installs never ping-pong.
-fn replace_running_service(running: &Value, own: &std::path::Path) -> bool {
+/// Replace a running self-managed service only when its binary is older
+/// than ours, so a newer build wins and two installs never ping-pong. The
+/// path alone proves nothing: reinstalling the app over the same path leaves
+/// the old build's service running with routes the new app needs.
+fn replace_running_service(running: &Value, _own: &std::path::Path) -> bool {
     let (_, own_built) = kode_bridge::messaging::server_binary();
     match (running["executable"].as_str(), running["built_at"].as_u64(), own_built) {
-        (Some(path), _, _) if std::path::Path::new(path) == own => false,
         (Some(_), Some(theirs), Some(ours)) => theirs < ours,
         // Services predating these fields report no pid and cannot be stopped.
         _ => false,
@@ -165,14 +166,17 @@ mod replacement_tests {
     use super::*;
 
     #[test]
-    fn only_older_services_from_other_binaries_are_replaced() {
+    fn only_services_from_older_builds_are_replaced() {
         let own = std::env::current_exe().unwrap();
         let (_, built) = kode_bridge::messaging::server_binary();
         let built = built.unwrap();
         let other = |at: u64| json!({"pid":1,"executable":"/other/kode-gui","built_at":at});
         assert!(replace_running_service(&other(built - 1), &own));
         assert!(!replace_running_service(&other(built + 1), &own));
-        assert!(!replace_running_service(&json!({"pid":1,"executable":own,"built_at":0}), &own));
+        // Reinstalled over the same path: the older build's service yields,
+        // the same build (equal timestamps) keeps running.
+        assert!(replace_running_service(&json!({"pid":1,"executable":own,"built_at":built - 1}), &own));
+        assert!(!replace_running_service(&json!({"pid":1,"executable":own,"built_at":built}), &own));
         assert!(!replace_running_service(&json!({"node_id":"n"}), &own));
     }
 }

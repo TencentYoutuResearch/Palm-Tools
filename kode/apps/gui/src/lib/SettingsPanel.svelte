@@ -1,3 +1,18 @@
+<script lang="ts" module>
+  export type Tab =
+    | 'account'
+    | 'relay'
+    | 'remote'
+    | 'integrations'
+    | 'backends'
+    | 'plugins'
+    | 'memory'
+    | 'terminal'
+    | 'capture'
+    | 'language'
+    | 'updates'
+</script>
+
 <script lang="ts">
   /**
    * SettingsPanel.svelte —— 统一设置面板(2026-06,重做)。
@@ -43,19 +58,45 @@
     type TerminalThemeMode,
   } from './terminal_settings'
   import { outsidePressClose } from './outside_close'
+  import Icon from './Icon.svelte'
+  import AccountPane from './AccountPane.svelte'
+  import PairingDialog from './PairingDialog.svelte'
+  import EndpointDialog from './EndpointDialog.svelte'
 
   type Props = {
     onClose: () => void
+    initialTab?: Tab
+    /** A drawer or dialog is open above Settings; it owns Escape. */
+    childOpen?: boolean
     onOpenMemorySync: () => void
+    onOpenMemoryReview: () => void
+    onOpenMemoryBrowse: () => void
+    onOpenDeploy: () => void
+    onEndpointsChanged: () => void
+    onAccountChanged: () => void
     onOpenPlugins: () => void
     onTakeScreenshot: () => void | Promise<void>
     locale: LocaleMode
     onLocaleChange: (locale: LocaleMode) => void
   }
-  let { onClose, onOpenMemorySync, onOpenPlugins, onTakeScreenshot, locale, onLocaleChange }: Props = $props()
+  let {
+    onClose,
+    initialTab = 'backends',
+    childOpen = false,
+    onOpenMemorySync,
+    onOpenMemoryReview,
+    onOpenMemoryBrowse,
+    onOpenDeploy,
+    onEndpointsChanged,
+    onAccountChanged,
+    onOpenPlugins,
+    onTakeScreenshot,
+    locale,
+    onLocaleChange,
+  }: Props = $props()
 
-  type Tab = 'integrations' | 'backends' | 'plugins' | 'memory' | 'terminal' | 'capture' | 'language' | 'updates'
-  let tab: Tab = $state('backends')
+  // svelte-ignore state_referenced_locally
+  let tab: Tab = $state(initialTab)
 
   let backends: BackendListItem[] = $state([])
   let detected: DetectedBackend[] = $state([])
@@ -319,7 +360,7 @@
   }
 
   function onKeyCapture(e: KeyboardEvent) {
-    if (e.key !== 'Escape') return
+    if (e.key !== 'Escape' || childOpen) return
     e.preventDefault()
     e.stopImmediatePropagation()
     if (editing) cancelEdit()
@@ -365,6 +406,19 @@
     <!-- ============ 左侧导航 ============ -->
     <nav class="nav">
       <div class="nav-brand">{tr('settings.title')}</div>
+      <button class="nav-item" class:active={tab === 'account'} onclick={() => (tab = 'account')}>
+        <Icon name="user" size={16} />
+        <span>{tr('settings.account.title')}</span>
+      </button>
+      <button class="nav-item" class:active={tab === 'relay'} onclick={() => (tab = 'relay')}>
+        <Icon name="smartphone" size={16} />
+        <span>{tr('settings.relay.title')}</span>
+      </button>
+      <button class="nav-item" class:active={tab === 'remote'} onclick={() => (tab = 'remote')}>
+        <Icon name="server" size={16} />
+        <span>{tr('settings.remote.title')}</span>
+      </button>
+      <div class="nav-divider" aria-hidden="true"></div>
       <button class="nav-item" class:active={tab === 'backends'} onclick={() => (tab = 'backends')}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" />
@@ -617,6 +671,31 @@
             </div>
           {/if}
         {/if}
+      {:else if tab === 'account'}
+        <div class="content-head">
+          <div>
+            <h2>{tr('settings.account.title')}</h2>
+            <p class="sub">{tr('settings.account.description')}</p>
+          </div>
+        </div>
+        <AccountPane onSignedIn={onAccountChanged} />
+      {:else if tab === 'relay'}
+        <div class="content-head">
+          <div>
+            <h2>{tr('settings.relay.title')}</h2>
+            <p class="sub">{tr('settings.relay.description')}</p>
+          </div>
+        </div>
+        <PairingDialog embedded />
+      {:else if tab === 'remote'}
+        <div class="content-head">
+          <div>
+            <h2>{tr('settings.remote.title')}</h2>
+            <p class="sub">{tr('settings.remote.description')}</p>
+          </div>
+          <button class="btn ghost sm" onclick={onOpenDeploy}>{tr('settings.remote.deploy')}</button>
+        </div>
+        <EndpointDialog embedded onChanged={onEndpointsChanged} />
       {:else if tab === 'integrations'}
         <IntegrationSettings />
       {:else if tab === 'memory'}
@@ -639,6 +718,22 @@
               <button class="switch" class:on={memoryPromptEnabled} onclick={toggleMemoryPrompt} role="switch" aria-checked={memoryPromptEnabled} aria-label="Toggle memory prompt injection">
                 <span class="knob"></span>
               </button>
+            </div>
+          </li>
+          <li class="item">
+            <div class="item-body">
+              <div class="item-title"><span class="name">{tr('settings.memory.review')}</span></div>
+            </div>
+            <div class="item-actions">
+              <button class="btn ghost sm" onclick={onOpenMemoryReview}>{tr('settings.memory.open')}</button>
+            </div>
+          </li>
+          <li class="item">
+            <div class="item-body">
+              <div class="item-title"><span class="name">{tr('settings.memory.browse')}</span></div>
+            </div>
+            <div class="item-actions">
+              <button class="btn ghost sm" onclick={onOpenMemoryBrowse}>{tr('settings.memory.open')}</button>
             </div>
           </li>
           <li class="item">
@@ -881,6 +976,7 @@
     color: var(--fg-tertiary);
     padding: var(--sp-2) var(--sp-2) var(--sp-3);
   }
+  .nav-divider { height: 1px; margin: 6px 8px; background: var(--bd-default); }
   .nav-item {
     display: flex;
     align-items: center;

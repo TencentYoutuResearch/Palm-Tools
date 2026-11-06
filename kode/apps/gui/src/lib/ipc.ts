@@ -421,6 +421,32 @@ export const ipc = {
     invoke<CloudSyncStatus>('cloud_sync_activate_backend', { backendId }),
   cloudSyncDeploy: (req: CloudDeployReq) =>
     invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
+  cloudAccountSendCode: (serverUrl: string, email: string) =>
+    invoke<{ expires_in: number }>('cloud_account_send_code', { serverUrl, email }),
+  cloudAccountSignIn: (code: string) =>
+    invoke<CloudSyncStatus>('cloud_account_sign_in', { code }),
+  cloudAccountSignOut: (backendId: string) =>
+    invoke<CloudSyncStatus>('cloud_account_sign_out', { backendId }),
+  cloudAccountMethods: (serverUrl: string) =>
+    invoke<{ methods: LoginMethodInfo[] }>('cloud_account_methods', { serverUrl }),
+  cloudAccountLinked: () => invoke<{ linked: string[] }>('cloud_account_linked'),
+  cloudPalmxStart: (purpose: 'sign_in' | 'bind', serverUrl?: string) =>
+    invoke<PalmxProgress>('cloud_palmx_start', { purpose, serverUrl: serverUrl ?? null }),
+  cloudPalmxPoll: () => invoke<PalmxProgress>('cloud_palmx_poll'),
+  cloudPalmxCancel: () => invoke<unknown>('cloud_palmx_cancel'),
+  cloudPalmxUnbind: () => invoke<unknown>('cloud_palmx_unbind'),
+  /** Runtime default relay from KODE_RELAY_URL or config.toml `[account]`. */
+  accountDefaultRelay: () => invoke<string>('account_default_relay'),
+  cloudAccountProfile: () => invoke<CloudSyncStatus>('cloud_account_profile'),
+  cloudAccountSetName: (name: string) => invoke<CloudSyncStatus>('cloud_account_set_name', { name }),
+  /** Runs the relay's palm capture page in a camera window on this Mac. */
+  palmCapture: (serverUrl: string, appId: string, sdkOrigin: string | null, locale: string) =>
+    invoke<PalmCaptureResult>('palm_capture', { serverUrl, appId, sdkOrigin, locale }),
+  cloudPalmSignIn: (serverUrl: string, sessionId: string) =>
+    invoke<CloudSyncStatus>('cloud_palm_sign_in', { serverUrl, sessionId }),
+  cloudPalmStart: (serverUrl: string) => invoke<PalmxProgress>('cloud_palm_start', { serverUrl }),
+  cloudPalmPoll: () => invoke<PalmxProgress>('cloud_palm_poll'),
+  cloudPalmCancel: () => invoke<unknown>('cloud_palm_cancel'),
 
   // 路径配置(GUI 启动 banner / 命令面板用)
   getPathsConfig: () => invoke<PathsConfig>('get_paths_config'),
@@ -880,11 +906,45 @@ export interface CloudSyncStatus {
   device_id: string | null
   active_backend_id: string | null
   backends: CloudBackendSummary[]
-  state: 'not_configured' | 'connecting' | 'waiting_for_pairing' | 'syncing' | 'offline' | string
+  state: 'not_configured' | 'connecting' | 'waiting_for_pairing' | 'standby' | 'syncing' | 'offline' | string
   connected: boolean
   sync_enabled: boolean
   binding_count: number
   last_error: string | null
+  /** Signed-in account of the active backend, when it is an account relay. */
+  account_email?: string | null
+  account_label?: string | null
+  account_method?: LoginMethodId | null
+  /** Display name from the account profile, when set. */
+  account_name?: string | null
+  /** HTTPS avatar URL from the account profile, when set. */
+  account_picture?: string | null
+}
+
+/** Sign-in methods a relay can offer; unknown ids are ignored by the UI. */
+export type LoginMethodId = 'email' | 'palmx' | 'palm'
+
+export interface LoginMethodInfo {
+  id: string
+  app_id?: string
+  base_url?: string
+  /** Palm H5 SDK loader (palm). */
+  sdk_url?: string
+}
+
+/** What the palm capture page reports; code 0 with a sessionId is a scan. */
+export interface PalmCaptureResult {
+  code: number
+  message?: string
+  data?: { sessionId?: string } | null
+}
+
+export interface PalmxProgress {
+  state: 'pending' | 'scanned' | 'confirmed' | 'denied' | 'expired' | string
+  qr_payload: string
+  /** Epoch seconds. */
+  expires_at: number
+  done: boolean
 }
 
 export interface CloudBackendSummary {
@@ -898,6 +958,11 @@ export interface CloudBackendSummary {
   remote_deploy_dir: string | null
   managed: boolean
   active: boolean
+  kind: 'self_hosted' | 'account_relay'
+  account_email: string | null
+  account_label: string | null
+  account_method: LoginMethodId | null
+  account_picture: string | null
 }
 
 export interface CloudDeployReq {

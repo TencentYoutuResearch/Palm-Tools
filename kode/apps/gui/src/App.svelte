@@ -36,6 +36,10 @@
   import ConfirmDialog from './lib/ConfirmDialog.svelte'
   import BackendChooser from './lib/BackendChooser.svelte'
   import PairingDialog from './lib/PairingDialog.svelte'
+  import AccountDialog from './lib/AccountDialog.svelte'
+  import AccountMenu from './lib/AccountMenu.svelte'
+  import type { Tab as SettingsTab } from './lib/SettingsPanel.svelte'
+  import type { CloudSyncStatus } from './lib/ipc'
   import EndpointDialog from './lib/EndpointDialog.svelte'
   import PathsBanner from './lib/PathsBanner.svelte'
   import MemoryPanel from './lib/MemoryPanel.svelte'
@@ -150,6 +154,40 @@
   let chooserWorkspace = $state<WsGroup | null>(null)
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
+  let accountOpen = $state(false)
+  let accountMenuOpen = $state(false)
+  let accountStatus = $state<CloudSyncStatus | null>(null)
+  let sidebarAccount = $derived(accountStatus?.backends.find((b) => b.kind === 'account_relay') ?? null)
+  /** Sidebar identity. Read on start, when the menu opens and when an
+   *  account surface closes; never polled, so an idle window stays idle. */
+  async function refreshAccountStatus() {
+    try {
+      accountStatus = await ipc.cloudSyncStatus()
+    } catch {
+      // The service may still be starting; the label stays until it answers.
+    }
+  }
+  $effect(() => {
+    if (!accountOpen && !settingsOpen) void refreshAccountStatus()
+  })
+  let settingsTab = $state<SettingsTab>('backends')
+  function openSettings(tab: SettingsTab = 'backends') {
+    settingsTab = tab
+    accountMenuOpen = false
+    settingsOpen = true
+  }
+  async function signOutFromMenu() {
+    accountMenuOpen = false
+    if (!sidebarAccount) return
+    try {
+      accountStatus = await ipc.cloudAccountSignOut(sidebarAccount.id)
+    } catch {
+      openSettings('account')
+    }
+  }
+  function accountInitial(label: string | null | undefined): string {
+    return ((label ?? '').split('@')[0].trim().slice(0, 1) || 'K').toUpperCase()
+  }
   /** Phase 11.4 远端 endpoint 配置面板 */
   let endpointsOpen = $state(false)
   /** 路径配置 banner —— 默认隐藏;用户可用 Cmd+, 打开 */
@@ -985,6 +1023,7 @@
       renameOpen ||
       chooserOpen ||
       pairingOpen ||
+      accountOpen ||
       endpointsOpen ||
       pathsOpen ||
       memoryPanelOpen ||
@@ -1472,8 +1511,13 @@
       if (memoryPanelOpen) { memoryPanelOpen = false; e.preventDefault(); return }
       if (workspacePanelOpen) { workspacePanelOpen = false; e.preventDefault(); return }
       if (memoryPromptPreviewText !== null) { memoryPromptPreviewText = null; e.preventDefault(); return }
-      if (settingsOpen) { settingsOpen = false; e.preventDefault(); return }
+      // Layers opened from Settings sit above it and close first.
+      if (deployOpen) return
       if (pluginPanelOpen) { pluginPanelOpen = false; e.preventDefault(); return }
+      if (memorySyncOpen) { memorySyncOpen = false; e.preventDefault(); return }
+      if (memoryBrowseOpen) { memoryBrowseOpen = false; e.preventDefault(); return }
+      if (accountMenuOpen) { accountMenuOpen = false; e.preventDefault(); return }
+      if (settingsOpen) { settingsOpen = false; e.preventDefault(); return }
       if (chooserOpen && $tabs.length > 0) {
         chooserOpen = false; e.preventDefault(); return
       }
@@ -1750,6 +1794,12 @@
       label: t('command.other.pairMobile'),
       group: 'other',
       run: () => { pairingOpen = true },
+    },
+    {
+      id: 'kode-account',
+      label: t('pairing.account.title'),
+      group: 'other',
+      run: () => openSettings('account'),
     },
     ]
   })
@@ -2088,6 +2138,58 @@
         </div>
       {/if}
     </div>
+    <div class="sidebar-account">
+      <button
+        class="account-trigger"
+        aria-haspopup="menu"
+        aria-expanded={accountMenuOpen}
+        title={sidebarAccount?.account_label ?? tr('pairing.account.sidebarSignIn')}
+        onclick={() => {
+          accountMenuOpen = !accountMenuOpen
+          if (accountMenuOpen) void refreshAccountStatus()
+        }}
+      >
+        <span class="account-avatar" class:empty={!sidebarAccount} aria-hidden="true">
+          {#if sidebarAccount?.account_picture}
+            <img src={sidebarAccount.account_picture} alt="" referrerpolicy="no-referrer" />
+          {:else if sidebarAccount}{accountInitial(sidebarAccount.account_label)}{:else}<Icon name="user" size={14} />{/if}
+          {#if sidebarAccount?.active}
+            <span class="presence" class:on={accountStatus?.connected} class:live={accountStatus?.sync_enabled}></span>
+          {/if}
+        </span>
+        <span class="account-copy">
+          <strong>{sidebarAccount?.account_label ?? tr('pairing.account.sidebarSignIn')}</strong>
+          {#if sidebarAccount}
+            <span>
+              {!sidebarAccount.active
+                ? tr('pairing.account.inactive')
+                : accountStatus?.sync_enabled
+                  ? tr('pairing.account.viewing')
+                  : accountStatus?.connected
+                    ? tr('pairing.account.standby')
+                    : tr('pairing.offline')}
+            </span>
+          {/if}
+        </span>
+      </button>
+      <button
+        class="icon-btn account-gear"
+        title={tr('settings.open')}
+        aria-label={tr('settings.open')}
+        onclick={() => openSettings()}
+      >
+        <Icon name="settings" size={16} />
+      </button>
+      {#if accountMenuOpen}
+        <AccountMenu
+          status={accountStatus}
+          onAccountSettings={() => openSettings('account')}
+          onRelaySettings={() => openSettings('relay')}
+          onSignOut={() => void signOutFromMenu()}
+          onClose={() => (accountMenuOpen = false)}
+        />
+      {/if}
+    </div>
   </aside>
 
   <main class="main" class:drag-over={dragOver} style={bottomTerminalVisible ? `--bottom-terminal-h:${terminalHeight}px` : ''} data-workspace-reference-target use:workspaceReferenceTarget={{ hover: (active) => { dragOver = active }, drop: receiveWorkspaceReference }} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
@@ -2110,6 +2212,14 @@
           onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
         >
           <Icon name="plus" size={16} />
+        </button>
+        <button
+          class="icon-btn hidden-fallback-add"
+          title={tr('settings.open')}
+          aria-label={tr('settings.open')}
+          onclick={() => openSettings()}
+        >
+          <Icon name="settings" size={16} />
         </button>
       {/if}
       <div class="main-title-center" data-tauri-drag-region>
@@ -2462,8 +2572,15 @@
 
 {#if settingsOpen}
   <SettingsPanel
+    initialTab={settingsTab}
+    childOpen={memorySyncOpen || pluginPanelOpen || deployOpen || memoryPanelOpen || memoryBrowseOpen}
     onClose={() => (settingsOpen = false)}
     onOpenMemorySync={() => { memorySyncOpen = true }}
+    onOpenMemoryReview={() => { memoryPanelOpen = true }}
+    onOpenMemoryBrowse={() => { memoryBrowseOpen = true }}
+    onOpenDeploy={() => { deployOpen = true }}
+    onEndpointsChanged={() => void refreshEndpoints()}
+    onAccountChanged={() => void refreshAccountStatus()}
     onOpenPlugins={() => { pluginPanelOpen = true }}
     onTakeScreenshot={() => void runConfiguredScreenshot()}
     {locale}
@@ -2489,6 +2606,10 @@
 
 {#if pairingOpen}
   <PairingDialog onClose={() => (pairingOpen = false)} />
+{/if}
+
+{#if accountOpen}
+  <AccountDialog onClose={() => (accountOpen = false)} />
 {/if}
 
 {#if endpointsOpen}
@@ -2931,6 +3052,68 @@
     color: var(--acc);
   }
 
+  /* Slack-style identity row: avatar + name/status opens the account menu,
+     the gear opens Settings. */
+  .sidebar-account {
+    position: relative;
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    padding: 6px 8px;
+    border-top: 1px solid var(--bd-default);
+  }
+  .account-trigger {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 4px;
+    border: 0;
+    border-radius: var(--rad-sm);
+    background: transparent;
+    color: var(--fg-primary);
+    font: var(--fs-sm) var(--font-ui);
+    text-align: left;
+    cursor: pointer;
+  }
+  .account-trigger:hover { background: var(--bg-tab-hover); }
+  .account-avatar {
+    position: relative;
+    display: grid;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: var(--rad-sm);
+    background: var(--acc);
+    color: var(--fg-on-accent);
+    font-weight: 700;
+  }
+  .account-avatar.empty { background: var(--bg-input); color: var(--fg-tertiary); }
+  .account-avatar img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+  .presence {
+    position: absolute;
+    right: -3px;
+    bottom: -3px;
+    width: 10px;
+    height: 10px;
+    box-sizing: border-box;
+    border: 2px solid var(--bg-sidebar);
+    border-radius: 50%;
+    background: var(--fg-tertiary);
+  }
+  .presence.on { background: var(--st-warn); }
+  .presence.live { background: var(--st-ok); }
+  .account-copy { display: grid; min-width: 0; gap: 1px; }
+  .account-copy strong { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .account-copy span { overflow: hidden; color: var(--fg-tertiary); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .account-gear { flex: 0 0 auto; }
+  .sidebar.compact .sidebar-account { flex-direction: column; padding: 6px 4px; }
+  .sidebar.compact .account-trigger { flex: 0 0 auto; justify-content: center; }
+  .sidebar.compact .account-copy { display: none; }
   .tab-list {
     flex: 1;
     overflow-y: auto;
