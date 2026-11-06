@@ -4,5 +4,5 @@
   "type": "module",
   "exports": { ".": "./host.js", "./client": "./client.js", "./package.json": "./package.json" },
   "dsh": { "client": { "platform": "web", "inject": [], "immediately": true } },
-  "peerDependencies": { "@deepseek-ai/dsh-client-connection": "0.2.1-rc.5" }
+  "peerDependencies": { "@deepseek-ai/dsh-client-connection": "*" }
 }
