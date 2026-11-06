@@ -10,7 +10,7 @@ export async function hostDirectory(ctx, config = {}) {
   const registry = ctx.get('workspaceRegistry')
   if (!registry) throw new Error('工作区服务尚未就绪。')
   const controller = sessionController(ctx)
-  const items = await classifyEmptySessions(controller, (await controller.list({})).items)
+  const items = await classifyEmptySessions(controller, (await controller.list({})).items, ctx.get?.('sessionQuery'))
   const runtime = ctx.get('kodeAgents'), profiles = runtime?.profiles
   const presentation = profile => { const view = runtime?.appearance?.profileView(profile) ?? profile; return { id: view.id, name: view.name, type: view.type, ...(view.avatar ? { avatar: view.avatar } : {}) } }
   const hiddenSessionIds = []

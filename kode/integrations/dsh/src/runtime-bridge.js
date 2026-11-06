@@ -1,6 +1,6 @@
 import { resolveDefaultSelection } from './model-alias.js'
 import { appendFastPreference } from './model-fast.js'
-import { needsEmptySessionCheck, setupOnlySession } from './empty-session.js'
+import { needsEmptySessionCheck, setupOnlySession, sessionInspector } from './empty-session.js'
 /** Project the existing dsh runtime into Kode. Never run a second Agent loop. */
 import { randomUUID, createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -70,7 +70,7 @@ export class RuntimeBridge {
     for (const row of items) {
       this.stop.signal.throwIfAborted()
       const agent = this.service('agents').get(row.sessionId)
-      const observed = agent ? { events: agent.session.snapshotEvents() } : await controller.inspect(row.sessionId, this.stop.signal)
+      const observed = agent ? { events: agent.session.snapshotEvents() } : await sessionInspector(controller, this.service('sessionQuery'))(row.sessionId, this.stop.signal)
       if (!agent && needsEmptySessionCheck(row) && setupOnlySession(observed)) {
         const previous = this.known.get(row.sessionId)
         if (previous && previous.status !== 'exited') {

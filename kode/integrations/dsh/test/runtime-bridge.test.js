@@ -231,3 +231,20 @@ test('continued timed questions stay answerable through the original dsh service
   await bridge.publish()
   assert.equal(bridge.continued.get(row.sessionId).size, 0)
 })
+
+test('0.2.2 query-only cold placeholders retire existing shared publications without activation', async () => {
+ let disposed=0
+ const publications=[],services={
+  sessionController:{list:async()=>({items:[{sessionId:'cold-draft',blank:false,running:false}]})},
+  sessionQuery:{observeSession:async()=>({inheritedEventCount:0,events:[{type:'permission/preset'},{type:'session/end-seed',data:{}}],[Symbol.dispose](){disposed++}})},
+  agents:{get:()=>undefined},
+ }
+ const backend={call:async(path,body)=>{
+  if(path.endsWith('/sessions'))return {sessions:[{runtime:'dsh',runtime_session_id:'cold-draft',status:'idle'}]}
+  publications.push(body);return {sessions:[]}
+ }}
+ const bridge=new RuntimeBridge({get:key=>services[key]},backend)
+ await bridge.publish();await bridge.publish()
+ assert.equal(disposed,2);assert.equal(publications.length,1)
+ assert.equal(publications[0].sessions[0].dto.status,'exited');assert.deepEqual(publications[0].sessions[0].events,[])
+})
