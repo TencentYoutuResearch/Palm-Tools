@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- The SDK answers the parent with postMessage(document.referrer origin);
+     custom-scheme parents (tauri://) would make that throw. -->
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="__KODE_PALM_CSP__">
+<title>Kode · Palm</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0f0e; color: #e8ece9; font: 15px -apple-system, system-ui, sans-serif; }
+  main { display: grid; place-items: center; height: 100%; text-align: center; padding: 24px; box-sizing: border-box; }
+  .status { max-width: 420px; line-height: 1.5; }
+  .diag { margin-top: 16px; color: #8a938d; font: 11px ui-monospace, monospace; white-space: pre-wrap; text-align: left; }
+  button { margin-top: 16px; padding: 10px 18px; border: 0; border-radius: 8px; background: #9fe870; color: #0d0f0e; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <div class="status" id="status">正在加载刷掌组件…</div>
+    <div class="diag" id="diag"></div>
+  </div>
+</main>
+<script>
+// Kode palm capture host. Query: mode=recognition|registration, app_id,
+// token (registration), user_id (registration), lang, diag=1.
+// The result goes back to the native host through the Flutter channel
+// `KodePalm`, else by navigating to kodepalm://result#<json>, which hosts
+// intercept and never load. Nothing leaves the device from this page.
+(function () {
+  'use strict';
+  var LOADER = '__KODE_PALM_LOADER__';
+  var START_TIMEOUT_MS = 120000;
+  var q = new URLSearchParams(location.search);
+  var mode = q.get('mode') === 'registration' ? 'registration' : 'recognition';
+  var appId = q.get('app_id') || '';
+  var statusEl = document.getElementById('status');
+  var diagEl = document.getElementById('diag');
+  var finished = false;
+
+  function diagnostics() {
+    return {
+      secure: window.isSecureContext,
+      referrer: document.referrer,
+      ua: navigator.userAgent,
+      media: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+      recorder: typeof MediaRecorder !== 'undefined',
+      wasmSimd: (function () {
+        try { return WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11])); }
+        catch (e) { return false; }
+      })()
+    };
+  }
+
+  function finish(result) {
+    if (finished) return;
+    finished = true;
+    result.diag = diagnostics();
+    var json = JSON.stringify(result);
+    if (q.get('diag') === '1') diagEl.textContent = JSON.stringify(result, null, 2);
+    if (window.KodePalm && typeof window.KodePalm.postMessage === 'function') {
+      window.KodePalm.postMessage(json);
+    } else {
+      location.href = 'kodepalm://result#' + encodeURIComponent(json);
+    }
+  }
+
+  if (q.get('diag') === '1') diagEl.textContent = JSON.stringify(diagnostics(), null, 2);
+  if (!appId) { finish({ code: 10001, message: 'app_id is required' }); return; }
+
+  var script = document.createElement('script');
+  script.src = LOADER;
+  script.async = true;
+  script.onerror = function () { statusEl.textContent = '刷掌组件加载失败，请检查网络'; finish({ code: 10500, message: 'loader failed to load' }); };
+  script.onload = function () {
+    var sdk = window.PalmMobileManager;
+    if (!sdk || !sdk.PalmMobileManager) { finish({ code: 10006, message: 'loader loaded without the SDK global' }); return; }
+    statusEl.textContent = mode === 'registration' ? '请按提示录入掌纹' : '请将手掌对准摄像头';
+    var params = mode === 'registration'
+      ? { token: q.get('token') || '', userId: q.get('user_id') || '', mode: 'registration', enableManager: false, customHeaders: { AppId: appId } }
+      // Matches the official site: recognition passes the AppId as userId.
+      : { token: '', userId: appId, mode: 'recognition', enableManager: false, customHeaders: { AppId: appId } };
+    // The SDK has no timeout before its iframe reports ready.
+    var timer = setTimeout(function () { finish({ code: 10008, message: 'palm capture did not finish in time' }); }, START_TIMEOUT_MS);
+    sdk.PalmMobileManager.start(params).then(function (result) {
+      clearTimeout(timer);
+      finish({ code: result.code, message: result.message, data: result.data || null });
+    }, function (error) {
+      clearTimeout(timer);
+      finish({ code: (error && error.code) || 10007, message: String((error && error.message) || error) });
+    });
+  };
+  document.head.appendChild(script);
+})();
+</script>
+</body>
+</html>

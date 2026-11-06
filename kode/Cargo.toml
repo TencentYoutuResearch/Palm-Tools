@@ -6,6 +6,8 @@ members = [
     "crates/kode-memory",
     "crates/kode-bridge",
     "crates/kode-sync-server",
+    "crates/kode-relay-protocol",
+    "crates/kode-relay",
     "apps/gui/src-tauri",
 ]
 exclude = ["vendor/vt100-ctt"]
