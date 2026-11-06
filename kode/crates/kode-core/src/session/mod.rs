@@ -207,6 +207,12 @@ impl Session {
         //    教 agent 用 memory_search / memory_propose 工具记/查共享 memory 池。
         //    用户在 backend.args 里已显式给 --append-system-prompt 等 flag 时会
         //    short-circuit(尊重)。enabled=false(GUI 关掉)也 short-circuit。
+        let final_args_pre_prompt = match &backend.effort {
+            Some(effort) => {
+                effort.inject_pty(&final_args_pre_prompt, backend.model_flag.as_deref(), None)?
+            }
+            None => final_args_pre_prompt,
+        };
         let final_args = inject_kode_memory_prompt(
             &final_args_pre_prompt,
             protocol_key,
@@ -301,6 +307,7 @@ impl Session {
             backend_key: backend_key.into(),
             backend_protocol: backend_key.into(),
             launch_config: BackendConfig {
+                effort: None,
                 protocol: Some(backend_key.into()),
                 command: command.into(),
                 args: vec![],
@@ -1944,6 +1951,7 @@ mod tests {
             99,
             "test",
             &BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "echo".into(),
                 args: vec![],
@@ -1991,6 +1999,7 @@ mod tests {
             100,
             "test",
             &BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "echo".into(),
                 args: vec![],
@@ -2051,6 +2060,7 @@ mod tests {
             101,
             "test",
             &BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "echo".into(),
                 args: vec![],

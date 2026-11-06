@@ -409,6 +409,7 @@ impl TailState {
 
 #[derive(Default)]
 struct LineUpdate {
+    selection: Option<crate::selection::SelectionObservation>,
     new_model: Option<String>,
     new_title: Option<String>,
     new_session_uuid: Option<String>,
@@ -432,7 +433,8 @@ struct LineUpdate {
 
 impl LineUpdate {
     fn changed(&self) -> bool {
-        self.new_model.is_some()
+        self.selection.is_some()
+            || self.new_model.is_some()
             || self.new_title.is_some()
             || self.new_session_uuid.is_some()
             || self.tokens_reset
@@ -625,6 +627,7 @@ async fn run_with_replay_policy(
                             state.last_title = Some(title.clone());
                             if evt_tx
                                 .send(CoreEvent::JsonlMeta {
+                                    selection: None,
                                     id,
                                     model: None,
                                     title: Some(title),
@@ -661,6 +664,7 @@ async fn run_with_replay_policy(
                         pending_retarget_path = None;
                         if let Some(session_uuid) = state.expected_session_uuid.clone() {
                             let _ = evt_tx.send(CoreEvent::JsonlMeta {
+                                selection: None,
                                 id,
                                 model: None,
                                 title: None,
@@ -701,6 +705,7 @@ async fn run_with_replay_policy(
                             pending_retarget_path = None;
                             let target_uuid = pending_retarget_uuid.take().unwrap_or_default();
                             let _ = evt_tx.send(CoreEvent::JsonlMeta {
+                                selection: None,
                                 id,
                                 model: None,
                                 title: None,
@@ -759,6 +764,9 @@ async fn run_with_replay_policy(
             Backend::Codex | Backend::Tcodex => parse_codex_line(backend, line, &mut state),
             Backend::Cursor | Backend::Opencode => LineUpdate::default(),
         };
+        if let Some(selection) = upd.selection.as_mut() {
+            selection.historical = line_start < replay_boundary;
+        }
         // Historical requests belong to this conversation, but not to the
         // newly spawned CLI's selected model. Keep their usage and identity.
         // A line appended while replay is in progress is still a live request.
@@ -799,6 +807,7 @@ async fn run_with_replay_policy(
                         pending_retarget_uuid = None;
                         // 显式通知 UI 清空旧 token/context(切到新 session 前先归零)。
                         let _ = evt_tx.send(CoreEvent::JsonlMeta {
+                            selection: None,
                             id,
                             model: None,
                             title: None,
@@ -889,6 +898,7 @@ async fn run_with_replay_policy(
 
         if evt_tx
             .send(CoreEvent::JsonlMeta {
+                selection: upd.selection,
                 id,
                 model: upd.new_model,
                 title: upd.new_title,
@@ -1422,6 +1432,22 @@ fn parse_codex_line(backend: Backend, line: &str, state: &mut TailState) -> Line
     }
 
     if entry.r#type.as_deref() == Some("turn_context") {
+        let bounded = |key: &str, max: usize| {
+            entry
+                .payload
+                .get(key)
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty() && v.len() <= max && !v.chars().any(char::is_control))
+                .map(str::to_owned)
+        };
+        upd.selection = Some(crate::selection::SelectionObservation {
+            source: crate::selection::SelectionSource::CodexTurnContext,
+            model: bounded("model", 256),
+            effort: bounded("effort", 64),
+            turn_id: bounded("turn_id", 160),
+            session_uuid: state.last_session_uuid.clone(),
+            historical: false,
+        });
         if let Some(model) = entry.payload.get("model").and_then(|v| v.as_str()) {
             if state.last_emitted_model.as_deref() != Some(model) {
                 upd.new_model = Some(model.to_string());
@@ -2743,6 +2769,35 @@ mod tests {
     }
 
     #[test]
+    fn codex_selection_keeps_unknown_effort_and_reports_unchanged_models() {
+        let mut state = TailState::new();
+        state.last_emitted_model = Some("fixture".into());
+        let update = parse_codex_line(
+            Backend::Codex,
+            r#"{"type":"turn_context","payload":{"model":"fixture","effort":"high","turn_id":"turn-1"}}"#,
+            &mut state,
+        );
+        assert!(update.new_model.is_none());
+        assert!(update.changed());
+        let observation = update.selection.unwrap();
+        assert_eq!(observation.effort.as_deref(), Some("high"));
+        assert_eq!(observation.turn_id.as_deref(), Some("turn-1"));
+        let unknown = parse_codex_line(
+            Backend::Codex,
+            r#"{"type":"turn_context","payload":{"model":"fixture"}}"#,
+            &mut state,
+        )
+        .selection
+        .unwrap();
+        assert!(unknown.effort.is_none());
+        let invalid = serde_json::json!({"type":"turn_context","payload":{"effort":"x".repeat(65),"model":"bad\nmodel"}}).to_string();
+        let invalid = parse_codex_line(Backend::Codex, &invalid, &mut state)
+            .selection
+            .unwrap();
+        assert!(invalid.effort.is_none() && invalid.model.is_none());
+    }
+
+    #[test]
     fn parses_codex_turn_context_and_token_count() {
         let mut state = TailState::new();
         let model_line = r#"{"timestamp":"2026-06-14T08:16:30Z","type":"turn_context","payload":{"cwd":"/tmp/p","model":"gpt-5.5"}}"#;
@@ -3185,7 +3240,7 @@ mod tests {
         let mut model = None;
         let mut identity = None;
         let mut usage = None;
-        for _ in 0..2 {
+        for _ in 0..3 {
             let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
                 .await
                 .unwrap()

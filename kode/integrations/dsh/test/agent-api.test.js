@@ -147,5 +147,19 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     assert.equal((await request({ action: 'save', profile: { name: 'Hidden', type: 'dsh' } })).status, 400)
     assert.equal((await request({ action: 'select', profileId: 'native', sessionId: agent.id })).status, 400)
     assert.equal(profiles.binding(agent.id).profile.executable, 'tcodex')
+    await profiles.patchBinding(agent.id,{managedOperation:{id:'controlled'},managedAssignment:{id:'assignment'}})
+    const selectionsBeforeGuard=selected.length
+    assert.equal((await request({action:'select',profileId:two.profile.id,sessionId:agent.id,model:'fixture'})).status,403)
+    assert.equal(selected.length,selectionsBeforeGuard)
+    assert.equal((await request({action:'edit-message',sessionId:agent.id,requestId:'managed-edit-request',seq:0,text:'Do not fork a managed operation'})).status,403,
+      'history edits must not bypass the managed Session fork fence')
+    assert.equal((await request({action:'session-avatar',sessionId:agent.id,avatarId:'fixture'})).status,403)
+
+    service.adapter.listModels=async()=>{throw Error('managed history must not probe an executor')}
+    const readOnlyConfiguration=await (await request()).json()
+    assert.equal(readOnlyConfiguration.managed.assignment_id,'assignment')
+    assert.equal(readOnlyConfiguration.canChangeAgent,false)
+    assert.deepEqual(readOnlyConfiguration.models,[])
+    assert.equal(readOnlyConfiguration.modelError,undefined)
   } finally { await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }) }
 })

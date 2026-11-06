@@ -84,8 +84,14 @@ fn backend(profile: &Value, previous: Option<&BackendConfig>) -> Result<BackendC
     if command.is_empty() || command.contains('\0') {
         bail!("Agent executable is missing or invalid");
     }
-    let defaults=kode_core::Config::default();
-    let mut config = previous.cloned().unwrap_or_else(||defaults.backends.get(kind).unwrap_or(&defaults.backends["codex"]).clone());
+    let defaults = kode_core::Config::default();
+    let mut config = previous.cloned().unwrap_or_else(|| {
+        defaults
+            .backends
+            .get(kind)
+            .unwrap_or(&defaults.backends["codex"])
+            .clone()
+    });
     config.protocol = Some(
         match kind {
             "codex" => {
@@ -582,6 +588,31 @@ pub(super) fn change(hub: &Hub, command: Change) -> Result<Catalog> {
                     .as_ref()
                     .and_then(|old| old["name"].as_str().map(str::to_owned)))
                 .unwrap_or_else(|| key.clone()));
+            // Desktop owns launch fields, while dsh/team configuration may add
+            // fields unknown to BackendConfig. Merge by stable ID, never name.
+            // Absent optional launch fields (notably defaultModel) stay cleared.
+            if let Some(old) = current.as_ref().and_then(Value::as_object) {
+                let projected = item.as_object_mut().unwrap();
+                for (field, value) in old {
+                    if ![
+                        "id",
+                        "name",
+                        "type",
+                        "origin",
+                        "executable",
+                        "args",
+                        "env",
+                        "defaultModel",
+                        "protocol",
+                    ]
+                    .contains(&field.as_str())
+                    {
+                        projected
+                            .entry(field.clone())
+                            .or_insert_with(|| value.clone());
+                    }
+                }
+            }
             value["profiles"].as_array_mut().unwrap().push(item);
         }
     } else {
@@ -603,10 +634,16 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     #[test]
-    fn codebuddy_keeps_its_protocol_and_permission_flags_for_named_profiles(){
-        let defaults=kode_core::Config::default();let item=profile("codebuddy",&defaults.backends["codebuddy"]).unwrap();
-        assert_eq!(item["type"],"codebuddy");let configured=backend(&item,None).unwrap();
-        assert_eq!(configured.protocol.as_deref(),Some("codebuddy"));assert_eq!(configured.permission_mode_flag.as_deref(),Some("--permission-mode"));
+    fn codebuddy_keeps_its_protocol_and_permission_flags_for_named_profiles() {
+        let defaults = kode_core::Config::default();
+        let item = profile("codebuddy", &defaults.backends["codebuddy"]).unwrap();
+        assert_eq!(item["type"], "codebuddy");
+        let configured = backend(&item, None).unwrap();
+        assert_eq!(configured.protocol.as_deref(), Some("codebuddy"));
+        assert_eq!(
+            configured.permission_mode_flag.as_deref(),
+            Some("--permission-mode")
+        );
     }
 
     fn host() -> (tempfile::TempDir, Arc<crate::Ctx>, Arc<Hub>) {
@@ -664,6 +701,13 @@ mod tests {
             .unwrap();
         assert_eq!(item["name"], "My original Codex");
         item["name"] = json!("Renamed in dsh");
+        item["defaultReasoningEffort"] = json!("high");
+        item["allowedModels"] = json!(["fixture-model"]);
+        item["responsibilities"] = json!(["review"]);
+        item["modelRoles"] = json!({"fixture-model":["reviewer"]});
+        item["pinned"] = json!(true);
+        item["extensionFixture"] = json!({"revision":3,"nested":["preserve"]});
+        item["defaultModel"] = json!("fixture-model");
         item["args"] = json!(["-c", "model_provider=\"gateway_v2\""]);
         item["env"] = json!({"EXAMPLE_KEY":"private-fixture-value"});
         save(&hub, row["revision"].as_u64().unwrap(), document).unwrap();
@@ -675,7 +719,8 @@ mod tests {
         );
         assert_eq!(ctx.backends()["work-agent"], shared.backends["work-agent"]);
         assert_eq!(shared.backends["work-agent"].command, "/usr/bin/env");
-        let config = shared.backends["work-agent"].clone();
+        let mut config = shared.backends["work-agent"].clone();
+        config.default_model = None;
         change(
             &hub,
             Change::Save {
@@ -693,6 +738,19 @@ mod tests {
             .find(|item| item["id"] == "kode-work-agent")
             .unwrap();
         assert_eq!(item["name"], "Edited in desktop");
+        assert_eq!(item["defaultReasoningEffort"], "high");
+        assert_eq!(item["allowedModels"], json!(["fixture-model"]));
+        assert_eq!(item["responsibilities"], json!(["review"]));
+        assert_eq!(item["modelRoles"], json!({"fixture-model":["reviewer"]}));
+        assert_eq!(item["pinned"], true);
+        assert_eq!(
+            item["extensionFixture"],
+            json!({"revision":3,"nested":["preserve"]})
+        );
+        assert!(
+            item.get("defaultModel").is_none(),
+            "desktop can clear its optional launch field"
+        );
         assert_eq!(item["env"]["EXAMPLE_KEY"], "private-fixture-value");
         assert_eq!(item["executable"], "codex");
         assert_eq!(item["args"], json!(["-c", "model_provider=\"gateway_v2\""]));

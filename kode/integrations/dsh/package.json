@@ -30,9 +30,7 @@
     "scripts/repair-plugin-records.py",
     "README.md",
     "cordis.patch.yml",
-    "cordis.remote.patch.yml",
-    "scripts/repair-inbox-history.js",
-    "scripts/repair-inbox-history.py"
+    "cordis.remote.patch.yml"
   ],
   "engines": {
     "node": ">=24.9.0",
@@ -55,7 +53,8 @@
     "test:ssh": "python3 scripts/test-ssh.py",
     "build:bundle": "node scripts/build-bundle.js",
     "build:directory-browse": "node scripts/build-directory-browse.js",
-    "build:chat": "node scripts/build-chat.js"
+    "build:chat": "node scripts/build-chat.js",
+    "build:collab": "node scripts/build-collab.js"
   },
   "bin": {
     "kode-sessions-mcp": "./src/mcp.js"
@@ -70,7 +69,8 @@
     "zod": "4.6.7",
     "js-yaml": "4.3.2",
     "@kode/dsh-chat": "file:packages/chat",
-    "qrcode": "1.5.4"
+    "qrcode": "1.5.4",
+    "@kode/dsh-collab": "file:packages/collab"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-include": "^1.0.10",
@@ -83,11 +83,13 @@
     "@deepseek-ai/dsh-web-app": "*",
     "@deepseek-ai/dsh-storage": "*",
     "@deepseek-ai/dsh-workspace": "*",
-    "@deepseek-ai/cordis": "4.0.5"
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-typert-protocol": "*"
   },
   "devDependencies": {
     "esbuild": "^0.25.12",
     "@deepseek-ai/dsh-bash-local": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.5"
+    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-rc.5"
   }
 }

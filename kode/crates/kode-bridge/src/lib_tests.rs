@@ -274,6 +274,7 @@ async fn mobile_text_input_submits_with_a_separate_carriage_return() {
     backends.insert(
         "capture".to_string(),
         BackendConfig {
+            effort: None,
             protocol: None,
             command: "/bin/sh".to_string(),
             args: vec![
@@ -302,6 +303,7 @@ async fn mobile_text_input_submits_with_a_separate_carriage_return() {
     let session = create_session(
         axum::Extension(Arc::clone(&ctx)),
         axum::Json(CreateSessionReq {
+            reasoning_effort: None,
             transport: Some("pty".to_string()),
             backend_key: "capture".to_string(),
             cwd: Some(
@@ -639,6 +641,7 @@ async fn create_session_emits_session_created_on_bus() {
 
     // 模拟 SpecOps 通过 HTTP API 调用 create_session
     let req = CreateSessionReq {
+        reasoning_effort: None,
         transport: Some("pty".to_string()),
         backend_key: "codebuddy".to_string(),
         cwd: Some(
@@ -686,6 +689,7 @@ async fn focus_session_emits_focus_requested_on_bus() {
     let token = "test-token-focus-session".to_string();
     let ctx = build_test_ctx(config, token);
     let req = CreateSessionReq {
+        reasoning_effort: None,
         transport: Some("pty".to_string()),
         backend_key: "codebuddy".to_string(),
         cwd: Some(
@@ -905,6 +909,7 @@ async fn pty_permission_snapshot_lists_native_modes() {
             rows: Some(24),
             permission_mode: mode.map(str::to_string),
             model: None,
+            reasoning_effort: None,
             resume_session_uuid: None,
             memory_context: None,
             extra_args: None,
@@ -942,4 +947,159 @@ fn detect_mode_reads_claude_cycle_footers() {
     ] {
         assert_eq!(detect_mode(footer), Some(mode), "{footer}");
     }
+}
+
+#[tokio::test]
+async fn runtime_selection_reaches_bus_and_session_projection_without_inheriting_missing_effort() {
+    use tokio::io::AsyncWriteExt;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("fixture-rollout.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"turn_context\",\"payload\":{\"model\":\"fixture\",\"effort\":\"low\"}}\n",
+    )
+    .unwrap();
+    let ctx = build_test_ctx(Config::default(), "fixture-selection".into());
+    ctx.sessions.lock().insert(
+        901,
+        Session::structured(
+            901,
+            "codex",
+            "fixture",
+            root.path(),
+            "fixture-session".into(),
+            "requested-model".into(),
+        ),
+    );
+    let mut events = ctx.bus.subscribe();
+    kode_core::session::jsonl_tail::spawn(
+        901,
+        kode_core::session::jsonl_tail::Backend::Codex,
+        path.clone(),
+        ctx.core_tx.clone(),
+        None,
+    );
+    for (expected, historical) in [(Some("low"), true), (Some("high"), false), (None, false)] {
+        if !historical {
+            let row =
+                json!({"type":"turn_context","payload":{"model":"fixture","effort":expected}});
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .await
+                .unwrap()
+                .write_all(format!("{row}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        let observation = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.r#type == "meta" && !event.payload["selection"].is_null() {
+                    break event.payload["selection"].clone();
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(observation["effort"], json!(expected));
+        assert_eq!(observation["historical"], historical);
+        assert_eq!(observation["source"], "codex_turn_context");
+        let sessions = ctx.sessions.lock();
+        let dto = serde_json::to_value(session_to_dto(&sessions[&901])).unwrap();
+        assert_eq!(dto["selection"], observation);
+    }
+    ctx.core_tx
+        .send(CoreEvent::JsonlMeta {
+            id: 901,
+            selection: None,
+            model: None,
+            title: None,
+            session_uuid: Some("other-session".into()),
+            tokens_reset: true,
+            tokens: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            cost_usd: None,
+            context_pct: None,
+        })
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.r#type == "meta" && event.payload["tokens_reset"] == true {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(ctx.sessions.lock()[&901].state.selection.is_none());
+}
+
+#[tokio::test]
+async fn requested_effort_is_scoped_to_the_created_session_and_rejects_unknown_levels() {
+    use kode_core::effort::{EffortAdapter, EffortConfig};
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("capture.sh");
+    let output = root.path().join("argv");
+    std::fs::write(&script, "out=$1; shift; printf '%s\\n' \"$@\" > \"$out\"\n").unwrap();
+    let mut config = Config::default();
+    let mut backend = config.backends["codex"].clone();
+    backend.protocol = Some("raw".into());
+    backend.command = "/bin/sh".into();
+    backend.args = vec![
+        script.to_string_lossy().into(),
+        output.to_string_lossy().into(),
+    ];
+    backend.default_model = None;
+    backend.model_flag = None;
+    backend.acp = None;
+    backend.effort = Some(EffortConfig {
+        default: Some("low".into()),
+        levels: vec!["low".into(), "high".into()],
+        adapter: EffortAdapter::Flag {
+            flag: "--effort".into(),
+        },
+    });
+    config.backends.insert("fixture".into(), backend);
+    let ctx = build_test_ctx(config, "fixture".into());
+    for (requested, expected) in [(Some("high"), "high"), (None, "low")] {
+        let req = serde_json::from_value(json!({"backend_key":"fixture","transport":"pty","cwd":root.path(),"headless":true,"reasoning_effort":requested})).unwrap();
+        let Json(dto) = create_session(Extension(ctx.clone()), Json(req))
+            .await
+            .unwrap();
+        assert_eq!(dto.configured_effort.as_deref(), Some(expected));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Ok(args) = std::fs::read_to_string(&output) {
+                    if !args.is_empty() {
+                        assert_eq!(args, format!("--effort\n{expected}\n"));
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::remove_file(&output).unwrap();
+        assert_eq!(
+            ctx.backends()["fixture"]
+                .effort
+                .as_ref()
+                .unwrap()
+                .default
+                .as_deref(),
+            Some("low")
+        );
+    }
+    let count = ctx.sessions.lock().len();
+    let req = serde_json::from_value(json!({"backend_key":"fixture","transport":"pty","cwd":root.path(),"headless":true,"reasoning_effort":"unsupported"})).unwrap();
+    assert!(create_session(Extension(ctx.clone()), Json(req))
+        .await
+        .is_err());
+    assert_eq!(ctx.sessions.lock().len(), count);
+    assert!(!output.exists());
 }

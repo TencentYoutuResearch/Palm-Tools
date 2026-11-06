@@ -18,8 +18,8 @@ for (const type of ['codex', 'cursor', 'custom']) test(`${type} native tools sen
   const tools = new Map(), disposers = [], inbox = [], events = []
   const sessionId = `native-${randomUUID()}`, peerId = `peer-${randomUUID()}`
   let adapter
-  const session = { header: { cwd: root }, append: (type, data) => events.push({ type, data }) }
-  const agent = { id: sessionId, session, followup: input => inbox.push(input), ctx: {
+  const session = { header: { cwd: root }, append: (type, data) => events.push({ seq: events.length, type, data }), snapshotEvents: offset => events.filter(event => event.seq >= offset) }
+  const agent = { id: sessionId, session, followup: input => { session.append('agent/inbox/spliced', { target: 'next-turn', start: inbox.length, removedCount: 0, inserted: [input] }); inbox.push(input) }, ctx: {
     parallel: async () => {}, get: () => undefined,
     tools: {
       register: tool => { tools.set(tool.name, tool); return () => tools.delete(tool.name) },
@@ -66,6 +66,9 @@ for (const type of ['codex', 'cursor', 'custom']) test(`${type} native tools sen
       await new Promise(resolve => setTimeout(resolve, 20))
     } while (Date.now() < deadline)
     assert.equal(receipt.status, 'accepted')
+    const observation = await peer.call(`${prefix}messages/${reply.id}/delivery`)
+    assert.equal(observation.delivery.phase, 'queued', 'the fixture supplies flushed queue events but no consumption event')
+    assert.equal(observation.delivery.input_id, inbox[0].id)
     assert.equal(inbox.length, 1)
     assert.match(inbox[0].content[0].text, /Native roundtrip verified/)
     assert.equal(inbox[0].source.senderSessionId, `kode:${node.node_id}:${peerId}`)

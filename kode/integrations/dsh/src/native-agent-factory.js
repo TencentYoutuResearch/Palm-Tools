@@ -77,6 +77,10 @@ export class NativeAgentFactory {
       // publication before setup may append model/preset/binding events.
       const suffix = session.snapshotEvents(storedCount)
       if (suffix.length) await handle.append(suffix)
+      // A persistence backend may defer even the header until flush. Publish
+      // only after the exact session and setup prefix are durable, so a later
+      // workspace-attachment failure can recover this identity after restart.
+      await handle.flush()
       check()
       detachSession = driver.ctx.sessions.enter(session)
       driver.ctx.sessions.announce(session); check()

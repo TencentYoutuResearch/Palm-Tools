@@ -132,6 +132,7 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
             let Json(dto) = create_session(
                 Extension(ctx),
                 Json(CreateSessionReq {
+                    reasoning_effort: None,
                     transport: None,
                     backend_key: req.backend_key,
                     cols: None,
