@@ -106,30 +106,50 @@ impl Client {
                 "This ACP session already has a live owner; close it before restoring".into(),
             );
         }
+        let selected_effort = backend
+            .effort
+            .as_ref()
+            .map(|effort| effort.selected(None).map_err(|error| error.to_string()))
+            .transpose()?
+            .flatten();
         // Preserve configured agent arguments; only the ACP spec supplies the transport entry.
         let spec = backend
             .acp
             .clone()
             .unwrap_or_else(kode_core::config::AcpSpec::flag);
         let model = model.or(backend.default_model.as_deref());
+        let mut args = backend.args.clone();
+        args.extend(spec.args.clone());
+        if let (Some(flag), Some(model)) = (spec.model_flag.as_deref(), model) {
+            args.extend([flag.into(), model.into()]);
+        }
+        if let Some(effort) = &backend.effort {
+            if !matches!(
+                effort.adapter,
+                kode_core::effort::EffortAdapter::AcpOption { .. }
+            ) {
+                args = effort
+                    .inject_pty(&args, spec.model_flag.as_deref(), None)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let mut command = Command::new(kode_core::pty::resolve_spawn_command(&backend.command));
         command
-            .args(&backend.args)
-            .args(&spec.args)
+            .args(&args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let (Some(flag), Some(model)) = (spec.model_flag.as_deref(), model) {
-            command.args([flag, model]);
-        }
         command
             .env("KODE_HOST", "1")
             .env("KODE_MEMORY_ROOT", crate::resolve_memory_root())
             .env_remove("KODE_HOOK_SOCK")
             .env_remove("KODE_SESSION_ID");
-        if std::env::var("KODE_GUI_RUNTIME").as_deref()==Ok("1") {
-            command.env("KODE_GUI_PROCESS_ID",std::process::id().to_string()).env("KODE_SESSION_ID",id.to_string()).env("KODE_BACKEND_KEY",backend_key);
+        if std::env::var("KODE_GUI_RUNTIME").as_deref() == Ok("1") {
+            command
+                .env("KODE_GUI_PROCESS_ID", std::process::id().to_string())
+                .env("KODE_SESSION_ID", id.to_string())
+                .env("KODE_BACKEND_KEY", backend_key);
         }
         let mut child = command
             .spawn()
@@ -190,9 +210,12 @@ impl Client {
             client.legacy_models.store(result["models"].is_object(), Ordering::Release);
             *client.modes.lock() = result["modes"].clone();
             client.apply_config_options(&result);
-            // Agents without a model flag pick the model in-session; an unknown model keeps the agent default.
+            // Explicit selection must be acknowledged; never silently retain a default.
             if let Some(model) = model.filter(|_| spec.model_flag.is_none()) {
-                let _ = client.select_config_option("model", model).await;
+                client.set_model(model).await?;
+            }
+            if let (Some(value), Some(kode_core::effort::EffortConfig { adapter: kode_core::effort::EffortAdapter::AcpOption { option }, .. })) = (selected_effort, backend.effort.as_ref()) {
+                client.select_option_id(option, value).await?;
             }
             if let Some(mode) = mode.filter(|m| *m != "default") {
                 let mode_id = if mode == "bypass" { "bypassPermissions" } else { mode };
@@ -381,26 +404,32 @@ impl Client {
                 "Agent returned a {category} option without an id"
             )));
         };
-        let result = self
+        Some(self.select_option_id(config_id, value).await)
+    }
+    async fn select_option_id(&self, config_id: &str, value: &str) -> Result<(), String> {
+        if !self
+            .config_options
+            .lock()
+            .iter()
+            .any(|o| o["type"] == "select" && (o["id"] == config_id || o["configId"] == config_id))
+        {
+            return Err("Agent does not advertise the requested configuration option".into());
+        }
+        let response = self
             .request(
                 "session/set_config_option",
                 json!({"sessionId":self.session_id(),"configId":config_id,"value":value}),
                 Some(Duration::from_secs(20)),
             )
-            .await;
-        Some(result.and_then(|response| {
-            self.apply_config_options(&response);
-            if self
-                .config_options
-                .lock()
-                .iter()
-                .any(|o| o["category"] == category && o["currentValue"] == value)
-            {
-                Ok(())
-            } else {
-                Err(format!("Agent did not confirm the requested {category}"))
-            }
-        }))
+            .await?;
+        self.apply_config_options(&response);
+        if self.config_options.lock().iter().any(|o| {
+            (o["id"] == config_id || o["configId"] == config_id) && o["currentValue"] == value
+        }) {
+            Ok(())
+        } else {
+            Err("Agent did not confirm the requested configuration value".into())
+        }
     }
     fn apply_config_options(&self, value: &Value) {
         let Some(options) = value["configOptions"].as_array() else {
@@ -569,11 +598,16 @@ impl Client {
         match update["sessionUpdate"].as_str() {
             Some("config_option_update") => self.apply_config_options(update),
             Some("current_mode_update") => {
-                if let Some(mode)=update["currentModeId"].as_str() {
-                    {let mut modes=self.modes.lock();if modes.is_object() {modes["currentModeId"]=json!(mode);}}
-                    self.emit("meta",json!({"mode":mode}));
+                if let Some(mode) = update["currentModeId"].as_str() {
+                    {
+                        let mut modes = self.modes.lock();
+                        if modes.is_object() {
+                            modes["currentModeId"] = json!(mode);
+                        }
+                    }
+                    self.emit("meta", json!({"mode":mode}));
                 }
-            },
+            }
             Some("agent_message_chunk") => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     let mut stream = self.stream.lock();
@@ -585,10 +619,13 @@ impl Client {
             }
             Some("tool_call" | "tool_call_update") => {
                 self.flush_message();
-                let name=update["name"].as_str().or(update["title"].as_str());
-                let mut payload=json!({"id":update["toolCallId"],"tool_use_id":update["toolCallId"],"tool":name,"name":name,"input":update["rawInput"],"status":update["status"],"content":update["content"]});
-                payload.as_object_mut().unwrap().retain(|_,value|!value.is_null());
-                self.emit("tool_use",payload);
+                let name = update["name"].as_str().or(update["title"].as_str());
+                let mut payload = json!({"id":update["toolCallId"],"tool_use_id":update["toolCallId"],"tool":name,"name":name,"input":update["rawInput"],"status":update["status"],"content":update["content"]});
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|_, value| !value.is_null());
+                self.emit("tool_use", payload);
             }
             _ => {}
         }
@@ -1194,5 +1231,58 @@ for line in sys.stdin:
         assert_eq!(client.permission_snapshot()["permission_mode"], "plan");
         assert!(!client.auto_approve.load(Ordering::Acquire));
         client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn creation_requires_acknowledged_model_and_effort_options() {
+        use kode_core::effort::{EffortAdapter, EffortConfig};
+        for (option, effort, model, succeeds) in [
+            ("thinking", "high", None, true),
+            ("thinking", "low", None, false),
+            ("missing", "high", None, false),
+            ("thinking", "high", Some("requested-model"), false),
+        ] {
+            let ctx = crate::build_test_ctx(kode_core::Config::default(), "fixture".into());
+            let mut backend = ctx.config.backend("opencode").unwrap().clone();
+            backend.command = "/usr/bin/python3".into();
+            backend.effort = Some(EffortConfig {
+                default: Some(effort.into()),
+                levels: vec!["low".into(), "high".into()],
+                adapter: EffortAdapter::AcpOption {
+                    option: option.into(),
+                },
+            });
+            backend.args = vec!["-u".into(), "-c".into(), r#"
+import json,sys
+options=[{'id':'thinking','type':'select','category':'thought_level','currentValue':'low','options':[{'value':'low'},{'value':'high'}]}, {'id':'model','type':'select','category':'model','currentValue':'old','options':[{'value':'old'},{'value':'requested-model'}]}]
+for line in sys.stdin:
+    frame=json.loads(line)
+    if 'id' not in frame: continue
+    method=frame['method']
+    if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+    elif method=='session/new': result={'sessionId':'fixture-effort','configOptions':options}
+    elif method=='session/set_config_option':
+        # Always acknowledge high, never acknowledge the requested model.
+        options[0]['currentValue']='high'
+        result={'configOptions':options}
+    else: raise Exception('Unexpected method; fixture must not run inference')
+    print(json.dumps({'jsonrpc':'2.0','id':frame['id'],'result':result}),flush=True)
+"#.into()];
+            let result = Client::start(
+                ctx,
+                993,
+                &backend,
+                "opencode",
+                Path::new("/tmp"),
+                None,
+                model,
+                None,
+            )
+            .await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(client) = result {
+                client.shutdown();
+            }
+        }
     }
 }

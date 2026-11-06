@@ -4,8 +4,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { AgentProfiles } from '../src/agent-profiles.js'
-import { AgentRuntimeAdapter, profileRoute } from '../src/agent-runtime.js'
+import { AgentProfiles, profileRevision } from '../src/agent-profiles.js'
+import { AgentRuntimeAdapter, discoveryRevision, installAgentRuntime, profileRoute } from '../src/agent-runtime.js'
 import { CodexSession } from '../src/codex-session.js'
 const fixture = fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))
 const consume = async stream => { const chunks = []; for await (const chunk of stream) chunks.push(chunk); return chunks }
@@ -34,6 +34,11 @@ test('dsh runtime binds profiles, forwards dynamic tools, persists native identi
     assert.equal(results[0].find(c => c.type === 'text-delta').text, 'codex: TOOL first')
     assert.equal(results[1].find(c => c.type === 'text-delta').text, 'tcodex: second')
     assert.equal(calls, 1)
+    const selection = profiles.binding('first').selectionEvidence
+    assert.equal(selection.model.status, 'acknowledged')
+    assert.equal(selection.model.observed, undefined, 'turn acceptance cannot prove actual inference model')
+    assert.deepEqual(selection.inputIds, ['one'])
+    assert.ok(events.some(e => e.data?.event?.method === 'kode/selection_evidence'))
     assert.ok(events.some(e => e.type === 'tool/result'))
     assert.equal(profiles.binding('first').threadId, profiles.binding('second').threadId)
     assert.notEqual(profiles.binding('first').profile.id, profiles.binding('second').profile.id)
@@ -142,4 +147,122 @@ test('late native events cannot append a tool lifecycle after its step has close
  assert.throws(()=>adapter.logCall(agent,'late','exec_command',{}),/open dsh step/)
  assert.throws(()=>adapter.logResult(agent,'late',[]),/open dsh step/)
  assert.equal(writes.length,0)
+})
+
+test('unconfirmed process stop is persisted and blocks input admission after adapter restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-stop-fence-'))
+  const profiles = await new AgentProfiles(join(root, 'agents.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fixture] }])
+  const events = [], agent = { id: 'worker', session: { header: { cwd: root } }, ctx: { parallel: async () => {} } }
+  const ctx = { agents: { get: () => agent }, sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { kind: 'start', step: 1 } }) } }
+  let adapter = new AgentRuntimeAdapter(ctx, profiles, { recordNative: (_, data) => events.push(data) })
+  const evidence = { spawned: true, leader_exited: false, exit_code: null, exit_signal: null, signal_scope: 'process_group', descendants_confirmed: false, signal_failures: [] }
+  const request = id => ({ sessionId: 'worker', provider: profileRoute('fixture'), model: 'fixture', messages: [{ id, role: 'user', content: [{ type: 'text', text: 'fixture' }] }] })
+  let closeStarted, release
+  const closing = new Promise(resolve => { closeStarted = resolve })
+  const closed = new Promise(resolve => { release = resolve })
+  adapter.createRuntime = async () => ({ nativeCalls: new Set(), async *turn() { throw new Error('fixture interrupted') }, close: async () => { closeStarted(); await closed; return evidence } })
+  try {
+    const first = consume(adapter.stream(request('first')))
+    const rejected = assert.rejects(first, /fixture interrupted/)
+    await closing
+    await assert.rejects(consume(adapter.stream(request('overlap'))), /active native request/)
+    release(); await rejected
+    assert.equal(profiles.binding('worker').stopBlocked, true)
+    assert.deepEqual(events.at(-1).event.params.inputIds, ['first'])
+    assert.equal(events.at(-1).event.method, 'kode/process_stop')
+    await adapter.close()
+    const reopened = await new AgentProfiles(profiles.path).open()
+    adapter = new AgentRuntimeAdapter(ctx, reopened, { recordNative: () => {} })
+    await assert.rejects(consume(adapter.stream(request('second'))), /session is fenced/)
+    assert.deepEqual(reopened.binding('worker').seenInputs, ['first'])
+  } finally { release(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('canceled native fixture records observed process exit without claiming descendant termination', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-stop-observation-'))
+  const profiles = await new AgentProfiles(join(root, 'agents.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fixture] }])
+  const events = [], agent = { id: 'worker', session: { header: { cwd: root }, append() {} }, ctx: { parallel: async () => {}, get: name => name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'workspace-write', workspaceRoot: root }) } : undefined, tools: { execute: async () => ({ content: [] }) } } }
+  const ctx = { agents: { get: () => agent }, sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { kind: 'start', step: 1 } }) } }
+  const adapter = new AgentRuntimeAdapter(ctx, profiles, { recordNative: (_, data) => events.push(data) })
+  const stop = new AbortController()
+  try {
+    await assert.rejects(consume(adapter.stream({ sessionId: 'worker', provider: profileRoute('fixture'), model: 'fixture', signal: AbortSignal.any([stop.signal, AbortSignal.timeout(5000)]), onNativeTurnReady: () => stop.abort(new Error('fixture cancellation')), messages: [{ id: 'cancel-me', role: 'user', content: [{ type: 'text', text: 'WAIT' }] }] })), /fixture cancellation/)
+    const observation = events.findLast(row => row.event.method === 'kode/process_stop').event.params
+    assert.equal(observation.spawned, true)
+    assert.equal(observation.leader_exited, true)
+    assert.equal(observation.descendants_confirmed, false)
+    assert.deepEqual(observation.inputIds, ['cancel-me'])
+    assert.equal(profiles.binding('worker').lastOutcome, 'uncertain')
+    assert.equal(profiles.binding('worker').stopBlocked, false)
+  } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('discovery reuses role-only edits but reprobes changed execution configuration', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-discovery-revision-')), log = join(root, 'wire.jsonl')
+  const profile = { id: 'fixture', name: 'Original', type: 'codex', executable: process.execPath, args: [fixture], env: { KODE_FIXTURE_RPC_LOG: log } }
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([profile])
+  const adapter = new AgentRuntimeAdapter({}, profiles)
+  const provider = profileRoute(profile.id)
+  const count = async () => (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse).filter(row => row.method === 'model/list').length
+  try {
+    await adapter.capabilities(provider, profile, root)
+    const assigned = { ...profile, name: 'Reviewer', responsibilities: ['review'], modelRoles: { fixture: ['reviewer'] }, pinned: true, assignedBy: 'owner' }
+    assert.notEqual(profileRevision(profile), profileRevision(assigned), 'authority revisions still include assignment changes')
+    assert.equal(discoveryRevision(profile), discoveryRevision(assigned))
+    await adapter.capabilities(provider, assigned, root)
+    assert.equal(await count(), 1, 'metadata edit must not launch a second process')
+    const changed = { ...assigned, env: { ...assigned.env, KODE_FIXTURE_AGENT_LABEL: 'changed' } }
+    await adapter.capabilities(provider, changed, root)
+    assert.equal(await count(), 2, 'execution environment changes invalidate discovery')
+    const changedArgs = { ...changed, args: [...changed.args, '--fixture-extra'] }
+    await adapter.capabilities(provider, changedArgs, root)
+    assert.equal(await count(), 3, 'argument changes invalidate discovery')
+    adapter.invalidateModels(provider)
+    await adapter.capabilities(provider, changedArgs, root)
+    assert.equal(await count(), 4, 'explicit refresh still reprobes')
+    const wire = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(wire.every(row => row.method !== 'turn/start'), 'discovery never runs inference')
+    assert.notEqual(discoveryRevision(changedArgs), discoveryRevision({ ...changedArgs, futureExecutionSetting: true }))
+    assert.notEqual(discoveryRevision(changedArgs), discoveryRevision({ ...changedArgs, executable: '/fixture/another-executable' }))
+  } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('profile save refresh preserves discovery while runtime replacement invalidates it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-discovery-refresh-')), log = join(root, 'wire.jsonl'), disposers = []
+  const profile = { id: 'fixture', name: 'Original', type: 'codex', executable: process.execPath, args: [fixture], env: { KODE_FIXTURE_RPC_LOG: log } }
+  const registration = Object.assign(() => {}, { replace() {} })
+  const ctx = { sessionProjections: { register: () => () => {} }, effect: fn => disposers.push(fn()), on() {}, emit() {}, parallel: async () => {}, provide() {}, llm: { registerAdapter: () => registration } }
+  try {
+    const service = await installAgentRuntime(ctx, { agentProfilesFile: join(root, 'profiles.json'), agentProfiles: [profile] })
+    const provider = profileRoute(profile.id)
+    await service.adapter.listModels(provider)
+    await service.profiles.save({ ...profile, name: 'Renamed' }); service.refresh()
+    await service.adapter.listModels(provider)
+    const count = async () => (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse).filter(row => row.method === 'model/list').length
+    assert.equal(await count(), 1)
+    const remove = service.registerRuntime('fixture-runtime', { name: 'Fixture', available: true })
+    await service.adapter.listModels(provider)
+    assert.equal(await count(), 2)
+    await remove()
+    await service.adapter.listModels(provider)
+    assert.equal(await count(), 3)
+  } finally { for (const dispose of disposers.reverse()) await dispose?.(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('an exited leader does not release a native process-group fence without drainage evidence', async () => {
+  for (const empty of [undefined, false, true]) {
+    const root = await mkdtemp(join(tmpdir(), 'kode-stop-group-'))
+    const profiles = await new AgentProfiles(join(root, 'agents.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fixture] }])
+    await profiles.bind('worker', 'fixture')
+    const agent = { id: 'worker', session: {} }
+    const ctx = { sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { kind: 'start', step: 1 } }) } }
+    const adapter = new AgentRuntimeAdapter(ctx, profiles, { recordNative: () => {} })
+    try {
+      await adapter.recordStop(agent, { close: async () => ({ spawned: true, leader_exited: true, signal_scope: 'process_group', signal_failures: [], ...(empty === undefined ? {} : { process_group_empty: empty }) }) })
+      assert.equal(profiles.binding('worker').stopBlocked, empty !== true)
+      assert.equal((await new AgentProfiles(profiles.path).open()).binding('worker').stopBlocked, empty !== true)
+    } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
+  }
 })

@@ -36,6 +36,7 @@ function run(command, args, { capture = false, cwd = root } = {}) {
   })
 }
 
+await run(process.execPath, [join(root, 'scripts/build-collab.js')])
 await run(process.execPath, [join(root, 'scripts/build-transport.js')])
 await run(process.execPath, [join(root, 'scripts/build-remote.js'), '--target', rustTarget])
 const destination = join(root, 'dist')

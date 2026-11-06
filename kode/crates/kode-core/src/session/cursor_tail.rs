@@ -167,6 +167,7 @@ async fn run(
                 if new_title.is_some() || new_session_uuid.is_some() {
                     if evt_tx
                         .send(CoreEvent::JsonlMeta {
+                            selection: None,
                             id,
                             model: None,
                             title: new_title,

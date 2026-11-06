@@ -1,3 +1,4 @@
+import { checkMcpPages } from './support/mcp-pages.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -30,12 +31,13 @@ test('MCP exposes session-bound model tools over real stdio and HTTP', { skip: !
   try {
     const initialized = await call('initialize', { protocolVersion: '2024-11-05' })
     assert.equal(initialized.result.serverInfo.name, 'kode-sessions')
-    const list = await call('tools/list', {}); assert.equal(list.result.tools.length, 4)
+    const list = await call('tools/list', {}); assert.equal(list.result.tools.length, 9); assert.ok(list.result.tools.some(tool => tool.name === 'kode_sessions_message_read'))
     const sent = await call('tools/call', { name: 'kode_sessions_send', arguments: { ...target.session.address, content: 'MCP peer message', idempotency_key: randomUUID() } })
     assert.equal(sent.result.isError, undefined)
     const message = JSON.parse(sent.result.content[0].text)
     assert.equal(message.source.session_id, source.session.address.session_id)
     assert.equal(message.content, 'MCP peer message')
+    await checkMcpPages(call, admin, source.session.address, target)
     const unknown = await call('tools/call', { name: 'unknown', arguments: {} }); assert.equal(unknown.result.isError, true)
   } finally {
     const exited = once(child, 'exit'); child.stdin.end(); await exited
