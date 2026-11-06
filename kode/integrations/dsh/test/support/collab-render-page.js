@@ -22,9 +22,15 @@ export async function collabRenderPage(req, res) {
     if (!target.startsWith(dist + sep)) return false
     body = await readFile(target)
     if (/\/index-[^/]+\.js$/.test(path)) {
-      const source = body.toString(), cut = source.lastIndexOf('const Ms=globalThis.dshDesktopBoot'), factory = source.match(/function (\w+)\(\)\{return\{react:/)?.[1]
-      if (cut < 0 || !factory) throw Error('Pinned dsh static-module boot seam changed')
-      body = source.slice(0, cut) + `globalThis.__KODE_TEST_MODULES__=${factory}();`
+      const source = body.toString()
+      // Minifiers rename the desktop boot variable across frontend releases;
+      // the assignment to this stable global marks the boundary after which
+      // the production desktop bootstrap executes. Keep the old rc2-era `Ms`
+      // seam working, but don't guess if the bundle shape becomes ambiguous.
+      const seams = [...source.matchAll(/\bconst\s+[A-Za-z_$][\w$]*\s*=\s*globalThis\.dshDesktopBoot\b/g)]
+      const factory = source.match(/function ([A-Za-z_$][\w$]*)\(\)\{return\{react:/)?.[1]
+      if (seams.length !== 1 || !factory) throw Error(`Pinned dsh static-module boot seam changed (found ${seams.length} boot assignments)`)
+      body = source.slice(0, seams[0].index) + `globalThis.__KODE_TEST_MODULES__=${factory}();`
     }
     mime = path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : mime
   } else return false
