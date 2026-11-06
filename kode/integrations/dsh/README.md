@@ -663,7 +663,7 @@ A shared saved-session import marker is reused only when the current Host still 
 
 These extensions live entirely in this plugin; they do not require editing dsh
 source or its installed files. The supported release is pinned to
-`0.2.1-rc.2` with Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
+`0.2.1-rc.5` with Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
 primitives provide the integration. A reversible presentation adapter wraps
 that release's `commandUi.candidates` and input controller to share the native
 menu for `/` and `$`; upgrading dsh requires checking those interfaces.
