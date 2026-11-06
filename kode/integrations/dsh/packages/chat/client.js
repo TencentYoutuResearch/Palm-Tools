@@ -5539,11 +5539,46 @@ function usageNumber(value) {
 function usageTableRows(snapshot) {
   return [...(snapshot?.rows ?? [])].sort((a, b) => b.total_tokens - a.total_tokens)
 }
+const usagePalette = ['#88e5b2', '#78b8ff', '#e6a58b', '#bdabff', '#f1cd78', '#ef96bd', '#63d5d1', '#d5b899']
+function usageGroupRows(rows, dimension) {
+  const groups = new Map()
+  for (const row of rows) {
+    const key = row[dimension] || '未知'
+    let group = groups.get(key)
+    if (!group) { group = { key, input_tokens: 0, output_tokens: 0, cached_tokens: 0, total_tokens: 0 }; groups.set(key, group) }
+    for (const field of ['input_tokens', 'output_tokens', 'cached_tokens', 'total_tokens']) group[field] += row[field] ?? 0
+  }
+  return [...groups.values()].sort((a, b) => b.total_tokens - a.total_tokens || a.key.localeCompare(b.key))
+}
+function usageView(snapshot, period, dimension, selected, now = new Date()) {
+  const groups = usageGroupRows(snapshot?.rows ?? [], dimension).map((row, index) => ({ ...row, color: usagePalette[index % usagePalette.length] }))
+  const chosen = new Set(selected ?? groups.map(row => row.key)), rows = groups.filter(row => chosen.has(row.key))
+  const totals = { input_tokens: 0, output_tokens: 0, cached_tokens: 0, total_tokens: 0 }
+  for (const row of rows) for (const field of Object.keys(totals)) totals[field] += row[field]
+  const pad = n => String(n).padStart(2, '0'), dateKey = date => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  const buckets = new Map((snapshot?.timeline ?? []).map(bucket => [bucket.date, usageGroupRows(bucket.rows, dimension)]))
+  const keys = []
+  if (period === 'today') for (let hour = 0; hour <= now.getHours(); hour++) keys.push(`${dateKey(now)}T${pad(hour)}:00`)
+  else if (period === 'month') for (let day = 1; day <= now.getDate(); day++) keys.push(`${dateKey(now).slice(0, 8)}${pad(day)}`)
+  else {
+    const first = [...buckets.keys()].sort()[0] ?? dateKey(now).slice(0, 7)
+    const [year, month] = first.split('-').map(Number)
+    const cursor = new Date(year, month - 1, 1)
+    while (cursor <= now) { keys.push(dateKey(cursor).slice(0, 7)); cursor.setMonth(cursor.getMonth() + 1) }
+  }
+  const timeline = keys.map(key => {
+    const values = new Map((buckets.get(key) ?? []).map(row => [row.key, row.total_tokens]))
+    const layers = rows.map(row => ({ key: row.key, color: row.color, value: values.get(row.key) ?? 0 }))
+    return { key, layers, total: layers.reduce((sum, row) => sum + row.value, 0) }
+  })
+  return { groups, rows, totals, timeline, max: Math.max(1, ...timeline.map(bucket => bucket.total)) }
+}
 function KodeTokenIsland() {
   const h = react.createElement, { IconChevronDownOutlineRegular, IconCloseOutlineRegular } = _deepseek_ai_dsh_client_ui_primitives
   const ctx = kodeWorkbenchContext, transport = ctx?.get('kodeTransport')
   const host = react.useSyncExternalStore(react.useCallback(fn => transport?.subscribe(fn) ?? (() => {}), [transport]), () => transport?.current ?? 'local')
   const [open, setOpen] = react.useState(false), [present, setPresent] = react.useState(false), [period, setPeriod] = react.useState('today')
+  const [dimension, setDimension] = react.useState('backend'), [selected, setSelected] = react.useState(null)
   const [result, setResult] = react.useState(null), [error, setError] = react.useState(''), [loading, setLoading] = react.useState(false), [refresh, setRefresh] = react.useState(0)
   const root = react.useRef(null), trigger = react.useRef(null), panelId = react.useId()
   const current = result?.host === host ? result : null
@@ -5585,12 +5620,13 @@ function KodeTokenIsland() {
     return () => document.removeEventListener('pointerdown', dismiss)
   }, [open])
   const snapshot = current?.period === period ? current.snapshot : null
-  const totals = snapshot?.totals, rows = usageTableRows(snapshot)
-  const dailyMax = Math.max(1, ...(snapshot?.daily ?? []).map(day => day.total_tokens))
-  const trend = (snapshot?.daily ?? []).slice(-30), trendMax = Math.max(1, ...trend.map(day => day.total_tokens))
-  const points = trend.map((day, i) => `${i * 280 / Math.max(1, trend.length - 1)},${52 - day.total_tokens / trendMax * 44}`).join(' ')
-  const backendTotals = new Map()
-  for (const row of rows) backendTotals.set(row.backend, (backendTotals.get(row.backend) ?? 0) + row.total_tokens)
+  const view = usageView(snapshot, period, dimension, selected), { totals, rows, timeline } = view
+  const rangeLabel = period === 'today' ? '今日 00:00 至现在 · 按小时' : period === 'month' ? '本月 1 日至今 · 按天' : '全部历史至今 · 按月'
+  const toggle = key => setSelected(prior => {
+    const next = new Set(prior ?? view.groups.map(row => row.key))
+    if (next.has(key)) next.delete(key); else next.add(key)
+    return [...next]
+  })
   const exact = value => Number.isFinite(value) ? value.toLocaleString() : '—'
   return h('div', { className: 'kode-token-rail', ref: root, onKeyDown: event => {
     if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus() }
@@ -5601,18 +5637,29 @@ function KodeTokenIsland() {
     present && h('section', { id: panelId, className: 'kode-token-panel', 'data-open': open, inert: !open ? '' : undefined, 'aria-hidden': !open || undefined, 'aria-label': 'Token 用量', 'aria-busy': loading },
       h('header', null, h('div', null, h('strong', null, 'Token 用量'), h('p', null, `${host === 'local' ? '本机' : host} · CLI 历史统计`)),
         h('button', { type: 'button', className: 'kode-token-close', 'aria-label': '收起 token 统计', onClick: () => { setOpen(false); trigger.current?.focus() } }, h(IconCloseOutlineRegular, { size: 16 }))),
-      h('div', { className: 'kode-token-periods', role: 'group', 'aria-label': '统计范围' }, ...[['today', '今天'], ['month', '本月'], ['all', '全部']].map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': period === id, onClick: () => setPeriod(id) }, label))),
+      h('div', { className: 'kode-token-periods', role: 'group', 'aria-label': '统计范围' }, ...[['today', '今天'], ['month', '本月'], ['all', '全部']].map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': period === id, onClick: () => { setPeriod(id); setSelected(null) } }, label))),
       error ? h('p', { role: 'alert', className: 'kode-token-error' }, error, ' ', h('button', { type: 'button', onClick: () => setRefresh(value => value + 1) }, '重试')) : !snapshot ? h('p', { role: 'status' }, '正在读取 CLI 历史…') : h(react.Fragment, null,
         h('dl', { className: 'kode-token-totals' }, ...[['总计', 'total_tokens'], ['输入', 'input_tokens'], ['输出', 'output_tokens'], ['缓存', 'cached_tokens']].map(([label, key]) => h('div', { key }, h('dt', null, label), h('dd', { title: exact(totals?.[key]) }, usageNumber(totals?.[key]))))),
         ...(snapshot.warnings ?? []).map((warning, i) => h('p', { key: i, className: 'kode-token-error' }, warning)),
-        backendTotals.size > 0 && h('div', { className: 'kode-token-backends', 'aria-label': '按 Agent 汇总' }, ...[...backendTotals].map(([backend, total]) => h('span', { key: backend, 'data-backend': backend }, h('i', { 'aria-hidden': true }), h('span', null, backend), h('strong', null, usageNumber(total))))),
-        trend.length > 0 && h('div', { className: 'kode-token-visuals' },
-          h('section', { className: 'kode-token-trend' }, h('h3', null, '近 30 天用量'), h('svg', { viewBox: '0 0 280 56', role: 'img', 'aria-label': '最近三十天 token 用量曲线' }, h('path', { d: 'M0 52H280', className: 'kode-token-axis' }), h('polygon', { points: `0,52 ${points} 280,52` }), h('polyline', { points })), h('div', null, h('span', null, trend[0]?.date.slice(5)), h('span', null, trend.at(-1)?.date.slice(5)))),
-          h('section', { className: 'kode-token-heat' }, h('h3', null, '近 12 周活跃度'), h('div', { className: 'kode-token-days' }, ...(snapshot?.daily ?? []).map(day => h('span', { key: day.date, title: `${day.date} · ${exact(day.total_tokens)} tokens`, 'aria-label': `${day.date}: ${exact(day.total_tokens)} tokens`, 'data-level': day.total_tokens ? Math.max(1, Math.ceil(day.total_tokens / dailyMax * 4)) : 0 }))))),
-        rows.length === 0 ? h('p', { className: 'kode-token-empty' }, '这个时间段暂无 CLI 用量记录。') : h('div', { className: 'kode-token-table-scroll' }, h('table', null,
-          h('thead', null, h('tr', null, ...['Agent / 模型', '输入', '输出', 'Token 总计'].map(label => h('th', { key: label, scope: 'col' }, label)))),
-          h('tbody', null, ...rows.map((row, index) => h('tr', { key: `${row.source}:${row.backend}:${row.model}:${index}` }, h('th', { scope: 'row' }, h('span', null, row.model), h('small', null, row.backend)), ...['input_tokens', 'output_tokens', 'total_tokens'].map(key => h('td', { key, title: exact(row[key]) }, usageNumber(row[key])))))))),
-        h('p', { className: 'kode-token-model-note' }, '模型用量明细 · 数值悬停可查看完整 token 数')),
+        h('div', { className: 'kode-token-dimensions', role: 'group', 'aria-label': '统计维度' }, ...[['backend', 'Agent'], ['model', '模型']].map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': dimension === id, onClick: () => { setDimension(id); setSelected(null) } }, label)), h('button', { type: 'button', className: 'kode-token-select-all', onClick: () => setSelected(null) }, '全选')),
+        view.groups.length > 0 && h('div', { className: 'kode-token-filters', role: 'group', 'aria-label': `选择${dimension === 'model' ? '模型' : ' Agent'}，支持多选` }, ...view.groups.map(group => h('button', { key: group.key, type: 'button', 'aria-pressed': selected === null || selected.includes(group.key), onClick: () => toggle(group.key), title: `${group.key} · ${exact(group.total_tokens)} tokens` }, h('i', { style: { background: group.color }, 'aria-hidden': true }), h('span', null, group.key), h('strong', null, usageNumber(group.total_tokens))))),
+        snapshot.timeline ? h('div', { className: 'kode-token-visuals' },
+          h('section', { className: 'kode-token-stack' }, h('h3', null, rangeLabel), h('div', { className: 'kode-token-scale' }, h('span', null, usageNumber(view.max)), h('span', null, 'tokens')),
+            h('svg', { viewBox: '0 0 560 112', role: 'img', 'aria-label': `${rangeLabel}，按${dimension === 'model' ? '模型' : 'Agent'}堆积用量` },
+              ...[12, 56, 100].map(y => h('path', { key: y, d: `M0 ${y}H560`, className: 'kode-token-axis' })),
+              ...timeline.flatMap((bucket, index) => {
+                let base = 0
+                return bucket.layers.map(layer => {
+                  const height = layer.value / view.max * 88, y = 100 - base - height; base += height
+                  return h('rect', { key: `${bucket.key}:${layer.key}`, x: index * 560 / timeline.length + 1, y, width: Math.max(.5, 560 / timeline.length - 2), height, fill: layer.color }, h('title', null, `${bucket.key} · ${layer.key}: ${exact(layer.value)} tokens · 合计 ${exact(bucket.total)}`))
+                })
+              })),
+            h('div', { className: 'kode-token-chart-labels' }, h('span', null, period === 'today' ? '00:00' : timeline[0]?.key), h('span', null, '现在'))),
+          h('section', { className: 'kode-token-heat' }, h('h3', null, period === 'today' ? '今日每小时活跃度' : period === 'month' ? '本月每日活跃度' : '全部历史每月活跃度'), h('div', { className: 'kode-token-activity', 'data-period': period }, ...timeline.map(bucket => h('span', { key: bucket.key, title: `${bucket.key} · ${exact(bucket.total)} tokens`, 'aria-label': `${bucket.key}: ${exact(bucket.total)} tokens`, 'data-level': bucket.total ? Math.max(1, Math.ceil(bucket.total / view.max * 4)) : 0 }, period === 'today' ? bucket.key.slice(11, 13) : period === 'month' ? bucket.key.slice(8) : bucket.key.slice(2)))))) : h('p', { className: 'kode-token-error', role: 'status' }, '此主机需更新 Kode 服务后才能显示分维度堆积统计。'),
+        rows.length === 0 ? h('p', { className: 'kode-token-empty' }, selected?.length === 0 ? '未选择统计项，请选择 Agent 或模型。' : '这个时间段暂无 CLI 用量记录。') : h('div', { className: 'kode-token-table-scroll' }, h('table', null,
+          h('thead', null, h('tr', null, ...[dimension === 'model' ? '模型' : 'Agent', '输入', '输出', 'Token 总计'].map(label => h('th', { key: label, scope: 'col' }, label)))),
+          h('tbody', null, ...rows.map((row, index) => h('tr', { key: row.key }, h('th', { scope: 'row' }, h('span', null, row.key)), ...['input_tokens', 'output_tokens', 'total_tokens'].map(key => h('td', { key, title: exact(row[key]) }, usageNumber(row[key])))))))),
+        h('p', { className: 'kode-token-model-note' }, '图表、活跃度与明细使用同一筛选 · 悬停查看完整 token 数')),
       h('footer', null, '每 30 秒更新 · CLI 历史统计，不等同于当前对话上下文占用')))
 }
 function installWorkbenchUi(ctx) {
@@ -5622,6 +5669,9 @@ function installWorkbenchUi(ctx) {
   ctx.effect(() => {
     const style = document.createElement('style')
     style.textContent = `.kode-token-rail{--island-green:#88e5b2;--island-cyan:#78cef2;--island-text:#f5f5f7;--island-muted:#a4a8b0;--island-line:#292d32;position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:220;display:flex;justify-content:center;pointer-events:none;width:min(620px,calc(100vw - 24px));height:0;color-scheme:dark;-webkit-app-region:no-drag}.kode-token-notch{position:relative;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:18px;width:min(250px,calc(100vw - 152px));height:34px;padding:0 13px;border:0;border-radius:0 0 16px 16px;background:#050608;color:var(--island-text);font:inherit;font-size:11px;cursor:pointer;pointer-events:auto;box-shadow:0 3px 8px #0002;font-variant-numeric:tabular-nums;transition:height 180ms cubic-bezier(.2,.78,.22,1),background 120ms}.kode-island-host{display:flex;align-items:center;gap:6px;white-space:nowrap;color:#d7dbe2;font-weight:500}.kode-island-host i{width:6px;height:6px;border-radius:50%;background:var(--island-green)}.kode-island-usage{display:flex;align-items:baseline;gap:6px;min-width:0;margin-left:auto;white-space:nowrap}.kode-island-usage strong{color:var(--island-green);font-size:13px;font-weight:650}.kode-island-usage>span{color:var(--island-muted);font-size:9px}.kode-token-notch>svg{color:var(--island-muted);flex-shrink:0}.kode-token-notch:hover{height:38px;background:#111418}.kode-token-notch:focus-visible,.kode-token-panel button:focus-visible{outline:2px solid var(--island-cyan);outline-offset:3px}.kode-token-panel{box-sizing:border-box;position:absolute;top:0;left:0;width:100%;max-height:calc(100dvh - 24px);overflow:auto;padding:52px 22px 18px;border:1px solid var(--island-line);border-top:0;border-radius:0 0 22px 22px;background:#090b0e;color:var(--island-text);box-shadow:0 12px 36px #0006;pointer-events:auto;font-size:13px;scrollbar-width:thin;scrollbar-color:#41464e transparent;transform-origin:50% 0;animation:kode-island-unfold 340ms cubic-bezier(.2,.78,.22,1) both;font-variant-numeric:tabular-nums}.kode-token-panel[data-open=false]{pointer-events:none;animation:kode-island-fold 280ms cubic-bezier(.45,0,.75,.2) both}.kode-token-panel::selection{background:#285248;color:#fff}.kode-token-panel header{display:flex;align-items:start;justify-content:space-between;gap:16px}.kode-token-panel header strong{font-size:17px;font-weight:600;letter-spacing:-.02em}.kode-token-panel header p{font-size:11px;color:var(--island-muted);margin:6px 0 0;overflow-wrap:anywhere}.kode-token-close{display:grid;place-items:center;width:30px;height:30px;border:0;border-radius:8px;background:transparent;color:var(--island-muted);cursor:pointer}.kode-token-close:hover{color:var(--island-text);background:#1c2026}.kode-token-periods{display:inline-flex;gap:3px;margin:18px 0 14px;padding:3px;border:1px solid var(--island-line);border-radius:9px;background:#0e1115}.kode-token-periods button{padding:5px 13px;border:0;border-radius:6px;background:transparent;color:var(--island-muted);font:inherit;font-size:12px;cursor:pointer}.kode-token-periods button:hover{color:var(--island-text)}.kode-token-periods button[aria-pressed=true]{color:var(--island-text);background:#262b32;box-shadow:0 1px 3px #0004}.kode-token-totals{display:grid;grid-template-columns:1.3fr repeat(3,minmax(0,1fr));margin:0 0 14px;border:1px solid var(--island-line);border-radius:12px;background:#111419;overflow:hidden}.kode-token-totals>div{padding:12px 14px;border-right:1px solid var(--island-line);min-width:0}.kode-token-totals>div:last-child{border:0}.kode-token-totals dt{font-size:11px;color:var(--island-muted)}.kode-token-totals dd{margin:7px 0 0;font-size:17px;font-weight:550;white-space:nowrap}.kode-token-totals>div:first-child dd{color:var(--island-green);font-size:22px;font-weight:650;letter-spacing:-.03em}.kode-token-backends{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 18px}.kode-token-backends>span{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--island-line);border-radius:8px;background:#13171d;padding:6px 9px;font-size:11px}.kode-token-backends i{width:5px;height:5px;border-radius:50%;background:var(--island-cyan)}.kode-token-backends [data-backend=codex] i{background:#bdabff}.kode-token-backends [data-backend=claude] i{background:#e6a58b}.kode-token-backends [data-backend=codebuddy] i{background:#78b8ff}.kode-token-backends strong{font-weight:550;margin-left:5px}.kode-token-visuals{display:grid;grid-template-columns:1.15fr 1fr;gap:22px;margin-bottom:18px;padding:0 0 16px;border-bottom:1px solid var(--island-line)}.kode-token-visuals section{min-width:0}.kode-token-visuals h3{margin:0 0 10px;color:var(--island-muted);font-size:10px;font-weight:500}.kode-token-trend svg{display:block;width:100%;height:60px;overflow:visible}.kode-token-axis{stroke:var(--island-line);fill:none}.kode-token-trend polygon{fill:#78cef215}.kode-token-trend polyline{stroke:var(--island-cyan);stroke-width:1.5;fill:none;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.kode-token-trend>div{display:flex;justify-content:space-between;margin-top:5px;font-size:9px;color:var(--island-muted)}.kode-token-days{display:grid;grid-template-rows:repeat(7,7px);grid-auto-flow:column;grid-auto-columns:7px;justify-content:space-between;gap:2px}.kode-token-days span{width:7px;height:7px;border-radius:2px;background:#20272b}.kode-token-days [data-level="1"]{background:#254a3b}.kode-token-days [data-level="2"]{background:#3e7c5c}.kode-token-days [data-level="3"]{background:#62b885}.kode-token-days [data-level="4"]{background:var(--island-green)}.kode-token-table-scroll{overflow-x:auto;max-height:260px;scrollbar-width:thin}.kode-token-panel table{width:100%;border-collapse:collapse;text-align:right;font-size:11px}.kode-token-panel th,.kode-token-panel td{padding:10px 6px;border-bottom:1px solid var(--island-line);white-space:nowrap;font-weight:400}.kode-token-panel th:first-child{text-align:left;max-width:225px;overflow:hidden;text-overflow:ellipsis;color:var(--island-text)}.kode-token-panel thead{position:sticky;top:0;background:#090b0e;color:var(--island-muted);font-size:10px}.kode-token-panel th small{display:block;margin-top:4px;color:var(--island-muted);font-size:10px}.kode-token-panel tbody td:last-child{color:var(--island-green);font-weight:550}.kode-token-model-note{font-size:10px;color:var(--island-muted);margin:10px 0 0}.kode-token-panel footer{padding-top:14px;font-size:10px;line-height:1.6;color:var(--island-muted)}.kode-token-empty{padding:20px 0;color:var(--island-muted)}.kode-token-error{color:#ffaaa6;line-height:1.6}.kode-token-error button{font:inherit;color:inherit;border:0;background:transparent;cursor:pointer;text-decoration:underline;text-underline-offset:3px}.kode-background-tasks{display:flex;align-items:center;min-width:0;padding:4px 6px 8px}.kode-background-tasks>div{max-width:100%}.kode-background-tasks button{font:inherit;font-size:12px}@keyframes kode-island-unfold{from{opacity:0;transform:scale(.44,.06);border-radius:0 0 16px 16px}70%{opacity:1;transform:scale(1.008,1.012)}to{opacity:1;transform:scale(1)}}@keyframes kode-island-fold{from{opacity:1;transform:scale(1)}to{opacity:0;transform:scale(.44,.06);border-radius:0 0 16px 16px}}@media(prefers-reduced-motion:reduce){.kode-token-panel,.kode-token-panel[data-open=false]{animation:none}.kode-token-notch{transition:none}}@media(max-width:480px){.kode-token-notch{width:200px;height:32px}.kode-token-panel{padding:48px 16px 16px}.kode-token-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.kode-token-totals>div:nth-child(2){border-right:0}.kode-token-totals>div:nth-child(-n+2){border-bottom:1px solid var(--island-line)}.kode-token-visuals{grid-template-columns:1fr}.kode-token-days{grid-auto-columns:10px;grid-template-rows:repeat(7,10px);justify-content:start;gap:3px}.kode-token-days span{width:10px;height:10px}.kode-token-panel th:first-child{max-width:130px}}
+`
+    style.textContent += `
+.kode-token-dimensions{display:flex;align-items:center;gap:4px;margin:4px 0 10px}.kode-token-dimensions button,.kode-token-filters button{font:inherit;font-size:12px;cursor:pointer;border:1px solid var(--island-line);border-radius:7px;background:#13171d;color:var(--island-muted);padding:6px 10px}.kode-token-dimensions button[aria-pressed=true]{color:var(--island-green);background:#1c3028;border-color:#486c59}.kode-token-dimensions .kode-token-select-all{margin-left:auto;border-color:transparent;background:transparent}.kode-token-filters{display:flex;flex-wrap:wrap;gap:6px;max-height:132px;overflow:auto;margin-bottom:18px;padding:2px}.kode-token-filters button{display:flex;align-items:center;gap:7px;max-width:100%;opacity:.5}.kode-token-filters button[aria-pressed=true]{color:var(--island-text);opacity:1;border-color:#555e6a}.kode-token-filters button:hover{background:#242b33;opacity:1}.kode-token-filters button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-token-filters i{width:8px;height:8px;border-radius:2px;flex-shrink:0}.kode-token-filters strong{font-size:11px;font-weight:500;color:var(--island-muted)}.kode-token-visuals{grid-template-columns:minmax(0,1fr);gap:18px}.kode-token-stack svg{display:block;width:100%;height:112px}.kode-token-stack rect:hover{filter:brightness(1.18)}.kode-token-scale,.kode-token-chart-labels{display:flex;justify-content:space-between;color:var(--island-muted);font-size:10px;margin:4px 0}.kode-token-activity{display:flex;flex-wrap:wrap;gap:4px;max-height:100px;overflow:auto}.kode-token-activity span{display:grid;place-items:center;min-width:24px;height:22px;padding:0 3px;border-radius:4px;background:#20272b;color:var(--island-muted);font-size:9px;font-variant-numeric:tabular-nums}.kode-token-activity [data-level="1"]{background:#254a3b;color:#d1f4df}.kode-token-activity [data-level="2"]{background:#356348;color:#e0ffe9}.kode-token-activity [data-level="3"]{background:#62b885;color:#07150d}.kode-token-activity [data-level="4"]{background:var(--island-green);color:#07150d}
 `
     document.head.append(style)
     return () => { style.remove(); if (kodeWorkbenchContext === ctx) kodeWorkbenchContext = undefined }

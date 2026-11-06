@@ -603,3 +603,43 @@ test('history edits publish a balanced native branch before sending and retain t
     assert.equal(child.status, 'idle')
   } finally { await h.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
 })
+
+for (const mode of ['cold', 'loaded', 'crash-loaded']) test(`restart recovery continues ${mode} native history exactly once`, async () => {
+  const { RestartResume } = await import('../src/restart-resume.js')
+  const root = await mkdtemp(join(tmpdir(), 'kode-restart-native-'))
+  let started, runs = 0
+  const ready = new Promise(resolve => { started = resolve })
+  const h = await host({ async *stream({ signal }) {
+    if (++runs === 1) { started(); await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); signal.throwIfAborted() }
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'Continued after restart' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Continued after restart' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }, closeSession: async () => {} })
+  const backend = { call: async () => ({ auto_resume_interrupted: true }) }
+  const file = join(root, 'restart.json'), initial = new RestartResume(h.ctx, backend, file)
+  await initial.load()
+  const subscription = h.ctx.on('agent/status', ({ agent }) => initial.status(agent))
+  try {
+    const first = await h.ctx.agents.create(options)
+    first.agent.followup(message('restart-task', 'Finish this task')); await ready
+    await first.dispose(); await initial.saving
+    assert.equal(initial.records[options.sessionId], true)
+    subscription()
+    if (mode === 'crash-loaded') h.stored.get(options.sessionId).events.pop()
+    h.ctx.provide('sessionController', {
+      inspect: async id => ({ events: h.stored.get(id).events }),
+      resolveAgent: id => h.ctx.agents.resume({ resumeSessionId: id, agentOptions: options.agentOptions }),
+    })
+    if (mode !== 'cold') await h.ctx.agents.resume({ resumeSessionId: options.sessionId, agentOptions: options.agentOptions })
+    const recovery = new RestartResume(h.ctx, backend, file); await recovery.load()
+    await recovery.recover(new AbortController().signal)
+    const agent = h.ctx.agents.get(options.sessionId); await agent.whenIdle()
+    assert.equal(runs, 2); assert.equal(agent.options.model, options.agentOptions.model)
+    const events = h.stored.get(agent.id).events
+    assert.equal(events.filter(event => event.type === 'user/message' && event.data.id === 'restart-task').length, 1)
+    assert.equal(events.filter(event => event.type === 'turn/start').length, 2)
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    await recovery.recover(new AbortController().signal); assert.equal(runs, 2)
+  } finally { subscription(); await h.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
+})

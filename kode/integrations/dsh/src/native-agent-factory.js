@@ -60,7 +60,11 @@ export class NativeAgentFactory {
           options = { ...options, agentOptions: { ...fallback, ...selected } }
         }
         const closers = interruptedTurnClosers(stored.events)
-        if (closers.length) await handle.append(closers)
+        if (closers.length) {
+          const start = stored.events.findLast(event => event.type === 'turn/start')
+          if (start) closers.push({ seq: stored.events.length + closers.length, time: Date.now(), type: 'plugin:kode/restart-interrupted', ignorable: true, data: { startSeq: start.seq, interruptedAt: stored.events.at(-1)?.time } })
+          await handle.append(closers)
+        }
         session = ctx.sessions.prepare(id, { seed: [...stored.events, ...closers], meta: handle.header, inheritedEventCount: handle.inheritedEventCount })
       } else {
         session = ctx.sessions.prepare(id, { ...(options.meta ? { meta: options.meta } : {}), ...(options.seed ? { seed: options.seed } : {}), ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}) })

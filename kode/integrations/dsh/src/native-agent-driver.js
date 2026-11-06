@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { ToolCallRecovery } from '@deepseek-ai/dsh-session'
+import { ToolCallRecovery, appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { AssistantStreamAccumulator, BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
@@ -118,7 +118,7 @@ export class NativeAgentDriver {
     })().catch(error => { this.events.emit('agent/error', { turn: this.turn, step: 1, error }) }).finally(() => { this.steeringTask = undefined; if (this.steeringRequested) this.scheduleSteering() })
   }
   inject(message) { this.send(message, 'next-step', false) }
-  cancel(cause, options = {}) { if (!options.keepInbox) this.inbox.clear(); this.abort?.abort(cause) }
+  cancel(cause, options = {}) { if (cause?.kind !== 'disposed' && this.status === 'running') appendPluginRecord(this.session, 'plugin:kode/manual-stop', {}); if (!options.keepInbox) this.inbox.clear(); this.abort?.abort(cause) }
   async whenIdle() { let pending; do { await (pending = this.activity) } while (pending !== this.activity) }
   async runMaintenance(job) {
     if (this.status !== 'idle' || this.maintenance) throw new Error('Agent already has active work')

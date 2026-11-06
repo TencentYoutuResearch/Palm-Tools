@@ -258,6 +258,10 @@ export async function apply(ctx, config = {}) {
       webCtx.effect(() => registerAgentHubApi(webCtx, { hub, backend: admin, service }), 'kode.agent-hub-api')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
       if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
+      webCtx.inject(['sessionController'], async scope => {
+        const { installRestartResume } = await import('./restart-resume.js')
+        await installRestartResume(scope, admin, `${stateFile}.restart.json`)
+      })
       if (runtimeConfig.sharedBackendState) webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
         const lifetime = new AbortController()
         const task = import('./workbench-import.js').then(({ syncNativeTabs }) => syncNativeTabs(sessionCtx.sessionController, admin, service.profiles, lifetime.signal))
