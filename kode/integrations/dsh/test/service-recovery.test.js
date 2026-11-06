@@ -130,6 +130,7 @@ for (const matchingIdentity of [true, false]) test(`detached worker relaunches t
     worker.send({ commit: true }); worker.disconnect()
     const exited = once(worker, 'exit'); parent.kill('SIGTERM'); await exited
     const deadline = Date.now() + 3000
+    // The two detached children can write their readiness markers in either order.
     while (true) { try { await access(marker); if (matchingIdentity) await access(server); break } catch { assert.ok(Date.now() < deadline); await new Promise(resolve => setTimeout(resolve, 20)) } }
     if (matchingIdentity) { await access(server); assert.ok(backend.exitCode !== null || backend.signalCode !== null) }
     else { await assert.rejects(access(server)); assert.equal(backend.exitCode, null); assert.equal(backend.signalCode, null) }

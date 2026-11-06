@@ -105,8 +105,36 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Frame {
-    WorkspaceRequest { id: String, command: super::workspaces::Command },
-    WorkspaceResponse { id: String, value: Option<serde_json::Value>, error: Option<String> },
+    OperationRequest {
+        id: String,
+        request: super::operation_relay::Request,
+    },
+    OperationResponse {
+        id: String,
+        value: Option<serde_json::Value>,
+        error: Option<String>,
+    },
+    DeliveryBatch {
+        entries: Vec<super::delivery::DeliveryEvent>,
+    },
+    DeliveryAck {
+        through: u64,
+    },
+    InputCancellation {
+        record: super::cancellation::Record,
+    },
+    Capabilities {
+        features: Vec<String>,
+    },
+    WorkspaceRequest {
+        id: String,
+        command: super::workspaces::Command,
+    },
+    WorkspaceResponse {
+        id: String,
+        value: Option<serde_json::Value>,
+        error: Option<String>,
+    },
     Hello {
         node_id: String,
         version: u32,

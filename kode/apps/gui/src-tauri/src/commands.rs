@@ -710,6 +710,7 @@ pub async fn spawn_session(
         return Ok(result);
     }
     let spec = SpawnSpec {
+        reasoning_effort: None,
         backend_key: backend_key.clone(),
         cols: cols.unwrap_or(80),
         rows: rows.unwrap_or(24),

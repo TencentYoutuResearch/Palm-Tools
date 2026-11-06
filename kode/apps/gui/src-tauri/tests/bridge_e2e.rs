@@ -25,6 +25,7 @@ fn test_config() -> Config {
     backends.insert(
         "echo".to_string(),
         BackendConfig {
+            effort: None,
             protocol: None,
             command: "/bin/cat".to_string(),
             args: vec![],

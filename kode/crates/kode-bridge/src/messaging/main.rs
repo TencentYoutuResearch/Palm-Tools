@@ -2,6 +2,16 @@
 use anyhow::{bail, Context, Result};
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().skip(1).eq(["--inspect-project"]) {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::io::stdin().take(32769).read_to_end(&mut bytes)?;
+        if bytes.len() > 32768 { bail!("project inspection request too large") }
+        let request = serde_json::from_slice(&bytes)?;
+        let result = kode_bridge::project_inspection::inspect(request)?;
+        println!("{}", serde_json::to_string(&result)?);
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -15,7 +25,7 @@ async fn main() -> Result<()> {
             "--token-file" => token_file = args.next(),
             "--bind" => bind = args.next().context("--bind needs an address")?,
             "--help" => {
-                println!("kode-session-server --config CONFIG.json --token-file TOKEN [--bind 127.0.0.1:47870]");
+                println!("kode-session-server --config CONFIG.json --token-file TOKEN [--bind 127.0.0.1:47870]\nkode-session-server --inspect-project < selected-project-request.json");
                 return Ok(());
             }
             _ => bail!("unknown argument: {arg}"),

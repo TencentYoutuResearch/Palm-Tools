@@ -1,6 +1,8 @@
 # kode sessions for dsh
 
-This integration adds **model-callable session communication** to DeepSeek Harness. It uses kode's Rust backend for durable local/SSH routing and dsh's original conversation, tool execution and inbox. It does not add a messaging page or replace kode's GUI.
+This integration adds **model-callable session communication** to DeepSeek Harness. It uses kode's Rust backend for durable local/SSH routing and dsh's original conversation, tool execution and inbox. The current isolated worktree also implements an opt-in Superagents/IM layer with persistent teams, configurable workflows, budgets and evidence. It has not been installed into the daily environment.
+
+For the current product flow, read the [Superagents/IM usage guide](../../.specops/changes/super-agent-im-collab/usage-guide.md), [upgrade checklist](../../.specops/changes/super-agent-im-collab/upgrade-checklist.md), and [current acceptance status](../../.specops/changes/super-agent-im-collab/acceptance-audit.md). Development notes below include historical checkpoints; they do not supersede the latest acceptance record or establish a full regression pass.
 
 The initial integration targets `@deepseek-ai/dsh@0.2.1-rc.2` and Node >=24.9.0. The plugin is opt-in. Existing kode behavior is unchanged without `KODE_MESSAGING_CONFIG`.
 
@@ -115,13 +117,18 @@ Then start `dsh web`. Open/resume a session and ask the model to use:
 | Tool | Behavior |
 |---|---|
 | `kode_sessions_list` | List local and connected-peer addresses and availability |
+| `kode_sessions_create` | Create a helper with a stable creation key and assign its task |
+| `kode_sessions_creation_status` | Query a prior creation by its original key and Host without starting work |
 | `kode_sessions_send` | Send content using an explicit target and a stable idempotency key |
+| `kode_sessions_delivery_status` | Inspect prepared/queued/consumed runtime evidence on the execution Host; not task completion |
 | `kode_sessions_read` | Read this session's communication events after a cursor |
 | `kode_sessions_wait` | Wait up to 30 seconds for communication events |
 
+If a creation response is lost, query `kode_sessions_creation_status` using the same key and execution Host. `completed` describes session creation only, not task assignment or completion. `uncertain` means creation or submission may have happened; do not create a replacement blindly. `pending` is not proof that no session exists.
+
 A reply is another send with `in_reply_to` set to the original message ID. The backend checks both participants. Delivery acceptance does not mean task completion.
 
-Incoming messages are attributed peer messages in the original dsh conversation. They queue a separate turn and do not answer pending approvals. On a Web Host with the native `sessionController`, the plugin automatically resumes a previously registered dsh session when it has pending messages. The native controller restores its recorded preset, model selection and persistence ownership; dsh's archive admission still controls whether it runs. Only session IDs already owned in this Host's token state file are eligible, never arbitrary sessions discovered on another Host. Set `resumeInactive: false` to require manual resume; Hosts without the controller retain queued messages until manual resume. The wakeup probe does not claim messages, so a failed resume leaves delivery pending.
+Incoming messages are attributed peer messages in the original dsh conversation. They queue a separate turn and do not answer pending approvals. On a Web Host with the native `sessionController`, the plugin automatically resumes a previously registered dsh session when it has pending messages, prepared/queued runtime deliveries without a cancellation, or requested input cancellations. Consumed deliveries and terminal cancellations alone do not wake a cold session. The probe counts each actionable message once; accepted inputs remain recoverable even after their original transport TTL. Resume still observes native execution fences and never treats a wakeup as permission to replay an external effect. The native controller restores its recorded preset, model selection and persistence ownership; dsh's archive admission still controls whether it runs. Only session IDs already owned in this Host's token state file are eligible, never arbitrary sessions discovered on another Host. Set `resumeInactive: false` to require manual resume; Hosts without the controller retain queued messages until manual resume. The wakeup probe does not claim messages, so a failed resume leaves delivery pending.
 
 ## Connect over SSH
 
@@ -219,7 +226,7 @@ python3 integrations/dsh/scripts/test-ssh.py
 
 The SSH script does not modify `~/.ssh` or system SSH settings. It requires a usable local `sshd` and `ssh-keygen`; unsupported environments fail explicitly.
 
-`test/fixture-model.js` is a local OpenAI-compatible inference fixture for manual dsh runtime verification. It handles fixture prompts only and never calls a remote model. Real dsh 0.2.1-rc.2 was used to verify model tool discovery/calls, native inbox persistence, and a request/reply roundtrip between two dsh Hosts through OpenSSH. A second verification stopped the receiving dsh Host, queued a message over SSH, restarted dsh without opening the session, and observed native cold resume, a model-issued reply linked by `in_reply_to`, and accepted receipts on both nodes. Both bridge binaries must use the same protocol revision. This is integration evidence, not a model-quality evaluation.
+`test/fixture-model.js` is a local OpenAI-compatible inference fixture for manual dsh runtime verification. It handles fixture prompts only and never calls a remote model. Real dsh 0.2.1-rc.2 was used to verify model tool discovery/calls, native inbox persistence, and a request/reply roundtrip between two dsh Hosts through OpenSSH. A second verification stopped the receiving dsh Host, queued a message over SSH, restarted dsh without opening the session, and observed native cold resume, a model-issued reply linked by `in_reply_to`, and accepted receipts on both nodes. New bridges negotiate link v2 using an optional authenticated upgrade header and a server-first Hello. Old bridges retain v1 message behavior; capability frames are exchanged only after both sides select v2. A v2 handshake alone does not imply support for managed collaboration operations. This is integration evidence, not a model-quality evaluation.
 
 ## Agent configurations and native CLI conversations
 
@@ -656,7 +663,7 @@ A shared saved-session import marker is reused only when the current Host still 
 
 These extensions live entirely in this plugin; they do not require editing dsh
 source or its installed files. The supported release is pinned to
-`0.2.1-rc.2` with Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
+`0.2.1-rc.5` with Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
 primitives provide the integration. A reversible presentation adapter wraps
 that release's `commandUi.candidates` and input controller to share the native
 menu for `/` and `$`; upgrading dsh requires checking those interfaces.
@@ -933,3 +940,1031 @@ session folders every time, including conversations created since the last
 scan, and validates released V4 envelopes, relationships, fork cuts and inbox
 prefixes. It reports artifacts changing during a read and exits nonzero on
 validation failures. It never repairs a log or replays a prompt.
+
+
+Runtime delivery evidence uses a separate durable ledger. The dsh Host records a stable
+message/input binding before queuing work, reports `queued` after persistence, and
+reports `consumed` only after observing the corresponding persisted `user/message` event.
+Recovery inspects recorded events without resubmitting the input. Missing evidence stays
+unconfirmed. Existing PTY paths retain their approximate acceptance semantics. The execution Host mirrors observations to the sender only when both peers negotiate
+`delivery_observations_v1`; durable acknowledgement cursors and idempotent batches recover
+from lost replies. The query identifies the execution node and whether data is a remote
+mirror. Missing evidence is not proof of non-execution. Cancellation is not yet implemented. Old backends without `delivery_tracking` retain their existing path.
+
+### Input-scoped cancellation (incremental)
+
+`kode_sessions_cancel_input(message_id)` requests cancellation of the caller's own message after a runtime input binding exists. `kode_sessions_cancellation_status(message_id)` reads the persisted result. These controls are separate from message receipt and task completion. A request is idempotent per message; the execution session polls controls without waiting for a model turn.
+
+The Kode native driver removes only the matching queued input and flushes before reporting `queued_removed`. A sole active input may request abort, but reports `cancel_unconfirmed / stop_requested` until adapter-specific process termination evidence is implemented. Shared turns refuse the abort (`shared_turn`); unsupported runtimes report `runtime_unsupported`. Unrelated queued inputs remain intact. Lost queue-removal responses can be recovered from session splice evidence. Unknown inputs do not imply successful cancellation.
+
+Remote requests require a mirrored input binding and previously authenticated `input_cancellation_v1` negotiation. The sender persists and periodically resends requests until the execution Host returns a durable result. Duplicate requests return the same result without re-enqueuing control; source/target identity and input binding are checked. A v1 reconnect disables new remote requests; existing pending controls remain pending until a compatible connection returns. The sender does not poll remote controls as local work even if session names coincide. Durable stop acknowledgements, pre-binding withdrawal, lease/attempt fencing and subprocess termination proofs remain pending. This is not the complete workflow cancellation contract.
+
+Native RPC and ACP processes now share owned-process cleanup. On POSIX, cleanup signals their own process group, escalates TERM to KILL and waits at most five seconds for leader exit. The returned evidence distinguishes leader exit from descendant termination; it does not certify escaped descendants or external operations stopped. Windows cleanup reports leader-only scope. These observations do not yet change `cancel_unconfirmed` into a confirmed workflow cancellation.
+
+Interrupted native turns append `kode/process_stop` evidence to the existing native-event audit and persist it on their binding. If a spawned leader has not exited or termination signalling fails, the binding is fenced (`stopBlocked`) across restart: new inputs remain queued and no new native turn is admitted. Busy ownership is held throughout cleanup. The fence requires explicit Host-owner reconciliation; it is never automatically cleared by a new message. Leader exit still does not certify descendant or external-operation termination, and the interrupted task remains uncertain.
+
+Owner-only stop reconciliation uses JSON POST `/api/kode/session-stop-control` through the existing authenticated Host connection (including its owner-authenticated remote transport). Status body: `{"action":"status","session_id":"…"}`. Reconcile body: `{"action":"reconcile","session_id":"…","expected_fence_id":"…","processes_checked":true,"reason":"What was inspected and resolved","resume":false}`. Obtain the current fence ID from status after checking owned processes and external work. Reconciliation is a recorded human attestation, not an automatic observation or successful-task verdict. It rejects active cleanup and stale fence IDs; repeated requests do not duplicate the audit. `resume:true` explicitly wakes an already loaded session's queue; cold sessions are not silently opened. No model-side release tool is provided.
+
+Model-facing message reads are bounded to 16 events / 8,192 conservative estimated token units for the entire JSON payload, with at most 1,024-code-point content previews. Until an executor-specific tokenizer is available, one serialized UTF-8 byte counts as one estimated unit; `token_budget` marks `accounting: serialized_utf8_bytes` and `exact_tokens: false`. This is a conservative fallback for byte-backed tokenizers, not actual provider usage and not a bound on surrounding prompt/tool framing. Full-message pages share this budget and the existing 4,096-code-point maximum; JSON escapes and metadata count. A first preview may shrink to fit, with its continuation offset adjusted; oversized metadata fails explicitly without advancing the cursor. Follow the returned cursor until an empty page (`may_have_more` is conservative); cursors never skip events omitted from the page. Automatic inbox delivery fits the complete followup JSON object (attribution, routing instructions and escaped text) within the same 8,192-unit estimate and a maximum 4,096-code-point preview. Its continuation offset is the actual retained code-point count. This bounds each input, not cumulative conversation context or repeated tool reads. Use `kode_sessions_message_read(message_id, offset)` and follow `next` until null for full content; offsets count Unicode code points. The underlying participant-authorized message endpoint retains the original text. Preview consumption proves only that preview entered the runtime, not that every byte was read. Truncated reply previews do not trigger the existing read-in-turn queue removal shortcut. The v1 backend event API keeps complete Message DTOs but caps aggregate stored event bytes per page at 256 KiB (always allowing a first event for progress).
+
+`kode_sessions_lifecycle_read(after)` reads the new participant-scoped audit projection via `/api/v1/messaging/lifecycle-events`. Its cursor is separate from legacy message-event cursors. Kinds are `message` (status only, no full content), `delivery`, `remote_delivery` and `cancellation`. The backend returns up to 100 records / approximately 32 KiB. Host, JS MCP and Rust MCP expose the lifecycle tool only when advertised by the Hub, and project at most 16 records within the same 8192-unit serialized-byte estimate as message reads. Complete audit records are preserved; an individually oversized record fails without advancing the cursor. Follow cursor until an empty page. Source mutations and audit projection are transactional, including remote mirror imports. Older records are imported once and marked `historical:true`; their import sequence does not prove chronology across the former independent logs. New sequences order local commits, not distributed causality or task completion. This stream does not yet cover the future team/workflow/usage audit domains.
+
+Messaging databases now use SQLite `user_version` migrations (current schema 3, also exposed as `messaging_schema_version` in node metadata). Before upgrading an existing lower-version store, the owning bridge creates a private, consistent SQLite snapshot named `*.pre-vN-<UUID>.sqlite`, including committed WAL contents. Upgrade DDL, lifecycle import and version advancement are transactional. Wrong-node and newer-schema stores are refused; reopening an up-to-date database does not repeat backups or historical import. This does not migrate or install anything until the new backend is explicitly run against a store. Retained backups contain the whole store and must retain owner-only access; never restore over an active bridge.
+
+An initial home-Hub operation ledger is available at POST `/api/v1/messaging/operations` (`owner_session`, `request_key`, local `worker` address), GET/POST `/operations/:id`, and GET `/operations/:id/events?after=…` under the messaging API prefix. Commands carry `attempt`, `epoch`, `expected_revision` and a typed `action`: claim/renew (1–60 second lease), report, cancel, admin-only stop attestation, or next attempt after stopped. Preparation does not start a Worker. Lease expiry produces uncertain, revokes the epoch and never retries. Reports deduplicate by report ID and preserve late results without advancing state; reported is not completed. New attempts require a stopped prior attempt, with owner attestation when prior execution was uncertain. Events are scoped and paginated.
+
+This ledger has an explicit owner opt-in for native turn and Host-mediated tool admission; automatic dispatch, CLI-internal side-effect fencing, remote operation routing and workflow evidence gates remain incomplete. Existing ordinary session messages retain their behavior. Do not treat these endpoints alone as enforcement against external Worker side effects; full managed execution still requires the adapter integration and capability gate.
+
+Owner JSON POST `/api/kode/session-operation` attaches a prepared local operation using `session_id`, `operation_id` and `expected_revision`. It requires an idle loaded native session with an empty inbox and no unresolved assignment; attachment runs under the driver's maintenance exclusion and does not inject work. The response explicitly labels enforcement `turn_and_host_tools_only`. The next ordinary input acquires its lease with the session-scoped credential; active/uncertain operations are never blindly reacquired after a lost response/restart.
+
+The bound turn renews conservatively and uses a monotonic local deadline armed independently of network calls. Revocation, identity changes, transport failure or deadline expiry abort the turn. Host-mediated tools and approval decisions recheck authority; steering, native slash commands, human shell shortcuts and continuation turns cannot share/bypass this binding. Ended executions persist `operationClosed`, leaving later input queued until explicit owner attachment to another prepared operation. Successful native return reports only `reported`, not workflow completion. This does not fence every CLI-internal action or already-issued external side effect and is not advertised as a fully compatible automatic Worker capability.
+
+### Execution evidence (development)
+
+Owner-authenticated `POST /api/kode/session-execution-evidence` accepts
+`{"session_id":"<existing-native-session>"}`. It reads persisted metadata only,
+including cold sessions; it never opens an executor or refreshes an account.
+The response separates model/effort `selection` evidence from `quota`.
+`acknowledged` means the executor accepted a request; `reported` means it returned
+configuration values. Neither proves the provider's actual inference model.
+Quota windows carry individual freshness (`reported`, `unknown`, `stale`, or
+`reset_passed`). A notification for one bucket does not refresh other buckets.
+Current observations are explicitly account-unbound and ineligible for dispatch;
+they are not team budgets or an account-wide remaining balance. The endpoint does
+not return profile environment variables, credentials, or session transcripts.
+
+### Internal budget recovery (development)
+
+The Hub budget API currently requires its existing administrator authorization;
+these routes are not exposed as model spending tools. Amounts are integer units
+chosen in the budget configuration, separate from provider quota observations.
+
+- `GET /api/v1/messaging/budgets/:id` reports internal budget, reserved/spent,
+  estimated charges and signed available amount, labelled `团队预算`.
+- `GET /api/v1/messaging/budget-reservations/:id` reads the current reservation
+  and `billing_status`; pending reconciliation is not a refund or task completion.
+- `GET /api/v1/messaging/budget-reservations/:id/settlements/:event` retrieves
+  an immutable settlement receipt after a lost response. Its result is the state
+  at that settlement; query the reservation for current state.
+- `GET /api/v1/messaging/budgets/:id/events?after=<sequence>` pages audit events.
+- `GET /api/v1/messaging/budgets/:id/reservations?after=<reservation-id>` pages
+  reservations in ID order. Follow the returned cursor until an empty page;
+  `may_have_more` is conservative. Queries never reserve, settle or release funds.
+
+Budget-backed operation leases are opt-in primitives pending team/assignment
+policy integration. A finalized budget reservation does not prove an operation
+stopped, and an expired/cancelled operation does not automatically refund it.
+
+Internal pricing is configured through administrator-only `price-versions` routes.
+Each immutable version specifies an exact model ID, accounting unit, and integer
+rates per million input, cached-input and output tokens. Bind its ID through
+`POST /api/v1/messaging/budget-reservations/:id/pricing` before billing begins.
+`POST /api/v1/messaging/metered-usage` accepts a globally unique event ID,
+reservation ID/revision and cumulative input/cached-input/output counts. Input
+includes cached tokens; output includes all output charged under the configured
+rate. The Hub rounds the cumulative estimate once and writes usage plus settlement
+atomically. `GET /api/v1/messaging/metered-usage/:event` recovers the receipt.
+These charges remain estimates with remaining holds until explicit reported or
+manual reconciliation. This API currently requires trusted administrator evidence;
+automatic native usage collection is not yet connected.
+
+Internal price versions optionally set `model_policy: "requested_model"` to
+explicitly allow estimates against the requested model. The default retains the
+trusted administrator's model assertion; it does not imply runtime verification.
+Requested-model usage must include `attribution: {kind: "requested_model",
+rerouted: false, cache_write_input_tokens: 0}` and match the frozen price model.
+Rerouted work or unresolved cache-write pricing cannot use this policy. Receipts
+preserve attribution and remain estimated/nonfinal, never provider invoices.
+The native evidence conversion helper does not itself submit ledger mutations;
+durable attempt-scoped automatic submission remains pending.
+
+Budget-required managed native operations now pin their attempt's reservation and
+price before opening the executor. Admin-only
+`GET /api/v1/messaging/operations/:id/budget?attempt=N` returns this accounting
+context. Missing pricing or a previously charged untracked reservation requires
+reconciliation before starting; ordinary unbudgeted sessions retain their behavior.
+Native usage is persisted in an attempt-scoped Host outbox, then sent with a frozen
+revision and event ID. Recovery first looks up the exact usage receipt, so a lost
+response cannot cause a new debit. New cumulative observations coalesce while an
+older immutable command is in flight. Unknown evidence and concurrent ledger edits
+remain pending reconciliation; replay never invents a new revision to bypass them.
+Owner execution-evidence exposes accounting status and the last estimated receipt.
+A bounded backlog fences new accounting contexts instead of dropping unresolved
+records. Completed local tails may be trimmed; Hub receipts/audit remain durable.
+This currently meters supported Codex usage with explicitly configured internal
+requested-model prices. It does not collect final supplier invoices, meter all
+executors, enforce future team grants, or verify production provider charges.
+
+Remote operation leases use negotiated `operation_leases_v1` on the
+existing authenticated Hub link. A Host owner can attach an idle native session
+with `home_node` in `/api/kode/session-operation`; the worker's scoped backend
+client routes reads/claims/renewals/reports through
+`POST /api/v1/messaging/operation-relay/:home_node`. The home ledger verifies both
+peer node and assigned worker session. Owner cancellation and human stop
+attestation are never delegated to this worker channel. Each transport request
+is sent at most once, including reconnects; a lost response is uncertain and must
+be inspected on the home ledger, not blindly repeated. Existing report IDs still
+deduplicate in the durable ledger. Old peers explicitly reject the capability.
+Remote budget-required runtime attachment additionally requires the separate
+`operation_accounting_v1` path described below; the lease relay itself grants no
+remote administrator or quota access.
+
+The integration harness includes actual spawned native fixture tests across two
+isolated loopback Hubs: home cancellation, SIGSTOP/SIGCONT pause, and SIGKILL plus
+restart from the same ledger. These verify local process-stop evidence, refusal
+to replay the old turn and home-side expiry fencing. The worker deadline starts
+before its claim reaches home, so home can briefly retain an active lease after
+the worker has conservatively stopped; eventual expiry is tested independently.
+This proves the fixture/transport behavior, not provider execution or escaped
+child-process termination. All fault signals target harness-owned processes.
+
+
+Remote internal estimates use separately negotiated `operation_accounting_v1`.
+Only the Host administrator can call
+`POST /api/v1/messaging/operation-accounting-relay/:home_node`; session principals
+are rejected on both this endpoint and attempts to smuggle accounting through the
+worker lease relay. The authenticated execution peer may read its assigned
+attempt's frozen accounting context, submit requested-model usage, and recover
+receipts for that exact reservation. Home rejects foreign attempts/reservations,
+foreign receipts and administrator-attested usage. No budget/price mutation or
+final invoice settlement is exposed. The durable Host outbox pins home identity;
+recovery always returns to that home ledger, including after either side restarts.
+
+Budget-required native admission now checks the resolved protocol's usage collector,
+a trustworthy pre-turn baseline, explicit automatic internal-price policy and exact
+selected-model/price match before claiming an operation. A cold resumed native
+thread has no attributable baseline and requires a fresh Worker; an already-live
+thread may retain its observed baseline. Unsupported collectors are not treated
+as zero-cost resources. Decisions are persisted and audited as
+`kode/accounting_admission`, exposed through owner execution-evidence.
+If a turn ends without attributable final usage (including rerouting or unresolved
+cache costs), it cannot report ready: the local outcome is uncertain and its
+reservation remains for reconciliation. This does not promise future provider
+telemetry, support all adapters, or enforce supplier quota admission yet.
+
+Resource-constrained operations opt in with `resource_required: true` at creation
+(the flag is immutable for that request key). Admin attaches one policy per attempt
+through `POST /api/v1/messaging/operations/:id/resource`, with attempt/revision and
+`policy: {host,profile,account_id,account_epoch,binding_revision,limit_ids,
+unknown_quota}`. `unknown_quota` is `require_fresh` or `team_budget`; the latter
+requires `budget_required: true` and the same claim transaction still checks the
+actual budget reservation. This opt-in is a foundation for future mandatory team
+grants; it does not retroactively constrain ordinary legacy sessions.
+
+Admin `POST /api/v1/messaging/resource-admission` evaluates that policy without
+reserving or executing. `allowed` describes only the resource predicate, not a
+complete dispatch permission; `requires_team_budget` signals the additional budget
+constraint. Claims/renewals evaluate account epoch, binding revision, configured
+limit IDs and sample freshness in the ledger transaction. Known exhaustion remains
+blocking past sample TTL until reset or newer evidence; reset alone is unknown.
+Fresh leases are capped at earliest sample expiry/reset and budget period boundary.
+Assignment and successful decision are audited. Workers cannot attach or change
+policy. The current native lease adapter verifies the assigned profile and aborts
+on resource revocation. Provider-wide coverage, all executor capability gates and
+mandatory team dispatch policy still remain to be implemented.
+
+Resource-required claims now use `claim_resource` and renewals `renew_resource`,
+with `resource: {profile,account_epoch,binding_revision}` alongside `lease_ms`.
+The Host takes profile identity from its actual session binding and the versions
+from the frozen operation policy. Home rejects legacy claim/renew commands for
+these operations and rejects missing/mismatched confirmation without changing
+revision. Ordinary unconstrained operations keep the original commands. Remote
+resource commands require separately negotiated `operation_resources_v1`, so old
+peers never receive an unknown action. This confirms adapter protocol support and
+policy identity; it is not proof of provider identity or arbitrary CLI tool fencing.
+
+The trusted remote accounting envelope additionally supports separately negotiated
+`operation_quota_v1`: `resource_context`, `quota {sample}` and `invalidate_quota`.
+Home reads the exact attempt's immutable resource policy; samples must match its
+Host/profile/account/epoch/revision and then pass ordinary quota freshness and
+binding validation. Invalidation targets only that frozen binding revision, with
+idempotent acknowledgement; an old assignment cannot revoke a newer binding.
+Worker credentials cannot access the Host-only relay. Envelopes are limited to
+64 KiB before queueing. Quota propagation does not grant budget or price authority.
+
+`prepareRemoteQuotaCollector` pins this scope and shares the allowlisted sample
+normalizer with the local collector. Its caller must persist account-change fences
+before publication/recreation. The helper/API are tested with idle native fixture
+telemetry. Native runtimes bound to remote managed operations now select the home-scoped collector and persist account-change fences before publication. A bounded replay loop retries frozen operation attempts after restart; acknowledged fences remain effective locally and never mix revisions from different homes. On a failed invalidation, replay reads the frozen attempt resource context and only reconciles an obsolete fence when the authoritative binding is newer or already inactive; it never invalidates the newer binding. The runtime callback path is covered with a spawned native protocol fixture and two isolated Hubs, including idle telemetry, durable fencing before transport, and replay after a lost committed response. This does not establish live provider or all-executor coverage. Quota events may be archived without a turn while idle; tool lifecycle events still require an open step.
+
+Quota invalidation state is included in the owner-only session execution evidence as `quota_fences`: local recorded/reconciled revisions and allowlisted remote home/profile/attempt records. Clearing an otherwise unused session binding refuses when any quota fence exists. Reconciled remote history compacts to the highest revision per home/profile within each binding; pending attempts are never discarded. This bounds acknowledged history per resource scope, not the number of unresolved attempts or registered resources.
+
+### Registered Host resource coverage
+
+Owner-only `GET /api/kode/resource-coverage?limit=25&after=...` inventories configured profiles and configuration versions retained by session bindings, including idle, unavailable-runtime and retired configurations. It also includes registered and declared dormant official-loop provider routes using cached public metadata; native routes are not duplicated. Pagination returns `next_cursor` (URL-encode it for the next request). The projection reads local Hub account binding and quota snapshots; it never starts a runtime, reads provider credentials or calls a model. It distinguishes unbound, unsupported source, unavailable authority/binding, missing sample, partial, stale, reset-passed, reported and exhausted states. Snapshot/binding revisions must agree.
+
+The response deliberately reports `scope: host_execution_resources` and `eligible_for_dispatch: false`: coverage is not an admission decision. Remote home identities and up to 16 registered assignment contexts per profile version are projected through the existing authorized relay, with explicit truncation. Each includes current authoritative quota and whether the original assignment binding is still current. Missing snapshot support, offline authority and scope mismatch are explicit. Remote resources without a registered assignment and official-loop model/account/usage coverage remain gaps. Team budget details require assignment context and are not synthesized from usage or quota. Profile environment, executable arguments and other configuration payloads are excluded.
+
+Official provider rows use `resource_kind: official_loop_provider`, `route_registered` and explicit `model_catalog_status: not_collected`. They do not imply usable credentials, a known balance, integrated usage metering or automatic dispatch permission. `official_directory_status` distinguishes complete registered/declared enumeration, registered-only compatibility and an unavailable directory. Coverage does not call `listModels`, export provider settings or start discovery.
+
+The Hub now exposes trusted local official-call collector receipts/events under `/api/v1/messaging/official-calls`. Ordinary Worker credentials cannot read or write them. Exact retries recover the same evidence; an interrupted call remains uncertain across Hub restart. This API is not yet connected to the official-loop middleware or pricing settlement, and remote call collection remains unsupported.
+
+`OfficialCallOutbox` now connects call-meter hooks to the local collector API with persisted begin identity and ordered evidence. An ambiguous begin refuses inference; startup recovery only reads receipts and replays evidence, never restarts a model call. Missing receipts remain pending. Completed local evidence tails are bounded, unresolved calls are retained with a 128-call admission cap. Evidence acknowledgement is explicitly pending accounting, not a billing settlement. The Host does not yet install this path for production official-loop execution; lease policy, pricing and remote transport remain required. Agent profile state writes now sync the temporary file, atomically rename it and sync the containing directory before resolving.
+
+Budgeted official-call evidence now drives internal estimated debit using the attempt's frozen requested-model price. Distinct calls aggregate once; duplicate event receipts do not re-debit. Unknown final counters preserve known charges and block the next budgeted call in that attempt until reconciliation. These estimates remain separate from provider balances and finalized invoices. The production official-loop policy/lease adapter and remote collector path are still pending.
+
+`streamLeasedOfficialCall` is the controlled local official-call entry. It uses the public LLM stream pipeline with a cloned request carrying the combined caller/operation abort signal, checks authority before and after begin admission, and persists an uncertain interruption if authority disappears before dispatch. It never reports the enclosing operation complete. Actual Cordis/LlmRuntime plus real Hub tests verify cancellation while a no-network adapter is blocked. This entry is not a blanket interceptor for arbitrary official agents, tool calls, auxiliary loops or ACP child processes; production team runtime installation is still required.
+
+Remote controlled official calls use `OfficialCallOutbox` with a managed operation's
+`home_node`. Begin, evidence and recovery reads travel through the administrator-only
+operation accounting relay, gated by `operation_official_calls_v1`. Each outbox row
+persists its home, so reopening the collector reconciles with the original authority.
+Recovery never invokes a provider. Calls from session credentials, another operation
+or another attempt are rejected. This supports the controlled call entry; production
+session ownership, tool boundaries and ACP child coverage remain separate work.
+
+`kodeAgents.officialExecution.open(agent, { tools, signal })` is the Host-owned
+entry for an explicitly managed `dsh` profile. It restores pending call evidence
+at service startup, claims the bound operation lease and exposes `stream`, `execute`,
+`finish`, and `dispose`. Tool names must be supplied explicitly (default none).
+Stream advertisements and actual tool requests are checked against that list;
+Agent object replacement, profile revision or operation binding changes fence
+subsequent execution. Model calls, tools and finish are serialized by rejecting
+concurrent actions. Disposing aborts the lease without claiming completion.
+The Host registers these explicitly managed official Agents on lease acquisition.
+
+This service is intended for the upcoming coordinator/Worker loop. Ordinary dsh
+loops do not automatically use it, ACP subprocesses are not intercepted, and the
+caller-provided tool list is not yet an authoritative TeamGrant. Tool-level audit
+and mandatory workflow/permission wiring remain required before product acceptance.
+
+Controlled official tool execution now persists a bounded execution-Host journal
+before calling the public tool service. Stable call IDs cannot be replayed, even
+after restart; unfinished records become `uncertain`. Unresolved tool outcomes
+prevent the controlled entry from reporting the operation complete. The owner-only
+execution evidence endpoint exposes tool identity, task/attempt, timestamps and
+status, without raw arguments, results or error messages. `returned` means the tool
+returned under a valid lease; it is not independent verification of its effects.
+These records explicitly remain `home_reconciled: false`: archival/home-Hub relay
+and reconciliation authorization are still required. The 256-record limit rejects
+new execution rather than silently deleting audit history.
+
+Local controlled-tool journals now submit terminal metadata to the home Hub's
+operation audit stream. Successful immutable receipts set `home_reconciled` and
+`home_sequence`; lost responses leave the durable entry pending for recovery or
+the next terminal flush. No tool is re-executed during reconciliation. Remote-home
+rows use the tool-specific relay capability described below.
+The journal retains records after home acknowledgement; archive/retention and
+owner-authorized resolution of uncertain effects are still pending.
+
+Remote tool journals now route immutable terminal evidence through the trusted
+Host accounting relay, gated by `operation_tool_evidence_v1`. The original home
+node is preserved on disk. Startup recovery or the next terminal flush retries
+pending evidence; home acknowledgement updates the local queue without copying
+the authoritative audit ledger into the execution Hub. Older peers leave evidence
+pending, and ordinary Worker credentials cannot submit through either relay path.
+
+The controlled execution entry now refuses subsequent model/tool/finish actions
+while prior tool evidence is unacknowledged or uncertain. A home administrator may
+record a separate adjudication with an evidence reference through `tool-resolutions`.
+Journal receipt refresh observes this both locally and through the remote evidence
+relay. Only `verified_applied` clears the tool-outcome gate; `verified_not_applied`
+and `abandoned` retain the need for explicit task recovery. Every original call ID
+remains non-replayable, and every action still requires a current lease. No user UI
+for adjudication is delivered yet.
+
+The tool journal compacts once it reaches 128 entries, retaining at least 32 recent
+rows. Only home-acknowledged returned or verified-applied records are eligible;
+unacknowledged/uncertain records continue counting toward the 256-entry admission
+limit. Each eligible row is first written as a private immutable file beside the
+profile store, with file and directory sync, then removed from the active profile
+transaction. Home audit history is retained. Archived call IDs are checked before
+admission, so compaction never enables replay. Shared-registry bindings retain the
+archive identity; a Host using a different or missing archive fails closed.
+
+The owner evidence view exposes archived count without the filesystem path. Detailed
+history remains available through home operation events. Archive disk usage is not
+bounded or automatically pruned; deleting it is unsupported because it also stores
+replay guards. Filesystem fault tests cover a queue write failing after archive
+creation, retry/reopen, immutable ID rejection and unavailable archive refusal;
+they do not claim physical power-loss testing.
+
+The backend now exposes an administrator-owned TeamGrant registry with immutable
+revisions, explicit expiry/revocation and scope checks. It distinguishes read,
+workspace-write, commit, push, merge, deploy, external-message and delegate
+capabilities; these are not inferred from a permission-mode string. Policies also
+name exact Host/workspace/root targets, tools, network access and budget IDs.
+This registry is not yet wired as mandatory admission for official/native Workers;
+operation binding and execution-Host enforcement must precede team activation.
+
+Grant-required operations now refuse claim until an administrator binds an exact
+TeamGrant revision/scope. Home checks that grant on claim, renewal and official-call
+admission; leases cannot outlive grant expiry. The dsh lease controller aborts when
+home reports grant_available=false. Revoked reports remain audit-only, and owner
+cancel/stop controls remain usable. New attempts require a new binding. Team
+creation must require this mode; existing legacy operations are not silently
+converted. Concrete tool, workspace, network and budget intersections are still
+needed for full team enforcement.
+
+Grant-required budgeted operations now check the actual reservation's budget IDs
+against the pinned scope, including team ownership. Both grant-first and
+budget-first attachment orders reject mismatches transactionally. Explicit shared
+budgets remain usable; another team's budget is not accepted merely because its
+ID appears in the requested scope. Tool/workspace/network enforcement remains
+separate work.
+
+Local grant-required `officialExecution` now reads the authoritative attempt scope
+and checks the registered workspace ID, execution Host, canonical root and actual
+session cwd before execution. A symlink resolving the cwd outside the root rejects.
+Grant/workspace/policy changes abort the controlled lease. Remote official execution
+uses the separately negotiated scoped grant projection described below.
+
+Host plugins can register explicit policies through `kodeOfficialToolPolicies`:
+`register(name, { capabilities, network, authorize(request, { root, scope }) })`.
+Registration returns a disposer. Capabilities must fit the frozen scope, network
+use requires permission, and authorize must return true for the concrete arguments.
+Unknown tools, changed registrations and missing argument authorization reject.
+There is no heuristic tool-name mapping or permissive fallback. These are trusted
+plugin contracts; each plugin still must enforce its actual file/network effects.
+This is not an OS sandbox, and native CLI descendants/ACP children remain outside
+this controlled official-tool boundary. Built-in general-purpose shell policies
+are not automatically granted.
+
+Remote `officialExecution` now obtains grant context from the persisted home through
+`operation_grants_v1`. All workspace realpath and registered tool-policy checks run
+on the execution Host, while current grant/revocation decisions come from home.
+No grant replica or administrator grant-write access is given to the Worker.
+Missing capability, foreign attempt/Worker and unavailable home fail closed.
+The same controlled entry routes model and tool evidence to home; a home revocation
+aborts its lease and prevents subsequent execution.
+
+Grant-required lease admission now requires a trusted Host execution-enforcement
+signal. Production Host supplies it only for an exact Agent/operation owned by the
+controlled OfficialExecution entry after its grant guard succeeds; profile metadata
+or a caller-selected model cannot enable it. Ordinary native CLI drivers without
+internal-tool enforcement are rejected before claim/runtime startup, with
+`executionAdmission.reason=grant_enforcement_unsupported` visible to the owner.
+Legacy non-grant sessions retain their behavior. Resource inventory marks native
+grant support according to the execution route. Controlled Codex workflow Workers
+use `managedInference`, Home admission, bounded native decisions and trusted Host
+tools. Team eligibility also requires the complete resource and authority checks.
+
+`kode_sessions_diagnostics` is a session-bound cold diagnostic tool: it reports
+local durable incoming/outgoing status counts, bounded message metadata samples,
+delivery-evidence phase counts and pending cancellations. It does not expose
+message content or probe/wake runtimes or peers. Queue emptiness must not be
+interpreted as runtime health. Use the returned message IDs with existing
+message delivery, cancellation and lifecycle tools for investigation.
+
+Model/command discovery uses a separate cache revision from execution authority:
+name, origin and role-assignment metadata do not trigger a new CLI probe. Launch
+settings, environment, unknown future fields, working directory and model hint
+remain part of discovery identity. Ordinary profile saves retain compatible cached
+results; explicit model refresh and runtime plugin registration/removal invalidate
+them. Full profile revisions used by execution/accounting guards remain unchanged.
+
+Native selection evidence is stamped by the Host with input IDs, the immutable
+profile revision and the bound operation identity before recording and flushing.
+ACP configuration mismatch emits rejected evidence before any session/prompt;
+missing confirmation remains unverifiable rather than being labeled a known
+mismatch. The adapter persists this evidence, rejects continuation, and never
+reports successful operation completion. Existing stop/replay fences still apply
+after reopening. Evidence describes executor configuration, not independently
+verified inference. Latest owner-readable binding evidence and native session
+history are local records; home-Hub selection reconciliation remains separate.
+
+Managed native turns now persist selection observations in a bounded Host outbox
+and reconcile them with the local or remote home Hub. Pending records survive
+restart and retry only the evidence request. Complete receipt identity and the
+Hub rejection decision must match before reconciliation is accepted; current
+attempt failures cannot be cleared by a later positive observation. Owner
+execution evidence exposes `selection_reconciliation` without opening a runtime.
+The installed runtime service starts/stops background retries with its lifecycle.
+ACP configuration evidence gates session/prompt; Codex evidence follows turn/start
+and cannot prove that inference had not begun. Request acknowledgement without
+reported values remains pending; strict inference confirmation is still pending.
+New selection observations await their own receipt rather than an unrelated
+background replay batch. Concurrent sends of the same record share one request;
+shutdown aborts and drains both foreground and background reconciliation. Real
+ACP-process tests cover the successful managed prompt/report path and lost
+receipt refusal before prompt. Recovery acknowledges evidence only and never
+reports the cancelled/nonexecuted operation as successful.
+Strict selection admission runs before lease claim in the current Host service.
+Unsupported scope/request mismatch keeps the home operation prepared, without
+starting a native executor. The persisted `selection_admission` owner projection
+explains rejection; capable means only that configuration verification can be
+attempted. It does not mean actual values are confirmed. Lease renewal/read checks
+reject a changed home policy. Local and remote ACP paths use the same check.
+For strict operations, claim/renew also transmit the exact frozen selection_ack.
+Home rejects missing/different acknowledgements; old clients cannot silently
+claim a strict task. This acknowledgement grants no evidence exemption: actual
+reported selection is still required for strict successful reports. Commands
+with this field are not relayed to peers lacking selection capability.
+Codex model/rerouted notifications now produce selection evidence only when both
+threadId and turnId exactly identify the active turn. A different known target
+model rejects the managed turn and reconciles that evidence with home. Missing
+values stay unverifiable; effort is never inferred from routing. These are runtime
+routing/configuration reports after turn/start, not provider-attested inference
+values or pre-inference validation. Foreign/historical/unscoped notifications do
+not change current-turn selection or usage attribution.
+Standalone session MCP now matches Host event pagination and exposes
+kode_sessions_message_read. Long previews carry the continuation tool/offset;
+follow event cursors until empty and message next offsets until null. GUI's Rust
+session MCP follows the same limits. Reading a preview is not a consumed receipt.
+
+### Creation recovery identity
+
+The creator persists `creating` before invoking the controller. A retry resolves
+only the original session ID; it never repeats controller creation, which can
+otherwise allocate a replacement when the requested session cannot be reused.
+Recovery requires a readable blank session history before configuration or task
+submission. An unresolved identity or an already active session stays uncertain.
+Late create responses cannot rewind the durable stage, and concurrent creators
+cannot submit the initial task twice. Frozen plans compare structural content,
+so JSON key ordering after Hub persistence does not falsely signal a change.
+
+`session-create-durable.test.js` uses a real Hub across SIGKILL/restart with a
+controlled session-controller boundary. It proves persistence and retry behavior,
+not full installed dsh controller/runtime recovery.
+
+Recovery also verifies the original session's cwd and archive state. If controller
+creation succeeded but workspace attachment failed, it restores membership using
+the Workspace API before returning ready or submitting a task. Missing membership
+metadata, a different owning workspace, or unconfirmed attachment stops recovery.
+`session-create-controller.test.js` exercises the installed official controller,
+SessionStore, AgentRegistry and native factory with controlled persistence and
+workspace services. It reproduces the post-creation attachment failure without
+inference. Whole-Host restart and real workspace-storage recovery remain separate
+acceptance requirements.
+
+Native factory publication waits for the persistence handle's flush barrier after
+writing the header and setup events. Session creation storage may otherwise defer
+materialization until flush. A failed flush releases the writer without publishing
+an Agent or Session; successful creation and resume expose only that durable prefix.
+Native factory tests cover delayed and failed flushes and exact-identity restoration
+in rebuilt Host services using a controlled disk persistence adapter. This does not
+claim process-kill testing of the installed production persistence backend.
+
+Standalone and desktop session MCP now expose delivery status and input
+cancellation/status alongside send/read. Cancellation tools are advertised only
+when supported by the Hub; cancellation of another sender's message is denied.
+Use persisted cancellation status to distinguish requested, queue removal and
+unconfirmed stopping. Never interpret a request receipt as confirmed termination.
+
+Host cancellation polling has its own loop, separate from delivery recovery and
+receipt posting. A slow delivery request cannot by itself delay cancellation.
+Shutdown aborts and drains both loops. This separation does not bypass runtime
+persistence or turn an unconfirmed stop request into a confirmed result.
+
+`native-persistence-crash.test.js` uses the official
+`@deepseek-ai/dsh-session-persistence-jsonl` backend in disposable child Hosts,
+including plain and default Zstandard storage. It SIGKILLs and recreates the Host
+around queued-input and cancellation persistence. No user configuration or model
+credentials are loaded, and the fixture prevents inference.
+
+Use a Node >=24.9 runtime able to load the official native file-lock addon. A
+hardened application-bundled Node may reject it because of signing Team IDs;
+`KODE_TEST_HOST_NODE=/path/to/ordinary/node` selects a separate executable for these
+owned child Hosts without changing the application or system signing settings.
+
+`collaboration-host-crash.test.js` combines actual Host tools, official session
+controller/query services, Kode workspace storage, native driver and official zstd
+persistence against an isolated Hub. It discards an assignment response after commit,
+kills both Host and Hub, resumes the original Worker, and checks that later persisted
+cancellation survives another crash without requeueing work. Auxiliary title/image
+services are fixtures and inference is fenced. It checks automatic cold activation
+before any explicit resolve/retry, and that terminal cancellation does not wake a
+cold Worker. Snapshot inspection afterward explicitly opens the saved session.
+
+`remote-collaboration-host-crash.test.js` runs two such child Hosts against paired
+isolated Hubs. Production owner HTTP creation/lookup handlers and remote client
+helpers are shared with the desktop portal; only SSH tunneling and owner admission
+transport are substituted by loopback HTTP and a generated fixture cookie. It drops
+a remote creation response after commit, queries/retries the same identity, checks
+Hub-relayed queued evidence, SIGKILLs all four processes, checks automatic recovery,
+and verifies remote cancellation remains durable after a second four-process crash.
+This proves these application protocol/storage boundaries, not SSH connectivity,
+production authentication, paid inference, or full workflow completion.
+
+Runtime delivery confirmation requires a matching queue or consumption event.
+If the executor cannot expose readable history, successful followup alone returns
+an `uncertain` message receipt explicitly describing approximate submission;
+the delivery binding stays `prepared`. It does not claim durable queue or model
+consumption. When history becomes readable, recovery can publish flushed evidence
+for that original input without resending it. A readable log missing that input
+also leaves the outcome uncertain. This distinction applies to legacy/custom
+runtimes as well as temporary loss of their observation capability.
+
+Owners can query `GET /api/v1/messaging/workbench/communication-health` on their
+Hub for read-only transport observations. Session/Agent credentials cannot call
+this endpoint. It reports responding Hub plus per-peer connected/stale/not_connected
+states, protocol versions and recent receive timestamps without disclosing URLs,
+SSH settings or link secrets. It uses existing authenticated connections and never
+wakes a Worker or sends a test task. Connected is not runtime readiness; absence of
+a connection does not distinguish network failure, handshake failure or shutdown.
+The existing session diagnostics endpoint still reports durable queue/evidence
+state and deliberately does not infer runtime liveness.
+
+Capability knowledge can now be saved as immutable home-Hub revisions through the
+owner-only `/api/v1/messaging/capability-profiles` API (see remote protocol). It records
+user/documented/measured soft evaluations with evidence references, confidence, expiry
+and protected pins. These records do not establish executor support or live prices.
+Builder configuration and resource ranking integration are still pending.
+
+Home-Hub owner API `POST /api/v1/messaging/resources/rank` now recommends candidates
+from exact capability revisions after account/quota and quality checks. It returns
+exclusions and score evidence; preferred status cannot bypass these checks. Missing
+cost gets no preference credit and is not presented as a zero price. Recommendations
+remain `eligible_for_dispatch:false` until activated team, executor, permission,
+independence, metering and atomic reservation checks are integrated at dispatch.
+
+`src/provider-balances.js` adds explicit-poll DeepSeek balance and OpenRouter key/credits
+connectors. A trusted Host must supply the authorized HTTP transport; the module does
+not load credentials or activate itself. Monetary scopes and decimal values remain
+separate from Codex percentage windows and platform team budgets. Binding, durable
+monetary snapshots and execution admission integration remain pending; fixture HTTP
+checks do not establish live provider connectivity.
+
+Home-Hub `/api/v1/messaging/monetary-quota` now durably stores scoped monetary facts,
+collection failures and the last successful observation, fenced by account epoch and
+resource binding revision. `prepareMonetaryCollector` pins that authority before querying
+and retries an unacknowledged publication before another query. Resource coverage exposes
+this under `provider_monetary`, independently of Codex percentage-window data. Automatic
+collector activation and scope-aware dispatch admission remain pending; collecting a
+balance does not itself authorize execution.
+
+Resource admission now accepts optional monetary source/currency requirements. The same
+Hub evaluator checks them for recommendation and operation leases; fresh positive facts
+do not replace budget reservations. Explicit exhaustion and auth/payment/rate-limit
+failures survive missing/partial samples and cannot be bypassed by team-budget fallback.
+Free-model request limits are selected explicitly, so they do not block paid-model work.
+Automatic source-policy configuration and real provider activation remain pending.
+
+Assigned remote Hosts can use `prepareRemoteMonetaryCollector` to publish through the
+home Hub's scoped accounting relay. New monetary actions require their own negotiated
+capability; old peers fail explicitly. Source/attempt/resource identity is checked on
+home, ordinary Worker tokens cannot publish, and only home stores the authoritative
+monetary facts. This is not yet automatic provider activation or unassigned idle polling.
+
+Trusted Host plugins can now register an explicit source through
+`ctx.kodeMonetaryCollectors.register({ profile, source, authorizedFetch, ttlMs, remote })`.
+`remote`, when present, is `{home_node,id,attempt,session}` from an existing assigned
+operation. The registration returns an async disposer. The registry is installed with
+the Kode runtime only when its home identity is available and shuts down with that runtime.
+No registrations are inferred from model names, profiles or account settings. The public
+dsh LLM service examined in 0.2.1-rc.2 has no generic authenticated HTTP query seam; the
+trusted provider plugin must supply its own controlled request function and dispose the
+registration when credential identity changes. This integration does not read credentials
+or automatically bind the separate DeepSeek Platform-wallet service to API balances.
+
+The registry polls idle sources, deduplicates home/profile/source targets, bounds active
+registrations, isolates slow sources, and aborts transport on removal/shutdown. Binding
+failure needs explicit re-registration; uncertain publication retries the same pinned
+sample. Coverage includes sanitized collector status, never transport functions or errors.
+Live provider transport registration and user-account acceptance are still pending.
+
+Managed official agents now have a process-local entry guard on the public dsh LLM/tool
+waterfalls. Direct managed calls outside `OfficialExecution` are rejected; ordinary
+sessions keep their normal path. Stream permits belong to one exact options object;
+tool permits use async-local authority and bind Agent identity, call ID, name and argument
+snapshot, then recheck the lease before dispatch. Permits are neither serialized nor
+model-visible. Closing execution keeps the denial fence until the owning Cordis scope
+is disposed. Concrete trusted tool implementations and the full controlled official-loop
+adapter still need integration; this guard prevents fallback to an uncontrolled path.
+
+Trusted official tool policies must now include the exact registered implementation:
+`implementation: agent.ctx.tools.get(name, agent)`. Opening a grant-bound tool set rejects
+missing implementation lookup or mismatched definitions, and every ownership/argument
+check verifies the definition has not been replaced or shadowed. Name-only authorization
+is insufficient. Real ToolRuntime regression coverage now includes prepared-argument
+changes, nested dispatch, permission revocation and same-name implementation replacement.
+This does not yet supply production Coordinator tools or a complete official loop.
+
+Official tool results with `isError: true` are recorded as uncertain and published to
+the home Hub, just like thrown execution failures. A normalized error does not prove
+that no side effect happened. Further calls and completion require explicit outcome
+reconciliation; automatic retry is not authorized. This conservatively includes errors
+that may have occurred before a side effect, until stronger evidence is available.
+
+Controlled official execution exposes `prepareCall(config, signal, configure)` for the
+AgentLoop preparation contract. It preserves resolved controls, metadata and the exact
+upstream adapter registration, then dispatches its one-use handle through ownership,
+lease and call-accounting gates. Preparation cancellation remains attached to dispatch.
+This API is tested with actual LlmRuntime and Hub; wiring the full AgentLoop scheduler
+and production tools remains pending.
+
+`OfficialExecution.loopServices()` now supplies an isolated service view for the actual
+upstream AgentLoop. Install its `llm` and `tools` in a child Cordis isolation before
+mounting that loop. It resolves the active run by exact initiating Agent identity;
+missing/disposed ownership fails closed. Root services and ordinary loops are unchanged.
+Tool calls are exclusive: the public ToolRuntime execute pipeline completes pre/body/
+post/content finalization before the loop commits the result. The scheduler bridge does
+not repeat finalization. Its symbol must come from AgentLoop's own dependency instance;
+this is an internal upstream contract guarded by actual-loop compatibility tests, not a
+stable plugin API promise. Parallel official tools are not enabled by this adapter.
+
+Actual AgentLoop + LlmRuntime + ToolRuntime + session registries + Hub tests now cover a
+model/tool/model turn with a grant-bound workspace, two ordered tools, call/tool evidence,
+and a failing post-execute hook that prevents later tools/inference/completion. Responses
+and tools are controlled fixtures, with no live inference. Coordinator/Builder lifecycle
+and production tool registration still need to consume this service view.
+
+The runtime now exposes `kodeAgents.officialLoops`, a lazy `OfficialLoopHost`. Its
+`create(options, { tools })` accepts the upstream creation options (including scoped
+setup) only for a pre-bound managed official operation, and returns `{ agent, run,
+dispose }`. It mounts a separate official loop factory over the shared live registry;
+the ordinary registry factory is not replaced. Duplicate live/pending identities are
+rejected. Admission failure/cancellation disposes the new handle; close aborts pending
+creation, drains owned handles and releases the loop. No inference starts just by
+mounting the service. Callers must not treat live-handle cleanup as deletion of persisted
+history: crash recovery integration and Coordinator/Builder provisioning remain pending.
+
+`officialLoops.resume(options, { tools })` restores a persisted upstream session under
+an explicitly assigned managed operation. Both create and resume now acquire controlled
+execution at the registry announcement boundary, before serial creation listeners can
+release queued work. Failed announcement unwinds that run with the factory transaction.
+Resume does not reclaim an old active lease or invent a new attempt: the caller supplies
+an admitted assignment and explicit provider/model options. Actual zstd persistence
+coverage restores prior model/tool history, queues input during resume announcement and
+verifies no old tool effects repeat. This verifies orderly release/reload; SIGKILL recovery
+of this official lifecycle remains separate acceptance work.
+
+Official lifecycle crash coverage now also SIGKILLs an owned native-runtime process
+inside a real grant-bound tool after its file side effect and session flush. A new process
+opens the same journal and zstd session storage, changes the started tool to uncertain,
+and publishes acknowledged home evidence. It rejects resume under the old active lease,
+performs no new model/tool calls, and leaves the effect count at one. This verifies safe
+refusal and recovery evidence, not automatic continuation after uncertain side effects;
+explicit reconciliation/new assignment remains necessary.
+
+`kodeAgents.mountOfficialResourceTools(agentCtx, agent, policy)` can be used in controlled
+Host setup to register two scoped read-only tools: `kode_resources_coverage` and
+`kode_resources_rank`. Owner policy fixes local profile IDs and ranking candidates,
+revision references, quality floors and weights. Model arguments only choose coverage
+pagination or task tag; unknown argument fields fail the grant check. Configuration is
+copied at mount. Coverage reads only selected local profiles and strips other session/
+remote-assignment detail; it does not discover remote resources or credentials. Ranking
+uses the actual home Hub and remains advisory (`eligible_for_dispatch: false`).
+
+Trusted policies now support per-Agent identity in addition to legacy global policies,
+so multiple teams can have same-named tools with different definitions/scopes. The loop
+service view exposes a scope-preserving registration accessor for trusted Host setup.
+Linked runtime packages must use compatible scope identities; tests use the ToolRuntime
+instance belonging to the actual AgentLoop dependency graph. Provider activation, full
+remote coverage and Builder conversation/TeamSpec configuration remain pending.
+
+Controlled Host setup now installs a fixed per-Agent global-tool allow mask and native
+tool presentation before publication. Only explicitly allowed existing global definitions
+survive the mask; later global registrations stay hidden. Scoped definitions still pass
+OfficialExecution's explicit name/implementation/argument gates. Ordinary global tools
+remain available outside the controlled scope. Real AgentLoop coverage now exercises the
+concrete resource tools as model → coverage → model → rank → model, for two isolated
+Agents, with old/new ambient global tools absent from model schemas and acknowledged
+home evidence for the actual tool results. Provider responses remain deterministic test
+fixtures; this does not yet implement the Builder interview or create a TeamSpec.
+
+Official execution now acknowledges home selection policies only for matching profile
+revision, configured model/effort and executor_configuration scope. Inference-attestation
+requirements remain unsupported and reject before claim. Policy-bound calls must use
+prepareCall: both requested and resolved controls are checked, provider routing stays
+pinned, and the prepared configuration is recorded through the durable SelectionOutbox
+before call admission. A missing home receipt prevents dispatch; replay sends evidence
+only. Selection evidence uses the official call ID as its configuration observation ID
+(turn_id) and session/input identities for correlation. It does not attest the provider's
+actual inference model. Completion requires reconciled matching evidence. Legacy calls
+without a selection policy retain their existing behavior.
+Before claiming a policy-bound lease, official execution also checks the current
+profile fingerprint and allowedModels, then calls the registered LlmRuntime
+resolveCallConfig adapter metadata resolver for the exact provider/model/effort.
+It rechecks the fingerprint after that asynchronous lookup and before subsequent
+controlled actions, including dispatch of an already prepared call. Missing providers,
+unsupported explicit effort and changed profiles reject without inference. Admission
+records label this as adapter_configuration_metadata with inference_verified=false;
+metadata availability is not proof of provider routability or inference identity.
+
+Home-Hub team draft APIs now persist stable Superagent/conversation identities and
+immutable configuration revisions separately from runtime sessions. Owner callers can
+save/read/list revisions and audit; draft save confers no execution authority. Builder
+interview/tools and workflow activation still need to consume these endpoints. See the
+remote protocol team-draft contract for exact routes and bounds.
+
+`artifact-snapshot.js` provides read-only capture for an explicitly authorized Git
+repository root. It hashes raw tracked, baseline and unignored untracked paths,
+file executable bits, symlink text and deletions. Staging unchanged content does
+not change its identity. `tree_hash` identifies the sorted raw file manifest;
+`patch_hash` identifies the base Git tree plus that manifest, not textual diff bytes.
+Ignored files are outside this capture and are not claimed as covered build outputs.
+No Git clean/textconv/external diff filters run; no index/commit is written. Local
+Git must exist at `/usr/bin/git`; unborn repositories, unresolved merges, submodules,
+non-UTF8 paths, special files and exceeded bounds fail explicitly. Two consecutive
+matching captures and per-file stability checks detect ordinary concurrent edits;
+this is not an atomic filesystem snapshot or OS sandbox. Callers must retain workspace
+locks during capture/use and revalidate before acceptance. Its
+integration test captures a newly created fixture repository and records the result
+through the real home artifact-evidence API; it does not inspect user repositories.
+
+`ArtifactOutbox` now persists fixed artifact/review/verification observations in
+AgentProfiles before sending. Recovery resends the same evidence and verifies the
+receipt sequence, evidence, producer session and snapshot digest. Reusing a saved
+capture ID replays its observation without reading the workspace again; fresh
+captures require fresh IDs. Remote operations route through the execution Host's
+negotiated artifact accounting relay to home; unsupported peers leave evidence
+pending. Pending records are never pruned; the per-binding 128-record bound
+fails explicitly pending archival support. OfficialExecution owns the outbox,
+recovers/polls/closes it, and blocks prepared model calls and operation completion
+while the current operation's observations are unreconciled. This does not implement
+WorkRun acceptance.
+
+Host setup can call `kodeAgents.mountOfficialArtifactTool(agentCtx, agent,
+{workspaceRoot,repositoryId})` to register scoped `kode_artifact_capture`. The tool
+accepts only evidence_id, pins owner configuration and the managed operation, requires
+the exact canonical workspace grant with read capability, and uses the durable
+outbox. Output distinguishes pending/home-reconciled evidence and never claims
+completion. Returned pending evidence is not a replayable tool failure. The actual
+official lifecycle/ToolRuntime integration test verifies private tool registration,
+argument scope, immutable capture IDs, fresh snapshots after edits and grant
+revocation. This mount API still needs automatic role provisioning, workspace locks
+and WorkRun artifact acceptance; it does not enable unconfigured agents by default.
+For remote assignments the tool reads grant context from the authoritative home
+through the execution Host's scoped accounting relay, captures the execution Host's
+fixed local repository and sends observations through ArtifactOutbox back to home.
+It never creates a shadow operation at the execution Host. Local and two-Hub actual
+official lifecycle/ToolRuntime/Git tests cover this path and home grant revocation;
+automatic assignment creation and remote SSH deployment are separate concerns.
+
+`WorkspaceLocks` provides Host-local POSIX kernel exclusion using the native flock
+entry already used by dsh session persistence. Canonical workspace paths map to
+stable lock inodes; release never unlinks them. Contention fails explicitly, with no
+TTL takeover. SIGKILL releases the descriptor in the kernel. Cancellation does not
+release a still-running callback; withLock releases only after it settles. Native
+loading failures and Windows are unsupported rather than silently running unlocked.
+OfficialExecution owns a manager under `workspace-locks` beside its profile state
+(or accepts an injected shared manager), and the capture tool holds that lock through
+capture/outbox recording. Grant-required official tools with a trusted
+`workspace_write` policy are automatically locked at the execution boundary;
+read-only tools may explicitly request the same exclusion with workspaceLock=true
+(capture does). Lock acquisition occurs after grant authorization but before the
+tool journal begins, so contention executes nothing and creates no uncertain tool
+record. Release follows the complete tool pipeline and evidence recording, including
+failure paths. Hosts/profiles that share workspaces must use the same
+trusted lock directory outside the repositories. Other writers still need to join
+this cooperative protocol; no protection against arbitrary external editors is
+claimed. Legacy non-granted execution, native executors and external writers are not
+covered by this official-tool boundary. Distributed reservation and WorkRun stage
+ownership remain separate work.
+Native test launchers clear NODE_TEST_CONTEXT and check explicit child pass counts,
+so a child test-runner environment cannot yield an empty apparent success.
+
+
+Controlled official loop Hosts expose `officialLoops.dispatches.dispatch(command,
+{setup, signal})` and `get(session_id, command_id)` to trusted Host orchestration.
+Commands pin session, operation/attempt/epoch, profile revision, provider/model/effort,
+workspace cwd and tool names. The profile store durably records intent before
+AgentLoop creation, then a `created` receipt. Concurrent identical requests join;
+changed content under the same command ID rejects. Historical receipts do not
+assert that the Agent is still running, and replay after disposal never recreates it.
+An interrupted/failed creation remains `uncertain`; persisted `creating` records
+without an in-process owner project as uncertain. Recovery must reconcile the
+runtime/session before any new command; this API does not automatically resume it.
+Each session permits one creation command, without eviction. Changing command ID
+cannot bypass an earlier uncertain or successful creation; later authorized work
+uses the separate resume path after reconciliation. The ledger assumes the existing
+single Host owner of the profile store. This is controlled session
+creation only: it sends no input, performs no inference, and is not yet the WorkRun
+Assignment/outbox dispatcher. Trusted setup still passes the actual tool/grant gates.
+
+
+`officialLoops.dispatches.reconcile(session_id, command_id)` can resolve a lost
+creation acknowledgement without making a session live. Successful controlled
+creation appends `plugin:kode/official-creation` through the official ignorable
+plugin-record API and flushes the session before saving its command receipt.
+Reconciliation opens only a read handle, checks exact session/cwd and non-fork
+identity, and requires one matching command/fingerprint marker in the first 4096
+events. Matching durable evidence records historical `created` plus its sequence;
+missing/unreadable/mismatched evidence keeps uncertainty. No absence proves no effect.
+This does not renew a lease, resume an Agent, send input or authorize work. A plugin
+record lost during format migration likewise leaves recovery uncertain. An existing
+created receipt remains historical and does not assert a currently running Agent.
+
+
+Managed official bindings may include `managedAssignment: { id }`. Before lease
+claim the controlled Host validates actual configuration/tools/canonical workspace,
+holds a native workspace lock and requests owner-Hub Assignment admission. The
+current path supports local first stages only; downstream evidence and remote
+admission remain pending. The lock spans execution and is borrowed by scoped tools;
+cancellation cannot release it while a controlled action is still in flight.
+Live Assignment authority/resources gate claims, renewals and active availability.
+No model inference is used to attest configuration identity.
+
+
+`kodeAgents.assignmentDispatches` provides owner-only creation delivery:
+`dispatch(assignmentId, {setup})` or `drain({prepare: async assignment => ({setup})})`.
+`prepare` is trusted Host code mounting exact scoped implementations/policies; return
+null to leave unsupported work queued. Managed profile/operation/Assignment binding
+is created atomically and never replaces another session identity. Resource holds
+and existing official admission precede creation. Hub receipt loss replays the same
+local command; uncertain creation reconciles persisted evidence without a new Agent.
+Results from dispatch/drain acknowledge creation only. Use start below for mandate
+delivery; neither entry infers stage completion, automatically resumes Agents or
+starts a background scheduler.
+
+
+`assignmentDispatches.start(assignmentId, {setup})` additionally queues the frozen
+first-stage mandate through the Hub's existing durable message inbox. It requires
+a currently owned live official handle; historical creation alone cannot restart
+work. The actual Host pump validates the bound message ID/hash and full input
+rather than using the ordinary 4096-character peer preview. Existing delivery
+tracking distinguishes durable queue from consumed context. Model calls still need
+the configured reservation pricing and live grant/budget/resource admission.
+There is no automatic background scheduler, downstream evidence delivery or stage
+completion implied by `start`. Large mandates exceeding 64 KiB reject without
+partial inbox/Assignment writes; paging is not implemented yet.
+
+
+Assignment model entry checks the actual projected user input against the exact
+Hub mandate and flushes session persistence before metered admission. Direct Agent
+followup, extra user input or altered mandate text cannot bypass the Host inbox
+check. Approved follow-up/context replacement/takeover are not implemented yet;
+they must not be simulated by injecting another user turn into the same Assignment.
+
+
+Artifact observations for a managed Assignment require its durable mandate to have
+been consumed. Home-Hub stage output selection binds exact stored observation
+sequences to the frozen WorkRun project/workflow/producer context. This is an
+immutable output selection, not stage completion or authorization to release locks.
+Actual fixture validation captures a generated Git workspace under the controlled
+execution lock and proves a foreign repository label cannot satisfy the frozen output.
+
+
+AssignmentDispatchHost.stop(id) drains an actually owned local official execution
+and persists a stop receipt before retryable Hub delivery. It waits for controlled
+actions and workspace lock release, and cannot infer stop from a missing handle.
+The owner-only stop-receipt API fences interrupted attempts but keeps budget and
+resource holds pending settlement. A reported operation remains reported; this is
+not workflow completion or a claim about detached external processes.
+
+
+Explicit budget policy settlement=internal_price permits owner Assignment
+accounting finalization after a durable drain and complete official usage. It
+settles only configured internal team credits; provider cost remains unconfirmed.
+Without this policy, or with any unresolved call, reservations stay pending.
+
+
+ArtifactOutbox.capture now persists a local content archive before recording its
+observation. Archives live beside the profile store in artifact-archive, addressed
+by snapshot hash. They contain the exact raw manifest and content-addressed bytes,
+including executable modes, deletion entries and symlink text (never target reads).
+Files are private, written/synced before atomic publication, and verified on replay;
+corruption rejects rather than silently replacing an existing archive. Capture
+retry reads its saved archive and does not rescan the workspace. Legacy manually
+recorded observations without archives remain observations only.
+
+Local retention alone is not a Hub content-transfer acknowledgement. The outbox
+now uploads captured content in idempotent chunks and separately records
+home_archive_reconciled after Hub validation. Hash-only observations are never
+presented as retrievable contents. Remote relay, stage-authorized use of restored workspaces and archival
+lifecycle/GC remain to be integrated.
+
+
+The owner artifact archive API retains 256 KiB chunks and exposes download only
+after digest/manifest/content validation against the original evidence sequence.
+fetchArtifactArchive validates retrieved bytes against the expected snapshot; it
+does not materialize or execute them. Completion does not pass a workflow stage.
+
+
+OfficialExecution.artifactWorkspaces provides owner-side prepare of an immutable
+Hub snapshot into a new private cache directory. Requests pin request_id, evidence
+sequence and snapshot_hash. It validates content before writing, rejects escaping
+symlink targets and file/directory conflicts, writes with exclusive creation, syncs
+files/directories and records ready only after exact no-extra/missing-file checks.
+Source files/directories are read-only, preserving executable distinction; contained
+relative symlinks are retained. This is a raw source tree, not a Git checkout or an
+execution sandbox. Nothing is run during restore.
+
+Same request revalidates the existing contents; changed or incomplete preparation
+rejects without overwriting or repairing files. A ready receipt always has
+execution_authorized=false. Worker grant/root registration, downstream Assignment
+binding and independent review/verification scheduling are separate pending gates.
+Runtime close aborts/waits for pending preparations; no automatic cache GC occurs.
+
+
+Managed official finish checks selected artifact bytes against a fresh capture
+under the held workspace lock. A mismatch keeps the operation unreported. After
+accepted report it persists finalArtifact; Assignment stop includes this proof for
+Hub validation against the selected stage outputs and complete archives. Reporting
+before selection remains possible but does not create final-artifact proof or
+complete a stage. No independent review or verification is inferred.
+
+
+Owner stage completion now validates selected archived artifacts, the final source
+observation, reported/drained execution and finalized Assignment accounting in one
+Hub transaction before passing the stage and releasing its resource/team slots.
+Exact receipt replay cannot release a later Assignment's hold. This currently
+supports local artifact-only stages; independent review/verification and external
+execution require additional proof. A passed stage never implies a completed Run
+or automatically starts its successor.
+
+
+OfficialExecution.prepareAssignmentInput({assignment_id, source_stage, output})
+restores only an artifact named by the Hub's frozen Assignment input manifest.
+It checks Host ownership and complete archive identity, derives a private cache key,
+revalidates bytes on reuse and rechecks the Assignment before returning. Caller
+paths/hashes are not accepted. The receipt links source and Assignment identities
+but retains execution_authorized=false; derived grants and independent downstream
+execution are still pending.
+
+
+Derived Assignment finish now persists finalInput after revalidating source bytes
+under its workspace lock. Hub stop checks this proof against admitted context,
+archive and exact selection. Read-only review stages can pass only with matching
+passed/nonblocking review evidence plus reported/drained/settled execution; resource
+release is atomic. This does not finalize the WorkRun or execute verification commands.
+
+### Versioned workflow instruction resources
+
+The owner registers a Skill or Plugin instruction artifact through `POST /api/v1/messaging/project-configs`. Use an immutable configuration `id` and `version`, with `spec.kind` set to `workflow_dependency` and `spec.artifact` containing the following fields.
+
+- `kind` selects `skill` or `plugin`.
+- `source` identifies the reviewed source, and `source_version` records its version.
+- `instructions` contains the complete UTF-8 instruction text. `content_hash` is its exact SHA-256 digest.
+- `hosts` lists the execution Hosts supporting this resource.
+- `tools`, `capabilities`, and `network` declare its execution requirements.
+
+Each artifact supports up to 16 KiB of instruction text. A stage supports up to eight references and 32 KiB of serialized frozen artifact records. Oversized resources receive a validation error.
+
+Reference the returned `{id,version,hash}` through the stage's optional `execution.dependencies` array. Builder's `dependency` catalog exposes owner-registered resources for the selected Hosts. The activation review displays their source, version, hashes, required tools and permissions, and expandable instruction text. Missing versions, mismatched hashes, unsupported Hosts and requirements beyond the stage scope block activation and WorkRun creation.
+
+Home freezes the resolved artifacts into the WorkRun context. Dispatch and admission validate the exact artifact bytes and Host. A Worker receives only its stage's resources, and the model-call provenance records their source and hashes. Later versions apply when explicitly selected for a new team revision. Empty dependency arrays preserve existing workflow hashes and mandate content.
+
+These resources transport reviewed workflow instructions. Their required tools pass the existing Host tool and grant checks. Executable plugin installation uses the owner's separate installation procedure.
+
+### Controlled Codex wrapper bootstrap
+
+An owner-configured Codex workflow profile can declare `managedInference.bootstrap`
+when its CLI wrapper supports an explicit engine-path environment variable. The
+bootstrap records the selected existing engine and its hook in the profile revision.
+For example, the installed TCodex wrapper supports the following configuration.
+
+```json
+{
+  "endpoint": "https://example.com/responses",
+  "reasoningEfforts": ["high"],
+  "bootstrap": {
+    "executable": "/absolute/path/to/installed/codex",
+    "pathVariable": "TCODEX_CODEX_PATH"
+  }
+}
+```
+
+The endpoint is the exact inference URL authorized by the owner. Authentication uses
+the existing optional `apiKeyVariable` name and explicit profile environment. Engine
+selection and wrapper update controls are configured by the owner. Each native decision
+creates a private launcher and manifest, then applies Host configuration after wrapper
+defaults. The launcher restores its owned HOME, CODEX_HOME and XDG_CONFIG_HOME and checks
+wrapper feature switches against disabled Host features.
+
+The wrapper's public `model_catalog_json` is bounded to 8 MiB and 1024 models. A private
+copy sets each model's `apply_patch_tool_type` to null, preserving its other model
+capabilities. Granted workspace edits use Host tools. Source and effective catalog hashes
+and model count enter the native configuration and persisted decision records. The
+original public catalog retains its bytes. The actual inference request still passes
+model, effort and tool validation and the one-request admission gate.
+
+TCodex 0.1.4 with Codex 0.154.0 has controlled-model acceptance for this bootstrap,
+including a human question, answer continuation in the same Worker, independent review,
+real verification and final reply. Real provider delivery requires its own acceptance.
+
+To use a wrapper's existing authenticated loopback proxy, omit `endpoint` and
+`apiKeyVariable`, and set `bootstrap.provider` to its selected provider identifier.
+Optional `bootstrap.home` selects the owner's existing wrapper HOME. The engine still
+uses the private decision HOME. The wrapper handles its own authentication. Host reads
+only the selected provider's loopback routing metadata and forwards authentication
+fields opaquely. No login file or authentication header enters decision records.
+This mode accepts literal HTTP loopback routes, rejects redirects and URL credentials,
+and configures transport once before admission. Persisted transport evidence contains
+the provider, loopback origin and endpoint hash. The full route remains decision-private.
+
+TCodex 0.1.4 with Codex 0.154.0 also passed one live hy4-preview-ioa text decision
+through this transport, with one admission, one request, token usage and confirmed
+process-group exit. Full live-provider WorkRun delivery remains pending acceptance.
+
+The opt-in `test/codex-wrapper-live-tools.test.js` exercises two real decisions with a
+Host tool result between them. Set `KODE_TEST_LIVE_FREE_WRAPPER=1` only for an explicitly
+authorized free resource. Also supply `KODE_TEST_MANAGED_CODEX_WRAPPER`,
+`KODE_TEST_MANAGED_CODEX_EXECUTABLE`, `KODE_TEST_WRAPPER_HOME`,
+`KODE_TEST_WRAPPER_PROVIDER` and `KODE_TEST_NATIVE_MODEL`. The engine-path hook in this
+acceptance test is TCodex's `TCODEX_CODEX_PATH`. Production profiles configure that hook.
+No Host tool is released until the admitted response drains and the native process
+group stops. Cancellation interrupts drainage. Every fresh decision receives explicit
+instructions to continue the serialized workflow history using completed Host results.
+
+Assignment evidence tools distinguish a declared parameter-shape failure detected before
+dispatch from an uncertain implementation outcome. The former returns a durable
+`INVALID_TOOL_ARGUMENTS` result, records the rejected call at Home and allows a corrected
+call with a new ID. It invokes no tool implementation. Extra authority fields and
+semantic/path checks retain their grant-denial behavior. Failures after implementation
+dispatch keep the existing reconciliation requirement. A real Home workflow regression
+injects an invalid output ID, corrects it and completes independent review and verification
+using controlled model responses.
+
+`test/coordinator-live-worker.test.js` is a separate opt-in Home workflow acceptance.
+It uses the same live-wrapper variables above, an actual hy4 implementation Worker,
+controlled Coordinator/reviewer/verifier models and a real verification command. Two
+consecutive runs completed all three stages, budget accounting, final reply and restart
+receipt checks. Its test credits use an explicit internal price, distinct from provider
+currency. Whole-team live-model acceptance remains separate.
+
+Failed native decisions persist `failure_details` with a fixed transport phase, HTTP
+status, allowlisted transport error code and cancellation flag. Error text, authentication
+fields and response content are excluded. Text completion and dynamic-tool interruption
+both drain the admitted response before native shutdown, with cancellation still active.

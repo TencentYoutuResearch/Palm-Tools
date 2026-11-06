@@ -1,17 +1,15 @@
 /** Newline JSON-RPC transport shared by native Agent protocols; no shell or work retries. */
-import { spawn } from 'node:child_process'
-import { EventEmitter, once } from 'node:events'
-import { HOST_ONLY_ENV } from './agent-profiles.js'
+import { EventEmitter } from 'node:events'
+import { spawnAgent } from './managed-agent-process.js'
 
 export class RpcProcess extends EventEmitter {
-  constructor(profile, cwd) {
+  constructor(profile, cwd, { appServerArgs = [], inheritEnvironment = true, gracefulCloseMs = 0 } = {}) {
     super()
+    if (!Number.isSafeInteger(gracefulCloseMs) || gracefulCloseMs < 0 || gracefulCloseMs > 5000) throw new Error('Invalid Agent graceful-close deadline')
+    this.gracefulCloseMs = gracefulCloseMs
     this.nextId = 1; this.pending = new Map(); this.closed = false; this.buffer = ''; this.stderr = ''
-    const env = { ...process.env, ...profile.env }
-    for (const name of HOST_ONLY_ENV) delete env[name]
-    this.child = spawn(profile.executable, [...(profile.args ?? []), 'app-server', '--listen', 'stdio://'], {
-      cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
-    })
+    this.process = spawnAgent(profile.executable, [...(profile.args ?? []), 'app-server', '--listen', 'stdio://', ...appServerArgs], cwd, profile.env, { inheritEnvironment })
+    this.child = this.process.child
     this.child.stdout.setEncoding('utf8')
     this.child.stdout.on('data', chunk => {
       this.buffer += chunk
@@ -39,7 +37,7 @@ export class RpcProcess extends EventEmitter {
     else pending.resolve(message.result)
   }
   send(message) {
-    if (this.closed) throw new Error('Agent process is closed')
+    if (this.closed || this.closing) throw new Error('Agent process is closed')
     this.child.stdin.write(JSON.stringify(message) + '\n')
   }
   notify(method, params) { this.send({ method, params }) }
@@ -62,13 +60,23 @@ export class RpcProcess extends EventEmitter {
     this.closed = true
     for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(error) }
     this.pending.clear(); this.emit('closed', error)
-    if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGTERM')
+    void this.process.close()
   }
-  async close() {
-    if (!this.child.pid || this.child.exitCode !== null || this.child.signalCode !== null) return
-    const exited = once(this.child, 'exit').catch(() => {})
-    this.fail(new Error('Agent process closed'))
-    const timer = setTimeout(() => this.child.kill('SIGKILL'), 2000)
-    try { await exited } finally { clearTimeout(timer) }
+  close() {
+    return this.closing ??= (async () => {
+      if (this.gracefulCloseMs && !this.closed) {
+        let timer, onExit
+        try {
+          const exited = new Promise(resolve => { onExit = resolve; this.child.once('exit', onExit) })
+          this.child.stdin.end()
+          await Promise.race([exited, new Promise(resolve => { timer = setTimeout(resolve, this.gracefulCloseMs) })])
+        } finally {
+          clearTimeout(timer)
+          if (onExit) this.child.off('exit', onExit)
+        }
+      }
+      this.fail(new Error('Agent process closed'))
+      return this.process.close()
+    })()
   }
 }

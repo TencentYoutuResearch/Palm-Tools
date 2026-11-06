@@ -1,7 +1,8 @@
 /** Host-owned executable profiles. Type selects a protocol; ID selects a configuration. */
-import { readFile, writeFile, rename, mkdir } from 'node:fs/promises'
+import { readFile, open, rename, mkdir, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
+import { normalizeManagedInference } from './managed-codex-profile.js'
 
 export const AGENT_TYPES = Object.freeze({
   dsh: { name: 'DeepSeek Harness', executable: null },
@@ -39,6 +40,16 @@ export function normalizeProfile(input) {
     }))
   }
   if (input.defaultModel !== undefined) profile.defaultModel = text(input.defaultModel, 'default model', 256)
+  if (input.defaultReasoningEffort != null) profile.defaultReasoningEffort = text(input.defaultReasoningEffort, 'default reasoning effort', 64)
+  if (input.allowedModels != null) {
+    if (!Array.isArray(input.allowedModels) || !input.allowedModels.length || input.allowedModels.length > 256) throw new Error('allowedModels must be a nonempty model ID list')
+    profile.allowedModels = [...new Set(input.allowedModels.map(id => text(id, 'allowed model', 256)))]
+  }
+  if (input.managedInference != null) {
+    if (profile.type !== 'codex' && profile.protocol !== 'codex') throw new Error('Managed inference currently requires a Codex protocol profile')
+    profile.managedInference = normalizeManagedInference(input.managedInference)
+    if (profile.defaultReasoningEffort && !profile.managedInference.reasoningEfforts.includes(profile.defaultReasoningEffort)) throw new Error('Managed inference must declare the default reasoning effort')
+  }
   return structuredClone(profile)
 }
 export function profileRevision(profile) {
@@ -47,8 +58,13 @@ export function profileRevision(profile) {
 export async function writePrivateJson(path, value) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const temporary = `${path}.${randomUUID()}.tmp`
-  await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 })
-  await rename(temporary, path)
+  try {
+    const file = await open(temporary, 'wx', 0o600)
+    try { await file.writeFile(JSON.stringify(value, null, 2)); await file.sync() } finally { await file.close() }
+    await rename(temporary, path)
+    const directory = await open(dirname(path), 'r')
+    try { await directory.sync() } finally { await directory.close() }
+  } finally { await rm(temporary, { force: true }) }
 }
 
 export function normalizeModelDefaults(input) {
@@ -66,7 +82,7 @@ export function normalizeModelDefaults(input) {
   }))
 }
 export class AgentProfiles {
-  constructor(path) { this.path = path; this.defaultProfileId = null; this.modelDefaults = {}; this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
+  constructor(path) { this.path = path; this.defaultProfileId = null; this.modelDefaults = {}; this.coordinatorStartPlans = Object.create(null); this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
   async open(initial = []) {
     let fresh = false
     try {
@@ -76,6 +92,8 @@ export class AgentProfiles {
       this.defaultProfileId = stored.defaultProfileId ?? null
       this.modelDefaults = normalizeModelDefaults(stored.modelDefaults)
       this.bindings = Object.assign(Object.create(null), stored.bindings)
+      if (stored.coordinatorStartPlans !== undefined && (!stored.coordinatorStartPlans || typeof stored.coordinatorStartPlans !== 'object' || Array.isArray(stored.coordinatorStartPlans))) throw new Error('unsupported Coordinator start plans')
+      this.coordinatorStartPlans = Object.assign(Object.create(null), stored.coordinatorStartPlans ?? {})
     } catch (e) {
       if (e.code !== 'ENOENT') throw e
       this.profiles = initial.map(normalizeProfile)
@@ -83,7 +101,7 @@ export class AgentProfiles {
     }
     const ids = new Set()
     for (const p of this.profiles) { if (ids.has(p.id)) throw new Error(`duplicate Agent profile ID: ${p.id}`); ids.add(p.id) }
-    if (fresh) await writePrivateJson(this.path, { version: 1, profiles: this.profiles, bindings: this.bindings, modelDefaults: this.modelDefaults })
+    if (fresh) await writePrivateJson(this.path, { version: 1, profiles: this.profiles, bindings: this.bindings, modelDefaults: this.modelDefaults, coordinatorStartPlans: this.coordinatorStartPlans })
     return this
   }
   list() { return structuredClone(this.profiles) }
@@ -91,11 +109,12 @@ export class AgentProfiles {
   binding(sessionId) { return this.bindings[sessionId] ? structuredClone(this.bindings[sessionId]) : undefined }
   update(operation) {
     const task = this.chain.then(async () => {
-      const state = { version: 1, defaultProfileId: this.defaultProfileId, modelDefaults: structuredClone(this.modelDefaults), profiles: this.list(), bindings: structuredClone(this.bindings) }
-      const result = operation(state)
+      const state = { version: 1, defaultProfileId: this.defaultProfileId, modelDefaults: structuredClone(this.modelDefaults), profiles: this.list(), bindings: structuredClone(this.bindings), coordinatorStartPlans: structuredClone(this.coordinatorStartPlans) }
+      const result = await operation(state)
       await writePrivateJson(this.path, state)
       this.defaultProfileId = state.defaultProfileId ?? null
-      this.modelDefaults = structuredClone(state.modelDefaults ?? {})
+      this.modelDefaults = normalizeModelDefaults(state.modelDefaults)
+      this.coordinatorStartPlans = Object.assign(Object.create(null), state.coordinatorStartPlans)
       this.profiles = state.profiles; this.bindings = Object.assign(Object.create(null), state.bindings)
       return structuredClone(result)
     })
@@ -122,7 +141,11 @@ export class AgentProfiles {
     return this.update(state => {
       if (p.id.startsWith('builtin-') || state.profiles.find(v => v.id === p.id)?.origin === 'builtin') throw new Error('内置 Agent 不能修改，请添加自定义配置。')
       const index = state.profiles.findIndex(v => v.id === p.id)
-      if (index < 0) state.profiles.push(p); else state.profiles[index] = p
+      if (index < 0) state.profiles.push(p); else {
+        for (const field of ['allowedModels', 'defaultReasoningEffort', 'managedInference']) if (!Object.hasOwn(input, field) && Object.hasOwn(state.profiles[index], field)) p[field] = state.profiles[index][field]
+        normalizeProfile(p)
+        state.profiles[index] = p
+      }
       return p
     })
   }
@@ -170,7 +193,7 @@ export class AgentProfiles {
       const prior = Object.values(state.bindings).find(row => row.threadId === threadId && row.profile.id === profileId)
       const profile = prior?.profile ?? existing?.profile ?? state.profiles.find(row => row.id === profileId)
       if (!profile) throw new Error('unknown Agent profile')
-      const binding = { profile: structuredClone(profile), revision: profileRevision(profile), threadId, seenInputs: [] }
+      const binding = { ...existing, profile: structuredClone(profile), revision: profileRevision(profile), threadId, seenInputs: [] }
       Object.defineProperty(state.bindings, sessionId, { value: binding, enumerable: true, configurable: true, writable: true })
       return binding
     })
@@ -178,7 +201,7 @@ export class AgentProfiles {
   clearUnusedBinding(sessionId) {
     return this.update(state => {
       const binding = Object.hasOwn(state.bindings, sessionId) ? state.bindings[sessionId] : undefined
-      if (binding && (binding.threadId || binding.seenInputs.length)) throw new Error('start a new conversation to change its Agent configuration')
+      if (binding && (binding.threadId || binding.seenInputs.length || binding.managedOperation || binding.officialToolArchive || Object.keys(binding.officialCalls ?? {}).length || Object.keys(binding.officialTools ?? {}).length || binding.quotaFenceRevision || binding.remoteQuotaFences?.length || Object.keys(binding.usageOutbox ?? {}).length)) throw new Error('start a new conversation to change its Agent configuration')
       delete state.bindings[sessionId]
       return { cleared: sessionId }
     })
