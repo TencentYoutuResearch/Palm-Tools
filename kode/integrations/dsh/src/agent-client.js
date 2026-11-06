@@ -1,3 +1,22 @@
+function groupProjectWorkspaces(items, parents = {}) {
+  const grouped = new Map(items.map(row => [row.workspaceId, { ...row, sessionIds: [...(row.sessionIds ?? [])] }]))
+  const hidden = new Set()
+  for (const row of items) {
+    let id = row.workspaceId; const seen = new Set()
+    while (parents[id] && !seen.has(id)) { seen.add(id); id = parents[id] }
+    if (seen.has(id) || id === row.workspaceId || !grouped.has(id)) continue
+    const parent = grouped.get(id)
+    parent.sessionIds = [...new Set([...parent.sessionIds, ...(row.sessionIds ?? [])])]; hidden.add(row.workspaceId)
+  }
+  return [...grouped].filter(([id]) => !hidden.has(id)).map(([, row]) => row)
+}
+// A saved SSH connection is not consent to pin its entire loose history.
+// Keep complete host directories for explicit resume/search; scope only the sidebar.
+function remoteSidebarSessions(host) {
+  const visible = new Set([...(host.workspaces ?? []).flatMap(row => row.sessionIds ?? []), ...(host.pinnedSessionIds ?? [])])
+  const hidden = new Set(host.hiddenSessionIds ?? [])
+  return (host.sessions ?? []).filter(row => visible.has(row.id) && !hidden.has(row.id))
+}
 function resumeCandidates(hosts, target, query = '') {
   if (!target?.profile) return []
   const text = query.trim().toLocaleLowerCase()
@@ -443,7 +462,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
     return h(React.Fragment, null,
       !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
-      data && [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
+      data && [{ key: 'auto_resume_interrupted', label: '重启后自动续接', detail: '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。' }, { key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
       h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }),
       h(HubSettings, { key: host, host }))
   }
@@ -938,7 +957,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const effortLabel = efforts.find(row => row.id === effort)?.name ?? effort
     const label = [selected?.name ?? selected?.id ?? (data ? '选择模型' : '正在读取模型…'), effortLabel, data?.fast && !/\bfast\b/i.test(selected?.name ?? '') ? 'Fast' : undefined].filter(Boolean).join(' · ')
     const close = () => { setOpen(false); setPane('root') }
-    const operate = body => { close(); void store.operate({ action: 'select', profileId: current.id, sessionId: id, ...body }).catch(() => {}) }
+    const operate = (body, returnToRoot = true) => { if (busy) return; if (returnToRoot) setPane('root'); void store.operate({ action: 'select', profileId: current.id, sessionId: id, ...body }).catch(() => {}) }
     const option = (name, value) => h('span', { className: 'kode-option' }, h('span', null, name), h('span', { className: 'kode-secondary' }, value))
     let items, selectedId
     if (pane === 'models') {
@@ -951,7 +970,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     } else {
       items = [{ id: 'models', label: option('模型', selected?.name ?? selected?.id ?? '未选择') }]
       if (efforts.length) items.push({ id: 'effort', disabled: efforts.length < 2, label: option('推理强度', effortLabel ?? '默认') })
-      if (selected?.fastCapability) items.push({ id: 'fast', label: h('span', { className: 'kode-option' }, h('span', null, 'Fast'), h(FastSwitch, { checked: data?.fast, disabled: busy, onChange: fast => operate({ provider: selected.provider, model: selected.id, reasoningEffort: effort, fast }) })) })
+      if (selected?.fastCapability) items.push({ id: 'fast', label: h('span', { className: 'kode-option' }, h('span', null, 'Fast'), h(FastSwitch, { checked: data?.fast, disabled: busy, onChange: fast => operate({ provider: selected.provider, model: selected.id, reasoningEffort: effort, fast }, false) })) })
       items.push({ type: 'separator' }, { id: 'reload', label: '重新读取模型' })
     }
     return h('div', { className: 'kode-model-control' }, h(Menu, { open, onClose: close, items, selectedId, side: 'top', align: 'end', portal: true,
@@ -964,7 +983,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         if (value.startsWith('effort:')) operate({ provider: selected.provider, model: selected.id, reasoningEffort: value.slice(7) })
       },
       anchor: h(Trigger, { model: true, label, open, disabled: busy || !id || !current, onClick: () => { if (open) close(); else { setOpen(true); setPane('root') } } }),
-      footer: data?.modelError ? h('div', { className: 'kode-menu-note', role: 'alert' }, '请检查 Agent 的安装与登录状态。') : undefined,
+      footer: error || data?.modelError ? [{ id: 'model-error', disabled: true, label: h('div', { className: 'kode-menu-note', role: 'alert' }, error || '请检查 Agent 的安装与登录状态。') }] : undefined,
     }), h(Failure, { text: error }))
   }
 
@@ -1154,12 +1173,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           archivedSessionIds.push(...(host.archivedSessionIds ?? [])); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
           const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:'))
           for (const row of saved) { ids.push(row.id); byId[row.id] = { ...row, updatedAt: row.updatedAt ?? 0, displayTitle: row.title, retainedBy: {}, blank: false, projectionValues: {} }; routes.set(row.id, { hostId: host.id, id: row.id }) }
-          items.push(...workspaceSource.items.map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds.filter(id => id.startsWith('saved:')) ?? [])])] })))
+          items.push(...groupProjectWorkspaces(workspaceSource.items, host.worktreeParents).map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds ?? [])])] })))
           if (host.id !== 'local') remoteRows.push(...workspaceSource.items.map(w => ({ id: w.workspaceId, name: host.name })))
           continue
         }
         const key = id => foreignId(host.id, id)
-        for (const session of host.sessions ?? []) {
+        const visibleSessions = remoteSidebarSessions(host)
+        for (const session of visibleSessions) {
           const id = key(session.id)
           ids.push(id); byId[id] = { ...session, updatedAt: session.updatedAt ?? 0, id, displayTitle: session.title, retainedBy: {}, blank: false, projectionValues: {} }
           routes.set(id, { hostId: host.id, id: session.id })
@@ -1171,7 +1191,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           if (host.id !== 'local') remoteRows.push({ id, name: host.name })
         }
         const accounted = new Set((host.workspaces ?? []).flatMap(workspace => workspace.sessionIds))
-        const ungrouped = (host.sessions ?? []).filter(session => !accounted.has(session.id))
+        const ungrouped = visibleSessions.filter(session => !accounted.has(session.id))
         if (!host.workspaces?.length || ungrouped.length) {
           const id = `kode-host-status:${encodeURIComponent(host.id)}`
           items.push({ workspaceId: id, title: host.name, path: '', sessionIds: ungrouped.map(session => key(session.id)), createdAt: 0, updatedAt: 0 })
@@ -1335,8 +1355,27 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     useEffect(() => { const show = event => { setInitialName(event.detail?.name ?? ''); setOpen(true) }; window.addEventListener('kode-create-project', show); return () => window.removeEventListener('kode-create-project', show) }, [])
     return h(ProjectFlow, { open, initialName, slots, workspaces, onCancel: () => setOpen(false), onPicked: async path => { const workspace = await workspaces.create({ path }); await uiWorkspace.openWorkspace(workspace.workspaceId); setOpen(false) } })
   }
+  function BranchPicker({ info, value, disabled, onChange }) {
+    const [open, setOpen] = useState(false), [query, setQuery] = useState('')
+    const selected = info?.branches?.find(row => row.ref === value)
+    const matches = (info?.branches ?? []).filter(row => row.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    const choose = ref => { onChange(ref); setOpen(false) }
+    const row = (ref, name, detail) => h('button', { type: 'button', role: 'menuitemradio', 'aria-checked': value === ref, key: ref, className: 'kode-branch-option', onClick: () => choose(ref) },
+      h('span', null, h('span', { className: 'kode-branch-name' }, name), h('small', null, detail)), value === ref && h(IconCheckOutlineRegular, { size: 16 }))
+    return h('div', { className: 'kode-field' }, h('span', null, '起始分支'), h(Menu, {
+      open: open && !disabled, onClose: () => setOpen(false), portal: true, minWidthFromAnchor: true, listClassName: 'kode-branch-popup',
+      anchor: h('button', { type: 'button', className: 'kode-branch-trigger', disabled, 'aria-label': '选择起始分支', 'aria-haspopup': 'menu', 'aria-expanded': open && !disabled, onClick: () => { setQuery(''); setOpen(!open) } },
+        h('span', null, selected?.name ?? (info ? `当前提交 · ${info.branch || '分离的 HEAD'}` : '正在读取分支…')), h(IconChevronDownOutlineRegular, { size: 14 })),
+    }, h('div', { className: 'kode-branch-search' }, h(IconSearchOutlineRegular, { size: 16, 'aria-hidden': true }), h('input', {
+      type: 'search', autoFocus: true, value: query, placeholder: '搜索本地或远端分支…', 'aria-label': '搜索起始分支', spellCheck: false,
+      onChange: event => setQuery(event.target.value), onKeyDown: event => { if (event.key === 'ArrowDown') { event.preventDefault(); event.stopPropagation(); event.currentTarget.closest('[role=menu]')?.querySelector('.kode-branch-option')?.focus() } },
+    })), h('div', { className: 'kode-branch-results' },
+      !query.trim() && row('HEAD', '当前提交', `${info?.branch || '分离的 HEAD'} · ${info?.commit?.slice(0,8) ?? ''}`),
+      ...matches.map(branch => row(branch.ref, branch.name, `${branch.ref.startsWith('refs/remotes/') ? '远端' : '本地'} · ${branch.commit.slice(0,8)}`)),
+      !matches.length && query.trim() && h('p', { className: 'kode-branch-empty', role: 'status' }, '没有匹配的分支'))))
+  }
   function WorktreeForm({ open, workspace, workspaces, onClose, onCreated }) {
-    const [info, setInfo] = useState(null), [branch, setBranch] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(''), [requestId, setRequestId] = useState('')
+    const [info, setInfo] = useState(null), [baseRef, setBaseRef] = useState('HEAD'), [branch, setBranch] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(''), [requestId, setRequestId] = useState('')
     const host = transport?.current ?? 'local'
     const call = async body => {
       const url = body ? '/api/kode/worktrees' : `/api/kode/worktrees?workspaceId=${encodeURIComponent(workspace.workspaceId)}`
@@ -1349,27 +1388,29 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }
     useEffect(() => {
       if (!open || !workspace) return
-      let alive = true; setInfo(null); setBranch(''); setError(''); setLoading(true); setRequestId(crypto.randomUUID())
+      let alive = true; setInfo(null); setBaseRef('HEAD'); setBranch(''); setError(''); setLoading(true); setRequestId(crypto.randomUUID())
       void call().then(value => { if (alive) setInfo(value) }, error => { if (alive) setError(error.message) }).finally(() => { if (alive) setLoading(false) })
       return () => { alive = false }
     }, [open, workspace?.workspaceId, host])
     const create = async () => {
       setBusy(true); setError('')
       try {
-        const result = await call({ workspaceId: workspace.workspaceId, requestId, branch })
+        const result = await call({ workspaceId: workspace.workspaceId, requestId, branch, baseRef })
         const created = await workspaces.create({ path: result.path })
         await workspaces.rename(created.workspaceId, `${workspace.title} · ${result.branch}`)
         if ((transport?.current ?? 'local') !== host) throw new Error('worktree 已创建；主机已切换，请返回原主机继续。')
         onCreated(created.workspaceId)
       } catch (error) { setError(error.message) } finally { setBusy(false) }
     }
+    const base = info?.branches?.find(row => row.ref === baseRef)
     return h(Modal, { open, title: '在 worktree 中新建会话', closeLabel: '关闭', onClose: () => { if (!busy) onClose() }, className: 'kode-project-dialog', footer: h(React.Fragment, null,
       h(Button, { onClick: onClose, disabled: busy }, '取消'), h(Button, { variant: 'primary', onClick: create, disabled: busy || loading || !info }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '创建中…') : '创建并进入')) },
       h('p', { className: 'kode-config-note' }, workspace?.title),
       loading && h('p', { role: 'status', className: 'kode-config-note' }, '正在检查 Git 仓库…'),
-      info && h('p', { className: 'kode-worktree-base' }, h('span', null, '起点'), h('strong', null, info.branch || '分离的 HEAD'), h('code', null, info.commit.slice(0,8))),
+      info && h('p', { className: 'kode-worktree-base' }, h('span', null, '起点'), h('strong', null, base?.name ?? (info.branch || '分离的 HEAD')), h('code', null, (base?.commit ?? info.commit).slice(0,8))),
+      h(BranchPicker, { info, value: baseRef, disabled: busy || loading || !info, onChange: value => { setBaseRef(value); setRequestId(crypto.randomUUID()) } }),
       h('label', { className: 'kode-field' }, '新分支名称（可选）', h('input', { value: branch, disabled: busy || loading, placeholder: '留空自动生成', spellCheck: false, onChange: event => { setBranch(event.target.value); setRequestId(crypto.randomUUID()) } })),
-      h('p', { className: 'kode-config-note' }, '从当前提交创建独立工作目录，新会话将在其中运行。原目录的未提交改动会保留在原处。'), h(Failure, { text: error }))
+      h('p', { className: 'kode-config-note' }, '从所选分支创建独立工作目录，新会话仍归入当前项目。原目录的未提交改动会保留在原处。'), h(Failure, { text: error }))
   }
   function WorkspacePicker({ open, anchorRef, selectedId, onPick, onClose, workspaces, slots, uiWorkspace, sessionId }) {
     const { data: projectHost } = useProjectHosts()
@@ -1384,31 +1425,42 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const snapshot = useSyncExternalStore(React.useCallback(fn => workspaces.list.subscribe(fn), [workspaces]), React.useCallback(() => workspaces.list.getSnapshot(), [workspaces]))
     const [query, setQuery] = useState(''), [picking, setPicking] = useState(false), [worktreeOpen, setWorktreeOpen] = useState(false)
     useEffect(() => { if (open) setQuery('') }, [open])
-    const items = snapshot.items.filter(w => `${w.title} ${w.path}`.toLowerCase().includes(query.trim().toLowerCase()))
+    const projectDirectory = useWorkspaceDirectory(), parents = projectDirectory.hosts.find(host => host.id === projectDirectory.current)?.worktreeParents ?? {}
+    const projects = groupProjectWorkspaces(snapshot.items, parents), selectedProject = projects.find(row => row.sessionIds.includes(sessionId)) ?? projects.find(row => row.workspaceId === (parents[selectedId] ?? selectedId))
+    const items = projects.filter(w => `${w.title} ${w.path}`.toLowerCase().includes(query.trim().toLowerCase()))
     const pick = id => { const origin = sessionId && directory(sessionId).getSnapshot().data; if (origin?.currentProfile && origin.canChangeAgent) stagedAgent = { host: transport?.current ?? 'local', sourceId: sessionId, profileId: origin.currentProfile.id, model: origin.selection?.model, provider: origin.selection?.provider, at: Date.now() }; onClose(); onPick(id) }
     return h(React.Fragment, null,
       h(HostControl, { slots, workspaces, uiWorkspace }),
       h('button', { type: 'button', className: 'kode-trigger kode-worktree-trigger', disabled: !selectedId, 'aria-label': '在新 worktree 中创建会话', onClick: () => { onClose(); setWorktreeOpen(true) } }, h(IconPlusOutlineRegular, { size: 14 }), '新建 worktree'),
-      h(WorktreeForm, { open: worktreeOpen, workspace: snapshot.items.find(row => row.workspaceId === selectedId), workspaces, onClose: () => setWorktreeOpen(false), onCreated: id => { const origin = sessionId && directory(sessionId).getSnapshot().data; if (origin?.currentProfile && origin.canChangeAgent) stagedAgent = { host: transport?.current ?? 'local', sourceId: sessionId, profileId: origin.currentProfile.id, model: origin.selection?.model, provider: origin.selection?.provider, at: Date.now() }; setWorktreeOpen(false); pick(id) } }),
+      h(WorktreeForm, { open: worktreeOpen, workspace: selectedProject ?? snapshot.items.find(row => row.workspaceId === selectedId), workspaces, onClose: () => setWorktreeOpen(false), onCreated: id => { const origin = sessionId && directory(sessionId).getSnapshot().data; if (origin?.currentProfile && origin.canChangeAgent) stagedAgent = { host: transport?.current ?? 'local', sourceId: sessionId, profileId: origin.currentProfile.id, model: origin.selection?.model, provider: origin.selection?.provider, at: Date.now() }; setWorktreeOpen(false); pick(id) } }),
       h(Menu, { open, anchor: null, onClose, portal: true, getAnchorRect: () => anchorRef?.current?.getBoundingClientRect() ?? null, listClassName: 'kode-workspace-menu', footer: [{ id: 'create', label: '创建项目…', icon: h(IconPlusOutlineRegular, { size: 16 }) }], onSelect: () => { onClose(); setPicking(true) } },
         h('div', { className: 'kode-workspace-search' }, h(IconSearchOutlineRegular, { size: 16 }), h('input', { autoFocus: true, 'aria-label': '搜索项目', placeholder: '搜索项目', value: query, onChange: e => setQuery(e.target.value) })),
-        ...items.map(w => h(MenuItemButton, { key: w.workspaceId, current: w.workspaceId === selectedId, icon: h(projectHost.current === 'local' ? IconFolderCloseRegular : RemoteComputerIcon, { size: 16 }), onSelect: () => pick(w.workspaceId) }, h('span', { className: 'kode-workspace-option' }, h('span', null, w.title === 'default-workspace' ? '默认工作区' : w.title || '默认工作区'), h('small', { title: w.path }, w.path)))),
+        ...items.map(w => h(MenuItemButton, { key: w.workspaceId, current: w.workspaceId === (selectedProject?.workspaceId ?? selectedId), icon: h(projectHost.current === 'local' ? IconFolderCloseRegular : RemoteComputerIcon, { size: 16 }), onSelect: () => pick(w.workspaceId) }, h('span', { className: 'kode-workspace-option' }, h('span', null, w.title === 'default-workspace' ? '默认工作区' : w.title || '默认工作区'), h('small', { title: w.path }, w.path)))),
         !items.length && h('p', { className: 'kode-menu-note' }, snapshot.phase === 'pending' ? '正在加载项目…' : '没有匹配的项目')),
       h(ProjectFlow, { slots, workspaces, open: picking, onCancel: () => setPicking(false), onPicked: async path => { const workspace = await workspaces.create({ path }); setPicking(false); pick(workspace.workspaceId) } }),
     )
   }
   const textContent = content => (content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n')
   function installInputPresentation(ctx) {
+    // Cordis returns a fresh context-bound Proxy on each method read. Compare
+    // and retain the underlying function, never a Proxy tied to this plugin.
+    const methodOf = (object, name) => {
+      for (let owner = object; owner; owner = Object.getPrototypeOf(owner)) {
+        const descriptor = Object.getOwnPropertyDescriptor(owner, name)
+        if (descriptor) return descriptor.value ?? object[name]
+      }
+    }
     ctx.inject(['inputTriggers', 'commandUi', 'remote.commands'], scope => {
       const input = scope.inputTriggers, commands = scope.commandUi
       if (!input?.sessionOf || typeof commands?.candidates !== 'function') return
       const metadata = new Map(), skillLists = new Map(), adapted = new Map(), sourceName = 'kode-codex-skills'
-      const originalCandidates = commands.candidates, originalSessionOf = input.sessionOf
-      let candidateWrapper, sessionOf
+      const originalCandidates = methodOf(commands, 'candidates'), originalSessionOf = methodOf(input, 'sessionOf')
+      let candidateWrapper, sessionOf, active = true
       scope.effect(() => () => {
-        if (candidateWrapper && commands.candidates === candidateWrapper) commands.candidates = originalCandidates
-        if (sessionOf && input.sessionOf === sessionOf) input.sessionOf = originalSessionOf
-        for (const [controller, methods] of adapted) if (controller.track === methods.wrapper) { controller.dismiss(); controller.track = methods.track }
+        active = false
+        if (candidateWrapper && methodOf(commands, 'candidates') === candidateWrapper) commands.candidates = originalCandidates
+        if (sessionOf && methodOf(input, 'sessionOf') === sessionOf) input.sessionOf = originalSessionOf
+        for (const [controller, methods] of adapted) if (methodOf(controller, 'track') === methods.wrapper) { controller.dismiss(); controller.track = methods.track }
         metadata.clear(); skillLists.clear(); adapted.clear()
       }, 'kode.input-presentation')
       const keyOf = session => `${transport?.current ?? 'local'}:${session.sessionId}`
@@ -1426,32 +1478,54 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         // metadata must neither race that admission nor hide an otherwise
         // usable menu when its optional read is unavailable.
         const rows = await originalCandidates.call(this, session, request)
+        if (!active) return rows
         const catalog = await metadataFor(session).catch(() => new Map())
+        if (!active) return rows
         const groups = { '快捷操作': [], 'Agent 命令': [], '技能': [] }
         for (const row of rows) {
           const definition = catalog.get(row.name)?.definitionId ?? ''
           const skill = definition.startsWith('@kode/dsh/native/skill/')
-          const section = skill ? '技能' : ['file', 'feedback', 'export', 'new'].includes(row.name) ? '快捷操作' : 'Agent 命令'
+          const section = skill ? '技能' : ['file', 'feedback', 'export', 'new', 'clear'].includes(row.name) ? '快捷操作' : 'Agent 命令'
           groups[section].push({ ...row, section, icon: row.icon ?? (skill ? SkillGlyph : iconFor(row.name)) })
         }
         return Object.values(groups).flat()
       }
       commands.candidates = candidateWrapper
+      const resetting = new Map()
+      const freshSession = (session, keepTitle = false) => {
+        const sourceHost = transport?.current ?? 'local', key = `${sourceHost}:${session.sessionId}`
+        if (resetting.has(key)) return resetting.get(key)
+        const binding = scope.sessions.binding(session.sessionId)
+        const task = (async () => {
+          const store = directory(session.sessionId, sourceHost); await store.load()
+          const data = store.getSnapshot().data, previous = scope.sessions.list.getSnapshot().byId[session.sessionId]
+          if (!data?.currentProfile) throw new Error('请先选择此会话的 Agent。')
+          const workspace = scope.get('workspaces')?.list.getSnapshot().items.find(row => row.sessionIds.includes(session.sessionId) && (!previous?.cwd || row.path === previous.cwd))
+          const id = await scope.sessions.create({ ...(workspace ? { workspaceId: workspace.workspaceId } : previous?.cwd ? { cwd: previous.cwd } : {}), agentPreset: 'kode-native' })
+          const checkHost = () => { if ((transport?.current ?? 'local') !== sourceHost) throw new Error('执行主机已切换，新会话保留在原主机。') }
+          checkHost()
+          const supportsFast = data.models?.find(row => row.id === data.selection?.model)?.fastCapability
+          await call({ action: 'select', sessionId: id, profileId: data.currentProfile.id, model: data.selection?.model, reasoningEffort: data.selection?.reasoningEffort, ...(supportsFast ? { fast: data.fast } : {}) }, id, false, sourceHost)
+          checkHost()
+          const title = previous?.title ?? previous?.displayTitle
+          if (keepTitle && title) {
+            const result = await scope.sessions.using(id, { source: 'workspaceOperation' }, reference => reference.binding.session.rename(title))
+            if (result?.ok === false) throw new Error(result.error.message)
+          }
+          checkHost()
+          await scope.get('uiWorkspace').openSession(id); await refreshWorkspaceDirectory()
+        })().catch(error => binding?.ctx.get('conversation')?.input.for(binding.ctx).notify('error', error.message)).finally(() => resetting.delete(key))
+        resetting.set(key, task); return task
+      }
+      const canStartFresh = session => Boolean(directory(session.sessionId).getSnapshot().data?.currentProfile && scope.get('uiWorkspace'))
       if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
-        name: 'new',
-        available: session => Boolean(directory(session.sessionId).getSnapshot().data?.currentProfile && scope.get('uiWorkspace')),
-        ui: { kind: 'action', run: session => {
-          const binding = scope.sessions.binding(session.sessionId), sourceHost = transport?.current ?? 'local'
-          void (async () => {
-            const data = directory(session.sessionId).getSnapshot().data, previous = scope.sessions.list.getSnapshot().byId[session.sessionId]
-            const workspace = scope.get('workspaces')?.list.getSnapshot().items.find(row => row.sessionIds.includes(session.sessionId))
-            const id = await scope.sessions.create({ ...(workspace ? { workspaceId: workspace.workspaceId } : previous?.cwd ? { cwd: previous.cwd } : {}), agentPreset: 'kode-native' })
-            if ((transport?.current ?? 'local') !== sourceHost) throw new Error('执行主机已切换，新会话保留在原主机。')
-            await call({ action: 'select', sessionId: id, profileId: data.currentProfile.id, model: data.selection?.model, reasoningEffort: data.selection?.reasoningEffort }, id, false, sourceHost)
-            scope.get('uiWorkspace').openSession(id); await refreshWorkspaceDirectory()
-          })().catch(error => binding?.ctx.get('conversation')?.input.for(binding.ctx).notify('error', error.message))
-        } },
+        name: 'new', available: canStartFresh,
+        ui: { kind: 'action', run: session => freshSession(session) },
       }), 'kode.new-session-command')
+      if (typeof commands.register === 'function') scope.effect(() => commands.register({
+        name: 'clear', description: () => '清空上下文并开始同名新会话', icon: IconPlusOutlineRegular, available: canStartFresh,
+        ui: { kind: 'action', run: session => freshSession(session, true) },
+      }), 'kode.clear-session-command')
       if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
         name: 'resume',
         available: session => { const profile = directory(session.sessionId).getSnapshot().data?.currentProfile; return ['codex', 'claude'].includes(profile?.type) || profile?.protocol === 'codex' },
@@ -1476,9 +1550,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       }), 'kode.native-skill-source')
       const decorate = (controller, sessionId, actx) => {
         if (adapted.has(controller)) return controller
-        const track = controller.track
+        const track = methodOf(controller, 'track')
         let previous = null, dollar = false
         const wrapper = function(draft, caret, guard, draftRev) {
+          if (!active) return track.call(this, draft, caret, guard, draftRev)
           const profile = directory(sessionId).getSnapshot().data?.currentProfile
           const match = guard.tier === 'plain' && (!profile || profile.type === 'codex' || profile.protocol === 'codex') && /(?:^|\s)\$([a-zA-Z0-9_:-]*)$/.exec(draft.slice(0, caret))
           if (!match) { if (dollar) controller.dismiss(); dollar = false; previous = null; return track.call(this, draft, caret, guard, draftRev) }
@@ -1492,10 +1567,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         }
         controller.track = wrapper; adapted.set(controller, { track, wrapper })
         const cacheKey = keyOf({ sessionId })
-        actx?.effect?.(() => () => { if (controller.track === wrapper) controller.track = track; adapted.delete(controller); metadata.delete(cacheKey); skillLists.delete(cacheKey) }, 'kode.session-input-presentation')
+        actx?.effect?.(() => () => { if (methodOf(controller, 'track') === wrapper) controller.track = track; adapted.delete(controller); metadata.delete(cacheKey); skillLists.delete(cacheKey) }, 'kode.session-input-presentation')
         return controller
       }
-      sessionOf = function(actx) { const controller = originalSessionOf.call(this, actx), session = scope.sessions.sessionOf(actx); return session ? decorate(controller, session.sessionId, actx) : controller }
+      sessionOf = function(actx) {
+        const controller = originalSessionOf.call(this, actx)
+        if (!active) return controller
+        const session = scope.sessions.sessionOf(actx)
+        return session ? decorate(controller, session.sessionId, actx) : controller
+      }
       input.sessionOf = sessionOf
       scope.slots.inject('conversation.input.overlay', () => scope.slots.register({ name: 'conversation.input.overlay', id: 'kode-input-adapter', inject: sessionId => {
         const binding = scope.sessions.binding(sessionId); if (binding) input.sessionOf(binding.ctx)
@@ -1937,11 +2017,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     })
     ctx.slots.inject('tool.call.toolview', function* () {
       for (const key of ['kode_sessions_list', 'kode_sessions_create', 'kode_sessions_send', 'kode_sessions_read', 'kode_sessions_wait']) yield ctx.slots.register({ name: 'tool.call.toolview', key, inject: sessionId => ({ sessions: ctx.sessions, sessionId }) }, MessagingTool)
-      for (const key of ['exec_command','apply_patch','kode_native_commandExecution','kode_native_fileChange','kode_native_operation']) yield ctx.slots.register({name:'tool.call.toolview',key},NativeOperationTool)
+      // Official renderers may already own these keys. Shadow them at a
+      // separate priority so either activation order and hot reload are valid.
+      for (const key of ['exec_command','apply_patch','kode_native_commandExecution','kode_native_fileChange','kode_native_operation']) yield ctx.slots.register({name:'tool.call.toolview',key,priority:-10},NativeOperationTool)
     })
     ctx.effect(() => { const timer = setInterval(() => { if (nameListeners.size && !document.hidden) void refreshNames() }, 10000); return () => clearInterval(timer) }, 'kode.session-names')
     const style = document.createElement('style')
     style.textContent = `
+.kode-branch-trigger{box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:40px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}.kode-branch-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-branch-trigger:disabled{opacity:.5;cursor:default}.kode-branch-trigger:focus-visible,.kode-branch-option:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-branch-popup{width:min(440px,calc(100vw - 24px));padding:0!important}.kode-branch-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);position:sticky;top:0;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);z-index:1}.kode-branch-search input{min-width:0;flex:1;border:0;padding:3px 0;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;outline:none}.kode-branch-search:focus-within{box-shadow:inset 0 -2px var(--dsw-focus-ring-color)}.kode-branch-results{max-height:280px;overflow-y:auto;padding:4px;scrollbar-width:thin}.kode-branch-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:9px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}.kode-branch-option>span{display:flex;flex-direction:column;gap:3px;min-width:0}.kode-branch-name{font-size:13px;overflow-wrap:anywhere}.kode-branch-option small{font-size:11px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}.kode-branch-option:hover,.kode-branch-option[aria-checked=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-branch-option[aria-checked=true]>svg{color:var(--dsw-alias-label-primary-bluish);flex-shrink:0}.kode-branch-empty{margin:0;padding:24px 12px;text-align:center;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .kode-native-input{display:block;margin:8px 0 8px 22px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-family:var(--ds-font-family-code);font-size:12px}.kode-native-output{padding:12px 0 4px;margin:0 0 0 22px;max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
 .kode-internal-stack{display:flex;flex-direction:column;gap:8px;min-width:0}.kode-internal-message{min-width:0;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-turn-trigger-bg,var(--dsw-alias-markdown-code-block));font-size:var(--dsh-content-font-size,14px);color:var(--dsw-alias-label-secondary)}.kode-internal-message>summary{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer;list-style:none;padding:12px 16px;font-size:13px}.kode-internal-message>summary::-webkit-details-marker{display:none}.kode-internal-message>summary:hover{background:var(--dsw-alias-interactive-bg-hover);border-radius:inherit}.kode-internal-title{color:var(--dsw-alias-label-primary);flex-shrink:0}.kode-internal-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary);flex:1}.kode-internal-message>summary>svg{flex-shrink:0}.kode-internal-chevron{margin-left:auto}.kode-internal-message[open]>summary>.kode-internal-chevron{transform:rotate(180deg)}.kode-internal-message summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-internal-body{padding:12px 16px 16px;min-width:0;overflow-wrap:anywhere}.kode-internal-body>dl{margin:0;display:flex;flex-direction:column;gap:6px;font-size:13px}.kode-internal-body>dl>div{display:flex;gap:12px;min-width:0;flex-wrap:wrap}.kode-internal-body dt{min-width:64px;color:var(--dsw-alias-label-tertiary)}.kode-internal-body dd{margin:0;min-width:0;flex:1;overflow-wrap:anywhere}
 [class*="hoverContent"]:has(.kode-unknown-time)>[class*="hoverTime"]{display:none}.kode-unknown-time{font-size:12px;color:var(--dsw-alias-label-secondary)}

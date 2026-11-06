@@ -138,6 +138,35 @@ impl Registry {
         .is_some_and(|seen| crate::now_ms().saturating_sub(seen) < 15000)
     }
 
+    pub fn retire_archived(&self, ctx: &Ctx, archived: &std::collections::HashSet<&str>) -> Result<()> {
+        if archived.is_empty() { return Ok(()); }
+        let mut emitted = Vec::new();
+        {
+            let mut guard = self.db.lock();
+            let db = guard.as_mut().context("runtime store unavailable")?;
+            let tx = db.transaction()?;
+            let rows = {
+                let mut stmt = tx.prepare("SELECT id,native_id,dto FROM runtime_sessions WHERE runtime!='_reserved'")?;
+                let rows = stmt.query_map([], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (id, native_id, encoded) in rows {
+                let mut dto: Value = serde_json::from_str(&encoded)?;
+                if dto["status"] == "exited" { continue; }
+                if archived.contains(native_id.as_str())
+                    || dto["session_uuid"].as_str().is_some_and(|id| archived.contains(id))
+                {
+                    dto["status"] = json!("exited");
+                    tx.execute("UPDATE runtime_sessions SET dto=?2 WHERE id=?1", params![id, serde_json::to_string(&dto)?])?;
+                    emitted.push(EventEnvelope::new(id, "session.updated", dto));
+                }
+            }
+            tx.commit()?;
+        }
+        for event in emitted { ctx.bus.emit(event); }
+        Ok(())
+    }
+
     pub fn contains(&self, id: u64) -> bool {
         let guard = self.db.lock();
         let Some(db) = guard.as_ref() else {
@@ -481,6 +510,24 @@ pub async fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn archived_existing_projections_retire_once_without_deleting_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::build_test_ctx(Default::default(), "test".into());
+        ctx.runtimes.open(&dir.path().join("runtime.sqlite")).unwrap();
+        let result = ctx.runtimes.publish(&ctx, publication("boot")).unwrap();
+        let id = result["sessions"][0]["id"].as_u64().unwrap();
+        let mut bus = ctx.bus.subscribe();
+        let archived = std::collections::HashSet::from(["session-1"]);
+        ctx.runtimes.retire_archived(&ctx, &archived).unwrap();
+        let event = bus.try_recv().unwrap();
+        assert_eq!(event.r#type, "session.updated");
+        assert_eq!(event.payload["status"], "exited");
+        assert_eq!(ctx.runtimes.history(id, 0, 10).unwrap().len(), 1);
+        ctx.runtimes.retire_archived(&ctx, &archived).unwrap();
+        assert!(bus.try_recv().is_err());
+    }
+
     fn publication(boot: &str) -> Publication {
         serde_json::from_value(json!({"runtime":"dsh","boot_id":boot,"sessions":[{"session_id":"session-1","dto":{"title":"Shared conversation","status":"idle","backend_key":"codex"},"events":[{"key":"log:1","kind":"message","payload":{"id":"message-1","role":"assistant","text":"hello"}}]}]})).unwrap()
     }

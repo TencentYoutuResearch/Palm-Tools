@@ -2,7 +2,7 @@
 
 This integration adds **model-callable session communication** to DeepSeek Harness. It uses kode's Rust backend for durable local/SSH routing and dsh's original conversation, tool execution and inbox. It does not add a messaging page or replace kode's GUI.
 
-The initial integration targets `@deepseek-ai/dsh@0.2.1-rc.2` and Node >=24.9.0. The plugin is opt-in. Existing kode behavior is unchanged without `KODE_MESSAGING_CONFIG`.
+The integration declares `engines.dsh: "*"` and wildcard DSH peer dependencies, with Node >=24.9.0. New DSH versions are allowed without updating the manifest; runtime compatibility issues are fixed as they arise. The plugin is opt-in. Existing kode behavior is unchanged without `KODE_MESSAGING_CONFIG`.
 
 ## Components
 
@@ -445,16 +445,18 @@ checkouts can also use local compiled binaries.
 | Resume, skills, images, approvals | Native protocol adapters; `/resume` lists registered Kode histories, not every arbitrary CLI history file. |
 | Files, Git preview, manual terminal | Official dsh services, including terminal font preferences. |
 | Sidebar browser | Official chrome with a private Chromium page provider; internal MR browsing. See input/accessibility limitations above. |
-| New conversations in worktrees | Create a branch/checkout from a registered Git workspace and start the new session there, preserving draft and Agent/model. Moving an existing conversation back to the main checkout is not implemented. |
+| New conversations in worktrees | Select a local or remote base branch, create a new branch/checkout and start the new session there, preserving draft and Agent/model. Worktree conversations remain grouped under their original project after reload; their execution cwd is the separate checkout. Moving an existing conversation back to the main checkout is not implemented. |
 | Mid-turn steering | Codex uses native `turn/steer`. Claude, Cursor and CodeBuddy use the advertised ACP `_session/steering` extension when available; otherwise they cancel the active prompt, wait for its terminal response, and continue with the new input in the same native session. |
 | Queued-message steering | Native admission is checked before transferring a queued input. The original queue occurrence is removed before insertion so every persisted prefix has unique pending IDs. Synchronous failure restores the original position; rejected native delivery returns the input to the queue. |
 | Shared memory UI and synchronization controls | Shared backend switches are available in both frontends. The review queue, scope/relation editing and memory sync administration remain in the original GUI. |
 | Native plugin/Hook installation and management | Missing desktop management UI; dsh's own plugin page manages dsh bundles, not all native CLI plugins. |
-| Model usage and desktop floating monitor | Missing desktop-wide monitoring parity; dsh has its own per-session observations. |
+| Model usage and desktop floating monitor | Application-wide top-edge token island reuses the CLI history collector on the selected Host (today/month/all, model totals, daily history). The OS-level floating window remains a Tauri feature. |
 | Phone pairing, cloud sync deployment | Settings → 手机与同步 shows a one-time pairing QR code and a manual pairing link through the shared backend. Cloud-service deployment remains in the original GUI. |
 | Native screenshot tools, desktop window/tab actions, SpecOps window | Not ported; some are desktop-specific rather than Web-session requirements. |
 
 For older logs failing with `invalid persisted inbox splice` or a non-ignorable `plugin:kode/model-fast` record, run `python3 scripts/repair-inbox-history.py --home <dsh-home> --session-id <id> --runtime-modules <released-node_modules> --node <node-24.22+>`. It reports changes by default. Add `--apply` to repair under the session writer lock, back up the artifact and projection cache, and invalidate the stale cache. Event sequence IDs and input content are retained; ambiguous transfers are refused.
+
+History loads and resumes automatically attempt a repair once for legacy `invalid persisted inbox splice` and `system/message requires a protected first surface head` failures. Concurrent opens share the repair. The maintenance writer lock excludes active writers; the repaired history is fully validated and the original log/cache backup is made durable before replacement. The backup path is logged. Existing repair rules preserve event sequence IDs and retain misplaced native system prompts as optional evidence. Unrecognized failures and ambiguous histories retain their original error and artifact. Automatic repair requires Python 3 (POSIX flock) and Node 24.22+; unavailable prerequisites leave the error intact.
 
 Managed service supervision is currently process based; automatic startup on OS
 boot and general service-manager integration are not included. Native Agent forks,
@@ -655,11 +657,11 @@ A shared saved-session import marker is reused only when the current Host still 
 ### Native conversation presentation
 
 These extensions live entirely in this plugin; they do not require editing dsh
-source or its installed files. The supported release is pinned to
-`0.2.1-rc.2` with Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
+source or its installed files. DSH version declarations use `"*"`, with
+Node.js `>=24.9.0`. Slots, input-trigger sources and native UI
 primitives provide the integration. A reversible presentation adapter wraps
-that release's `commandUi.candidates` and input controller to share the native
-menu for `/` and `$`; upgrading dsh requires checking those interfaces.
+dsh's `commandUi.candidates` and input controller to share the native
+menu for `/` and `$`; interface changes in new dsh versions are handled as they arise.
 Installation still requires the Kode backend and configured, authenticated
 Agent CLIs. `serverCommand`/`serverConfig` can start an existing backend binary;
 the plugin is not a standalone backend installer.
@@ -685,13 +687,17 @@ Appearance (`ui-theme`, including native font roles) belongs to the entry Host,
 so switching SSH execution does not change the window theme. Execution settings
 remain owned by their selected Host. Native model discovery carries published
 reasoning effort choices; the selector validates and forwards only those values.
+Selecting a model or effort returns to the parent menu. Fast switches stay in
+the current menu, so multiple parameters can be changed before dismissing it.
 Fenced `console` tool output uses dsh's Markdown code renderer.
 
 The slash menu groups quick actions, Agent commands and skills with consistent
 icons. Skill classification uses native metadata or bounded SKILL.md discovery.
 Codex `$` completion uses dsh's menu and guarded draft insertion, including
 namespaced skills. Shared `/rename`, `/diff`, `/stop` and frontend `/new` are
-available; Codex rename also updates its native thread title. `/plan` is offered
+available. Frontend `/clear` starts a fresh conversation with the same name,
+Agent, model/effort/Fast and execution directory, retaining the old history.
+Codex rename also updates its native thread title. `/plan` is offered
 when the app-server advertises that collaboration mode. For Claude adapters
 without native `/autocompact`, `/autocompact on|off|status` records the preference
 and passes SDK settings when reopening the same native thread at the next turn
@@ -933,3 +939,25 @@ session folders every time, including conversations created since the last
 scan, and validates released V4 envelopes, relationships, fork cuts and inbox
 prefixes. It reports artifacts changing during a read and exits nonzero on
 validation failures. It never repairs a log or replays a prompt.
+
+
+Historical human messages (including admitted steering messages) have an **编辑并重发** action. Editing creates a new branch with the original name, Agent, model/effort/Fast selection, attachments, and project directory. The original conversation remains intact; the edited message and every later answer/input are excluded from the inherited prefix. Pending inputs inherited from that prefix are canceled before the new branch can run. This changes conversation context only; workspace files are not rolled back.
+
+All installed Agent runtimes (Codex, Claude, Cursor, CodeBuddy, custom ACP/Codex, and the built-in dsh ACP runtime) use a fresh native thread for the branch. Prior model-visible messages and tool results are transferred as a quoted, read-only transcript in its first request, with images/files retained; earlier requests and tools are not replayed. Subsequent requests resume that new thread normally. This shared transfer also works with runtimes that offer no native fork/rollback API. The Host validates the original durable user-message position and retains a retry identity so a repeated submission cannot create another branch or send it twice.
+
+The single application-wide top-edge token island reports CLI history totals on the selected Host, separately from the composer's context-pressure indicator. It refreshes every 30 seconds while visible and exposes today/month/all totals and selectable Agent/model breakdowns. The owner-only `/api/kode/model-usage` proxy uses the existing bridge collector through `/api/v1/messaging/model-usage`; it never exposes backend credentials. Remote calendar boundaries follow the viewer's timezone. Background jobs use the native output/stop panel above the composer. The Worktree branch dropdown contains its own search field for local/remote branches, retains the selected starting point when filtered out, and supports Escape/outside dismissal. The token island uses the Kode dark silhouette, green totals, per-Agent/model stacked bars, period-aligned activity cells and reduced-motion-aware unfold/fold animation. Inline history editing fills the conversation content column.
+
+Native factory setup runs after SessionStore entry and creation publication, matching the DSH 0.2.2 lifecycle guard. Model/preset/binding writes therefore remain inside a registered store during both creation and resume.
+
+DSH 0.2.2 tool calls are dispatched through the selected scoped batch executor; older Hosts retain single-call dispatch. Native adapters keep their own tool history without duplicate batch logging. This includes native background-job registration and the original host approval/policy pipeline.
+
+Restarted empty Desktop composer artifacts may include `session/end-seed`. Cold directory and runtime classification treats non-inherited seed sealing as setup-only, preventing empty profile-directory placeholders from reappearing as ungrouped histories. Inherited branches, queued work, real messages and unknown events remain visible; no artifacts are deleted.
+
+On DSH 0.2.2, cold-history inspection uses `sessionQuery.observeSession` when the legacy controller inspection API is absent, and releases every retained observation after copying its immutable event snapshot. Both the owner directory and shared runtime publication use this adapter, so existing empty drafts are hidden and prior publications retired. Desktop MCP launch preserves `ELECTRON_RUN_AS_NODE=1`; plugin reload retains the base Connection identity and restores original Cordis input methods.
+
+
+### Restart continuity and usage filtering
+
+**Kode → 插件与集成 → 重启后自动续接** is enabled by default and persisted per execution Host. An execution-intent journal records running sessions; on the next Host boot, cold log inspection admits only restart-interrupted turns. Normal completion, explicit stop, archived history and already active sessions are excluded. Recovery retains the same conversation and recorded Agent/model/permissions, consumes existing queued input without duplication, and otherwise submits a continuation reminder. Permission prompts still require the configured approval flow. Old idle history is never treated as interrupted work. On the first upgrade boot without an intent journal, only restart evidence from the preceding two minutes is admitted. Already materialized idle tabs remain eligible; crash-boundary repair retains an ignorable restart-evidence marker so it is distinct from a user interruption.
+
+The token island scopes today to 00:00–now (hourly buckets), month to the first day–now (daily), and all to the earliest history–now (monthly). Switch between Agent/model and toggle multiple colored legend controls; totals, stacked bars, activity cells and the grouped detail table share the selection. An older remote service shows an update notice rather than an invented breakdown.

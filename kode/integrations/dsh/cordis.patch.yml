@@ -22,7 +22,7 @@
         collapseTiming: completion
     - id: kode-sidebar-browser
       name: '@kode/dsh-browser'
-    - id: kode-connection
+    - id: connection
       name: '@kode/dsh-transport'
       inject: [webStartup]
       config:
@@ -30,8 +30,6 @@
     # Ship the official dsh ACP runtime by default alongside external Agents.
     - id: kode-dsh-conversation
       name: '@kode/dsh/dsh-conversation'
-- id: connection
-  disabled: true
 - id: workspace
   disabled: true
 - id: storage-domain

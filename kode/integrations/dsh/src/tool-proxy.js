@@ -37,7 +37,12 @@ export async function createToolProxy(tools, execute) {
   catch (error) { await rm(root, { recursive: true, force: true }); throw error }
   const url = `http://127.0.0.1:${server.address().port}/mcp`
   return { url, tokenFile,
-    definition: { name: 'kode', command: process.execPath, args: [fileURLToPath(new URL('./tool-proxy-stdio.js', import.meta.url))], env: [{ name: 'KODE_TOOL_PROXY_URL', value: url }, { name: 'KODE_TOOL_PROXY_TOKEN_FILE', value: tokenFile }] },
+    definition: { name: 'kode', command: process.execPath, args: [fileURLToPath(new URL('./tool-proxy-stdio.js', import.meta.url))], env: [
+      { name: 'KODE_TOOL_PROXY_URL', value: url }, { name: 'KODE_TOOL_PROXY_TOKEN_FILE', value: tokenFile },
+      // Desktop's execPath is Electron. CLI-launched MCP processes do not
+      // inherit the Host's Node mode and would otherwise open another GUI.
+      ...(process.versions.electron ? [{ name: 'ELECTRON_RUN_AS_NODE', value: '1' }] : []),
+    ] },
     async close() {
       await Promise.allSettled([...transports].map(t => t.close()))
       server.closeAllConnections()

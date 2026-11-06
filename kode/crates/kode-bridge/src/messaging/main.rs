@@ -31,7 +31,9 @@ async fn main() -> Result<()> {
     }
     let ctx = kode_bridge::build_runtime_ctx(kode_core::config::Config::load(), token);
     let hub = kode_bridge::messaging::Hub::open(config, &ctx)?;
-    // The service owns messaging once; do not use the environment-enabled GUI attachment.
+    // Keep the saved cloud manager alive for the service's entire lifetime.
+    let cloud = kode_bridge::cloud_sync::CloudSyncManager::new(ctx.clone());
+    cloud.start_saved();
     let router = hub.router();
     hub.start();
     let listener = tokio::net::TcpListener::bind(&bind).await?;

@@ -57,6 +57,11 @@ pub(super) fn local(hub: &Hub, offset: usize) -> Result<Value> {
     let projects = workspaces.pointer("/value/tables/workspaces").and_then(Value::as_object);
     let directory = hub.store.sessions()?;
     let archived = workspaces.pointer("/value/global/archivedSessionIds").and_then(Value::as_array);
+    let retired: HashSet<String> = hub.ctx.upgrade().map(|ctx| ctx.runtimes.snapshots())
+        .unwrap_or_default().into_iter()
+        .filter(|snapshot| snapshot["dto"]["runtime"] == "dsh" && snapshot["dto"]["status"] == "exited")
+        .filter_map(|snapshot| snapshot["dto"]["runtime_session_id"].as_str().map(str::to_owned))
+        .collect();
     let mut tabs = Vec::new();
     let mut seen = HashSet::new();
     // Native records take precedence; gui.tabs is an opened-tabs snapshot only.
@@ -64,7 +69,8 @@ pub(super) fn local(hub: &Hub, offset: usize) -> Result<Value> {
         let Some(mut row) = sanitized(tab) else { continue };
         if !seen.insert(key(&row)) { continue }
         let dsh_id = row["dsh_session_id"].as_str();
-        if dsh_id.is_some_and(|id| archived.is_some_and(|rows| rows.iter().any(|row|row.as_str()==Some(id)))) { continue }
+        if is_archived_local(&row, archived) { continue }
+        if retired_runtime_tab(&row, &retired) { continue }
         if let Some(info) = directory.iter().find(|info| Some(info.address.session_id.as_str()) == dsh_id) {
             if !info.title.is_empty() { row["title"] = json!(info.title); }
         }
@@ -82,6 +88,19 @@ pub(super) fn local(hub: &Hub, offset: usize) -> Result<Value> {
     }
     let end = offset + page.len();
     Ok(json!({"node_id":hub.node_id(),"tabs":page,"next_offset":if end<tabs.len(){Some(end)}else{None}}))
+}
+
+pub(super) fn is_archived_local(row: &Value, archived: Option<&Vec<Value>>) -> bool {
+    is_local(row) && ["dsh_session_id", "session_id"].iter().any(|field| {
+        row[*field].as_str().is_some_and(|id| {
+            archived.is_some_and(|rows| rows.iter().any(|value| value.as_str() == Some(id)))
+        })
+    })
+}
+
+fn retired_runtime_tab(row: &Value, retired: &HashSet<String>) -> bool {
+    is_local(row) && row["transport_kind"] == "runtime"
+        && row["session_id"].as_str().is_some_and(|id| retired.contains(id))
 }
 
 fn endpoint_for<'a>(peer: &Peer, endpoints: &'a [Value]) -> Option<&'a Value> {
@@ -146,6 +165,19 @@ pub(super) async fn federated(hub: Arc<Hub>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_archive_ids_hide_local_tabs_without_hiding_remote_history() {
+        let archived = vec![json!("legacy"), json!("shared")];
+        assert!(is_archived_local(&json!({"session_id":"legacy"}), Some(&archived)));
+        assert!(is_archived_local(&json!({"session_id":"native","dsh_session_id":"shared"}), Some(&archived)));
+        assert!(!is_archived_local(&json!({"session_id":"active"}), Some(&archived)));
+        assert!(!is_archived_local(&json!({"session_id":"legacy","endpoint_id":{"kind":"remote","id":"ssh"}}), Some(&archived)));
+        assert!(!is_archived_local(&json!({"session_id":"legacy"}), None));
+        let retired = HashSet::from(["draft".to_owned()]);
+        assert!(retired_runtime_tab(&json!({"session_id":"draft","transport_kind":"runtime"}), &retired));
+        assert!(!retired_runtime_tab(&json!({"session_id":"draft","transport_kind":"pty"}), &retired));
+    }
+
     #[test]
     fn ssh_endpoint_mapping_accepts_config_user_but_rejects_ambiguous_hosts() {
         let peer=Peer{node_id:"remote".into(),link_token:"private".into(),url:None,ssh:Some(super::super::SshConfig{host:"server.example".into(),port:2200,remote_port:47981,config_file:None})};

@@ -9,6 +9,7 @@ import SessionStore, { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-sessio
 import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import * as factoryPlugin from '../src/native-agent-factory.js'
+import { installNativeStartupBarrier } from '../src/native-startup.js'
 import {buildHistorySeed} from '../src/native-history.js'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import Subprocess from '@deepseek-ai/dsh-subprocess-local'
@@ -24,10 +25,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+async function load(ctx, plugin, ...args) {
+  const fiber = await ctx.plugin(plugin, ...args)
+  await fiber.await?.()
+  return fiber
+}
 async function host(adapter, official = false, requests = false) {
   const ctx = new Context(), stored = new Map(), writers = new Map()
-  await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(ProjectionRegistry)
-  ctx.provide('tools', { schemas: () => [] })
+  await load(ctx,SessionStore); await load(ctx,AgentRegistry); await load(ctx,ProjectionRegistry)
+  ctx.provide('tools', { schemas: () => [], resolve: async () => ({ tools: [], schemas: [], dispose() {} }) })
   ctx.provide('agentPresets', { register: async () => () => {} })
   ctx.provide('kodeAgents', { adapter })
   const makeHandle = (row, write) => {
@@ -46,14 +52,14 @@ async function host(adapter, official = false, requests = false) {
   ctx.on('session/event', (session, event) => { const row = stored.get(session.id); if (row && writers.has(session.id)) { assert.equal(event.seq, row.events.length); row.events.push(event) } })
   ctx.on('session/flush', async () => {})
   if (official) {
-    if (requests) { await ctx.plugin(LlmRuntime); await ctx.plugin(SystemPrompt) }
+    if (requests) { await load(ctx,LlmRuntime); await load(ctx,SystemPrompt) }
     else { ctx.provide('llm', {}); ctx.provide('systemPrompt', { variable: () => () => {} }) }
-    await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
+    await load(ctx,AgentLoop, { agents: [], maxParallelToolCalls: 10 })
   } else {
     ctx.agents.setFactory({ createAgent() { throw new Error('official create') }, resume() { throw new Error('official resume') } })
     ctx.provide('agentLoop', {})
   }
-  const fiber = await ctx.plugin(factoryPlugin)
+  const fiber = await load(ctx,factoryPlugin)
   return { ctx, stored, writers, fiber }
 }
 const message = (id, text) => ({ id, role: 'user', source: { kind: 'human' }, content: [{ type: 'text', text }] })
@@ -218,6 +224,29 @@ test('native commentary and final answer remain separate durable messages around
   } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
 
+test('native setup appends only after store entry and creation publication, on create and resume', async () => {
+  const h = await host({ closeSession: async () => {} })
+  const announced = new Set()
+  h.ctx.on('session/created', session => { announced.add(session.id) })
+  let calls = 0
+  const setup = async (_scope, driver) => {
+    assert.equal(h.ctx.sessions.get(driver.id), driver.session)
+    assert.ok(announced.has(driver.id), 'session/created must finish before setup writes')
+    driver.session.append('agent-preset/selected', { agentPreset: 'kode-native' })
+    calls++
+  }
+  try {
+    const first = await h.ctx.agents.create({ ...options, setup }); await first.dispose()
+    announced.clear()
+    const second = await h.ctx.agents.resume({ resumeSessionId: options.sessionId, agentOptions: options.agentOptions, setup })
+    const events = h.stored.get(options.sessionId).events
+    assert.equal(calls, 2)
+    assert.equal(events.filter(event => event.type === 'agent-preset/selected').length, 2)
+    assert.deepEqual(events.map(event => event.seq), events.map((_, index) => index))
+    await second.dispose()
+  } finally { await h.fiber.dispose() }
+})
+
 test('native factory persists actual Agent turns without assembling a dsh system prompt and resumes once', async () => {
   const inputs = []
   const h = await host({ async *stream(request) { inputs.push(request.messages.map(m => m.id)); yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text: 'Native reply' }; yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Native reply' } }; yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} })
@@ -276,7 +305,7 @@ test('native model selection is session-local and does not persist or reload glo
 test('! commands use the shipped workspace shell without inference and persist context for the next native prompt',async()=>{
   const root=await mkdtemp(join(tmpdir(),'kode-human-shell-')),log=join(root,'wire.jsonl')
   const h=await host({closeSession:async()=>{}})
-  const processes=await h.ctx.plugin(Subprocess),shell=await h.ctx.plugin(LocalBashExecutor)
+  const processes=await load(h.ctx,Subprocess),shell=await load(h.ctx,LocalBashExecutor)
   const profiles=await new AgentProfiles(join(root,'profiles.json')).open([{id:'fixture',name:'Fixture',type:'codex',executable:process.execPath,args:[fileURLToPath(new URL('./fixture-codex-server.js',import.meta.url))],env:{KODE_FIXTURE_RPC_LOG:log}}])
   const adapter=new AgentRuntimeAdapter(h.ctx,profiles,{recordNative:()=>{}})
   Object.assign(h.ctx.kodeAgents,{profiles,adapter,recordBinding:()=>{}})
@@ -297,7 +326,7 @@ test('! commands use the shipped workspace shell without inference and persist c
 
 test('native slash definitions shadow harness commands only for their Agent and unload with it',async()=>{
   const received=[],h=await host({async *stream(request){received.push(request);yield{type:'finish',reason:{kind:'stop'}}},closeSession:async()=>{}})
-  const commands=await h.ctx.plugin(CommandRuntime)
+  const commands=await load(h.ctx,CommandRuntime)
   const global=h.ctx.commands.register({name:'compact',description:'Harness compaction',handler:()=>({kind:'success',text:'global'})})
   const {agent}=await h.ctx.agents.create(options)
   const service={commandOwners:new Map(),adapter:{capabilities:async()=>({commands:[{name:'compact',description:'Native compact'},{name:'team:review',description:'Project skill',kind:'skill',input:{hint:'task'}}],modes:[]}),listModels:async()=>[{id:'next-model',name:'Friendly model'}]}}
@@ -502,7 +531,7 @@ test('unloading and reloading Kode never falls through to an official loop for n
     const other = await h.ctx.agents.create({ sessionId: 'official-during-reload', agentOptions: { provider: 'deepseek-official', model: 'fixture' } })
     other.agent.session.append('model/selection', { provider: 'deepseek-official', model: 'fixture' }); await other.dispose()
     const restoredOther = await h.ctx.agents.resume({ resumeSessionId: 'official-during-reload', agentOptions: options.agentOptions }); await restoredOther.dispose()
-    const reloaded = await h.ctx.plugin(factoryPlugin)
+    const reloaded = await load(h.ctx,factoryPlugin)
     const resumed = await h.ctx.agents.resume({ resumeSessionId: first.agent.id, agentOptions: { provider: 'deepseek-official', model: 'fallback' } })
     assert.equal(resumed.agent.isKodeNativeAgent, true)
     resumed.agent.followup(message('next', 'Continue')); await resumed.agent.whenIdle()
@@ -512,12 +541,13 @@ test('unloading and reloading Kode never falls through to an official loop for n
 })
 
 
-test('direct official restore cannot write a system head into native history before factory readiness', async () => {
+test('configured resumeWith routes native history to the native driver', async () => {
   const h = await host({ closeSession: async () => {} }, true, true)
   const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
   const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
   let streams = 0
   adapter.stream = async function* () { streams++; yield { type: 'finish', reason: { kind: 'stop' } } }
+  h.ctx.kodeAgents.adapter = adapter
   try {
     const first = await h.ctx.agents.create({ ...options, sessionId: 'direct-official-restore' })
     first.agent.session.append('user/message', message('historical', 'Native history'), { surfaceOp: 'append' })
@@ -525,15 +555,188 @@ test('direct official restore cannot write a system head into native history bef
     // Configured AgentLoop restores can enter resumeWith directly, bypassing
     // createAgent/resume wrappers. Exercise the released loop's actual path.
     const restored = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, { resumeSessionId: first.agent.id, agentOptions: options.agentOptions })
-    assert.notEqual(restored.agent.isKodeNativeAgent, true)
+    assert.equal(restored.agent.isKodeNativeAgent, true)
     restored.agent.followup(message('followup', 'Continue'))
     await restored.agent.whenIdle()
     const events = h.stored.get(first.agent.id).events
     assert.equal(events.some(event => event.type === 'system/message'), false)
-    assert.equal(streams, 0)
-    assert.match(events.findLast(event => event.type === 'turn/end').data.reason.error.message, /写入系统提示前停止/)
+    assert.equal(streams, 1)
+    assert.equal(events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
     const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
     assert.doesNotThrow(() => assertReleasedV4Relationships({ header: h.stored.get(first.agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
     await restored.dispose()
   } finally { unregister(); await adapter.close(); await h.ctx.fiber.dispose() }
+})
+
+test('configured resumeWith retains its native barrier across plugin reloads', async () => {
+  const h = await host({ async *stream() { yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} }, true)
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'configured-reload' })
+    first.agent.followup(message('first', 'Native turn')); await first.agent.whenIdle(); await first.dispose()
+    const count = h.stored.get(first.agent.id).events.length
+    const restore = { resumeSessionId: first.agent.id, agentOptions: { provider: 'deepseek-official', model: 'fallback' } }
+    await h.fiber.dispose()
+    await assert.rejects(h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, restore), /保护历史/)
+    assert.equal(h.stored.get(first.agent.id).events.length, count)
+    const other = await h.ctx.agents.create({ sessionId: 'configured-official', agentOptions: restore.agentOptions })
+    other.agent.session.append('model/selection', restore.agentOptions); await other.dispose()
+    const official = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, { resumeSessionId: other.agent.id, agentOptions: options.agentOptions })
+    assert.notEqual(official.agent.isKodeNativeAgent, true)
+    await official.dispose()
+    const reloaded = await load(h.ctx,factoryPlugin)
+    const resumed = await h.ctx.agentLoop.resumeWith(h.ctx, h.ctx.sessionPersistence, restore)
+    assert.equal(resumed.agent.isKodeNativeAgent, true)
+    resumed.agent.followup(message('next', 'Continue')); await resumed.agent.whenIdle()
+    assert.equal(h.stored.get(first.agent.id).events.at(-1).data.reason.kind, 'completed')
+    await resumed.dispose(); await reloaded.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+test('bypassing native routing still rejects ordinary system prompt admission', async () => {
+  const h = await host({ closeSession: async () => {} }, true, true)
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
+  adapter.stream = async function* () { throw new Error('Ordinary loop must not reach native stream') }
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'unrouted-restore' })
+    first.agent.session.append('user/message', message('historical', 'Native history'), { surfaceOp: 'append' })
+    await first.dispose()
+    const loop = h.ctx.agents.requireFactory().target
+    const original = loop[Symbol.for('kode.native-factory.upstream')].resumeWith
+    const restored = await original.call(loop, h.ctx, h.ctx.sessionPersistence, { resumeSessionId: first.agent.id, agentOptions: options.agentOptions })
+    restored.agent.followup(message('next', 'Continue')); await restored.agent.whenIdle()
+    const events = h.stored.get(first.agent.id).events
+    assert.equal(events.some(event => event.type === 'system/message'), false)
+    assert.match(events.at(-1).data.reason.error.message, /写入系统提示前停止/)
+    await restored.dispose()
+  } finally { unregister(); await adapter.close(); await h.ctx.fiber.dispose() }
+})
+
+
+test('history edits publish a balanced native branch before sending and retain the original session', async () => {
+  const { HistoryEditor, branchHistoryInput } = await import('../src/history-edit.js')
+  const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+  const root = await mkdtemp(join(tmpdir(), 'kode-edit-native-')), requests = []
+  const h = await host({
+    async *stream(options) {
+      const agent = h.ctx.agents.get(options.sessionId)
+      requests.push({ messages: options.messages, history: await branchHistoryInput(agent.session, { historyBranch: true }, undefined, false) })
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Branch answer' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Branch answer' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }, closeSession: async () => {},
+  })
+  try {
+    const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex' }])
+    Object.assign(h.ctx.kodeAgents, { profiles, recordBinding() {}, hasRuntime: () => true })
+    h.ctx.sessionPersistence.stat = async id => h.stored.has(id) ? {} : undefined
+    h.ctx.provide('sessionQuery', { observeSession: async id => { const row = h.stored.get(id); return { header: row.header, events: [...row.events], [Symbol.dispose]() {} } } })
+    h.ctx.provide('sessionController', { rename: async () => {}, resolveAgent: async id => ({ agent: h.ctx.agents.get(id) }) })
+    const seed = buildHistorySeed({ timeline: [
+      { kind: 'text', role: 'user', text: 'Prior question' }, { kind: 'text', role: 'agent', text: 'Prior answer' },
+      { kind: 'text', role: 'user', text: 'Replace me' }, { kind: 'text', role: 'agent', text: 'Future answer' },
+    ] }, options.agentOptions)
+    const { agent: source } = await h.ctx.agents.create({ ...options, seed })
+    await profiles.bind(source.id, 'fixture'); await profiles.patchBinding(source.id, { threadId: 'source-native-thread' })
+    const before = JSON.stringify(h.stored.get(source.id).events)
+    const seq = seed.find(event => event.type === 'user/message' && event.data.content[0].text === 'Replace me').seq
+    const result = await new HistoryEditor(h.ctx, h.ctx.kodeAgents).edit({ sessionId: source.id, seq, text: 'Replacement', requestId: 'native-edit-request' })
+    const child = h.ctx.agents.get(result.sessionId); await child.whenIdle()
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].messages[0].content[0].text, 'Replacement')
+    assert.match(JSON.stringify(requests[0].history), /Prior answer/)
+    assert.ok(!JSON.stringify(requests[0].history).includes('Future answer'))
+    assert.equal(JSON.stringify(h.stored.get(source.id).events), before)
+    assert.equal(profiles.binding(child.id).threadId, undefined)
+    const stored = h.stored.get(child.id)
+    assert.doesNotThrow(() => assertReleasedV4Relationships({ header: stored.header, events: stored.events, inheritedEventCount: seq }, KNOWN_SESSION_EVENT_TYPES))
+    assert.equal(child.status, 'idle')
+  } finally { await h.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+for (const mode of ['cold', 'loaded', 'crash-loaded']) test(`restart recovery continues ${mode} native history exactly once`, async () => {
+  const { RestartResume } = await import('../src/restart-resume.js')
+  const root = await mkdtemp(join(tmpdir(), 'kode-restart-native-'))
+  let started, runs = 0
+  const ready = new Promise(resolve => { started = resolve })
+  const h = await host({ async *stream({ signal }) {
+    if (++runs === 1) { started(); await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); signal.throwIfAborted() }
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'Continued after restart' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Continued after restart' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }, closeSession: async () => {} })
+  const backend = { call: async () => ({ auto_resume_interrupted: true }) }
+  const file = join(root, 'restart.json'), initial = new RestartResume(h.ctx, backend, file)
+  await initial.load()
+  const subscription = h.ctx.on('agent/status', ({ agent }) => initial.status(agent))
+  try {
+    const first = await h.ctx.agents.create(options)
+    first.agent.followup(message('restart-task', 'Finish this task')); await ready
+    await first.dispose(); await initial.saving
+    assert.equal(initial.records[options.sessionId], true)
+    subscription()
+    if (mode === 'crash-loaded') h.stored.get(options.sessionId).events.pop()
+    h.ctx.provide('sessionController', {
+      inspect: async id => ({ events: h.stored.get(id).events }),
+      resolveAgent: id => h.ctx.agents.resume({ resumeSessionId: id, agentOptions: options.agentOptions }),
+    })
+    if (mode !== 'cold') await h.ctx.agents.resume({ resumeSessionId: options.sessionId, agentOptions: options.agentOptions })
+    const recovery = new RestartResume(h.ctx, backend, file); await recovery.load()
+    await recovery.recover(new AbortController().signal)
+    const agent = h.ctx.agents.get(options.sessionId); await agent.whenIdle()
+    assert.equal(runs, 2); assert.equal(agent.options.model, options.agentOptions.model)
+    const events = h.stored.get(agent.id).events
+    assert.equal(events.filter(event => event.type === 'user/message' && event.data.id === 'restart-task').length, 1)
+    assert.equal(events.filter(event => event.type === 'turn/start').length, 2)
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    await recovery.recover(new AbortController().signal); assert.equal(runs, 2)
+  } finally { subscription(); await h.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('early startup barrier rolls back an ordinary native restore before input or prompt admission', async () => {
+  const h = await host({ closeSession: async () => {} }, true)
+  installNativeStartupBarrier(h.ctx)
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'early-startup' })
+    first.agent.session.append('user/message', message('history', 'Retain my native task'), { surfaceOp: 'append' })
+    await first.dispose()
+    const count = h.stored.get(first.agent.id).events.length
+    const loop = h.ctx.agents.requireFactory().target
+    const original = loop[Symbol.for('kode.native-factory.upstream')].resumeWith
+    await assert.rejects(original.call(loop, h.ctx, h.ctx.sessionPersistence, { resumeSessionId: first.agent.id, agentOptions: options.agentOptions }), /阻止普通 dsh/)
+    assert.equal(h.ctx.agents.get(first.agent.id), undefined)
+    assert.equal(h.writers.has(first.agent.id), false)
+    // Released loops may seal an imported seed while opening the log.
+    assert.ok(h.stored.get(first.agent.id).events.slice(count).every(event => event.type === 'session/end-seed'))
+    assert.equal(h.stored.get(first.agent.id).events.filter(event => event.type === 'user/message').length, 1)
+    const restored = await h.ctx.agents.resume({ resumeSessionId: first.agent.id, agentOptions: options.agentOptions })
+    assert.equal(restored.agent.isKodeNativeAgent, true)
+    await restored.dispose()
+  } finally { await h.ctx.fiber.dispose() }
+})
+
+test('native admission waits for delayed factory initialization without creating an ordinary driver', async () => {
+  const h = await host({ closeSession: async () => {} }, true)
+  installNativeStartupBarrier(h.ctx)
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  try {
+    const first = await h.ctx.agents.create({ ...options, sessionId: 'delayed-startup' })
+    await first.dispose(); await h.fiber.dispose()
+    h.ctx.agentPresets.register = async () => { entered.resolve(); await release.promise; return () => {} }
+    const loading = load(h.ctx, factoryPlugin)
+    await entered.promise
+    let admitted = false
+    const restoring = h.ctx.agents.resume({ resumeSessionId: first.agent.id, agentOptions: options.agentOptions }).then(result => { admitted = true; return result })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(admitted, false)
+    assert.equal(h.ctx.agents.get(first.agent.id), undefined)
+    assert.equal(h.writers.has(first.agent.id), false)
+    release.resolve(); await loading
+    const restored = await restoring
+    assert.equal(restored.agent.isKodeNativeAgent, true)
+    await restored.dispose()
+  } finally { release.resolve(); await h.ctx.fiber.dispose() }
 })

@@ -1,6 +1,6 @@
 import { resolveDefaultSelection } from './model-alias.js'
 import { appendFastPreference } from './model-fast.js'
-import { needsEmptySessionCheck, setupOnlySession } from './empty-session.js'
+import { needsEmptySessionCheck, setupOnlySession, sessionInspector } from './empty-session.js'
 /** Project the existing dsh runtime into Kode. Never run a second Agent loop. */
 import { randomUUID, createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -56,7 +56,8 @@ export class RuntimeBridge {
     const controller = this.service('sessionController'), directory = await controller.list({}, this.stop.signal)
     // Empty composer placeholders are not saved conversations. Retire older
     // publications too, so another frontend cannot persist and reimport them.
-    const items = directory.items.filter(row => !row.blank)
+    const archived = new Set(this.service('workspaceRegistry')?.archivedSessionIds ?? [])
+    const items = directory.items.filter(row => !row.blank && !archived.has(row.sessionId))
     if (!this.known) {
       const saved = await this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)
       this.known = new Map(saved.sessions.filter(row => row.runtime === this.runtime).map(row => [row.runtime_session_id, row]))
@@ -69,7 +70,7 @@ export class RuntimeBridge {
     for (const row of items) {
       this.stop.signal.throwIfAborted()
       const agent = this.service('agents').get(row.sessionId)
-      const observed = agent ? { events: agent.session.snapshotEvents() } : await controller.inspect(row.sessionId, this.stop.signal)
+      const observed = agent ? { events: agent.session.snapshotEvents() } : await sessionInspector(controller, this.service('sessionQuery'))(row.sessionId, this.stop.signal)
       if (!agent && needsEmptySessionCheck(row) && setupOnlySession(observed)) {
         const previous = this.known.get(row.sessionId)
         if (previous && previous.status !== 'exited') {
