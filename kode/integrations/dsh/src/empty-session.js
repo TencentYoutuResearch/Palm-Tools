@@ -6,7 +6,10 @@ export function needsEmptySessionCheck(row) {
 }
 export function setupOnlySession(inspection) {
   return inspection.inheritedEventCount === 0 && Array.isArray(inspection.events)
-    && inspection.events.every(event => setupEvents.has(event.type))
+    && inspection.events.every(event => setupEvents.has(event.type)
+      // A restored empty composer can be sealed without gaining any work.
+      // Inherited seed markers still represent a branch and remain visible.
+      || event.type === 'session/end-seed' && event.data?.inherited !== true)
 }
 export async function classifyEmptySessions(controller, items) {
   if (!controller.inspect) return items

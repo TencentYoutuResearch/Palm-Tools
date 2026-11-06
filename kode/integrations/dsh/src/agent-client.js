@@ -1347,8 +1347,27 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     useEffect(() => { const show = event => { setInitialName(event.detail?.name ?? ''); setOpen(true) }; window.addEventListener('kode-create-project', show); return () => window.removeEventListener('kode-create-project', show) }, [])
     return h(ProjectFlow, { open, initialName, slots, workspaces, onCancel: () => setOpen(false), onPicked: async path => { const workspace = await workspaces.create({ path }); await uiWorkspace.openWorkspace(workspace.workspaceId); setOpen(false) } })
   }
+  function BranchPicker({ info, value, disabled, onChange }) {
+    const [open, setOpen] = useState(false), [query, setQuery] = useState('')
+    const selected = info?.branches?.find(row => row.ref === value)
+    const matches = (info?.branches ?? []).filter(row => row.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    const choose = ref => { onChange(ref); setOpen(false) }
+    const row = (ref, name, detail) => h('button', { type: 'button', role: 'menuitemradio', 'aria-checked': value === ref, key: ref, className: 'kode-branch-option', onClick: () => choose(ref) },
+      h('span', null, h('span', { className: 'kode-branch-name' }, name), h('small', null, detail)), value === ref && h(IconCheckOutlineRegular, { size: 16 }))
+    return h('div', { className: 'kode-field' }, h('span', null, '起始分支'), h(Menu, {
+      open: open && !disabled, onClose: () => setOpen(false), portal: true, minWidthFromAnchor: true, listClassName: 'kode-branch-popup',
+      anchor: h('button', { type: 'button', className: 'kode-branch-trigger', disabled, 'aria-label': '选择起始分支', 'aria-haspopup': 'menu', 'aria-expanded': open && !disabled, onClick: () => { setQuery(''); setOpen(!open) } },
+        h('span', null, selected?.name ?? (info ? `当前提交 · ${info.branch || '分离的 HEAD'}` : '正在读取分支…')), h(IconChevronDownOutlineRegular, { size: 14 })),
+    }, h('div', { className: 'kode-branch-search' }, h(IconSearchOutlineRegular, { size: 16, 'aria-hidden': true }), h('input', {
+      type: 'search', autoFocus: true, value: query, placeholder: '搜索本地或远端分支…', 'aria-label': '搜索起始分支', spellCheck: false,
+      onChange: event => setQuery(event.target.value), onKeyDown: event => { if (event.key === 'ArrowDown') { event.preventDefault(); event.stopPropagation(); event.currentTarget.closest('[role=menu]')?.querySelector('.kode-branch-option')?.focus() } },
+    })), h('div', { className: 'kode-branch-results' },
+      !query.trim() && row('HEAD', '当前提交', `${info?.branch || '分离的 HEAD'} · ${info?.commit?.slice(0,8) ?? ''}`),
+      ...matches.map(branch => row(branch.ref, branch.name, `${branch.ref.startsWith('refs/remotes/') ? '远端' : '本地'} · ${branch.commit.slice(0,8)}`)),
+      !matches.length && query.trim() && h('p', { className: 'kode-branch-empty', role: 'status' }, '没有匹配的分支'))))
+  }
   function WorktreeForm({ open, workspace, workspaces, onClose, onCreated }) {
-    const [info, setInfo] = useState(null), [baseRef, setBaseRef] = useState('HEAD'), [branchSearch, setBranchSearch] = useState(''), [branch, setBranch] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(''), [requestId, setRequestId] = useState('')
+    const [info, setInfo] = useState(null), [baseRef, setBaseRef] = useState('HEAD'), [branch, setBranch] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(''), [requestId, setRequestId] = useState('')
     const host = transport?.current ?? 'local'
     const call = async body => {
       const url = body ? '/api/kode/worktrees' : `/api/kode/worktrees?workspaceId=${encodeURIComponent(workspace.workspaceId)}`
@@ -1361,7 +1380,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }
     useEffect(() => {
       if (!open || !workspace) return
-      let alive = true; setInfo(null); setBaseRef('HEAD'); setBranchSearch(''); setBranch(''); setError(''); setLoading(true); setRequestId(crypto.randomUUID())
+      let alive = true; setInfo(null); setBaseRef('HEAD'); setBranch(''); setError(''); setLoading(true); setRequestId(crypto.randomUUID())
       void call().then(value => { if (alive) setInfo(value) }, error => { if (alive) setError(error.message) }).finally(() => { if (alive) setLoading(false) })
       return () => { alive = false }
     }, [open, workspace?.workspaceId, host])
@@ -1376,16 +1395,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       } catch (error) { setError(error.message) } finally { setBusy(false) }
     }
     const base = info?.branches?.find(row => row.ref === baseRef)
-    const matches = (info?.branches ?? []).filter(row => row.name.toLocaleLowerCase().includes(branchSearch.trim().toLocaleLowerCase()))
-    const branchOptions = [{ value: 'HEAD', label: info ? `当前提交 · ${info.branch || '分离的 HEAD'} (${info.commit.slice(0,8)})` : '正在读取分支…' }, ...(base && !matches.includes(base) ? [{ value: base.ref, label: `${base.name} · 已选` }] : []), ...matches.map(row => ({ value: row.ref, label: row.name }))]
     return h(Modal, { open, title: '在 worktree 中新建会话', closeLabel: '关闭', onClose: () => { if (!busy) onClose() }, className: 'kode-project-dialog', footer: h(React.Fragment, null,
       h(Button, { onClick: onClose, disabled: busy }, '取消'), h(Button, { variant: 'primary', onClick: create, disabled: busy || loading || !info }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '创建中…') : '创建并进入')) },
       h('p', { className: 'kode-config-note' }, workspace?.title),
       loading && h('p', { role: 'status', className: 'kode-config-note' }, '正在检查 Git 仓库…'),
       info && h('p', { className: 'kode-worktree-base' }, h('span', null, '起点'), h('strong', null, base?.name ?? (info.branch || '分离的 HEAD')), h('code', null, (base?.commit ?? info.commit).slice(0,8))),
-      h('label', { className: 'kode-field' }, '搜索起始分支', h('input', { type: 'search', value: branchSearch, disabled: busy || loading || !info, placeholder: '输入本地或远端分支名…', spellCheck: false, 'aria-controls': 'kode-worktree-branches', onChange: event => setBranchSearch(event.target.value) })),
-      h('div', { id: 'kode-worktree-branches' }, h(SelectField, { label: '起始分支', value: baseRef, disabled: busy || loading || !info, options: branchOptions, onChange: value => { setBaseRef(value); setRequestId(crypto.randomUUID()) } })),
-      info && branchSearch.trim() && h('p', { className: 'kode-config-note', role: 'status' }, matches.length ? `找到 ${matches.length} 个分支` : '没有匹配分支。可修改搜索词；已选起点保持不变。'),
+      h(BranchPicker, { info, value: baseRef, disabled: busy || loading || !info, onChange: value => { setBaseRef(value); setRequestId(crypto.randomUUID()) } }),
       h('label', { className: 'kode-field' }, '新分支名称（可选）', h('input', { value: branch, disabled: busy || loading, placeholder: '留空自动生成', spellCheck: false, onChange: event => { setBranch(event.target.value); setRequestId(crypto.randomUUID()) } })),
       h('p', { className: 'kode-config-note' }, '从所选分支创建独立工作目录，新会话仍归入当前项目。原目录的未提交改动会保留在原处。'), h(Failure, { text: error }))
   }
@@ -1982,6 +1997,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     ctx.effect(() => { const timer = setInterval(() => { if (nameListeners.size && !document.hidden) void refreshNames() }, 10000); return () => clearInterval(timer) }, 'kode.session-names')
     const style = document.createElement('style')
     style.textContent = `
+.kode-branch-trigger{box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:40px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}.kode-branch-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-branch-trigger:disabled{opacity:.5;cursor:default}.kode-branch-trigger:focus-visible,.kode-branch-option:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-branch-popup{width:min(440px,calc(100vw - 24px));padding:0!important}.kode-branch-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);position:sticky;top:0;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);z-index:1}.kode-branch-search input{min-width:0;flex:1;border:0;padding:3px 0;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;outline:none}.kode-branch-search:focus-within{box-shadow:inset 0 -2px var(--dsw-focus-ring-color)}.kode-branch-results{max-height:280px;overflow-y:auto;padding:4px;scrollbar-width:thin}.kode-branch-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:9px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}.kode-branch-option>span{display:flex;flex-direction:column;gap:3px;min-width:0}.kode-branch-name{font-size:13px;overflow-wrap:anywhere}.kode-branch-option small{font-size:11px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}.kode-branch-option:hover,.kode-branch-option[aria-checked=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-branch-option[aria-checked=true]>svg{color:var(--dsw-alias-label-primary-bluish);flex-shrink:0}.kode-branch-empty{margin:0;padding:24px 12px;text-align:center;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .kode-native-input{display:block;margin:8px 0 8px 22px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-family:var(--ds-font-family-code);font-size:12px}.kode-native-output{padding:12px 0 4px;margin:0 0 0 22px;max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
 .kode-internal-stack{display:flex;flex-direction:column;gap:8px;min-width:0}.kode-internal-message{min-width:0;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-turn-trigger-bg,var(--dsw-alias-markdown-code-block));font-size:var(--dsh-content-font-size,14px);color:var(--dsw-alias-label-secondary)}.kode-internal-message>summary{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer;list-style:none;padding:12px 16px;font-size:13px}.kode-internal-message>summary::-webkit-details-marker{display:none}.kode-internal-message>summary:hover{background:var(--dsw-alias-interactive-bg-hover);border-radius:inherit}.kode-internal-title{color:var(--dsw-alias-label-primary);flex-shrink:0}.kode-internal-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary);flex:1}.kode-internal-message>summary>svg{flex-shrink:0}.kode-internal-chevron{margin-left:auto}.kode-internal-message[open]>summary>.kode-internal-chevron{transform:rotate(180deg)}.kode-internal-message summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-internal-body{padding:12px 16px 16px;min-width:0;overflow-wrap:anywhere}.kode-internal-body>dl{margin:0;display:flex;flex-direction:column;gap:6px;font-size:13px}.kode-internal-body>dl>div{display:flex;gap:12px;min-width:0;flex-wrap:wrap}.kode-internal-body dt{min-width:64px;color:var(--dsw-alias-label-tertiary)}.kode-internal-body dd{margin:0;min-width:0;flex:1;overflow-wrap:anywhere}
 [class*="hoverContent"]:has(.kode-unknown-time)>[class*="hoverTime"]{display:none}.kode-unknown-time{font-size:12px;color:var(--dsw-alias-label-secondary)}

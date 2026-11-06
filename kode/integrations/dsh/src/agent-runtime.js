@@ -6,7 +6,7 @@ import { agentDefaults, builtinProfiles } from './agent-defaults.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { z } from 'zod'
 import { BackendAgentProfiles } from './backend-state.js'
-import { nativeToolDescriptor } from './native-tools.js'
+import { nativeToolDescriptor, executeNativeTool } from './native-tools.js'
 import { mountNativeCommands } from './native-commands.js'
 import { humanInput, terminalOnlyCommands } from './native-commands.js'
 import { pendingShellContext } from './native-shell.js'
@@ -171,7 +171,7 @@ export class AgentRuntimeAdapter {
         const callId = callIdentity(request.turnId, request.callId)
         this.logCall(agent, callId, request.tool, request.arguments)
         nativeCalls.add(callId)
-        const result = await agent.ctx.tools.execute({ callId, name: request.tool, arguments: request.arguments, agent, signal })
+        const result = await executeNativeTool(agent.ctx.tools, { callId, name: request.tool, arguments: request.arguments, agent, signal })
         signal.throwIfAborted()
         this.logResult(agent, callId, result.content, result.isError)
         nativeCalls.delete(callId)

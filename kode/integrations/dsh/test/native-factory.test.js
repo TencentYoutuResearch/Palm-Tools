@@ -218,6 +218,29 @@ test('native commentary and final answer remain separate durable messages around
   } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
 
+test('native setup appends only after store entry and creation publication, on create and resume', async () => {
+  const h = await host({ closeSession: async () => {} })
+  const announced = new Set()
+  h.ctx.on('session/created', session => { announced.add(session.id) })
+  let calls = 0
+  const setup = async (_scope, driver) => {
+    assert.equal(h.ctx.sessions.get(driver.id), driver.session)
+    assert.ok(announced.has(driver.id), 'session/created must finish before setup writes')
+    driver.session.append('agent-preset/selected', { agentPreset: 'kode-native' })
+    calls++
+  }
+  try {
+    const first = await h.ctx.agents.create({ ...options, setup }); await first.dispose()
+    announced.clear()
+    const second = await h.ctx.agents.resume({ resumeSessionId: options.sessionId, agentOptions: options.agentOptions, setup })
+    const events = h.stored.get(options.sessionId).events
+    assert.equal(calls, 2)
+    assert.equal(events.filter(event => event.type === 'agent-preset/selected').length, 2)
+    assert.deepEqual(events.map(event => event.seq), events.map((_, index) => index))
+    await second.dispose()
+  } finally { await h.fiber.dispose() }
+})
+
 test('native factory persists actual Agent turns without assembling a dsh system prompt and resumes once', async () => {
   const inputs = []
   const h = await host({ async *stream(request) { inputs.push(request.messages.map(m => m.id)); yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text: 'Native reply' }; yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Native reply' } }; yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} })

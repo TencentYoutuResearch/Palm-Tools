@@ -13,7 +13,6 @@ replace('className: MessageItem_module_css_default.bubble,', 'className: Message
 const historyEdit = await readFile(new URL('../packages/chat/history-edit.js', import.meta.url), 'utf8')
 const workbenchUi = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
 replace('function UserStyleBubble(', historyEdit + '\n' + workbenchUi + '\nfunction UserStyleBubble(')
-replace('className: ChatView_module_css_default.frame,\n\t\t\t\tchildren: [', 'className: ChatView_module_css_default.frame,\n\t\t\t\tchildren: [react.createElement(KodeTokenIsland, { key: sessionId }),')
 replace('const UserMessageNodeView = (0, react.memo)(function UserMessageNodeView(', 'const OriginalUserMessageNodeView = (0, react.memo)(function UserMessageNodeView(')
 replace('function UserMessageNodeView({ node, renderFactorySlot, loadImage, t })', 'function UserMessageNodeView({ node, renderFactorySlot, loadImage, t, historyEditAction })')
 replace('text,\n\t\t\t\t\ttime: data.time,', 'text,\n\t\t\t\t\textraActions: historyEditAction,\n\t\t\t\t\ttime: data.time,')

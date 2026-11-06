@@ -14,25 +14,29 @@ test('jobs move to the composer with native injections, locale, output and kill 
   const node = slots[0].component({ sessionId: 'session' }); assert.equal(node.child.type, native); assert.equal(node.child.props.sessionId, 'session')
   cleanups[0](); assert.equal(entry.component, native); assert.equal(slots[0].disposed, true)
 })
-test('worktree search filters local and remote names without silently changing the selected starting point', async () => {
+test('worktree search lives inside the dropdown and preserves selection while filtering local and remote branches', async () => {
   const client = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
-  let cursor = 0
-  const state = [], info = { branch: 'main', commit: '1234567890', branches: [{ name: 'main', ref: 'refs/heads/main', commit: '1234567890' }, { name: 'origin/FEATURE', ref: 'refs/remotes/origin/FEATURE', commit: '2345678901' }] }
-  const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }), React: { Fragment: 'fragment' }, Modal: 'modal', Button: 'button', StateDot: 'dot', SelectField: 'select', Failure: 'failure', transport: null,
-    useState(initial) { const i = cursor++; if (!(i in state)) state[i] = initial; return [state[i], value => { state[i] = value }] }, useEffect() {}, crypto: { randomUUID: () => 'fixture' } }
-  vm.runInNewContext(client.slice(client.indexOf('  function WorktreeForm('), client.indexOf('  function WorkspacePicker(')), scope)
-  const render = () => { cursor = 0; return scope.WorktreeForm({ open: true, workspace: { workspaceId: 'fixture' } }) }
+  let cursor = 0, value = 'refs/heads/main'
+  const state = [], info = { branch: 'main', commit: '1234567890', branches: [{ name: 'main', ref: value, commit: '1234567890' }, { name: 'origin/FEATURE', ref: 'refs/remotes/origin/FEATURE', commit: '2345678901' }] }
+  const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }), Menu: 'menu', IconChevronDownOutlineRegular: 'chevron', IconSearchOutlineRegular: 'search', IconCheckOutlineRegular: 'check',
+    useState(initial) { const i = cursor++; if (!(i in state)) state[i] = initial; return [state[i], next => { state[i] = next }] } }
+  vm.runInNewContext(client.slice(client.indexOf('  function BranchPicker('), client.indexOf('  function WorktreeForm(')), scope)
+  const render = () => { cursor = 0; return scope.BranchPicker({ info, value, disabled: false, onChange: next => { value = next } }) }
   const find = (node, predicate) => node && typeof node === 'object' ? predicate(node) ? node : (node.children ?? []).map(child => find(child, predicate)).find(Boolean) : undefined
-  render(); state[0] = info
-  let tree = render(); const select = () => find(tree, node => node.type === 'select')
-  select().props.onChange('refs/heads/main'); tree = render()
-  find(tree, node => node.props.type === 'search').props.onChange({ target: { value: '  feature ' } }); tree = render()
-  assert.equal(select().props.value, 'refs/heads/main')
-  assert.equal(select().props.options.length, 3); assert.match(select().props.options[1].label, /main.*已选/)
-  assert.equal(select().props.options[2].value, 'refs/remotes/origin/FEATURE')
+  let tree = render(), menu = find(tree, node => node.type === 'menu')
+  assert.equal(menu.props.open, false)
+  assert.equal(find(tree, node => node.props.type === 'search'), find(menu, node => node.props.type === 'search'))
+  menu.props.anchor.props.onClick(); tree = render(); menu = find(tree, node => node.type === 'menu')
+  assert.equal(menu.props.open, true); assert.equal(menu.props.portal, true)
+  find(menu, node => node.props.type === 'search').props.onChange({ target: { value: '  feature ' } }); tree = render()
+  assert.equal(value, 'refs/heads/main')
+  assert.equal(find(tree, node => node.props.className === 'kode-branch-name').children[0], 'origin/FEATURE')
+  assert.equal(find(tree, node => node.props['aria-checked'] === true), undefined)
+  find(tree, node => node.props.role === 'menuitemradio').props.onClick(); tree = render()
+  assert.equal(value, 'refs/remotes/origin/FEATURE'); assert.equal(find(tree, node => node.type === 'menu').props.open, false)
+  find(tree, node => node.type === 'menu').props.anchor.props.onClick(); tree = render()
   find(tree, node => node.props.type === 'search').props.onChange({ target: { value: 'missing' } }); tree = render()
-  assert.equal(select().props.value, 'refs/heads/main'); assert.equal(select().props.options.length, 2)
-  assert.match(find(tree, node => node.props.role === 'status').children[0], /没有匹配/)
+  assert.equal(value, 'refs/remotes/origin/FEATURE'); assert.match(find(tree, node => node.props.role === 'status').children[0], /没有匹配/)
 })
 
 test('token island loads selected-host statistics, changes period, and never displays a previous host snapshot', async () => {
@@ -49,7 +53,7 @@ test('token island loads selected-host statistics, changes period, and never dis
   } }
   const scope = { react, context: { get: () => transport }, _deepseek_ai_dsh_client_ui_primitives: { IconChevronDownOutlineRegular: 'chevron', IconCloseOutlineRegular: 'close' },
     document: { hidden: false, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
-    AbortController, setInterval: () => 1, clearInterval() {}, Intl }
+    AbortController, setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, Intl }
   const component = vm.runInNewContext(source + '\nkodeWorkbenchContext = context; KodeTokenIsland', scope)
   const render = () => { cursor = 0; const tree = component(); effects.splice(0).forEach(fn => fn()); return tree }
   const settle = () => new Promise(resolve => setImmediate(resolve))
@@ -66,6 +70,17 @@ test('token island loads selected-host statistics, changes period, and never dis
   await settle(); tree = render(); assert.equal(find(tree, node => node.type === 'strong').children[0], '9K')
   assert.equal(requests.at(-1).selected, host)
   tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); tree = render()
-  assert.equal(find(tree, node => node.props['aria-label'] === 'Token 用量'), undefined)
+  assert.equal(find(tree, node => node.props['aria-label'] === 'Token 用量').props['aria-hidden'], true)
   for (const value of state) value?.cleanup?.()
+})
+
+test('token island is registered once on the application overlay rather than inside each session', async () => {
+  const seats = [], entries = []
+  const document = { createElement: () => ({ remove() {} }), head: { append() {} } }
+  const install = vm.runInNewContext(source + '\ninstallWorkbenchUi', { document })
+  install({ effect: fn => fn(), slots: { inject: (seat, fn) => { seats.push(seat); if (seat === 'shell.overlay') fn() }, register: (options, component) => { entries.push({ options, component }); return () => {} } } })
+  assert.deepEqual(seats, ['conversation.session.header.actions', 'shell.overlay'])
+  assert.equal(entries.length, 1); assert.equal(entries[0].options.id, 'kode-token-island')
+  const build = await readFile(new URL('../scripts/build-chat.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(build, /react\.createElement\(KodeTokenIsland/)
 })

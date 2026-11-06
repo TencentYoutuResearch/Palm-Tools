@@ -68,12 +68,16 @@ export class NativeAgentFactory {
       }
       driver = new NativeAgentDriver(ctx, id, options.agentOptions ?? {}, session, ctx.kodeAgents)
       const storedCount = resume ? (await handle.read()).events.length : 0
-      const commit = await options.setup?.(driver.ctx, driver); check(); commit?.commit()
+      // DSH 0.2.2 requires store membership and completed session/created
+      // publication before setup may append model/preset/binding events.
       const suffix = session.snapshotEvents(storedCount)
       if (suffix.length) await handle.append(suffix)
       check()
-      detachSession = driver.ctx.sessions.enter(session); detachAgent = ctx.agents.enter(driver, options.parentAgent)
-      driver.ctx.sessions.announce(session); await ctx.agents.announce(driver, resume ? 'resume' : 'startup', signal); check()
+      detachSession = driver.ctx.sessions.enter(session)
+      driver.ctx.sessions.announce(session); check()
+      const commit = await options.setup?.(driver.ctx, driver); check(); commit?.commit()
+      detachAgent = ctx.agents.enter(driver, options.parentAgent)
+      await ctx.agents.announce(driver, resume ? 'resume' : 'startup', signal); check()
       published = true; this.live.add(dispose); this.byId.set(id, dispose); ctx.kodeAgents.mountCommands?.(driver); driver.start()
       setupDone.resolve()
       return { agent: driver, dispose: async () => { try { await dispose() } finally { await releaseOwner() } } }

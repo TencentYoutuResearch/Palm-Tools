@@ -23,3 +23,17 @@ export function acpToolItem(old, update) {
     ...(update.rawOutput !== undefined && !contents ? { aggregatedOutput: typeof update.rawOutput === 'string' ? update.rawOutput : JSON.stringify(update.rawOutput) } : {}),
   }
 }
+
+/** Keep native Agent calls on the host's policy/executor path across DSH APIs.
+ * 0.2.2 delegates raw call batches to scoped executors; older hosts accept one
+ * parsed invocation. Omit batch logging because the native adapter owns it. */
+export async function executeNativeTool(tools, input) {
+  if (typeof tools.selectExecutor !== 'function') return tools.execute(input)
+  const batch = await tools.execute({
+    agent: input.agent, signal: input.signal,
+    calls: [{ id: input.callId, name: input.name, arguments: JSON.stringify(input.arguments) }],
+  })
+  const result = batch.results?.find(row => row.callId === input.callId)?.result
+  if (!result) throw new Error('DSH tool executor returned no result for the native call')
+  return result
+}
