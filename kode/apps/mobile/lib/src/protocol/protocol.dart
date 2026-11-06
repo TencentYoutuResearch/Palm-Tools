@@ -157,6 +157,11 @@ class Endpoint {
     this.serverKind,
   });
 
+  /// Account-relay desktops share one server and one account token; the
+  /// desktop is selected per request instead of by a per-device token.
+  static const relayKind = 'kode-relay';
+
+  bool get isRelay => serverKind == relayKind;
   String get baseUrl => serverUrl.replaceAll(RegExp(r'/+$'), '');
   String get storageKey => '$baseUrl::$deviceId';
   String get wsUrl {
@@ -165,6 +170,7 @@ class Endpoint {
         .replace(
           scheme: uri.scheme == 'https' ? 'wss' : 'ws',
           path: '${uri.path.replaceAll(RegExp(r'/+$'), '')}/ws',
+          queryParameters: isRelay ? {'device_id': deviceId} : null,
         )
         .toString();
   }

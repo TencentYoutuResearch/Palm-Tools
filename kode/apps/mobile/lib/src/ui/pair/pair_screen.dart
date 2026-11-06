@@ -5,11 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../api/account_client.dart';
 import '../../api/api_client.dart';
 import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
 import '../theme.dart';
 import '../glass.dart';
+import '../palm/palm_capture_screen.dart';
 
 class PairScreen extends ConsumerStatefulWidget {
   const PairScreen({super.key});
@@ -139,7 +141,13 @@ class _PairScreenState extends ConsumerState<PairScreen> {
           padding: const EdgeInsets.all(16),
           children: [
             if (_scanning) _buildScanner() else _buildScanCard(colors),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: _claiming ? null : () => context.push('/login'),
+              icon: const Icon(Icons.account_circle_outlined),
+              label: const Text('Sign in with a Kode account instead'),
+            ),
+            const SizedBox(height: 8),
             _buildPermissionCard(colors),
             const SizedBox(height: 20),
             Text(
@@ -286,6 +294,58 @@ class _PairScreenState extends ConsumerState<PairScreen> {
     );
   }
 
+  /// A desktop's "sign in with your phone's palm" QR: scan the palm here
+  /// and the waiting desktop signs in to the matched account.
+  Future<void> _approvePalmHandoff(PalmHandoff handoff) async {
+    if (_claiming) return;
+    setState(() {
+      _claiming = true;
+      _error = null;
+    });
+    String? error;
+    var approved = false;
+    try {
+      if (!await palmCaptureSupported()) {
+        error = 'Palm scanning needs iOS 16.4 or later on this phone.';
+        return;
+      }
+      final client = ref.read(accountClientProvider);
+      final config = await client.palmConfig(handoff.relay);
+      if (!mounted) return;
+      final result = await capturePalm(
+        context,
+        config.captureUri(),
+        enrol: false,
+      );
+      if (result == null || result.code == 10002) return;
+      final sessionId = result.sessionId;
+      if (!result.ok || sessionId == null) {
+        error = result.friendly;
+        return;
+      }
+      await client.approveHandoff(handoff, sessionId);
+      approved = true;
+    } on ApiException catch (e) {
+      error = e.detail;
+    } on DioException catch (_) {
+      error = 'Cannot reach the account relay. Check your network.';
+    } catch (e) {
+      error = '$e';
+    } finally {
+      if (mounted) {
+        setState(() {
+          _claiming = false;
+          _error = error;
+        });
+        if (approved) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Your computer is signing in.')),
+          );
+        }
+      }
+    }
+  }
+
   Widget _buildScanner() {
     return SizedBox(
       height: 340,
@@ -296,6 +356,12 @@ class _PairScreenState extends ConsumerState<PairScreen> {
               if (!_scanning || _claiming) return;
               final raw = result.text;
               if (raw == null || raw.isEmpty) return;
+              final handoff = PalmHandoff.tryParse(raw);
+              if (handoff != null) {
+                setState(() => _scanning = false);
+                _approvePalmHandoff(handoff);
+                return;
+              }
               final invite = PairingInvite.tryParseUri(raw);
               if (invite == null) {
                 setState(
