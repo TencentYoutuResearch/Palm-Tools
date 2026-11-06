@@ -1143,3 +1143,17 @@ fn backend_extension_commit_failure_restores_updated_and_pruned_links(){
     assert!(super::extension_files::replace(&previous,&next,||anyhow::bail!("fixture commit failed")).is_err());
     assert_eq!(std::fs::read_link(one).unwrap(),old);assert_eq!(std::fs::read_link(two).unwrap(),old);
 }
+
+#[tokio::test]
+async fn usage_history_requires_admin_and_valid_period_and_timezone() {
+    let server = server("usage-admin", vec![]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/model-usage", server.url);
+    assert_eq!(client.get(format!("{url}?period=today")).send().await.unwrap().status(), 401);
+    let token = register(&server, "usage-session").await;
+    assert_eq!(client.get(format!("{url}?period=today")).bearer_auth(token.owner_token).send().await.unwrap().status(), 403);
+    for query in ["period=unknown", "period=today&timezone_offset_minutes=1440"] {
+        assert_eq!(client.get(format!("{url}?{query}")).bearer_auth("admin-test").send().await.unwrap().status(), 400);
+    }
+    assert_eq!(client.post(format!("{url}?period=today")).bearer_auth("admin-test").send().await.unwrap().status(), 405);
+}

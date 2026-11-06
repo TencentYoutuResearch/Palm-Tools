@@ -2916,7 +2916,7 @@ var module = { exports: {} };
 			const flowContext = (0, react.useMemo)(() => ({ motion: scroll.motion }), [scroll.motion]);
 			return (0, react_jsx_runtime.jsxs)("div", {
 				className: ChatView_module_css_default.frame,
-				children: [
+				children: [react.createElement(KodeTokenIsland, { key: sessionId }),
 					scroll.initialized && (0, react_jsx_runtime.jsx)(TurnNavigator, {
 						items: railItems,
 						activeTurn: scroll.activeTurn,
@@ -5439,7 +5439,181 @@ var module = { exports: {} };
 			});
 		}
 		/** Right-aligned bubble shared by user and steering rows. */
-		function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pending = false, echo = false, referenceLabels, skillNames, previewAttachments, facts: inputFacts = EMPTY_TEXT_FACTS, interactive = false }) {
+		/** Shared history editing for ordinary and admitted-steering human messages.
+ * The Host validates the durable row; this component never rewrites history. */
+function historyEditBinding(ctx, sessionId) {
+  return { historyHost: () => ctx.get('kodeTransport')?.current ?? 'local', editHistory: async (seq, text, requestId, sourceHost) => {
+    const transport = ctx.get('kodeTransport'), host = sourceHost ?? transport?.current ?? 'local'
+    if ((transport?.current ?? 'local') !== host) throw new Error('执行主机已切换，请返回原主机后重新编辑。')
+    const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'edit-message', sessionId, seq, text, requestId }) }
+    const response = await (transport ? transport.fetch('/api/kode/agents', init, host) : fetch('/api/kode/agents', init))
+    if (response.status === 404) throw new Error('请更新此主机的 Kode 服务以支持历史消息编辑。')
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error ?? '编辑重发失败，请重试。')
+    if ((transport?.current ?? 'local') !== host) throw new Error('主机已切换，编辑分支保留在原主机，请返回查看。')
+    await ctx.get('uiWorkspace').openSession(result.sessionId)
+  } }
+}
+function HistoryEditableMessage({ native, editHistory, ...props }) {
+  const h = react.createElement, { Button, Tooltip, IconEditOutlineRegular } = _deepseek_ai_dsh_client_ui_primitives
+  const [open, setOpen] = react.useState(false), [draft, setDraft] = react.useState(''), [error, setError] = react.useState('')
+  const [busy, setBusy] = react.useState(false), request = react.useRef(null), inFlight = react.useRef(false), sourceHost = react.useRef(null), editor = react.useRef(null)
+  const allowed = props.useAccess('session/fork'), data = props.node.data
+  const human = ['user', 'human'].includes(data.source?.kind)
+  const text = data.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+  const editable = allowed && human && typeof editHistory === 'function'
+  react.useLayoutEffect(() => {
+    if (!open || !editor.current) return
+    editor.current.style.height = 'auto'
+    editor.current.style.height = Math.min(480, Math.max(80, editor.current.scrollHeight)) + 'px'
+  }, [open, draft])
+  const close = () => { if (!inFlight.current) setOpen(false) }
+  const send = async () => {
+    if (inFlight.current || !draft.trim()) return
+    inFlight.current = true; setBusy(true); setError('')
+    try { await editHistory(data.seq, draft, request.current, sourceHost.current); setOpen(false) }
+    catch (error) { setError(error.message) }
+    finally { inFlight.current = false; setBusy(false) }
+  }
+  const action = editable && h(Tooltip, { label: '编辑', side: 'bottom' },
+    h('button', { type: 'button', className: MessageIconActions_module_css_default.action, 'aria-label': '编辑消息', disabled: busy, onClick: () => {
+      if (inFlight.current) return
+      sourceHost.current = props.historyHost?.(); setDraft(text); setError(''); request.current = crypto.randomUUID(); setOpen(true)
+    } }, h(IconEditOutlineRegular)))
+  // The shipped action row owns Copy placement, hover/last-message reveal and focus behavior.
+  if (!open || !editable) return h(native, { ...props, historyEditAction: action })
+  const parts = contentParts(data.content)
+  return h('div', { className: MessageItem_module_css_default.userRow, 'data-kode-history-editing': true },
+    parts.attachments.length > 0 && props.renderFactorySlot('conversation.chat.user.content', {
+      content: { text: '', attachments: parts.attachments, extraBlocks: [] }, loadImage: props.loadImage, facts: {},
+    }),
+    h('form', { className: 'kode-history-edit-inline', onSubmit: event => { event.preventDefault(); void send() } },
+      h('textarea', { ref: editor, value: draft, rows: 3, autoFocus: true, 'aria-label': '编辑消息内容', disabled: busy,
+        onChange: event => { setDraft(event.target.value); request.current = crypto.randomUUID() },
+        onKeyDown: event => {
+          if (event.nativeEvent?.isComposing || event.isComposing) return
+          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close() }
+          else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send() }
+        } }),
+      h('div', { className: 'kode-history-edit-footer' },
+        h('span', { className: 'kode-history-edit-note' }, '从此处创建新分支，后续消息不参与上下文'),
+        h(Button, { type: 'button', onClick: close, disabled: busy }, '取消'),
+        h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.trim() }, busy ? '发送中…' : '重新发送')),
+      error && h('p', { role: 'alert', className: 'kode-history-edit-error' }, error)))
+}
+
+function installHistoryEditStyle(ctx) {
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.textContent = `.kode-history-edit-inline{box-sizing:border-box;width:100%;min-width:0;margin:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-bubble,var(--dsw-alias-bg-module-platform));color:var(--dsw-alias-label-primary)}.kode-history-edit-inline textarea{box-sizing:border-box;display:block;width:100%;min-height:80px;max-height:480px;resize:vertical;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:1.6}.kode-history-edit-inline textarea:focus-visible{outline:none}.kode-history-edit-inline:focus-within{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-history-edit-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px}.kode-history-edit-note{flex:1 1 200px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.6}.kode-history-edit-error{margin:8px 0 0;color:var(--dsw-alias-state-error-primary);font-size:13px}`
+    document.head.append(style)
+    return () => style.remove()
+  }, 'kode.history-edit-style')
+}
+
+/** Workbench status: CLI usage in the chat's top edge; jobs beside the composer.
+ * The native job component retains its subscriptions, locale, output and kill UI. */
+let kodeWorkbenchContext
+function relocateWorkbenchJobs(ctx) {
+  const sourceSeat = 'conversation.session.header.actions', targetSeat = 'conversation.input.dock'
+  ctx.slots.inject(sourceSeat, () => {
+    const moved = new Map()
+    const install = () => {
+      for (const entry of ctx.slots.entries(sourceSeat)) {
+        if (entry.options.id !== 'job-list' || moved.has(entry)) continue
+        const native = entry.component, hidden = () => null
+        const DockJobs = props => react.createElement('div', { className: 'kode-background-tasks' }, react.createElement(native, props))
+        const dispose = ctx.slots.register({ ...entry.options, name: targetSeat, order: 20 }, DockJobs)
+        moved.set(entry, { native, hidden, dispose }); entry.component = hidden
+      }
+    }
+    const unsubscribe = ctx.slots.subscribe(sourceSeat, install); install()
+    return () => { unsubscribe(); for (const [entry, row] of moved) { row.dispose(); if (entry.component === row.hidden) entry.component = row.native } }
+  })
+}
+function usageNumber(value) {
+  if (!Number.isFinite(value)) return '—'
+  return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+}
+function usageTableRows(snapshot) {
+  return [...(snapshot?.rows ?? [])].sort((a, b) => b.total_tokens - a.total_tokens)
+}
+function KodeTokenIsland() {
+  const h = react.createElement, { IconChevronDownOutlineRegular, IconCloseOutlineRegular } = _deepseek_ai_dsh_client_ui_primitives
+  const ctx = kodeWorkbenchContext, transport = ctx?.get('kodeTransport')
+  const host = react.useSyncExternalStore(react.useCallback(fn => transport?.subscribe(fn) ?? (() => {}), [transport]), () => transport?.current ?? 'local')
+  const [open, setOpen] = react.useState(false), [period, setPeriod] = react.useState('today')
+  const [result, setResult] = react.useState(null), [error, setError] = react.useState(''), [loading, setLoading] = react.useState(false), [refresh, setRefresh] = react.useState(0)
+  const root = react.useRef(null), trigger = react.useRef(null), panelId = react.useId()
+  const current = result?.host === host ? result : null
+  react.useEffect(() => {
+    let alive = true, pending = false
+    const controller = new AbortController()
+    const load = async () => {
+      if (pending || document.hidden) return
+      pending = true; setLoading(true); setError('')
+      try {
+        const read = async period => {
+          const path = `/api/kode/model-usage?period=${period}&timezone_offset_minutes=${-new Date().getTimezoneOffset()}`
+          const options = { credentials: 'same-origin', cache: 'no-store', signal: controller.signal }
+          const response = await (transport ? transport.fetch(path, options, host) : fetch(path, options))
+          if (response.status === 404) throw new Error('此主机尚未支持 token 统计，请更新 Kode 服务。')
+          const value = await response.json()
+          if (!response.ok) throw new Error(value.error ?? '读取 token 统计失败，请重试。')
+          return value
+        }
+        const today = await read('today'), snapshot = open && period !== 'today' ? await read(period) : today
+        if (alive) setResult({ host, today, snapshot, period: open ? period : 'today' })
+      } catch (error) { if (alive && !controller.signal.aborted) setError(error.message) }
+      finally { pending = false; if (alive) setLoading(false) }
+    }
+    void load()
+    const timer = setInterval(load, 30000), wake = () => { if (!document.hidden) void load() }
+    document.addEventListener('visibilitychange', wake)
+    return () => { alive = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', wake) }
+  }, [host, transport, period, open, refresh])
+  react.useEffect(() => {
+    if (!open) return
+    const dismiss = event => { if (!root.current?.contains(event.target)) setOpen(false) }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [open])
+  const snapshot = current?.period === period ? current.snapshot : null
+  const totals = snapshot?.totals, rows = usageTableRows(snapshot)
+  const dailyMax = Math.max(1, ...(snapshot?.daily ?? []).map(day => day.total_tokens))
+  const exact = value => Number.isFinite(value) ? value.toLocaleString() : '—'
+  return h('div', { className: 'kode-token-rail', ref: root, onKeyDown: event => {
+    if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus() }
+  } },
+    h('button', { type: 'button', ref: trigger, className: 'kode-token-notch', 'aria-expanded': open, 'aria-controls': panelId, onClick: () => setOpen(!open), title: '当前主机的 CLI 历史 token 用量' },
+      h('span', null, '今日'), h('strong', null, usageNumber(current?.today?.totals?.total_tokens)), h('span', null, 'tokens'),
+      h(IconChevronDownOutlineRegular, { size: 12, style: { transform: open ? 'rotate(180deg)' : undefined } })),
+    open && h('section', { id: panelId, className: 'kode-token-panel', 'aria-label': 'Token 用量', 'aria-busy': loading },
+      h('header', null, h('div', null, h('strong', null, 'Token 用量'), h('p', null, `${host === 'local' ? '本机' : host} · CLI 历史统计`)),
+        h('button', { type: 'button', className: 'kode-token-close', 'aria-label': '收起 token 统计', onClick: () => { setOpen(false); trigger.current?.focus() } }, h(IconCloseOutlineRegular, { size: 16 }))),
+      h('div', { className: 'kode-token-periods', role: 'group', 'aria-label': '统计范围' }, ...[['today', '今天'], ['month', '本月'], ['all', '全部']].map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': period === id, onClick: () => setPeriod(id) }, label))),
+      error ? h('p', { role: 'alert', className: 'kode-token-error' }, error, ' ', h('button', { type: 'button', onClick: () => setRefresh(value => value + 1) }, '重试')) : !snapshot ? h('p', { role: 'status' }, '正在读取 CLI 历史…') : h(react.Fragment, null,
+        h('dl', { className: 'kode-token-totals' }, ...[['总计', 'total_tokens'], ['输入', 'input_tokens'], ['输出', 'output_tokens'], ['缓存', 'cached_tokens']].map(([label, key]) => h('div', { key }, h('dt', null, label), h('dd', { title: exact(totals?.[key]) }, usageNumber(totals?.[key]))))),
+        ...(snapshot.warnings ?? []).map((warning, i) => h('p', { key: i, className: 'kode-token-error' }, warning)),
+        rows.length === 0 ? h('p', { className: 'kode-token-empty' }, '这个时间段暂无 CLI 用量记录。') : h('div', { className: 'kode-token-table-scroll' }, h('table', null,
+          h('thead', null, h('tr', null, ...['Agent / 模型', '输入', '输出', 'Token 总计'].map(label => h('th', { key: label, scope: 'col' }, label)))),
+          h('tbody', null, ...rows.map((row, index) => h('tr', { key: `${row.source}:${row.backend}:${row.model}:${index}` }, h('th', { scope: 'row' }, h('span', null, row.model), h('small', null, row.backend)), ...['input_tokens', 'output_tokens', 'total_tokens'].map(key => h('td', { key, title: exact(row[key]) }, usageNumber(row[key])))))))),
+        snapshot.daily?.length > 0 && h('details', { className: 'kode-token-daily' }, h('summary', null, '每日用量 · 最近 12 周'), h('div', { className: 'kode-token-days' }, ...snapshot.daily.map(day => h('span', { key: day.date, title: `${day.date} · ${exact(day.total_tokens)} tokens`, 'aria-label': `${day.date}: ${exact(day.total_tokens)} tokens`, style: { opacity: day.total_tokens > 0 ? .3 + .7 * Math.sqrt(day.total_tokens / dailyMax) : .12 } }))))),
+      h('footer', null, '每 30 秒更新 · CLI 历史统计，不等同于当前对话上下文占用')))
+}
+function installWorkbenchUi(ctx) {
+  kodeWorkbenchContext = ctx
+  relocateWorkbenchJobs(ctx)
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.textContent = `.kode-token-rail{position:relative;flex:none;display:flex;justify-content:center;z-index:25;min-width:0;height:28px}.kode-token-notch{display:inline-flex;align-items:center;justify-content:center;gap:6px;max-width:100%;height:26px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2);border-top:0;border-radius:0 0 12px 12px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font:inherit;font-size:11px;cursor:pointer;font-variant-numeric:tabular-nums}.kode-token-notch strong{font-weight:600;color:var(--dsw-alias-label-primary)}.kode-token-notch:hover,.kode-token-notch[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-token-notch:focus-visible,.kode-token-panel button:focus-visible,.kode-token-panel summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-token-panel{position:absolute;top:30px;box-sizing:border-box;width:min(600px,calc(100% - 24px));max-height:min(600px,70vh);overflow:auto;padding:18px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 12px 32px #0002;font-size:13px;scrollbar-width:thin}.kode-token-panel header{display:flex;justify-content:space-between;gap:16px;align-items:start}.kode-token-panel header p{margin:4px 0 0;color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}.kode-token-close{border:0;background:transparent;color:inherit;cursor:pointer;display:grid;place-items:center;width:28px;height:28px;border-radius:var(--dsw-radius-sm)}.kode-token-close:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-token-periods{display:flex;gap:4px;margin:16px 0}.kode-token-periods button{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;padding:6px 12px;border-radius:var(--dsw-radius-sm);cursor:pointer}.kode-token-periods button:hover,.kode-token-periods button[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.kode-token-totals{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 16px}.kode-token-totals dt{color:var(--dsw-alias-label-secondary);font-size:12px}.kode-token-totals dd{margin:4px 0 0;font-size:18px;font-weight:500;font-variant-numeric:tabular-nums}.kode-token-table-scroll{overflow-x:auto;scrollbar-width:thin}.kode-token-panel table{width:100%;border-collapse:collapse;text-align:right;font-variant-numeric:tabular-nums}.kode-token-panel th,.kode-token-panel td{padding:9px 6px;border-bottom:1px solid var(--dsw-alias-border-l2);white-space:nowrap;font-weight:400}.kode-token-panel th:first-child{text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis}.kode-token-panel th small{display:block;font-size:11px;color:var(--dsw-alias-label-secondary);margin-top:3px}.kode-token-panel thead{font-size:11px;color:var(--dsw-alias-label-secondary)}.kode-token-panel footer{margin-top:16px;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary)}.kode-token-empty{padding:12px 0;color:var(--dsw-alias-label-secondary)}.kode-token-error{color:var(--dsw-alias-state-error-primary);line-height:1.6}.kode-token-error button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;text-decoration:underline;text-underline-offset:3px}.kode-token-daily{margin-top:16px;font-size:12px}.kode-token-daily summary{cursor:pointer;color:var(--dsw-alias-label-secondary)}.kode-token-days{display:grid;grid-template-columns:repeat(28,minmax(0,1fr));gap:3px;margin-top:10px}.kode-token-days span{aspect-ratio:1;background:var(--dsw-alias-label-primary);border-radius:2px}.kode-background-tasks{display:flex;align-items:center;min-width:0;padding:4px 6px 8px}.kode-background-tasks>div{max-width:100%}.kode-background-tasks button{font:inherit;font-size:12px}@media(max-width:480px){.kode-token-panel{padding:14px}.kode-token-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.kode-token-panel th:first-child{max-width:130px}.kode-token-close{width:36px;height:36px}}`
+    document.head.append(style)
+    return () => { style.remove(); if (kodeWorkbenchContext === ctx) kodeWorkbenchContext = undefined }
+  }, 'kode.workbench-ui')
+}
+
+function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pending = false, echo = false, referenceLabels, skillNames, previewAttachments, facts: inputFacts = EMPTY_TEXT_FACTS, interactive = false }) {
 			const parts = (0, react.useMemo)(() => contentParts(content), [content]);
 			const prepared = (0, react.useMemo)(() => ({
 				text: parts.text,
@@ -5532,7 +5706,7 @@ var module = { exports: {} };
 			});
 		}
 		/** User and admitted-steering keyed Chat renderer. */
-		const UserMessageNodeView = (0, react.memo)(function UserMessageNodeView({ node, renderFactorySlot, loadImage, t }) {
+		const OriginalUserMessageNodeView = (0, react.memo)(function UserMessageNodeView({ node, renderFactorySlot, loadImage, t, historyEditAction }) {
 			const data = node.data;
 			return (0, react_jsx_runtime.jsx)(UserStyleBubble, {
 				content: data.content,
@@ -5543,6 +5717,7 @@ var module = { exports: {} };
 				...data.skillNames === void 0 ? {} : { skillNames: data.skillNames },
 				actions: (text) => (0, react_jsx_runtime.jsx)(MessageIconActions, {
 					text,
+					extraActions: historyEditAction,
 					time: data.time,
 					clock: "start",
 					className: MessageItem_module_css_default.actions,
@@ -5550,7 +5725,8 @@ var module = { exports: {} };
 				})
 			});
 		});
-		/** Injected-context keyed Chat renderer. */
+		const UserMessageNodeView = (props) => react.createElement(HistoryEditableMessage, { ...props, native: OriginalUserMessageNodeView });
+/** Injected-context keyed Chat renderer. */
 		const ContextMessageNodeView = (0, react.memo)(function ContextMessageNodeView({ node, t }) {
 			const data = node.data;
 			return (0, react_jsx_runtime.jsx)(ContextInjectionRow, {
@@ -7273,7 +7449,7 @@ if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus, { 
 		* @param performanceUsage - live statistics detail preference.
 		* @param presentation - live presentation policy.
 		*/
-		function registerChatNodeRenderers(ctx, performanceUsage, presentation) {
+		function registerChatNodeRenderers(ctx, performanceUsage, presentation) { installHistoryEditStyle(ctx); installWorkbenchUi(ctx);
 			ctx.effect(() => ctx.slots.registerFactory({
 				name: "conversation.chat.reasoning.content",
 				scope: "root",
@@ -7286,11 +7462,13 @@ if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus, { 
 			ctx.slots.inject("conversation.chat.node", () => ctx.slots.register({
 				name: "conversation.chat.node",
 				key: "user",
+				inject: sessionId => historyEditBinding(ctx, sessionId),
 				locale: NS
 			}, UserMessageNodeView));
 			ctx.slots.inject("conversation.chat.node", () => ctx.slots.register({
 				name: "conversation.chat.node",
 				key: "steering",
+				inject: sessionId => historyEditBinding(ctx, sessionId),
 				locale: NS
 			}, UserMessageNodeView));
 			ctx.slots.inject("conversation.chat.node", () => ctx.slots.register({

@@ -11,6 +11,7 @@ import { mountNativeCommands } from './native-commands.js'
 import { humanInput, terminalOnlyCommands } from './native-commands.js'
 import { pendingShellContext } from './native-shell.js'
 import { classifyCommands } from './command-skills.js'
+import { branchHistoryInput } from './history-edit.js'
 import { nativeInput } from './native-input.js'
 import { SessionAppearance } from './session-appearance.js'
 import { fastPreference, withModelVariantFast } from './model-fast.js'
@@ -228,7 +229,9 @@ export class AgentRuntimeAdapter {
       const match = human && /^\/([a-z][a-z0-9_:-]*)(?:\s|$)/.exec(human)
       const command = match ? { name: match[1], input: human.slice(match[0].length).trim() } : undefined
       const context = command || options.nativeContinuation ? [] : pendingShellContext(agent.session)
-      const input = await nativeInput([...context, ...messages], { attachments: (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments), codex: profile.type === 'codex' || profile.protocol === 'codex', signal })
+      const attachments = (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments)
+      const history = await branchHistoryInput(agent.session, binding, attachments, profile.type === 'codex' || profile.protocol === 'codex', signal)
+      const input = [...history, ...await nativeInput([...context, ...messages], { attachments, codex: profile.type === 'codex' || profile.protocol === 'codex', signal })]
       const tools = options.tools ?? []
       runtime = this.live.get(agent.id)
       const autoCompactRevision = profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact')?.seq ?? -1 : -1
@@ -245,7 +248,7 @@ export class AgentRuntimeAdapter {
       if (command && terminalOnlyCommands.has(command.name)) throw new Error(`/${command.name} 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。`)
       // Commit admission before sending. A crash cannot automatically repeat a
       // native turn with potentially irreversible tools; the user may follow up.
-      await this.profiles.patchBinding(agent.id, { seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
+      await this.profiles.patchBinding(agent.id, { ...(history.length ? { historyBootstrapped: true } : {}), seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
       if (context.length) appendPluginRecord(agent.session, 'plugin:kode/shell-context-consumed', { ids: context.map(row => row.id) })
       await agent.ctx.parallel('session/flush', agent.session)
       let text = '', reasoning = '', textIndex, reasoningIndex, textItemId, nextIndex = 0

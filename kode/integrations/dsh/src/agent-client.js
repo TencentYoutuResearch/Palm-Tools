@@ -1,3 +1,15 @@
+function groupProjectWorkspaces(items, parents = {}) {
+  const grouped = new Map(items.map(row => [row.workspaceId, { ...row, sessionIds: [...(row.sessionIds ?? [])] }]))
+  const hidden = new Set()
+  for (const row of items) {
+    let id = row.workspaceId; const seen = new Set()
+    while (parents[id] && !seen.has(id)) { seen.add(id); id = parents[id] }
+    if (seen.has(id) || id === row.workspaceId || !grouped.has(id)) continue
+    const parent = grouped.get(id)
+    parent.sessionIds = [...new Set([...parent.sessionIds, ...(row.sessionIds ?? [])])]; hidden.add(row.workspaceId)
+  }
+  return [...grouped].filter(([id]) => !hidden.has(id)).map(([, row]) => row)
+}
 function resumeCandidates(hosts, target, query = '') {
   if (!target?.profile) return []
   const text = query.trim().toLocaleLowerCase()
@@ -938,7 +950,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const effortLabel = efforts.find(row => row.id === effort)?.name ?? effort
     const label = [selected?.name ?? selected?.id ?? (data ? '选择模型' : '正在读取模型…'), effortLabel, data?.fast && !/\bfast\b/i.test(selected?.name ?? '') ? 'Fast' : undefined].filter(Boolean).join(' · ')
     const close = () => { setOpen(false); setPane('root') }
-    const operate = body => { close(); void store.operate({ action: 'select', profileId: current.id, sessionId: id, ...body }).catch(() => {}) }
+    const operate = (body, returnToRoot = true) => { if (busy) return; if (returnToRoot) setPane('root'); void store.operate({ action: 'select', profileId: current.id, sessionId: id, ...body }).catch(() => {}) }
     const option = (name, value) => h('span', { className: 'kode-option' }, h('span', null, name), h('span', { className: 'kode-secondary' }, value))
     let items, selectedId
     if (pane === 'models') {
@@ -951,7 +963,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     } else {
       items = [{ id: 'models', label: option('模型', selected?.name ?? selected?.id ?? '未选择') }]
       if (efforts.length) items.push({ id: 'effort', disabled: efforts.length < 2, label: option('推理强度', effortLabel ?? '默认') })
-      if (selected?.fastCapability) items.push({ id: 'fast', label: h('span', { className: 'kode-option' }, h('span', null, 'Fast'), h(FastSwitch, { checked: data?.fast, disabled: busy, onChange: fast => operate({ provider: selected.provider, model: selected.id, reasoningEffort: effort, fast }) })) })
+      if (selected?.fastCapability) items.push({ id: 'fast', label: h('span', { className: 'kode-option' }, h('span', null, 'Fast'), h(FastSwitch, { checked: data?.fast, disabled: busy, onChange: fast => operate({ provider: selected.provider, model: selected.id, reasoningEffort: effort, fast }, false) })) })
       items.push({ type: 'separator' }, { id: 'reload', label: '重新读取模型' })
     }
     return h('div', { className: 'kode-model-control' }, h(Menu, { open, onClose: close, items, selectedId, side: 'top', align: 'end', portal: true,
@@ -964,7 +976,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         if (value.startsWith('effort:')) operate({ provider: selected.provider, model: selected.id, reasoningEffort: value.slice(7) })
       },
       anchor: h(Trigger, { model: true, label, open, disabled: busy || !id || !current, onClick: () => { if (open) close(); else { setOpen(true); setPane('root') } } }),
-      footer: data?.modelError ? h('div', { className: 'kode-menu-note', role: 'alert' }, '请检查 Agent 的安装与登录状态。') : undefined,
+      footer: error || data?.modelError ? [{ id: 'model-error', disabled: true, label: h('div', { className: 'kode-menu-note', role: 'alert' }, error || '请检查 Agent 的安装与登录状态。') }] : undefined,
     }), h(Failure, { text: error }))
   }
 
@@ -1154,7 +1166,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           archivedSessionIds.push(...(host.archivedSessionIds ?? [])); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
           const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:'))
           for (const row of saved) { ids.push(row.id); byId[row.id] = { ...row, updatedAt: row.updatedAt ?? 0, displayTitle: row.title, retainedBy: {}, blank: false, projectionValues: {} }; routes.set(row.id, { hostId: host.id, id: row.id }) }
-          items.push(...workspaceSource.items.map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds.filter(id => id.startsWith('saved:')) ?? [])])] })))
+          items.push(...groupProjectWorkspaces(workspaceSource.items, host.worktreeParents).map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds ?? [])])] })))
           if (host.id !== 'local') remoteRows.push(...workspaceSource.items.map(w => ({ id: w.workspaceId, name: host.name })))
           continue
         }
@@ -1336,7 +1348,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     return h(ProjectFlow, { open, initialName, slots, workspaces, onCancel: () => setOpen(false), onPicked: async path => { const workspace = await workspaces.create({ path }); await uiWorkspace.openWorkspace(workspace.workspaceId); setOpen(false) } })
   }
   function WorktreeForm({ open, workspace, workspaces, onClose, onCreated }) {
-    const [info, setInfo] = useState(null), [branch, setBranch] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(''), [requestId, setRequestId] = useState('')
+    const [info, setInfo] = useState(null), [baseRef, setBaseRef] = useState('HEAD'), [branchSearch, setBranchSearch] = useState(''), [branch, setBranch] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(''), [requestId, setRequestId] = useState('')
     const host = transport?.current ?? 'local'
     const call = async body => {
       const url = body ? '/api/kode/worktrees' : `/api/kode/worktrees?workspaceId=${encodeURIComponent(workspace.workspaceId)}`
@@ -1349,27 +1361,33 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }
     useEffect(() => {
       if (!open || !workspace) return
-      let alive = true; setInfo(null); setBranch(''); setError(''); setLoading(true); setRequestId(crypto.randomUUID())
+      let alive = true; setInfo(null); setBaseRef('HEAD'); setBranchSearch(''); setBranch(''); setError(''); setLoading(true); setRequestId(crypto.randomUUID())
       void call().then(value => { if (alive) setInfo(value) }, error => { if (alive) setError(error.message) }).finally(() => { if (alive) setLoading(false) })
       return () => { alive = false }
     }, [open, workspace?.workspaceId, host])
     const create = async () => {
       setBusy(true); setError('')
       try {
-        const result = await call({ workspaceId: workspace.workspaceId, requestId, branch })
+        const result = await call({ workspaceId: workspace.workspaceId, requestId, branch, baseRef })
         const created = await workspaces.create({ path: result.path })
         await workspaces.rename(created.workspaceId, `${workspace.title} · ${result.branch}`)
         if ((transport?.current ?? 'local') !== host) throw new Error('worktree 已创建；主机已切换，请返回原主机继续。')
         onCreated(created.workspaceId)
       } catch (error) { setError(error.message) } finally { setBusy(false) }
     }
+    const base = info?.branches?.find(row => row.ref === baseRef)
+    const matches = (info?.branches ?? []).filter(row => row.name.toLocaleLowerCase().includes(branchSearch.trim().toLocaleLowerCase()))
+    const branchOptions = [{ value: 'HEAD', label: info ? `当前提交 · ${info.branch || '分离的 HEAD'} (${info.commit.slice(0,8)})` : '正在读取分支…' }, ...(base && !matches.includes(base) ? [{ value: base.ref, label: `${base.name} · 已选` }] : []), ...matches.map(row => ({ value: row.ref, label: row.name }))]
     return h(Modal, { open, title: '在 worktree 中新建会话', closeLabel: '关闭', onClose: () => { if (!busy) onClose() }, className: 'kode-project-dialog', footer: h(React.Fragment, null,
       h(Button, { onClick: onClose, disabled: busy }, '取消'), h(Button, { variant: 'primary', onClick: create, disabled: busy || loading || !info }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '创建中…') : '创建并进入')) },
       h('p', { className: 'kode-config-note' }, workspace?.title),
       loading && h('p', { role: 'status', className: 'kode-config-note' }, '正在检查 Git 仓库…'),
-      info && h('p', { className: 'kode-worktree-base' }, h('span', null, '起点'), h('strong', null, info.branch || '分离的 HEAD'), h('code', null, info.commit.slice(0,8))),
+      info && h('p', { className: 'kode-worktree-base' }, h('span', null, '起点'), h('strong', null, base?.name ?? (info.branch || '分离的 HEAD')), h('code', null, (base?.commit ?? info.commit).slice(0,8))),
+      h('label', { className: 'kode-field' }, '搜索起始分支', h('input', { type: 'search', value: branchSearch, disabled: busy || loading || !info, placeholder: '输入本地或远端分支名…', spellCheck: false, 'aria-controls': 'kode-worktree-branches', onChange: event => setBranchSearch(event.target.value) })),
+      h('div', { id: 'kode-worktree-branches' }, h(SelectField, { label: '起始分支', value: baseRef, disabled: busy || loading || !info, options: branchOptions, onChange: value => { setBaseRef(value); setRequestId(crypto.randomUUID()) } })),
+      info && branchSearch.trim() && h('p', { className: 'kode-config-note', role: 'status' }, matches.length ? `找到 ${matches.length} 个分支` : '没有匹配分支。可修改搜索词；已选起点保持不变。'),
       h('label', { className: 'kode-field' }, '新分支名称（可选）', h('input', { value: branch, disabled: busy || loading, placeholder: '留空自动生成', spellCheck: false, onChange: event => { setBranch(event.target.value); setRequestId(crypto.randomUUID()) } })),
-      h('p', { className: 'kode-config-note' }, '从当前提交创建独立工作目录，新会话将在其中运行。原目录的未提交改动会保留在原处。'), h(Failure, { text: error }))
+      h('p', { className: 'kode-config-note' }, '从所选分支创建独立工作目录，新会话仍归入当前项目。原目录的未提交改动会保留在原处。'), h(Failure, { text: error }))
   }
   function WorkspacePicker({ open, anchorRef, selectedId, onPick, onClose, workspaces, slots, uiWorkspace, sessionId }) {
     const { data: projectHost } = useProjectHosts()
@@ -1384,15 +1402,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const snapshot = useSyncExternalStore(React.useCallback(fn => workspaces.list.subscribe(fn), [workspaces]), React.useCallback(() => workspaces.list.getSnapshot(), [workspaces]))
     const [query, setQuery] = useState(''), [picking, setPicking] = useState(false), [worktreeOpen, setWorktreeOpen] = useState(false)
     useEffect(() => { if (open) setQuery('') }, [open])
-    const items = snapshot.items.filter(w => `${w.title} ${w.path}`.toLowerCase().includes(query.trim().toLowerCase()))
+    const projectDirectory = useWorkspaceDirectory(), parents = projectDirectory.hosts.find(host => host.id === projectDirectory.current)?.worktreeParents ?? {}
+    const projects = groupProjectWorkspaces(snapshot.items, parents), selectedProject = projects.find(row => row.sessionIds.includes(sessionId)) ?? projects.find(row => row.workspaceId === (parents[selectedId] ?? selectedId))
+    const items = projects.filter(w => `${w.title} ${w.path}`.toLowerCase().includes(query.trim().toLowerCase()))
     const pick = id => { const origin = sessionId && directory(sessionId).getSnapshot().data; if (origin?.currentProfile && origin.canChangeAgent) stagedAgent = { host: transport?.current ?? 'local', sourceId: sessionId, profileId: origin.currentProfile.id, model: origin.selection?.model, provider: origin.selection?.provider, at: Date.now() }; onClose(); onPick(id) }
     return h(React.Fragment, null,
       h(HostControl, { slots, workspaces, uiWorkspace }),
       h('button', { type: 'button', className: 'kode-trigger kode-worktree-trigger', disabled: !selectedId, 'aria-label': '在新 worktree 中创建会话', onClick: () => { onClose(); setWorktreeOpen(true) } }, h(IconPlusOutlineRegular, { size: 14 }), '新建 worktree'),
-      h(WorktreeForm, { open: worktreeOpen, workspace: snapshot.items.find(row => row.workspaceId === selectedId), workspaces, onClose: () => setWorktreeOpen(false), onCreated: id => { const origin = sessionId && directory(sessionId).getSnapshot().data; if (origin?.currentProfile && origin.canChangeAgent) stagedAgent = { host: transport?.current ?? 'local', sourceId: sessionId, profileId: origin.currentProfile.id, model: origin.selection?.model, provider: origin.selection?.provider, at: Date.now() }; setWorktreeOpen(false); pick(id) } }),
+      h(WorktreeForm, { open: worktreeOpen, workspace: selectedProject ?? snapshot.items.find(row => row.workspaceId === selectedId), workspaces, onClose: () => setWorktreeOpen(false), onCreated: id => { const origin = sessionId && directory(sessionId).getSnapshot().data; if (origin?.currentProfile && origin.canChangeAgent) stagedAgent = { host: transport?.current ?? 'local', sourceId: sessionId, profileId: origin.currentProfile.id, model: origin.selection?.model, provider: origin.selection?.provider, at: Date.now() }; setWorktreeOpen(false); pick(id) } }),
       h(Menu, { open, anchor: null, onClose, portal: true, getAnchorRect: () => anchorRef?.current?.getBoundingClientRect() ?? null, listClassName: 'kode-workspace-menu', footer: [{ id: 'create', label: '创建项目…', icon: h(IconPlusOutlineRegular, { size: 16 }) }], onSelect: () => { onClose(); setPicking(true) } },
         h('div', { className: 'kode-workspace-search' }, h(IconSearchOutlineRegular, { size: 16 }), h('input', { autoFocus: true, 'aria-label': '搜索项目', placeholder: '搜索项目', value: query, onChange: e => setQuery(e.target.value) })),
-        ...items.map(w => h(MenuItemButton, { key: w.workspaceId, current: w.workspaceId === selectedId, icon: h(projectHost.current === 'local' ? IconFolderCloseRegular : RemoteComputerIcon, { size: 16 }), onSelect: () => pick(w.workspaceId) }, h('span', { className: 'kode-workspace-option' }, h('span', null, w.title === 'default-workspace' ? '默认工作区' : w.title || '默认工作区'), h('small', { title: w.path }, w.path)))),
+        ...items.map(w => h(MenuItemButton, { key: w.workspaceId, current: w.workspaceId === (selectedProject?.workspaceId ?? selectedId), icon: h(projectHost.current === 'local' ? IconFolderCloseRegular : RemoteComputerIcon, { size: 16 }), onSelect: () => pick(w.workspaceId) }, h('span', { className: 'kode-workspace-option' }, h('span', null, w.title === 'default-workspace' ? '默认工作区' : w.title || '默认工作区'), h('small', { title: w.path }, w.path)))),
         !items.length && h('p', { className: 'kode-menu-note' }, snapshot.phase === 'pending' ? '正在加载项目…' : '没有匹配的项目')),
       h(ProjectFlow, { slots, workspaces, open: picking, onCancel: () => setPicking(false), onPicked: async path => { const workspace = await workspaces.create({ path }); setPicking(false); pick(workspace.workspaceId) } }),
     )
@@ -1431,27 +1451,47 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         for (const row of rows) {
           const definition = catalog.get(row.name)?.definitionId ?? ''
           const skill = definition.startsWith('@kode/dsh/native/skill/')
-          const section = skill ? '技能' : ['file', 'feedback', 'export', 'new'].includes(row.name) ? '快捷操作' : 'Agent 命令'
+          const section = skill ? '技能' : ['file', 'feedback', 'export', 'new', 'clear'].includes(row.name) ? '快捷操作' : 'Agent 命令'
           groups[section].push({ ...row, section, icon: row.icon ?? (skill ? SkillGlyph : iconFor(row.name)) })
         }
         return Object.values(groups).flat()
       }
       commands.candidates = candidateWrapper
+      const resetting = new Map()
+      const freshSession = (session, keepTitle = false) => {
+        const sourceHost = transport?.current ?? 'local', key = `${sourceHost}:${session.sessionId}`
+        if (resetting.has(key)) return resetting.get(key)
+        const binding = scope.sessions.binding(session.sessionId)
+        const task = (async () => {
+          const store = directory(session.sessionId, sourceHost); await store.load()
+          const data = store.getSnapshot().data, previous = scope.sessions.list.getSnapshot().byId[session.sessionId]
+          if (!data?.currentProfile) throw new Error('请先选择此会话的 Agent。')
+          const workspace = scope.get('workspaces')?.list.getSnapshot().items.find(row => row.sessionIds.includes(session.sessionId) && (!previous?.cwd || row.path === previous.cwd))
+          const id = await scope.sessions.create({ ...(workspace ? { workspaceId: workspace.workspaceId } : previous?.cwd ? { cwd: previous.cwd } : {}), agentPreset: 'kode-native' })
+          const checkHost = () => { if ((transport?.current ?? 'local') !== sourceHost) throw new Error('执行主机已切换，新会话保留在原主机。') }
+          checkHost()
+          const supportsFast = data.models?.find(row => row.id === data.selection?.model)?.fastCapability
+          await call({ action: 'select', sessionId: id, profileId: data.currentProfile.id, model: data.selection?.model, reasoningEffort: data.selection?.reasoningEffort, ...(supportsFast ? { fast: data.fast } : {}) }, id, false, sourceHost)
+          checkHost()
+          const title = previous?.title ?? previous?.displayTitle
+          if (keepTitle && title) {
+            const result = await scope.sessions.using(id, { source: 'workspaceOperation' }, reference => reference.binding.session.rename(title))
+            if (result?.ok === false) throw new Error(result.error.message)
+          }
+          checkHost()
+          await scope.get('uiWorkspace').openSession(id); await refreshWorkspaceDirectory()
+        })().catch(error => binding?.ctx.get('conversation')?.input.for(binding.ctx).notify('error', error.message)).finally(() => resetting.delete(key))
+        resetting.set(key, task); return task
+      }
+      const canStartFresh = session => Boolean(directory(session.sessionId).getSnapshot().data?.currentProfile && scope.get('uiWorkspace'))
       if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
-        name: 'new',
-        available: session => Boolean(directory(session.sessionId).getSnapshot().data?.currentProfile && scope.get('uiWorkspace')),
-        ui: { kind: 'action', run: session => {
-          const binding = scope.sessions.binding(session.sessionId), sourceHost = transport?.current ?? 'local'
-          void (async () => {
-            const data = directory(session.sessionId).getSnapshot().data, previous = scope.sessions.list.getSnapshot().byId[session.sessionId]
-            const workspace = scope.get('workspaces')?.list.getSnapshot().items.find(row => row.sessionIds.includes(session.sessionId))
-            const id = await scope.sessions.create({ ...(workspace ? { workspaceId: workspace.workspaceId } : previous?.cwd ? { cwd: previous.cwd } : {}), agentPreset: 'kode-native' })
-            if ((transport?.current ?? 'local') !== sourceHost) throw new Error('执行主机已切换，新会话保留在原主机。')
-            await call({ action: 'select', sessionId: id, profileId: data.currentProfile.id, model: data.selection?.model, reasoningEffort: data.selection?.reasoningEffort }, id, false, sourceHost)
-            scope.get('uiWorkspace').openSession(id); await refreshWorkspaceDirectory()
-          })().catch(error => binding?.ctx.get('conversation')?.input.for(binding.ctx).notify('error', error.message))
-        } },
+        name: 'new', available: canStartFresh,
+        ui: { kind: 'action', run: session => freshSession(session) },
       }), 'kode.new-session-command')
+      if (typeof commands.register === 'function') scope.effect(() => commands.register({
+        name: 'clear', description: () => '清空上下文并开始同名新会话', icon: IconPlusOutlineRegular, available: canStartFresh,
+        ui: { kind: 'action', run: session => freshSession(session, true) },
+      }), 'kode.clear-session-command')
       if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
         name: 'resume',
         available: session => { const profile = directory(session.sessionId).getSnapshot().data?.currentProfile; return ['codex', 'claude'].includes(profile?.type) || profile?.protocol === 'codex' },

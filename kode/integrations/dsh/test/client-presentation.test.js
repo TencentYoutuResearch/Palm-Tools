@@ -677,3 +677,35 @@ test('goal dock pause, resume and clear controls retain the current session iden
  }
  assert.equal(render({sessionId:'session-goal-fixture',useProjection:()=>null}),null)
 })
+
+test('/clear creates a same-name fresh session for each Agent without copying its old thread', async () => {
+  for (const type of ['codex', 'claude', 'cursor', 'codebuddy', 'custom', 'dsh']) {
+    const contributions = [], calls = [], title = 'Keep this conversation name', original = 'source-session'
+    const agentDirectory = { currentProfile: { id: 'selected-agent', type }, profiles: [], selection: { provider: 'kode-agent-selected-agent', model: 'fixture', reasoningEffort: 'high' }, fast: true, models: [{ id: 'fixture', fastCapability: {} }], binding: { nativeThreadId: 'old-native-thread' } }
+    const sessions = {
+      list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { [original]: { title, cwd: '/srv/project/worktree' } } }) },
+      binding: () => undefined,
+      create: async input => { calls.push(['create', input]); return 'new-session' },
+      using: async (id, _options, run) => run({ binding: { session: { rename: async name => { calls.push(['rename', id, name]); return { ok: true } } } } }),
+    }
+    const workspace = { workspaceId: 'checkout', path: '/srv/project/worktree', sessionIds: [original] }
+    const c = client(undefined, { agentDirectory }, {
+      sessions, inputTriggers: { sessionOf: () => ({}), registerSource: () => () => {} },
+      commandUi: { candidates: async () => [], register: value => { contributions.push(value); return () => {} }, decorate: () => () => {} },
+      remote: { commands: { list: async () => ({ ok: true, value: [] }) } },
+      get: name => name === 'uiWorkspace' ? { openSession: async id => calls.push(['open', id]) } : name === 'workspaces' ? { list: { getSnapshot: () => ({ items: [workspace] }) } } : undefined,
+    })
+    const render = c.ctx.slots.entries('conversation.input.model')[0].component
+    render({ sessionId: original, sessions }); await new Promise(resolve => setImmediate(resolve))
+    const clear = contributions.find(value => value.name === 'clear')
+    assert.ok(clear?.available({ sessionId: original }), type)
+    await Promise.all([clear.ui.run({ sessionId: original }), clear.ui.run({ sessionId: original })])
+    assert.equal(calls.filter(row => row[0] === 'create').length, 1)
+    assert.deepEqual({ ...calls[0][1] }, { workspaceId: 'checkout', agentPreset: 'kode-native' })
+    assert.deepEqual(calls.find(row => row[0] === 'rename'), ['rename', 'new-session', title])
+    assert.deepEqual(calls.at(-1), ['open', 'new-session'])
+    const selected = c.requests.find(row => row.action === 'select')
+    assert.equal(selected.sessionId, 'new-session'); assert.equal(selected.profileId, 'selected-agent'); assert.equal(selected.fast, true)
+    assert.equal(selected.reasoningEffort, 'high'); assert.equal(selected.model, 'fixture'); assert.equal(selected.threadId, undefined)
+  }
+})

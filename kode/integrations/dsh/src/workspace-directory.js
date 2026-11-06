@@ -2,6 +2,7 @@
 import { BackendDocument } from './backend-state.js'
 import { classifyEmptySessions } from './empty-session.js'
 import { savedSessionProfile } from './saved-session-profile.js'
+import { groupWorktreeProjects } from './worktree-projects.js'
 import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
 const sessionController = ctx => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用；工作区配置仍保留，请先恢复会话服务。'); return value }
 export const DIRECTORY_PATH = '/api/kode/host-directory'
@@ -49,6 +50,8 @@ export async function hostDirectory(ctx, config = {}) {
       if (result.archivedSessionIds.includes(adopted)) result.archivedSessionIds.push(id)
       if (result.pinnedSessionIds.includes(adopted)) result.pinnedSessionIds.push(id)
     }
+    result.worktreeParents = index?.worktreeParents ?? {}
+    result.workspaces = groupWorktreeProjects(result.workspaces, result.worktreeParents)
   }
   return result
 }

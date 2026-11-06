@@ -611,3 +611,7 @@ permission/sandbox/approval initialization events. Read failures, unknown events
 inbox work, inherited history and real messages remain visible. GUI snapshots
 preserve `dsh_session_id` separately from the native CLI `session_id`, so later
 archive and unarchive operations retain the original runtime identity.
+
+### Dsh 工作台 CLI token 统计
+
+`GET /api/v1/messaging/model-usage?period=today|month|all&timezone_offset_minutes=<minutes>&since_ms=<optional-ms>` 供独立 session server 的管理端使用，要求 bridge 管理员 bearer，session-scoped token 返回 `403`。复用 `/api/v1/model-usage` 的 collector 和响应格式（`period`、`rows`、`totals`、`daily`、`warnings`）。时区为 UTC 以东分钟数，`since_ms` 可指定查看者日历的今日/月初边界；`all` 不传该边界。此接口只读，未知 period 或时区超出 ±1439 返回 `400`。Dsh 浏览器通过 owner-only `/api/kode/model-usage` 代理访问，凭据不进入前端；统计范围为当前执行主机的 CLI 历史，与当前对话上下文占用独立。

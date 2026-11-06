@@ -67,6 +67,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/api/v1/messaging/workbench/agent-hub", get(agent_hub).post(change_agent_hub))
         .route("/api/v1/messaging/workbench/handoff", post(handoff))
+        .route("/api/v1/messaging/model-usage", get(model_usage))
         .route("/api/v1/messaging/integrations", get(integration_status).post(integration_configure))
         .route("/api/v1/messaging/memory/tool", post(memory_tool))
         .route("/api/v1/messaging/cloud/status", get(cloud_status))
@@ -130,6 +131,11 @@ pub fn server_binary() -> (Option<String>, Option<u64>) {
             (path.map(|path| path.to_string_lossy().into_owned()), built_at)
         })
         .clone()
+}
+// The standalone session server exposes the same collector as the full bridge.
+async fn model_usage(State(hub): State<Arc<Hub>>, h: HeaderMap, Query(query): Query<crate::model_usage::ModelUsageQuery>) -> Response {
+    if let Err(error) = admin(&hub, &h) { return error.into_response(); }
+    crate::get_model_usage(Query(query)).await.into_response()
 }
 async fn add_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(peer): Json<super::Peer>) -> Result<Json<serde_json::Value>> {
     admin(&hub, &h)?;

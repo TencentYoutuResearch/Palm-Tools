@@ -12,6 +12,8 @@ import { registerIntegrationApi, memoryTools } from './integration-api.js'
 import { ExtensionHub } from './extension-hub.js'
 import { registerAgentHubApi } from './agent-hub-api.js'
 import { registerSharedSessionApi } from './shared-session-api.js'
+import { installSessionRecovery } from './session-recovery.js'
+import { registerModelUsageApi } from './model-usage-api.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -28,6 +30,7 @@ const output = {
 }
 
 export async function apply(ctx, config = {}) {
+  if (ctx.inject) ctx.inject(['sessionPersistence'], scope => scope.effect(() => installSessionRecovery(scope), 'kode.session-recovery'))
   const runtimeConfig = await prepareRuntimeConfig(config)
   const token = runtimeConfig.tokenFile ? (await readFile(runtimeConfig.tokenFile, 'utf8')).trim() : process.env.KODE_BRIDGE_TOKEN
   if (!token) throw new Error('kode requires tokenFile or KODE_BRIDGE_TOKEN on the dsh Host')
@@ -64,6 +67,7 @@ export async function apply(ctx, config = {}) {
   }
   if (ctx.inject) ctx.inject(['webServer', 'connection'], async webCtx => {
     webCtx.effect(() => registerIntegrationApi(webCtx, admin), 'kode.integration-api')
+    webCtx.effect(() => registerModelUsageApi(webCtx, admin), 'kode.model-usage-api')
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
