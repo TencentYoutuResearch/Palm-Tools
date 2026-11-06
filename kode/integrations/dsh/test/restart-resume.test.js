@@ -61,3 +61,18 @@ test('factory repaired crash boundaries retain restart evidence without treating
   assert.equal(interruptedByRestart([start, closed]), false)
   assert.equal(interruptedByRestart([start, closed, { seq: 3, type: 'plugin:kode/restart-interrupted', data: { startSeq: 1 } }]), true)
 })
+
+
+test('a protected routing failure is rediscovered after an earlier journal dropped its intent', async () => {
+  const queued = []
+  const failed = [start, end({ kind: 'error', error: { message: 'Kode 原生 Agent 会话被普通 dsh 执行器接管，已在写入系统提示前停止。' } })]
+  const rows = { protected: failed, ordinary: [start, end({ kind: 'error', error: { message: 'network failed' } })], stopped: [...failed, { seq: 4, type: 'plugin:kode/manual-stop' }] }
+  const service = new RestartResume({ agents: { get: () => undefined }, sessionController: {
+    list: async () => ({ items: Object.keys(rows).map(sessionId => ({ sessionId })) }),
+    inspect: async id => ({ events: rows[id] }),
+    resolveAgent: async id => ({ agent: { isKodeNativeAgent: true, status: 'idle', inbox: { nextTurn: [], nextStep: [] }, followup: () => queued.push(id), session: {}, ctx: { parallel: async () => {} } } }),
+  }, logger: { warn: () => {} } }, { call: async () => ({ auto_resume_interrupted: true }) }, '')
+  service.previous = new Set(); service.persist = async () => {}
+  await service.recover(new AbortController().signal)
+  assert.deepEqual(queued, ['protected'])
+})

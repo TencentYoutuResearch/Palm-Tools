@@ -2,6 +2,7 @@
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { isNativeRoutingFailure } from './native-startup.js'
 import { sessionInspector } from './empty-session.js'
 
 export function interruptedByRestart(events) {
@@ -11,6 +12,7 @@ export function interruptedByRestart(events) {
   if (events.some(event => event.seq > start.seq && event.type === 'plugin:kode/manual-stop')) return false
   if (!end) return true
   const reason = end.data?.reason
+  if (isNativeRoutingFailure(reason)) return true
   if (reason?.kind === 'aborted' && reason.reason?.kind === 'disposed') return true
   return reason?.kind === 'interrupted' && events.some(event => event.type === 'plugin:kode/restart-interrupted' && event.data?.startSeq === start.seq)
 }
@@ -45,9 +47,9 @@ export class RestartResume {
     const controller = get('sessionController'), inspect = sessionInspector(controller, get('sessionQuery'))
     if (!settings.auto_resume_interrupted) { for (const id of this.previous) delete this.records[id]; await this.persist(); return }
     if (!inspect) return
-    // Upgrade bootstrap: the old process could not have written our new journal.
-    // Admit only recent restart evidence, not arbitrary abandoned historical work.
-    if (this.needsBootstrap && controller.list) {
+    // Rediscover protected routing failures even if an older worker cleared intent.
+    // Other journal-free recovery is limited to recent first-upgrade evidence.
+    if (controller.list) {
       const directory = await controller.list({}, signal)
       for (const row of directory.items) {
         signal.throwIfAborted()
@@ -59,7 +61,7 @@ export class RestartResume {
           const evidence = events.findLast(event => event.type === 'plugin:kode/restart-interrupted')
           const lastEnd = events.findLast(event => event.type === 'turn/end')
           const at = evidence?.data?.interruptedAt ?? lastEnd?.time ?? events.at(-1)?.time
-          if (interruptedByRestart(events) && at >= this.bootTime - 120_000) {
+          if (interruptedByRestart(events) && (isNativeRoutingFailure(lastEnd?.data?.reason) || this.needsBootstrap && at >= this.bootTime - 120_000)) {
             this.previous.add(row.sessionId); this.records[row.sessionId] = true
           }
         } catch (error) { if (signal.aborted) throw error }
@@ -73,6 +75,7 @@ export class RestartResume {
       try {
         if (archived.has(id)) { delete this.records[id]; continue }
         const live = get('agents').get(id)
+        if (live && !live.isKodeNativeAgent && live.options?.provider?.startsWith('kode-agent-')) throw new Error('会话仍由旧执行器持有，请重新启动 Desktop 以释放旧实例。')
         if (live?.status === 'running') continue
         const stored = live ? { events: live.session.snapshotEvents() } : await inspect(id, signal)
         if (!interruptedByRestart(stored.events)) { delete this.records[id]; continue }

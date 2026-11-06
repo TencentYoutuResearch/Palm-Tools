@@ -13,6 +13,7 @@ import { ExtensionHub } from './extension-hub.js'
 import { registerAgentHubApi } from './agent-hub-api.js'
 import { registerSharedSessionApi } from './shared-session-api.js'
 import { installSessionRecovery } from './session-recovery.js'
+import { installNativeStartupBarrier } from './native-startup.js'
 import { registerModelUsageApi } from './model-usage-api.js'
 
 export const name = 'kode'
@@ -30,6 +31,7 @@ const output = {
 }
 
 export async function apply(ctx, config = {}) {
+  installNativeStartupBarrier(ctx)
   if (ctx.inject) ctx.inject(['sessionPersistence'], scope => scope.effect(() => installSessionRecovery(scope), 'kode.session-recovery'))
   const runtimeConfig = await prepareRuntimeConfig(config)
   const token = runtimeConfig.tokenFile ? (await readFile(runtimeConfig.tokenFile, 'utf8')).trim() : process.env.KODE_BRIDGE_TOKEN
@@ -258,7 +260,8 @@ export async function apply(ctx, config = {}) {
       webCtx.effect(() => registerAgentHubApi(webCtx, { hub, backend: admin, service }), 'kode.agent-hub-api')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
       if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
-      webCtx.inject(['sessionController'], async scope => {
+      webCtx.inject(['sessionController', 'kodeNativeFactory'], async scope => {
+        await scope.kodeNativeFactory.ready
         const { installRestartResume } = await import('./restart-resume.js')
         await installRestartResume(scope, admin, `${stateFile}.restart.json`)
       })

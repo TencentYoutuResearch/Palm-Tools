@@ -1,3 +1,4 @@
+import { symbols } from '@deepseek-ai/cordis'
 import { contextUsageProjection } from './context-usage.js'
 import { fastProjection } from './model-fast.js'
 /** Cordis-owned Agent factory. Storage and lifecycle are independent of dsh's LLM loop. */
@@ -199,6 +200,22 @@ export function installNativeFactoryRouting(ctx, native) {
   }
 }
 export async function apply(ctx) {
+  const factory = new NativeAgentFactory(ctx)
+  const readiness = Promise.withResolvers()
+  factory.ready = readiness.promise
+  // Install routing before preset registration or cold-log migration can yield.
+  // A native admission waits on readiness without constructing an ordinary Agent.
+  const delegate = {
+    createAgent: async (...args) => { await factory.ready; return factory.createAgent(...args) },
+    resume: async (...args) => { await factory.ready; return factory.resume(...args) },
+  }
+  // Cordis publishes a Service before its async initializer registers the factory.
+  const loop = ctx.agentLoop[symbols.original] ?? ctx.agentLoop
+  await loop.ctx?.fiber.await?.()
+  ctx.effect(() => installNativeFactoryRouting(ctx, delegate), 'kode.native-routing')
+  ctx.effect(() => () => readiness.reject(new Error('Native executor initialization disposed')), 'kode.native-readiness')
+  // Keep disposal rejection observed even if no caller has awaited readiness.
+  void factory.ready.catch(() => {})
   ctx.inject(['sessionController'], scope => scope.effect(() => installQueueSteering(scope, scope.sessionController), 'kode.queue-steering'))
   const unregisterPreset = await ctx.agentPresets.register({ id: 'kode-native', name: '外部 Agent', description: '由所选 Agent 负责模型、指令和工具执行。', plugins: [] })
   ctx.effect(() => unregisterPreset, 'kode.native-preset')
@@ -220,18 +237,18 @@ export async function apply(ctx) {
       if (error.code !== 'ENOENT' && !/not found/i.test(error.message)) ctx.logger.warn('Kode session composition migration for %s: %s', id, error.message)
     } finally { await handle?.close() }
   }
-  const factory = new NativeAgentFactory(ctx)
   ctx.on('kode/runtime-removed', async type => {
     const ids = [...factory.byId.keys()].filter(id => ctx.kodeAgents.profiles.binding(id)?.profile.type === type)
     await Promise.all(ids.map(id => factory.byId.get(id)?.()))
   })
+  factory.promote = (...args) => delegate.promote(...args)
   ctx.provide('kodeNativeFactory', factory)
   ctx.effect(function* () {
     yield ctx.sessionProjections.register(boundaryProjection)
     yield ctx.sessionProjections.register(inboxProjection)
     yield ctx.sessionProjections.register(contextUsageProjection)
     yield ctx.sessionProjections.register(fastProjection)
-    yield installNativeFactoryRouting(ctx, factory)
     yield () => factory.close()
+    readiness.resolve()
   }, 'kode.native-factory')
 }
