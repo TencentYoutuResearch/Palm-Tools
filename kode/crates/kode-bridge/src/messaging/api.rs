@@ -234,7 +234,8 @@ async fn workbench_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<
         if !tab["endpoint_id"].is_null() && tab["endpoint_id"]["kind"]!="local" {return true}
         let native=document.pointer("/value/native_sessions").and_then(serde_json::Value::as_array).and_then(|rows|rows.iter().find(|row|row["session_id"]==tab["session_id"] && row["backend_key"]==tab["backend_key"]));
         let id=tab["dsh_session_id"].as_str().or_else(||native.and_then(|row|row["dsh_session_id"].as_str()));
-        !id.is_some_and(|id|archived.is_some_and(|rows|rows.iter().any(|row|row.as_str()==Some(id))))
+        !super::session_catalog::is_archived_local(tab, archived)
+            && !id.is_some_and(|id|archived.is_some_and(|rows|rows.iter().any(|row|row.as_str()==Some(id))))
     });
     let agents = super::agents::catalog(&hub)?;
     let backends = serde_json::to_value(&agents.backends).map_err(anyhow::Error::from)?;
