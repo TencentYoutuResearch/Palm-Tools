@@ -1434,16 +1434,25 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   }
   const textContent = content => (content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n')
   function installInputPresentation(ctx) {
+    // Cordis returns a fresh context-bound Proxy on each method read. Compare
+    // and retain the underlying function, never a Proxy tied to this plugin.
+    const methodOf = (object, name) => {
+      for (let owner = object; owner; owner = Object.getPrototypeOf(owner)) {
+        const descriptor = Object.getOwnPropertyDescriptor(owner, name)
+        if (descriptor) return descriptor.value ?? object[name]
+      }
+    }
     ctx.inject(['inputTriggers', 'commandUi', 'remote.commands'], scope => {
       const input = scope.inputTriggers, commands = scope.commandUi
       if (!input?.sessionOf || typeof commands?.candidates !== 'function') return
       const metadata = new Map(), skillLists = new Map(), adapted = new Map(), sourceName = 'kode-codex-skills'
-      const originalCandidates = commands.candidates, originalSessionOf = input.sessionOf
-      let candidateWrapper, sessionOf
+      const originalCandidates = methodOf(commands, 'candidates'), originalSessionOf = methodOf(input, 'sessionOf')
+      let candidateWrapper, sessionOf, active = true
       scope.effect(() => () => {
-        if (candidateWrapper && commands.candidates === candidateWrapper) commands.candidates = originalCandidates
-        if (sessionOf && input.sessionOf === sessionOf) input.sessionOf = originalSessionOf
-        for (const [controller, methods] of adapted) if (controller.track === methods.wrapper) { controller.dismiss(); controller.track = methods.track }
+        active = false
+        if (candidateWrapper && methodOf(commands, 'candidates') === candidateWrapper) commands.candidates = originalCandidates
+        if (sessionOf && methodOf(input, 'sessionOf') === sessionOf) input.sessionOf = originalSessionOf
+        for (const [controller, methods] of adapted) if (methodOf(controller, 'track') === methods.wrapper) { controller.dismiss(); controller.track = methods.track }
         metadata.clear(); skillLists.clear(); adapted.clear()
       }, 'kode.input-presentation')
       const keyOf = session => `${transport?.current ?? 'local'}:${session.sessionId}`
@@ -1461,7 +1470,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         // metadata must neither race that admission nor hide an otherwise
         // usable menu when its optional read is unavailable.
         const rows = await originalCandidates.call(this, session, request)
+        if (!active) return rows
         const catalog = await metadataFor(session).catch(() => new Map())
+        if (!active) return rows
         const groups = { '快捷操作': [], 'Agent 命令': [], '技能': [] }
         for (const row of rows) {
           const definition = catalog.get(row.name)?.definitionId ?? ''
@@ -1531,9 +1542,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       }), 'kode.native-skill-source')
       const decorate = (controller, sessionId, actx) => {
         if (adapted.has(controller)) return controller
-        const track = controller.track
+        const track = methodOf(controller, 'track')
         let previous = null, dollar = false
         const wrapper = function(draft, caret, guard, draftRev) {
+          if (!active) return track.call(this, draft, caret, guard, draftRev)
           const profile = directory(sessionId).getSnapshot().data?.currentProfile
           const match = guard.tier === 'plain' && (!profile || profile.type === 'codex' || profile.protocol === 'codex') && /(?:^|\s)\$([a-zA-Z0-9_:-]*)$/.exec(draft.slice(0, caret))
           if (!match) { if (dollar) controller.dismiss(); dollar = false; previous = null; return track.call(this, draft, caret, guard, draftRev) }
@@ -1547,10 +1559,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         }
         controller.track = wrapper; adapted.set(controller, { track, wrapper })
         const cacheKey = keyOf({ sessionId })
-        actx?.effect?.(() => () => { if (controller.track === wrapper) controller.track = track; adapted.delete(controller); metadata.delete(cacheKey); skillLists.delete(cacheKey) }, 'kode.session-input-presentation')
+        actx?.effect?.(() => () => { if (methodOf(controller, 'track') === wrapper) controller.track = track; adapted.delete(controller); metadata.delete(cacheKey); skillLists.delete(cacheKey) }, 'kode.session-input-presentation')
         return controller
       }
-      sessionOf = function(actx) { const controller = originalSessionOf.call(this, actx), session = scope.sessions.sessionOf(actx); return session ? decorate(controller, session.sessionId, actx) : controller }
+      sessionOf = function(actx) {
+        const controller = originalSessionOf.call(this, actx)
+        if (!active) return controller
+        const session = scope.sessions.sessionOf(actx)
+        return session ? decorate(controller, session.sessionId, actx) : controller
+      }
       input.sessionOf = sessionOf
       scope.slots.inject('conversation.input.overlay', () => scope.slots.register({ name: 'conversation.input.overlay', id: 'kode-input-adapter', inject: sessionId => {
         const binding = scope.sessions.binding(sessionId); if (binding) input.sessionOf(binding.ctx)
@@ -1992,7 +2009,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     })
     ctx.slots.inject('tool.call.toolview', function* () {
       for (const key of ['kode_sessions_list', 'kode_sessions_create', 'kode_sessions_send', 'kode_sessions_read', 'kode_sessions_wait']) yield ctx.slots.register({ name: 'tool.call.toolview', key, inject: sessionId => ({ sessions: ctx.sessions, sessionId }) }, MessagingTool)
-      for (const key of ['exec_command','apply_patch','kode_native_commandExecution','kode_native_fileChange','kode_native_operation']) yield ctx.slots.register({name:'tool.call.toolview',key},NativeOperationTool)
+      // Official renderers may already own these keys. Shadow them at a
+      // separate priority so either activation order and hot reload are valid.
+      for (const key of ['exec_command','apply_patch','kode_native_commandExecution','kode_native_fileChange','kode_native_operation']) yield ctx.slots.register({name:'tool.call.toolview',key,priority:-10},NativeOperationTool)
     })
     ctx.effect(() => { const timer = setInterval(() => { if (nameListeners.size && !document.hidden) void refreshNames() }, 10000); return () => clearInterval(timer) }, 'kode.session-names')
     const style = document.createElement('style')
