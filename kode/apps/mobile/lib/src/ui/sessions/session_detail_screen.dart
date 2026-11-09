@@ -33,16 +33,6 @@ import 'speech_locale.dart';
 import 'session_send_button.dart';
 import 'session_glass_layout.dart';
 
-String _compactTokens(int value) {
-  if (value >= 1000000) {
-    return '${(value / 1000000).toStringAsFixed(value >= 10000000 ? 0 : 1)}M';
-  }
-  if (value >= 1000) {
-    return '${(value / 1000).toStringAsFixed(value >= 10000 ? 0 : 1)}k';
-  }
-  return '$value';
-}
-
 /// 一条对话气泡或工具调用卡。
 class _Item {
   final String key; // 去重 + ListView key
@@ -75,7 +65,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   /// 已见 key 去重(message id / tool_use id;同 tool_use 的 running→ok 会更新而非重复)
   final _byKey = <String, int>{};
 
-  /// AppBar 上显示的 meta(model / total tokens / context_pct)
+  /// meta 事件累积的字段(model / title 等;tokens / context_pct 不再展示)
   Map<String, dynamic> _meta = const {};
 
   /// WebSocket 收到的即时状态。优先于列表快照，避免详情页晚一拍。
@@ -800,8 +790,6 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   @override
   Widget build(BuildContext context) {
     final metaModel = _meta['model'] as String? ?? '';
-    final metaCtxPct = (_meta['context_pct'] as num?)?.toDouble();
-    final metaTokens = (_meta['tokens'] as num?)?.toInt();
     final metaTitle = _meta['title'] as String? ?? '';
     final sessionList =
         ref.watch(sessionsProvider).valueOrNull ?? const <SessionDto>[];
@@ -815,8 +803,6 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     final backendKey =
         summary?.backendKey ?? (_meta['backend_key'] as String?) ?? 'agent';
     final model = metaModel.isNotEmpty ? metaModel : summary?.model ?? '';
-    final ctxPct = metaCtxPct ?? summary?.contextPct;
-    final tokens = metaTokens ?? summary?.tokens.total ?? 0;
     final summaryTitle = summary?.title ?? '';
     final displayTitle = metaTitle.isNotEmpty
         ? metaTitle
@@ -891,7 +877,6 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                   ),
                 ],
               ),
-              _SessionHeaderMeta(tokens: tokens, contextPct: ctxPct),
               if (attentionKind != null) _AttentionBanner(kind: attentionKind),
             ],
           ),
@@ -1505,88 +1490,6 @@ class _SessionHeaderTitle extends StatelessWidget {
         ),
       ],
     );
-  }
-}
-
-class _SessionHeaderMeta extends StatelessWidget {
-  final int tokens;
-  final double? contextPct;
-
-  const _SessionHeaderMeta({required this.tokens, required this.contextPct});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final contextColor = contextPct == null
-        ? colors.onSurfaceVariant
-        : contextPct! >= 80
-        ? colors.error
-        : contextPct! >= 50
-        ? KillLaColors.warning
-        : colors.onSurfaceVariant;
-    if (tokens <= 0 && contextPct == null) return const SizedBox.shrink();
-    return Container(
-      height: 28,
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 0, 10, 0),
-      child: Row(
-        children: [
-          if (tokens > 0) ...[
-            const SizedBox(width: 10),
-            _HeaderMetaValue(
-              icon: Icons.data_usage_rounded,
-              text: '${_compactTokens(tokens)} tok',
-              color: colors.onSurfaceVariant,
-            ),
-          ],
-          if (contextPct != null) ...[
-            const SizedBox(width: 10),
-            _HeaderMetaValue(
-              icon: Icons.donut_large_rounded,
-              text: '${contextPct!.toStringAsFixed(0)}%',
-              color: contextColor,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _HeaderMetaValue extends StatelessWidget {
-  final IconData icon;
-  final String text;
-  final Color color;
-
-  const _HeaderMetaValue({
-    required this.icon,
-    required this.text,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final content = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 11, color: color),
-        const SizedBox(width: 4),
-        Flexible(
-          child: Text(
-            text,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: color,
-              fontSize: 9.5,
-              fontFamily: 'Menlo',
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      ],
-    );
-    return content;
   }
 }
 

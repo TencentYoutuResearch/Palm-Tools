@@ -12,16 +12,6 @@ import '../theme.dart';
 import '../glass.dart';
 import 'backend_identity.dart';
 
-String _compactTokens(int value) {
-  if (value >= 1000000) {
-    return '${(value / 1000000).toStringAsFixed(value >= 10000000 ? 0 : 1)}M';
-  }
-  if (value >= 1000) {
-    return '${(value / 1000).toStringAsFixed(value >= 10000 ? 0 : 1)}k';
-  }
-  return '$value';
-}
-
 String _pathLeaf(String? path) {
   if (path == null || path.trim().isEmpty) return 'workspace unset';
   final normalized = path.replaceAll('\\', '/');
@@ -90,6 +80,7 @@ class SessionsScreen extends ConsumerStatefulWidget {
 
 class _SessionsScreenState extends ConsumerState<SessionsScreen> {
   final Set<String> _expandedGroups = <String>{};
+  bool _groupsInitialized = false;
 
   late final AppLifecycleListener _lifecycleListener;
 
@@ -129,7 +120,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
               children: [
                 Flexible(
                   child: Text(
-                    'kode · ${endpoint?.deviceName ?? '?'}',
+                    endpoint?.deviceName ?? 'Sessions',
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -177,7 +168,8 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
                       child: Builder(
                         builder: (context) {
                           final groups = _buildGroups(list);
-                          if (_expandedGroups.isEmpty) {
+                          if (!_groupsInitialized) {
+                            _groupsInitialized = true;
                             _expandedGroups.addAll(
                               groups.map((group) => group.key),
                             );
@@ -426,20 +418,6 @@ class _SessionTile extends ConsumerWidget {
                     children: [
                       if (s.model.trim().isNotEmpty)
                         _Chip(text: s.model, color: KillLaColors.warning),
-                      if (s.tokens.total > 0)
-                        _Chip(
-                          text: '${_compactTokens(s.tokens.total)} tok',
-                          color: KillLaColors.busy,
-                        ),
-                      if ((s.contextPct ?? 0) > 0)
-                        _Chip(
-                          text: 'ctx ${s.contextPct!.toStringAsFixed(0)}%',
-                          color: (s.contextPct ?? 0) >= 80
-                              ? KillLaColors.danger
-                              : (s.contextPct ?? 0) >= 50
-                              ? KillLaColors.warning
-                              : KillLaColors.textSecondary,
-                        ),
                     ],
                   ),
                 ],

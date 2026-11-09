@@ -131,6 +131,27 @@ const _backendProfiles = <String, BackendIdentity>{
     asset: 'droid',
     accent: Color(0xFF737873),
   ),
+  // Tencent-internal wrappers. Mirror apps/gui/src/lib/backend_icons.ts so the
+  // mobile avatars stay consistent with the desktop instead of all collapsing
+  // to the same two-letter "TC" monogram.
+  'tclaude': BackendIdentity(
+    label: 'TClaude',
+    fallback: 'CL',
+    asset: 'claudecode',
+    accent: Color(0xFFD97757),
+  ),
+  'tcodex': BackendIdentity(
+    label: 'TCodex',
+    fallback: 'CX',
+    asset: 'codex',
+    accent: Color(0xFF7A9DFF),
+  ),
+  'tcodebuddy': BackendIdentity(
+    label: 'TCodeBuddy',
+    fallback: 'CB',
+    asset: 'codebuddy',
+    accent: Color(0xFF6878E8),
+  ),
 };
 
 BackendIdentity backendIdentity(String backendKey) {
