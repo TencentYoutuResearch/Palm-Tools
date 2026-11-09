@@ -812,7 +812,7 @@ services. Regression tests exercise official and Kode factories side by side.
 
 ### Kode 设置
 
-全局设置中只新增一个 **Kode** 入口。页内导航可直达 Agent、集成、界面、通知、手机与同步、主机与服务、头像与背景；其他插件继续使用各自的设置入口。
+全局设置中只新增一个 **Kode** 入口。页内导航可直达 常规、外观、Agent、插件与集成、手机与同步、主机与服务；其他插件继续使用各自的设置入口。
 
 前四个分区共享“配置主机”选择，修改配置不会切换当前工作区。头像与背景应用到当前打开的会话。会话中的 Agent 配置、主机管理和服务恢复快捷入口会打开 Kode 页内对应分区；dsh 模型设置仍打开原有模型页面。
 
@@ -958,14 +958,14 @@ On DSH 0.2.2, cold-history inspection uses `sessionQuery.observeSession` when th
 
 ### Restart continuity and usage filtering
 
-**Kode → 插件与集成 → 重启后自动续接** is enabled by default and persisted per execution Host. An execution-intent journal records running sessions; on the next Host boot, cold log inspection admits only restart-interrupted turns. Normal completion, explicit stop, archived history and already active sessions are excluded. Recovery retains the same conversation and recorded Agent/model/permissions, consumes existing queued input without duplication, and otherwise submits a continuation reminder. Permission prompts still require the configured approval flow. Old idle history is never treated as interrupted work. On the first upgrade boot without an intent journal, only restart evidence from the preceding two minutes is admitted. Already materialized idle tabs remain eligible; crash-boundary repair retains an ignorable restart-evidence marker so it is distinct from a user interruption.
+**Kode → 常规 → 会话恢复 → 重启后自动续接** is enabled by default and persisted per execution Host. An execution-intent journal records running sessions; on the next Host boot, cold log inspection admits only restart-interrupted turns. Normal completion, explicit stop, archived history and already active sessions are excluded. Recovery retains the same conversation and recorded Agent/model/permissions, consumes existing queued input without duplication, and otherwise submits a continuation reminder. Permission prompts still require the configured approval flow. Old idle history is never treated as interrupted work. On the first upgrade boot without an intent journal, only restart evidence from the preceding two minutes is admitted. Already materialized idle tabs remain eligible; crash-boundary repair retains an ignorable restart-evidence marker so it is distinct from a user interruption.
 
 The token island scopes today to 00:00–now (hourly buckets), month to the first day–now (daily), and all to the earliest history–now (monthly). Switch between Agent/model and toggle multiple colored legend controls; totals, stacked bars, activity cells and the grouped detail table share the selection. An older remote service shows an update notice rather than an invented breakdown.
 
 
 ### 会话完成与等待操作通知
 
-在 **Kode → 通知** 中允许系统通知，并分别控制“会话完成”和“等待操作”。偏好保存在当前设备；Desktop 使用系统通知，Web 版本需要浏览器支持并授权。
+在 **Kode → 常规 → 会话通知** 中允许系统通知，并分别控制“会话完成”和“等待操作”。偏好保存在当前设备；Desktop 使用系统通知，Web 版本需要浏览器支持并授权。
 
 - 原生 dsh 的侧边栏状态提示继续保留。Kode 补充系统通知：本轮成功结束且队列为空时通知；提问、计划确认或审批等待超过 250ms 时通知。取消、主动停止、异常退出和子 Agent 的内部完成不会误报成功。
 - 正在前台查看的会话不弹通知。通知只显示会话名称，不包含问题正文、命令参数或回答；点击后返回对应主机和会话。问题解决后撤回等待提醒。
@@ -993,16 +993,17 @@ retains that application identity. Older cached generic Electron launches migrat
 to their matching, signature-verified development runtime before starting the Host;
 original launch arguments are preserved and identified runtimes never relaunch again.
 
-**Kode → 界面 → 显示 Token 刘海** controls both the native menu-bar panel and the in-app fallback. This device-local preference takes effect immediately and survives restart. Disabling it also stops token polling; enabling it reopens the collapsed panel.
+**Kode → 外观 → 显示 Token 刘海** controls both the native menu-bar panel and the in-app fallback. This device-local preference takes effect immediately and survives restart. Disabling it also stops token polling; enabling it reopens the collapsed panel.
 
-The token panel follows the DSH window's display and is hidden when DSH leaves
-the foreground or the window is hidden/minimized. Plain menu bars use their own
+The token panel stays on the DSH main window's display, including when another
+app is in front. Moving/resizing the owner updates its display; hiding or minimizing
+the owner hides the panel. Plain menu bars use their own
 height; internal camera clearance comes from AppKit's actual screen safe areas.
 The launcher and shell installer set `AppleMenuBarVisibleInFullscreen` only for
 `com.deepseek.dsh.development`, keeping the application menu and system status
 items visible alongside Kode in native full screen. The panel avoids process
-activation-policy transformations, hides synchronously when the app resigns
-active, and delayed blur checks cannot raise it again over another app.
+activation-policy transformations. App focus changes leave the panel in place
+without repeated hide/show calls or moving it to another display.
 
 The status dot aggregates all non-archived conversations across the current
 catalog and connected Host directories, independently of sidebar mounting.
@@ -1025,3 +1026,7 @@ the DSH module registry, covering consecutive plugin recompositions and Kode
 unload/re-enable cycles. Unknown revisions still return 404, and old requests
 never receive newer code. The jobs dock preserves the official entry's injected
 state hooks and localization, which are stored separately from its slot options.
+
+### 设置分类约定
+
+常规收纳会话恢复和通知；外观收纳状态/用量显示、头像与背景。Agent 配置、插件与集成、手机配对和同步、SSH 主机及服务分别保留独立页面，因为它们有完整的编辑或部署流程。小开关应归入这些稳定分类的页内分组，避免按功能持续新增导航项。常规默认打开，原通知/个性化入口继续映射到新分类。重启续接继续写入此计算机的服务配置；通知和刘海继续保存在当前设备，头像仍应用于当前会话，不因合并页面改变作用范围。

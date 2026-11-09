@@ -21,7 +21,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     return { windowOpen: () => null, childCreated() {} }
   }
   const islands = new Map(), notices = new Map(), layouts = new WeakMap(), noticeOwners = new WeakSet()
-  let cutouts = new Map(), active = true
+  let cutouts = new Map()
   const readGeometry = () => {
     if (process.platform !== 'darwin') return
     try {
@@ -60,22 +60,16 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     }
   }
   const refresh = () => {
-    const focused = BrowserWindow.getFocusedWindow()
     for (const [parent, child] of islands) {
       if (parent.isDestroyed() || child.isDestroyed()) continue
-      if (active && parent.isVisible() && !parent.isMinimized() && (focused === parent || focused === child)) { position(parent, child, child.getBounds()); if (!child.isVisible()) child.showInactive() }
+      if (parent.isVisible() && !parent.isMinimized()) { position(parent, child, child.getBounds()); if (!child.isVisible()) child.showInactive() }
       else child.hide()
     }
   }
   app.on('browser-window-focus', refresh)
-  // A delayed blur callback must only hide: stale window focus during Cmd-Tab
-  // used to raise the island again over the newly activated application.
-  app.on('browser-window-blur', () => setImmediate(() => {
-    const focused = BrowserWindow.getFocusedWindow()
-    for (const [parent, child] of islands) if (!child.isDestroyed() && (!active || focused !== parent && focused !== child)) child.hide()
-  }))
-  app.on('did-resign-active', () => { active = false; for (const child of islands.values()) if (!child.isDestroyed()) child.hide() })
-  app.on('did-become-active', () => { active = true; refresh() })
+  // The panel belongs to its owner's display, independently of app focus.
+  // App switching must neither hide it nor reposition it onto another screen.
+  app.on('did-become-active', refresh)
   void app.whenReady().then(() => {
     readGeometry(); refresh()
     const changed = () => { readGeometry(); refresh() }
@@ -142,10 +136,10 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
       }
       parent.on('enter-full-screen', fullScreenChanged)
       parent.on('leave-full-screen', fullScreenChanged)
-      parent.on('move', move)
+      for (const event of ['move', 'moved', 'resize']) parent.on(event, move)
       for (const event of ['hide', 'show', 'minimize', 'restore']) parent.on(event, refresh)
       parent.once('closed', () => { if (!child.isDestroyed()) child.close() })
-      child.once('closed', () => { parent.removeListener('move', move); parent.removeListener('enter-full-screen', fullScreenChanged); parent.removeListener('leave-full-screen', fullScreenChanged); for (const event of ['hide', 'show', 'minimize', 'restore']) parent.removeListener(event, refresh); islands.delete(parent) })
+      child.once('closed', () => { for (const event of ['move', 'moved', 'resize']) parent.removeListener(event, move); parent.removeListener('enter-full-screen', fullScreenChanged); parent.removeListener('leave-full-screen', fullScreenChanged); for (const event of ['hide', 'show', 'minimize', 'restore']) parent.removeListener(event, refresh); islands.delete(parent) })
       child.webContents.once('did-finish-load', refresh)
       position(parent, child)
       refresh()

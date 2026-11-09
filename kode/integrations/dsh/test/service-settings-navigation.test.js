@@ -11,7 +11,7 @@ function fixture(open = () => {}) {
     useState: value => [typeof value === 'function' ? value() : value, () => {}], useEffect(fn) { fn() },
     transport: { current: 'local' }, requestedServiceHost: undefined, requestedSettingsSection: undefined,
     window: { dispatchEvent() {}, addEventListener() {}, removeEventListener() {} }, CustomEvent: class {}, requestAnimationFrame() {},
-    HubSettings: 'hub', AgentSettingsBody: 'agents', PersonalizationSettings: 'personalization', PowerSettings: 'power',
+    NotificationSettingsBody: 'notifications', InterfaceSettingsBody: 'appearance', HubSettings: 'hub', AgentSettingsBody: 'agents', PersonalizationSettings: 'personalization', PowerSettings: 'power',
     useProjectHosts: () => ({ data: { current: 'local', hosts: [{ id: 'local', name: 'This computer' }, { id: 'worker', name: 'Worker' }] } }),
     useIntegrationSettings: () => ({ data: null, busy: false, error: 'Missing API', recoveryNeeded: true }),
     Button: 'button', Failure: 'failure', SelectField: 'select', RemoteComputerIcon: 'icon', IconPlusOutlineRegular: 'plus', IconAgentPresetOutlineRegular: 'agent-icon',
@@ -49,6 +49,7 @@ test('service recovery navigation selects the failing Host without switching the
   }
   assert.equal(scope.transport.current, 'local')
   assert.equal(scope.requestedServiceHost, undefined, 'consume the navigation target once')
+  scope.requestedSettingsSection = 'agents'
   assert.equal(nodes(scope.KodeSettings({ slots })).find(node => node.type === 'select').props.value, 'local')
 })
 

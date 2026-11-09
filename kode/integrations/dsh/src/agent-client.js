@@ -462,9 +462,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
     return h(React.Fragment, null,
       !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
-      data && [{ key: 'auto_resume_interrupted', label: '重启后自动续接', detail: '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。' }, { key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
+      data && [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
       h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }),
       h(HubSettings, { key: host, host }))
+  }
+  function SessionBehaviorSettings({ host, slots }) {
+    const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
+    return h(React.Fragment, null,
+      h('h3', null, '会话恢复'),
+      h('p', { className: 'kode-config-note' }, '此计算机的会话行为；远端主机保留各自的配置。'),
+      !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取会话配置…'),
+      data && h('label', { className: 'kode-integration-row' },
+        h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
+        h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) })),
+      h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
   }
   function MobileSettingsBody({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
@@ -730,7 +741,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const snapshot = useSyncExternalStore(subscribe, () => service?.getSnapshot() ?? empty)
     const [error, setError] = useState('')
     return h(React.Fragment, null,
-      h('h3', null, '界面'),
+      h('h3', null, '状态与用量'),
       h('label', { className: 'kode-integration-row' },
         h('span', null, h('strong', null, '显示 Token 刘海'), h('span', { className: 'kode-config-note' }, '显示 Token 用量与全局会话状态；关闭后立即隐藏，设置保存在当前设备。')),
         h('input', { type: 'checkbox', role: 'switch', checked: snapshot.tokenIsland, disabled: !service, onChange: event => {
@@ -757,16 +768,22 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('p', { className: 'kode-config-note' }, '通知偏好保存在当前设备。已连接过的 SSH 主机会继续在后台提供提醒。'),
       h(Failure, { text: error }))
   }
-  const settingsSections = [['agents', 'Agent'], ['integrations', '插件与集成'], ['appearance', '界面'], ['notifications', '通知'], ['mobile', '手机与同步'], ['ssh', '主机与服务'], ['personalization', '头像与背景']]
+  // Broad task categories; small preferences belong in a section within a page.
+  const settingsSections = [['general', '常规'], ['appearance', '外观'], ['agents', 'Agent'], ['integrations', '插件与集成'], ['mobile', '手机与同步'], ['ssh', '主机与服务']]
+  const settingsSectionAliases = { notifications: 'general', personalization: 'appearance' }
+  function resolveSettingsSection(section) {
+    const id = settingsSectionAliases[section] ?? section
+    return settingsSections.some(([key]) => key === id) ? id : 'general'
+  }
   function KodeSettings({ sessions, slots, close }) {
     const { data: hosts, error } = useProjectHosts()
     const [agentHost, setAgentHost] = useState(() => (requestedSettingsSection === 'agents' ? requestedServiceHost : undefined) ?? transport?.current ?? 'local')
     const [serviceHost, setServiceHost] = useState(() => requestedServiceHost ?? 'local')
-    const [active, setActive] = useState(() => settingsSections.some(([id]) => id === requestedSettingsSection) ? requestedSettingsSection : 'agents')
+    const [active, setActive] = useState(() => resolveSettingsSection(requestedSettingsSection))
     const [serviceBusy, setServiceBusy] = useState(false)
     const root = React.useRef(null)
     const selectSection = section => {
-      if (!settingsSections.some(([id]) => id === section)) return
+      section = resolveSettingsSection(section)
       setActive(section)
       requestAnimationFrame(() => root.current?.querySelector(`#kode-settings-${section}`)?.focus({ preventScroll: true }))
     }
@@ -790,13 +807,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h(Failure, { text: error }),
         h(AgentSettingsBody, { key: agentHost, sessions, slots, settingsHost: agentHost })),
       integrations: () => h(IntegrationSettingsBody, { host: 'local', slots }),
-      appearance: () => h(InterfaceSettingsBody),
-      notifications: () => h(NotificationSettingsBody),
+      general: () => h(React.Fragment, null,
+        h('div', { className: 'kode-settings-group' }, h(SessionBehaviorSettings, { host: 'local', slots })),
+        h('div', { className: 'kode-settings-group' }, h(NotificationSettingsBody))),
+      appearance: () => h(React.Fragment, null,
+        h('div', { className: 'kode-settings-group' }, h(InterfaceSettingsBody)),
+        h('div', { className: 'kode-settings-group' }, h('h3', null, '头像与背景'), h(PersonalizationSettings, { sessions, close }))),
       mobile: () => h(MobileSettingsBody, { host: 'local', slots }),
       ssh: () => h(SshSettings, { host: serviceHost, onBusyChange: setServiceBusy }),
-      personalization: () => h(PersonalizationSettings, { sessions, close }),
     }
-    const title = settingsSections.find(([id]) => id === active)?.[1] ?? 'Agent'
+    const title = settingsSections.find(([id]) => id === active)?.[1] ?? '常规'
     return h('div', { ref: root, className: 'kode-settings-page kode-agent-settings' },
       h('header', { className: 'kode-settings-brand' },
         h('span', { className: 'kode-settings-brand-avatar', 'aria-hidden': true }, h('img', { src: '/api/kode/avatars/media?type=kode&state=idle', alt: '', width: 32, height: 32 })),
@@ -1124,7 +1144,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   function sessionStateMap(rows, statuses) {
     const states = new Map()
     for (const [id, row] of Object.entries(rows)) {
-      const status = statuses.get(id), running = status?.running ?? row.running, completed = status?.completionUnread ?? row.completed, awaiting = status?.pendingInteraction ?? row.pendingInteraction
+      const status = statuses.get(id), running = status?.running ?? row.running, completed = status?.completionUnread ?? row.completed, awaiting = status ? status.pendingInteraction : row.pendingInteraction
       const state = preferredAvatarState(awaiting ? 'awaiting' : undefined, completed ? 'done' : undefined, running ? 'ongoing' : undefined)
       if (state) states.set(id, state)
     }
@@ -1146,10 +1166,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const own = host.id === data.current
       const hidden = new Set([...(host.hiddenSessionIds ?? []), ...(host.archivedSessionIds ?? []), ...(own ? archived : [])])
       const rows = Object.fromEntries((host.sessions ?? []).map(row => [row.id, row]))
-      if (own) Object.assign(rows, catalog.byId ?? {})
+      if (own) {
+        Object.assign(rows, catalog.byId ?? {})
+        // The live status stream may announce a turn before the catalog row.
+        for (const [id, status] of statuses) if (!rows[id] && (status.running || status.pendingInteraction || status.completionUnread)) rows[id] = {}
+      }
       for (const [id, row] of Object.entries(rows)) {
         const key = `${host.id}:${id}`
-        if (hidden.has(id) || row.blank || seen.has(key)) continue
+        if (hidden.has(id) || (row.blank && !(own && (statuses.get(id)?.running || statuses.get(id)?.pendingInteraction))) || seen.has(key)) continue
         seen.add(key)
         const state = sessionStateMap({ [id]: row }, own ? statuses : new Map()).get(id)
         if (state) counts[state]++
@@ -1167,12 +1191,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }
   }
   const globalActivity = createGlobalActivityStore()
-  function GlobalActivitySource() {
+  function GlobalActivitySource({ statusSource, workspaceSource } = {}) {
     const data = useWorkspaceDirectory(), sessions = avatarContext.sessions
     const catalog = useSyncExternalStore(sessions.list.subscribe, sessions.list.getSnapshot)
-    const statusSource = avatarContext.get('uiSession')?.sessionStatus
+    statusSource ??= avatarContext.get('uiSession')?.sessionStatus
     const statuses = useSyncExternalStore(statusSource?.subscribe ?? emptyAvatarSubscribe, statusSource?.getSnapshot ?? emptyAvatarSnapshot)
-    const workspaceSource = avatarContext.get('workspaces')?.list
+    workspaceSource ??= avatarContext.get('workspaces')?.list
     const workspaces = useSyncExternalStore(workspaceSource?.subscribe ?? emptyAvatarSubscribe, workspaceSource?.getSnapshot ?? emptyAvatarListSnapshot)
     useEffect(() => { globalActivity.publish(globalSessionActivity(data, catalog, statuses, workspaces.archivedSessionIds)) }, [data, catalog, statuses, workspaces])
     return null
@@ -1972,7 +1996,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 
   return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets', 'kodeNotifications'], apply(ctx) {
     ctx.provide('kodeActivity', globalActivity)
-    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'kode-global-activity', order: 0 }, GlobalActivitySource))
+    ctx.inject(['uiSession', 'workspaces'], scope => scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'kode-global-activity', order: 0, inject: () => ({ statusSource: scope.get('uiSession')?.sessionStatus, workspaceSource: scope.get('workspaces')?.list }) }, GlobalActivitySource)))
     avatarContext = ctx
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'kode-avatar-dialog' }, AvatarDialog))
     ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({ name: 'conversation.input.overlay', id: 'kode-conversation-background', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, ConversationBackground))
@@ -2076,7 +2100,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       install()
       return () => { unsubscribe(); restore() }
     })
-    ctx.effect(() => { const timer = setInterval(() => { if (workspaceListeners.size && !document.hidden) void refreshWorkspaceDirectory() }, 5000); return () => clearInterval(timer) }, 'kode.workspace-directory')
+    ctx.effect(() => { const timer = setInterval(() => { if (workspaceListeners.size) void refreshWorkspaceDirectory() }, 5000); return () => clearInterval(timer) }, 'kode.workspace-directory')
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'kode-project-host-appearance' }, ProjectHostAppearance))
     // Optional glyph face. Font family and size remain entirely user settings.
     if (typeof FontFace !== 'undefined') ctx.effect(() => {
@@ -2142,7 +2166,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-avatar-preview-name{display:flex;align-items:center;gap:6px;min-width:0}.kode-avatar-preview-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-avatar-name-edit{display:inline-flex;align-items:center;justify-content:center;flex:none;min-width:32px;min-height:32px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}.kode-avatar-name-edit:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-name-edit:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename{display:flex;align-items:center;flex:1;min-width:0;gap:4px}.kode-avatar-rename input{min-width:0;width:100%;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}.kode-avatar-rename input:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename button{flex:none}.kode-editable-avatar{display:inline-flex;position:relative;flex:none}.kode-avatar-edit-mark{position:absolute;right:-6px;bottom:-5px;display:flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:50%;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}.kode-agent-settings .kode-session-avatar-button{min-width:40px;min-height:40px;padding:8px}.kode-personalization{height:100%;min-height:0;box-sizing:border-box;overflow:hidden}.kode-personalization-session{display:flex;align-items:baseline;gap:8px;min-width:0;padding:0 2px}.kode-personalization-session-label{flex:none;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary)}.kode-personalization-session strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:20px;color:var(--dsw-alias-label-primary)}.kode-personalization>.kode-config-note{margin:0}.kode-personalization>.kode-avatar-editor{flex:1;min-height:0;padding-bottom:0}.kode-personalization .kode-avatar-content{flex:1;min-height:0;overflow-y:auto;padding:0 4px 4px 0}.kode-personalization .kode-avatar-footer{position:static;flex:none}.kode-personalization .kode-avatar-grid{max-height:min(320px,32vh)}
 @media(max-width:600px){.kode-avatar-grid{grid-template-columns:repeat(auto-fill,minmax(76px,1fr))}.kode-avatar-dialog{width:calc(100vw - 24px);max-width:calc(100vw - 24px)}}
 
-.kode-settings-main{height:100%;min-height:0;overflow:auto;box-sizing:border-box;padding:24px clamp(16px,4vw,48px) 32px}.kode-settings-main .kode-settings-page{max-width:960px;margin:0 auto;padding-bottom:0}.kode-settings-page{gap:0;padding-bottom:16px;max-width:720px;width:100%;min-height:0}.kode-settings-page>header.kode-settings-brand{display:flex;align-items:center;gap:12px;margin:0;padding:4px 0}.kode-settings-brand-avatar{display:inline-flex;align-items:center;justify-content:center;flex:none;width:32px;height:32px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent);color:var(--dsw-alias-state-business-primary)}.kode-settings-brand-meta{display:flex;flex-direction:column;gap:2px;min-width:0}.kode-settings-page .kode-settings-brand h2{margin:0;font-size:16px;font-weight:600;line-height:24px}.kode-settings-brand p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.kode-settings-scope{display:block;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill)}.kode-settings-scope .kode-field{margin:0;width:100%;max-width:none;min-width:0}.kode-settings-brand-avatar{overflow:hidden}.kode-settings-brand-avatar>img{display:block;width:100%;height:100%;object-fit:cover}.kode-settings-layout{display:block;margin-top:16px}.kode-settings-nav{position:static;display:flex;flex-direction:row;flex-wrap:wrap;gap:4px;min-width:0;margin:0 0 16px;padding:0}.kode-settings-nav button{min-height:32px;padding:6px 10px;text-align:center;font:inherit;font-size:13px;color:var(--dsw-alias-label-secondary);background:transparent;border:1px solid transparent;border-radius:var(--dsw-radius-md);cursor:pointer;white-space:nowrap}.kode-settings-nav button:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}.kode-settings-nav button[aria-current=page]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-settings-card-fill);border-color:var(--dsw-alias-border-l2);font-weight:500}.kode-settings-nav button:focus-visible,.kode-settings-section:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}.kode-settings-section{display:flex;flex-direction:column;gap:12px;min-width:0;padding:0;margin:0}.kode-settings-section .kode-agent-settings>.kode-field:first-child{margin-bottom:0}.kode-settings-section>h3{font-size:15px;font-weight:600;margin:0 0 4px}.kode-settings-page .kode-agent-editor{gap:12px;padding:14px}.kode-settings-page .kode-integration-row{padding:12px 0}.kode-settings-page .kode-personalization{height:auto;overflow:visible}.kode-settings-page .kode-personalization .kode-avatar-content{flex:none;overflow:visible}.kode-settings-page .kode-personalization .kode-avatar-editor{flex:none}.kode-settings-page .kode-personalization .kode-avatar-grid{max-height:320px}
+.kode-settings-main{height:100%;min-height:0;overflow:auto;box-sizing:border-box;padding:24px clamp(16px,4vw,48px) 32px}.kode-settings-main .kode-settings-page{max-width:960px;margin:0 auto;padding-bottom:0}.kode-settings-page{gap:0;padding-bottom:16px;max-width:720px;width:100%;min-height:0}.kode-settings-page>header.kode-settings-brand{display:flex;align-items:center;gap:12px;margin:0;padding:4px 0}.kode-settings-brand-avatar{display:inline-flex;align-items:center;justify-content:center;flex:none;width:32px;height:32px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent);color:var(--dsw-alias-state-business-primary)}.kode-settings-brand-meta{display:flex;flex-direction:column;gap:2px;min-width:0}.kode-settings-page .kode-settings-brand h2{margin:0;font-size:16px;font-weight:600;line-height:24px}.kode-settings-brand p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.kode-settings-scope{display:block;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill)}.kode-settings-scope .kode-field{margin:0;width:100%;max-width:none;min-width:0}.kode-settings-brand-avatar{overflow:hidden}.kode-settings-brand-avatar>img{display:block;width:100%;height:100%;object-fit:cover}.kode-settings-layout{display:block;margin-top:16px}.kode-settings-nav{position:static;display:flex;flex-direction:row;flex-wrap:wrap;gap:4px;min-width:0;margin:0 0 16px;padding:0}.kode-settings-nav button{min-height:32px;padding:6px 10px;text-align:center;font:inherit;font-size:13px;color:var(--dsw-alias-label-secondary);background:transparent;border:1px solid transparent;border-radius:var(--dsw-radius-md);cursor:pointer;white-space:nowrap}.kode-settings-nav button:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}.kode-settings-nav button[aria-current=page]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-settings-card-fill);border-color:var(--dsw-alias-border-l2);font-weight:500}.kode-settings-nav button:focus-visible,.kode-settings-section:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}.kode-settings-section{display:flex;flex-direction:column;gap:12px;min-width:0;padding:0;margin:0}.kode-settings-section .kode-agent-settings>.kode-field:first-child{margin-bottom:0}.kode-settings-group{display:flex;flex-direction:column;gap:12px;min-width:0}.kode-settings-group+.kode-settings-group{margin-top:16px;padding-top:24px;border-top:1px solid var(--dsw-alias-border-l2)}.kode-settings-group>h3,.kode-settings-section>h3{font-size:15px;font-weight:600;margin:0 0 4px}.kode-settings-page .kode-agent-editor{gap:12px;padding:14px}.kode-settings-page .kode-integration-row{padding:12px 0}.kode-settings-page .kode-personalization{height:auto;overflow:visible}.kode-settings-page .kode-personalization .kode-avatar-content{flex:none;overflow:visible}.kode-settings-page .kode-personalization .kode-avatar-editor{flex:none}.kode-settings-page .kode-personalization .kode-avatar-grid{max-height:320px}
 .kode-handoff-trigger{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px!important;padding:0 10px!important;white-space:nowrap}.kode-handoff-dialog{width:min(480px,calc(100vw - 32px))}.kode-handoff-body .kode-field{margin-bottom:12px}.kode-handoff-body>.kode-config-note{margin:0}.kode-model-control{min-width:0;max-width:min(360px,45cqw)}.kode-model-control>.kode-trigger{max-width:100%}[data-slot="conversation.input.right"] [data-composer-stat="activity"]{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;min-width:0;width:24px;max-width:24px;margin-right:-8px;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] button{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;width:24px;min-width:24px;height:24px;min-height:24px;margin:0;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] [class*="label"]{display:none}
 .kode-settings-main{width:100%;min-width:0}.kode-settings-page .kode-settings-section{width:100%}.kode-settings-page .kode-settings-section>.kode-agent-settings{width:100%;max-width:none;min-width:0;box-sizing:border-box}.kode-settings-page .kode-agent-rows,.kode-settings-page .kode-agent-row,.kode-settings-page .kode-agent-editor{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-source-summary,.kode-settings-page .kode-source-copy{min-width:0}.kode-settings-page .kode-personalization .kode-avatar-content,.kode-settings-page .kode-personalization .kode-avatar-grid,.kode-settings-page .kode-personalization .kode-avatar-preview{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-personalization .kode-avatar-preview>img{max-width:100%}
 .kode-source-editor{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;align-items:start}.kode-source-editor>.kode-field{min-width:0;margin:0}.kode-source-editor>.kode-field input{box-sizing:border-box;width:100%;min-width:0}.kode-source-field-location,.kode-source-field-subdir,.kode-source-editor>.kode-hub-targets,.kode-source-editor-actions{grid-column:1/-1}.kode-source-editor>.kode-hub-targets{display:flex;flex-wrap:wrap;gap:8px 16px;min-width:0;margin:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md)}.kode-source-editor>.kode-hub-targets>legend{padding:0 4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-source-editor>.kode-hub-targets>label{display:inline-flex;align-items:center;gap:6px;min-height:28px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}.kode-source-editor>.kode-hub-targets input{flex:none;margin:0;accent-color:var(--dsw-alias-state-business-primary)}.kode-source-editor-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}.kode-source-editor-actions>button{width:auto;min-width:88px}

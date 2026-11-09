@@ -19,7 +19,7 @@ function fixture() {
   const bridge = installDesktopShell({ app, screen, BrowserWindow: { fromWebContents: s => s === sender ? parent : null, getFocusedWindow: () => focused }, ipcMain: { handle: (key, fn) => handlers.set(key, fn), on: (key, fn) => listeners.set(key, fn) }, Notification, shell: { openExternal: async () => {} } })
   return { bridge, parent, child, app, notes, handlers, listeners, event: { sender, senderFrame: frame }, focus: window => { focused = window; app.emit('browser-window-focus') } }
 }
-test('one native panel follows the owning display, avoids the camera and hides when DSH loses focus', () => {
+test('one native panel follows the owning display, avoids the camera and stays on the owning display when DSH loses focus', () => {
   const f = fixture()
   if (process.platform === 'darwin') {
     const result = f.bridge.windowOpen(f.parent, { frameName: 'kode-token-island', url: 'about:blank' })
@@ -42,7 +42,8 @@ test('one native panel follows the owning display, avoids the camera and hides w
   f.parent.emit('move')
   assert.equal(f.child.bounds.x, 2440)
   assert.equal(f.child.bounds.height, 25)
-  f.focus(null); assert.equal(f.child.visible, false)
+  f.focus(null); assert.equal(f.child.visible, true)
+  assert.equal(f.child.bounds.x, 2440, 'another app focus must not move the panel')
   f.focus(f.parent); assert.equal(f.child.visible, true)
   f.parent.isVisible = () => false; f.focus(f.child); assert.equal(f.child.visible, false)
   f.parent.isVisible = () => true; f.focus(f.parent)
@@ -81,24 +82,29 @@ test('full-screen menu hiding preserves the measured camera gap and disconnected
 })
 
 
-test('resigning active hides immediately and delayed blur cannot raise the island using stale focus', async () => {
+test('app switching leaves the owner panel stable while minimize and hide still dismiss it', async () => {
   const f = fixture()
   f.bridge.childCreated(f.parent, f.child, { frameName: 'kode-token-island' })
   let shows = 0
   const show = f.child.showInactive.bind(f.child)
   f.child.showInactive = () => { shows++; show() }
-  f.focus(f.parent)
-  assert.equal(shows, 0, 'focus refresh must not reorder an already visible panel')
+  const before = { ...f.child.bounds }
   f.app.emit('browser-window-blur', {}, f.parent)
-  f.app.emit('did-resign-active')
-  assert.equal(f.child.visible, false)
-  // Electron can still return the former focused window during app switching.
-  f.focus(f.parent)
+  f.app.emit('did-resign-active'); f.focus(null)
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(f.child.visible, false)
-  assert.equal(shows, 0)
-  f.app.emit('did-become-active')
   assert.equal(f.child.visible, true)
-  assert.equal(shows, 1)
-  assert.equal(f.child.workspaces.options.skipTransformProcessType, true)
+  assert.deepEqual(f.child.bounds, before); assert.equal(shows, 0)
+  f.app.emit('did-become-active'); assert.equal(shows, 0)
+  f.parent.isMinimized = () => true; f.parent.emit('minimize')
+  assert.equal(f.child.visible, false)
+  f.parent.isMinimized = () => false; f.parent.emit('restore')
+  assert.equal(f.child.visible, true)
+  f.parent.isVisible = () => false; f.parent.emit('hide'); assert.equal(f.child.visible, false)
+  f.parent.isVisible = () => true; f.parent.emit('show'); assert.equal(f.child.visible, true)
+  f.parent.getBounds = () => ({ x: 1700, y: 100, width: 900, height: 600 })
+  f.parent.emit('resize'); assert.equal(f.child.bounds.x, 2440)
+  f.parent.getBounds = () => ({ x: 0, y: 50, width: 900, height: 600 })
+  f.parent.emit('moved'); assert.equal(f.child.bounds.x, 600)
+  f.child.close()
+  for (const event of ['move', 'moved', 'resize']) assert.equal(f.parent.listenerCount(event), 0)
 })

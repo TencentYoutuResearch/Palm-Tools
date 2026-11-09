@@ -15,7 +15,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   const listeners=new Map()
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
-    useState: value => [typeof value === 'function' ? value() : value, () => {}],
+    useState: value => { const initial = typeof value === 'function' ? value() : value; return [initial === 'general' && windowProperties.settingsSection ? windowProperties.settingsSection : initial, () => {}] },
     useEffect(fn) { fn() }, useRef: value => ({ current: value }), useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (subscribe, get) => { subscribe(() => {}); return get() },
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
@@ -259,7 +259,7 @@ test('workspace menu reads the bound native source and adopts the picked directo
 
 
 test('Agent list keeps editors collapsed until requested', () => {
-  const c = client(undefined, {}, { layout: { selectPanel() {} } }), render = c.entry('main', 'kode-settings')
+  const c = client(undefined, { settingsSection: 'agents' }, { layout: { selectPanel() {} } }), render = c.entry('main', 'kode-settings')
   const wrapper = render(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /配置主机/)
   const body = findNode(tree, child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
@@ -275,7 +275,7 @@ test('every Agent owns independent model, effort and Fast defaults while the def
     defaultModelSelection: { model: 'fixture', reasoningEffort: 'high', fast: false },
     models: [{ id: 'fixture', name: 'Fixture', reasoningEfforts: [{ id: 'high', name: 'High' }, { id: 'medium', name: 'Medium' }], fastCapability: { transport: 'service-tier', defaultEnabled: false } }, { id: 'plain', name: 'Plain' }],
   }
-  const c = client(undefined, { agentDirectory }, { layout: { selectPanel() {} } }), wrapper = c.entry('main', 'kode-settings')(), panel = wrapper.children[0], outer = panel.type(panel.props)
+  const c = client(undefined, { agentDirectory, settingsSection: 'agents' }, { layout: { selectPanel() {} } }), wrapper = c.entry('main', 'kode-settings')(), panel = wrapper.children[0], outer = panel.type(panel.props)
   const component = findNode(outer, node => node?.props?.settingsHost).type, props = { sessions: c.ctx.sessions, settingsHost: 'local' }
   component(props); await new Promise(resolve => setImmediate(resolve))
   const body = component(props)
@@ -493,7 +493,7 @@ test('directory browsing keeps injected callbacks stable across unrelated rerend
 test('remote Agent configuration and default writes stay on the selected Host without changing the active workspace', async () => {
  const calls=[],agents={profiles:[{id:'remote-codex',name:'Remote Codex',type:'codex',executable:'codex'}],types:{codex:{name:'Codex'}},selection:{provider:'kode-agent-remote-codex',model:'default'},configuredDefaultProfileId:'remote-codex'}
  const transport={current:'local',subscribe:()=>()=>{},path:url=>url,select:()=>{throw new Error('settings must not switch execution Host')},fetch:async(url,options,host)=>{calls.push({url,host,body:options?.body&&JSON.parse(options.body)});return{ok:true,json:async()=>url.includes('/settings/')?{result:{ok:true,value:{}}}:agents}}}
- const c=client(undefined,{}, {kodeTransport:transport,layout:{selectPanel(){}}})
+ const c=client(undefined,{settingsSection:'agents'}, {kodeTransport:transport,layout:{selectPanel(){}}})
  const wrapper=c.entry('main','kode-settings')(),panel=wrapper.children[0],outer=panel.type(panel.props)
  const component=findNode(outer,node=>node?.props?.settingsHost).type
  component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
@@ -719,6 +719,8 @@ test('global activity uses project priority across Hosts and updates without mou
  const catalog={byId:{done:{completed:true},blank:{blank:true,running:true}}}
  const result=scope.globalSessionActivity(data,catalog,live)
  assert.equal(result.state,'done');assert.deepEqual({...result.counts},{ongoing:2,done:1,awaiting:0})
+ live.set('review',{pendingInteraction:undefined,running:false,completionUnread:false})
+ assert.equal(scope.globalSessionActivity(data,catalog,live).state,'done', 'native undefined interaction clears stale catalog awaiting state')
  live.set('review',{pendingInteraction:{kind:'approval'},running:true,completionUnread:true})
  assert.equal(scope.globalSessionActivity(data,catalog,live).state,'awaiting')
  assert.equal(scope.globalSessionActivity(data,catalog,live,['review','done']).state,'ongoing')
@@ -749,4 +751,48 @@ test('interface settings toggle the device service directly and report save fail
  service.update = () => { throw new Error('storage denied') }
  findNode(tree, node => node.props.role === 'switch').props.onChange({ target: { checked: true } })
  assert.match(error, /无法保存/); assert.equal(enabled, false)
+})
+
+test('settings group small preferences by task, preserve deep links, and keep deployment separate', () => {
+ const scope = {}
+ vm.runInNewContext(source.slice(source.indexOf('  const settingsSections ='), source.indexOf('  function KodeSettings(')) + '\nthis.categories = settingsSections', scope)
+ assert.deepEqual(Array.from(scope.categories, row => row[1]), ['常规', '外观', 'Agent', '插件与集成', '手机与同步', '主机与服务'])
+ assert.equal(scope.resolveSettingsSection('notifications'), 'general')
+ assert.equal(scope.resolveSettingsSection('personalization'), 'appearance')
+ assert.equal(scope.resolveSettingsSection('appearance'), 'appearance')
+ assert.equal(scope.resolveSettingsSection(undefined), 'general')
+ assert.equal(scope.resolveSettingsSection('agents'), 'agents')
+ const c = client(undefined, {}, { layout: { selectPanel() {} } })
+ const page = c.entry('main', 'kode-settings')(), general = page.children[0].type(page.children[0].props)
+ const content = findNode(general, node => node.props.id === 'kode-settings-general')
+ assert.ok(content)
+ const groups = content.children[0].children
+ assert.equal(groups[0].children[0].type.name, 'SessionBehaviorSettings')
+ assert.equal(groups[0].children[0].props.host, 'local')
+ assert.equal(groups[1].children[0].type.name, 'NotificationSettingsBody')
+ const a = client(undefined, { settingsSection: 'appearance' }, { layout: { selectPanel() {} } })
+ const wrapper = a.entry('main', 'kode-settings')(), tree = wrapper.children[0].type(wrapper.children[0].props)
+ const appearance = findNode(tree, node => node.props.id === 'kode-settings-appearance')
+ assert.equal(appearance.children[0].children[0].children[0].type.name, 'InterfaceSettingsBody')
+ assert.equal(appearance.children[0].children[1].children[1].type.name, 'PersonalizationSettings')
+ const integrations = source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function SessionBehaviorSettings('))
+ assert.doesNotMatch(integrations, /auto_resume_interrupted/)
+ assert.match(integrations, /messaging_enabled/); assert.match(integrations, /memory_enabled/)
+})
+
+test('global activity waits for native services and includes early live running facts before the catalog', () => {
+ const deferred = []
+ const c = client(undefined, {}, { inject(names, callback) { if (names.includes('uiSession') && names.includes('workspaces')) deferred.push(callback); else callback(this) } })
+ assert.equal(c.ctx.slots.entries('shell.overlay').some(row => row.options.id === 'kode-global-activity'), false)
+ const subscribers = new Set(); let statuses = new Map([['live-before-catalog', { running: true }]])
+ c.ctx.uiSession = { sessionStatus: { subscribe: fn => { subscribers.add(fn); return () => subscribers.delete(fn) }, getSnapshot: () => statuses } }
+ c.ctx.workspaces = { list: { subscribe: () => () => {}, getSnapshot: () => ({ archivedSessionIds: [] }) } }
+ deferred[0](c.ctx)
+ const entry = c.ctx.slots.entries('shell.overlay').find(row => row.options.id === 'kode-global-activity')
+ const props = entry.options.inject(); assert.equal(props.statusSource, c.ctx.uiSession.sessionStatus)
+ entry.component(props); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'ongoing')
+ statuses = new Map([['live-before-catalog', { running: false, completionUnread: true }]])
+ entry.component(props); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'done')
+ statuses = new Map(); entry.component(props); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'idle')
+ assert.ok(subscribers.size > 0)
 })
