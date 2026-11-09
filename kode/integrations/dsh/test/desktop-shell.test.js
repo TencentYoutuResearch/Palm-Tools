@@ -13,7 +13,7 @@ function fixture() {
   const parent = new EventEmitter(), child = new EventEmitter()
   const frame = {}, sender = { mainFrame: frame, getURL: () => 'dsh-app://app/', send: (...args) => { sender.sent = args } }
   Object.assign(parent, { id: 1, webContents: sender, isVisible: () => true, isMinimized: () => false, isDestroyed: () => false, getBounds: () => ({ x: 0, y: 50, width: 900, height: 600 }), show() { this.shown = true }, focus() { this.focused = true } })
-  Object.assign(child, { webContents: Object.assign(new EventEmitter(), { setWindowOpenHandler() {}, isLoadingMainFrame: () => false, executeJavaScript: async () => {} }), isDestroyed: () => false, setBounds(bounds) { this.bounds = bounds }, getBounds() { return this.bounds }, setAlwaysOnTop(flag, level) { this.level = level }, setVisibleOnAllWorkspaces(flag, options) { this.workspaces = { flag, options } }, showInactive() { this.visible = true }, hide() { this.visible = false }, close() { this.emit('closed') } })
+  Object.assign(child, { webContents: Object.assign(new EventEmitter(), { setWindowOpenHandler() {}, isLoadingMainFrame: () => false, executeJavaScript: async () => {} }), isDestroyed: () => false, isVisible() { return !!this.visible }, setBounds(bounds) { this.bounds = bounds }, getBounds() { return this.bounds }, setAlwaysOnTop(flag, level) { this.level = level }, setVisibleOnAllWorkspaces(flag, options) { this.workspaces = { flag, options } }, showInactive() { this.visible = true }, hide() { this.visible = false }, close() { this.emit('closed') } })
   let focused = parent
   class Notification extends EventEmitter { constructor(data) { super(); this.data = data; notes.push(this) } show() { this.emit('show') } close() { this.emit('close') } }
   const bridge = installDesktopShell({ app, screen, BrowserWindow: { fromWebContents: s => s === sender ? parent : null, getFocusedWindow: () => focused }, ipcMain: { handle: (key, fn) => handlers.set(key, fn), on: (key, fn) => listeners.set(key, fn) }, Notification, shell: { openExternal: async () => {} } })
@@ -78,4 +78,27 @@ test('full-screen menu hiding preserves the measured camera gap and disconnected
   const changed = { ...cutout, left: 600, right: 800 }
   assert.deepEqual(screenCutouts([changed], layouts).get(1), changed)
   assert.equal(screenCutouts([{ id: 2 }], layouts).has(1), false)
+})
+
+
+test('resigning active hides immediately and delayed blur cannot raise the island using stale focus', async () => {
+  const f = fixture()
+  f.bridge.childCreated(f.parent, f.child, { frameName: 'kode-token-island' })
+  let shows = 0
+  const show = f.child.showInactive.bind(f.child)
+  f.child.showInactive = () => { shows++; show() }
+  f.focus(f.parent)
+  assert.equal(shows, 0, 'focus refresh must not reorder an already visible panel')
+  f.app.emit('browser-window-blur', {}, f.parent)
+  f.app.emit('did-resign-active')
+  assert.equal(f.child.visible, false)
+  // Electron can still return the former focused window during app switching.
+  f.focus(f.parent)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.child.visible, false)
+  assert.equal(shows, 0)
+  f.app.emit('did-become-active')
+  assert.equal(f.child.visible, true)
+  assert.equal(shows, 1)
+  assert.equal(f.child.workspaces.options.skipTransformProcessType, true)
 })

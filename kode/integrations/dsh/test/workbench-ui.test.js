@@ -40,7 +40,7 @@ test('worktree search lives inside the dropdown and preserves selection while fi
 })
 
 test('token island loads selected-host statistics, changes period, and never displays a previous host snapshot', async () => {
-  let cursor = 0, host = 'local'
+  let cursor = 0, host = 'local', activityState = { state: 'awaiting', label: '全局：2 个会话等待操作' }
   const state = [], effects = [], requests = [], listeners = new Map()
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
   const react = { createElement: h, Fragment: 'fragment',
@@ -55,11 +55,14 @@ test('token island loads selected-host statistics, changes period, and never dis
     document: { hidden: false, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
     AbortController, setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, Intl }
   const component = vm.runInNewContext(source + '\nkodeWorkbenchContext = context; KodeTokenIsland', scope)
-  const render = () => { cursor = 0; const tree = component(); effects.splice(0).forEach(fn => fn()); return tree }
+  const render = () => { cursor = 0; const tree = component({ activity: { subscribe: () => () => {}, getSnapshot: () => activityState } }); effects.splice(0).forEach(fn => fn()); return tree }
   const settle = () => new Promise(resolve => setImmediate(resolve))
   const find = (node, predicate) => node && typeof node === 'object' ? predicate(node) ? node : (node.children ?? []).map(child => find(child, predicate)).find(Boolean) : undefined
   let tree = render(); await settle(); tree = render()
   assert.equal(find(tree, node => node.type === 'strong').children[0], '1.2K')
+  assert.equal(find(tree, node => node.type === 'i').props['data-state'], 'awaiting')
+  activityState = { state: 'ongoing', label: '全局：1 个会话正在运行' }; tree = render()
+  assert.equal(find(tree, node => node.type === 'i').props['data-state'], 'ongoing')
   assert.equal(requests[0].selected, 'local'); assert.ok(requests[0].options.signal)
   find(tree, node => node.props.className === 'kode-token-notch').props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(find(tree, node => node.props['aria-label'] === 'Token 用量'))
@@ -91,7 +94,7 @@ test('token island is registered once on the application overlay rather than ins
   const seats = [], entries = []
   const document = { createElement: () => ({ dataset: {}, remove() {} }), head: { append() {} } }
   const install = vm.runInNewContext(source + '\ninstallWorkbenchUi', { document })
-  install({ effect: fn => fn(), slots: { inject: (seat, fn) => { seats.push(seat); if (seat === 'shell.overlay') fn() }, register: (options, component) => { entries.push({ options, component }); return () => {} } } })
+  install({ inject(names, fn) { fn(this) }, get: () => null, effect: fn => fn(), slots: { inject: (seat, fn) => { seats.push(seat); if (seat === 'shell.overlay') fn() }, register: (options, component) => { entries.push({ options, component }); return () => {} } } })
   assert.deepEqual(seats, ['conversation.session.header.actions', 'shell.overlay'])
   assert.equal(entries.length, 1); assert.equal(entries[0].options.id, 'kode-token-island')
   const build = await readFile(new URL('../scripts/build-chat.js', import.meta.url), 'utf8')

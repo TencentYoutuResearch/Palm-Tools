@@ -996,6 +996,18 @@ original launch arguments are preserved and identified runtimes never relaunch a
 The token panel follows the DSH window's display and is hidden when DSH leaves
 the foreground or the window is hidden/minimized. Plain menu bars use their own
 height; internal camera clearance comes from AppKit's actual screen safe areas.
+The launcher and shell installer set `AppleMenuBarVisibleInFullscreen` only for
+`com.deepseek.dsh.development`, keeping the application menu and system status
+items visible alongside Kode in native full screen. The panel avoids process
+activation-policy transformations, hides synchronously when the app resigns
+active, and delayed blur checks cannot raise it again over another app.
+
+The status dot aggregates all non-archived conversations across the current
+catalog and connected Host directories, independently of sidebar mounting.
+It shares project priority: awaiting action (amber), completion unread (green),
+running (blue), then idle (gray). Live current-Host facts override catalog facts.
+Hidden, blank, archived and disconnected-Host stale sessions do not participate.
+
 The menu bar has a continuous black surface with square top corners and only
 CSS-drawn bottom corners; native window rounding is disabled. Full-screen
 transitions restore the panel and retain the last measured cutout when macOS

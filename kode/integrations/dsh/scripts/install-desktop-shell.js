@@ -1,4 +1,5 @@
 /** Patch only an unpacked development shell, preserving backups and checking upstream anchors. */
+import { execFileSync } from 'node:child_process'
 import { readFile, writeFile, copyFile } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -48,4 +49,6 @@ for (const [path, content] of [[mainPath, main], [preloadPath, preload]]) {
   if (!(await readFile(path, 'utf8')).includes(marker)) await copyFile(path, path + '.before-kode-shell')
   await writeFile(path, content)
 }
+// App-scoped: preserve the system app menu and status items in full screen.
+if (process.platform === 'darwin') execFileSync('/usr/bin/defaults', ['write', 'com.deepseek.dsh.development', 'AppleMenuBarVisibleInFullscreen', '-bool', 'true'])
 console.log('Installed Kode Desktop bridge')

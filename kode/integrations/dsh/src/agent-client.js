@@ -1122,6 +1122,45 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }
     return summary
   }
+  function globalSessionActivity(data, catalog, statuses, archived = []) {
+    const counts = { ongoing: 0, done: 0, awaiting: 0 }, seen = new Set()
+    const hosts = data.hosts?.length ? data.hosts : [{ id: data.current ?? 'local', sessions: [] }]
+    for (const host of hosts) {
+      if (host.id !== data.current && host.status && host.status !== 'online') continue
+      const own = host.id === data.current
+      const hidden = new Set([...(host.hiddenSessionIds ?? []), ...(host.archivedSessionIds ?? []), ...(own ? archived : [])])
+      const rows = Object.fromEntries((host.sessions ?? []).map(row => [row.id, row]))
+      if (own) Object.assign(rows, catalog.byId ?? {})
+      for (const [id, row] of Object.entries(rows)) {
+        const key = `${host.id}:${id}`
+        if (hidden.has(id) || row.blank || seen.has(key)) continue
+        seen.add(key)
+        const state = sessionStateMap({ [id]: row }, own ? statuses : new Map()).get(id)
+        if (state) counts[state]++
+      }
+    }
+    const state = preferredAvatarState(...Object.keys(counts).filter(key => counts[key])) ?? 'idle'
+    const label = [counts.awaiting ? `${counts.awaiting} 个会话等待操作` : '', counts.done ? `${counts.done} 个会话完成未读` : '', counts.ongoing ? `${counts.ongoing} 个会话正在运行` : ''].filter(Boolean).join(' · ') || '所有会话空闲'
+    return { state, counts, label: `全局：${label}` }
+  }
+  function createGlobalActivityStore() {
+    let snapshot = { state: 'idle', counts: { ongoing: 0, done: 0, awaiting: 0 }, label: '全局：所有会话空闲' }
+    const listeners = new Set()
+    return { subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn) }, getSnapshot: () => snapshot,
+      publish(next) { if (JSON.stringify(snapshot) === JSON.stringify(next)) return; snapshot = next; for (const fn of listeners) fn() },
+    }
+  }
+  const globalActivity = createGlobalActivityStore()
+  function GlobalActivitySource() {
+    const data = useWorkspaceDirectory(), sessions = avatarContext.sessions
+    const catalog = useSyncExternalStore(sessions.list.subscribe, sessions.list.getSnapshot)
+    const statusSource = avatarContext.get('uiSession')?.sessionStatus
+    const statuses = useSyncExternalStore(statusSource?.subscribe ?? emptyAvatarSubscribe, statusSource?.getSnapshot ?? emptyAvatarSnapshot)
+    const workspaceSource = avatarContext.get('workspaces')?.list
+    const workspaces = useSyncExternalStore(workspaceSource?.subscribe ?? emptyAvatarSubscribe, workspaceSource?.getSnapshot ?? emptyAvatarListSnapshot)
+    useEffect(() => { globalActivity.publish(globalSessionActivity(data, catalog, statuses, workspaces.archivedSessionIds)) }, [data, catalog, statuses, workspaces])
+    return null
+  }
   function SessionStatusAvatars({ root, rows, workspaces = [], statuses = new Map() }) {
     const [targets, setTargets] = useState([]), [workspaceTargets, setWorkspaceTargets] = useState([])
     const profileKey = Object.entries(rows).filter(([, row]) => row.agent).map(([id, row]) => `${id}:${row.agent.type}:${row.agent.avatar?.id}:${row.agent.avatar?.url}`).sort().join('|')
@@ -1916,6 +1955,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   }
 
   return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets', 'kodeNotifications'], apply(ctx) {
+    ctx.provide('kodeActivity', globalActivity)
+    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'kode-global-activity', order: 0 }, GlobalActivitySource))
     avatarContext = ctx
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'kode-avatar-dialog' }, AvatarDialog))
     ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({ name: 'conversation.input.overlay', id: 'kode-conversation-background', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, ConversationBackground))

@@ -23,7 +23,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
     setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
-  const ctx = { sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
+  const ctx = { provide(name, value) { this[name] = value }, get(name) { return this[name] }, sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
     slots: { entries, subscribe: (name,fn) => {const set=listeners.get(name)??new Set();listeners.set(name,set);set.add(fn);return()=>set.delete(fn)}, inject: (_name, callback) => { const result = callback(); if (result?.next) for (const _ of result) {}; if (typeof result === 'function') disposers.push(result) }, register: (options, component) => { registry.push({ options, component });for(const fn of listeners.get(options.name)??[])fn(); return () => {} } },
     inject: (_names, callback) => callback(ctx), effect: callback => { const result = callback(); if (typeof result === 'function') disposers.push(result) }, ...contextProperties,
   }
@@ -709,4 +709,28 @@ test('/clear creates a same-name fresh session for each Agent without copying it
     assert.equal(selected.sessionId, 'new-session'); assert.equal(selected.profileId, 'selected-agent'); assert.equal(selected.fast, true)
     assert.equal(selected.reasoningEffort, 'high'); assert.equal(selected.model, 'fixture'); assert.equal(selected.threadId, undefined)
   }
+})
+
+
+test('global activity uses project priority across Hosts and updates without mounting the workspace browser', () => {
+ const scope={};vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function SessionStatusAvatars')),scope)
+ const data={current:'local',hosts:[{id:'local',sessions:[{id:'same',completed:true},{id:'review',pendingInteraction:true},{id:'archived',pendingInteraction:true}],archivedSessionIds:['archived']},{id:'worker.example',status:'online',sessions:[{id:'same',running:true},{id:'hidden',pendingInteraction:true}],hiddenSessionIds:['hidden']},{id:'offline.example',status:'offline',sessions:[{id:'stale',pendingInteraction:true}]}]}
+ const live=new Map([['same',{running:true,completionUnread:false}],['review',{pendingInteraction:false}]])
+ const catalog={byId:{done:{completed:true},blank:{blank:true,running:true}}}
+ const result=scope.globalSessionActivity(data,catalog,live)
+ assert.equal(result.state,'done');assert.deepEqual({...result.counts},{ongoing:2,done:1,awaiting:0})
+ live.set('review',{pendingInteraction:{kind:'approval'},running:true,completionUnread:true})
+ assert.equal(scope.globalSessionActivity(data,catalog,live).state,'awaiting')
+ assert.equal(scope.globalSessionActivity(data,catalog,live,['review','done']).state,'ongoing')
+ assert.equal(scope.globalSessionActivity({current:'local',hosts:[]},{byId:{}},new Map()).state,'idle')
+ const store=scope.createGlobalActivityStore();let updates=0
+ const stop=store.subscribe(()=>updates++)
+ store.publish(result);store.publish(result);assert.equal(updates,1);assert.equal(store.getSnapshot().state,'done')
+ stop();store.publish({...result,state:'ongoing'});assert.equal(updates,1)
+ const c=client();assert.equal(typeof c.ctx.kodeActivity.subscribe,'function')
+ const sourceComponent=c.entryById('kode-global-activity')
+ c.ctx.sessions.list.getSnapshot=()=>({byId:{live:{running:true}}})
+ assert.equal(sourceComponent(),null);assert.equal(c.ctx.kodeActivity.getSnapshot().state,'ongoing')
+ c.ctx.sessions.list.getSnapshot=()=>({byId:{live:{completed:true}}})
+ sourceComponent();assert.equal(c.ctx.kodeActivity.getSnapshot().state,'done')
 })

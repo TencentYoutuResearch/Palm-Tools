@@ -33,5 +33,8 @@ if ! /usr/bin/codesign --verify --deep --strict "$TARGET" 2>/dev/null; then
   /bin/ln -s -h "$STAGING" "$CACHE/dsh-development-v2-$FINGERPRINT" 2>/dev/null || true
   /usr/bin/codesign --verify --deep --strict "$TARGET" >&2
 fi
+# Keep the app menu and system status items visible alongside the island in
+# native full screen. This preference is scoped to this development app only.
+/usr/bin/defaults write com.deepseek.dsh.development AppleMenuBarVisibleInFullscreen -bool true
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET" >&2
 printf '%s\n' "$TARGET"

@@ -21,7 +21,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     return { windowOpen: () => null, childCreated() {} }
   }
   const islands = new Map(), notices = new Map(), layouts = new WeakMap(), noticeOwners = new WeakSet()
-  let cutouts = new Map()
+  let cutouts = new Map(), active = true
   const readGeometry = () => {
     if (process.platform !== 'darwin') return
     try {
@@ -45,7 +45,8 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     const desiredX = collapsed && camera ? center - gap / 2 - leftWing : center - width / 2
     const x = Math.round(Math.max(display.bounds.x, Math.min(desiredX, display.bounds.x + display.bounds.width - width)))
     const height = collapsed ? (cutout?.height ?? Math.max(22, Math.min(28, menuHeight || 28))) : Math.min(size.height, display.workArea.height)
-    child.setBounds({ x, y: display.bounds.y, width, height })
+    const bounds = { x, y: display.bounds.y, width, height }, previous = child.getBounds()
+    if (!previous || Object.keys(bounds).some(key => previous[key] !== bounds[key])) child.setBounds(bounds)
     const layout = JSON.stringify([camera, gap, center - x, height])
     if (layouts.get(child) !== layout && !child.webContents.isLoadingMainFrame()) {
       layouts.set(child, layout)
@@ -62,12 +63,19 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     const focused = BrowserWindow.getFocusedWindow()
     for (const [parent, child] of islands) {
       if (parent.isDestroyed() || child.isDestroyed()) continue
-      if (parent.isVisible() && !parent.isMinimized() && (focused === parent || focused === child)) { position(parent, child, child.getBounds()); child.showInactive() }
+      if (active && parent.isVisible() && !parent.isMinimized() && (focused === parent || focused === child)) { position(parent, child, child.getBounds()); if (!child.isVisible()) child.showInactive() }
       else child.hide()
     }
   }
   app.on('browser-window-focus', refresh)
-  app.on('browser-window-blur', () => setImmediate(refresh))
+  // A delayed blur callback must only hide: stale window focus during Cmd-Tab
+  // used to raise the island again over the newly activated application.
+  app.on('browser-window-blur', () => setImmediate(() => {
+    const focused = BrowserWindow.getFocusedWindow()
+    for (const [parent, child] of islands) if (!child.isDestroyed() && (!active || focused !== parent && focused !== child)) child.hide()
+  }))
+  app.on('did-resign-active', () => { active = false; for (const child of islands.values()) if (!child.isDestroyed()) child.hide() })
+  app.on('did-become-active', () => { active = true; refresh() })
   void app.whenReady().then(() => {
     readGeometry(); refresh()
     const changed = () => { readGeometry(); refresh() }
@@ -121,7 +129,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
       islands.get(parent)?.close()
       islands.set(parent, child)
       child.setAlwaysOnTop(true, 'pop-up-menu')
-      child.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+      child.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
       child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
       const move = () => { if (!child.isDestroyed()) position(parent, child, child.getBounds()) }
       // A native full-screen transition moves the owner to another Space and
