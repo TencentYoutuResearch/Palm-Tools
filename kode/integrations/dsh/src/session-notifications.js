@@ -1,5 +1,22 @@
 /** Live owner-only attention events. Never replay historical turns as new notifications. */
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+/** This endpoint always operates on the local Desktop Host, independent of the viewed SSH Host. */
+export function registerNotificationSettings(ctx, { platform = process.platform, open = promisify(execFile) } = {}) {
+  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/notification-settings', async handler(req, res) {
+    const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
+    const admission = ctx.connection.admit(req)
+    if ('rejection' in admission || admission.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
+    if (req.method !== 'POST') return send(405, { error: 'POST required' })
+    if (platform !== 'darwin') return send(400, { error: '请在当前设备的系统设置中管理通知权限。' })
+    try {
+      await open('/usr/bin/open', ['x-apple.systempreferences:com.apple.Notifications-Settings.extension'], { timeout: 5000 })
+      return send(200, { opened: true })
+    } catch { return send(503, { error: '无法打开系统设置，请手动打开“系统设置 → 通知”。' }) }
+  } })
+}
 export function registerSessionNotifications(ctx, { waitMs = 250 } = {}) {
   const streams = new Set(), pending = new Map(), recent = [], timers = new Set(), finished = new WeakMap()
   let sequence = 0, closed = false

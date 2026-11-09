@@ -14,7 +14,7 @@ import { registerAgentHubApi } from './agent-hub-api.js'
 import { registerSharedSessionApi } from './shared-session-api.js'
 import { installSessionRecovery } from './session-recovery.js'
 import { installNativeStartupBarrier } from './native-startup.js'
-import { registerSessionNotifications } from './session-notifications.js'
+import { registerSessionNotifications, registerNotificationSettings } from './session-notifications.js'
 import { registerModelUsageApi } from './model-usage-api.js'
 
 export const name = 'kode'
@@ -72,6 +72,7 @@ export async function apply(ctx, config = {}) {
     webCtx.effect(() => registerIntegrationApi(webCtx, admin), 'kode.integration-api')
     webCtx.effect(() => registerModelUsageApi(webCtx, admin), 'kode.model-usage-api')
     webCtx.effect(() => registerSessionNotifications(webCtx), 'kode.session-notifications')
+    webCtx.effect(() => registerNotificationSettings(webCtx), 'kode.notification-settings')
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)

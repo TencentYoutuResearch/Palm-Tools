@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { Context } from '@deepseek-ai/cordis'
-import { registerSessionNotifications } from '../src/session-notifications.js'
+import { registerSessionNotifications, registerNotificationSettings } from '../src/session-notifications.js'
 import { installSessionNotifications } from '../packages/transport/notifications.js'
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 function host() {
@@ -119,5 +119,53 @@ test('notification settings explain denied permission and expose independently n
   assert.equal(nodes.filter(node => node.props?.role === 'switch').length, 2)
   assert.equal(nodes.some(node => node.type === 'button'), false)
   state.permission = 'granted'
-  assert.ok(JSON.stringify(scope.NotificationSettingsBody()).includes('发送测试通知'))
+  assert.ok(!JSON.stringify(scope.NotificationSettingsBody()).includes('发送测试通知'))
+  state.systemSettings = true
+  assert.ok(JSON.stringify(scope.NotificationSettingsBody()).includes('前往系统设置'))
+  assert.ok(!JSON.stringify(scope.NotificationSettingsBody()).includes('已获授权'))
+})
+
+
+test('system settings are local, owner-only, POST-only and use a fixed macOS destination', async () => {
+  let route
+  const calls = []
+  const ctx = { webServer: { register(value) { route = value; return () => {} } }, connection: { admit: req => req.owner ? { peer: { principal: { kind: 'owner' } } } : { rejection: 403 } } }
+  const request = async patch => {
+    const res = { writeHead(status) { this.status = status }, end(body) { this.body = JSON.parse(body) } }
+    await route.handler({ owner: true, method: 'POST', ...patch }, res)
+    return res
+  }
+  registerNotificationSettings(ctx, { platform: 'darwin', open: async (...args) => calls.push(args) })
+  assert.equal((await request({ owner: false })).status, 403)
+  assert.equal((await request({ method: 'GET' })).status, 405)
+  assert.equal(calls.length, 0)
+  assert.equal((await request({})).status, 200)
+  assert.deepEqual(calls[0], ['/usr/bin/open', ['x-apple.systempreferences:com.apple.Notifications-Settings.extension'], { timeout: 5000 }])
+  registerNotificationSettings(ctx, { platform: 'linux', open: async () => assert.fail('must not open settings on a remote non-macOS Host') })
+  assert.equal((await request({})).status, 400)
+  registerNotificationSettings(ctx, { platform: 'darwin', open: async () => { throw new Error('failed') } })
+  assert.equal((await request({})).status, 503)
+})
+
+test('notification failures reach settings and the test notification action is absent', () => {
+  const b = browser()
+  try {
+    assert.equal(b.service.test, undefined)
+    b.send()
+    b.notifications[0].onerror()
+    assert.equal(b.service.getSnapshot().deliveryError, true)
+    b.notifications[0].onshow()
+    assert.equal(b.service.getSnapshot().deliveryError, false)
+  } finally { b.dispose() }
+})
+
+test('Desktop permission flow opens local system settings even while viewing SSH', async () => {
+  const b = browser(), calls = []
+  b.dispose()
+  const env = { ...b.env, navigator: { platform: 'MacIntel', userAgent: 'Chrome Electron/44.7.0' } }
+  const ctx = { get() {}, provide() {}, effect() {} }
+  const transport = { current: 'fixture-ssh', getSnapshot: () => ({ switching: true }), subscribe: () => () => {}, async fetch(...args) { calls.push(args); return { ok: true } } }
+  const service = installSessionNotifications(ctx, transport, env)
+  await service.enable()
+  assert.deepEqual(calls[0], ['/api/kode/notification-settings', { method: 'POST' }, 'local'])
 })

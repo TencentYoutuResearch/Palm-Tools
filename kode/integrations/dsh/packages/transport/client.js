@@ -1511,9 +1511,10 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
     for (const key of ["completed", "waiting"]) if (typeof saved[key] === "boolean") preferences[key] = saved[key];
   } catch {
   }
-  let snapshot2;
+  const systemSettings = /Mac/i.test(env.navigator?.platform ?? "") && /Electron\//.test(env.navigator?.userAgent ?? "");
+  let snapshot2, deliveryError = false;
   const publish = () => {
-    snapshot2 = { ...preferences, permission: env.Notification?.permission ?? "unsupported" };
+    snapshot2 = { ...preferences, permission: env.Notification?.permission ?? "unsupported", systemSettings, deliveryError };
     for (const fn of listeners) fn();
   };
   publish();
@@ -1539,7 +1540,22 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
     if (seen.size > 512) seen.delete(seen.values().next().value);
     if (env.Notification?.permission !== "granted" || !(event.kind === "completed" ? preferences.completed : preferences.waiting) || active(host, event.sessionId)) return;
     const label = { completed: "\u672C\u8F6E\u5DF2\u5B8C\u6210", question: "\u7B49\u5F85\u4F60\u56DE\u7B54", approval: "\u7B49\u5F85\u4F60\u6279\u51C6" }[event.kind];
-    const notification = new env.Notification(`${label} \xB7 Kode`, { body: String(event.title ?? "\u672A\u547D\u540D\u4F1A\u8BDD").slice(0, 160), tag: key });
+    let notification;
+    try {
+      notification = new env.Notification(`${label} \xB7 Kode`, { body: String(event.title ?? "\u672A\u547D\u540D\u4F1A\u8BDD").slice(0, 160), tag: key });
+    } catch {
+      deliveryError = true;
+      publish();
+      return;
+    }
+    notification.onerror = () => {
+      deliveryError = true;
+      publish();
+    };
+    notification.onshow = () => {
+      deliveryError = false;
+      publish();
+    };
     notification.onclick = () => {
       env.window.focus();
       close(key);
@@ -1588,13 +1604,15 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
       publish();
     },
     async enable() {
-      if (env.Notification) await env.Notification.requestPermission();
+      if (env.Notification?.permission === "default") await env.Notification.requestPermission();
       publish();
+      if (systemSettings) await service.openSettings();
     },
-    test() {
-      if (env.Notification?.permission === "granted") {
-        const note = new env.Notification("Kode \u901A\u77E5\u5DF2\u5F00\u542F", { body: "\u4F1A\u8BDD\u5B8C\u6210\u6216\u9700\u8981\u4F60\u64CD\u4F5C\u65F6\uFF0C\u4F1A\u5728\u8FD9\u91CC\u63D0\u9192\u4F60\u3002", tag: "kode-notification-test" });
-        env.setTimeout(() => note.close(), 5e3);
+    async openSettings() {
+      const response = await transport.fetch("/api/kode/notification-settings", { method: "POST" }, "local");
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error ?? "\u65E0\u6CD5\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E\uFF0C\u8BF7\u624B\u52A8\u6253\u5F00\u201C\u7CFB\u7EDF\u8BBE\u7F6E \u2192 \u901A\u77E5\u201D\u3002");
       }
     }
   };

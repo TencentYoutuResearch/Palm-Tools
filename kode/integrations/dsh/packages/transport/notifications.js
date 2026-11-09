@@ -3,8 +3,9 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
   const storageKey = 'kode.session-notifications.v1', listeners = new Set(), streams = new Map(), shown = new Map(), seen = new Set()
   let preferences = { completed: true, waiting: true }
   try { const saved = JSON.parse(env.localStorage?.getItem(storageKey) ?? '{}'); for (const key of ['completed', 'waiting']) if (typeof saved[key] === 'boolean') preferences[key] = saved[key] } catch {}
-  let snapshot
-  const publish = () => { snapshot = { ...preferences, permission: env.Notification?.permission ?? 'unsupported' }; for (const fn of listeners) fn() }
+  const systemSettings = /Mac/i.test(env.navigator?.platform ?? '') && /Electron\//.test(env.navigator?.userAgent ?? '')
+  let snapshot, deliveryError = false
+  const publish = () => { snapshot = { ...preferences, permission: env.Notification?.permission ?? 'unsupported', systemSettings, deliveryError }; for (const fn of listeners) fn() }
   publish()
   const active = (host, id) => {
     if (host !== transport.current || env.document.visibilityState !== 'visible' || !env.document.hasFocus()) return false
@@ -21,7 +22,11 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
     seen.add(id); if (seen.size > 512) seen.delete(seen.values().next().value)
     if (env.Notification?.permission !== 'granted' || !(event.kind === 'completed' ? preferences.completed : preferences.waiting) || active(host, event.sessionId)) return
     const label = { completed: '本轮已完成', question: '等待你回答', approval: '等待你批准' }[event.kind]
-    const notification = new env.Notification(`${label} · Kode`, { body: String(event.title ?? '未命名会话').slice(0, 160), tag: key })
+    let notification
+    try { notification = new env.Notification(`${label} · Kode`, { body: String(event.title ?? '未命名会话').slice(0, 160), tag: key }) }
+    catch { deliveryError = true; publish(); return }
+    notification.onerror = () => { deliveryError = true; publish() }
+    notification.onshow = () => { deliveryError = false; publish() }
     notification.onclick = () => {
       env.window.focus(); close(key)
       void transport.select(host, { sessionId: event.sessionId }).catch(error => { ctx.logger?.warn?.('无法打开通知会话：%s', error.message) })
@@ -47,8 +52,18 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
       for (const key of shown.keys()) close(key)
       publish()
     },
-    async enable() { if (env.Notification) await env.Notification.requestPermission(); publish() },
-    test() { if (env.Notification?.permission === 'granted') { const note = new env.Notification('Kode 通知已开启', { body: '会话完成或需要你操作时，会在这里提醒你。', tag: 'kode-notification-test' }); env.setTimeout(() => note.close(), 5000) } },
+    async enable() {
+      if (env.Notification?.permission === 'default') await env.Notification.requestPermission()
+      publish()
+      if (systemSettings) await service.openSettings()
+    },
+    async openSettings() {
+      const response = await transport.fetch('/api/kode/notification-settings', { method: 'POST' }, 'local')
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error ?? '无法打开系统设置，请手动打开“系统设置 → 通知”。')
+      }
+    },
   }
   connect()
   const unsubscribe = transport.subscribe(connect)

@@ -729,13 +729,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const empty = React.useMemo(() => ({ permission: 'loading', completed: true, waiting: true }), [])
     const snapshot = useSyncExternalStore(subscribe, () => service?.getSnapshot() ?? empty)
     const [busy, setBusy] = useState(false), [error, setError] = useState('')
-    const labels = { granted: '系统通知已获授权', default: '允许通知后，后台会话就能提醒你', denied: '通知权限已关闭，请在浏览器或 macOS 系统设置的通知中允许 DeepSeek Harness。', unsupported: '当前环境不支持系统通知，请使用 Desktop 或支持通知的浏览器。', loading: '正在连接通知服务…' }
-    const enable = async () => { setBusy(true); setError(''); try { await service.enable() } catch { setError('请求通知权限失败，请检查系统设置后重试。') } finally { setBusy(false) } }
+    const labels = { granted: '会话通知已开启', default: '允许通知后，后台会话就能提醒你', denied: '通知权限已关闭，请在浏览器或 macOS 系统设置的通知中允许 DeepSeek Harness。', unsupported: '当前环境不支持系统通知，请使用 Desktop 或支持通知的浏览器。', loading: '正在连接通知服务…' }
+    const authorize = async () => { setBusy(true); setError(''); try { await (snapshot.permission === 'default' ? service.enable() : service.openSettings()) } catch (error) { setError(error.message || '无法打开通知设置，请手动前往系统设置。') } finally { setBusy(false) } }
     return h(React.Fragment, null,
       h('h3', null, '会话通知'),
       h('p', { className: 'kode-config-note' }, '后台会话完成或等待你操作时提醒你。正在查看的会话保持安静；点击通知可返回对应会话。'),
       h('div', { className: 'kode-integration-row' }, h('span', { role: 'status' }, labels[snapshot.permission]),
-        snapshot.permission === 'default' ? h(Button, { variant: 'primary', disabled: busy, onClick: () => void enable() }, busy ? '正在请求…' : '允许系统通知') : snapshot.permission === 'granted' ? h(Button, { variant: 'outline', onClick: () => service.test() }, '发送测试通知') : null),
+        snapshot.permission === 'default' || snapshot.systemSettings ? h(Button, { variant: snapshot.permission === 'granted' ? 'outline' : 'primary', disabled: busy, onClick: () => void authorize() }, busy ? '正在打开…' : snapshot.systemSettings ? '前往系统设置' : '开启通知') : null),
+      snapshot.systemSettings ? h('p', { className: 'kode-config-note' }, '请在 macOS 系统设置 → 通知中允许当前应用，并开启横幅。开发模式的应用可能显示为 Electron。') : null,
+      snapshot.deliveryError ? h(Failure, { text: '系统未能显示通知，请检查系统通知权限与应用签名。' }) : null,
       ...[{ key: 'completed', label: '会话完成', detail: '本轮回答完成且队列为空时提醒。主动停止和执行失败不会触发完成通知。' }, { key: 'waiting', label: '等待操作', detail: 'Agent 请求回答、计划确认或操作审批时提醒。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: snapshot[item.key], disabled: !service, onChange: event => service.update({ [item.key]: event.target.checked }) }))),
       h('p', { className: 'kode-config-note' }, '通知偏好保存在当前设备。已连接过的 SSH 主机会继续在后台提供提醒。'),
       h(Failure, { text: error }))
