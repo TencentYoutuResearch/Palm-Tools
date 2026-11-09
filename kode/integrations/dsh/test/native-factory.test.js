@@ -20,7 +20,11 @@ import { mountNativeCommands } from '../src/native-commands.js'
 import { pendingShellContext } from '../src/native-shell.js'
 import { installQueueSteering } from '../src/queue-steering.js'
 import { AcpTurnCancelledError } from '../src/acp-session.js'
-import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises'
+import { apply as installMessagingHost } from '../src/host.js'
+import { isolatedHub } from './support/isolated-hub.js'
+import { sessionMcp } from './support/session-mcp.js'
+import { BackendClient } from '../src/backend-client.js'
+import { mkdtemp, rm, readFile, writeFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,17 +34,19 @@ async function load(ctx, plugin, ...args) {
   await fiber.await?.()
   return fiber
 }
-async function host(adapter, official = false, requests = false) {
-  const ctx = new Context(), stored = new Map(), writers = new Map()
+async function host(adapter, official = false, persistence = {}) {
+  const requests = persistence === true
+  if (requests) persistence = {}
+  const ctx = new Context(), stored = persistence.stored ?? new Map(), writers = new Map()
   await load(ctx,SessionStore); await load(ctx,AgentRegistry); await load(ctx,ProjectionRegistry)
-  ctx.provide('tools', { schemas: () => [], resolve: async () => ({ tools: [], schemas: [], dispose() {} }) })
+  ctx.provide('tools', { schemas: () => [], resolve: async () => ({ tools: [], schemas: [], dispose() {} }), ...persistence.tools })
   ctx.provide('agentPresets', { register: async () => () => {} })
   ctx.provide('kodeAgents', { adapter })
   const makeHandle = (row, write) => {
     const handle = { header: row.header, inheritedEventCount: 0,
       read: async () => ({ events: [...row.events] }),
       append: async events => { assert.equal(events[0]?.seq ?? row.events.length, row.events.length); row.events.push(...events) },
-      flush: async () => {}, close: async () => { if (writers.get(row.header.id) === handle) writers.delete(row.header.id) },
+      flush: async () => { await persistence.flush?.(row) }, close: async () => { if (writers.get(row.header.id) === handle) writers.delete(row.header.id) },
     }
     if (write) { if (writers.has(row.header.id)) throw new Error('already owned'); writers.set(row.header.id, handle) }
     return handle
@@ -172,8 +178,13 @@ for (const type of ['claude', 'cursor', 'codebuddy']) for (const extension of [t
   try {
     const { agent } = await h.ctx.agents.create({ ...options, agentOptions: { ...options.agentOptions, model: 'fixture-fast' }, meta: { cwd: root } })
     agent.followup(message('initial', extension ? 'WAIT' : 'WAIT_TOOL'))
-    const readyBy = Date.now() + 5000
-    while (!adapter.live.get(agent.id)?.active?.ready && Date.now() < readyBy) await new Promise(resolve => setTimeout(resolve, 10))
+    // Full-suite process contention can exceed one second; wait for observed
+    // readiness with the same bounded allowance as the actual steering operation.
+    const readyDeadline = performance.now() + 5000
+    while (!adapter.live.get(agent.id)?.active?.ready) {
+      assert.ok(performance.now() < readyDeadline, 'ACP fixture did not become ready within 5 seconds')
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
     const runtime = adapter.live.get(agent.id)
     assert.ok(runtime?.active?.ready)
     runtime.profile.type = type
@@ -543,7 +554,7 @@ test('unloading and reloading Kode never falls through to an official loop for n
 
 test('configured resumeWith routes native history to the native driver', async () => {
   const h = await host({ closeSession: async () => {} }, true, true)
-  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], binding: () => undefined, bindings: {} })
   const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
   let streams = 0
   adapter.stream = async function* () { streams++; yield { type: 'finish', reason: { kind: 'stop' } } }
@@ -594,7 +605,7 @@ test('configured resumeWith retains its native barrier across plugin reloads', a
 
 test('bypassing native routing still rejects ordinary system prompt admission', async () => {
   const h = await host({ closeSession: async () => {} }, true, true)
-  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], binding: () => undefined, bindings: {} })
   const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
   adapter.stream = async function* () { throw new Error('Ordinary loop must not reach native stream') }
   try {
@@ -807,4 +818,251 @@ test('image prompt admission uses the native current model, keeps attachments, a
     })
     assert.equal(commits, process.env.KODE_TEST_SESSION_COMMANDS ? 3 : 2)
   } finally { await h.ctx.fiber.dispose() }
+})
+
+test('scoped cancellation removes only its queued input and recovers a lost response', async () => {
+  const h = await host({ closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.inject(message('withdraw', 'queued'))
+    agent.inject(message('keep', 'unrelated'))
+    assert.deepEqual(await agent.cancelInput('withdraw'), { state: 'queued_removed' })
+    assert.deepEqual(await agent.cancelInput('withdraw'), { state: 'queued_removed' })
+    assert.deepEqual(agent.inbox.nextStep.map(m => m.id), ['keep'])
+    assert.equal((await agent.cancelInput('unknown')).state, 'cancel_unconfirmed')
+    assert.equal(h.stored.get(agent.id).events.filter(e => e.type === 'user/message').length, 0)
+  } finally { await h.fiber.dispose() }
+})
+
+test('scoped cancellation does not abort a shared turn', async () => {
+  let started, release, signal
+  const running = new Promise(resolve => { started = resolve })
+  const done = new Promise(resolve => { release = resolve })
+  const h = await host({ async *stream(input) { signal = input.signal; started(); await done }, closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.inject(message('other', 'already queued steering'))
+    agent.followup(message('target', 'work'))
+    await running
+    assert.deepEqual(await agent.cancelInput('target'), { state: 'cancel_unconfirmed', reason: 'shared_turn' })
+    assert.equal(signal.aborted, false)
+    release(); await agent.whenIdle()
+  } finally { release(); await h.fiber.dispose() }
+})
+
+test('scoped active cancellation requests stop without claiming confirmed termination', async () => {
+  let started, calls = 0
+  const running = new Promise(resolve => { started = resolve })
+  const h = await host({ async *stream({ signal }) {
+    calls++
+    if (calls > 1) return
+    started(); await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); signal.throwIfAborted()
+  }, closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.followup(message('target', 'work')); await running
+    agent.followup(message('other', 'next task'))
+    assert.deepEqual(await agent.cancelInput('unknown'), { state: 'cancel_unconfirmed', reason: 'input_not_active_or_queued' })
+    const flush = agent.ctx.sessions.flush
+    let failOnce = true
+    agent.ctx.sessions.flush = async (...args) => { if (failOnce) { failOnce = false; throw new Error('fixture cancellation flush failed') }; return flush.call(agent.ctx.sessions, ...args) }
+    try { await assert.rejects(agent.cancelInput('target'), /cancellation flush failed/) }
+    finally { agent.ctx.sessions.flush = flush }
+    assert.deepEqual(await agent.cancelInput('target'), { state: 'cancel_unconfirmed', reason: 'stop_requested' })
+    await agent.whenIdle()
+    assert.equal(calls, 2, 'unrelated queued input still executes')
+    assert.deepEqual(await agent.cancelInput('target'), { state: 'cancel_unconfirmed', reason: 'stop_requested' })
+    assert.equal(h.stored.get(agent.id).events.filter(e => e.type === 'plugin:kode/input-cancellation').length, 1)
+    assert.deepEqual(h.stored.get(agent.id).events.filter(e => e.type === 'user/message').map(e => e.data.id), ['target', 'other'])
+  } finally { await h.fiber.dispose() }
+})
+
+test('queue cancellation cannot acknowledge failed persistence and retries from log evidence', async () => {
+  const h = await host({ closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.inject(message('withdraw', 'queued'))
+    const original = agent.ctx.sessions.flush
+    agent.ctx.sessions.flush = async () => { throw new Error('fixture disk unavailable') }
+    try { await assert.rejects(agent.cancelInput('withdraw'), /disk unavailable/) }
+    finally { agent.ctx.sessions.flush = original }
+    assert.deepEqual(await agent.cancelInput('withdraw'), { state: 'queued_removed' })
+    assert.equal(agent.inbox.nextStep.length, 0)
+  } finally { await h.fiber.dispose() }
+})
+
+test('a persisted stop fence leaves later input queued without starting a turn', async () => {
+  let calls = 0
+  const h = await host({ stopBlocked: () => true, async *stream() { calls++ }, closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.followup(message('later', 'must remain queued'))
+    await agent.whenIdle()
+    assert.equal(calls, 0)
+    assert.deepEqual(agent.inbox.nextTurn.map(m => m.id), ['later'])
+    assert.equal(h.stored.get(agent.id).events.filter(e => e.type === 'turn/start').length, 0)
+  } finally { await h.fiber.dispose() }
+})
+
+
+test('native session publication waits for the persistence durability barrier', async () => {
+  let entered, release
+  const flushing = new Promise(resolve => { entered = resolve })
+  const blocked = new Promise(resolve => { release = resolve })
+  const h = await host({ closeSession: async () => {} }, false, { flush: async () => { entered(); await blocked } })
+  let announced = 0
+  h.ctx.on('session/created', () => { announced++ })
+  const creating = h.ctx.agents.create(options)
+  try {
+    await flushing
+    assert.equal(h.ctx.agents.get(options.sessionId), undefined)
+    assert.equal(h.ctx.sessions.get(options.sessionId), undefined)
+    assert.equal(announced, 0)
+    release()
+    const { agent } = await creating
+    assert.equal(h.ctx.agents.get(options.sessionId), agent)
+    assert.equal(announced, 1)
+  } finally { release(); await creating.catch(() => {}); await h.fiber.dispose() }
+})
+
+test('failed native session flush publishes no Agent and releases its writer', async () => {
+  const h = await host({ closeSession: async () => {} }, false, { flush: async () => { throw new Error('fixture flush failed') } })
+  let announced = 0
+  h.ctx.on('session/created', () => { announced++ })
+  try {
+    await assert.rejects(h.ctx.agents.create(options), /fixture flush failed/)
+    assert.equal(h.ctx.agents.get(options.sessionId), undefined)
+    assert.equal(h.ctx.sessions.get(options.sessionId), undefined)
+    assert.equal(h.writers.size, 0)
+    assert.equal(announced, 0)
+  } finally { await h.fiber.dispose() }
+})
+
+
+test('a flushed native identity resumes in a rebuilt Host from persisted header and setup events', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-create-durable-')), path = join(root, 'session.json')
+  let first, second
+  const flush = async row => writeFile(path, JSON.stringify(row))
+  try {
+    first = await host({ closeSession: async () => {} }, false, { flush })
+    const { agent } = await first.ctx.agents.create({ ...options, meta: { cwd: root, agentPreset: 'kode-native' } })
+    // Publication itself must have materialized the exact original identity.
+    const persisted = JSON.parse(await readFile(path, 'utf8'))
+    assert.equal(persisted.header.id, agent.id)
+    await first.fiber.dispose(); first = undefined
+    second = await host({ closeSession: async () => {} }, false, { stored: new Map([[persisted.header.id, persisted]]), flush })
+    assert.equal(second.ctx.agents.get(persisted.header.id), undefined)
+    const { agent: restored } = await second.ctx.agents.resume({ resumeSessionId: persisted.header.id, agentOptions: options.agentOptions })
+    assert.equal(restored.id, persisted.header.id)
+    assert.equal(restored.session.header.cwd, root)
+    assert.equal(second.stored.size, 1)
+    assert.equal(restored.session.snapshotEvents().some(event => event.type === 'user/message'), false)
+  } finally { await first?.fiber.dispose(); await second?.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('STDIO send reaches native driver consumption and survives Hub restart without replay', { skip: !process.env.KODE_TEST_BACKEND_URL, timeout: 30000 }, async () => {
+  const hub = await isolatedHub('native-consumption')
+  let h, adapter, hostFiber, mcp
+  const wire = join(hub.root, 'native-wire.jsonl')
+  try {
+    h = await host({ closeSession: async () => {} }, false, { tools: { schemas: () => [], register: () => () => {} } })
+    const profiles = await new AgentProfiles(join(hub.root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))], env: { KODE_FIXTURE_RPC_LOG: wire } }])
+    adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
+    Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+    const config = { url: hub.url, tokenFile: join(hub.root, 'admin.token'), stateFile: join(hub.root, 'host-tokens.json'), pollMs: 20, agentRuntime: false, runtimeBridge: false }
+    const startHost = () => h.ctx.plugin({ inject: ['agents', 'tools', 'sessions', 'sessionProjections', 'kodeAgents'], apply: ctx => installMessagingHost(ctx, config) })
+    hostFiber = await startHost()
+    const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: hub.root } })
+    const source = await hub.client.call('/api/v1/messaging/sessions', { session_id: 'sender', title: 'Sender', runtime: 'external' })
+    mcp = await sessionMcp(hub, source)
+    const input = { node_id: hub.node, session_id: agent.id, content: 'Inspect the fixture', idempotency_key: 'one-native-turn' }
+    const sent = await mcp.tool('kode_sessions_send', input)
+    const messageId = sent.id
+    let delivery
+    const deadline = Date.now() + 10000
+    while (Date.now() < deadline) {
+      delivery = await hub.client.call(`/api/v1/messaging/messages/${messageId}/delivery`)
+      if (delivery.delivery?.phase === 'consumed') break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    assert.equal(delivery.delivery.phase, 'consumed')
+    const event = agent.session.snapshotEvents().find(row => row.seq === delivery.delivery.event_seq)
+    assert.equal(event.type, 'user/message')
+    assert.equal(event.data.id, delivery.delivery.input_id)
+    await agent.whenIdle()
+    assert.equal(agent.lastError, undefined)
+    const requests = () => readFile(wire, 'utf8').then(text => text.trim().split('\n').map(JSON.parse).filter(row => row.method === 'turn/start'))
+    assert.equal((await requests()).length, 1)
+    await mcp.close(); mcp = undefined
+    await hostFiber.dispose(); hostFiber = undefined
+    await hub.stop('SIGKILL'); await hub.start()
+    hostFiber = await startHost()
+    mcp = await sessionMcp(hub, source)
+    const retried = await mcp.tool('kode_sessions_send', input)
+    assert.equal(retried.id, messageId)
+    assert.deepEqual(await hub.client.call(`/api/v1/messaging/messages/${messageId}/delivery`), delivery)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await agent.whenIdle()
+    assert.equal((await requests()).length, 1)
+    assert.equal(agent.session.snapshotEvents().filter(row => row.type === 'user/message' && row.data.id === delivery.delivery.input_id).length, 1)
+    // Hold the driver in its real maintenance boundary while two peer inputs queue.
+    let release
+    const blocked = new Promise(resolve => { release = resolve })
+    const maintenance = agent.runMaintenance(() => blocked)
+    const originalCall = BackendClient.prototype.call
+    let lostCancellationAck = false, releaseDelivery, enteredDelivery
+    const deliveryBlocked = new Promise(resolve => { enteredDelivery = resolve })
+    const unblockDelivery = new Promise(resolve => { releaseDelivery = resolve })
+    const waitStatus = async (tool, id, field, expected) => {
+      const until = Date.now() + 5000
+      while (Date.now() < until) {
+        const value = await mcp.tool(tool, { message_id: id })
+        if (value[field]?.[field === 'delivery' ? 'phase' : 'state'] === expected) return value[field]
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      assert.fail(`Expected ${field} ${expected}`)
+    }
+    try {
+      const withdraw = await mcp.tool('kode_sessions_send', { ...input, content: 'Withdraw this input', idempotency_key: 'withdraw-input' })
+      const keep = await mcp.tool('kode_sessions_send', { ...input, content: 'Keep this input', idempotency_key: 'keep-input' })
+      const withdrawnDelivery = await waitStatus('kode_sessions_delivery_status', withdraw.id, 'delivery', 'queued')
+      const keptDelivery = await waitStatus('kode_sessions_delivery_status', keep.id, 'delivery', 'queued')
+      BackendClient.prototype.call = async function(path, body, signal) {
+        if (path.startsWith(`/api/v1/messaging/sessions/${agent.id}/deliveries?`)) {
+          enteredDelivery(); await unblockDelivery
+        }
+        const result = await originalCall.call(this, path, body, signal)
+        if (!lostCancellationAck && path.endsWith(`/messages/${withdraw.id}/cancellation/result`)) {
+          lostCancellationAck = true
+          throw new Error('fixture cancellation result acknowledgement lost')
+        }
+        return result
+      }
+      await deliveryBlocked
+      const requested = await mcp.tool('kode_sessions_cancel_input', { message_id: withdraw.id })
+      assert.equal(requested.state, 'requested')
+      const cancellation = await waitStatus('kode_sessions_cancellation_status', withdraw.id, 'cancellation', 'queued_removed')
+      assert.equal(lostCancellationAck, true)
+      releaseDelivery(); BackendClient.prototype.call = originalCall
+      assert.equal(agent.inbox.nextTurn.some(row => row.id === withdrawnDelivery.input_id), false)
+      assert.equal(agent.inbox.nextTurn.some(row => row.id === keptDelivery.input_id), true)
+      assert.equal((await requests()).length, 1, 'queued cancellation must not run another model turn')
+      await mcp.close(); mcp = undefined
+      await hostFiber.dispose(); hostFiber = undefined
+      await hub.stop('SIGKILL'); await hub.start()
+      hostFiber = await startHost(); mcp = await sessionMcp(hub, source)
+      assert.deepEqual((await mcp.tool('kode_sessions_cancellation_status', { message_id: withdraw.id })).cancellation, cancellation)
+      assert.deepEqual(await mcp.tool('kode_sessions_cancel_input', { message_id: withdraw.id }), cancellation)
+      assert.equal((await mcp.tool('kode_sessions_send', { ...input, content: 'Withdraw this input', idempotency_key: 'withdraw-input' })).id, withdraw.id)
+      release(); await maintenance; await agent.whenIdle()
+      await waitStatus('kode_sessions_delivery_status', keep.id, 'delivery', 'consumed')
+      assert.equal((await requests()).length, 2)
+      assert.equal(agent.session.snapshotEvents().filter(row => row.type === 'user/message' && row.data.id === withdrawnDelivery.input_id).length, 0)
+      assert.equal(agent.session.snapshotEvents().filter(row => row.type === 'user/message' && row.data.id === keptDelivery.input_id).length, 1)
+    } finally { releaseDelivery(); BackendClient.prototype.call = originalCall; release(); await maintenance }
+
+  } finally {
+    await mcp?.close(); await hostFiber?.dispose(); await h?.fiber.dispose(); await adapter?.close(); await hub.close()
+  }
 })

@@ -1,0 +1,7 @@
+{
+  "name": "@kode/dsh-collab",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./host.js", "./client": "./client.js", "./package.json": "./package.json" },
+  "dsh": { "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-ui-conversation"] } }
+}

@@ -17,6 +17,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BackendConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<crate::effort::EffortConfig>,
     /// Protocol identity is independent of the shared Agent's name or ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
@@ -199,6 +201,7 @@ impl Default for Config {
         backends.insert(
             "codebuddy".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "codebuddy".into(),
                 // 不传任何 positional 参数 —— codebuddy 直接跑就是交互模式;
@@ -220,6 +223,7 @@ impl Default for Config {
         backends.insert(
             "claude-internal".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 // 用户内部环境的 claude 入口(自带 wrapper 脚本或别名)
                 // 用户的 PATH 里需要有这个命令。如果实际命令名不同,
@@ -239,6 +243,7 @@ impl Default for Config {
         backends.insert(
             "claude".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "claude".into(),
                 args: vec![],
@@ -255,6 +260,7 @@ impl Default for Config {
         backends.insert(
             "codex".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "codex".into(),
                 args: vec![],
@@ -274,6 +280,7 @@ impl Default for Config {
         backends.insert(
             "tcodex".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "tcodex".into(),
                 args: vec![],
@@ -288,6 +295,7 @@ impl Default for Config {
         backends.insert(
             "tclaude".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "tclaude".into(),
                 args: vec![],
@@ -302,6 +310,7 @@ impl Default for Config {
         backends.insert(
             "cursor".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "cursor-agent".into(),
                 args: vec![],
@@ -334,6 +343,7 @@ impl Default for Config {
             backends.insert(
                 key.into(),
                 BackendConfig {
+                    effort: None,
                     protocol: None,
                     command: command.into(),
                     args: vec![],
@@ -1049,6 +1059,7 @@ enabled = true
         backends.insert(
             "tcodex".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "tcodex".into(),
                 args: vec![],
@@ -1063,6 +1074,7 @@ enabled = true
         backends.insert(
             "tclaude".into(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "tclaude".into(),
                 args: vec!["--dangerously-skip-permissions".into()],

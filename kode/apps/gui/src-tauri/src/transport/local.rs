@@ -95,10 +95,17 @@ impl SessionTransport for LocalTransport {
             })?
             .clone();
         if self.use_persisted_memory_prompt_flag && spec.resume_session_uuid.is_some() {
-            backend = crate::shared_agents::configuration(&spec.backend_key,spec.resume_session_uuid.as_deref()).await
-                .map_err(TransportError::BadRequest)?;
+            backend = crate::shared_agents::configuration(
+                &spec.backend_key,
+                spec.resume_session_uuid.as_deref(),
+            )
+            .await
+            .map_err(TransportError::BadRequest)?;
         }
 
+        backend = backend
+            .with_requested_effort(spec.reasoning_effort.as_deref())
+            .map_err(|error| TransportError::BadRequest(error.to_string()))?;
         let id = self.ctx.alloc_id();
         let cwd_path = spec
             .cwd
@@ -106,8 +113,17 @@ impl SessionTransport for LocalTransport {
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")));
 
         if self.use_persisted_memory_prompt_flag {
-            crate::workbench_state::connection().await.map_err(|e|TransportError::BadRequest(e.to_string()))?;
-            kode_bridge::session_mcp::reserve_gui_session(id,&spec.backend_key,&cwd_path,spec.model.as_deref()).await.map_err(|e|TransportError::BadRequest(e.to_string()))?;
+            crate::workbench_state::connection()
+                .await
+                .map_err(|e| TransportError::BadRequest(e.to_string()))?;
+            kode_bridge::session_mcp::reserve_gui_session(
+                id,
+                &spec.backend_key,
+                &cwd_path,
+                spec.model.as_deref(),
+            )
+            .await
+            .map_err(|e| TransportError::BadRequest(e.to_string()))?;
         }
         // 构建 extra_env:
         // - KODE_HOST 是 memory/hook 的宿主激活开关；外部 CLI 不会拥有它。
@@ -119,7 +135,10 @@ impl SessionTransport for LocalTransport {
         let memory_prompt_enabled = self.read_memory_prompt_flag();
         let mut extra_env: Vec<(String, String)> = Vec::new();
         extra_env.push(("KODE_HOST".to_string(), "1".to_string()));
-        extra_env.push(("KODE_GUI_PROCESS_ID".to_string(),std::process::id().to_string()));
+        extra_env.push((
+            "KODE_GUI_PROCESS_ID".to_string(),
+            std::process::id().to_string(),
+        ));
         if let Some(sock) = self.hook_sock.as_deref() {
             extra_env.push(("KODE_HOOK_SOCK".to_string(), sock.to_string()));
         }
@@ -197,7 +216,9 @@ impl SessionTransport for LocalTransport {
         // Phase 9.1.4 jsonl 语义 tail
         if let (Some(sid), Some(backend_kind)) = (
             session_uuid.as_deref(),
-            kode_core::session::jsonl_tail::Backend::from_backend_key(backend.protocol_key(&spec.backend_key)),
+            kode_core::session::jsonl_tail::Backend::from_backend_key(
+                backend.protocol_key(&spec.backend_key),
+            ),
         ) {
             let claimed = self
                 .ctx
@@ -288,8 +309,7 @@ fn apply_resume_meta_snapshot(
     let Some(session_id) = session_id else {
         return;
     };
-    let Some(backend) = session.backend_kind()
-    else {
+    let Some(backend) = session.backend_kind() else {
         return;
     };
     let Some(path) = kode_core::session::jsonl_tail::resolve_session_path(backend, cwd, session_id)
@@ -320,6 +340,7 @@ mod tests {
         backends.insert(
             "echo".to_string(),
             BackendConfig {
+                effort: None,
                 protocol: None,
                 command: "/bin/cat".to_string(),
                 args: vec![],
@@ -346,6 +367,7 @@ mod tests {
 
         let spawned = transport
             .spawn(SpawnSpec {
+                reasoning_effort: None,
                 backend_key: "echo".into(),
                 cols: 80,
                 rows: 24,
@@ -394,6 +416,7 @@ mod tests {
         let transport = LocalTransport::new_for_test(ctx);
         let err = transport
             .spawn(SpawnSpec {
+                reasoning_effort: None,
                 backend_key: "nonexistent".into(),
                 cols: 80,
                 rows: 24,
@@ -439,6 +462,7 @@ mod tests {
 
         let spawned = transport
             .spawn(SpawnSpec {
+                reasoning_effort: None,
                 backend_key: "echo".into(),
                 cols: 80,
                 rows: 24,
@@ -457,5 +481,63 @@ mod tests {
         assert_eq!(env.r#type, "session.created");
         assert_eq!(env.session_id, spawned.id);
         let _ = transport.kill(spawned.id).await;
+    }
+    #[tokio::test]
+    async fn local_requested_effort_uses_a_private_launch_snapshot() {
+        use kode_core::effort::{EffortAdapter, EffortConfig};
+        let mut config = echo_config();
+        let backend = config.backends.get_mut("echo").unwrap();
+        backend.command = "/bin/sh".into();
+        backend.args = vec!["-c".into(), "exit 0".into(), "fixture".into()];
+        backend.effort = Some(EffortConfig {
+            default: Some("low".into()),
+            levels: vec!["low".into(), "high".into()],
+            adapter: EffortAdapter::Flag {
+                flag: "--effort".into(),
+            },
+        });
+        let ctx = build_test_ctx(config, "fixture".into());
+        let transport = LocalTransport::new_for_test(ctx.clone());
+        let request = SpawnSpec {
+            reasoning_effort: Some("high".into()),
+            backend_key: "echo".into(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(std::env::temp_dir()),
+            resume_session_uuid: None,
+            permission_mode: None,
+            model: None,
+            memory_context: None,
+            terminal_dark: None,
+        };
+        let created = transport.spawn(request.clone()).await.unwrap();
+        assert_eq!(
+            ctx.sessions.lock()[&created.id]
+                .launch_config
+                .effort
+                .as_ref()
+                .unwrap()
+                .default
+                .as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            ctx.backend_configs.read()["echo"]
+                .effort
+                .as_ref()
+                .unwrap()
+                .default
+                .as_deref(),
+            Some("low")
+        );
+        let count = ctx.sessions.lock().len();
+        assert!(transport
+            .spawn(SpawnSpec {
+                reasoning_effort: Some("unsupported".into()),
+                ..request
+            })
+            .await
+            .is_err());
+        assert_eq!(ctx.sessions.lock().len(), count);
     }
 }

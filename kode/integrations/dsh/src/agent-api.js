@@ -5,6 +5,8 @@ import { profileRoute } from './agent-runtime.js'
 import { SUPPORTED_AGENT_TYPES } from './native-session.js'
 import { resolveAdvertisedModel, resolveDefaultSelection } from './model-alias.js'
 import { appendFastPreference, effectiveFast } from './model-fast.js'
+import { selectModelPlan } from './model-selection.js'
+import { managedSessionBinding, managedSessionReadOnlyReason } from './managed-session-access.js'
 const PATH = '/api/kode/agents'
 const json = (res, status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
 export function registerAgentApi(ctx, service) {
@@ -18,7 +20,7 @@ export function registerAgentApi(ctx, service) {
     return state?.pending ?? state?.next ?? state?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
   }
   const modelsFor = async (profile, catalog, modelHint) => profile
-    ? (adapter.listModels ? await adapter.listModels(profileRoute(profile.id), profile, modelHint) : catalog.groups.find(g => g.id === profileRoute(profile.id))?.models ?? []).filter(m => m.id !== 'default' || m.fastCapability)
+    ? (adapter.listModels ? await adapter.listModels(profileRoute(profile.id), profile, modelHint) : catalog.groups.find(g => g.id === profileRoute(profile.id))?.models ?? []).filter(m => (m.id !== 'default' || m.fastCapability) && (!profile.allowedModels || profile.allowedModels.includes(m.id)))
     : catalog.groups.filter(g => !g.id.startsWith('kode-agent-')).flatMap(g => g.models.map(m => ({ ...m, provider: g.id })))
   const disposeUpdates = ctx.webServer.register({ kind: 'exact', path: `${PATH}/runtimes`, handler: (req, res) => {
     const admitted = ctx.connection.admit(req)
@@ -45,6 +47,7 @@ export function registerAgentApi(ctx, service) {
         const configurationOnly = query.get('configuration') === '1'
         const agent = sessionId ? ctx.agents.get(sessionId) : undefined
         const binding = sessionId ? profiles.binding(sessionId) : undefined
+        const managed = sessionId ? managedSessionBinding(profiles, sessionId) : null
         const storedRow = sessionId && !agent ? (await controller().list?.({}))?.items.find(row => row.sessionId === sessionId) : undefined
         const stored = storedRow?.projections?.values?.modelSelection
         const selection = agent ? selected(agent) : stored?.pending ?? stored?.next ?? stored?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
@@ -59,7 +62,7 @@ export function registerAgentApi(ctx, service) {
         const defaultPreference = configurationOnly && profile ? profiles.defaultModelFor?.(profile.id) : undefined
         const modelHint = configurationOnly ? defaultPreference?.model ?? profile?.defaultModel : selection?.provider === profileRoute(profile?.id) ? selection.model : undefined
         let models = [], modelError, defaultModelSelection
-        try { if (profile && available(profile)) models = await modelsFor(profile, catalog, modelHint) } catch (error) { modelError = error.message }
+        try { if (!managed && profile && available(profile)) models = await modelsFor(profile, catalog, modelHint) } catch (error) { modelError = error.message }
         if (configurationOnly && profile && models.length) {
           try { defaultModelSelection = resolveDefaultSelection(models, defaultPreference, profile.defaultModel) }
           catch (error) { modelError = error.message }
@@ -67,13 +70,14 @@ export function registerAgentApi(ctx, service) {
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })
         const installed = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
         const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
-        const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
+        const skills = !managed && query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         const fastState = agent ? ctx.sessionProjections.stateOf(agent.session, 'kodeFast') : storedRow?.projections?.values?.kodeFast
         const selectedModel = models.find(row => row.id === selection?.model)
         const fast = effectiveFast(fastState, selection, selectedModel)
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
           selectedProfileId, selection, defaultModelSelection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
-          canChangeAgent: agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true,
+          ...(managed ? { managed } : {}),
+          canChangeAgent: !managed && (agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true),
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
       }
@@ -82,6 +86,9 @@ export function registerAgentApi(ctx, service) {
       let body = ''
       for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) throw new Error('Agent configuration exceeds 128 KiB') }
       const input = JSON.parse(body)
+      if (['select', 'session-avatar', 'edit-message'].includes(input.action) && input.sessionId && managedSessionBinding(profiles, input.sessionId)) {
+        json(res, 403, { error: managedSessionReadOnlyReason }); return
+      }
       if (input.action === 'edit-message') { json(res, 200, await historyEditor.edit(input)); return }
       if (input.action === 'set-default') {
         const id = input.profileId ?? null
@@ -146,11 +153,15 @@ export function registerAgentApi(ctx, service) {
         }
         const efforts = selectedModel.reasoningEfforts ?? []
         const sameModel = !inheritDefaults && prior?.provider === provider && (prior.model === model || requestedFast !== undefined && prior.model === input.model)
-        reasoningEffort = input.reasoningEffort ?? (sameModel ? prior.reasoningEffort : undefined) ?? defaults?.reasoningEffort ?? selectedModel.defaultReasoningEffort
+        reasoningEffort = input.reasoningEffort ?? (sameModel ? prior.reasoningEffort : undefined) ?? defaults?.reasoningEffort ?? profile.defaultReasoningEffort ?? selectedModel.defaultReasoningEffort
         if (reasoningEffort && !efforts.some(row => row.id === reasoningEffort)) {
           if (input.reasoningEffort) throw new Error('此模型未公布该推理强度，请重新选择。')
+          if (profile.defaultReasoningEffort) throw new Error('此模型未公布此 Agent 配置的默认推理强度。')
           reasoningEffort = selectedModel.defaultReasoningEffort
         }
+        const planned = selectModelPlan(profile, models, { model, ...(reasoningEffort ? { reasoningEffort } : {}) })
+        model = planned.model
+        reasoningEffort = planned.reasoningEffort
         fast = effectiveFast(ctx.sessionProjections.stateOf(agent.session, 'kodeFast'), { provider, model }, selectedModel)
       }
       // Verify the route before committing the profile binding; no executable is

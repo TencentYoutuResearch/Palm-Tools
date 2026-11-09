@@ -29,6 +29,7 @@ fn echo_config() -> Config {
     backends.insert(
         "echo".to_string(),
         BackendConfig {
+            effort: None,
             protocol: None,
             command: "/bin/cat".into(),
             args: vec![],
@@ -91,6 +92,7 @@ async fn spawn_then_write_then_kill_round_trip() {
 
     let spawned = t
         .spawn(SpawnSpec {
+            reasoning_effort: None,
             backend_key: "echo".into(),
             cols: 80,
             rows: 24,
@@ -128,6 +130,7 @@ async fn ws_relays_pty_bytes_into_core_tx() {
 
     let spawned = t
         .spawn(SpawnSpec {
+            reasoning_effort: None,
             backend_key: "echo".into(),
             cols: 80,
             rows: 24,
@@ -180,6 +183,7 @@ async fn ws_relays_session_exited_into_core_tx() {
 
     let spawned = t
         .spawn(SpawnSpec {
+            reasoning_effort: None,
             backend_key: "echo".into(),
             cols: 80,
             rows: 24,
@@ -221,6 +225,7 @@ async fn unknown_backend_returns_bad_request() {
 
     let err = t
         .spawn(SpawnSpec {
+            reasoning_effort: None,
             backend_key: "no-such-backend".into(),
             cols: 80,
             rows: 24,
@@ -251,6 +256,7 @@ async fn wrong_token_yields_internal_error_with_auth_prefix() {
 
     let err = t
         .spawn(SpawnSpec {
+            reasoning_effort: None,
             backend_key: "echo".into(),
             cols: 80,
             rows: 24,
@@ -293,6 +299,7 @@ async fn resize_below_minimum_propagates_to_server_validation() {
 
     let spawned = t
         .spawn(SpawnSpec {
+            reasoning_effort: None,
             backend_key: "echo".into(),
             cols: 80,
             rows: 24,
@@ -314,4 +321,83 @@ async fn resize_below_minimum_propagates_to_server_validation() {
     assert!(matches!(err, TransportError::BadRequest(_)));
 
     let _ = t.kill(spawned.id).await;
+}
+
+#[tokio::test]
+async fn explicit_effort_is_forwarded_after_capability_check_and_legacy_peer_is_not_called() {
+    use kode_core::effort::{EffortAdapter, EffortConfig};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("capture.sh");
+    let output = root.path().join("argv");
+    std::fs::write(&script, "out=$1; shift; printf '%s\\n' \"$@\" > \"$out\"\n").unwrap();
+    let mut config = echo_config();
+    let backend = config.backends.get_mut("echo").unwrap();
+    backend.command = "/bin/sh".into();
+    backend.args = vec![
+        script.to_string_lossy().into(),
+        output.to_string_lossy().into(),
+    ];
+    backend.effort = Some(EffortConfig {
+        default: Some("low".into()),
+        levels: vec!["low".into(), "high".into()],
+        adapter: EffortAdapter::Flag {
+            flag: "--effort".into(),
+        },
+    });
+    let ctx = build_test_ctx(config, TOKEN.into());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move { axum::serve(listener, build_router(ctx)).await.unwrap() });
+    let (remote, _rx) = make_remote(base, TOKEN);
+    let request = SpawnSpec {
+        reasoning_effort: Some("high".into()),
+        backend_key: "echo".into(),
+        cols: 80,
+        rows: 24,
+        cwd: Some(root.path().into()),
+        resume_session_uuid: None,
+        permission_mode: None,
+        model: None,
+        memory_context: None,
+        terminal_dark: None,
+    };
+    remote.spawn(request.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(args) = std::fs::read_to_string(&output) {
+                if !args.is_empty() {
+                    assert_eq!(args, "--effort\nhigh\n");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    server.abort();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    let legacy = axum::Router::new().route(
+        "/api/v1/sessions",
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::Json(serde_json::json!({}))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, legacy).await.unwrap() });
+    let (legacy, _rx) = make_remote(base, TOKEN);
+    assert!(matches!(
+        legacy.spawn(request).await,
+        Err(TransportError::BadRequest(_))
+    ));
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
+    server.abort();
 }

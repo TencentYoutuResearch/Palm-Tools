@@ -335,6 +335,7 @@ fn process_hook_json_inner(
                 return;
             };
             let _ = core_tx.send(CoreEvent::JsonlMeta {
+                selection: None,
                 id: session_id,
                 model: Some(model),
                 title: None,
@@ -370,6 +371,7 @@ fn process_hook_json_inner(
                 reset_hook_tokens(session_id);
                 if let Some(tx) = core_tx.filter(|_| session_id != 0) {
                     let _ = tx.send(CoreEvent::JsonlMeta {
+                        selection: None,
                         id: session_id,
                         model: None,
                         title: None,
@@ -509,6 +511,7 @@ fn emit_hook_token_update(
     let totals = add_hook_tokens(session_id, usage.input, usage.output, usage.cached);
     if let Some(core_tx) = core_tx {
         let _ = core_tx.send(CoreEvent::JsonlMeta {
+            selection: None,
             id: session_id,
             model: usage.model.clone(),
             title: None,
