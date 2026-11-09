@@ -554,7 +554,7 @@ test('unloading and reloading Kode never falls through to an official loop for n
 
 test('configured resumeWith routes native history to the native driver', async () => {
   const h = await host({ closeSession: async () => {} }, true, true)
-  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], binding: () => undefined, bindings: {} })
   const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
   let streams = 0
   adapter.stream = async function* () { streams++; yield { type: 'finish', reason: { kind: 'stop' } } }
@@ -605,7 +605,7 @@ test('configured resumeWith retains its native barrier across plugin reloads', a
 
 test('bypassing native routing still rejects ordinary system prompt admission', async () => {
   const h = await host({ closeSession: async () => {} }, true, true)
-  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], bindings: {} })
+  const adapter = new AgentRuntimeAdapter(h.ctx, { list: () => [{ id: 'fixture', name: 'Fixture', type: 'codex' }], binding: () => undefined, bindings: {} })
   const unregister = h.ctx.llm.registerAdapter(['kode-agent-fixture'], adapter)
   adapter.stream = async function* () { throw new Error('Ordinary loop must not reach native stream') }
   try {
