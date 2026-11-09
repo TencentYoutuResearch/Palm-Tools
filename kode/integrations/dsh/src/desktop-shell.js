@@ -20,7 +20,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     })
     return { windowOpen: () => null, childCreated() {} }
   }
-  const islands = new Map(), notices = new Map(), layouts = new WeakMap(), noticeOwners = new WeakSet()
+  const islands = new Map(), notices = new Map(), layouts = new WeakMap(), requestedSizes = new WeakMap(), positioning = new WeakSet(), noticeOwners = new WeakSet()
   let cutouts = new Map()
   const readGeometry = () => {
     if (process.platform !== 'darwin') return
@@ -33,36 +33,43 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     const window = BrowserWindow.fromWebContents(event.sender)
     return window && !window.isDestroyed() && event.senderFrame === event.sender.mainFrame && event.sender.getURL().startsWith('dsh-app://app/') ? window : null
   }
-  const position = (parent, child, size = { width: 240, height: 28 }) => {
-    const display = screen.getDisplayMatching(parent.getBounds())
-    const menuHeight = display.workArea.y - display.bounds.y
-    const cutout = cutouts.get(display.id)
-    const camera = !!cutout || (display.internal && menuHeight >= 30)
-    const gap = cutout ? cutout.right - cutout.left : 200
-    const leftWing = 24, rightWing = 96, collapsed = size.height <= 40
-    const center = display.bounds.x + (cutout ? (cutout.left + cutout.right) / 2 : display.bounds.width / 2)
-    const width = collapsed ? (camera ? leftWing + gap + rightWing : 240) : size.width
-    const desiredX = collapsed && camera ? center - gap / 2 - leftWing : center - width / 2
-    const x = Math.round(Math.max(display.bounds.x, Math.min(desiredX, display.bounds.x + display.bounds.width - width)))
-    const height = collapsed ? (cutout?.height ?? Math.max(22, Math.min(28, menuHeight || 28))) : Math.min(size.height, display.workArea.height)
-    const bounds = { x, y: display.bounds.y, width, height }, previous = child.getBounds()
-    if (!previous || Object.keys(bounds).some(key => previous[key] !== bounds[key])) child.setBounds(bounds)
-    const layout = JSON.stringify([camera, gap, center - x, height])
-    if (layouts.get(child) !== layout && !child.webContents.isLoadingMainFrame()) {
-      layouts.set(child, layout)
-      void child.webContents.executeJavaScript(`{
-        const root = document.documentElement;
-        root.dataset.kodeMenuCamera = '${camera ? 'true' : 'false'}';
-        root.style.setProperty('--kode-camera-gap', '${gap}px');
-        root.style.setProperty('--kode-camera-center', '${center - x}px');
-        root.style.setProperty('--kode-menu-height', '${cutout?.height ?? 28}px');
-      }`).catch(() => {})
-    }
+  const position = (parent, child) => {
+    if (positioning.has(child)) return
+    positioning.add(child)
+    try {
+      // AppKit may move/resize a panel during a Space or application switch.
+      // Only renderer IPC may change expansion state; native bounds are output.
+      const size = requestedSizes.get(child) ?? { width: 240, height: 28 }
+      const display = screen.getDisplayMatching(parent.getBounds())
+      const menuHeight = display.workArea.y - display.bounds.y
+      const cutout = cutouts.get(display.id)
+      const camera = !!cutout || (display.internal && menuHeight >= 30)
+      const gap = cutout ? cutout.right - cutout.left : 200
+      const leftWing = 24, rightWing = 96, collapsed = size.height <= 40
+      const center = display.bounds.x + (cutout ? (cutout.left + cutout.right) / 2 : display.bounds.width / 2)
+      const width = collapsed ? (camera ? leftWing + gap + rightWing : 240) : size.width
+      const desiredX = collapsed && camera ? center - gap / 2 - leftWing : center - width / 2
+      const x = Math.round(Math.max(display.bounds.x, Math.min(desiredX, display.bounds.x + display.bounds.width - width)))
+      const height = collapsed ? (cutout?.height ?? Math.max(22, Math.min(28, menuHeight || 28))) : Math.min(size.height, display.workArea.height)
+      const bounds = { x, y: display.bounds.y, width, height }, previous = child.getBounds()
+      if (!previous || Object.keys(bounds).some(key => previous[key] !== bounds[key])) child.setBounds(bounds)
+      const layout = JSON.stringify([camera, gap, center - x, height])
+      if (layouts.get(child) !== layout && !child.webContents.isLoadingMainFrame()) {
+        layouts.set(child, layout)
+        void child.webContents.executeJavaScript(`{
+          const root = document.documentElement;
+          root.dataset.kodeMenuCamera = '${camera ? 'true' : 'false'}';
+          root.style.setProperty('--kode-camera-gap', '${gap}px');
+          root.style.setProperty('--kode-camera-center', '${center - x}px');
+          root.style.setProperty('--kode-menu-height', '${cutout?.height ?? 28}px');
+        }`).catch(() => {})
+      }
+    } finally { positioning.delete(child) }
   }
   const refresh = () => {
     for (const [parent, child] of islands) {
       if (parent.isDestroyed() || child.isDestroyed()) continue
-      if (parent.isVisible() && !parent.isMinimized()) { position(parent, child, child.getBounds()); if (!child.isVisible()) child.showInactive() }
+      if (parent.isVisible() && !parent.isMinimized()) { if (!child.isVisible()) child.showInactive(); position(parent, child) }
       else child.hide()
     }
   }
@@ -110,7 +117,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
   ipcMain.on('kode-desktop:island-size', (event, size) => {
     const parent = owner(event), child = parent && islands.get(parent)
     if (!child || !Number.isFinite(size?.width) || !Number.isFinite(size?.height)) return
-    position(parent, child, { width: Math.max(240, Math.min(680, Math.round(size.width))), height: Math.max(28, Math.min(900, Math.round(size.height))) })
+    requestedSizes.set(child, { width: Math.max(240, Math.min(680, Math.round(size.width))), height: Math.max(28, Math.min(900, Math.round(size.height))) })
     refresh()
   })
   return {
@@ -125,7 +132,8 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
       child.setAlwaysOnTop(true, 'pop-up-menu')
       child.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
       child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-      const move = () => { if (!child.isDestroyed()) position(parent, child, child.getBounds()) }
+      const move = () => { if (!child.isDestroyed()) position(parent, child) }
+      for (const event of ['move', 'moved', 'resize', 'show']) child.on(event, move)
       // A native full-screen transition moves the owner to another Space and
       // temporarily changes focus. Reassert the panel after the transition,
       // rather than leaving it hidden by the intermediate blur event.
@@ -139,7 +147,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
       for (const event of ['move', 'moved', 'resize']) parent.on(event, move)
       for (const event of ['hide', 'show', 'minimize', 'restore']) parent.on(event, refresh)
       parent.once('closed', () => { if (!child.isDestroyed()) child.close() })
-      child.once('closed', () => { for (const event of ['move', 'moved', 'resize']) parent.removeListener(event, move); parent.removeListener('enter-full-screen', fullScreenChanged); parent.removeListener('leave-full-screen', fullScreenChanged); for (const event of ['hide', 'show', 'minimize', 'restore']) parent.removeListener(event, refresh); islands.delete(parent) })
+      child.once('closed', () => { for (const event of ['move', 'moved', 'resize', 'show']) child.removeListener(event, move); for (const event of ['move', 'moved', 'resize']) parent.removeListener(event, move); parent.removeListener('enter-full-screen', fullScreenChanged); parent.removeListener('leave-full-screen', fullScreenChanged); for (const event of ['hide', 'show', 'minimize', 'restore']) parent.removeListener(event, refresh); islands.delete(parent) })
       child.webContents.once('did-finish-load', refresh)
       position(parent, child)
       refresh()

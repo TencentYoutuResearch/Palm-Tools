@@ -71,11 +71,13 @@ export class HistoryEditor {
   async create(input, key, fingerprint) {
     const ctx = this.ctx, service = this.service, controller = ctx.get('sessionController')
     const id = `session-${key.slice(0, 32)}`, inputId = `history-edit-${key}`
-    const source = await ctx.sessionQuery.observeSession(input.sessionId)
+    const query = ctx.get('sessionQuery'), persistence = ctx.get('sessionPersistence')
+    if (!query || !persistence || !controller) throw new Error('会话服务暂不可用，请稍后重试。')
+    const source = await query.observeSession(input.sessionId)
     try {
       const message = editedMessage(source.events, input.seq, input.text)
       let agent = ctx.agents.get(id)
-      if (!agent && await ctx.sessionPersistence.stat(id)) {
+      if (!agent && await persistence.stat(id)) {
         const found = await controller.resolveAgent(id)
         if (found.error) throw new Error(found.error.message)
         agent = found.agent

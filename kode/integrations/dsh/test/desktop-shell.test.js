@@ -108,3 +108,29 @@ test('app switching leaves the owner panel stable while minimize and hide still 
   f.child.close()
   for (const event of ['move', 'moved', 'resize']) assert.equal(f.parent.listenerCount(event), 0)
 })
+
+
+test('Space transitions cannot turn native panel drift into a new expansion size', () => {
+  const f = fixture()
+  f.bridge.childCreated(f.parent, f.child, { frameName: 'kode-token-island' })
+  const collapsed = { ...f.child.bounds }
+  // Model synchronous native notifications from setBounds too: correcting drift
+  // must not recursively reposition the same panel.
+  f.child.setBounds = function(bounds) { this.bounds = bounds; this.emit('move'); this.emit('resize') }
+  f.child.bounds = { x: 400, y: 450, width: 500, height: 300 }
+  f.child.emit('move')
+  assert.deepEqual(f.child.bounds, collapsed)
+  const resize = f.listeners.get('kode-desktop:island-size')
+  resize(f.event, { width: 640, height: 820 })
+  const expanded = { ...f.child.bounds }
+  f.child.bounds = { x: 400, y: 200, width: 300, height: 28 }
+  f.child.emit('resize')
+  assert.deepEqual(f.child.bounds, expanded, 'native resize cannot collapse an expanded panel')
+  resize(f.event, { width: 240, height: 28 })
+  f.child.hide()
+  f.child.showInactive = function() { this.visible = true; this.bounds = { x: 400, y: 450, width: 500, height: 300 }; this.emit('show') }
+  f.app.emit('did-become-active')
+  assert.deepEqual(f.child.bounds, collapsed, 'showing a panel reasserts the menu-bar position')
+  f.child.close()
+  for (const event of ['move', 'moved', 'resize', 'show']) assert.equal(f.child.listenerCount(event), 0)
+})

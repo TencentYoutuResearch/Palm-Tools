@@ -80,6 +80,9 @@ test('branch API deduplicates retries across restarts, retains workspace and pro
           followup(message) { sent.push(message); this.inbox.nextTurn.push(message) } }
         agents.set(agent.id, agent); return { agent }
       } } }
+    // Cordis rejects un-injected property access, while get() supports optional services.
+    services.sessionQuery = ctx.sessionQuery; services.sessionPersistence = ctx.sessionPersistence
+    for (const key of ['sessionQuery', 'sessionPersistence']) Object.defineProperty(ctx, key, { get() { throw new Error(`cannot get property ${key} without inject`) } })
     const service = { profiles, hasRuntime: () => true }, input = { sessionId: 'source', requestId: 'same-request-001', seq: targetSeq(events), text: 'EDITED_REQUEST' }
     const editor = new HistoryEditor(ctx, service)
     const first = editor.edit(input); assert.equal(editor.edit(input), first)
