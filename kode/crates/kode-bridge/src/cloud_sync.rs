@@ -216,6 +216,10 @@ pub struct Inner {
     pending_sign_in: Mutex<Option<PendingSignIn>>,
     pending_palmx: tokio::sync::Mutex<Option<(PalmxPending, PalmxPurpose)>>,
     pending_palm: tokio::sync::Mutex<Option<PalmHandoff>>,
+    /// CloudBase rotates refresh tokens: a second refresh with the same
+    /// token fails and signs the account out. One refresh at a time, and
+    /// each re-reads the saved session first.
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl CloudSyncManager {
@@ -275,6 +279,7 @@ impl CloudSyncManager {
                 pending_sign_in: Mutex::new(None),
                 pending_palmx: tokio::sync::Mutex::new(None),
                 pending_palm: tokio::sync::Mutex::new(None),
+                refresh_lock: tokio::sync::Mutex::new(()),
             }),
         };
         *shared = Arc::downgrade(&manager.inner);
@@ -377,16 +382,38 @@ impl CloudSyncManager {
     /// A fresh access token for the saved account, refreshing if needed.
     async fn account_token(&self) -> Result<(String, String), String> {
         let backend = self.account_backend().ok_or("sign in to a Kode account first")?;
-        let mut session = backend.account.clone().ok_or("sign in to a Kode account first")?;
-        if session.needs_refresh(now_ms()) {
-            session = self.inner.account.refresh(&session, now_ms()).await?;
-            let mut config = self.inner.config.lock();
-            if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend.id) {
-                current.account = Some(session.clone());
-            }
-            save_config(&self.inner.config_path, &config)?;
-        }
+        let session = self.fresh_session(&backend.id).await?;
         Ok((backend.server_url, session.access_token))
+    }
+
+    /// The saved session of `backend_id`, refreshed when close to expiry.
+    async fn fresh_session(&self, backend_id: &str) -> Result<AccountSession, String> {
+        let saved = || {
+            self.inner
+                .config
+                .lock()
+                .backends
+                .iter()
+                .find(|b| b.id == backend_id)
+                .and_then(|b| b.account.clone())
+                .ok_or_else(|| "sign in to a Kode account first".to_string())
+        };
+        if !saved()?.needs_refresh(now_ms()) {
+            return saved();
+        }
+        let _guard = self.inner.refresh_lock.lock().await;
+        // Another caller may have refreshed while this one waited.
+        let session = saved()?;
+        if !session.needs_refresh(now_ms()) {
+            return Ok(session);
+        }
+        let session = self.inner.account.refresh(&session, now_ms()).await?;
+        let mut config = self.inner.config.lock();
+        if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
+            current.account = Some(session.clone());
+        }
+        save_config(&self.inner.config_path, &config)?;
+        Ok(session)
     }
 
     pub async fn account_login_methods(&self, server_url: String) -> Result<Vec<LoginMethodInfo>, String> {
@@ -534,12 +561,18 @@ impl CloudSyncManager {
         self.save_account(&backend.id, session)
     }
 
+    /// Saves profile fields only: tokens may have rotated since `session`
+    /// was read, and writing an old refresh token back would sign out.
     fn save_account(&self, backend_id: &str, session: AccountSession) -> Result<CloudSyncStatus, String> {
         {
             let mut config = self.inner.config.lock();
             if let Some(backend) = config.backends.iter_mut().find(|b| b.id == backend_id) {
-                backend.name = format!("Kode account · {}", session.label());
-                backend.account = Some(session);
+                if let Some(current) = backend.account.as_mut() {
+                    current.name = session.name;
+                    current.picture = session.picture;
+                    current.email = session.email;
+                    backend.name = format!("Kode account · {}", current.label());
+                }
             }
             save_config(&self.inner.config_path, &config)?;
         }
@@ -845,17 +878,10 @@ impl CloudSyncManager {
             let registration = self.ensure_registered().await?;
             return Ok((registration.device_id, registration.device_token, backend.kind));
         }
-        let mut session = backend
-            .account
-            .ok_or_else(|| "sign in to the account relay first".to_string())?;
-        if session.needs_refresh(now_ms()) {
-            session = self.inner.account.refresh(&session, now_ms()).await?;
-            let mut config = self.inner.config.lock();
-            if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend.id) {
-                current.account = Some(session.clone());
-            }
-            save_config(&self.inner.config_path, &config)?;
+        if backend.account.is_none() {
+            return Err("sign in to the account relay first".into());
         }
+        let session = self.fresh_session(&backend.id).await?;
         self.inner.status.lock().device_id = Some(installation_id.clone());
         Ok((installation_id, session.access_token, backend.kind))
     }

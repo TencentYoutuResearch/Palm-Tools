@@ -296,6 +296,7 @@ async fn mobile_text_input_submits_with_a_separate_carriage_return() {
             default_backend: "capture".to_string(),
             backends,
             ui: kode_core::config::UiConfig::default(),
+            account: Default::default(),
         },
         "test-mobile-input".to_string(),
     );
