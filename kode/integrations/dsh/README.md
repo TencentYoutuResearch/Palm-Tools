@@ -1006,7 +1006,10 @@ activation-policy transformations. App focus changes leave the panel in place
 without repeated hide/show calls or moving it to another display.
 
 The status dot aggregates all non-archived conversations across the current
-catalog and connected Host directories, independently of sidebar mounting.
+catalog and connected Host directories, independently of sidebar or overlay mounting.
+Direct subscriptions preserve the receiver of workspace controller methods; passing
+its getSnapshot unbound throws refreshSnapshot and previously froze the island gray.
+Subscriptions follow native service availability and release on plugin disposal.
 It shares project priority: awaiting action (amber), completion unread (green),
 running (blue), then idle (gray). Live current-Host facts override catalog facts.
 Hidden, blank, archived and disconnected-Host stale sessions do not participate.
@@ -1030,3 +1033,5 @@ state hooks and localization, which are stored separately from its slot options.
 ### 设置分类约定
 
 常规收纳会话恢复和通知；外观收纳状态/用量显示、头像与背景。Agent 配置、插件与集成、手机配对和同步、SSH 主机及服务分别保留独立页面，因为它们有完整的编辑或部署流程。小开关应归入这些稳定分类的页内分组，避免按功能持续新增导航项。常规默认打开，原通知/个性化入口继续映射到新分类。重启续接继续写入此计算机的服务配置；通知和刘海继续保存在当前设备，头像仍应用于当前会话，不因合并页面改变作用范围。
+
+Settings groups fill their content width, including nested avatar/background editors; only the settings page owns the overall width limit. Group boundaries own their divider, so the final preference row does not draw a second line.

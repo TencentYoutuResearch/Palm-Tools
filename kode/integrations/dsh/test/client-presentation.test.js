@@ -12,7 +12,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   const workspaceShell = { options: {}, component: native, store: {}, children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } } }
   const chatShell={options:{id:'chat'},component:native,store:{},children:{'conversation.chat.flow':{kind:'single',scope:'session'}}}
   const nodeSeats=new Map(['user','steering','context','turn-trigger','assistant-step'].map(key=>[key,{options:{key},component:native,locale:'conversation',children:{images:{kind:'single'}},inject:()=>({hooks:{}})}]))
-  const listeners=new Map()
+  const listeners=new Map(), sessionListeners=new Set()
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: value => { const initial = typeof value === 'function' ? value() : value; return [initial === 'general' && windowProperties.settingsSection ? windowProperties.settingsSection : initial, () => {}] },
@@ -23,12 +23,12 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
     setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
-  const ctx = { provide(name, value) { this[name] = value }, get(name) { return this[name] }, sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
+  const ctx = { provide(name, value) { this[name] = value }, get(name) { return this[name] }, sessions: { list: { subscribe: fn => { sessionListeners.add(fn); return () => sessionListeners.delete(fn) }, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
     slots: { entries, subscribe: (name,fn) => {const set=listeners.get(name)??new Set();listeners.set(name,set);set.add(fn);return()=>set.delete(fn)}, inject: (_name, callback) => { const result = callback(); if (result?.next) for (const _ of result) {}; if (typeof result === 'function') disposers.push(result) }, register: (options, component) => { registry.push({ options, component });for(const fn of listeners.get(options.name)??[])fn(); return () => {} } },
     inject: (_names, callback) => callback(ctx), effect: callback => { const result = callback(); if (typeof result === 'function') disposers.push(result) }, ...contextProperties,
   }
   plugin.apply(ctx)
-  return { ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
+  return { notifySessions: () => { for (const fn of sessionListeners) fn() }, ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
 }
 const relay = (text = 'Please review <script>alert(1)</script>\nsecond line') => ({
   time: 1, source: { kind: 'agent-message', senderSessionId: 'kode:worker.example:session-same-id' },
@@ -663,7 +663,7 @@ test('service status and personalization use explicit labeled cards and fill the
  assert.match(source,/\.kode-mobile-pairing,\.kode-host-service\{display:flex;flex-direction:column;gap:12px;padding:16px/)
  assert.match(source,/className: 'kode-personalization-session-label' \}, '当前会话'/)
  assert.match(source,/\.kode-personalization-session strong\{[^}]*font-size:14px;font-weight:500/)
- assert.match(source,/\.kode-settings-page \.kode-settings-section>\.kode-agent-settings\{width:100%;max-width:none;min-width:0;box-sizing:border-box\}/)
+ assert.match(source,/\.kode-settings-page \.kode-settings-section \.kode-agent-settings\{width:100%;max-width:none;min-width:0;box-sizing:border-box\}/)
  assert.match(source,/\.kode-settings-page \.kode-personalization \.kode-avatar-content,\.kode-settings-page \.kode-personalization \.kode-avatar-grid,\.kode-settings-page \.kode-personalization \.kode-avatar-preview\{width:100%;min-width:0;box-sizing:border-box\}/)
 })
 
@@ -730,11 +730,10 @@ test('global activity uses project priority across Hosts and updates without mou
  store.publish(result);store.publish(result);assert.equal(updates,1);assert.equal(store.getSnapshot().state,'done')
  stop();store.publish({...result,state:'ongoing'});assert.equal(updates,1)
  const c=client();assert.equal(typeof c.ctx.kodeActivity.subscribe,'function')
- const sourceComponent=c.entryById('kode-global-activity')
  c.ctx.sessions.list.getSnapshot=()=>({byId:{live:{running:true}}})
- assert.equal(sourceComponent(),null);assert.equal(c.ctx.kodeActivity.getSnapshot().state,'ongoing')
+ c.notifySessions();assert.equal(c.ctx.kodeActivity.getSnapshot().state,'ongoing')
  c.ctx.sessions.list.getSnapshot=()=>({byId:{live:{completed:true}}})
- sourceComponent();assert.equal(c.ctx.kodeActivity.getSnapshot().state,'done')
+ c.notifySessions();assert.equal(c.ctx.kodeActivity.getSnapshot().state,'done')
 })
 
 test('interface settings toggle the device service directly and report save failures', () => {
@@ -783,19 +782,27 @@ test('settings group small preferences by task, preserve deep links, and keep de
  assert.match(integrations, /messaging_enabled/); assert.match(integrations, /memory_enabled/)
 })
 
-test('global activity waits for native services and includes early live running facts before the catalog', () => {
- const deferred = []
- const c = client(undefined, {}, { inject(names, callback) { if (names.includes('uiSession') && names.includes('workspaces')) deferred.push(callback); else callback(this) } })
+test('global activity follows native subscriptions without any mounted shell or React component', () => {
+ const deferred = [], nativeListeners = new Set()
+ const workspaceListeners = new Set()
+ const workspaceList = { archivedSessionIds: [], refreshSnapshot() { return { archivedSessionIds: this.archivedSessionIds } }, getSnapshot() { return this.refreshSnapshot() }, subscribe(fn) { workspaceListeners.add(fn); return () => workspaceListeners.delete(fn) } }
+ const c = client(undefined, {}, { workspaces: { list: workspaceList }, inject(names, callback) { if (names.includes('uiSession')) deferred.push(callback); else callback(this) } })
  assert.equal(c.ctx.slots.entries('shell.overlay').some(row => row.options.id === 'kode-global-activity'), false)
- const subscribers = new Set(); let statuses = new Map([['live-before-catalog', { running: true }]])
- c.ctx.uiSession = { sessionStatus: { subscribe: fn => { subscribers.add(fn); return () => subscribers.delete(fn) }, getSnapshot: () => statuses } }
- c.ctx.workspaces = { list: { subscribe: () => () => {}, getSnapshot: () => ({ archivedSessionIds: [] }) } }
+ c.ctx.sessions.list.getSnapshot = () => ({ byId: { running: { running: true } } })
+ c.notifySessions(); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'ongoing', 'catalog status works before uiSession is ready')
+ let statuses = new Map([['running', { running: true, pendingInteraction: { kind: 'approval' } }]])
+ c.ctx.uiSession = { sessionStatus: { subscribe: fn => { nativeListeners.add(fn); return () => nativeListeners.delete(fn) }, getSnapshot: () => statuses } }
  deferred[0](c.ctx)
- const entry = c.ctx.slots.entries('shell.overlay').find(row => row.options.id === 'kode-global-activity')
- const props = entry.options.inject(); assert.equal(props.statusSource, c.ctx.uiSession.sessionStatus)
- entry.component(props); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'ongoing')
- statuses = new Map([['live-before-catalog', { running: false, completionUnread: true }]])
- entry.component(props); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'done')
- statuses = new Map(); entry.component(props); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'idle')
- assert.ok(subscribers.size > 0)
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'awaiting')
+ workspaceList.archivedSessionIds = ['running']; for (const fn of workspaceListeners) fn()
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'idle', 'workspace methods retain their receiver during publication')
+ workspaceList.archivedSessionIds = []; for (const fn of workspaceListeners) fn()
+ statuses = new Map([['running', { running: false, completionUnread: true }]])
+ for (const fn of nativeListeners) fn()
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'done')
+ statuses = new Map([['running', { running: false, completionUnread: false }]])
+ for (const fn of nativeListeners) fn()
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'idle', 'native clearing facts override an older running catalog')
+ for (const dispose of c.disposers) dispose()
+ assert.equal(nativeListeners.size, 0); assert.equal(workspaceListeners.size, 0)
 })
