@@ -82,8 +82,26 @@ pub async fn load_tabs(fallback: &mut PersistedState) {
     if !response.status().is_success() { return }
     let Ok(row) = response.json::<Value>().await else { return };
     let Some(rows) = row["tabs"].as_array() else { return };
+    let opened = match client.get(&url).bearer_auth(&token).send().await {
+        Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
+        _ => None,
+    };
+    let opened = opened.as_ref().and_then(|document| document.pointer("/value/gui/tabs")).and_then(Value::as_array);
     // A malformed entry must not prevent every other session from loading.
-    fallback.tabs = rows.iter().filter_map(|row|serde_json::from_value(row.clone()).ok()).collect();
+    fallback.tabs = opened_tabs(rows, opened).into_iter().filter_map(|row|serde_json::from_value(row.clone()).ok()).collect();
+}
+
+/// `/sessions` also lists every saved native conversation, which a CLI exit or
+/// tab close intentionally keeps. Restore only what was open at last save;
+/// without a saved snapshot (first run after migration) keep everything.
+fn opened_tabs<'a>(rows: &'a [Value], opened: Option<&Vec<Value>>) -> Vec<&'a Value> {
+    let Some(opened) = opened else { return rows.iter().collect() };
+    let key = |row: &Value| {
+        let endpoint = if row["endpoint_id"].is_null() || row["endpoint_id"]["kind"] == "local" { Value::Null } else { row["endpoint_id"]["id"].clone() };
+        (endpoint.to_string(), row["backend_key"].to_string(), row["session_id"].to_string())
+    };
+    let keys: std::collections::HashSet<_> = opened.iter().map(key).collect();
+    rows.iter().filter(|row| keys.contains(&key(row))).collect()
 }
 pub async fn save(state: &PersistedState) -> anyhow::Result<()> {
     let Ok((client,url,token)) = connection().await else { return Ok(()) };
@@ -158,6 +176,22 @@ mod tests {
         assert_eq!(rows["workspaces"][0]["path"],path);
         assert!(workspace_paths_from(&client,&url,token,"unknown-ssh-host").await.is_err());
         hub.shutdown();task.abort();
+    }
+}
+
+#[cfg(test)]
+mod opened_tabs_tests {
+    use super::*;
+
+    #[test]
+    fn restore_skips_saved_sessions_that_are_no_longer_open() {
+        let tab = |backend: &str, id: &str| json!({"backend_key":backend,"session_id":id,"endpoint_id":null});
+        let remote = json!({"backend_key":"codex","session_id":"r1","endpoint_id":{"kind":"remote","id":"host.example"}});
+        let rows = vec![tab("tclaude","open"), tab("tclaude","exited"), tab("codex","open"), remote.clone()];
+        let opened = vec![tab("tclaude","open"), json!({"backend_key":"codex","session_id":"open","endpoint_id":{"kind":"local"}}), remote];
+        let ids: Vec<_> = opened_tabs(&rows, Some(&opened)).iter().map(|row| row["session_id"].as_str().unwrap().to_string() + "@" + row["backend_key"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["open@tclaude", "open@codex", "r1@codex"]);
+        assert_eq!(opened_tabs(&rows, None).len(), 4);
     }
 }
 
