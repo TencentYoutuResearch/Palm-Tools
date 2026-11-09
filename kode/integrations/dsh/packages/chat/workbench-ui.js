@@ -163,8 +163,9 @@ function KodeTokenIsland({ activity, appearance } = {}) {
     if (!enabled) return
     let alive = true, pending = false
     const controller = new AbortController()
+    const visible = () => !document.hidden || Boolean(nativeWindow && !nativeWindow.closed && !nativeWindow.document.hidden)
     const load = async () => {
-      if (pending || document.hidden) return
+      if (pending || !visible()) return
       pending = true; setLoading(true); setError('')
       try {
         const read = async (period, start, end) => {
@@ -182,10 +183,17 @@ function KodeTokenIsland({ activity, appearance } = {}) {
       finally { pending = false; if (alive) setLoading(false) }
     }
     void load()
-    const timer = setInterval(load, 30000), wake = () => { if (!document.hidden) void load() }
+    const timer = setInterval(load, 30000), wake = () => { void load() }
     document.addEventListener('visibilitychange', wake)
-    return () => { alive = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', wake) }
-  }, [enabled, host, transport, tokenPeriod, period, bucketPeriod, range, open, refresh])
+    nativeWindow?.document.addEventListener('visibilitychange', wake)
+    nativeWindow?.addEventListener('focus', wake)
+    return () => {
+      alive = false; controller.abort(); clearInterval(timer)
+      document.removeEventListener('visibilitychange', wake)
+      nativeWindow?.document.removeEventListener('visibilitychange', wake)
+      nativeWindow?.removeEventListener('focus', wake)
+    }
+  }, [enabled, host, transport, tokenPeriod, period, bucketPeriod, range, open, refresh, nativeWindow])
   react.useEffect(() => {
     if (!open) return
     const dismiss = event => { if (!root.current?.contains(event.target)) setOpen(false) }

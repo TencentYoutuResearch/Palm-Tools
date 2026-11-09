@@ -40,7 +40,7 @@ test('worktree search lives inside the dropdown and preserves selection while fi
 })
 
 test('token island loads selected-host statistics, changes period, and never displays a previous host snapshot', async () => {
-  let enabled = true, meterPeriod = 'today'
+  let enabled = true, meterPeriod = 'today', poll
   let cursor = 0, host = 'local', activityState = { state: 'awaiting', label: '全局：2 个会话等待操作' }
   const state = [], effects = [], requests = [], listeners = new Map()
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
@@ -54,10 +54,11 @@ test('token island loads selected-host statistics, changes period, and never dis
   } }
   const popups = []
   const scope = { kodeDesktop: { island: true, resizeIsland() {} }, window: { open() {
-    const popup = { closed: false, close() { this.closed = true }, screen: { availHeight: 1000 }, document: { createElement: () => ({}), head: { append() {} }, body: {} } }; popups.push(popup); return popup
+    const popupListeners = new Map(), windowListeners = new Map()
+    const popup = { listeners: popupListeners, addEventListener: (name, fn) => windowListeners.set(name, fn), removeEventListener: name => windowListeners.delete(name), closed: false, close() { this.closed = true }, screen: { availHeight: 1000 }, document: { hidden: false, addEventListener: (name, fn) => popupListeners.set(name, fn), removeEventListener: name => popupListeners.delete(name), createElement: () => ({}), head: { append() {} }, body: {} } }; popups.push(popup); return popup
   } }, react_dom: { createPortal: content => content }, react, context: { get: () => transport }, _deepseek_ai_dsh_client_ui_primitives: { IconChevronDownOutlineRegular: 'chevron', IconCloseOutlineRegular: 'close' },
     document: { querySelector: () => null, hidden: false, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
-    AbortController, setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, Intl }
+    AbortController, setTimeout, clearTimeout, setInterval: fn => { poll = fn; return 1 }, clearInterval() {}, Intl }
   const component = vm.runInNewContext(source + '\nkodeWorkbenchContext = context; KodeTokenIsland', scope)
   const render = () => { cursor = 0; const tree = component({ appearance: { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled, tokenPeriod: meterPeriod }) }, activity: { subscribe: () => () => {}, getSnapshot: () => activityState } }); effects.splice(0).forEach(fn => fn()); return tree }
   const settle = () => new Promise(resolve => setImmediate(resolve))
@@ -68,6 +69,7 @@ test('token island loads selected-host statistics, changes period, and never dis
   activityState = { state: 'ongoing', label: '全局：1 个会话正在运行' }; tree = render()
   assert.equal(find(tree, node => node.type === 'i').props['data-state'], 'ongoing')
   assert.equal(requests[0].selected, 'local'); assert.ok(requests[0].options.signal)
+  scope.document.hidden = true // The native island stays visible when the owner is backgrounded.
   for (const selectedPeriod of ['month', 'all', 'today']) {
     meterPeriod = selectedPeriod; tree = render()
     assert.equal(find(tree, node => node.type === 'strong').children[0], '—', 'never relabel a stale total as a new period')
@@ -75,10 +77,25 @@ test('token island loads selected-host statistics, changes period, and never dis
     assert.ok(requests.at(-1).path.includes(`period=${selectedPeriod}`))
     assert.match(find(tree, node => node.props.className === 'kode-token-notch').props['aria-label'], new RegExp(({today:'今日',month:'本月',all:'全部'})[selectedPeriod]))
   }
+  let beforePoll = requests.length
+  poll(); await settle(); tree = render()
+  assert.ok(requests.length > beforePoll, 'visible native island keeps polling behind other apps')
+  popups[0].document.hidden = true; beforePoll = requests.length
+  poll(); await settle()
+  assert.equal(requests.length, beforePoll, 'hidden owner and panel pause history scans')
+  popups[0].document.hidden = false
+  popups[0].listeners.get('visibilitychange')(); await settle(); tree = render()
+  assert.ok(requests.length > beforePoll, 'native visibility resumes reads without foregrounding the owner')
   find(tree, node => node.props.className === 'kode-token-notch').props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(find(tree, node => node.props['aria-label'] === 'Token 用量'))
   find(tree, node => node.type === 'button' && node.children.includes('本月')).props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(requests.some(row => row.path.includes('period=month')))
+  for (const label of ['全部', '今天']) {
+    find(tree, node => node.type === 'button' && node.children.includes(label)).props.onClick()
+    tree = render(); await settle(); tree = render()
+    assert.equal(find(tree, node => node.props.role === 'status' && node.children.includes('正在读取 CLI 历史…')), undefined)
+    assert.ok(find(tree, node => node.props.className === 'kode-token-totals'), 'background period changes render the loaded totals')
+  }
   const begin = () => find(tree, node => node.props['aria-label'] === '开始时间')
   const end = () => find(tree, node => node.props['aria-label'] === '结束时间')
   assert.ok(begin().props.value); assert.ok(end().props.value)
@@ -104,7 +121,8 @@ test('token island loads selected-host statistics, changes period, and never dis
   const stoppedRequests = requests.length
   render(); await settle(); assert.equal(requests.length, stoppedRequests)
   assert.equal(listeners.has('visibilitychange'), false)
-  enabled = true; tree = render(); await settle(); tree = render()
+  assert.equal(popups[0].listeners.size, 0)
+  enabled = true; tree = render(); await settle(); tree = render(); await settle(); tree = render()
   assert.ok(requests.length > stoppedRequests)
   assert.equal(popups.length, 2); assert.equal(popups[1].closed, false)
   for (const value of state) value?.cleanup?.()
