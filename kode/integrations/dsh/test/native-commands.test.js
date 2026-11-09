@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -95,4 +95,26 @@ test('Codex goal controls use native state and preserve usage on pause/resume',a
   assert.equal(writes[1].params.objective,undefined);assert.equal(writes[3].params.objective,undefined)
   await assert.rejects(session.goal('x'.repeat(4001)),/4000/)
  }finally{await session.close();await rm(root,{recursive:true,force:true})}
+})
+
+test('Codex duplicate skill installations produce one typed input while different instructions remain ambiguous', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-codex-skill-copies-')), log = join(root, 'wire.jsonl')
+  const paths = [join(root, 'original.md'), join(root, 'copy.md')]
+  await Promise.all(paths.map(path => writeFile(path, 'Workspace skill instructions')))
+  const skills = paths.map(path => ({ name: 'fixture-skill', path, enabled: true }))
+  const session = new CodexSession({ executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))], env: { KODE_FIXTURE_RPC_LOG: log, KODE_FIXTURE_SKILLS: JSON.stringify(skills) } }, root)
+  try {
+    await session.open({}, [], AbortSignal.timeout(5000))
+    assert.equal((await session.listSkills()).skills.length, 1)
+    await collect(session.turn([{ type: 'text', text: 'Use $fixture-skill' }], { skillNames: ['fixture-skill'], signal: AbortSignal.timeout(5000) }))
+    await collect(session.turn([{ type: 'text', text: '/fixture-skill inspect' }], { command: { name: 'fixture-skill', input: 'inspect' }, signal: AbortSignal.timeout(5000) }))
+    const turns = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse).filter(row => row.method === 'turn/start')
+    assert.equal(turns.length, 2)
+    for (const turn of turns) assert.deepEqual(turn.params.input.at(-1), { type: 'skill', name: 'fixture-skill', path: paths[0] })
+    await writeFile(paths[1], 'Different workspace instructions')
+    assert.equal((await session.listSkills()).skills.length, 2)
+    await assert.rejects(collect(session.turn([{ type: 'text', text: 'Use skill' }], { skillNames: ['fixture-skill'], signal: AbortSignal.timeout(5000) })), /内容不同/)
+    const after = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse).filter(row => row.method === 'turn/start')
+    assert.equal(after.length, 2)
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
 })

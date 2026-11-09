@@ -734,3 +734,19 @@ test('global activity uses project priority across Hosts and updates without mou
  c.ctx.sessions.list.getSnapshot=()=>({byId:{live:{completed:true}}})
  sourceComponent();assert.equal(c.ctx.kodeActivity.getSnapshot().state,'done')
 })
+
+test('interface settings toggle the device service directly and report save failures', () => {
+ let enabled = true, error = '', received
+ const service = { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled }), update(value) { received = value; enabled = value.tokenIsland } }
+ const scope = { avatarContext: { get: name => name === 'kodeInterface' ? service : undefined },
+   React: { Fragment: 'fragment', useMemo: fn => fn(), useCallback: fn => fn }, useSyncExternalStore: (_subscribe, get) => get(),
+   useState: () => [error, value => { error = value }], Failure: 'failure', h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
+ const component = vm.runInNewContext(source.slice(source.indexOf('  function InterfaceSettingsBody('), source.indexOf('  function NotificationSettingsBody(')) + '\nInterfaceSettingsBody', scope)
+ let tree = component(), toggle = findNode(tree, node => node.props.role === 'switch')
+ assert.equal(toggle.props.checked, true); assert.equal(toggle.props.disabled, false)
+ toggle.props.onChange({ target: { checked: false } }); assert.equal(received.tokenIsland, false)
+ tree = component(); assert.equal(findNode(tree, node => node.props.role === 'switch').props.checked, false)
+ service.update = () => { throw new Error('storage denied') }
+ findNode(tree, node => node.props.role === 'switch').props.onChange({ target: { checked: true } })
+ assert.match(error, /无法保存/); assert.equal(enabled, false)
+})

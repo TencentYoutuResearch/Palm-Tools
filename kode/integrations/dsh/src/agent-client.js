@@ -723,6 +723,21 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           h('p', { className: 'kode-config-note' }, '目标 Agent 会收到一份新的文字上下文，不会修改当前会话。'), h(Failure, { text: error }))))
   }
 
+  function InterfaceSettingsBody() {
+    const service = avatarContext?.get('kodeInterface')
+    const empty = React.useMemo(() => ({ tokenIsland: true }), [])
+    const subscribe = React.useCallback(fn => service?.subscribe(fn) ?? (() => {}), [service])
+    const snapshot = useSyncExternalStore(subscribe, () => service?.getSnapshot() ?? empty)
+    const [error, setError] = useState('')
+    return h(React.Fragment, null,
+      h('h3', null, '界面'),
+      h('label', { className: 'kode-integration-row' },
+        h('span', null, h('strong', null, '显示 Token 刘海'), h('span', { className: 'kode-config-note' }, '显示 Token 用量与全局会话状态；关闭后立即隐藏，设置保存在当前设备。')),
+        h('input', { type: 'checkbox', role: 'switch', checked: snapshot.tokenIsland, disabled: !service, onChange: event => {
+          setError(''); try { service.update({ tokenIsland: event.target.checked }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
+        } })),
+      h(Failure, { text: error }))
+  }
   function NotificationSettingsBody() {
     const service = avatarContext?.get('kodeNotifications')
     const subscribe = React.useCallback(fn => service?.subscribe(fn) ?? (() => {}), [service])
@@ -742,7 +757,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('p', { className: 'kode-config-note' }, '通知偏好保存在当前设备。已连接过的 SSH 主机会继续在后台提供提醒。'),
       h(Failure, { text: error }))
   }
-  const settingsSections = [['agents', 'Agent'], ['integrations', '插件与集成'], ['notifications', '通知'], ['mobile', '手机与同步'], ['ssh', '主机与服务'], ['personalization', '头像与背景']]
+  const settingsSections = [['agents', 'Agent'], ['integrations', '插件与集成'], ['appearance', '界面'], ['notifications', '通知'], ['mobile', '手机与同步'], ['ssh', '主机与服务'], ['personalization', '头像与背景']]
   function KodeSettings({ sessions, slots, close }) {
     const { data: hosts, error } = useProjectHosts()
     const [agentHost, setAgentHost] = useState(() => (requestedSettingsSection === 'agents' ? requestedServiceHost : undefined) ?? transport?.current ?? 'local')
@@ -775,6 +790,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h(Failure, { text: error }),
         h(AgentSettingsBody, { key: agentHost, sessions, slots, settingsHost: agentHost })),
       integrations: () => h(IntegrationSettingsBody, { host: 'local', slots }),
+      appearance: () => h(InterfaceSettingsBody),
       notifications: () => h(NotificationSettingsBody),
       mobile: () => h(MobileSettingsBody, { host: 'local', slots }),
       ssh: () => h(SshSettings, { host: serviceHost, onBusyChange: setServiceBusy }),

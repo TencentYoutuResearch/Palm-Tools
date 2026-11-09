@@ -40,6 +40,7 @@ test('worktree search lives inside the dropdown and preserves selection while fi
 })
 
 test('token island loads selected-host statistics, changes period, and never displays a previous host snapshot', async () => {
+  let enabled = true
   let cursor = 0, host = 'local', activityState = { state: 'awaiting', label: '全局：2 个会话等待操作' }
   const state = [], effects = [], requests = [], listeners = new Map()
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
@@ -51,11 +52,14 @@ test('token island loads selected-host statistics, changes period, and never dis
     requests.push({ path, selected, options })
     return { ok: true, json: async () => ({ totals: { total_tokens: selected === 'local' ? 1200 : 9000 }, rows: [], daily: [] }) }
   } }
-  const scope = { react, context: { get: () => transport }, _deepseek_ai_dsh_client_ui_primitives: { IconChevronDownOutlineRegular: 'chevron', IconCloseOutlineRegular: 'close' },
-    document: { hidden: false, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
+  const popups = []
+  const scope = { kodeDesktop: { island: true, resizeIsland() {} }, window: { open() {
+    const popup = { closed: false, close() { this.closed = true }, screen: { availHeight: 1000 }, document: { createElement: () => ({}), head: { append() {} }, body: {} } }; popups.push(popup); return popup
+  } }, react_dom: { createPortal: content => content }, react, context: { get: () => transport }, _deepseek_ai_dsh_client_ui_primitives: { IconChevronDownOutlineRegular: 'chevron', IconCloseOutlineRegular: 'close' },
+    document: { querySelector: () => null, hidden: false, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
     AbortController, setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, Intl }
   const component = vm.runInNewContext(source + '\nkodeWorkbenchContext = context; KodeTokenIsland', scope)
-  const render = () => { cursor = 0; const tree = component({ activity: { subscribe: () => () => {}, getSnapshot: () => activityState } }); effects.splice(0).forEach(fn => fn()); return tree }
+  const render = () => { cursor = 0; const tree = component({ appearance: { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled }) }, activity: { subscribe: () => () => {}, getSnapshot: () => activityState } }); effects.splice(0).forEach(fn => fn()); return tree }
   const settle = () => new Promise(resolve => setImmediate(resolve))
   const find = (node, predicate) => node && typeof node === 'object' ? predicate(node) ? node : (node.children ?? []).map(child => find(child, predicate)).find(Boolean) : undefined
   let tree = render(); await settle(); tree = render()
@@ -87,6 +91,15 @@ test('token island loads selected-host statistics, changes period, and never dis
   assert.equal(requests.at(-1).selected, host)
   tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); tree = render()
   assert.equal(find(tree, node => node.props['aria-label'] === 'Token 用量').props['aria-hidden'], true)
+  assert.equal(popups.length, 1); assert.equal(popups[0].closed, false)
+  enabled = false; assert.equal(render(), null); await settle()
+  assert.equal(popups[0].closed, true)
+  const stoppedRequests = requests.length
+  render(); await settle(); assert.equal(requests.length, stoppedRequests)
+  assert.equal(listeners.has('visibilitychange'), false)
+  enabled = true; tree = render(); await settle(); tree = render()
+  assert.ok(requests.length > stoppedRequests)
+  assert.equal(popups.length, 2); assert.equal(popups[1].closed, false)
   for (const value of state) value?.cleanup?.()
 })
 

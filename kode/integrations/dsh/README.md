@@ -642,7 +642,7 @@ Human `!command` input runs through the selected Host's existing dsh shell in th
 
 The existing slash menu contains session-scoped native capabilities, including Claude and CodeBuddy commands/skills received after ACP setup. Namespaced commands also have a hyphenated menu alias because the pinned registry does not accept colons; dispatch retains the native name. `/help`, `/status`, `/model`, `/mode`, and `/shell` are session utilities. Codex additionally maps `/compact`, `/review`, `/mcp`, and `/skills` to app-server methods. Commands requiring a CLI window, login, or a different conversation identity are rejected explicitly. Native control commands never fall through to an ordinary model prompt.
 
-Codex `$skill` completion reads `skills/list` for the current profile and workspace. Selection preserves existing draft references; matching explicit references become native skill inputs containing the discovered name and path. Claude and CodeBuddy skills remain native slash commands. Unique advertised display names and case variants resolve to canonical model IDs; unknown or ambiguous names are rejected.
+Codex `$skill` completion reads `skills/list` for the current profile and workspace. Selection preserves existing draft references; matching explicit references become native skill inputs containing the discovered name and path. Identical same-name skill copies are collapsed at catalog load, retaining the first advertised path; different-content copies remain ambiguous. Contents are re-read on every reload, so updates cannot reuse stale fingerprints. Claude and CodeBuddy skills remain native slash commands. Unique advertised display names and case variants resolve to canonical model IDs; unknown or ambiguous names are rejected.
 
 Saved native tabs can be pinned, renamed, archived, and restored through canonical Kode metadata even if their Agent configuration or adapter is gone. These actions allocate no Agent, import no transcript, and never rewrite CLI logs. Archive state stays in the workspace document; the session index retains the identity a future import would use. Kode's catalog respects that archive state too.
 
@@ -812,7 +812,7 @@ services. Regression tests exercise official and Kode factories side by side.
 
 ### Kode 设置
 
-全局设置中只新增一个 **Kode** 入口。页内导航可直达 Agent、集成、通知、手机与同步、主机与服务、头像与背景；其他插件继续使用各自的设置入口。
+全局设置中只新增一个 **Kode** 入口。页内导航可直达 Agent、集成、界面、通知、手机与同步、主机与服务、头像与背景；其他插件继续使用各自的设置入口。
 
 前四个分区共享“配置主机”选择，修改配置不会切换当前工作区。头像与背景应用到当前打开的会话。会话中的 Agent 配置、主机管理和服务恢复快捷入口会打开 Kode 页内对应分区；dsh 模型设置仍打开原有模型页面。
 
@@ -992,6 +992,8 @@ Electron runtime produced by `prepare-desktop-notifications.sh`; set
 retains that application identity. Older cached generic Electron launches migrate
 to their matching, signature-verified development runtime before starting the Host;
 original launch arguments are preserved and identified runtimes never relaunch again.
+
+**Kode → 界面 → 显示 Token 刘海** controls both the native menu-bar panel and the in-app fallback. This device-local preference takes effect immediately and survives restart. Disabling it also stops token polling; enabling it reopens the collapsed panel.
 
 The token panel follows the DSH window's display and is hidden when DSH leaves
 the foreground or the window is hidden/minimized. Plain menu bars use their own

@@ -338,7 +338,7 @@ export class AgentRuntimeAdapter {
       const { skills } = await runtime.listSkills(signal)
       for (const name of new Set(names)) {
         const matches = skills.filter(skill => skill.name === name)
-        if (matches.length > 1) throw new Error(`技能 ${name} 对应多个路径。`)
+        if (matches.length > 1) throw new Error(`技能 ${name} 存在内容不同的同名副本，请先处理重复安装。`)
         if (matches.length === 1) input.push({ type: 'skill', name, path: matches[0].path })
       }
     }

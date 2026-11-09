@@ -1502,6 +1502,43 @@ function showConnectionProgress(label, document2 = globalThis.document) {
   };
 }
 
+// packages/transport/interface.js
+function installInterfacePreferences(ctx, env = globalThis) {
+  const key = "kode.interface.v1", listeners = /* @__PURE__ */ new Set();
+  const read = () => {
+    try {
+      return JSON.parse(env.localStorage?.getItem(key) ?? "{}").tokenIsland !== false;
+    } catch {
+      return true;
+    }
+  };
+  let snapshot2 = { tokenIsland: read() };
+  const publish = (enabled) => {
+    if (snapshot2.tokenIsland === enabled) return;
+    snapshot2 = { tokenIsland: enabled };
+    for (const listener of listeners) listener();
+  };
+  const service = {
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSnapshot: () => snapshot2,
+    update({ tokenIsland }) {
+      if (typeof tokenIsland !== "boolean") throw new Error("\u65E0\u6548\u7684\u5218\u6D77\u663E\u793A\u8BBE\u7F6E\u3002");
+      env.localStorage?.setItem(key, JSON.stringify({ tokenIsland }));
+      publish(tokenIsland);
+    }
+  };
+  const changed = (event) => {
+    if (event.key === key || event.key === null) publish(read());
+  };
+  env.window?.addEventListener("storage", changed);
+  ctx.effect(() => () => env.window?.removeEventListener("storage", changed), "kode.interface-preferences");
+  ctx.provide("kodeInterface", service);
+  return service;
+}
+
 // packages/transport/notifications.js
 function installSessionNotifications(ctx, transport, env = globalThis) {
   const storageKey = "kode.session-notifications.v1", listeners = /* @__PURE__ */ new Set(), streams = /* @__PURE__ */ new Map(), shown = /* @__PURE__ */ new Map(), seen = /* @__PURE__ */ new Set();
@@ -1672,6 +1709,7 @@ async function openSessionTarget(ctx, target, signal) {
 // packages/transport/client-source.js
 var inject = [];
 async function apply(ctx) {
+  installInterfacePreferences(ctx);
   const startup = new AbortController();
   ctx.effect(() => () => startup.abort(new Error("Host transport unloaded")), "kode.transport-startup");
   await waitForSessionService(fetch, startup.signal);

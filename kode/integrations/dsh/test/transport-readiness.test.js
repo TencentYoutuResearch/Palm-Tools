@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import{waitForSessionService}from'../packages/transport/readiness.js'
 import{readFile}from'node:fs/promises'
 import vm from'node:vm'
+import { installInterfacePreferences } from '../packages/transport/interface.js'
 const clientSource=await readFile(new URL('../packages/transport/client-source.js',import.meta.url),'utf8')
 test('session subscription waits for the Host read endpoint without replaying any mutation',async()=>{
  const calls=[],statuses=[404,503,200]
@@ -23,7 +24,7 @@ for (const [page, carrier, expected] of [
  class Socket { constructor(url) { this.url = new URL(url) } }
  let installed
  const ctx = {
-  AbortController, URL, waitForSessionService, installSessionNotifications() {},
+  AbortController, URL, waitForSessionService, installInterfacePreferences, installSessionNotifications() {},
   __DSH_TRANSPORT__: carrier,
   window: { location: new URL(page) }, WebSocket: Socket,
   fetch: async () => ({status:200, ok:true}),

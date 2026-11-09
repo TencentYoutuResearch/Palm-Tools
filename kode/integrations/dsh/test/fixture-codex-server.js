@@ -50,7 +50,7 @@ async function receive(message) {
     notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } }); return
   }
   if (method === 'turn/interrupt') { result(id, {}); return }
-  if (method === 'skills/list') return result(id,{data:[{cwd:params.cwds[0],skills:[{name:'fixture-skill',description:'Example workspace skill',path:params.cwds[0]+'/.agents/skills/fixture-skill/SKILL.md',enabled:true}],errors:[]}]})
+  if (method === 'skills/list') return result(id,{data:[{cwd:params.cwds[0],skills:process.env.KODE_FIXTURE_SKILLS ? JSON.parse(process.env.KODE_FIXTURE_SKILLS) : [{name:'fixture-skill',description:'Example workspace skill',path:params.cwds[0]+'/.agents/skills/fixture-skill/SKILL.md',enabled:true}],errors:[]}]})
   if (method === 'mcpServerStatus/list') return result(id,{data:[{name:'fixture-mcp',authStatus:'notLoggedIn',tools:{example:{}}}],nextCursor:null})
   if (method === 'thread/compact/start') {
     const turnId='compact-'+ ++turn,threadId=params.threadId

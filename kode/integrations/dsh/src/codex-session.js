@@ -1,4 +1,5 @@
 /** One persistent Codex app-server connection per dsh Session and profile snapshot. */
+import { deduplicateSkillCopies } from './codex-skills.js'
 import { RpcProcess } from './rpc-process.js'
 import { createToolProxy } from './tool-proxy.js'
 import { randomUUID } from 'node:crypto'
@@ -138,7 +139,7 @@ export class CodexSession {
     await this.initialize(signal)
     const response = await this.rpc.request('skills/list', { cwds: [this.cwd], forceReload: true }, { signal })
     const errors = response.data.flatMap(group => group.errors ?? [])
-    const skills = response.data.flatMap(group => group.skills ?? []).filter(skill => skill.enabled !== false && typeof skill.path === 'string')
+    const skills = await deduplicateSkillCopies(response.data.flatMap(group => group.skills ?? []).filter(skill => skill.enabled !== false && typeof skill.path === 'string'))
     return { skills, errors }
   }
   hasContinuation() { return !this.rpc?.closed && this.pendingEvents.some(event => event.method === 'turn/started') }
@@ -190,7 +191,7 @@ export class CodexSession {
         const skills = discoveredSkills ?? (await this.listSkills(signal)).skills
         for (const name of new Set(skillNames)) {
           const matches = skills.filter(skill => skill.name === name)
-          if (matches.length > 1) throw new Error(`技能 ${name} 对应多个路径，请先处理同名技能。`)
+          if (matches.length > 1) throw new Error(`技能 ${name} 存在内容不同的同名副本，请先处理重复安装。`)
           if (matches.length === 1) input = [...input, { type: 'skill', name, path: matches[0].path }]
         }
       }

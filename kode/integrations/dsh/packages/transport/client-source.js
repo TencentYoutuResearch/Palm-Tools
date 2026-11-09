@@ -2,10 +2,12 @@ import { installConnection } from '@deepseek-ai/dsh-client-connection/client'
 import { waitForSessionService } from './readiness.js'
 import { fetchWithLocalAppearance } from './preferences.js'
 import { showConnectionProgress } from './connection-progress.js'
+import { installInterfacePreferences } from './interface.js'
 import { installSessionNotifications } from './notifications.js'
 import { openSessionTarget } from './navigation.js'
 export const inject = []
 export async function apply(ctx) {
+  installInterfacePreferences(ctx)
   const startup=new AbortController()
   ctx.effect(()=>()=>startup.abort(new Error('Host transport unloaded')),'kode.transport-startup')
   await waitForSessionService(fetch,startup.signal)

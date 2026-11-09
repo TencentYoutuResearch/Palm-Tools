@@ -1,5 +1,6 @@
 /** Workbench status: one application-wide token island; jobs beside the composer.
  * The native job component retains its subscriptions, locale, output and kill UI. */
+const defaultIslandAppearance = { tokenIsland: true }
 const idleIslandActivity = { state: 'idle', label: '全局：所有会话空闲' }
 let kodeWorkbenchContext
 
@@ -118,9 +119,10 @@ function usageDefaultStart(snapshot, period, end) {
   if (period === 'month') start.setDate(1)
   return period === 'all' ? end : start.getTime()
 }
-function KodeTokenIsland({ activity } = {}) {
+function KodeTokenIsland({ activity, appearance } = {}) {
   const h = react.createElement, { IconChevronDownOutlineRegular, IconCloseOutlineRegular } = _deepseek_ai_dsh_client_ui_primitives
   const ctx = kodeWorkbenchContext, transport = ctx?.get('kodeTransport')
+  const enabled = react.useSyncExternalStore(appearance?.subscribe ?? (() => () => {}), appearance?.getSnapshot ?? (() => defaultIslandAppearance)).tokenIsland
   const status = react.useSyncExternalStore(activity?.subscribe ?? (() => () => {}), activity?.getSnapshot ?? (() => idleIslandActivity))
   const host = react.useSyncExternalStore(react.useCallback(fn => transport?.subscribe(fn) ?? (() => {}), [transport]), () => transport?.current ?? 'local')
   const [open, setOpen] = react.useState(false), [present, setPresent] = react.useState(false), [period, setPeriod] = react.useState('today')
@@ -130,6 +132,7 @@ function KodeTokenIsland({ activity } = {}) {
   const [rangeInputs, setRangeInputs] = react.useState({ start: null, end: null }), [range, setRange] = react.useState(null)
   const [nativeWindow, setNativeWindow] = react.useState(null)
   react.useEffect(() => {
+    if (!enabled) { setNativeWindow(null); setOpen(false); setPresent(false); return }
     if (!globalThis.kodeDesktop?.island) return
     const popup = window.open('about:blank', 'kode-token-island', 'popup,width=240,height=28')
     if (!popup) return
@@ -141,10 +144,10 @@ function KodeTokenIsland({ activity } = {}) {
       setNativeWindow(popup)
     } catch { popup.close(); return }
     return () => popup.close()
-  }, [])
+  }, [enabled])
   react.useEffect(() => {
-    if (nativeWindow) globalThis.kodeDesktop?.resizeIsland({ width: open ? 640 : 240, height: open ? Math.min(820, nativeWindow.screen.availHeight - 32) : 28 })
-  }, [nativeWindow, open])
+    if (enabled && nativeWindow) globalThis.kodeDesktop?.resizeIsland({ width: open ? 640 : 240, height: open ? Math.min(820, nativeWindow.screen.availHeight - 32) : 28 })
+  }, [enabled, nativeWindow, open])
   const bucketPeriod = usagePeriod(period, range?.since, range?.until)
   const current = result?.host === host ? result : null
   react.useEffect(() => {
@@ -153,6 +156,7 @@ function KodeTokenIsland({ activity } = {}) {
     return () => clearTimeout(timer)
   }, [open])
   react.useEffect(() => {
+    if (!enabled) return
     let alive = true, pending = false
     const controller = new AbortController()
     const load = async () => {
@@ -177,7 +181,7 @@ function KodeTokenIsland({ activity } = {}) {
     const timer = setInterval(load, 30000), wake = () => { if (!document.hidden) void load() }
     document.addEventListener('visibilitychange', wake)
     return () => { alive = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', wake) }
-  }, [host, transport, period, bucketPeriod, range, open, refresh])
+  }, [enabled, host, transport, period, bucketPeriod, range, open, refresh])
   react.useEffect(() => {
     if (!open) return
     const dismiss = event => { if (!root.current?.contains(event.target)) setOpen(false) }
@@ -244,12 +248,12 @@ function KodeTokenIsland({ activity } = {}) {
           h('tbody', null, ...rows.map((row, index) => h('tr', { key: row.key }, h('th', { scope: 'row' }, h('span', null, row.key)), ...['input_tokens', 'output_tokens', 'total_tokens'].map(key => h('td', { key, title: exact(row[key]) }, usageNumber(row[key])))))))),
         h('p', { className: 'kode-token-model-note' }, '图表、活跃度与明细使用同一筛选 · 悬停查看完整 token 数')),
       h('footer', null, '每 30 秒更新 · CLI 历史统计，不等同于当前对话上下文占用')))
-  return nativeWindow ? react_dom.createPortal(content, nativeWindow.document.body) : content
+  return !enabled ? null : nativeWindow ? react_dom.createPortal(content, nativeWindow.document.body) : content
 }
 function installWorkbenchUi(ctx) {
   kodeWorkbenchContext = ctx
   relocateWorkbenchJobs(ctx)
-  ctx.inject(['kodeActivity'], scope => scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'kode-token-island', order: 10, inject: () => ({ activity: scope.get('kodeActivity') }) }, KodeTokenIsland)))
+  ctx.inject(['kodeActivity', 'kodeInterface'], scope => scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'kode-token-island', order: 10, inject: () => ({ activity: scope.get('kodeActivity'), appearance: scope.get('kodeInterface') }) }, KodeTokenIsland)))
   ctx.effect(() => {
     const style = document.createElement('style')
     style.dataset.kodeWorkbench = ''
