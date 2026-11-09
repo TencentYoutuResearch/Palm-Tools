@@ -137,6 +137,11 @@ export function reconcileSharedSessionTabs(tabs: TabInfo[], incoming: TabInfo[],
   return next
 }
 
+/** Exited tabs stay visible for this run only; restoring them would resume a session the user ended. */
+export function persistableTabs(tabs: TabInfo[]): PersistedTab[] {
+  return tabs.filter(tab => tab.exited == null && tab.status !== 'exited').map(sessionTabToPersisted)
+}
+
 export function sessionTabToPersisted(tab: TabInfo): PersistedTab {
   return {
     backend_key: tab.backendKey,

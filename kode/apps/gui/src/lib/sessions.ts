@@ -21,7 +21,7 @@ import {
 } from './app_events'
 import { pushToast } from './toast'
 import { currentTermTheme } from './terminal_settings'
-import { SessionMetadataBuffer, upsertSessionTab, sessionTabToPersisted, reconcileSharedSessionTabs } from './session_metadata'
+import { SessionMetadataBuffer, upsertSessionTab, persistableTabs, reconcileSharedSessionTabs } from './session_metadata'
 
 export interface TabInfo {
   sharedRuntime?: boolean
@@ -291,7 +291,7 @@ export async function startEventSubscriptions() {
       detail: exitTitle,
       source: tab?.backendKey,
     })
-    // Keep failed resumes inspectable instead of making their history vanish.
+    // Keep failed resumes inspectable for this run; persistableTabs drops them on restart.
     if (m.code !== 0) {
       tabs.update((arr) => arr.map((t) => t.id === m.id ? { ...t, exited: m.code, status: 'exited' } : t))
       schedulePersist()
@@ -473,7 +473,7 @@ export function schedulePersist() {
   if (persistTimer) clearTimeout(persistTimer)
   persistTimer = setTimeout(() => {
     persistTimer = null
-    const liveTabs = get(tabs).map(sessionTabToPersisted)
+    const liveTabs = persistableTabs(get(tabs))
     // 合并 restore 失败 tab:它们不在 $tabs 里(没 spawn 成功),但 state.json 必须保留
     // 才能下次启动重试。按 session_id 去重(live 优先)。
     const liveSids = new Set(liveTabs.map((t) => t.session_id?.trim()).filter(Boolean) as string[])

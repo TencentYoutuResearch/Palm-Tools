@@ -5,6 +5,7 @@ import {
   MAX_PENDING_SESSION_METADATA,
   SessionMetadataBuffer,
   sessionTabToPersisted,
+  persistableTabs,
   upsertSessionTab,
   reconcileSharedSessionTabs,
 } from '../src/lib/session_metadata.ts'
@@ -46,6 +47,15 @@ test('saved shared tab keeps the dsh identity separate from its native CLI threa
   assert.equal(saved.session_id, 'native-thread')
   assert.equal(saved.transport_kind, 'runtime')
   assert.equal(sessionTabToPersisted(tab()).dsh_session_id, undefined)
+})
+
+test('exited tabs are not persisted for restore', () => {
+  const saved = persistableTabs([
+    tab({ id: 1, sessionId: uuid }),
+    tab({ id: 2, sessionId: nextUuid, exited: 1, status: 'exited' }),
+    tab({ id: 3, sessionId: 'remote-ended', status: 'exited' }),
+  ])
+  assert.deepEqual(saved.map(row => row.session_id), [uuid])
 })
 
 test('tclaude actual response model replaces auto before and after stale spawn DTO', () => {
