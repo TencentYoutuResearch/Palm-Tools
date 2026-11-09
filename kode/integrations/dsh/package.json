@@ -20,6 +20,7 @@
     "packages",
     "scripts/build-remote.js",
     "scripts/build-bundle.js",
+    "scripts/prepare-desktop-notifications.sh",
     "scripts/audit-history.js",
     "scripts/repair-inbox-history.js",
     "scripts/repair-inbox-history.py",
