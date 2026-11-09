@@ -740,3 +740,25 @@ test('native admission waits for delayed factory initialization without creating
     await restored.dispose()
   } finally { release.resolve(); await h.ctx.fiber.dispose() }
 })
+
+test('native completion reaches the root notification carrier only after its durable turn settles', async () => {
+  const { registerSessionNotifications } = await import('../src/session-notifications.js')
+  const { EventEmitter } = await import('node:events')
+  const h = await host({ async *stream() { yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} }, true)
+  let route
+  h.ctx.provide('webServer', { register(value) { route = value; return () => {} } })
+  h.ctx.provide('connection', { admit: () => ({ peer: { principal: { kind: 'owner' } } }) })
+  const dispose = registerSessionNotifications(h.ctx)
+  const chunks = [], res = new EventEmitter()
+  res.writeHead = () => {}; res.write = value => { chunks.push(value); return true }; res.end = () => res.emit('close')
+  route.handler({ method: 'GET', headers: {} }, res)
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, sessionId: 'native-completion-notification' })
+    agent.followup(message('work', 'Complete a fixture task')); await agent.whenIdle()
+    const notices = chunks.flatMap(chunk => chunk.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6))))
+    assert.equal(notices.length, 1)
+    assert.equal(notices[0].kind, 'completed')
+    assert.equal(notices[0].sessionId, agent.id)
+    assert.equal(h.stored.get(agent.id).events.at(-1).data.reason.kind, 'completed')
+  } finally { dispose(); await h.ctx.fiber.dispose() }
+})

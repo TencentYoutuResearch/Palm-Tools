@@ -23,7 +23,7 @@ for (const [page, carrier, expected] of [
  class Socket { constructor(url) { this.url = new URL(url) } }
  let installed
  const ctx = {
-  AbortController, URL, waitForSessionService,
+  AbortController, URL, waitForSessionService, installSessionNotifications() {},
   __DSH_TRANSPORT__: carrier,
   window: { location: new URL(page) }, WebSocket: Socket,
   fetch: async () => ({status:200, ok:true}),

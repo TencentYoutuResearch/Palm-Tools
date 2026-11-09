@@ -812,7 +812,7 @@ services. Regression tests exercise official and Kode factories side by side.
 
 ### Kode 设置
 
-全局设置中只新增一个 **Kode** 入口。页内导航可直达 Agent、集成、手机与同步、主机与服务、头像与背景；其他插件继续使用各自的设置入口。
+全局设置中只新增一个 **Kode** 入口。页内导航可直达 Agent、集成、通知、手机与同步、主机与服务、头像与背景；其他插件继续使用各自的设置入口。
 
 前四个分区共享“配置主机”选择，修改配置不会切换当前工作区。头像与背景应用到当前打开的会话。会话中的 Agent 配置、主机管理和服务恢复快捷入口会打开 Kode 页内对应分区；dsh 模型设置仍打开原有模型页面。
 
@@ -961,3 +961,13 @@ On DSH 0.2.2, cold-history inspection uses `sessionQuery.observeSession` when th
 **Kode → 插件与集成 → 重启后自动续接** is enabled by default and persisted per execution Host. An execution-intent journal records running sessions; on the next Host boot, cold log inspection admits only restart-interrupted turns. Normal completion, explicit stop, archived history and already active sessions are excluded. Recovery retains the same conversation and recorded Agent/model/permissions, consumes existing queued input without duplication, and otherwise submits a continuation reminder. Permission prompts still require the configured approval flow. Old idle history is never treated as interrupted work. On the first upgrade boot without an intent journal, only restart evidence from the preceding two minutes is admitted. Already materialized idle tabs remain eligible; crash-boundary repair retains an ignorable restart-evidence marker so it is distinct from a user interruption.
 
 The token island scopes today to 00:00–now (hourly buckets), month to the first day–now (daily), and all to the earliest history–now (monthly). Switch between Agent/model and toggle multiple colored legend controls; totals, stacked bars, activity cells and the grouped detail table share the selection. An older remote service shows an update notice rather than an invented breakdown.
+
+
+### 会话完成与等待操作通知
+
+在 **Kode → 通知** 中允许系统通知，并分别控制“会话完成”和“等待操作”。偏好保存在当前设备；Desktop 使用系统通知，Web 版本需要浏览器支持并授权。
+
+- 原生 dsh 的侧边栏状态提示继续保留。Kode 补充系统通知：本轮成功结束且队列为空时通知；提问、计划确认或审批等待超过 250ms 时通知。取消、主动停止、异常退出和子 Agent 的内部完成不会误报成功。
+- 正在前台查看的会话不弹通知。通知只显示会话名称，不包含问题正文、命令参数或回答；点击后返回对应主机和会话。问题解决后撤回等待提醒。
+- 本地及本次打开过的 SSH 主机保持独立通知连接。远端也需安装本版本插件；尚未连接的主机不会为通知而自动启动。首次连接不补发过去的完成通知，短暂断线按事件游标补齐并去重。
+- 若系统权限被拒绝，请到浏览器或 macOS 通知设置中允许 DeepSeek Harness；设置页提供测试通知按钮。通知展示仍受系统专注模式和通知偏好控制。

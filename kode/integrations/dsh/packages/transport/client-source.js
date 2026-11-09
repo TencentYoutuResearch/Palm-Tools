@@ -2,6 +2,7 @@ import { installConnection } from '@deepseek-ai/dsh-client-connection/client'
 import { waitForSessionService } from './readiness.js'
 import { fetchWithLocalAppearance } from './preferences.js'
 import { showConnectionProgress } from './connection-progress.js'
+import { installSessionNotifications } from './notifications.js'
 import { openSessionTarget } from './navigation.js'
 export const inject = []
 export async function apply(ctx) {
@@ -89,5 +90,6 @@ export async function apply(ctx) {
     },
   }
   ctx.provide('kodeTransport', service)
+  installSessionNotifications(ctx, service)
   ctx.effect(() => () => { navigation?.abort(new Error('Host transport unplugged')); listeners.clear() }, 'kode.transport')
 }
