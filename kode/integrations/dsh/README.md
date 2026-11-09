@@ -989,7 +989,9 @@ and refuses packaged `.app/Contents` paths. It must be run from the installed
 plugin so the shell imports its stable path. Launch the signed development
 Electron runtime produced by `prepare-desktop-notifications.sh`; set
 `KODE_DESKTOP_EXECUTABLE` to its `Contents/MacOS/Electron` path so in-app restart
-retains that application identity.
+retains that application identity. Older cached generic Electron launches migrate
+to their matching, signature-verified development runtime before starting the Host;
+original launch arguments are preserved and identified runtimes never relaunch again.
 
 The token panel follows the DSH window's display and is hidden when DSH leaves
 the foreground or the window is hidden/minimized. Plain menu bars use their own

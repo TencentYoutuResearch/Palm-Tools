@@ -1,5 +1,14 @@
 /** Owned Desktop integration, loaded by the unpacked shell installer. */
+import { findDevelopmentRuntime } from './desktop-runtime.js'
 export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notification, shell }) {
+  const executable = process.platform === 'darwin' ? findDevelopmentRuntime(process.execPath) : null
+  if (executable) {
+    void app.whenReady().then(() => {
+      app.relaunch({ execPath: executable, args: process.argv.slice(1) })
+      app.exit(0)
+    })
+    return { windowOpen: () => null, childCreated() {} }
+  }
   const islands = new Map(), notices = new Map(), layouts = new WeakMap(), noticeOwners = new WeakSet()
   const owner = event => {
     const window = BrowserWindow.fromWebContents(event.sender)
