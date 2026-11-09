@@ -974,3 +974,26 @@ The token island scopes today to 00:00–now (hourly buckets), month to the firs
 
 
 macOS 使用 `electron app-directory` 开发启动时，npm 分发的 Electron 可能只有未封装的链接器签名，系统通知会返回 `UNErrorDomain 1`。开发启动器应先运行 `scripts/prepare-desktop-notifications.sh /path/to/Electron.app /path/to/cache`，使用其 stdout 返回的应用包内 `Contents/MacOS/Electron` 启动原有 app-directory。脚本保留原运行时，在独立缓存中复制，设置独立的 `com.deepseek.dsh.development` 标识和“DeepSeek Harness 开发版”名称，完整 ad-hoc 签名并注册到 Launch Services，按运行时内容复用，准备失败时阻止启动。正式签名的 Desktop 包使用原有发布流程。
+
+### Unpacked macOS Desktop development shell
+
+The owned native bridge supplies menu-bar token usage and native completion/wait
+notifications in the unpacked development shell:
+
+```sh
+node /path/to/installed/@kode/dsh/scripts/install-desktop-shell.js /path/to/unpacked-desktop
+```
+
+The installer validates the Desktop package, keeps `.before-kode-shell` backups,
+and refuses packaged `.app/Contents` paths. It must be run from the installed
+plugin so the shell imports its stable path. Launch the signed development
+Electron runtime produced by `prepare-desktop-notifications.sh`; set
+`KODE_DESKTOP_EXECUTABLE` to its `Contents/MacOS/Electron` path so in-app restart
+retains that application identity.
+
+The token panel follows the DSH window's display and is hidden when DSH leaves
+the foreground or the window is hidden/minimized. Plain menu bars use their own
+height; internal camera cutouts reserve space beside the camera. Browser and
+unmodified Desktop shells retain the in-app token island and browser notification
+carrier. Completion and wait notifications honor their settings even when the
+conversation is currently visible.

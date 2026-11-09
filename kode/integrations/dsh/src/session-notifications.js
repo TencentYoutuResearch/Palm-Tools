@@ -71,6 +71,7 @@ export function registerSessionNotifications(ctx, { waitMs = 250 } = {}) {
     if ('rejection' in admission || admission.peer.principal.kind !== 'owner') { res.writeHead(403); res.end(); return }
     if (req.method !== 'GET') { res.writeHead(405); res.end(); return }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' })
+    res.flushHeaders?.()
     streams.add(res)
     const last = recent.findIndex(item => item.id === req.headers['last-event-id'])
     const replay = last >= 0 ? recent.slice(last + 1) : [...pending.values()]

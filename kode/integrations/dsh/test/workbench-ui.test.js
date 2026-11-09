@@ -65,10 +65,19 @@ test('token island loads selected-host statistics, changes period, and never dis
   assert.ok(find(tree, node => node.props['aria-label'] === 'Token 用量'))
   find(tree, node => node.type === 'button' && node.children.includes('本月')).props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(requests.some(row => row.path.includes('period=month')))
-  find(tree, node => node.props.type === 'datetime-local').props.onChange({ target: { value: '2026-01-12T08:23' } }); tree = render()
-  find(tree, node => node.type === 'form' && node.props.className === 'kode-token-start').props.onSubmit({ preventDefault() {} }); tree = render(); await settle(); tree = render()
+  const begin = () => find(tree, node => node.props['aria-label'] === '开始时间')
+  const end = () => find(tree, node => node.props['aria-label'] === '结束时间')
+  assert.ok(begin().props.value); assert.ok(end().props.value)
+  assert.equal(find(tree, node => node.type === 'button' && node.children.includes('从此时至今')), undefined)
+  begin().props.onChange({ target: { value: '2026-01-12T08:23' } }); tree = render(); await settle(); tree = render()
   assert.ok(requests.at(-1).path.includes(`since_ms=${new Date('2026-01-12T08:23').getTime()}`))
-  assert.equal(find(tree, node => node.type === 'button' && node.children.includes('从此时至今')).props['aria-pressed'], true)
+  end().props.onChange({ target: { value: '2026-01-13T12:00' } }); tree = render(); await settle(); tree = render()
+  assert.ok(requests.at(-1).path.includes(`until_ms=${new Date('2026-01-13T12:00').getTime()}`))
+  assert.ok(requests.at(-1).path.includes('period=today'))
+  const requestCount = requests.length
+  begin().props.onChange({ target: { value: '2026-01-14T08:23' } }); tree = render(); await settle(); tree = render()
+  assert.equal(begin().props['aria-invalid'], true)
+  assert.equal(requests.length, requestCount)
   host = 'remote:fixture.example'; tree = render()
   assert.equal(find(tree, node => node.type === 'strong').children[0], '—')
   await settle(); tree = render(); assert.equal(find(tree, node => node.type === 'strong').children[0], '9K')
@@ -80,7 +89,7 @@ test('token island loads selected-host statistics, changes period, and never dis
 
 test('token island is registered once on the application overlay rather than inside each session', async () => {
   const seats = [], entries = []
-  const document = { createElement: () => ({ remove() {} }), head: { append() {} } }
+  const document = { createElement: () => ({ dataset: {}, remove() {} }), head: { append() {} } }
   const install = vm.runInNewContext(source + '\ninstallWorkbenchUi', { document })
   install({ effect: fn => fn(), slots: { inject: (seat, fn) => { seats.push(seat); if (seat === 'shell.overlay') fn() }, register: (options, component) => { entries.push({ options, component }); return () => {} } } })
   assert.deepEqual(seats, ['conversation.session.header.actions', 'shell.overlay'])

@@ -1512,17 +1512,12 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
   } catch {
   }
   const systemSettings = /Mac/i.test(env.navigator?.platform ?? "") && /Electron\//.test(env.navigator?.userAgent ?? "");
-  let snapshot2, deliveryError = false;
+  let snapshot2, deliveryError = false, lastEvent = null, connection = "connecting";
   const publish = () => {
-    snapshot2 = { ...preferences, permission: env.Notification?.permission ?? "unsupported", systemSettings, deliveryError };
+    snapshot2 = { ...preferences, permission: env.Notification?.permission ?? "unsupported", systemSettings, deliveryError, lastEvent, connection };
     for (const fn of listeners) fn();
   };
   publish();
-  const active = (host, id) => {
-    if (host !== transport.current || env.document.visibilityState !== "visible" || !env.document.hasFocus()) return false;
-    if (ctx.get("layout")?.panelInfo.getSnapshot().activePanelId) return false;
-    return (ctx.get("sessions")?.list.getSnapshot().byId[id]?.retainedBy?.mainView ?? 0) > 0;
-  };
   const close = (key) => {
     shown.get(key)?.close();
     shown.delete(key);
@@ -1538,10 +1533,24 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
     if (seen.has(id)) return;
     seen.add(id);
     if (seen.size > 512) seen.delete(seen.values().next().value);
-    if (env.Notification?.permission !== "granted" || !(event.kind === "completed" ? preferences.completed : preferences.waiting) || active(host, event.sessionId)) return;
+    lastEvent = { kind: event.kind, sessionId: event.sessionId, at: Date.now() };
+    publish();
+    if (!env.kodeDesktop?.notify && env.Notification?.permission !== "granted" || !(event.kind === "completed" ? preferences.completed : preferences.waiting)) return;
     const label = { completed: "\u672C\u8F6E\u5DF2\u5B8C\u6210", question: "\u7B49\u5F85\u4F60\u56DE\u7B54", approval: "\u7B49\u5F85\u4F60\u6279\u51C6" }[event.kind];
     let notification;
-    try {
+    if (env.kodeDesktop?.notify) {
+      notification = { close() {
+        void env.kodeDesktop.notify({ key, close: true }).catch(() => {
+        });
+      } };
+      void env.kodeDesktop.notify({ key, title: `${label} \xB7 Kode`, body: String(event.title ?? "\u672A\u547D\u540D\u4F1A\u8BDD").slice(0, 160) }).then((result) => {
+        deliveryError = result?.status === "failed";
+        publish();
+      }).catch(() => {
+        deliveryError = true;
+        publish();
+      });
+    } else try {
       notification = new env.Notification(`${label} \xB7 Kode`, { body: String(event.title ?? "\u672A\u547D\u540D\u4F1A\u8BDD").slice(0, 160), tag: key });
     } catch {
       deliveryError = true;
@@ -1580,10 +1589,21 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
     const host = transport.current;
     if (transport.getSnapshot().switching || streams.has(host) || !env.EventSource) return;
     const events = new env.EventSource(transport.path("/api/kode/notifications", host));
+    events.onopen = () => {
+      connection = "connected";
+      publish();
+    };
+    events.onerror = () => {
+      connection = "reconnecting";
+      publish();
+    };
     events.onmessage = (event) => {
       try {
         receive(host, JSON.parse(event.data));
-      } catch {
+      } catch (error) {
+        deliveryError = true;
+        publish();
+        ctx.logger?.warn?.("\u4F1A\u8BDD\u901A\u77E5\u5904\u7406\u5931\u8D25\uFF1A%s", error.message);
       }
     };
     streams.set(host, events);
@@ -1609,6 +1629,7 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
       if (systemSettings) await service.openSettings();
     },
     async openSettings() {
+      if (env.kodeDesktop?.openNotificationSettings) return env.kodeDesktop.openNotificationSettings();
       const response = await transport.fetch("/api/kode/notification-settings", { method: "POST" }, "local");
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -1616,12 +1637,14 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
       }
     }
   };
+  const stopNativeClicks = env.kodeDesktop?.onNotificationClick?.((key) => shown.get(key)?.onclick?.());
   connect();
   const unsubscribe = transport.subscribe(connect);
   const onFocus = () => publish();
   env.window.addEventListener("focus", onFocus);
   ctx.provide("kodeNotifications", service);
   ctx.effect(() => () => {
+    stopNativeClicks?.();
     unsubscribe();
     env.window.removeEventListener("focus", onFocus);
     for (const stream of streams.values()) stream.close();

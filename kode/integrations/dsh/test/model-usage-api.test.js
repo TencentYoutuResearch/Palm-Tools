@@ -23,7 +23,7 @@ test('concurrent usage requests share one scan and use the viewer calendar bound
   const paths = [], snapshot = { totals: { total_tokens: 12 }, rows: [], daily: [] }
   const api = fixture(async path => { paths.push(path); return snapshot })
   const [first, second] = await Promise.all([api.request('?period=month&timezone_offset_minutes=480'), api.request('?period=month&timezone_offset_minutes=480')])
-  assert.deepEqual(first.body, snapshot); assert.deepEqual(second.body, snapshot); assert.equal(paths.length, 1)
+  assert.deepEqual(first.body, { ...snapshot, until_ms: first.body.until_ms }); assert.deepEqual(second.body, first.body); assert.equal(paths.length, 1)
   assert.equal(first.headers['cache-control'], 'no-store')
   const url = new URL(paths[0], 'https://fixture.example'), since = Number(url.searchParams.get('since_ms')), calendar = new Date(since + 480 * 60000)
   assert.equal(calendar.getUTCDate(), 1); assert.equal(calendar.getUTCHours(), 0)
@@ -52,6 +52,10 @@ test('standalone server serves the real CLI collector through the authenticated 
   let child
   try {
     await mkdir(join(root, 'codex/sessions'), { recursive: true })
+    await writeFile(join(root, 'codex/sessions/rollout-range-fixture.jsonl'), [
+      { type: 'turn_context', payload: { model: 'fixture-model' } },
+      ...[10, 30, 60].map((total, index) => ({ timestamp: `2026-01-12T${String(9 + index).padStart(2, '0')}:00:00Z`, type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: total, output_tokens: 0, total_tokens: total } } } })),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
     await writeFile(join(root, 'admin.token'), token, { mode: 0o600 })
     await writeFile(join(root, 'config.json'), JSON.stringify({ node_id: 'usage-fixture', database: join(root, 'db.sqlite'), peers: [] }))
     const project = fileURLToPath(new URL('../../../', import.meta.url))
@@ -68,8 +72,16 @@ test('standalone server serves the real CLI collector through the authenticated 
     const api = fixture(path => backend.call(path))
     const response = await api.request('?period=today&timezone_offset_minutes=480')
     assert.equal(response.status, 200); assert.equal(response.body.period, 'today')
-    assert.equal(response.body.daily.length, 84); assert.equal(response.body.totals.total_tokens, 0)
+    assert.equal(response.body.daily.length, 1); assert.equal(response.body.totals.total_tokens, 0)
     assert.deepEqual(response.body.rows, [])
+    const since = Date.parse('2026-01-12T09:30:00Z'), until = Date.parse('2026-01-12T10:30:00Z')
+    const bounded = await api.request(`?period=today&since_ms=${since}&until_ms=${until}`)
+    assert.equal(bounded.status, 200)
+    assert.equal(bounded.body.until_ms, until)
+    assert.equal(bounded.body.totals.total_tokens, 20)
+    assert.equal(bounded.body.timeline.reduce((total, bucket) => total + bucket.rows.reduce((n, row) => n + row.total_tokens, 0), 0), 20)
+    assert.equal(bounded.body.daily.length, 1)
+    assert.equal(bounded.body.daily[0].total_tokens, 20)
   } finally {
     if (child && child.exitCode === null && child.pid) { const exited = once(child, 'exit'); child.kill('SIGINT'); await exited }
     await rm(root, { recursive: true, force: true })
@@ -86,4 +98,27 @@ test('a custom start overrides calendar presets and separates cached ranges', as
   assert.equal(new URL(paths[0], 'https://fixture.example').searchParams.get('since_ms'), String(since))
   for (const value of ['-1', 'bad', '1.5', String(Date.now() + 86400000)]) assert.equal((await api.request(`?since_ms=${value}`)).status, 400)
   assert.equal(paths.length, 2)
+})
+
+
+test('end time is forwarded, isolates cached intervals, and rejects inverted or invalid ranges', async () => {
+  const paths = [], api = fixture(async path => { paths.push(path); return { rows: [], until_ms: Number(new URL(path, 'https://fixture.example').searchParams.get('until_ms')) } })
+  const since = new Date('2026-01-12T08:23:00Z').getTime(), until = since + 3600000
+  const first = await api.request(`?period=today&since_ms=${since}&until_ms=${until}`)
+  assert.equal(first.body.until_ms, until)
+  assert.equal(new URL(paths[0], 'https://fixture.example').searchParams.get('until_ms'), String(until))
+  await api.request(`?period=today&since_ms=${since}&until_ms=${until + 1000}`)
+  assert.equal(paths.length, 2)
+  for (const value of ['-1', 'bad', '1.5', String(Date.now() + 86400000), String(since - 1)]) {
+    assert.equal((await api.request(`?since_ms=${since}&until_ms=${value}`)).status, 400)
+  }
+  assert.equal(paths.length, 2)
+})
+
+
+test('a Host that ignores the end boundary cannot display unbounded totals as a selected range', async () => {
+  const api = fixture(async () => ({ totals: { total_tokens: 100 } }))
+  const result = await api.request('?period=all&since_ms=100&until_ms=200')
+  assert.equal(result.status, 503)
+  assert.match(result.body.error, /更新并重启/)
 })

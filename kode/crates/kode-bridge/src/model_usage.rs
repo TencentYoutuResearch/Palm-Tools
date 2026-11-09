@@ -40,6 +40,8 @@ pub struct ModelUsageRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUsageSnapshot {
     pub period: String,
+    #[serde(default)]
+    pub until_ms: Option<i64>,
     pub scanned_files: usize,
     pub rows: Vec<ModelUsageRow>,
     pub totals: ModelUsageTotals,
@@ -100,6 +102,7 @@ fn history_cache() -> &'static Mutex<HistoryCache> {
 pub struct ModelUsageQuery {
     pub period: String,
     pub since_ms: Option<i64>,
+    pub until_ms: Option<i64>,
     pub timezone_offset_minutes: Option<i32>,
 }
 
@@ -151,6 +154,7 @@ fn bucket_key(timestamp: i64, period: &str, offset: Option<i32>) -> Option<Strin
 pub fn collect_snapshot(
     period: &str,
     since_override: Option<i64>,
+    until_override: Option<i64>,
     timezone_offset_minutes: Option<i32>,
 ) -> Result<ModelUsageSnapshot, String> {
     normalize_period(period)?;
@@ -158,7 +162,7 @@ pub fn collect_snapshot(
     let since_ms = since_override.or_else(|| period_start_ms(period));
     let history_since_ms = since_ms.unwrap_or(i64::MIN);
     let mut timeline: HashMap<String, UsageMap> = HashMap::new();
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let until_ms = until_override.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     let file_since_ms = since_ms.map(|since| since.min(history_since_ms));
     let mut usage = UsageMap::new();
     let mut daily = DailyMap::new();
@@ -194,7 +198,7 @@ pub fn collect_snapshot(
                 refresh_history_file(&mut history, &path, *profile, fingerprint);
                 if let Some(cached) = history.files.get(&path) {
                     for event in &cached.events {
-                        if event.timestamp_ms.is_some_and(|at| at > now_ms) {
+                        if !event_in_range(event.timestamp_ms, since_ms, until_ms) {
                             continue;
                         }
                         if let Some(at) = event
@@ -233,7 +237,23 @@ pub fn collect_snapshot(
     history.files.retain(|path, _| seen_paths.contains(path));
 
     let mut snapshot =
-        finish_snapshot(period, scanned_files, usage, daily, timezone_offset_minutes);
+        finish_snapshot(period, scanned_files, usage, daily.clone(), timezone_offset_minutes);
+    // Daily compatibility output follows the same explicit interval as timeline.
+    if let Some(end) = bucket_key(until_ms, "month", timezone_offset_minutes)
+        .and_then(|key| chrono::NaiveDate::parse_from_str(&key, "%Y-%m-%d").ok())
+    {
+        let start = since_ms
+            .and_then(|at| bucket_key(at, "month", timezone_offset_minutes))
+            .or_else(|| daily.keys().min().cloned())
+            .and_then(|key| chrono::NaiveDate::parse_from_str(&key, "%Y-%m-%d").ok())
+            .unwrap_or(end);
+        snapshot.daily = (0..=(end - start).num_days().max(0)).map(|offset| {
+            let date = (start + ChronoDuration::days(offset)).format("%Y-%m-%d").to_string();
+            let total_tokens = daily.get(&date).copied().unwrap_or(0);
+            ModelUsageDay { date, total_tokens }
+        }).collect();
+    }
+    snapshot.until_ms = Some(until_ms);
     snapshot.timeline = timeline
         .into_iter()
         .map(|(date, usage)| ModelUsageTimeBucket {
@@ -320,6 +340,13 @@ fn refresh_history_file(
         },
     );
     true
+}
+
+// Explicit ranges exclude undated records because they cannot be attributed to the interval.
+fn event_in_range(timestamp: Option<i64>, since: Option<i64>, until: i64) -> bool {
+    timestamp.map_or(since.is_none(), |at| {
+        at <= until && since.is_none_or(|start| at >= start)
+    })
 }
 
 fn aggregate_event(
@@ -450,6 +477,7 @@ fn finish_snapshot(
         .collect();
     ModelUsageSnapshot {
         period: period.to_string(),
+        until_ms: None,
         scanned_files,
         rows,
         totals,
@@ -462,6 +490,16 @@ fn finish_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_ranges_include_endpoints_and_exclude_later_or_undated_records() {
+        assert!(event_in_range(Some(100), Some(100), 200));
+        assert!(event_in_range(Some(200), Some(100), 200));
+        assert!(!event_in_range(Some(99), Some(100), 200));
+        assert!(!event_in_range(Some(201), Some(100), 200));
+        assert!(!event_in_range(None, Some(100), 200));
+        assert!(event_in_range(None, None, 200));
+    }
 
     #[test]
     fn snapshot_days_match_selected_period() {

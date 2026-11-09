@@ -4,14 +4,9 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
   let preferences = { completed: true, waiting: true }
   try { const saved = JSON.parse(env.localStorage?.getItem(storageKey) ?? '{}'); for (const key of ['completed', 'waiting']) if (typeof saved[key] === 'boolean') preferences[key] = saved[key] } catch {}
   const systemSettings = /Mac/i.test(env.navigator?.platform ?? '') && /Electron\//.test(env.navigator?.userAgent ?? '')
-  let snapshot, deliveryError = false
-  const publish = () => { snapshot = { ...preferences, permission: env.Notification?.permission ?? 'unsupported', systemSettings, deliveryError }; for (const fn of listeners) fn() }
+  let snapshot, deliveryError = false, lastEvent = null, connection = 'connecting'
+  const publish = () => { snapshot = { ...preferences, permission: env.Notification?.permission ?? 'unsupported', systemSettings, deliveryError, lastEvent, connection }; for (const fn of listeners) fn() }
   publish()
-  const active = (host, id) => {
-    if (host !== transport.current || env.document.visibilityState !== 'visible' || !env.document.hasFocus()) return false
-    if (ctx.get('layout')?.panelInfo.getSnapshot().activePanelId) return false
-    return (ctx.get('sessions')?.list.getSnapshot().byId[id]?.retainedBy?.mainView ?? 0) > 0
-  }
   const close = key => { shown.get(key)?.close(); shown.delete(key) }
   const receive = (host, event) => {
     if (!event || typeof event.sessionId !== 'string' || typeof event.key !== 'string' || !['completed', 'question', 'approval', 'resolved'].includes(event.kind)) return
@@ -20,10 +15,14 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
     const id = `${host}:${event.id}`
     if (seen.has(id)) return
     seen.add(id); if (seen.size > 512) seen.delete(seen.values().next().value)
-    if (env.Notification?.permission !== 'granted' || !(event.kind === 'completed' ? preferences.completed : preferences.waiting) || active(host, event.sessionId)) return
+    lastEvent = { kind: event.kind, sessionId: event.sessionId, at: Date.now() }; publish()
+    if ((!env.kodeDesktop?.notify && env.Notification?.permission !== 'granted') || !(event.kind === 'completed' ? preferences.completed : preferences.waiting)) return
     const label = { completed: '本轮已完成', question: '等待你回答', approval: '等待你批准' }[event.kind]
     let notification
-    try { notification = new env.Notification(`${label} · Kode`, { body: String(event.title ?? '未命名会话').slice(0, 160), tag: key }) }
+    if (env.kodeDesktop?.notify) {
+      notification = { close() { void env.kodeDesktop.notify({ key, close: true }).catch(() => {}) } }
+      void env.kodeDesktop.notify({ key, title: `${label} · Kode`, body: String(event.title ?? '未命名会话').slice(0, 160) }).then(result => { deliveryError = result?.status === 'failed'; publish() }).catch(() => { deliveryError = true; publish() })
+    } else try { notification = new env.Notification(`${label} · Kode`, { body: String(event.title ?? '未命名会话').slice(0, 160), tag: key }) }
     catch { deliveryError = true; publish(); return }
     notification.onerror = () => { deliveryError = true; publish() }
     notification.onshow = () => { deliveryError = false; publish() }
@@ -41,7 +40,9 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
     const host = transport.current
     if (transport.getSnapshot().switching || streams.has(host) || !env.EventSource) return
     const events = new env.EventSource(transport.path('/api/kode/notifications', host))
-    events.onmessage = event => { try { receive(host, JSON.parse(event.data)) } catch {} }
+    events.onopen = () => { connection = 'connected'; publish() }
+    events.onerror = () => { connection = 'reconnecting'; publish() }
+    events.onmessage = event => { try { receive(host, JSON.parse(event.data)) } catch (error) { deliveryError = true; publish(); ctx.logger?.warn?.('会话通知处理失败：%s', error.message) } }
     streams.set(host, events)
   }
   const service = {
@@ -58,6 +59,7 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
       if (systemSettings) await service.openSettings()
     },
     async openSettings() {
+      if (env.kodeDesktop?.openNotificationSettings) return env.kodeDesktop.openNotificationSettings()
       const response = await transport.fetch('/api/kode/notification-settings', { method: 'POST' }, 'local')
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
@@ -65,11 +67,12 @@ export function installSessionNotifications(ctx, transport, env = globalThis) {
       }
     },
   }
+  const stopNativeClicks = env.kodeDesktop?.onNotificationClick?.(key => shown.get(key)?.onclick?.())
   connect()
   const unsubscribe = transport.subscribe(connect)
   const onFocus = () => publish()
   env.window.addEventListener('focus', onFocus)
   ctx.provide('kodeNotifications', service)
-  ctx.effect(() => () => { unsubscribe(); env.window.removeEventListener('focus', onFocus); for (const stream of streams.values()) stream.close(); for (const key of shown.keys()) close(key); listeners.clear() }, 'kode.notifications')
+  ctx.effect(() => () => { stopNativeClicks?.(); unsubscribe(); env.window.removeEventListener('focus', onFocus); for (const stream of streams.values()) stream.close(); for (const key of shown.keys()) close(key); listeners.clear() }, 'kode.notifications')
   return service
 }

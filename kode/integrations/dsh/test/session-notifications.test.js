@@ -82,17 +82,17 @@ function browser() {
   const send = (patch = {}, stream = 0) => events[stream].onmessage({ data: JSON.stringify({ id: 'event-1', kind: 'completed', sessionId: 's', key: 's:turn1', title: 'My task', ...patch }) })
   return { env, service, send, events, notifications, opened, dispose: () => effects.forEach(fn => fn()), focus: id => { focused = true; selected = id }, switch(host) { current = host; for (const fn of changes) fn() } }
 }
-test('browser deduplicates, suppresses the visible session, honors preferences and navigates notification clicks', async () => {
+test('browser deduplicates, notifies the visible session, honors preferences and navigates notification clicks', async () => {
   const b = browser()
   try {
     b.send(); b.send(); assert.equal(b.notifications.length, 1)
     b.notifications[0].onclick(); await delay(0)
     assert.deepEqual(b.opened, [{ host: 'local', sessionId: 's' }])
-    b.focus('s'); b.send({ id: 'event-2', key: 's:turn2' }); assert.equal(b.notifications.length, 1)
-    b.service.update({ waiting: false }); b.send({ kind: 'question', id: 'q', key: 'q', sessionId: 'other' }); assert.equal(b.notifications.length, 1)
-    b.service.update({ waiting: true }); b.send({ kind: 'question', id: 'q2', key: 'q2', sessionId: 'other' }); assert.equal(b.notifications.length, 2)
-    b.send({ kind: 'resolved', key: 'q2' }); assert.equal(b.notifications[1].closed, true)
-    b.env.Notification.permission = 'denied'; b.send({ id: 'event-3', sessionId: 'other' }); assert.equal(b.notifications.length, 2)
+    b.focus('s'); b.send({ id: 'event-2', key: 's:turn2' }); assert.equal(b.notifications.length, 2)
+    b.service.update({ waiting: false }); b.send({ kind: 'question', id: 'q', key: 'q', sessionId: 'other' }); assert.equal(b.notifications.length, 2)
+    b.service.update({ waiting: true }); b.send({ kind: 'question', id: 'q2', key: 'q2', sessionId: 'other' }); assert.equal(b.notifications.length, 3)
+    b.send({ kind: 'resolved', key: 'q2' }); assert.equal(b.notifications[2].closed, true)
+    b.env.Notification.permission = 'denied'; b.send({ id: 'event-3', sessionId: 'other' }); assert.equal(b.notifications.length, 3)
   } finally { b.dispose() }
 })
 test('visited SSH notification streams remain active after switching Hosts and are released on unload', () => {
@@ -168,4 +168,36 @@ test('Desktop permission flow opens local system settings even while viewing SSH
   const service = installSessionNotifications(ctx, transport, env)
   await service.enable()
   assert.deepEqual(calls[0], ['/api/kode/notification-settings', { method: 'POST' }, 'local'])
+})
+
+
+test('Desktop uses the native carrier, reports failures and routes native clicks', async () => {
+  const b = browser(), calls = []
+  let click, disposed = false
+  b.env.Notification.permission = 'denied'
+  b.env.kodeDesktop = {
+    async notify(data) { calls.push(data); return { status: 'failed' } },
+    onNotificationClick(fn) { click = fn; return () => { disposed = true } },
+  }
+  // Install after the bridge exists, as happens before client boot in Desktop.
+  b.dispose()
+  const effects = [], streams = []
+  b.env.EventSource = class { constructor() { streams.push(this) } close() {} }
+  const opened = []
+  const service = installSessionNotifications({ provide() {}, effect: fn => effects.push(fn()) }, {
+    current: 'local', getSnapshot: () => ({}), path: p => p, subscribe: () => () => {},
+    async select(host, target) { opened.push({ host, ...target }) },
+  }, b.env)
+  streams[0].onopen()
+  assert.equal(service.getSnapshot().connection, 'connected')
+  streams[0].onmessage({ data: JSON.stringify({ id: 'native-1', kind: 'completed', sessionId: 'native-session', key: 'native-key', title: 'Native task' }) })
+  await delay(0)
+  assert.equal(calls[0].title, '本轮已完成 · Kode')
+  assert.equal(b.notifications.length, 0)
+  assert.equal(service.getSnapshot().deliveryError, true)
+  click('local:native-key'); await delay(0)
+  assert.deepEqual(opened, [{ host: 'local', sessionId: 'native-session' }])
+  assert.deepEqual(calls[1], { key: 'local:native-key', close: true })
+  effects.forEach(fn => fn())
+  assert.equal(disposed, true)
 })
