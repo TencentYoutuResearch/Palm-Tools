@@ -65,6 +65,10 @@ test('token island loads selected-host statistics, changes period, and never dis
   assert.ok(find(tree, node => node.props['aria-label'] === 'Token 用量'))
   find(tree, node => node.type === 'button' && node.children.includes('本月')).props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(requests.some(row => row.path.includes('period=month')))
+  find(tree, node => node.props.type === 'datetime-local').props.onChange({ target: { value: '2026-01-12T08:23' } }); tree = render()
+  find(tree, node => node.type === 'form' && node.props.className === 'kode-token-start').props.onSubmit({ preventDefault() {} }); tree = render(); await settle(); tree = render()
+  assert.ok(requests.at(-1).path.includes(`since_ms=${new Date('2026-01-12T08:23').getTime()}`))
+  assert.equal(find(tree, node => node.type === 'button' && node.children.includes('从此时至今')).props['aria-pressed'], true)
   host = 'remote:fixture.example'; tree = render()
   assert.equal(find(tree, node => node.type === 'strong').children[0], '—')
   await settle(); tree = render(); assert.equal(find(tree, node => node.type === 'strong').children[0], '9K')
@@ -85,22 +89,41 @@ test('token island is registered once on the application overlay rather than ins
   assert.doesNotMatch(build, /react\.createElement\(KodeTokenIsland/)
 })
 
-test('period buckets cover only elapsed hours/days/months, with multi-select Agent and model totals', () => {
+test('period buckets begin with selected activity and retain elapsed gaps with multi-select totals', () => {
   const viewOf = vm.runInNewContext(source + '\nusageView', { Intl })
   const now = new Date(2026, 10, 6, 10, 30)
   const rows = [{ backend: 'codex', model: 'shared', total_tokens: 100, input_tokens: 80, output_tokens: 20 }, { backend: 'claude', model: 'shared', total_tokens: 50, input_tokens: 40, output_tokens: 10 }, { backend: 'claude', model: 'other', total_tokens: 30, input_tokens: 20, output_tokens: 10 }]
   const snapshot = { rows, timeline: [{ date: '2026-11-06T02:00', rows: rows.slice(0, 1) }, { date: '2026-11-06T10:00', rows: rows.slice(1) }] }
   let view = viewOf(snapshot, 'today', 'backend', null, now)
-  assert.equal(view.timeline.length, 11); assert.equal(view.timeline[0].key, '2026-11-06T00:00')
+  assert.equal(view.timeline.length, 9); assert.equal(view.timeline[0].key, '2026-11-06T02:00')
   assert.equal(view.totals.total_tokens, 180); assert.equal(view.timeline.reduce((sum, bucket) => sum + bucket.total, 0), 180)
   view = viewOf(snapshot, 'today', 'backend', ['claude'], now)
-  assert.equal(view.totals.total_tokens, 80); assert.equal(view.timeline[2].total, 0); assert.equal(view.timeline[10].total, 80)
+  assert.equal(view.totals.total_tokens, 80); assert.equal(view.timeline.length, 1); assert.equal(view.timeline[0].key, '2026-11-06T10:00'); assert.equal(view.timeline[0].total, 80)
   view = viewOf(snapshot, 'today', 'model', ['shared'], now)
-  assert.equal(view.rows.length, 1); assert.equal(view.totals.total_tokens, 150); assert.equal(view.timeline[10].total, 50)
+  assert.equal(view.rows.length, 1); assert.equal(view.totals.total_tokens, 150); assert.equal(view.timeline.at(-1).total, 50)
   view = viewOf(snapshot, 'today', 'model', ['shared', 'other'], now)
   assert.equal(view.totals.total_tokens, 180)
   assert.equal(viewOf(snapshot, 'today', 'model', [], now).totals.total_tokens, 0)
-  assert.equal(viewOf({ rows, timeline: [] }, 'month', 'model', null, now).timeline.length, 6)
+  assert.equal(viewOf({ rows, timeline: [] }, 'month', 'model', null, now).timeline.length, 0)
   view = viewOf({ rows, timeline: [{ date: '2025-11', rows }, { date: '2026-11', rows }] }, 'all', 'model', null, now)
   assert.equal(view.timeline.length, 13); assert.equal(view.timeline[0].key, '2025-11'); assert.equal(view.timeline[1].total, 0)
+})
+
+
+test('stacked area boundaries add each selected series and support a single data point', () => {
+  const scope = vm.runInNewContext(source + '\n({ usageView, usageAreaPaths, usagePeriod })', { Intl })
+  const rows = [{ backend: 'a', model: 'one', total_tokens: 60 }, { backend: 'b', model: 'two', total_tokens: 40 }]
+  const view = scope.usageView({ rows, timeline: [{ date: '2026-11-06T10:00', rows }] }, 'today', 'backend', null, new Date(2026, 10, 6, 10, 30))
+  const paths = scope.usageAreaPaths(view)
+  assert.equal(paths.length, 2)
+  assert.match(paths[0].line, /M0.00 47.20 L560.00 47.20/)
+  assert.match(paths[1].line, /M0.00 12.00 L560.00 12.00/)
+  assert.match(paths[1].area, /L560.00 47.20 L0.00 47.20 Z$/)
+  const since = new Date(2026, 10, 6, 8, 20).getTime()
+  const custom = scope.usageView({ rows, timeline: [{ date: '2026-11-06T10:00', rows }] }, 'today', 'backend', null, new Date(2026, 10, 6, 10, 30), since)
+  assert.equal(custom.timeline[0].key, '2026-11-06T08:00'); assert.equal(custom.timeline[0].total, 0)
+  assert.equal(custom.timeline.at(-1).total, 100)
+  assert.equal(scope.usagePeriod('custom', since, since + 3600000), 'today')
+  assert.equal(scope.usagePeriod('custom', since, since + 7 * 86400000), 'month')
+  assert.equal(scope.usagePeriod('custom', since, since + 200 * 86400000), 'all')
 })

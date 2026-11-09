@@ -75,3 +75,15 @@ test('standalone server serves the real CLI collector through the authenticated 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+
+test('a custom start overrides calendar presets and separates cached ranges', async () => {
+  const paths = [], api = fixture(async path => { paths.push(path); return { rows: [] } })
+  const since = new Date('2026-01-12T08:23:00Z').getTime()
+  await api.request(`?period=today&since_ms=${since}`)
+  await api.request(`?period=today&since_ms=${since + 60000}`)
+  assert.equal(paths.length, 2)
+  assert.equal(new URL(paths[0], 'https://fixture.example').searchParams.get('since_ms'), String(since))
+  for (const value of ['-1', 'bad', '1.5', String(Date.now() + 86400000)]) assert.equal((await api.request(`?since_ms=${value}`)).status, 400)
+  assert.equal(paths.length, 2)
+})

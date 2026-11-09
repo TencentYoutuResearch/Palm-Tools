@@ -12,7 +12,11 @@ export function registerModelUsageApi(ctx, backend) {
     if (!['today', 'month', 'all'].includes(period) || !/^-?\d{1,4}$/.test(offsetText) || !Number.isInteger(offset) || Math.abs(offset) > 1439) return send(400, { error: 'Invalid usage period or timezone' })
     // Use the viewer's calendar boundary for remote Hosts in other timezones.
     const local = new Date(Date.now() + offset * 60000)
-    const since = period === 'all' ? undefined : Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), period === 'month' ? 1 : local.getUTCDate()) - offset * 60000
+    const requestedStart = url.searchParams.get('since_ms')
+    if (requestedStart !== null && (!/^\d{1,16}$/.test(requestedStart) || !Number.isSafeInteger(Number(requestedStart)) || Number(requestedStart) > Date.now())) return send(400, { error: 'Invalid usage start time' })
+    let since
+    if (requestedStart !== null) since = Number(requestedStart)
+    else if (period !== 'all') since = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), period === 'month' ? 1 : local.getUTCDate()) - offset * 60000
     const key = `${period}:${offset}:${since ?? ''}`
     try {
       let entry = cache.get(key)
