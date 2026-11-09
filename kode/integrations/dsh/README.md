@@ -970,7 +970,7 @@ The token island scopes today to 00:00–now (hourly buckets), month to the firs
 - 原生 dsh 的侧边栏状态提示继续保留。Kode 补充系统通知：本轮成功结束且队列为空时通知；提问、计划确认或审批等待超过 250ms 时通知。取消、主动停止、异常退出和子 Agent 的内部完成不会误报成功。
 - 正在前台查看的会话不弹通知。通知只显示会话名称，不包含问题正文、命令参数或回答；点击后返回对应主机和会话。问题解决后撤回等待提醒。
 - 本地及本次打开过的 SSH 主机保持独立通知连接。远端也需安装本版本插件；尚未连接的主机不会为通知而自动启动。首次连接不补发过去的完成通知，短暂断线按事件游标补齐并去重。
-- macOS Desktop 的“前往系统设置”会打开当前设备的通知设置，查看 SSH 会话时也使用本机入口。网页权限允许不代表系统已授权，开发模式可能显示为 Electron，并需要有效的应用签名。通知发送失败会显示恢复提示。Web 版本请在浏览器站点设置中授权。通知展示受系统专注模式和通知偏好控制。
+- macOS Desktop 的“前往系统设置”会打开当前设备的通知设置，查看 SSH 会话时也使用本机入口。网页权限允许不代表系统已授权，开发模式显示为“DeepSeek Harness 开发版”，并需要有效的应用签名。通知发送失败会显示恢复提示。Web 版本请在浏览器站点设置中授权。通知展示受系统专注模式和通知偏好控制。
 
 
-macOS 使用 `electron app-directory` 开发启动时，npm 分发的 Electron 可能只有未封装的链接器签名，系统通知会返回 `UNErrorDomain 1`。开发启动器应先运行 `scripts/prepare-desktop-notifications.sh /path/to/Electron.app /path/to/cache`，使用其 stdout 返回的应用包内 `Contents/MacOS/Electron` 启动原有 app-directory。脚本保留原运行时，在独立缓存中复制并完整 ad-hoc 签名，按运行时内容复用，准备失败时阻止启动。正式签名的 Desktop 包使用原有发布流程。
+macOS 使用 `electron app-directory` 开发启动时，npm 分发的 Electron 可能只有未封装的链接器签名，系统通知会返回 `UNErrorDomain 1`。开发启动器应先运行 `scripts/prepare-desktop-notifications.sh /path/to/Electron.app /path/to/cache`，使用其 stdout 返回的应用包内 `Contents/MacOS/Electron` 启动原有 app-directory。脚本保留原运行时，在独立缓存中复制，设置独立的 `com.deepseek.dsh.development` 标识和“DeepSeek Harness 开发版”名称，完整 ad-hoc 签名并注册到 Launch Services，按运行时内容复用，准备失败时阻止启动。正式签名的 Desktop 包使用原有发布流程。

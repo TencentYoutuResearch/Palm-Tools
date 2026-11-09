@@ -17,15 +17,21 @@ fi
 # The framework contains Electron's notification implementation. Refresh the copy
 # whenever npm replaces the runtime, even when its outer launcher stays identical.
 FINGERPRINT=$(/usr/bin/shasum -a 256 "$SOURCE/Contents/Info.plist" "$SOURCE/Contents/MacOS/Electron" "$SOURCE/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')
-TARGET="$CACHE/$FINGERPRINT/Electron.app"
+TARGET="$CACHE/dsh-development-v2-$FINGERPRINT/Electron.app"
 if ! /usr/bin/codesign --verify --deep --strict "$TARGET" 2>/dev/null; then
   # Each attempt uses its own directory, so interrupted or concurrent preparation
   # cannot launch a partly copied bundle. Only the verified path reaches stdout.
   STAGING=$(/usr/bin/mktemp -d "$CACHE/preparing.XXXXXX")
   /usr/bin/ditto "$SOURCE" "$STAGING/Electron.app"
+  # Generic Electron identifiers collide with other development tools registered
+  # in Launch Services. Give this shell a stable, owned notification identity.
+  /usr/bin/plutil -replace CFBundleIdentifier -string com.deepseek.dsh.development "$STAGING/Electron.app/Contents/Info.plist"
+  /usr/bin/plutil -replace CFBundleName -string 'DeepSeek Harness 开发版' "$STAGING/Electron.app/Contents/Info.plist"
+  /usr/bin/plutil -replace CFBundleDisplayName -string 'DeepSeek Harness 开发版' "$STAGING/Electron.app/Contents/Info.plist"
   /usr/bin/codesign --force --deep --sign - "$STAGING/Electron.app" >&2
   /usr/bin/codesign --verify --deep --strict "$STAGING/Electron.app" >&2
-  /bin/ln -s -h "$STAGING" "$CACHE/$FINGERPRINT" 2>/dev/null || true
+  /bin/ln -s -h "$STAGING" "$CACHE/dsh-development-v2-$FINGERPRINT" 2>/dev/null || true
   /usr/bin/codesign --verify --deep --strict "$TARGET" >&2
 fi
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET" >&2
 printf '%s\n' "$TARGET"

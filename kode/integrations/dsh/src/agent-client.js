@@ -736,7 +736,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('p', { className: 'kode-config-note' }, '后台会话完成或等待你操作时提醒你。正在查看的会话保持安静；点击通知可返回对应会话。'),
       h('div', { className: 'kode-integration-row' }, h('span', { role: 'status' }, labels[snapshot.permission]),
         snapshot.permission === 'default' || snapshot.systemSettings ? h(Button, { variant: snapshot.permission === 'granted' ? 'outline' : 'primary', disabled: busy, onClick: () => void authorize() }, busy ? '正在打开…' : snapshot.systemSettings ? '前往系统设置' : '开启通知') : null),
-      snapshot.systemSettings ? h('p', { className: 'kode-config-note' }, '请在 macOS 系统设置 → 通知中允许当前应用，并开启横幅。开发模式的应用可能显示为 Electron。') : null,
+      snapshot.systemSettings ? h('p', { className: 'kode-config-note' }, '请在 macOS 系统设置 → 通知中允许当前应用，并开启横幅。开发模式请选择“DeepSeek Harness 开发版”。') : null,
       snapshot.deliveryError ? h(Failure, { text: '系统未能显示通知，请检查系统通知权限与应用签名。' }) : null,
       ...[{ key: 'completed', label: '会话完成', detail: '本轮回答完成且队列为空时提醒。主动停止和执行失败不会触发完成通知。' }, { key: 'waiting', label: '等待操作', detail: 'Agent 请求回答、计划确认或操作审批时提醒。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: snapshot[item.key], disabled: !service, onChange: event => service.update({ [item.key]: event.target.checked }) }))),
       h('p', { className: 'kode-config-note' }, '通知偏好保存在当前设备。已连接过的 SSH 主机会继续在后台提供提醒。'),
