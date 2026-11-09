@@ -11,8 +11,9 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     const menuHeight = display.workArea.y - display.bounds.y
     const camera = display.internal && menuHeight >= 30
     const center = display.bounds.x + display.bounds.width / 2
-    const x = camera ? center + 120 + 240 - size.width : center - size.width / 2
-    child.setBounds({ x: Math.round(Math.max(display.bounds.x, Math.min(x, display.bounds.x + display.bounds.width - size.width))), y: display.bounds.y, width: size.width, height: size.height <= 28 ? Math.max(22, Math.min(28, menuHeight || 28)) : Math.min(size.height, display.workArea.height) })
+    const width = size.height <= 28 ? (camera ? 560 : 240) : size.width
+    const x = center - width / 2
+    child.setBounds({ x: Math.round(Math.max(display.bounds.x, Math.min(x, display.bounds.x + display.bounds.width - width))), y: display.bounds.y, width, height: size.height <= 28 ? Math.max(22, Math.min(28, menuHeight || 28)) : Math.min(size.height, display.workArea.height) })
     if (layouts.get(child) !== camera && !child.webContents.isLoadingMainFrame()) {
       layouts.set(child, camera)
       void child.webContents.executeJavaScript(`document.documentElement.dataset.kodeMenuCamera = '${camera ? 'true' : 'false'}'`).catch(() => {})
