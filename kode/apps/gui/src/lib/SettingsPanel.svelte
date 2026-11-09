@@ -36,6 +36,7 @@
   } from './ipc'
   import type { UnlistenFn } from '@tauri-apps/api/event'
   import BackendIcon from './BackendIcon.svelte'
+  import BackendAddPicker from './BackendAddPicker.svelte'
   import UpdateSettings from './UpdateSettings.svelte'
   import IntegrationSettings from './IntegrationSettings.svelte'
   import { currentLocale, systemLanguageLabel, t } from './i18n'
@@ -112,6 +113,10 @@
   let agentArgsText = $state('[]')
   /** 正在编辑的是否为「新增」(决定 key 输入框是否可改)。 */
   let isNew = $state(false)
+  /** Add 选择器:探测 → 安装 → 配置。addKey = 从列表「安装」直达的 backend。 */
+  let adding = $state(false)
+  let addKey: string | null = $state(null)
+  let addLocked = $state(false)
 
   let memoryPromptEnabled = $state(true)
   let ptyAppearance = $state<TerminalAppearance>(loadTerminalAppearance('pty'))
@@ -200,7 +205,14 @@
     }
   }
 
+  function openAddPicker(key: string | null = null) {
+    addKey = key
+    adding = true
+    err = null
+  }
+
   function startAdd() {
+    adding = false
     agentArgsText = '[]'
     editing = newRequest()
     isNew = true
@@ -360,10 +372,12 @@
   }
 
   function onKeyCapture(e: KeyboardEvent) {
-    if (e.key !== 'Escape' || childOpen) return
+    // 选择器的确认框自己处理 Esc;安装进行中不允许离开。
+    if (e.key !== 'Escape' || childOpen || (adding && addLocked)) return
     e.preventDefault()
     e.stopImmediatePropagation()
     if (editing) cancelEdit()
+    else if (adding) adding = false
     else onClose()
   }
 
@@ -595,6 +609,15 @@
               {busy ? 'Saving…' : 'Save backend'}
             </button>
           </div>
+        {:else if adding}
+          <BackendAddPicker
+            initialKey={addKey}
+            bind:locked={addLocked}
+            onBack={() => (adding = false)}
+            onCustom={startAdd}
+            onDone={(msg) => { showToast(msg); void refreshBackends() }}
+            onError={(msg) => (err = msg)}
+          />
         {:else}
           <!-- ===== backend 列表 ===== -->
           <div class="content-head">
@@ -602,7 +625,7 @@
               <h2>{tr('settings.backends.title')}</h2>
               <p class="sub">{tr('settings.backends.description')}</p>
             </div>
-            <button class="btn primary sm" onclick={startAdd} disabled={busy}>
+            <button class="btn primary sm" onclick={() => openAddPicker()} disabled={busy}>
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
               Add
             </button>
@@ -622,6 +645,7 @@
                       <span class="tag ok">installed</span>
                     {:else if inst === false}
                       <span class="tag warn">not on PATH</span>
+                      <button class="link" onclick={() => openAddPicker(b.key)} disabled={busy}>{tr('settings.backends.add.install')}</button>
                     {/if}
                     {#if b.default_model}
                       <span class="tag dim">{b.default_model}</span>

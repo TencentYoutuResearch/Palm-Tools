@@ -14,6 +14,7 @@
 mod app_updates;
 mod attachments;
 mod backend_admin;
+mod backend_install;
 mod bridge;
 mod cloud_deploy;
 mod cloud_sync;
@@ -293,6 +294,9 @@ pub fn run() {
             backend_admin::backend_save,
             backend_admin::backend_delete,
             backend_admin::backend_set_enabled,
+            backend_install::backend_catalog,
+            backend_install::backend_install,
+            backend_install::backend_configure,
             commands::list_all_backends,
             // Phase 11.4 远端 endpoint 配置
             endpoints::endpoint_list,

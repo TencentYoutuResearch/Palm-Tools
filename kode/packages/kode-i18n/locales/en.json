@@ -1913,5 +1913,24 @@
   },
   "workspace.files.differentEndpoint": {
     "message": "Copy between different endpoints is not supported."
-  }
+  },
+  "settings.backends.add.title": { "message": "Add backend" },
+  "settings.backends.add.description": { "message": "Kode checks which AI CLIs are installed. Installed ones are configured in one click; missing ones can be installed for you." },
+  "settings.backends.add.custom": { "message": "Custom backend…" },
+  "settings.backends.add.back": { "message": "Back" },
+  "settings.backends.add.loading": { "message": "Checking installed CLIs…" },
+  "settings.backends.add.ready": { "message": "Ready" },
+  "settings.backends.add.installed": { "message": "Installed" },
+  "settings.backends.add.notInstalled": { "message": "Not installed" },
+  "settings.backends.add.configure": { "message": "Configure" },
+  "settings.backends.add.install": { "message": "Install" },
+  "settings.backends.add.installing": { "message": "Installing…" },
+  "settings.backends.add.configuring": { "message": "Configuring…" },
+  "settings.backends.add.needs": { "message": "Requires {tools}" },
+  "settings.backends.add.manual": { "message": "No automatic installer on this platform" },
+  "settings.backends.add.confirmTitle": { "message": "Install {key}?" },
+  "settings.backends.add.confirmMessage": { "message": "{key} is not installed. Kode will run this command on your computer and then configure it:\n\n{script}" },
+  "settings.backends.add.done": { "message": "{key} is ready" },
+  "settings.backends.add.mcpWarning": { "message": "{key} is ready, but memory MCP setup failed: {error}" },
+  "settings.backends.add.log": { "message": "Install log" }
 }

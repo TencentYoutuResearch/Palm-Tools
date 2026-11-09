@@ -785,5 +785,24 @@
   },
   "workspace.files.differentEndpoint": {
     "message": "暂不支持在不同端点之间复制。"
-  }
+  },
+  "settings.backends.add.title": { "message": "添加 backend" },
+  "settings.backends.add.description": { "message": "Kode 会探测本机已安装的 AI CLI：已安装的一键配置，未安装的可以帮你自动安装。" },
+  "settings.backends.add.custom": { "message": "自定义 backend…" },
+  "settings.backends.add.back": { "message": "返回" },
+  "settings.backends.add.loading": { "message": "正在探测本机 CLI…" },
+  "settings.backends.add.ready": { "message": "已配置" },
+  "settings.backends.add.installed": { "message": "已安装" },
+  "settings.backends.add.notInstalled": { "message": "未安装" },
+  "settings.backends.add.configure": { "message": "配置" },
+  "settings.backends.add.install": { "message": "安装" },
+  "settings.backends.add.installing": { "message": "安装中…" },
+  "settings.backends.add.configuring": { "message": "配置中…" },
+  "settings.backends.add.needs": { "message": "需要先安装 {tools}" },
+  "settings.backends.add.manual": { "message": "本平台暂无自动安装方式，请手动安装" },
+  "settings.backends.add.confirmTitle": { "message": "安装 {key}？" },
+  "settings.backends.add.confirmMessage": { "message": "本机未检测到 {key}。Kode 将在本机执行以下命令，安装完成后自动配置：\n\n{script}" },
+  "settings.backends.add.done": { "message": "{key} 已配置完成" },
+  "settings.backends.add.mcpWarning": { "message": "{key} 已可用，但 memory MCP 接入失败：{error}" },
+  "settings.backends.add.log": { "message": "安装日志" }
 }

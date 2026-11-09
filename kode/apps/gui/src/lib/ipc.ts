@@ -649,7 +649,37 @@ export interface BackendSaveRequest {
   enabled: boolean | null
 }
 
+/// 后端 `backend_install::CatalogEntry` 镜像:Add 选择器的一行。
+export interface BackendCatalogEntry {
+  key: string
+  command: string
+  /** null = 本机未安装 */
+  command_path: string | null
+  configured: boolean
+  enabled: boolean
+  read_only: boolean
+  /** 本平台将执行的安装脚本(macOS/Linux 走登录 shell,Windows 走 PowerShell) */
+  install_script: string | null
+  /** 所有安装方式缺的前置工具;为空且无 install_script = 本平台无自动安装 */
+  install_missing: string[]
+}
+
+export interface BackendConfigureOutcome {
+  key: string
+  command_path: string
+  /** memory MCP 接入失败原因;backend 本身已可用 */
+  mcp_warning: string | null
+}
+
 export const backendAdminIpc = {
+  /** 全部已知 CLI + 本机安装/配置状态 + 本平台安装方式 */
+  catalog: () => invoke<BackendCatalogEntry[]>('backend_catalog'),
+  /** 安装(未装时)并配置;安装输出经 onInstallLog 推送 */
+  install: (key: string) => invoke<BackendConfigureOutcome>('backend_install', { key }),
+  /** 已安装的 CLI:启用 + 接入 memory MCP */
+  configure: (key: string) => invoke<BackendConfigureOutcome>('backend_configure', { key }),
+  onInstallLog: (cb: (log: { key: string; line: string }) => void): Promise<UnlistenFn> =>
+    listen<{ key: string; line: string }>('backend-install-log', (e) => cb(e.payload)),
   /** 扫 PATH 上的内置已知 candidate(codebuddy / claude / claude-internal / codex) */
   detect: () => invoke<DetectedBackend[]>('detect_known_backends'),
   /** 创建或更新 backend。保存后新 tab 选择列表立即刷新。 */
