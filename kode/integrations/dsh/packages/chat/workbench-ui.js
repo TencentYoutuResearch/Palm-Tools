@@ -1,6 +1,6 @@
 /** Workbench status: one application-wide token island; jobs beside the composer.
  * The native job component retains its subscriptions, locale, output and kill UI. */
-const defaultIslandAppearance = { tokenIsland: true }
+const defaultIslandAppearance = { tokenIsland: true, tokenPeriod: 'today' }
 const idleIslandActivity = { state: 'idle', label: '全局：所有会话空闲' }
 let kodeWorkbenchContext
 
@@ -13,7 +13,8 @@ html,body{margin:0;width:100%;height:100%;min-height:100%;overflow:hidden;backgr
 .kode-token-notch,.kode-token-notch:hover{width:240px;height:min(var(--kode-menu-height,28px),100dvh);border-radius:0 0 8px 8px;background:#000;box-shadow:none}
 .kode-token-panel{max-height:calc(100dvh - 4px);box-shadow:none}
 button,input{font:inherit}
-html[data-kode-menu-camera=true] .kode-token-notch,html[data-kode-menu-camera=true] .kode-token-notch:hover{display:grid;grid-template-columns:56px var(--kode-camera-gap,200px) 144px;position:absolute;left:calc(var(--kode-camera-center,156px) - var(--kode-camera-gap,200px)/2 - 56px);width:calc(200px + var(--kode-camera-gap,200px));gap:0;padding:0;background:#000}
+html[data-kode-menu-camera=true] .kode-token-notch,html[data-kode-menu-camera=true] .kode-token-notch:hover{display:grid;grid-template-columns:24px var(--kode-camera-gap,200px) 96px;position:absolute;left:calc(var(--kode-camera-center,124px) - var(--kode-camera-gap,200px)/2 - 24px);width:calc(120px + var(--kode-camera-gap,200px));gap:0;padding:0;background:#000}
+html[data-kode-menu-camera=true] .kode-island-name,html[data-kode-menu-camera=true] .kode-island-period-label{display:none}
 html[data-kode-menu-camera=true] .kode-token-notch::before{content:"";grid-column:2;grid-row:1}
 html[data-kode-menu-camera=true] .kode-island-host{grid-column:1;grid-row:1;justify-content:flex-end;height:100%;padding:0 8px}
 html[data-kode-menu-camera=true] .kode-island-usage{grid-column:3;grid-row:1;align-items:center;justify-content:flex-start;height:100%;margin:0;padding:0 22px 0 8px}
@@ -122,15 +123,18 @@ function usageDefaultStart(snapshot, period, end) {
 function KodeTokenIsland({ activity, appearance } = {}) {
   const h = react.createElement, { IconChevronDownOutlineRegular, IconCloseOutlineRegular } = _deepseek_ai_dsh_client_ui_primitives
   const ctx = kodeWorkbenchContext, transport = ctx?.get('kodeTransport')
-  const enabled = react.useSyncExternalStore(appearance?.subscribe ?? (() => () => {}), appearance?.getSnapshot ?? (() => defaultIslandAppearance)).tokenIsland
+  const preferences = react.useSyncExternalStore(appearance?.subscribe ?? (() => () => {}), appearance?.getSnapshot ?? (() => defaultIslandAppearance))
+  const enabled = preferences.tokenIsland, tokenPeriod = preferences.tokenPeriod ?? 'today'
+  const tokenPeriodLabel = { today: '今日', month: '本月', all: '全部' }[tokenPeriod]
   const status = react.useSyncExternalStore(activity?.subscribe ?? (() => () => {}), activity?.getSnapshot ?? (() => idleIslandActivity))
   const host = react.useSyncExternalStore(react.useCallback(fn => transport?.subscribe(fn) ?? (() => {}), [transport]), () => transport?.current ?? 'local')
-  const [open, setOpen] = react.useState(false), [present, setPresent] = react.useState(false), [period, setPeriod] = react.useState('today')
+  const [open, setOpen] = react.useState(false), [present, setPresent] = react.useState(false), [period, setPeriod] = react.useState(tokenPeriod)
   const [dimension, setDimension] = react.useState('backend'), [selected, setSelected] = react.useState(null)
   const [result, setResult] = react.useState(null), [error, setError] = react.useState(''), [loading, setLoading] = react.useState(false), [refresh, setRefresh] = react.useState(0)
   const root = react.useRef(null), trigger = react.useRef(null), panelId = react.useId()
   const [rangeInputs, setRangeInputs] = react.useState({ start: null, end: null }), [range, setRange] = react.useState(null)
   const [nativeWindow, setNativeWindow] = react.useState(null)
+  react.useEffect(() => { setPeriod(tokenPeriod); setRange(null); setRangeInputs({ start: null, end: null }); setSelected(null) }, [tokenPeriod])
   react.useEffect(() => {
     if (!enabled) { setNativeWindow(null); setOpen(false); setPresent(false); return }
     if (!globalThis.kodeDesktop?.island) return
@@ -172,8 +176,8 @@ function KodeTokenIsland({ activity, appearance } = {}) {
           if (!response.ok) throw new Error(value.error ?? '读取 token 统计失败，请重试。')
           return value
         }
-        const today = await read('today'), snapshot = open && period !== 'today' ? await read(bucketPeriod, range?.since, range?.until) : today
-        if (alive) setResult({ host, today, snapshot, range: open ? range : null, period: open ? period : 'today' })
+        const meter = await read(tokenPeriod), snapshot = open && (period !== tokenPeriod || range) ? await read(bucketPeriod, range?.since, range?.until) : meter
+        if (alive) setResult({ host, meter, tokenPeriod, snapshot, range: open ? range : null, period: open ? period : tokenPeriod })
       } catch (error) { if (alive && !controller.signal.aborted) setError(error.message) }
       finally { pending = false; if (alive) setLoading(false) }
     }
@@ -181,7 +185,7 @@ function KodeTokenIsland({ activity, appearance } = {}) {
     const timer = setInterval(load, 30000), wake = () => { if (!document.hidden) void load() }
     document.addEventListener('visibilitychange', wake)
     return () => { alive = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', wake) }
-  }, [enabled, host, transport, period, bucketPeriod, range, open, refresh])
+  }, [enabled, host, transport, tokenPeriod, period, bucketPeriod, range, open, refresh])
   react.useEffect(() => {
     if (!open) return
     const dismiss = event => { if (!root.current?.contains(event.target)) setOpen(false) }
@@ -216,8 +220,8 @@ function KodeTokenIsland({ activity, appearance } = {}) {
   const content = h('div', { className: 'kode-token-rail', ref: root, onKeyDown: event => {
     if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus() }
   } },
-    h('button', { type: 'button', ref: trigger, className: 'kode-token-notch', 'aria-expanded': open, 'aria-controls': panelId, onClick: () => setOpen(!open), title: '当前主机的 CLI 历史 token 用量' },
-      h('span', { className: 'kode-island-host' }, h('i', { 'data-state': status.state, role: 'img', 'aria-label': status.label, title: status.label }), host === 'local' ? 'Kode' : '远端'), h('span', { className: 'kode-island-usage' }, h('strong', null, usageNumber(current?.today?.totals?.total_tokens)), h('span', null, '今日 tokens')),
+    h('button', { type: 'button', ref: trigger, className: 'kode-token-notch', 'aria-expanded': open, 'aria-controls': panelId, onClick: () => setOpen(!open), title: `当前主机的${tokenPeriodLabel} CLI 历史 token 用量`, 'aria-label': `${status.label}；${tokenPeriodLabel} tokens：${usageNumber(current?.tokenPeriod === tokenPeriod ? current.meter?.totals?.total_tokens : undefined)}` },
+      h('span', { className: 'kode-island-host' }, h('i', { 'data-state': status.state, role: 'img', 'aria-label': status.label, title: status.label }), h('span', { className: 'kode-island-name' }, host === 'local' ? 'Kode' : '远端')), h('span', { className: 'kode-island-usage' }, h('strong', null, usageNumber(current?.tokenPeriod === tokenPeriod ? current.meter?.totals?.total_tokens : undefined)), h('span', { className: 'kode-island-period-label' }, `${tokenPeriodLabel} tokens`)),
       h(IconChevronDownOutlineRegular, { size: 12, style: { transform: open ? 'rotate(180deg)' : undefined } })),
     present && h('section', { id: panelId, className: 'kode-token-panel', 'data-open': open, inert: !open ? '' : undefined, 'aria-hidden': !open || undefined, 'aria-label': 'Token 用量', 'aria-busy': loading },
       h('header', null, h('div', null, h('strong', null, 'Token 用量'), h('p', null, `${host === 'local' ? '本机' : host} · CLI 历史统计`)),

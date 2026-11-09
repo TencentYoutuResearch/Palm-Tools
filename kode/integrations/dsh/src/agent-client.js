@@ -736,7 +736,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 
   function InterfaceSettingsBody() {
     const service = avatarContext?.get('kodeInterface')
-    const empty = React.useMemo(() => ({ tokenIsland: true }), [])
+    const empty = React.useMemo(() => ({ tokenIsland: true, tokenPeriod: 'today' }), [])
     const subscribe = React.useCallback(fn => service?.subscribe(fn) ?? (() => {}), [service])
     const snapshot = useSyncExternalStore(subscribe, () => service?.getSnapshot() ?? empty)
     const [error, setError] = useState('')
@@ -747,6 +747,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h('input', { type: 'checkbox', role: 'switch', checked: snapshot.tokenIsland, disabled: !service, onChange: event => {
           setError(''); try { service.update({ tokenIsland: event.target.checked }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
         } })),
+      h(SelectField, { label: '刘海用量范围', value: snapshot.tokenPeriod ?? 'today', disabled: !service, options: [{ value: 'today', label: '今日 Token' }, { value: 'month', label: '本月 Token' }, { value: 'all', label: '全部 Token' }], onChange: tokenPeriod => {
+        setError(''); try { service.update({ tokenPeriod }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
+      } }),
+      h('p', { className: 'kode-config-note' }, '刘海屏仅显示状态点与用量数字；展开后仍可查看范围并切换统计。'),
       h(Failure, { text: error }))
   }
   function NotificationSettingsBody() {

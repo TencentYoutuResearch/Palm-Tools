@@ -39,7 +39,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     const cutout = cutouts.get(display.id)
     const camera = !!cutout || (display.internal && menuHeight >= 30)
     const gap = cutout ? cutout.right - cutout.left : 200
-    const leftWing = 56, rightWing = 144, collapsed = size.height <= 40
+    const leftWing = 24, rightWing = 96, collapsed = size.height <= 40
     const center = display.bounds.x + (cutout ? (cutout.left + cutout.right) / 2 : display.bounds.width / 2)
     const width = collapsed ? (camera ? leftWing + gap + rightWing : 240) : size.width
     const desiredX = collapsed && camera ? center - gap / 2 - leftWing : center - width / 2

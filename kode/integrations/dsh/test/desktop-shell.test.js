@@ -29,7 +29,7 @@ test('one native panel follows the owning display, avoids the camera and stays o
   }
   assert.equal(f.bridge.windowOpen(f.parent, { frameName: 'kode-token-island', url: 'https://example.com' }), null)
   f.bridge.childCreated(f.parent, f.child, { frameName: 'kode-token-island' })
-  assert.deepEqual(f.child.bounds, { x: 600, y: 0, width: 400, height: 28 })
+  assert.deepEqual(f.child.bounds, { x: 632, y: 0, width: 320, height: 28 })
   assert.equal(f.child.visible, true)
   assert.equal(f.child.level, 'pop-up-menu')
   f.child.hide()
@@ -104,7 +104,7 @@ test('app switching leaves the owner panel stable while minimize and hide still 
   f.parent.getBounds = () => ({ x: 1700, y: 100, width: 900, height: 600 })
   f.parent.emit('resize'); assert.equal(f.child.bounds.x, 2440)
   f.parent.getBounds = () => ({ x: 0, y: 50, width: 900, height: 600 })
-  f.parent.emit('moved'); assert.equal(f.child.bounds.x, 600)
+  f.parent.emit('moved'); assert.equal(f.child.bounds.x, 632)
   f.child.close()
   for (const event of ['move', 'moved', 'resize']) assert.equal(f.parent.listenerCount(event), 0)
 })

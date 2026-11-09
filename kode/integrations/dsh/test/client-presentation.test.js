@@ -742,10 +742,13 @@ test('interface settings toggle the device service directly and report save fail
  const service = { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled }), update(value) { received = value; enabled = value.tokenIsland } }
  const scope = { avatarContext: { get: name => name === 'kodeInterface' ? service : undefined },
    React: { Fragment: 'fragment', useMemo: fn => fn(), useCallback: fn => fn }, useSyncExternalStore: (_subscribe, get) => get(),
-   useState: () => [error, value => { error = value }], Failure: 'failure', h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
+   useState: () => [error, value => { error = value }], SelectField: 'select', Failure: 'failure', h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
  const component = vm.runInNewContext(source.slice(source.indexOf('  function InterfaceSettingsBody('), source.indexOf('  function NotificationSettingsBody(')) + '\nInterfaceSettingsBody', scope)
  let tree = component(), toggle = findNode(tree, node => node.props.role === 'switch')
  assert.equal(toggle.props.checked, true); assert.equal(toggle.props.disabled, false)
+ const period = findNode(tree, node => node.type === 'select' && node.props.label === '刘海用量范围')
+ assert.equal(period.props.value, 'today'); assert.deepEqual(Array.from(period.props.options, item => item.value), ['today','month','all'])
+ period.props.onChange('month'); assert.equal(received.tokenPeriod, 'month')
  toggle.props.onChange({ target: { checked: false } }); assert.equal(received.tokenIsland, false)
  tree = component(); assert.equal(findNode(tree, node => node.props.role === 'switch').props.checked, false)
  service.update = () => { throw new Error('storage denied') }

@@ -40,7 +40,7 @@ test('worktree search lives inside the dropdown and preserves selection while fi
 })
 
 test('token island loads selected-host statistics, changes period, and never displays a previous host snapshot', async () => {
-  let enabled = true
+  let enabled = true, meterPeriod = 'today'
   let cursor = 0, host = 'local', activityState = { state: 'awaiting', label: '全局：2 个会话等待操作' }
   const state = [], effects = [], requests = [], listeners = new Map()
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
@@ -59,7 +59,7 @@ test('token island loads selected-host statistics, changes period, and never dis
     document: { querySelector: () => null, hidden: false, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
     AbortController, setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, Intl }
   const component = vm.runInNewContext(source + '\nkodeWorkbenchContext = context; KodeTokenIsland', scope)
-  const render = () => { cursor = 0; const tree = component({ appearance: { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled }) }, activity: { subscribe: () => () => {}, getSnapshot: () => activityState } }); effects.splice(0).forEach(fn => fn()); return tree }
+  const render = () => { cursor = 0; const tree = component({ appearance: { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled, tokenPeriod: meterPeriod }) }, activity: { subscribe: () => () => {}, getSnapshot: () => activityState } }); effects.splice(0).forEach(fn => fn()); return tree }
   const settle = () => new Promise(resolve => setImmediate(resolve))
   const find = (node, predicate) => node && typeof node === 'object' ? predicate(node) ? node : (node.children ?? []).map(child => find(child, predicate)).find(Boolean) : undefined
   let tree = render(); await settle(); tree = render()
@@ -68,6 +68,13 @@ test('token island loads selected-host statistics, changes period, and never dis
   activityState = { state: 'ongoing', label: '全局：1 个会话正在运行' }; tree = render()
   assert.equal(find(tree, node => node.type === 'i').props['data-state'], 'ongoing')
   assert.equal(requests[0].selected, 'local'); assert.ok(requests[0].options.signal)
+  for (const selectedPeriod of ['month', 'all', 'today']) {
+    meterPeriod = selectedPeriod; tree = render()
+    assert.equal(find(tree, node => node.type === 'strong').children[0], '—', 'never relabel a stale total as a new period')
+    await settle(); tree = render(); await settle(); tree = render()
+    assert.ok(requests.at(-1).path.includes(`period=${selectedPeriod}`))
+    assert.match(find(tree, node => node.props.className === 'kode-token-notch').props['aria-label'], new RegExp(({today:'今日',month:'本月',all:'全部'})[selectedPeriod]))
+  }
   find(tree, node => node.props.className === 'kode-token-notch').props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(find(tree, node => node.props['aria-label'] === 'Token 用量'))
   find(tree, node => node.type === 'button' && node.children.includes('本月')).props.onClick(); tree = render(); await settle(); tree = render()
@@ -151,4 +158,11 @@ test('stacked area boundaries add each selected series and support a single data
   assert.equal(scope.usagePeriod('custom', since, since + 3600000), 'today')
   assert.equal(scope.usagePeriod('custom', since, since + 7 * 86400000), 'month')
   assert.equal(scope.usagePeriod('custom', since, since + 200 * 86400000), 'all')
+})
+
+test('camera menu bars hide only text labels and keep compact geometry aligned with the native panel', () => {
+ assert.match(source, /html\[data-kode-menu-camera=true\] \.kode-island-name,html\[data-kode-menu-camera=true\] \.kode-island-period-label\{display:none\}/)
+ assert.match(source, /grid-template-columns:24px var\(--kode-camera-gap,200px\) 96px/)
+ assert.match(source, /className: 'kode-island-name'/)
+ assert.match(source, /className: 'kode-island-period-label'/)
 })

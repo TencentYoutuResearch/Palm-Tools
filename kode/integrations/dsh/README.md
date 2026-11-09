@@ -993,7 +993,7 @@ retains that application identity. Older cached generic Electron launches migrat
 to their matching, signature-verified development runtime before starting the Host;
 original launch arguments are preserved and identified runtimes never relaunch again.
 
-**Kode → 外观 → 显示 Token 刘海** controls both the native menu-bar panel and the in-app fallback. This device-local preference takes effect immediately and survives restart. Disabling it also stops token polling; enabling it reopens the collapsed panel.
+**Kode → 外观 → 显示 Token 刘海** controls both the native menu-bar panel and the in-app fallback. This device-local preference takes effect immediately and survives restart. Disabling it also stops token polling; enabling it reopens the collapsed panel. The adjacent “刘海用量范围” selector persists Today / This month / All time and updates the collapsed meter immediately; expanded detail filters remain independent. On camera-cutout screens, the collapsed panel hides the Kode/remote name and period caption, retaining the global status dot, total and disclosure control. Both native geometry and CSS use compact 24/96-point wings; plain screens keep their descriptive labels.
 
 The token panel stays on the DSH main window's display, including when another
 app is in front. Moving/resizing the owner updates its display; hiding or minimizing
