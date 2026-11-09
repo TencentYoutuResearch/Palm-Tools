@@ -5515,6 +5515,23 @@ function installHistoryEditStyle(ctx) {
 /** Workbench status: one application-wide token island; jobs beside the composer.
  * The native job component retains its subscriptions, locale, output and kill UI. */
 let kodeWorkbenchContext
+
+// The native window has square corners; CSS owns only the two bottom corners.
+// Paint through the camera clearance, so the real cutout and wings form one bar.
+const nativeIslandStyle = `
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;min-height:100%;overflow:hidden;background:transparent;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+.kode-token-rail{width:100%;height:var(--kode-menu-height,28px);min-height:var(--kode-menu-height,28px)}
+.kode-token-notch,.kode-token-notch:hover{width:240px;height:min(var(--kode-menu-height,28px),100dvh);border-radius:0 0 8px 8px;background:#000;box-shadow:none}
+.kode-token-panel{max-height:calc(100dvh - 4px);box-shadow:none}
+button,input{font:inherit}
+html[data-kode-menu-camera=true] .kode-token-notch,html[data-kode-menu-camera=true] .kode-token-notch:hover{display:grid;grid-template-columns:56px var(--kode-camera-gap,200px) 144px;position:absolute;left:calc(var(--kode-camera-center,156px) - var(--kode-camera-gap,200px)/2 - 56px);width:calc(200px + var(--kode-camera-gap,200px));gap:0;padding:0;background:#000}
+html[data-kode-menu-camera=true] .kode-token-notch::before{content:"";grid-column:2;grid-row:1}
+html[data-kode-menu-camera=true] .kode-island-host{grid-column:1;grid-row:1;justify-content:flex-end;height:100%;padding:0 8px}
+html[data-kode-menu-camera=true] .kode-island-usage{grid-column:3;grid-row:1;align-items:center;justify-content:flex-start;height:100%;margin:0;padding:0 22px 0 8px}
+html[data-kode-menu-camera=true] .kode-token-notch>svg{position:absolute;right:8px;top:calc(50% - 6px)}
+`
+
 function relocateWorkbenchJobs(ctx) {
   const sourceSeat = 'conversation.session.header.actions', targetSeat = 'conversation.input.dock'
   ctx.slots.inject(sourceSeat, () => {
@@ -5631,7 +5648,7 @@ function KodeTokenIsland() {
     try {
       popup.document.title = 'Kode 用量'
       const style = popup.document.createElement('style')
-      style.textContent = (document.querySelector('[data-kode-workbench]')?.textContent ?? '') + '\n*,*::before,*::after{box-sizing:border-box}html,body{margin:0;background:transparent;font-family:-apple-system,BlinkMacSystemFont,sans-serif} .kode-token-rail{width:100%;height:auto}.kode-token-notch,.kode-token-notch:hover{width:240px;height:min(var(--kode-menu-height,28px),100dvh);border-radius:0 0 10px 10px}.kode-token-panel{max-height:calc(100dvh - 4px);box-shadow:none}button,input{font:inherit}html[data-kode-menu-camera=true] .kode-token-notch,html[data-kode-menu-camera=true] .kode-token-notch:hover{display:grid;grid-template-columns:56px var(--kode-camera-gap,200px) 144px;position:absolute;left:calc(var(--kode-camera-center,156px) - var(--kode-camera-gap,200px)/2 - 56px);width:calc(200px + var(--kode-camera-gap,200px));gap:0;padding:0;background:transparent;box-shadow:none}html[data-kode-menu-camera=true] .kode-token-notch::before{content:"";grid-column:2;grid-row:1}html[data-kode-menu-camera=true] .kode-island-host{grid-column:1;grid-row:1;justify-content:flex-end;height:100%;padding:0 8px;background:#050608;border-radius:0 0 0 4px}html[data-kode-menu-camera=true] .kode-island-usage{grid-column:3;grid-row:1;align-items:center;justify-content:flex-start;height:100%;margin:0;padding:0 22px 0 8px;background:#050608;border-radius:0 0 4px 0}html[data-kode-menu-camera=true] .kode-token-notch:hover .kode-island-host,html[data-kode-menu-camera=true] .kode-token-notch:hover .kode-island-usage{background:#111418}html[data-kode-menu-camera=true] .kode-token-notch>svg{position:absolute;right:8px;top:calc(50% - 6px)}'
+      style.textContent = (document.querySelector('[data-kode-workbench]')?.textContent ?? '') + nativeIslandStyle
       popup.document.head.append(style)
       setNativeWindow(popup)
     } catch { popup.close(); return }

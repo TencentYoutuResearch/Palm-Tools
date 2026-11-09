@@ -2,6 +2,15 @@
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { findDevelopmentRuntime } from './desktop-runtime.js'
+// Full-screen Spaces may temporarily report empty auxiliary menu regions.
+// Keep the last measured cutout until the physical display disappears.
+export function screenCutouts(rows, previous = new Map()) {
+  return new Map(rows.flatMap(row => {
+    const measured = Number.isFinite(row.left) && Number.isFinite(row.right) && row.right > row.left
+    const cutout = measured ? row : previous.get(row.id)
+    return cutout ? [[row.id, cutout]] : []
+  }))
+}
 export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notification, shell }) {
   const executable = process.platform === 'darwin' ? findDevelopmentRuntime(process.execPath) : null
   if (executable) {
@@ -17,7 +26,7 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     if (process.platform !== 'darwin') return
     try {
       const rows = JSON.parse(execFileSync(fileURLToPath(new URL('../assets/desktop/screen-layout', import.meta.url)), [], { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }))
-      cutouts = new Map(rows.filter(row => Number.isFinite(row.left) && Number.isFinite(row.right) && row.right > row.left).map(row => [row.id, row]))
+      cutouts = screenCutouts(rows, cutouts)
     } catch { /* Older packages retain a conservative camera clearance. */ }
   }
   const owner = event => {
@@ -105,20 +114,30 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
   return {
     windowOpen(parent, { url, frameName }) {
       if (process.platform !== 'darwin' || frameName !== 'kode-token-island' || url !== 'about:blank' || !parent.webContents.getURL().startsWith('dsh-app://app/')) return null
-      return { action: 'allow', overrideBrowserWindowOptions: { type: 'panel', enableLargerThanScreen: true, width: 240, height: 28, show: false, frame: false, transparent: true, resizable: false, minimizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, hasShadow: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } } }
+      return { action: 'allow', overrideBrowserWindowOptions: { type: 'panel', enableLargerThanScreen: true, width: 240, height: 28, show: false, frame: false, roundedCorners: false, transparent: true, resizable: false, minimizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, hasShadow: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } } }
     },
     childCreated(parent, child, details) {
       if (details.frameName !== 'kode-token-island') return
       islands.get(parent)?.close()
       islands.set(parent, child)
-      child.setAlwaysOnTop(true, 'status')
+      child.setAlwaysOnTop(true, 'pop-up-menu')
       child.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
       child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
       const move = () => { if (!child.isDestroyed()) position(parent, child, child.getBounds()) }
+      // A native full-screen transition moves the owner to another Space and
+      // temporarily changes focus. Reassert the panel after the transition,
+      // rather than leaving it hidden by the intermediate blur event.
+      const fullScreenChanged = () => {
+        if (child.isDestroyed()) return
+        child.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
+        readGeometry(); refresh()
+      }
+      parent.on('enter-full-screen', fullScreenChanged)
+      parent.on('leave-full-screen', fullScreenChanged)
       parent.on('move', move)
       for (const event of ['hide', 'show', 'minimize', 'restore']) parent.on(event, refresh)
       parent.once('closed', () => { if (!child.isDestroyed()) child.close() })
-      child.once('closed', () => { parent.removeListener('move', move); for (const event of ['hide', 'show', 'minimize', 'restore']) parent.removeListener(event, refresh); islands.delete(parent) })
+      child.once('closed', () => { parent.removeListener('move', move); parent.removeListener('enter-full-screen', fullScreenChanged); parent.removeListener('leave-full-screen', fullScreenChanged); for (const event of ['hide', 'show', 'minimize', 'restore']) parent.removeListener(event, refresh); islands.delete(parent) })
       child.webContents.once('did-finish-load', refresh)
       position(parent, child)
       refresh()

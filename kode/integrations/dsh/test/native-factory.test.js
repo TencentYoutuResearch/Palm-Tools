@@ -762,3 +762,49 @@ test('native completion reaches the root notification carrier only after its dur
     assert.equal(h.stored.get(agent.id).events.at(-1).data.reason.kind, 'completed')
   } finally { dispose(); await h.ctx.fiber.dispose() }
 })
+
+
+test('image prompt admission uses the native current model, keeps attachments, and rejects text-only models accurately', async () => {
+  const { SessionCommandController } = await import(process.env.KODE_TEST_SESSION_COMMANDS ?? new URL('../node_modules/@deepseek-ai/dsh-api-session-controller/lib/types/commands.js', import.meta.url).href)
+  const received = [], checked = []
+  const h = await host({ async *stream(request) { received.push(request.messages); yield { type: 'finish', reason: { kind: 'stop' } } }, closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    const ref = { attachmentId: 'sha256:' + 'a'.repeat(64), mediaType: 'image/png', bytes: 10, width: 1, height: 1 }
+    let allowImages = true, commits = 0
+    const controller = new SessionCommandController({
+      agents: h.ctx.agents,
+      llm: { resolveModelInfo: async (provider, model) => { checked.push({ provider, model }); return { inputModalities: allowImages ? ['text', 'image'] : ['text'] } } },
+      attachments: { admitPromptContent: async content => content.map(part => part.type === 'image' ? { type: 'image', attachment: ref } : part) },
+      fileUploads: { resolve: () => ({ type: 'image', mediaType: 'image/png', data: 'aGVsbG8=' }), bindPrompt: () => ({ commit() { commits++ }, [Symbol.dispose]() {} }) },
+    }, { resolveAgent: async () => ({ agent }), serializeImageAdmission: (_agent, run) => run(), selectionFor: agent => ({ current: agent.model.current() }) })
+    assert.deepEqual(agent.model.current(), options.agentOptions)
+    agent.model.select({ provider: 'kode-agent-fixture', model: 'vision' })
+    assert.equal(agent.model.current().model, 'vision')
+    const request = { sessionId: agent.id, requestId: 'image-admission', mode: 'queue', content: [{ type: 'text', text: 'Describe' }, { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=' }] }
+    assert.deepEqual(await controller.prompt(request, { kind: 'user', rpcId: request.requestId }), { accepted: true })
+    await agent.whenIdle()
+    assert.equal(commits, 1); assert.equal(received.length, 1)
+    assert.deepEqual(checked[0], { provider: 'kode-agent-fixture', model: 'vision' })
+    assert.equal(received[0][0].content[1].attachment.attachmentId, ref.attachmentId)
+    // Uploaded-image receipts were added by 0.2.2; the older dev dependency
+    // treats receipts as files. Exercise the new form against Desktop's API.
+    if (process.env.KODE_TEST_SESSION_COMMANDS) {
+      assert.deepEqual(await controller.prompt({ ...request, requestId: 'image-receipt', content: [{ type: 'file', receiptId: 'uploaded-image' }] }, { kind: 'user', rpcId: 'image-receipt' }), { accepted: true })
+      await agent.whenIdle()
+      assert.equal(received.length, 2)
+      assert.equal(received[1][0].content[0].attachment.attachmentId, ref.attachmentId)
+    }
+    // A running Agent can still queue an image; admission is not inference.
+    agent.maintenance = true
+    agent.setStatus('running')
+    assert.deepEqual(await controller.prompt({ ...request, requestId: 'image-queued' }, { kind: 'user', rpcId: 'image-queued' }), { accepted: true })
+    assert.equal(agent.inbox.nextTurn.length, 1)
+    agent.inbox.clear(); agent.setStatus('idle'); agent.maintenance = false
+    allowImages = false
+    await assert.rejects(controller.prompt({ ...request, requestId: 'image-denied' }, { kind: 'user', rpcId: 'image-denied' }), error => {
+      assert.match(error.message, /does not support image input/); return true
+    })
+    assert.equal(commits, process.env.KODE_TEST_SESSION_COMMANDS ? 3 : 2)
+  } finally { await h.ctx.fiber.dispose() }
+})

@@ -69,6 +69,16 @@ export class NativeAgentDriver {
     this.id = id; this.options = options; this.session = session; this.runtime = runtime
     this.scope = createScope(ctx, this); this.ctx = this.scope.ctx; this.events = agentEvents(ctx, this)
     this.inbox = new Inbox(this); this.status = 'idle'; this.activity = Promise.resolve(); this.ready = false; this.disposed = false; this.revision = 0
+    // DSH 0.2.2 validates image admission and model changes through this API.
+    // Read the live projection so a pending selection wins over the last turn.
+    this.model = {
+      current: () => {
+        const state = this.ctx.sessionProjections.stateOf(this.session, 'modelSelection')
+        const selected = state?.pending ?? state?.next ?? state?.lastUsed ?? this.options
+        return selected?.provider && selected?.model ? { ...selected } : undefined
+      },
+      select: selected => { this.selectModel(selected) },
+    }
     this.turn = ctx.sessionProjections.stateOf(session, 'kodeTurnBoundary')?.lastTurn ?? 0
   }
   setStatus(status) { if (this.status !== status) { this.status = status; this.events.emit('agent/status', { status }) } }
