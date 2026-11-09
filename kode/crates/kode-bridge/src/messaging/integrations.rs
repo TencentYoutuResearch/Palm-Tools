@@ -11,12 +11,18 @@ use std::sync::Arc;
 pub struct Settings {
     pub messaging_enabled: bool,
     pub memory_enabled: bool,
+    #[serde(default = "enabled_by_default")]
+    pub auto_resume_interrupted: bool,
+}
+fn enabled_by_default() -> bool {
+    true
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             messaging_enabled: true,
             memory_enabled: true,
+            auto_resume_interrupted: true,
         }
     }
 }
@@ -26,6 +32,7 @@ impl Default for Settings {
 pub struct Change {
     pub messaging_enabled: Option<bool>,
     pub memory_enabled: Option<bool>,
+    pub auto_resume_interrupted: Option<bool>,
 }
 pub fn change(hub: &Hub, patch: Change) -> Result<Settings> {
     let _gate = hub.gate.lock();
@@ -35,6 +42,9 @@ pub fn change(hub: &Hub, patch: Change) -> Result<Settings> {
     }
     if let Some(enabled) = patch.memory_enabled {
         value.memory_enabled = enabled;
+    }
+    if let Some(enabled) = patch.auto_resume_interrupted {
+        value.auto_resume_interrupted = enabled;
     }
     let row = hub.store.document("integrations")?;
     hub.store.save_document(
@@ -212,6 +222,7 @@ mod tests {
             Settings {
                 messaging_enabled: true,
                 memory_enabled: false,
+                auto_resume_interrupted: true,
             },
         )
         .unwrap();
@@ -238,16 +249,19 @@ mod tests {
             Change {
                 messaging_enabled: Some(false),
                 memory_enabled: None,
+                auto_resume_interrupted: Some(false),
             },
         )
         .unwrap();
         assert!(!patched.messaging_enabled);
         assert!(!patched.memory_enabled);
+        assert!(!patched.auto_resume_interrupted);
         let patched = change(
             &reopened,
             Change {
                 messaging_enabled: None,
                 memory_enabled: Some(true),
+                auto_resume_interrupted: None,
             },
         )
         .unwrap();

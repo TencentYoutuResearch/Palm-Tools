@@ -9,6 +9,16 @@ function replace(from, to) { if (!source.includes(from)) throw new Error(`Pinned
 replace('id: "@deepseek-ai/dsh-client-ui-chat",','id: "@kode/dsh-chat",')
 // Stable user-bubble seat for scene-aware appearance without matching generated classes.
 replace('className: MessageItem_module_css_default.bubble,', 'className: MessageItem_module_css_default.bubble, "data-kode-user-bubble": true,')
+// Keep history editing separate from the generated renderer and preserve its native bubble/actions.
+const historyEdit = await readFile(new URL('../packages/chat/history-edit.js', import.meta.url), 'utf8')
+const workbenchUi = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
+replace('function UserStyleBubble(', historyEdit + '\n' + workbenchUi + '\nfunction UserStyleBubble(')
+replace('const UserMessageNodeView = (0, react.memo)(function UserMessageNodeView(', 'const OriginalUserMessageNodeView = (0, react.memo)(function UserMessageNodeView(')
+replace('function UserMessageNodeView({ node, renderFactorySlot, loadImage, t })', 'function UserMessageNodeView({ node, renderFactorySlot, loadImage, t, historyEditAction })')
+replace('text,\n\t\t\t\t\ttime: data.time,', 'text,\n\t\t\t\t\textraActions: historyEditAction,\n\t\t\t\t\ttime: data.time,')
+replace('/** Injected-context keyed Chat renderer. */', 'const UserMessageNodeView = (props) => react.createElement(HistoryEditableMessage, { ...props, native: OriginalUserMessageNodeView });\n/** Injected-context keyed Chat renderer. */')
+for (const key of ['user', 'steering']) replace('key: "' + key + '",\n\t\t\t\tlocale: NS', 'key: "' + key + '",\n\t\t\t\tinject: sessionId => historyEditBinding(ctx, sessionId),\n\t\t\t\tlocale: NS')
+replace('function registerChatNodeRenderers(ctx, performanceUsage, presentation) {', 'function registerChatNodeRenderers(ctx, performanceUsage, presentation) { installHistoryEditStyle(ctx); installWorkbenchUi(ctx);')
 // Keep ui-chat settings compatible with the official chat UI.
 replace('function activity(name) {', 'function activity(name) {\n if (name === "kode_native_commandExecution") return "commands";\n if (name === "kode_native_fileChange") return "edit";')
 // Keep running commentary visible, but fold completed process even after steering.

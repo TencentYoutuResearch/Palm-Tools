@@ -37,6 +37,8 @@ with (directory / "session.lock").open("r+") as lease:
         if args.apply:
             command.append(str(output))
         report = json.loads(subprocess.check_output(command, text=True))
+        if report["sessionId"] != args.session_id:
+            raise SystemExit("Session header identity mismatch; repair aborted")
         report["applied"] = False
         if args.apply and report["changes"]:
             if path.read_bytes() != original:
@@ -47,6 +49,16 @@ with (directory / "session.lock").open("r+") as lease:
             cache = home / "storages/session_projcache/sessions" / (args.session_id + ".json")
             if cache.exists():
                 shutil.copy2(cache, backup / "projection-cache.json")
+            # Make the rollback copy durable before publishing the replacement.
+            for saved in backup.iterdir():
+                with saved.open("rb") as stream:
+                    os.fsync(stream.fileno())
+            for folder in (backup, backup.parent, backup.parent.parent):
+                backup_fd = os.open(folder, os.O_RDONLY)
+                try:
+                    os.fsync(backup_fd)
+                finally:
+                    os.close(backup_fd)
             os.chmod(output, path.stat().st_mode & 0o777)
             os.replace(output, path)
             if cache.exists():

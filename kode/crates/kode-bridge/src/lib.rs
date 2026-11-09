@@ -820,8 +820,16 @@ async fn get_model_usage(
     {
         return Err(ApiError::BadRequest("invalid timezone offset".into()));
     }
+    if query.since_ms.is_some_and(|start| start < 0)
+        || query.until_ms.is_some_and(|end| end < 0)
+        || query.since_ms.zip(query.until_ms).is_some_and(|(start, end)| start > end)
+    {
+        return Err(ApiError::BadRequest("invalid usage time range".into()));
+    }
     let snapshot = tokio::task::spawn_blocking(move || {
-        model_usage::collect_snapshot(&period, query.since_ms, query.timezone_offset_minutes)
+        model_usage::collect_snapshot(
+            &period, query.since_ms, query.until_ms, query.timezone_offset_minutes,
+        )
     })
     .await
     .map_err(|error| ApiError::Internal(format!("usage task failed: {error}")))?

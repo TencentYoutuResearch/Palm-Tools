@@ -9,14 +9,22 @@ import { AgentRuntimeAdapter, profileRoute } from '../src/agent-runtime.js'
 import { CodexSession } from '../src/codex-session.js'
 const fixture = fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))
 const consume = async stream => { const chunks = []; for await (const chunk of stream) chunks.push(chunk); return chunks }
-test('dsh runtime binds profiles, forwards dynamic tools, persists native identity and refuses input replay', async () => {
+for (const batch of [false, true]) test(`dsh runtime forwards ${batch ? '0.2.2 batch' : 'legacy single'} tools, persists native identity and refuses input replay`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-dsh-native-')), log = join(root, 'wire.jsonl')
   const profiles = await new AgentProfiles(join(root, 'agents.json')).open(['codex', 'tcodex'].map(id => ({ id, name: id, type: 'codex', executable: process.execPath, args: [fixture], env: { KODE_FIXTURE_AGENT_LABEL: id, KODE_FIXTURE_RPC_LOG: log } })))
   const events = [], agents = new Map()
   let calls = 0
   const makeAgent = id => ({ id, session: { header: { cwd: root }, append: (type, data) => events.push({ type, data }) }, ctx: {
     parallel: async () => {}, get: name => name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'workspace-write', workspaceRoot: root }) } : undefined,
-    tools: { execute: async exec => { assert.equal(exec.agent.id, id); calls++; return { isError: false, content: [{ type: 'text', text: 'session directory' }] } } },
+    tools: { ...(batch ? { selectExecutor() {} } : {}), execute: async exec => {
+      assert.equal(exec.agent.id, id); calls++
+      const result = { isError: false, content: [{ type: 'text', text: 'session directory' }] }
+      if (!batch) return result
+      assert.equal(exec.calls.length, 1); assert.equal(exec.calls[0].name, 'kode_sessions_list')
+      assert.equal(typeof exec.calls[0].arguments, 'string'); JSON.parse(exec.calls[0].arguments)
+      assert.equal(exec.log, undefined, 'native adapter owns tool history; batch must not duplicate it')
+      return { results: [{ callId: exec.calls[0].id, result }], additionalContexts: [], concluded: false }
+    } },
   } })
   agents.set('first', makeAgent('first')); agents.set('second', makeAgent('second'))
   const ctx = { agents: { get: id => agents.get(id) }, sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { kind: 'start', seq: 1 } }) } }

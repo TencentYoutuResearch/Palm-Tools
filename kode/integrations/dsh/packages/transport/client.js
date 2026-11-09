@@ -1502,6 +1502,197 @@ function showConnectionProgress(label, document2 = globalThis.document) {
   };
 }
 
+// packages/transport/interface.js
+function installInterfacePreferences(ctx, env = globalThis) {
+  const key = "kode.interface.v1", listeners = /* @__PURE__ */ new Set(), periods = ["today", "month", "all"];
+  const read = () => {
+    try {
+      const value = JSON.parse(env.localStorage?.getItem(key) ?? "{}");
+      return { tokenIsland: value?.tokenIsland !== false, tokenPeriod: periods.includes(value?.tokenPeriod) ? value.tokenPeriod : "today" };
+    } catch {
+      return { tokenIsland: true, tokenPeriod: "today" };
+    }
+  };
+  let snapshot2 = read();
+  const publish = (next) => {
+    if (snapshot2.tokenIsland === next.tokenIsland && snapshot2.tokenPeriod === next.tokenPeriod) return;
+    snapshot2 = next;
+    for (const listener of listeners) listener();
+  };
+  const service = {
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSnapshot: () => snapshot2,
+    update(patch) {
+      if ("tokenIsland" in patch && typeof patch.tokenIsland !== "boolean" || "tokenPeriod" in patch && !periods.includes(patch.tokenPeriod)) throw new Error("\u65E0\u6548\u7684\u5218\u6D77\u663E\u793A\u8BBE\u7F6E\u3002");
+      const next = { ...snapshot2, ...patch };
+      env.localStorage?.setItem(key, JSON.stringify(next));
+      publish(next);
+    }
+  };
+  const changed = (event) => {
+    if (event.key === key || event.key === null) publish(read());
+  };
+  env.window?.addEventListener("storage", changed);
+  ctx.effect(() => () => env.window?.removeEventListener("storage", changed), "kode.interface-preferences");
+  ctx.provide("kodeInterface", service);
+  return service;
+}
+
+// packages/transport/notifications.js
+function installSessionNotifications(ctx, transport, env = globalThis) {
+  const storageKey = "kode.session-notifications.v1", listeners = /* @__PURE__ */ new Set(), streams = /* @__PURE__ */ new Map(), shown = /* @__PURE__ */ new Map(), seen = /* @__PURE__ */ new Set();
+  let preferences = { completed: true, waiting: true };
+  try {
+    const saved = JSON.parse(env.localStorage?.getItem(storageKey) ?? "{}");
+    for (const key of ["completed", "waiting"]) if (typeof saved[key] === "boolean") preferences[key] = saved[key];
+  } catch {
+  }
+  const systemSettings = /Mac/i.test(env.navigator?.platform ?? "") && /Electron\//.test(env.navigator?.userAgent ?? "");
+  let snapshot2, deliveryError = false, lastEvent = null, connection = "connecting";
+  const publish = () => {
+    snapshot2 = { ...preferences, permission: env.Notification?.permission ?? "unsupported", systemSettings, deliveryError, lastEvent, connection };
+    for (const fn of listeners) fn();
+  };
+  publish();
+  const close = (key) => {
+    shown.get(key)?.close();
+    shown.delete(key);
+  };
+  const receive = (host, event) => {
+    if (!event || typeof event.sessionId !== "string" || typeof event.key !== "string" || !["completed", "question", "approval", "resolved"].includes(event.kind)) return;
+    const key = `${host}:${event.key}`;
+    if (event.kind === "resolved") {
+      close(key);
+      return;
+    }
+    const id = `${host}:${event.id}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    if (seen.size > 512) seen.delete(seen.values().next().value);
+    lastEvent = { kind: event.kind, sessionId: event.sessionId, at: Date.now() };
+    publish();
+    if (!env.kodeDesktop?.notify && env.Notification?.permission !== "granted" || !(event.kind === "completed" ? preferences.completed : preferences.waiting)) return;
+    const label = { completed: "\u672C\u8F6E\u5DF2\u5B8C\u6210", question: "\u7B49\u5F85\u4F60\u56DE\u7B54", approval: "\u7B49\u5F85\u4F60\u6279\u51C6" }[event.kind];
+    let notification;
+    if (env.kodeDesktop?.notify) {
+      notification = { close() {
+        void env.kodeDesktop.notify({ key, close: true }).catch(() => {
+        });
+      } };
+      void env.kodeDesktop.notify({ key, title: `${label} \xB7 Kode`, body: String(event.title ?? "\u672A\u547D\u540D\u4F1A\u8BDD").slice(0, 160) }).then((result) => {
+        deliveryError = result?.status === "failed";
+        publish();
+      }).catch(() => {
+        deliveryError = true;
+        publish();
+      });
+    } else try {
+      notification = new env.Notification(`${label} \xB7 Kode`, { body: String(event.title ?? "\u672A\u547D\u540D\u4F1A\u8BDD").slice(0, 160), tag: key });
+    } catch {
+      deliveryError = true;
+      publish();
+      return;
+    }
+    notification.onerror = () => {
+      deliveryError = true;
+      publish();
+    };
+    notification.onshow = () => {
+      deliveryError = false;
+      publish();
+    };
+    notification.onclick = () => {
+      env.window.focus();
+      close(key);
+      void transport.select(host, { sessionId: event.sessionId }).catch((error) => {
+        ctx.logger?.warn?.("\u65E0\u6CD5\u6253\u5F00\u901A\u77E5\u4F1A\u8BDD\uFF1A%s", error.message);
+      });
+    };
+    notification.onclose = () => {
+      if (shown.get(key) === notification) shown.delete(key);
+    };
+    shown.set(key, notification);
+    if (event.kind === "completed") {
+      const timer = env.setTimeout(() => close(key), 6e4);
+      notification.onclose = () => {
+        env.clearTimeout(timer);
+        if (shown.get(key) === notification) shown.delete(key);
+      };
+    }
+    while (shown.size > 32) close(shown.keys().next().value);
+  };
+  const connect = () => {
+    const host = transport.current;
+    if (transport.getSnapshot().switching || streams.has(host) || !env.EventSource) return;
+    const events = new env.EventSource(transport.path("/api/kode/notifications", host));
+    events.onopen = () => {
+      connection = "connected";
+      publish();
+    };
+    events.onerror = () => {
+      connection = "reconnecting";
+      publish();
+    };
+    events.onmessage = (event) => {
+      try {
+        receive(host, JSON.parse(event.data));
+      } catch (error) {
+        deliveryError = true;
+        publish();
+        ctx.logger?.warn?.("\u4F1A\u8BDD\u901A\u77E5\u5904\u7406\u5931\u8D25\uFF1A%s", error.message);
+      }
+    };
+    streams.set(host, events);
+  };
+  const service = {
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    getSnapshot: () => snapshot2,
+    update(patch) {
+      for (const key of ["completed", "waiting"]) if (typeof patch[key] === "boolean") preferences[key] = patch[key];
+      try {
+        env.localStorage?.setItem(storageKey, JSON.stringify(preferences));
+      } catch {
+      }
+      for (const key of shown.keys()) close(key);
+      publish();
+    },
+    async enable() {
+      if (env.Notification?.permission === "default") await env.Notification.requestPermission();
+      publish();
+      if (systemSettings) await service.openSettings();
+    },
+    async openSettings() {
+      if (env.kodeDesktop?.openNotificationSettings) return env.kodeDesktop.openNotificationSettings();
+      const response = await transport.fetch("/api/kode/notification-settings", { method: "POST" }, "local");
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error ?? "\u65E0\u6CD5\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E\uFF0C\u8BF7\u624B\u52A8\u6253\u5F00\u201C\u7CFB\u7EDF\u8BBE\u7F6E \u2192 \u901A\u77E5\u201D\u3002");
+      }
+    }
+  };
+  const stopNativeClicks = env.kodeDesktop?.onNotificationClick?.((key) => shown.get(key)?.onclick?.());
+  connect();
+  const unsubscribe = transport.subscribe(connect);
+  const onFocus = () => publish();
+  env.window.addEventListener("focus", onFocus);
+  ctx.provide("kodeNotifications", service);
+  ctx.effect(() => () => {
+    stopNativeClicks?.();
+    unsubscribe();
+    env.window.removeEventListener("focus", onFocus);
+    for (const stream of streams.values()) stream.close();
+    for (const key of shown.keys()) close(key);
+    listeners.clear();
+  }, "kode.notifications");
+  return service;
+}
+
 // packages/transport/navigation.js
 async function openSessionTarget(ctx, target, signal) {
   signal.throwIfAborted();
@@ -1520,6 +1711,7 @@ async function openSessionTarget(ctx, target, signal) {
 // packages/transport/client-source.js
 var inject = [];
 async function apply(ctx) {
+  installInterfacePreferences(ctx);
   const startup = new AbortController();
   ctx.effect(() => () => startup.abort(new Error("Host transport unloaded")), "kode.transport-startup");
   await waitForSessionService(fetch, startup.signal);
@@ -1648,6 +1840,7 @@ async function apply(ctx) {
     }
   };
   ctx.provide("kodeTransport", service);
+  installSessionNotifications(ctx, service);
   ctx.effect(() => () => {
     navigation?.abort(new Error("Host transport unplugged"));
     listeners.clear();

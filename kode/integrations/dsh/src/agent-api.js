@@ -1,4 +1,5 @@
 /** Owner-only Agent configuration API over dsh's existing authenticated Web carrier. */
+import { HistoryEditor } from './history-edit.js'
 import { AGENT_TYPES } from './agent-profiles.js'
 import { profileRoute } from './agent-runtime.js'
 import { SUPPORTED_AGENT_TYPES } from './native-session.js'
@@ -7,7 +8,7 @@ import { appendFastPreference, effectiveFast } from './model-fast.js'
 const PATH = '/api/kode/agents'
 const json = (res, status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
 export function registerAgentApi(ctx, service) {
-  const streams = new Set()
+  const streams = new Set(), historyEditor = new HistoryEditor(ctx, service)
   const controller = () => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用，请稍后重试。'); return value }
   const { profiles, adapter } = service
   const available = profile => service.hasRuntime ? service.hasRuntime(profile.type) : Object.hasOwn(service.types ?? AGENT_TYPES, profile.type)
@@ -81,6 +82,7 @@ export function registerAgentApi(ctx, service) {
       let body = ''
       for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) throw new Error('Agent configuration exceeds 128 KiB') }
       const input = JSON.parse(body)
+      if (input.action === 'edit-message') { json(res, 200, await historyEditor.edit(input)); return }
       if (input.action === 'set-default') {
         const id = input.profileId ?? null
         if (id !== null && !available(profiles.get(id))) throw new Error('此 Agent 的执行插件尚未安装。')

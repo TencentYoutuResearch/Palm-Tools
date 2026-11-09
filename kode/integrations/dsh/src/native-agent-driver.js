@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { ToolCallRecovery } from '@deepseek-ai/dsh-session'
+import { ToolCallRecovery, appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { AssistantStreamAccumulator, BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
@@ -69,6 +69,16 @@ export class NativeAgentDriver {
     this.id = id; this.options = options; this.session = session; this.runtime = runtime
     this.scope = createScope(ctx, this); this.ctx = this.scope.ctx; this.events = agentEvents(ctx, this)
     this.inbox = new Inbox(this); this.status = 'idle'; this.activity = Promise.resolve(); this.ready = false; this.disposed = false; this.revision = 0
+    // DSH 0.2.2 validates image admission and model changes through this API.
+    // Read the live projection so a pending selection wins over the last turn.
+    this.model = {
+      current: () => {
+        const state = this.ctx.sessionProjections.stateOf(this.session, 'modelSelection')
+        const selected = state?.pending ?? state?.next ?? state?.lastUsed ?? this.options
+        return selected?.provider && selected?.model ? { ...selected } : undefined
+      },
+      select: selected => { this.selectModel(selected) },
+    }
     this.turn = ctx.sessionProjections.stateOf(session, 'kodeTurnBoundary')?.lastTurn ?? 0
   }
   setStatus(status) { if (this.status !== status) { this.status = status; this.events.emit('agent/status', { status }) } }
@@ -118,7 +128,7 @@ export class NativeAgentDriver {
     })().catch(error => { this.events.emit('agent/error', { turn: this.turn, step: 1, error }) }).finally(() => { this.steeringTask = undefined; if (this.steeringRequested) this.scheduleSteering() })
   }
   inject(message) { this.send(message, 'next-step', false) }
-  cancel(cause, options = {}) { if (!options.keepInbox) this.inbox.clear(); this.abort?.abort(cause) }
+  cancel(cause, options = {}) { if (cause?.kind !== 'disposed' && this.status === 'running') appendPluginRecord(this.session, 'plugin:kode/manual-stop', {}); if (!options.keepInbox) this.inbox.clear(); this.abort?.abort(cause) }
   async whenIdle() { let pending; do { await (pending = this.activity) } while (pending !== this.activity) }
   async runMaintenance(job) {
     if (this.status !== 'idle' || this.maintenance) throw new Error('Agent already has active work')

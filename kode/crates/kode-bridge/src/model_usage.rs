@@ -13,7 +13,6 @@ use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone};
 use kode_core::session::backend::{self, UsageBucket, UsageEvent};
 use serde::{Deserialize, Serialize};
 const MAX_HISTORY_FILES: usize = 50_000;
-const DAILY_HISTORY_DAYS: i64 = 84;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelUsageTotals {
@@ -41,12 +40,23 @@ pub struct ModelUsageRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUsageSnapshot {
     pub period: String,
+    #[serde(default)]
+    pub until_ms: Option<i64>,
     pub scanned_files: usize,
     pub rows: Vec<ModelUsageRow>,
     pub totals: ModelUsageTotals,
     pub daily: Vec<ModelUsageDay>,
+    /// Period-aligned buckets with model/Agent attribution for client filtering.
+    #[serde(default)]
+    pub timeline: Vec<ModelUsageTimeBucket>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelUsageTimeBucket {
+    pub date: String,
+    pub rows: Vec<ModelUsageRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +102,7 @@ fn history_cache() -> &'static Mutex<HistoryCache> {
 pub struct ModelUsageQuery {
     pub period: String,
     pub since_ms: Option<i64>,
+    pub until_ms: Option<i64>,
     pub timezone_offset_minutes: Option<i32>,
 }
 
@@ -125,31 +136,33 @@ fn display_today(offset_minutes: Option<i32>) -> chrono::NaiveDate {
         .unwrap_or_else(|| Local::now().date_naive())
 }
 
-fn daily_history_start_ms(offset_minutes: Option<i32>) -> i64 {
-    let date = display_today(offset_minutes) - ChronoDuration::days(DAILY_HISTORY_DAYS - 1);
-    let start = date.and_hms_opt(0, 0, 0).expect("midnight is valid");
-    offset_minutes
-        .and_then(|minutes| chrono::FixedOffset::east_opt(minutes * 60))
-        .and_then(|offset| offset.from_local_datetime(&start).single())
-        .map(|time| time.timestamp_millis())
-        .or_else(|| {
-            Local
-                .from_local_datetime(&start)
-                .earliest()
-                .map(|time| time.timestamp_millis())
+fn bucket_key(timestamp: i64, period: &str, offset: Option<i32>) -> Option<String> {
+    let zone = chrono::FixedOffset::east_opt(
+        offset.unwrap_or_else(|| Local::now().offset().local_minus_utc() / 60) * 60,
+    )?;
+    let at = zone.timestamp_millis_opt(timestamp).single()?;
+    Some(
+        at.format(match period {
+            "today" => "%Y-%m-%dT%H:00",
+            "all" => "%Y-%m",
+            _ => "%Y-%m-%d",
         })
-        .expect("local midnight exists")
+        .to_string(),
+    )
 }
 
 pub fn collect_snapshot(
     period: &str,
     since_override: Option<i64>,
+    until_override: Option<i64>,
     timezone_offset_minutes: Option<i32>,
 ) -> Result<ModelUsageSnapshot, String> {
     normalize_period(period)?;
     let home = dirs::home_dir().ok_or_else(|| "home directory is unavailable".to_string())?;
     let since_ms = since_override.or_else(|| period_start_ms(period));
-    let history_since_ms = daily_history_start_ms(timezone_offset_minutes);
+    let history_since_ms = since_ms.unwrap_or(i64::MIN);
+    let mut timeline: HashMap<String, UsageMap> = HashMap::new();
+    let until_ms = until_override.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     let file_since_ms = since_ms.map(|since| since.min(history_since_ms));
     let mut usage = UsageMap::new();
     let mut daily = DailyMap::new();
@@ -185,6 +198,22 @@ pub fn collect_snapshot(
                 refresh_history_file(&mut history, &path, *profile, fingerprint);
                 if let Some(cached) = history.files.get(&path) {
                     for event in &cached.events {
+                        if !event_in_range(event.timestamp_ms, since_ms, until_ms) {
+                            continue;
+                        }
+                        if let Some(at) = event
+                            .timestamp_ms
+                            .filter(|at| since_ms.is_none_or(|since| *at >= since))
+                        {
+                            if let Some(key) = bucket_key(at, period, timezone_offset_minutes) {
+                                add_usage(
+                                    timeline.entry(key).or_default(),
+                                    &event.backend,
+                                    &event.model,
+                                    event.usage.clone(),
+                                );
+                            }
+                        }
                         aggregate_event(
                             event,
                             since_ms,
@@ -207,13 +236,33 @@ pub fn collect_snapshot(
 
     history.files.retain(|path, _| seen_paths.contains(path));
 
-    Ok(finish_snapshot(
-        period,
-        scanned_files,
-        usage,
-        daily,
-        timezone_offset_minutes,
-    ))
+    let mut snapshot =
+        finish_snapshot(period, scanned_files, usage, daily.clone(), timezone_offset_minutes);
+    // Daily compatibility output follows the same explicit interval as timeline.
+    if let Some(end) = bucket_key(until_ms, "month", timezone_offset_minutes)
+        .and_then(|key| chrono::NaiveDate::parse_from_str(&key, "%Y-%m-%d").ok())
+    {
+        let start = since_ms
+            .and_then(|at| bucket_key(at, "month", timezone_offset_minutes))
+            .or_else(|| daily.keys().min().cloned())
+            .and_then(|key| chrono::NaiveDate::parse_from_str(&key, "%Y-%m-%d").ok())
+            .unwrap_or(end);
+        snapshot.daily = (0..=(end - start).num_days().max(0)).map(|offset| {
+            let date = (start + ChronoDuration::days(offset)).format("%Y-%m-%d").to_string();
+            let total_tokens = daily.get(&date).copied().unwrap_or(0);
+            ModelUsageDay { date, total_tokens }
+        }).collect();
+    }
+    snapshot.until_ms = Some(until_ms);
+    snapshot.timeline = timeline
+        .into_iter()
+        .map(|(date, usage)| ModelUsageTimeBucket {
+            date,
+            rows: usage_rows(usage).0,
+        })
+        .collect();
+    snapshot.timeline.sort_by(|a, b| a.date.cmp(&b.date));
+    Ok(snapshot)
 }
 
 fn collect_jsonl_files(root: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -293,6 +342,13 @@ fn refresh_history_file(
     true
 }
 
+// Explicit ranges exclude undated records because they cannot be attributed to the interval.
+fn event_in_range(timestamp: Option<i64>, since: Option<i64>, until: i64) -> bool {
+    timestamp.map_or(since.is_none(), |at| {
+        at <= until && since.is_none_or(|start| at >= start)
+    })
+}
+
 fn aggregate_event(
     event: &UsageEvent,
     since_ms: Option<i64>,
@@ -353,13 +409,7 @@ fn add_daily(daily: &mut DailyMap, timestamp_ms: i64, tokens: u64, offset_minute
     *entry = entry.saturating_add(tokens);
 }
 
-fn finish_snapshot(
-    period: &str,
-    scanned_files: usize,
-    usage: UsageMap,
-    daily_usage: DailyMap,
-    timezone_offset_minutes: Option<i32>,
-) -> ModelUsageSnapshot {
+fn usage_rows(usage: UsageMap) -> (Vec<ModelUsageRow>, ModelUsageTotals) {
     let mut rows = Vec::with_capacity(usage.len());
     let mut totals = ModelUsageTotals::default();
     for ((backend, model), bucket) in usage {
@@ -393,8 +443,28 @@ fn finish_snapshot(
     for row in &mut rows {
         row.cost_usd = (row.cost_usd * 1_000_000.0).round() / 1_000_000.0;
     }
+    (rows, totals)
+}
+
+fn finish_snapshot(
+    period: &str,
+    scanned_files: usize,
+    usage: UsageMap,
+    daily_usage: DailyMap,
+    timezone_offset_minutes: Option<i32>,
+) -> ModelUsageSnapshot {
+    let (rows, totals) = usage_rows(usage);
     let today = display_today(timezone_offset_minutes);
-    let daily = (0..DAILY_HISTORY_DAYS)
+    let first = match period {
+        "today" => today,
+        "month" => today.with_day(1).unwrap(),
+        _ => daily_usage
+            .keys()
+            .filter_map(|key| chrono::NaiveDate::parse_from_str(key, "%Y-%m-%d").ok())
+            .min()
+            .unwrap_or(today),
+    };
+    let daily = (0..=(today - first).num_days().max(0))
         .rev()
         .map(|offset| {
             let date = today - ChronoDuration::days(offset);
@@ -407,10 +477,12 @@ fn finish_snapshot(
         .collect();
     ModelUsageSnapshot {
         period: period.to_string(),
+        until_ms: None,
         scanned_files,
         rows,
         totals,
         daily,
+        timeline: Vec::new(),
         warnings: Vec::new(),
     }
 }
@@ -420,10 +492,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_always_contains_twelve_weeks_of_days() {
+    fn bounded_ranges_include_endpoints_and_exclude_later_or_undated_records() {
+        assert!(event_in_range(Some(100), Some(100), 200));
+        assert!(event_in_range(Some(200), Some(100), 200));
+        assert!(!event_in_range(Some(99), Some(100), 200));
+        assert!(!event_in_range(Some(201), Some(100), 200));
+        assert!(!event_in_range(None, Some(100), 200));
+        assert!(event_in_range(None, None, 200));
+    }
+
+    #[test]
+    fn snapshot_days_match_selected_period() {
         let snapshot = finish_snapshot("today", 0, UsageMap::new(), DailyMap::new(), None);
-        assert_eq!(snapshot.daily.len(), DAILY_HISTORY_DAYS as usize);
+        assert_eq!(snapshot.daily.len(), 1);
+        let month = finish_snapshot("month", 0, UsageMap::new(), DailyMap::new(), Some(480));
+        assert_eq!(month.daily.len(), display_today(Some(480)).day() as usize);
         assert!(snapshot.daily.iter().all(|day| day.total_tokens == 0));
+    }
+
+    #[test]
+    fn timeline_buckets_follow_viewer_timezone_and_period() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-31T17:20:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            bucket_key(at, "today", Some(480)).as_deref(),
+            Some("2026-11-01T01:00")
+        );
+        assert_eq!(
+            bucket_key(at, "month", Some(480)).as_deref(),
+            Some("2026-11-01")
+        );
+        assert_eq!(bucket_key(at, "all", Some(480)).as_deref(), Some("2026-11"));
+        let mut usage = UsageMap::new();
+        for (agent, model, tokens) in [
+            ("codex", "shared", 10),
+            ("claude", "shared", 20),
+            ("claude", "other", 30),
+        ] {
+            add_usage(
+                &mut usage,
+                agent,
+                model,
+                UsageBucket {
+                    total: tokens,
+                    ..UsageBucket::default()
+                },
+            );
+        }
+        let (rows, totals) = usage_rows(usage);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(totals.total_tokens, 60);
+        let date = display_today(Some(480)) - ChronoDuration::days(100);
+        let snapshot = finish_snapshot(
+            "all",
+            0,
+            UsageMap::new(),
+            HashMap::from([(date.to_string(), 1)]),
+            Some(480),
+        );
+        assert_eq!(snapshot.daily.len(), 101);
     }
 
     #[test]

@@ -12,10 +12,10 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   const workspaceShell = { options: {}, component: native, store: {}, children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } } }
   const chatShell={options:{id:'chat'},component:native,store:{},children:{'conversation.chat.flow':{kind:'single',scope:'session'}}}
   const nodeSeats=new Map(['user','steering','context','turn-trigger','assistant-step'].map(key=>[key,{options:{key},component:native,locale:'conversation',children:{images:{kind:'single'}},inject:()=>({hooks:{}})}]))
-  const listeners=new Map()
+  const listeners=new Map(), sessionListeners=new Set()
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
-    useState: value => [typeof value === 'function' ? value() : value, () => {}],
+    useState: value => { const initial = typeof value === 'function' ? value() : value; return [initial === 'general' && windowProperties.settingsSection ? windowProperties.settingsSection : initial, () => {}] },
     useEffect(fn) { fn() }, useRef: value => ({ current: value }), useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (subscribe, get) => { subscribe(() => {}); return get() },
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
@@ -23,12 +23,12 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
     setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
-  const ctx = { sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
+  const ctx = { provide(name, value) { this[name] = value }, get(name) { return this[name] }, sessions: { list: { subscribe: fn => { sessionListeners.add(fn); return () => sessionListeners.delete(fn) }, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
     slots: { entries, subscribe: (name,fn) => {const set=listeners.get(name)??new Set();listeners.set(name,set);set.add(fn);return()=>set.delete(fn)}, inject: (_name, callback) => { const result = callback(); if (result?.next) for (const _ of result) {}; if (typeof result === 'function') disposers.push(result) }, register: (options, component) => { registry.push({ options, component });for(const fn of listeners.get(options.name)??[])fn(); return () => {} } },
     inject: (_names, callback) => callback(ctx), effect: callback => { const result = callback(); if (typeof result === 'function') disposers.push(result) }, ...contextProperties,
   }
   plugin.apply(ctx)
-  return { ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
+  return { notifySessions: () => { for (const fn of sessionListeners) fn() }, ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
 }
 const relay = (text = 'Please review <script>alert(1)</script>\nsecond line') => ({
   time: 1, source: { kind: 'agent-message', senderSessionId: 'kode:worker.example:session-same-id' },
@@ -259,7 +259,7 @@ test('workspace menu reads the bound native source and adopts the picked directo
 
 
 test('Agent list keeps editors collapsed until requested', () => {
-  const c = client(undefined, {}, { layout: { selectPanel() {} } }), render = c.entry('main', 'kode-settings')
+  const c = client(undefined, { settingsSection: 'agents' }, { layout: { selectPanel() {} } }), render = c.entry('main', 'kode-settings')
   const wrapper = render(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /配置主机/)
   const body = findNode(tree, child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
@@ -275,7 +275,7 @@ test('every Agent owns independent model, effort and Fast defaults while the def
     defaultModelSelection: { model: 'fixture', reasoningEffort: 'high', fast: false },
     models: [{ id: 'fixture', name: 'Fixture', reasoningEfforts: [{ id: 'high', name: 'High' }, { id: 'medium', name: 'Medium' }], fastCapability: { transport: 'service-tier', defaultEnabled: false } }, { id: 'plain', name: 'Plain' }],
   }
-  const c = client(undefined, { agentDirectory }, { layout: { selectPanel() {} } }), wrapper = c.entry('main', 'kode-settings')(), panel = wrapper.children[0], outer = panel.type(panel.props)
+  const c = client(undefined, { agentDirectory, settingsSection: 'agents' }, { layout: { selectPanel() {} } }), wrapper = c.entry('main', 'kode-settings')(), panel = wrapper.children[0], outer = panel.type(panel.props)
   const component = findNode(outer, node => node?.props?.settingsHost).type, props = { sessions: c.ctx.sessions, settingsHost: 'local' }
   component(props); await new Promise(resolve => setImmediate(resolve))
   const body = component(props)
@@ -454,15 +454,16 @@ test('saved legacy tab archive controls work without importing or starting the s
  assert.ok(!c.requests.some(row=>row.action==='import-saved'))
 })
 
-test('foreign conversations without project metadata stay grouped under their owning Host',async()=>{
- const c=client({current:'local',hosts:[{id:'local',sessions:[],workspaces:[]},{id:'ssh',name:'Build host',status:'offline',sessions:[{id:'saved:remote',title:'Remote history'}],workspaces:[]}]})
+for (const pinned of [false,true]) test(`foreign loose histories ${pinned?'explicitly pinned retain their host group':'do not appear automatically in the sidebar'}`,async()=>{
+ const c=client({current:'local',hosts:[{id:'local',sessions:[],workspaces:[]},{id:'ssh',name:'Build host',status:'offline',sessions:[{id:'saved:remote',title:'Remote history'}],workspaces:[],pinnedSessionIds:pinned?['saved:remote']:[]}]})
  const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:[],byId:{}}),useWorkspaces:select=>select({items:[],archivedSessionIds:[],pinnedSessionIds:[]})})
  wrapper.type(wrapper.props);await new Promise(resolve=>setImmediate(resolve))
  const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
  const groups=native.props.useWorkspaces(state=>state.items)
- assert.equal(groups.length,1)
- assert.equal(groups[0].title,'Build host')
- assert.deepEqual(Array.from(groups[0].sessionIds),['kode-host:ssh/saved%3Aremote'])
+ assert.equal(groups.length,pinned?1:0)
+ const ids=native.props.useSessions(state=>state.ids)
+ assert.equal(ids.includes('kode-host:ssh/saved%3Aremote'),pinned)
+ if(pinned){assert.equal(groups[0].title,'Build host');assert.deepEqual(Array.from(groups[0].sessionIds),['kode-host:ssh/saved%3Aremote'])}
 })
 
 test('/resume filters by execution host and Agent and retains original native identities', () => {
@@ -492,7 +493,7 @@ test('directory browsing keeps injected callbacks stable across unrelated rerend
 test('remote Agent configuration and default writes stay on the selected Host without changing the active workspace', async () => {
  const calls=[],agents={profiles:[{id:'remote-codex',name:'Remote Codex',type:'codex',executable:'codex'}],types:{codex:{name:'Codex'}},selection:{provider:'kode-agent-remote-codex',model:'default'},configuredDefaultProfileId:'remote-codex'}
  const transport={current:'local',subscribe:()=>()=>{},path:url=>url,select:()=>{throw new Error('settings must not switch execution Host')},fetch:async(url,options,host)=>{calls.push({url,host,body:options?.body&&JSON.parse(options.body)});return{ok:true,json:async()=>url.includes('/settings/')?{result:{ok:true,value:{}}}:agents}}}
- const c=client(undefined,{}, {kodeTransport:transport,layout:{selectPanel(){}}})
+ const c=client(undefined,{settingsSection:'agents'}, {kodeTransport:transport,layout:{selectPanel(){}}})
  const wrapper=c.entry('main','kode-settings')(),panel=wrapper.children[0],outer=panel.type(panel.props)
  const component=findNode(outer,node=>node?.props?.settingsHost).type
  component({sessions:c.ctx.sessions,slots:c.ctx.slots,settingsHost:'ssh-test'})
@@ -662,7 +663,7 @@ test('service status and personalization use explicit labeled cards and fill the
  assert.match(source,/\.kode-mobile-pairing,\.kode-host-service\{display:flex;flex-direction:column;gap:12px;padding:16px/)
  assert.match(source,/className: 'kode-personalization-session-label' \}, '当前会话'/)
  assert.match(source,/\.kode-personalization-session strong\{[^}]*font-size:14px;font-weight:500/)
- assert.match(source,/\.kode-settings-page \.kode-settings-section>\.kode-agent-settings\{width:100%;max-width:none;min-width:0;box-sizing:border-box\}/)
+ assert.match(source,/\.kode-settings-page \.kode-settings-section \.kode-agent-settings\{width:100%;max-width:none;min-width:0;box-sizing:border-box\}/)
  assert.match(source,/\.kode-settings-page \.kode-personalization \.kode-avatar-content,\.kode-settings-page \.kode-personalization \.kode-avatar-grid,\.kode-settings-page \.kode-personalization \.kode-avatar-preview\{width:100%;min-width:0;box-sizing:border-box\}/)
 })
 
@@ -676,4 +677,132 @@ test('goal dock pause, resume and clear controls retain the current session iden
   assert.deepEqual(c.requests.at(-1),{action:'goal',sessionId:'session-goal-fixture',command})
  }
  assert.equal(render({sessionId:'session-goal-fixture',useProjection:()=>null}),null)
+})
+
+test('/clear creates a same-name fresh session for each Agent without copying its old thread', async () => {
+  for (const type of ['codex', 'claude', 'cursor', 'codebuddy', 'custom', 'dsh']) {
+    const contributions = [], calls = [], title = 'Keep this conversation name', original = 'source-session'
+    const agentDirectory = { currentProfile: { id: 'selected-agent', type }, profiles: [], selection: { provider: 'kode-agent-selected-agent', model: 'fixture', reasoningEffort: 'high' }, fast: true, models: [{ id: 'fixture', fastCapability: {} }], binding: { nativeThreadId: 'old-native-thread' } }
+    const sessions = {
+      list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { [original]: { title, cwd: '/srv/project/worktree' } } }) },
+      binding: () => undefined,
+      create: async input => { calls.push(['create', input]); return 'new-session' },
+      using: async (id, _options, run) => run({ binding: { session: { rename: async name => { calls.push(['rename', id, name]); return { ok: true } } } } }),
+    }
+    const workspace = { workspaceId: 'checkout', path: '/srv/project/worktree', sessionIds: [original] }
+    const c = client(undefined, { agentDirectory }, {
+      sessions, inputTriggers: { sessionOf: () => ({}), registerSource: () => () => {} },
+      commandUi: { candidates: async () => [], register: value => { contributions.push(value); return () => {} }, decorate: () => () => {} },
+      remote: { commands: { list: async () => ({ ok: true, value: [] }) } },
+      get: name => name === 'uiWorkspace' ? { openSession: async id => calls.push(['open', id]) } : name === 'workspaces' ? { list: { getSnapshot: () => ({ items: [workspace] }) } } : undefined,
+    })
+    const render = c.ctx.slots.entries('conversation.input.model')[0].component
+    render({ sessionId: original, sessions }); await new Promise(resolve => setImmediate(resolve))
+    const clear = contributions.find(value => value.name === 'clear')
+    assert.ok(clear?.available({ sessionId: original }), type)
+    await Promise.all([clear.ui.run({ sessionId: original }), clear.ui.run({ sessionId: original })])
+    assert.equal(calls.filter(row => row[0] === 'create').length, 1)
+    assert.deepEqual({ ...calls[0][1] }, { workspaceId: 'checkout', agentPreset: 'kode-native' })
+    assert.deepEqual(calls.find(row => row[0] === 'rename'), ['rename', 'new-session', title])
+    assert.deepEqual(calls.at(-1), ['open', 'new-session'])
+    const selected = c.requests.find(row => row.action === 'select')
+    assert.equal(selected.sessionId, 'new-session'); assert.equal(selected.profileId, 'selected-agent'); assert.equal(selected.fast, true)
+    assert.equal(selected.reasoningEffort, 'high'); assert.equal(selected.model, 'fixture'); assert.equal(selected.threadId, undefined)
+  }
+})
+
+
+test('global activity uses project priority across Hosts and updates without mounting the workspace browser', () => {
+ const scope={};vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function SessionStatusAvatars')),scope)
+ const data={current:'local',hosts:[{id:'local',sessions:[{id:'same',completed:true},{id:'review',pendingInteraction:true},{id:'archived',pendingInteraction:true}],archivedSessionIds:['archived']},{id:'worker.example',status:'online',sessions:[{id:'same',running:true},{id:'hidden',pendingInteraction:true}],hiddenSessionIds:['hidden']},{id:'offline.example',status:'offline',sessions:[{id:'stale',pendingInteraction:true}]}]}
+ const live=new Map([['same',{running:true,completionUnread:false}],['review',{pendingInteraction:false}]])
+ const catalog={byId:{done:{completed:true},blank:{blank:true,running:true}}}
+ const result=scope.globalSessionActivity(data,catalog,live)
+ assert.equal(result.state,'done');assert.deepEqual({...result.counts},{ongoing:2,done:1,awaiting:0})
+ live.set('review',{pendingInteraction:undefined,running:false,completionUnread:false})
+ assert.equal(scope.globalSessionActivity(data,catalog,live).state,'done', 'native undefined interaction clears stale catalog awaiting state')
+ live.set('review',{pendingInteraction:{kind:'approval'},running:true,completionUnread:true})
+ assert.equal(scope.globalSessionActivity(data,catalog,live).state,'awaiting')
+ assert.equal(scope.globalSessionActivity(data,catalog,live,['review','done']).state,'ongoing')
+ assert.equal(scope.globalSessionActivity({current:'local',hosts:[]},{byId:{}},new Map()).state,'idle')
+ const store=scope.createGlobalActivityStore();let updates=0
+ const stop=store.subscribe(()=>updates++)
+ store.publish(result);store.publish(result);assert.equal(updates,1);assert.equal(store.getSnapshot().state,'done')
+ stop();store.publish({...result,state:'ongoing'});assert.equal(updates,1)
+ const c=client();assert.equal(typeof c.ctx.kodeActivity.subscribe,'function')
+ c.ctx.sessions.list.getSnapshot=()=>({byId:{live:{running:true}}})
+ c.notifySessions();assert.equal(c.ctx.kodeActivity.getSnapshot().state,'ongoing')
+ c.ctx.sessions.list.getSnapshot=()=>({byId:{live:{completed:true}}})
+ c.notifySessions();assert.equal(c.ctx.kodeActivity.getSnapshot().state,'done')
+})
+
+test('interface settings toggle the device service directly and report save failures', () => {
+ let enabled = true, error = '', received
+ const service = { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled }), update(value) { received = value; enabled = value.tokenIsland } }
+ const scope = { avatarContext: { get: name => name === 'kodeInterface' ? service : undefined },
+   React: { Fragment: 'fragment', useMemo: fn => fn(), useCallback: fn => fn }, useSyncExternalStore: (_subscribe, get) => get(),
+   useState: () => [error, value => { error = value }], SelectField: 'select', Failure: 'failure', h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
+ const component = vm.runInNewContext(source.slice(source.indexOf('  function InterfaceSettingsBody('), source.indexOf('  function NotificationSettingsBody(')) + '\nInterfaceSettingsBody', scope)
+ let tree = component(), toggle = findNode(tree, node => node.props.role === 'switch')
+ assert.equal(toggle.props.checked, true); assert.equal(toggle.props.disabled, false)
+ const period = findNode(tree, node => node.type === 'select' && node.props.label === '刘海用量范围')
+ assert.equal(period.props.value, 'today'); assert.deepEqual(Array.from(period.props.options, item => item.value), ['today','month','all'])
+ period.props.onChange('month'); assert.equal(received.tokenPeriod, 'month')
+ toggle.props.onChange({ target: { checked: false } }); assert.equal(received.tokenIsland, false)
+ tree = component(); assert.equal(findNode(tree, node => node.props.role === 'switch').props.checked, false)
+ service.update = () => { throw new Error('storage denied') }
+ findNode(tree, node => node.props.role === 'switch').props.onChange({ target: { checked: true } })
+ assert.match(error, /无法保存/); assert.equal(enabled, false)
+})
+
+test('settings group small preferences by task, preserve deep links, and keep deployment separate', () => {
+ const scope = {}
+ vm.runInNewContext(source.slice(source.indexOf('  const settingsSections ='), source.indexOf('  function KodeSettings(')) + '\nthis.categories = settingsSections', scope)
+ assert.deepEqual(Array.from(scope.categories, row => row[1]), ['常规', '外观', 'Agent', '插件与集成', '手机与同步', '主机与服务'])
+ assert.equal(scope.resolveSettingsSection('notifications'), 'general')
+ assert.equal(scope.resolveSettingsSection('personalization'), 'appearance')
+ assert.equal(scope.resolveSettingsSection('appearance'), 'appearance')
+ assert.equal(scope.resolveSettingsSection(undefined), 'general')
+ assert.equal(scope.resolveSettingsSection('agents'), 'agents')
+ const c = client(undefined, {}, { layout: { selectPanel() {} } })
+ const page = c.entry('main', 'kode-settings')(), general = page.children[0].type(page.children[0].props)
+ const content = findNode(general, node => node.props.id === 'kode-settings-general')
+ assert.ok(content)
+ const groups = content.children[0].children
+ assert.equal(groups[0].children[0].type.name, 'SessionBehaviorSettings')
+ assert.equal(groups[0].children[0].props.host, 'local')
+ assert.equal(groups[1].children[0].type.name, 'NotificationSettingsBody')
+ const a = client(undefined, { settingsSection: 'appearance' }, { layout: { selectPanel() {} } })
+ const wrapper = a.entry('main', 'kode-settings')(), tree = wrapper.children[0].type(wrapper.children[0].props)
+ const appearance = findNode(tree, node => node.props.id === 'kode-settings-appearance')
+ assert.equal(appearance.children[0].children[0].children[0].type.name, 'InterfaceSettingsBody')
+ assert.equal(appearance.children[0].children[1].children[1].type.name, 'PersonalizationSettings')
+ const integrations = source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function SessionBehaviorSettings('))
+ assert.doesNotMatch(integrations, /auto_resume_interrupted/)
+ assert.match(integrations, /messaging_enabled/); assert.match(integrations, /memory_enabled/)
+})
+
+test('global activity follows native subscriptions without any mounted shell or React component', () => {
+ const deferred = [], nativeListeners = new Set()
+ const workspaceListeners = new Set()
+ const workspaceList = { archivedSessionIds: [], refreshSnapshot() { return { archivedSessionIds: this.archivedSessionIds } }, getSnapshot() { return this.refreshSnapshot() }, subscribe(fn) { workspaceListeners.add(fn); return () => workspaceListeners.delete(fn) } }
+ const c = client(undefined, {}, { workspaces: { list: workspaceList }, inject(names, callback) { if (names.includes('uiSession')) deferred.push(callback); else callback(this) } })
+ assert.equal(c.ctx.slots.entries('shell.overlay').some(row => row.options.id === 'kode-global-activity'), false)
+ c.ctx.sessions.list.getSnapshot = () => ({ byId: { running: { running: true } } })
+ c.notifySessions(); assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'ongoing', 'catalog status works before uiSession is ready')
+ let statuses = new Map([['running', { running: true, pendingInteraction: { kind: 'approval' } }]])
+ c.ctx.uiSession = { sessionStatus: { subscribe: fn => { nativeListeners.add(fn); return () => nativeListeners.delete(fn) }, getSnapshot: () => statuses } }
+ deferred[0](c.ctx)
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'awaiting')
+ workspaceList.archivedSessionIds = ['running']; for (const fn of workspaceListeners) fn()
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'idle', 'workspace methods retain their receiver during publication')
+ workspaceList.archivedSessionIds = []; for (const fn of workspaceListeners) fn()
+ statuses = new Map([['running', { running: false, completionUnread: true }]])
+ for (const fn of nativeListeners) fn()
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'done')
+ statuses = new Map([['running', { running: false, completionUnread: false }]])
+ for (const fn of nativeListeners) fn()
+ assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'idle', 'native clearing facts override an older running catalog')
+ for (const dispose of c.disposers) dispose()
+ assert.equal(nativeListeners.size, 0); assert.equal(workspaceListeners.size, 0)
 })

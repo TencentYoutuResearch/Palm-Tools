@@ -630,6 +630,9 @@ impl CloudSyncManager {
                     }
                 }
                 _ = heartbeat.tick() => {
+                    if sync_enabled {
+                        snapshotted_session_ids = self.send_snapshot(&mut socket).await?;
+                    }
                     send_json(&mut socket, &json!({"type":"ping"})).await?;
                 }
             }
@@ -922,7 +925,12 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
         ctx.runtimes
             .snapshots()
             .into_iter()
-            .filter(|s| s["dto"]["status"] != "exited"),
+            .filter(|s| {
+                s["dto"]["status"] != "exited"
+                    && !(s["dto"]["runtime"] == "gui"
+                        && s["dto"]["native_process_id"].as_u64().is_some()
+                        && s["dto"]["owner_alive"] == false)
+            }),
     );
     snapshots
 }
@@ -1145,6 +1153,37 @@ mod tests {
             json!({"dto": {}}),
         ];
         assert_eq!(snapshot_session_ids(&sessions), HashSet::from([7, 9]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cloud_excludes_dead_gui_owners_but_keeps_offline_dsh_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::build_test_ctx(Default::default(), "test".into());
+        let path = dir.path().join("runtime.sqlite");
+        ctx.runtimes.open(&path).unwrap();
+        for (runtime, pid) in [("gui", i32::MAX as u64), ("dsh", 0)] {
+            let input = serde_json::from_value(json!({
+                "runtime": runtime, "boot_id": "test",
+                "sessions": [{
+                    "session_id": "history",
+                    "dto": {"status": "idle", "native_process_id": pid},
+                    "events": [{"key": "1", "kind": "message", "payload": {"text": "retained"}}]
+                }]
+            })).unwrap();
+            ctx.runtimes.publish(&ctx, input).unwrap();
+        }
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.execute("UPDATE runtime_hosts SET seen=0", []).unwrap();
+        let snapshots = session_snapshots(&ctx);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0]["dto"]["runtime"], "dsh");
+        assert_eq!(snapshots[0]["dto"]["runtime_online"], false);
+        let saved = ctx.runtimes.snapshots();
+        assert_eq!(saved.len(), 2);
+        for session in saved {
+            assert_eq!(ctx.runtimes.history(session["local_id"].as_u64().unwrap(), 0, 10).unwrap().len(), 1);
+        }
     }
 
     #[test]

@@ -100,6 +100,27 @@ test('empty ungrouped placeholders retire old publications without being inspect
   assert.equal(publications.flatMap(row=>row.sessions).length,1)
 })
 
+test('archived sessions retire old publications without inspecting or starting an Agent', async () => {
+  const publications = []
+  const services = {
+    workspaceRegistry: { archivedSessionIds: ['archived'] },
+    sessionController: {
+      list: async () => ({ items: [{ sessionId: 'archived', blank: false }] }),
+      inspect: async () => { throw new Error('Archived history must not be inspected') },
+    },
+  }
+  const backend = { call: async (path, body) => {
+    if (path.endsWith('/sessions')) return { sessions: [{ runtime: 'dsh', runtime_session_id: 'archived', status: 'idle' }] }
+    publications.push(body); return { sessions: [] }
+  } }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, backend)
+  await Promise.all([bridge.publish(), bridge.publish()])
+  const rows = publications.flatMap(row => row.sessions)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].session_id, 'archived')
+  assert.equal(rows[0].dto.status, 'exited')
+})
+
 test('canonical messages, native tools and turn boundaries retain identities and content', () => {
   const content = [{ type: 'text', text: 'A reply' }, { type: 'image', attachment: { id: 'image-1' } }]
   const [message] = projectSessionEvent({ seq: 5, type: 'assistant/message', data: { message: { id: 'native-message', content } } }, 'shared-message')
@@ -209,4 +230,21 @@ test('continued timed questions stay answerable through the original dsh service
   row.projections.values.userQuestions.questions.active = []
   await bridge.publish()
   assert.equal(bridge.continued.get(row.sessionId).size, 0)
+})
+
+test('0.2.2 query-only cold placeholders retire existing shared publications without activation', async () => {
+ let disposed=0
+ const publications=[],services={
+  sessionController:{list:async()=>({items:[{sessionId:'cold-draft',blank:false,running:false}]})},
+  sessionQuery:{observeSession:async()=>({inheritedEventCount:0,events:[{type:'permission/preset'},{type:'session/end-seed',data:{}}],[Symbol.dispose](){disposed++}})},
+  agents:{get:()=>undefined},
+ }
+ const backend={call:async(path,body)=>{
+  if(path.endsWith('/sessions'))return {sessions:[{runtime:'dsh',runtime_session_id:'cold-draft',status:'idle'}]}
+  publications.push(body);return {sessions:[]}
+ }}
+ const bridge=new RuntimeBridge({get:key=>services[key]},backend)
+ await bridge.publish();await bridge.publish()
+ assert.equal(disposed,2);assert.equal(publications.length,1)
+ assert.equal(publications[0].sessions[0].dto.status,'exited');assert.deepEqual(publications[0].sessions[0].events,[])
 })

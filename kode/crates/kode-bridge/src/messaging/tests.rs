@@ -3,6 +3,30 @@ use super::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 const SECRET: &str = "test-peer-secret-at-least-32-bytes";
+#[tokio::test]
+async fn archive_document_changes_retire_projections_without_host_publication() {
+    let server = server("archive-test", vec![]).await;
+    let ctx = &server._ctx;
+    let publication = serde_json::from_value(json!({
+        "runtime":"dsh","boot_id":"test",
+        "sessions":[{"session_id":"removed","dto":{"status":"idle"},
+            "events":[{"key":"1","kind":"message","payload":{"text":"kept"}}]}]
+    })).unwrap();
+    let result = ctx.runtimes.publish(ctx, publication).unwrap();
+    let id = result["sessions"][0]["id"].as_u64().unwrap();
+    let mut revision = None;
+    server.hub.reconcile_archive_visibility(&mut revision).unwrap();
+    let document = server.hub.store.document("workspaces").unwrap();
+    server.hub.store.save_document("workspaces", document["revision"].as_u64().unwrap(),
+        json!({"global":{"archivedSessionIds":["removed"]}})).unwrap();
+    server.hub.reconcile_archive_visibility(&mut revision).unwrap();
+    assert_eq!(ctx.runtimes.snapshots()[0]["dto"]["status"], "exited");
+    assert_eq!(ctx.runtimes.history(id, 0, 10).unwrap().len(), 1);
+    let mut events = ctx.bus.subscribe();
+    server.hub.reconcile_archive_visibility(&mut revision).unwrap();
+    assert!(events.try_recv().is_err());
+}
+
 struct Server {
     hub: Arc<Hub>,
     url: String,
@@ -1118,4 +1142,18 @@ fn backend_extension_commit_failure_restores_updated_and_pruned_links(){
     let previous=vec![json!({"path":one,"to":old}),json!({"path":two,"to":old})];let next=vec![json!({"path":one,"to":new})];
     assert!(super::extension_files::replace(&previous,&next,||anyhow::bail!("fixture commit failed")).is_err());
     assert_eq!(std::fs::read_link(one).unwrap(),old);assert_eq!(std::fs::read_link(two).unwrap(),old);
+}
+
+#[tokio::test]
+async fn usage_history_requires_admin_and_valid_period_and_timezone() {
+    let server = server("usage-admin", vec![]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/model-usage", server.url);
+    assert_eq!(client.get(format!("{url}?period=today")).send().await.unwrap().status(), 401);
+    let token = register(&server, "usage-session").await;
+    assert_eq!(client.get(format!("{url}?period=today")).bearer_auth(token.owner_token).send().await.unwrap().status(), 403);
+    for query in ["period=unknown", "period=today&timezone_offset_minutes=1440"] {
+        assert_eq!(client.get(format!("{url}?{query}")).bearer_auth("admin-test").send().await.unwrap().status(), 400);
+    }
+    assert_eq!(client.post(format!("{url}?period=today")).bearer_auth("admin-test").send().await.unwrap().status(), 405);
 }

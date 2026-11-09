@@ -122,8 +122,12 @@ impl Hub {
         let hub = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            let mut workspace_revision = None;
             while !hub.stopped.load(Ordering::Relaxed) {
                 interval.tick().await;
+                if let Err(e) = hub.reconcile_archive_visibility(&mut workspace_revision) {
+                    tracing::warn!(error=%e,"archive visibility reconciliation failed");
+                }
                 if let Err(e) = hub.tick().await {
                     tracing::warn!(error=%e,"messaging dispatch failed");
                 }
@@ -136,6 +140,18 @@ impl Hub {
         {
             link::connect(self.clone(), peer.clone());
         }
+    }
+    fn reconcile_archive_visibility(&self, revision: &mut Option<u64>) -> Result<()> {
+        let document = self.store.document("workspaces")?;
+        let current = document["revision"].as_u64();
+        if current == *revision { return Ok(()); }
+        if let Some(ctx) = self.ctx.upgrade() {
+            let archived = document["value"]["global"]["archivedSessionIds"]
+                .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
+            ctx.runtimes.retire_archived(&ctx, &archived)?;
+        }
+        *revision = current;
+        Ok(())
     }
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Relaxed);

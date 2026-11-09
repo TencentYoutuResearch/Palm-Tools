@@ -67,6 +67,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/api/v1/messaging/workbench/agent-hub", get(agent_hub).post(change_agent_hub))
         .route("/api/v1/messaging/workbench/handoff", post(handoff))
+        .route("/api/v1/messaging/model-usage", get(model_usage))
         .route("/api/v1/messaging/integrations", get(integration_status).post(integration_configure))
         .route("/api/v1/messaging/memory/tool", post(memory_tool))
         .route("/api/v1/messaging/cloud/status", get(cloud_status))
@@ -130,6 +131,11 @@ pub fn server_binary() -> (Option<String>, Option<u64>) {
             (path.map(|path| path.to_string_lossy().into_owned()), built_at)
         })
         .clone()
+}
+// The standalone session server exposes the same collector as the full bridge.
+async fn model_usage(State(hub): State<Arc<Hub>>, h: HeaderMap, Query(query): Query<crate::model_usage::ModelUsageQuery>) -> Response {
+    if let Err(error) = admin(&hub, &h) { return error.into_response(); }
+    crate::get_model_usage(Query(query)).await.into_response()
 }
 async fn add_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(peer): Json<super::Peer>) -> Result<Json<serde_json::Value>> {
     admin(&hub, &h)?;
@@ -228,7 +234,8 @@ async fn workbench_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<
         if !tab["endpoint_id"].is_null() && tab["endpoint_id"]["kind"]!="local" {return true}
         let native=document.pointer("/value/native_sessions").and_then(serde_json::Value::as_array).and_then(|rows|rows.iter().find(|row|row["session_id"]==tab["session_id"] && row["backend_key"]==tab["backend_key"]));
         let id=tab["dsh_session_id"].as_str().or_else(||native.and_then(|row|row["dsh_session_id"].as_str()));
-        !id.is_some_and(|id|archived.is_some_and(|rows|rows.iter().any(|row|row.as_str()==Some(id))))
+        !super::session_catalog::is_archived_local(tab, archived)
+            && !id.is_some_and(|id|archived.is_some_and(|rows|rows.iter().any(|row|row.as_str()==Some(id))))
     });
     let agents = super::agents::catalog(&hub)?;
     let backends = serde_json::to_value(&agents.backends).map_err(anyhow::Error::from)?;
@@ -464,8 +471,13 @@ async fn events(
     Ok(Json(json!({"events":events,"cursor":cursor})))
 }
 
-async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<crate::runtime::Publication>) -> Result<Json<serde_json::Value>> {
+async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(mut input): Json<crate::runtime::Publication>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let workspace_document = hub.store.document("workspaces")?;
+    enforce_archive_visibility(&mut input, &workspace_document["value"]);
+    let archived = workspace_document["value"]["global"]["archivedSessionIds"]
+        .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
+    ctx.runtimes.retire_archived(&ctx, &archived)?;
     let runtime=input.runtime.clone();
     let result=ctx.runtimes.publish(&ctx,input)?;
     if runtime=="gui" {
@@ -479,6 +491,42 @@ async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input):
         }
     }
     Ok(Json(result))
+}
+
+fn enforce_archive_visibility(input: &mut crate::runtime::Publication, workspaces: &serde_json::Value) {
+    let archived: std::collections::HashSet<&str> = workspaces["global"]["archivedSessionIds"]
+        .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
+    for session in &mut input.sessions {
+        if archived.contains(session.session_id.as_str())
+            || session.dto["session_uuid"].as_str().is_some_and(|id| archived.contains(id))
+        {
+            session.dto["status"] = json!("exited");
+            session.events.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod archive_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn old_hosts_cannot_republish_archived_sessions_or_history() {
+        let mut input: crate::runtime::Publication = serde_json::from_value(json!({
+            "runtime":"dsh","boot_id":"boot","sessions":[
+                {"session_id":"archived","dto":{"status":"idle"},"events":[{"key":"late","kind":"session.status","payload":{"status":"idle"}}]},
+                {"session_id":"alias","dto":{"status":"busy","session_uuid":"archived"},"events":[]},
+                {"session_id":"active","dto":{"status":"idle"},"events":[]}
+            ]
+        })).unwrap();
+        enforce_archive_visibility(&mut input, &json!({"global":{"archivedSessionIds":["archived"]}}));
+        assert_eq!(input.sessions[0].dto["status"], "exited");
+        assert!(input.sessions[0].events.is_empty());
+        assert_eq!(input.sessions[1].dto["status"], "exited");
+        assert_eq!(input.sessions[2].dto["status"], "idle");
+        enforce_archive_visibility(&mut input, &json!({}));
+        assert_eq!(input.sessions[2].dto["status"], "idle");
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

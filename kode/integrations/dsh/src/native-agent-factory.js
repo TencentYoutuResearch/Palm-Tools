@@ -1,3 +1,4 @@
+import { symbols } from '@deepseek-ai/cordis'
 import { contextUsageProjection } from './context-usage.js'
 import { fastProjection } from './model-fast.js'
 /** Cordis-owned Agent factory. Storage and lifecycle are independent of dsh's LLM loop. */
@@ -60,7 +61,11 @@ export class NativeAgentFactory {
           options = { ...options, agentOptions: { ...fallback, ...selected } }
         }
         const closers = interruptedTurnClosers(stored.events)
-        if (closers.length) await handle.append(closers)
+        if (closers.length) {
+          const start = stored.events.findLast(event => event.type === 'turn/start')
+          if (start) closers.push({ seq: stored.events.length + closers.length, time: Date.now(), type: 'plugin:kode/restart-interrupted', ignorable: true, data: { startSeq: start.seq, interruptedAt: stored.events.at(-1)?.time } })
+          await handle.append(closers)
+        }
         session = ctx.sessions.prepare(id, { seed: [...stored.events, ...closers], meta: handle.header, inheritedEventCount: handle.inheritedEventCount })
       } else {
         session = ctx.sessions.prepare(id, { ...(options.meta ? { meta: options.meta } : {}), ...(options.seed ? { seed: options.seed } : {}), ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}) })
@@ -68,12 +73,16 @@ export class NativeAgentFactory {
       }
       driver = new NativeAgentDriver(ctx, id, options.agentOptions ?? {}, session, ctx.kodeAgents)
       const storedCount = resume ? (await handle.read()).events.length : 0
-      const commit = await options.setup?.(driver.ctx, driver); check(); commit?.commit()
+      // DSH 0.2.2 requires store membership and completed session/created
+      // publication before setup may append model/preset/binding events.
       const suffix = session.snapshotEvents(storedCount)
       if (suffix.length) await handle.append(suffix)
       check()
-      detachSession = driver.ctx.sessions.enter(session); detachAgent = ctx.agents.enter(driver, options.parentAgent)
-      driver.ctx.sessions.announce(session); await ctx.agents.announce(driver, resume ? 'resume' : 'startup', signal); check()
+      detachSession = driver.ctx.sessions.enter(session)
+      driver.ctx.sessions.announce(session); check()
+      const commit = await options.setup?.(driver.ctx, driver); check(); commit?.commit()
+      detachAgent = ctx.agents.enter(driver, options.parentAgent)
+      await ctx.agents.announce(driver, resume ? 'resume' : 'startup', signal); check()
       published = true; this.live.add(dispose); this.byId.set(id, dispose); ctx.kodeAgents.mountCommands?.(driver); driver.start()
       setupDone.resolve()
       return { agent: driver, dispose: async () => { try { await dispose() } finally { await releaseOwner() } } }
@@ -92,7 +101,8 @@ export function installNativeFactoryRouting(ctx, native) {
   const previous = upstream[routingKey]
   const create = previous?.wrappedCreate === upstream.createAgent ? previous.create : upstream.createAgent
   const resume = previous?.wrappedResume === upstream.resume ? previous.resume : upstream.resume
-  const routing = upstream[routingKey] = { create, resume }
+  const resumeWith = previous && previous.wrappedResumeWith === upstream.resumeWith ? previous.resumeWith : upstream.resumeWith
+  const routing = upstream[routingKey] = { create, resume, resumeWith }
   const persistence = ctx.sessionPersistence
   const nativeIds = new Set(Object.keys(ctx.kodeAgents.profiles?.bindings ?? {}))
   const nativeUnavailable = () => new Error('Kode 原生 Agent 执行器正在重载，请稍后重试；为保护历史，不会改用普通 dsh 执行器。')
@@ -108,9 +118,9 @@ export function installNativeFactoryRouting(ctx, native) {
     return opened.agent
   }
   const remember = (owner, handle) => { officialHandles.set(handle.agent.id, {owner,handle}); return handle }
-  const owns = async (options, restoring) => {
+  const owns = async (options, restoring, storage = persistence, checkBinding = true) => {
     const id = options.resumeSessionId ?? options.sessionId
-    if (ctx.kodeAgents.profiles?.binding?.(id)) return true
+    if (checkBinding && ctx.kodeAgents.profiles?.binding?.(id)) return true
     const provider = options.agentOptions?.provider
     if (!restoring) {
       if (provider) return provider.startsWith('kode-agent-')
@@ -118,7 +128,7 @@ export function installNativeFactoryRouting(ctx, native) {
     }
     let handle
     try {
-      handle = await ctx.sessionPersistence.open(id, 'read')
+      handle = await storage.open(id, 'read', { signal: options.signal })
       const stored = await handle.read()
       const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
         ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
@@ -156,6 +166,15 @@ export function installNativeFactoryRouting(ctx, native) {
     return remember(owner, await resume.call(this, owner, options))
   }
   upstream.createAgent = routing.wrappedCreate = createRouter; upstream.resume = routing.wrappedResume = resumeRouter
+  // Configured restores bypass resume() and pass their persistence service directly.
+  const resumeWithRouter = async function(owner, storage, options) {
+    if (await owns(options, true, storage)) {
+      nativeIds.add(options.resumeSessionId)
+      return native.resume(owner, options)
+    }
+    return resumeWith.call(this, owner, storage, options)
+  }
+  if (resumeWith) upstream.resumeWith = routing.wrappedResumeWith = resumeWithRouter
   return () => {
     if (upstream.createAgent === createRouter) upstream.createAgent = routing.wrappedCreate = function(owner, options) {
       if (nativeIds.has(options.sessionId) || options.agentOptions?.provider?.startsWith('kode-agent-') || !options.agentOptions?.provider && options.meta?.agentPreset === 'kode-native') throw nativeUnavailable()
@@ -174,9 +193,29 @@ export function installNativeFactoryRouting(ctx, native) {
       } finally { await handle?.close() }
       return resume.call(this, owner, options)
     }
+    if (resumeWith && upstream.resumeWith === resumeWithRouter) upstream.resumeWith = routing.wrappedResumeWith = async function(owner, storage, options) {
+      if (nativeIds.has(options.resumeSessionId) || await owns(options, true, storage, false)) throw nativeUnavailable()
+      return resumeWith.call(this, owner, storage, options)
+    }
   }
 }
 export async function apply(ctx) {
+  const factory = new NativeAgentFactory(ctx)
+  const readiness = Promise.withResolvers()
+  factory.ready = readiness.promise
+  // Install routing before preset registration or cold-log migration can yield.
+  // A native admission waits on readiness without constructing an ordinary Agent.
+  const delegate = {
+    createAgent: async (...args) => { await factory.ready; return factory.createAgent(...args) },
+    resume: async (...args) => { await factory.ready; return factory.resume(...args) },
+  }
+  // Cordis publishes a Service before its async initializer registers the factory.
+  const loop = ctx.agentLoop[symbols.original] ?? ctx.agentLoop
+  await loop.ctx?.fiber.await?.()
+  ctx.effect(() => installNativeFactoryRouting(ctx, delegate), 'kode.native-routing')
+  ctx.effect(() => () => readiness.reject(new Error('Native executor initialization disposed')), 'kode.native-readiness')
+  // Keep disposal rejection observed even if no caller has awaited readiness.
+  void factory.ready.catch(() => {})
   ctx.inject(['sessionController'], scope => scope.effect(() => installQueueSteering(scope, scope.sessionController), 'kode.queue-steering'))
   const unregisterPreset = await ctx.agentPresets.register({ id: 'kode-native', name: '外部 Agent', description: '由所选 Agent 负责模型、指令和工具执行。', plugins: [] })
   ctx.effect(() => unregisterPreset, 'kode.native-preset')
@@ -198,18 +237,18 @@ export async function apply(ctx) {
       if (error.code !== 'ENOENT' && !/not found/i.test(error.message)) ctx.logger.warn('Kode session composition migration for %s: %s', id, error.message)
     } finally { await handle?.close() }
   }
-  const factory = new NativeAgentFactory(ctx)
   ctx.on('kode/runtime-removed', async type => {
     const ids = [...factory.byId.keys()].filter(id => ctx.kodeAgents.profiles.binding(id)?.profile.type === type)
     await Promise.all(ids.map(id => factory.byId.get(id)?.()))
   })
+  factory.promote = (...args) => delegate.promote(...args)
   ctx.provide('kodeNativeFactory', factory)
   ctx.effect(function* () {
     yield ctx.sessionProjections.register(boundaryProjection)
     yield ctx.sessionProjections.register(inboxProjection)
     yield ctx.sessionProjections.register(contextUsageProjection)
     yield ctx.sessionProjections.register(fastProjection)
-    yield installNativeFactoryRouting(ctx, factory)
     yield () => factory.close()
+    readiness.resolve()
   }, 'kode.native-factory')
 }

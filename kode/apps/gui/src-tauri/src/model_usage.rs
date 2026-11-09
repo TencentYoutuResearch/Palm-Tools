@@ -17,7 +17,7 @@ pub async fn model_usage_snapshot(
     let offset = chrono::Local::now().offset().local_minus_utc() / 60;
     let local_period = period.clone();
     let mut combined = tauri::async_runtime::spawn_blocking(move || {
-        model_usage::collect_snapshot(&local_period, since, Some(offset))
+        model_usage::collect_snapshot(&local_period, since, None, Some(offset))
     })
     .await
     .map_err(|error| format!("model usage task failed: {error}"))??;
@@ -124,6 +124,8 @@ mod tests {
     fn merging_remote_preserves_source_and_daily_counts() {
         let mut local = ModelUsageSnapshot {
             period: "today".into(),
+            until_ms: None,
+            timeline: Vec::new(),
             scanned_files: 1,
             rows: Vec::new(),
             totals: Default::default(),

@@ -1,4 +1,5 @@
 /** Kode Host integration: durable backend messaging and independently owned native Agent execution. */
+import { retainClientBatches } from './client-asset-retention.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -12,6 +13,10 @@ import { registerIntegrationApi, memoryTools } from './integration-api.js'
 import { ExtensionHub } from './extension-hub.js'
 import { registerAgentHubApi } from './agent-hub-api.js'
 import { registerSharedSessionApi } from './shared-session-api.js'
+import { installSessionRecovery } from './session-recovery.js'
+import { installNativeStartupBarrier } from './native-startup.js'
+import { registerSessionNotifications, registerNotificationSettings } from './session-notifications.js'
+import { registerModelUsageApi } from './model-usage-api.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -28,6 +33,9 @@ const output = {
 }
 
 export async function apply(ctx, config = {}) {
+  ctx.inject?.(['clientModules'], scope => retainClientBatches(scope.clientModules))
+  installNativeStartupBarrier(ctx)
+  if (ctx.inject) ctx.inject(['sessionPersistence'], scope => scope.effect(() => installSessionRecovery(scope), 'kode.session-recovery'))
   const runtimeConfig = await prepareRuntimeConfig(config)
   const token = runtimeConfig.tokenFile ? (await readFile(runtimeConfig.tokenFile, 'utf8')).trim() : process.env.KODE_BRIDGE_TOKEN
   if (!token) throw new Error('kode requires tokenFile or KODE_BRIDGE_TOKEN on the dsh Host')
@@ -64,6 +72,9 @@ export async function apply(ctx, config = {}) {
   }
   if (ctx.inject) ctx.inject(['webServer', 'connection'], async webCtx => {
     webCtx.effect(() => registerIntegrationApi(webCtx, admin), 'kode.integration-api')
+    webCtx.effect(() => registerModelUsageApi(webCtx, admin), 'kode.model-usage-api')
+    webCtx.effect(() => registerSessionNotifications(webCtx), 'kode.session-notifications')
+    webCtx.effect(() => registerNotificationSettings(webCtx), 'kode.notification-settings')
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
@@ -254,6 +265,11 @@ export async function apply(ctx, config = {}) {
       webCtx.effect(() => registerAgentHubApi(webCtx, { hub, backend: admin, service }), 'kode.agent-hub-api')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
       if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
+      webCtx.inject(['sessionController', 'kodeNativeFactory'], async scope => {
+        await scope.kodeNativeFactory.ready
+        const { installRestartResume } = await import('./restart-resume.js')
+        await installRestartResume(scope, admin, `${stateFile}.restart.json`)
+      })
       if (runtimeConfig.sharedBackendState) webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
         const lifetime = new AbortController()
         const task = import('./workbench-import.js').then(({ syncNativeTabs }) => syncNativeTabs(sessionCtx.sessionController, admin, service.profiles, lifetime.signal))

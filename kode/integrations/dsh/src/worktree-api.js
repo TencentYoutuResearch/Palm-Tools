@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile, rename, realpath } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { rememberWorktreeProject } from './worktree-projects.js'
 const execute = promisify(execFile)
 async function git(cwd, args) {
   try { return (await execute('git', ['-C', cwd, ...args], { timeout: 60000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })).stdout.trim() }
@@ -22,13 +23,18 @@ export class WorktreeCreator {
     const repository = await git(cwd, ['rev-parse', '--show-toplevel'])
     const commit = await git(repository, ['rev-parse', '--verify', 'HEAD^{commit}'])
     const branch = await git(repository, ['branch', '--show-current'])
-    return { repository, commit, branch }
+    const refs = await git(repository, ['for-each-ref', '--format=%(refname)%09%(objectname)%09%(symref)', 'refs/heads', 'refs/remotes'])
+    const branches = refs.split('\n').filter(Boolean).flatMap(line => {
+      const [ref, commit, symbolic] = line.split('\t')
+      return symbolic ? [] : [{ ref, name: ref.replace(/^refs\/(heads|remotes)\//, ''), commit }]
+    })
+    return { repository, commit, branch, branches }
   }
   create(path, input) {
     if (this.closed) return Promise.reject(new Error('Host is stopping'))
     if (!/^[a-zA-Z0-9_-]{16,80}$/.test(input.requestId ?? '')) return Promise.reject(new Error('无效的 worktree 创建请求。'))
     const key = createHash('sha256').update(input.requestId).digest('hex')
-    const identity = JSON.stringify([resolve(path), String(input.branch ?? '').trim()])
+    const identity = JSON.stringify([resolve(path), String(input.branch ?? '').trim(), ...(input.baseRef && input.baseRef !== 'HEAD' ? [input.baseRef] : [])])
     if (this.jobs.has(key)) {
       const job = this.jobs.get(key)
       return job.identity === identity ? job.promise : Promise.reject(new Error('创建请求已用于另一个工作目录。'))
@@ -49,15 +55,17 @@ export class WorktreeCreator {
       return record.result
     }
     const info = await this.inspect(path), requested = String(input.branch ?? '').trim()
+    const base = input.baseRef === undefined || input.baseRef === 'HEAD' ? { commit: info.commit } : info.branches.find(row => row.ref === input.baseRef)
+    if (!base) throw new Error('起始分支已不存在，请重新选择。')
     const branch = requested || `kode/${basename(info.repository).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0,40) || 'work'}-${key.slice(0,8)}`
     if (branch.length > 200 || branch.startsWith('-') || /[\x00-\x1f]/.test(branch)) throw new Error('请输入有效的 Git 分支名称。')
     await git(info.repository, ['check-ref-format', '--branch', branch])
     const destination = join(this.root, `${basename(info.repository).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0,50) || 'work'}-${key.slice(0,12)}`)
-    record = { identity, status: 'creating', path: destination, branch, baseCommit: info.commit, repository: info.repository }
+    record = { identity, status: 'creating', path: destination, branch, baseCommit: base.commit, repository: info.repository }
     await save(recordPath, record)
     try {
-      await git(info.repository, ['worktree', 'add', '-b', branch, '--', destination, info.commit])
-      const result = { path: await realpath(destination), branch, baseCommit: info.commit, repository: info.repository }
+      await git(info.repository, ['worktree', 'add', '-b', branch, '--', destination, base.commit])
+      const result = { path: await realpath(destination), branch, baseCommit: base.commit, repository: info.repository }
       await save(recordPath, { ...record, status: 'ready', result }); return result
     } catch (error) { await save(recordPath, { ...record, status: 'failed' }); throw error }
   }
@@ -76,7 +84,12 @@ export function registerWorktreeApi(ctx, config = {}) {
       } else return send(405, { error: 'GET or JSON POST required' })
       const workspace = ctx.get('workspaceRegistry')?.list().find(row => row.id === input.workspaceId)
       if (!workspace) throw new Error('请选择当前执行主机上已注册的项目。')
-      send(200, req.method === 'GET' ? await creator.inspect(workspace.path) : await creator.create(workspace.path, input))
+      if (req.method === 'GET') return send(200, await creator.inspect(workspace.path))
+      if (!config.backendClient) throw new Error('项目归属存储尚未就绪，请稍后重试。')
+      const result = await creator.create(workspace.path, input)
+      const checkout = await ctx.get('workspaceRegistry').create(result.path)
+      const parents = await rememberWorktreeProject(config.backendClient, checkout.id, workspace.id)
+      send(200, { ...result, workspaceId: checkout.id, projectId: parents[checkout.id] })
     } catch (error) { send(400, { error: error.message }) }
   } })
   return async () => { dispose(); await creator.close() }

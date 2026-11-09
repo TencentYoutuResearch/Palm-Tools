@@ -611,3 +611,12 @@ permission/sandbox/approval initialization events. Read failures, unknown events
 inbox work, inherited history and real messages remain visible. GUI snapshots
 preserve `dsh_session_id` separately from the native CLI `session_id`, so later
 archive and unarchive operations retain the original runtime identity.
+
+### Dsh 工作台 CLI token 统计
+
+`GET /api/v1/messaging/model-usage?period=today|month|all&timezone_offset_minutes=<minutes>&since_ms=<optional-ms>&until_ms=<optional-ms>` 供独立 session server 的管理端使用，要求 bridge 管理员 bearer，session-scoped token 返回 `403`。复用 `/api/v1/model-usage` 的 collector 和响应格式（`period`、`rows`、`totals`、`daily`、`timeline`、`warnings`）。时区为 UTC 以东分钟数，`since_ms` 可指定查看者日历的今日/月初边界；`all` 不传该边界。可选 `until_ms` 指定闭区间结束时间（含边界），与 `since_ms` 同时限制总量、timeline、daily 及明细；起点晚于终点或负时间返回 `400`。响应 `until_ms` 是实际使用的截止时间，默认服务端采样时刻。此接口只读，未知 period 或时区超出 ±1439 返回 `400`。Dsh 浏览器通过 owner-only `/api/kode/model-usage` 代理访问，凭据不进入前端；统计范围为当前执行主机的 CLI 历史，与当前对话上下文占用独立。
+
+
+`timeline` 为按查看者时区聚合的 `{date, rows}` 数组，rows 保留 backend/model 及输入、输出、缓存、总量。today 按小时（YYYY-MM-DDTHH:00）、month 按日、all 按月，从相应范围起点截至现在；缺失桶由客户端补零。daily 同样仅包含所选范围，不固定截断为 84 天。Agent/model 多选在客户端按 rows 的对应维度聚合，同时过滤图、活跃度及明细；不把未知时间的记录猜配到某一天。
+
+`GET/POST /api/v1/messaging/integrations` 新增持久化布尔项 `auto_resume_interrupted`，默认 true，旧配置缺失字段时采用默认值。修改仍要求 owner/admin 身份。DSH Host 独立保存上次运行中的会话 ID（非打开的 tab），启动时以冷查询核对最后一轮是否未闭合或因 disposed 中断，忽略已完成、用户停止、错误、归档及已有活动的会话，使用 SessionController 恢复原 Agent/模型/权限并排入一个续接输入。已有待处理输入直接恢复而不重复插入。主动停止用 ignorable plugin record 标识，关闭开关会清除此前候选；不自动接受权限请求。
