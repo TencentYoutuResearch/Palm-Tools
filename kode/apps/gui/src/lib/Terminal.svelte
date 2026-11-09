@@ -1069,6 +1069,10 @@
   function safeFit(): boolean {
     if (!term || !fitAddon || !hasHealthyRenderDimensions()) return false
     try {
+      // 容器过窄时保持 xterm 原尺寸:先 fit 再拦 PTY 会让两边宽度不一致,
+      // CLI 按旧宽度输出的内容会被 xterm 折成一两列。返回 true 避免调用方 80ms 轮询。
+      const dims = fitAddon.proposeDimensions()
+      if (dims && (dims.cols < MIN_COLS || dims.rows < MIN_ROWS)) return true
       fitAddon.fit()
       return true
     } catch (e) {
