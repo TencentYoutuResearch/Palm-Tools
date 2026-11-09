@@ -1,4 +1,5 @@
 /** Kode Host integration: durable backend messaging and independently owned native Agent execution. */
+import { retainClientBatches } from './client-asset-retention.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -32,6 +33,7 @@ const output = {
 }
 
 export async function apply(ctx, config = {}) {
+  ctx.inject?.(['clientModules'], scope => retainClientBatches(scope.clientModules))
   installNativeStartupBarrier(ctx)
   if (ctx.inject) ctx.inject(['sessionPersistence'], scope => scope.effect(() => installSessionRecovery(scope), 'kode.session-recovery'))
   const runtimeConfig = await prepareRuntimeConfig(config)

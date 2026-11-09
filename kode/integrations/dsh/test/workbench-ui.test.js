@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
 test('jobs move to the composer with native injections, locale, output and kill handlers intact and restore on disposal', () => {
   const slots = [], cleanups = [], native = () => {}, inject = () => ({ hooks: { jobs: 'state' }, killJob: 'kill', observe: 'output' })
-  const entry = { options: { id: 'job-list', name: 'conversation.session.header.actions', order: 20, locale: 'job', inject }, component: native }
+  const entry = { options: { id: 'job-list', name: 'conversation.session.header.actions', order: 20 }, locale: 'job', inject, component: native }
   let subscriber
   const ctx = { slots: { inject(seat, fn) { cleanups.push(fn()) }, entries: () => [entry], subscribe(seat, fn) { subscriber = fn; return () => {} }, register(options, component) { const row = { options, component, disposed: false }; slots.push(row); return () => { row.disposed = true } } } }
   const relocate = vm.runInNewContext(source + '\nrelocateWorkbenchJobs', { react: { createElement: (type, props, child) => ({ type, props, child }) } })

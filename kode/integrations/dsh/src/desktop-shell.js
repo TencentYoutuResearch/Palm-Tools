@@ -1,4 +1,6 @@
 /** Owned Desktop integration, loaded by the unpacked shell installer. */
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { findDevelopmentRuntime } from './desktop-runtime.js'
 export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notification, shell }) {
   const executable = process.platform === 'darwin' ? findDevelopmentRuntime(process.execPath) : null
@@ -10,22 +12,41 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
     return { windowOpen: () => null, childCreated() {} }
   }
   const islands = new Map(), notices = new Map(), layouts = new WeakMap(), noticeOwners = new WeakSet()
+  let cutouts = new Map()
+  const readGeometry = () => {
+    if (process.platform !== 'darwin') return
+    try {
+      const rows = JSON.parse(execFileSync(fileURLToPath(new URL('../assets/desktop/screen-layout', import.meta.url)), [], { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }))
+      cutouts = new Map(rows.filter(row => Number.isFinite(row.left) && Number.isFinite(row.right) && row.right > row.left).map(row => [row.id, row]))
+    } catch { /* Older packages retain a conservative camera clearance. */ }
+  }
   const owner = event => {
     const window = BrowserWindow.fromWebContents(event.sender)
     return window && !window.isDestroyed() && event.senderFrame === event.sender.mainFrame && event.sender.getURL().startsWith('dsh-app://app/') ? window : null
   }
   const position = (parent, child, size = { width: 240, height: 28 }) => {
     const display = screen.getDisplayMatching(parent.getBounds())
-    // A 32+ point menu bar on an internal display reserves the camera housing.
     const menuHeight = display.workArea.y - display.bounds.y
-    const camera = display.internal && menuHeight >= 30
-    const center = display.bounds.x + display.bounds.width / 2
-    const width = size.height <= 28 ? (camera ? 560 : 240) : size.width
-    const x = center - width / 2
-    child.setBounds({ x: Math.round(Math.max(display.bounds.x, Math.min(x, display.bounds.x + display.bounds.width - width))), y: display.bounds.y, width, height: size.height <= 28 ? Math.max(22, Math.min(28, menuHeight || 28)) : Math.min(size.height, display.workArea.height) })
-    if (layouts.get(child) !== camera && !child.webContents.isLoadingMainFrame()) {
-      layouts.set(child, camera)
-      void child.webContents.executeJavaScript(`document.documentElement.dataset.kodeMenuCamera = '${camera ? 'true' : 'false'}'`).catch(() => {})
+    const cutout = cutouts.get(display.id)
+    const camera = !!cutout || (display.internal && menuHeight >= 30)
+    const gap = cutout ? cutout.right - cutout.left : 200
+    const leftWing = 56, rightWing = 144, collapsed = size.height <= 40
+    const center = display.bounds.x + (cutout ? (cutout.left + cutout.right) / 2 : display.bounds.width / 2)
+    const width = collapsed ? (camera ? leftWing + gap + rightWing : 240) : size.width
+    const desiredX = collapsed && camera ? center - gap / 2 - leftWing : center - width / 2
+    const x = Math.round(Math.max(display.bounds.x, Math.min(desiredX, display.bounds.x + display.bounds.width - width)))
+    const height = collapsed ? (cutout?.height ?? Math.max(22, Math.min(28, menuHeight || 28))) : Math.min(size.height, display.workArea.height)
+    child.setBounds({ x, y: display.bounds.y, width, height })
+    const layout = JSON.stringify([camera, gap, center - x, height])
+    if (layouts.get(child) !== layout && !child.webContents.isLoadingMainFrame()) {
+      layouts.set(child, layout)
+      void child.webContents.executeJavaScript(`{
+        const root = document.documentElement;
+        root.dataset.kodeMenuCamera = '${camera ? 'true' : 'false'}';
+        root.style.setProperty('--kode-camera-gap', '${gap}px');
+        root.style.setProperty('--kode-camera-center', '${center - x}px');
+        root.style.setProperty('--kode-menu-height', '${cutout?.height ?? 28}px');
+      }`).catch(() => {})
     }
   }
   const refresh = () => {
@@ -39,8 +60,11 @@ export function installDesktopShell({ app, BrowserWindow, screen, ipcMain, Notif
   app.on('browser-window-focus', refresh)
   app.on('browser-window-blur', () => setImmediate(refresh))
   void app.whenReady().then(() => {
-    screen.on('display-metrics-changed', refresh)
-    screen.on('display-removed', refresh)
+    readGeometry(); refresh()
+    const changed = () => { readGeometry(); refresh() }
+    screen.on('display-metrics-changed', changed)
+    screen.on('display-added', changed)
+    screen.on('display-removed', changed)
   })
   ipcMain.handle('kode-desktop:notification-settings', event => {
     if (!owner(event)) throw new Error('Owned application window required')

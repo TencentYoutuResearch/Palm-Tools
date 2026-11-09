@@ -22,6 +22,7 @@
     "scripts/build-bundle.js",
     "scripts/prepare-desktop-notifications.sh",
     "scripts/install-desktop-shell.js",
+    "scripts/build-desktop-screen.js",
     "scripts/audit-history.js",
     "scripts/repair-inbox-history.js",
     "scripts/repair-inbox-history.py",

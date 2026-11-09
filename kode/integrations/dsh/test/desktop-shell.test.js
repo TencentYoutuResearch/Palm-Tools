@@ -28,7 +28,7 @@ test('one native panel follows the owning display, avoids the camera and hides w
   }
   assert.equal(f.bridge.windowOpen(f.parent, { frameName: 'kode-token-island', url: 'https://example.com' }), null)
   f.bridge.childCreated(f.parent, f.child, { frameName: 'kode-token-island' })
-  assert.deepEqual(f.child.bounds, { x: 476, y: 0, width: 560, height: 28 })
+  assert.deepEqual(f.child.bounds, { x: 600, y: 0, width: 400, height: 28 })
   assert.equal(f.child.visible, true)
   f.parent.getBounds = () => ({ x: 1700, y: 100, width: 900, height: 600 })
   f.parent.emit('move')

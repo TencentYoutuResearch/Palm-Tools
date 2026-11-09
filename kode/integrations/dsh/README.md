@@ -995,7 +995,15 @@ original launch arguments are preserved and identified runtimes never relaunch a
 
 The token panel follows the DSH window's display and is hidden when DSH leaves
 the foreground or the window is hidden/minimized. Plain menu bars use their own
-height; internal camera cutouts reserve space beside the camera. Browser and
+height; internal camera clearance comes from AppKit's actual screen safe areas.
+The build ships a small universal geometry reader; users need no compiler. Browser and
 unmodified Desktop shells retain the in-app token island and browser notification
 carrier. Completion and wait notifications honor their settings even when the
 conversation is currently visible.
+
+
+Client batch resources retain up to 64 exact immutable URLs for the lifetime of
+the DSH module registry, covering consecutive plugin recompositions and Kode
+unload/re-enable cycles. Unknown revisions still return 404, and old requests
+never receive newer code. The jobs dock preserves the official entry's injected
+state hooks and localization, which are stored separately from its slot options.
