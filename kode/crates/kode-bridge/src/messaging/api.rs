@@ -84,6 +84,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/cloud/account/palmx/unbind", post(cloud_palmx_unbind))
         .route("/api/v1/messaging/cloud/account/profile", post(cloud_account_profile))
         .route("/api/v1/messaging/cloud/account/name", post(cloud_account_name))
+        .route("/api/v1/messaging/cloud/account/devices", post(cloud_account_devices))
         .route("/api/v1/messaging/cloud/account/palm/sign_in", post(cloud_palm_sign_in))
         .route("/api/v1/messaging/cloud/account/palm/start", post(cloud_palm_start))
         .route("/api/v1/messaging/cloud/account/palm/poll", post(cloud_palm_poll))
@@ -614,6 +615,10 @@ async fn cloud_palmx_unbind(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result
 async fn cloud_account_profile(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
     admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).account_profile().await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
+}
+async fn cloud_account_devices(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<crate::remote_devices::Request>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::remote_devices::call(&crate::cloud_sync::CloudSyncManager::new(ctx),input).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

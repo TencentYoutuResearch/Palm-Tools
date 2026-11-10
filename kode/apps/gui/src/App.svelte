@@ -39,7 +39,7 @@
   import AccountDialog from './lib/AccountDialog.svelte'
   import AccountMenu from './lib/AccountMenu.svelte'
   import type { Tab as SettingsTab } from './lib/SettingsPanel.svelte'
-  import type { CloudSyncStatus } from './lib/ipc'
+  import type { AccountDevice, AccountDeviceSession, CloudSyncStatus } from './lib/ipc'
   import EndpointDialog from './lib/EndpointDialog.svelte'
   import PathsBanner from './lib/PathsBanner.svelte'
   import MemoryPanel from './lib/MemoryPanel.svelte'
@@ -51,6 +51,8 @@
   import DeployPanel from './lib/DeployPanel.svelte'
   import MetricsHoverCard from './lib/MetricsHoverCard.svelte'
   import WorkspacePanel from './lib/WorkspacePanel.svelte'
+  import DevicesSection from './lib/DevicesSection.svelte'
+  import DeviceSession from './lib/DeviceSession.svelte'
   import ShellTerminalPanel, { type ShellTerminalPosition } from './lib/ShellTerminalPanel.svelte'
   import Icon from './lib/Icon.svelte'
   import BackendIcon from './lib/BackendIcon.svelte'
@@ -184,6 +186,24 @@
     } catch {
       openSettings('account')
     }
+  }
+  /** A session on another desktop of the account, shown over the tabs.
+   *  Not a tab: it is never persisted or restored, and any local tab
+   *  activation or new-session flow closes it. */
+  let deviceView = $state<{ device: AccountDevice; session: AccountDeviceSession; sessions: AccountDeviceSession[] } | null>(null)
+  let deviceViewTab: number | null = null
+  $effect(() => {
+    // Keyboard tab switching and new sessions also leave the device view.
+    const id = $activeId
+    if (chooserOpen || id !== deviceViewTab) deviceView = null
+    deviceViewTab = id
+  })
+  $effect(() => {
+    if (!sidebarAccount?.active) deviceView = null
+  })
+  function activateTab(id: number) {
+    deviceView = null
+    selectTab(id)
   }
   function accountInitial(label: string | null | undefined): string {
     return ((label ?? '').split('@')[0].trim().slice(0, 1) || 'K').toUpperCase()
@@ -1808,7 +1828,7 @@
   // 标题格式: "<序号>. <active tab title>";没有 active tab 时回落到品牌名。
   // active tab 由 (tabs, activeId) 共同决定 — 任一变化都需要刷新。
   const appWindow = getCurrentWindow()
-  const topbarTitle = $derived($activeTab ? $activeTab.title : 'Kill la Code')
+  const topbarTitle = $derived(deviceView ? `${deviceView.session.title?.trim() || deviceView.session.backend_key} · ${deviceView.device.name}` : $activeTab ? $activeTab.title : 'Kill la Code')
 
   // 标题栏拖拽:`data-tauri-drag-region` 不会冒泡到子元素(Tauri 设计行为,
   // 保护按钮/input),所以手动监听 mousedown:左键单击 startDragging,双击 toggleMaximize
@@ -1851,8 +1871,8 @@
     aria-current={t.id === $activeId ? 'true' : undefined}
     aria-label={`${t.title}, ${sessionStatus.text}, ${shortModelName(t.model)}`}
     title={`${t.title} · ${shortModelName(t.model)}`}
-    onclick={() => { selectTab(t.id); if (menuOpenId !== null) closeMenu() }}
-    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectTab(t.id) } }}
+    onclick={() => { activateTab(t.id); if (menuOpenId !== null) closeMenu() }}
+    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTab(t.id) } }}
     oncontextmenu={(e) => onTabContext(e, t.id)}
   >
     <div class="tab-rail">
@@ -2138,6 +2158,12 @@
         </div>
       {/if}
     </div>
+    {#if sidebarAccount?.active && sidebarMode !== 'compact'}
+      <DevicesSection
+        active={deviceView ? { deviceId: deviceView.device.device_id, sessionId: deviceView.session.id } : null}
+        onOpen={(device, session, sessions) => { chooserOpen = false; deviceView = { device, session, sessions } }}
+      />
+    {/if}
     <div class="sidebar-account">
       <button
         class="account-trigger"
@@ -2337,7 +2363,7 @@
       {/key}
     {/if}
     {#each $mountedIds as id (id)}
-      {@const isActive = id === $activeId && !chooserOpen}
+      {@const isActive = id === $activeId && !chooserOpen && !deviceView}
       {@const tab = $tabs.find((t) => t.id === id)}
       <!-- inert 兜底:visibility:hidden 仍可能被 Tab 键焦点穿透,inert 完全屏蔽
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
@@ -2355,6 +2381,16 @@
         {/if}
       </div>
     {/each}
+    {#if deviceView}
+      {#key `${deviceView.device.device_id}:${deviceView.session.id}`}
+        <DeviceSession
+          device={deviceView.device}
+          session={deviceView.session}
+          sessions={deviceView.sessions}
+          onClose={() => (deviceView = null)}
+        />
+      {/key}
+    {/if}
     {#if bottomTerminalVisible}
       <div class="bottom-terminal" style="height: {terminalHeight}px">
         <div

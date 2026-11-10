@@ -386,6 +386,13 @@ impl CloudSyncManager {
         Ok((backend.server_url, session.access_token))
     }
 
+    /// Relay URL, fresh access token and this desktop's own device id, for
+    /// viewing the account's other devices.
+    pub(crate) async fn account_viewer(&self) -> Result<(String, String, String), String> {
+        let (server_url, token) = self.account_token().await?;
+        Ok((server_url, token, self.inner.config.lock().installation_id.clone()))
+    }
+
     /// The saved session of `backend_id`, refreshed when close to expiry.
     async fn fresh_session(&self, backend_id: &str) -> Result<AccountSession, String> {
         let saved = || {

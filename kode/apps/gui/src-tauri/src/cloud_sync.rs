@@ -188,3 +188,9 @@ pub async fn cloud_palm_cancel(manager: State<'_, CloudSyncManager>) -> Result<V
 pub async fn cloud_palmx_unbind(manager: State<'_, CloudSyncManager>) -> Result<Value, String> {
     manager.account_call("/cloud/account/palmx/unbind", json!({})).await
 }
+/// Other devices on the signed-in account; `request` is a
+/// `kode_bridge::remote_devices::Request` validated by the service.
+#[tauri::command]
+pub async fn cloud_account_devices(manager: State<'_, CloudSyncManager>, request: Value) -> Result<Value, String> {
+    manager.account_call("/cloud/account/devices", request).await
+}

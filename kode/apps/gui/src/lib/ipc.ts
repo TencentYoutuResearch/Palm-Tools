@@ -439,6 +439,24 @@ export const ipc = {
   accountDefaultRelay: () => invoke<string>('account_default_relay'),
   cloudAccountProfile: () => invoke<CloudSyncStatus>('cloud_account_profile'),
   cloudAccountSetName: (name: string) => invoke<CloudSyncStatus>('cloud_account_set_name', { name }),
+  /** Other desktops on the signed-in account, through the relay's phone API. */
+  accountDevices: () =>
+    invoke<{ devices: AccountDevice[]; self_device_id: string }>('cloud_account_devices', { request: { action: 'devices' } }),
+  accountDeviceSessions: (deviceId: string) =>
+    invoke<{ sessions: AccountDeviceSession[] }>('cloud_account_devices', { request: { action: 'sessions', device_id: deviceId } }),
+  accountDeviceHistory: (deviceId: string, sessionId: number, limit = 500) =>
+    invoke<{ events: AccountDeviceEvent[] }>('cloud_account_devices', {
+      request: { action: 'history', device_id: deviceId, session_id: sessionId, from: 0, limit },
+    }),
+  accountDeviceCommand: (
+    deviceId: string,
+    sessionId: number,
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response',
+    body: Record<string, unknown> = {},
+  ) =>
+    invoke<{ command_id?: string; status?: string }>('cloud_account_devices', {
+      request: { action: 'command', device_id: deviceId, session_id: sessionId, op, body },
+    }),
   /** Runs the relay's palm capture page in a camera window on this Mac. */
   palmCapture: (serverUrl: string, appId: string, sdkOrigin: string | null, locale: string) =>
     invoke<PalmCaptureResult>('palm_capture', { serverUrl, appId, sdkOrigin, locale }),
@@ -1506,3 +1524,16 @@ export const agentHub = {
   handoff: (payload: { source_session_id: string; source_runtime: 'gui' | 'dsh'; profile_id: string; target_runtime: 'gui' | 'dsh'; request_id: string }) =>
     invoke<{ sessionId: string; runtime: 'gui' | 'dsh'; id: number; sourceId: number }>('shared_session_handoff', { payload }),
 }
+
+export type AccountDevice = { device_id: string; name: string; online: boolean; last_seen_at: number | null }
+export type AccountDeviceSession = {
+  id: number
+  backend_key: string
+  title: string | null
+  model: string | null
+  status: string
+  cwd: string
+  session_uuid?: string | null
+  transport_kind?: string
+}
+export type AccountDeviceEvent = { type: string; ts: number; session_id?: number; payload: Record<string, any> }

@@ -46,6 +46,7 @@ pub mod runtime;
 pub mod session_mcp;
 pub mod cloud_sync;
 pub mod account;
+pub mod remote_devices;
 
 pub use hook_relay::HookRelay;
 

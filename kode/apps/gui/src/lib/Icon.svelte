@@ -33,6 +33,7 @@
     | 'folder'
     | 'folder-open'
     | 'server'
+    | 'monitor'
     | 'user'
     | 'settings'
     | 'hand'
@@ -149,6 +150,8 @@
     // lucide:folder-open
     'folder-open':
       '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6A2 2 0 0 1 18.46 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2A2 2 0 0 0 12.1 6H20a2 2 0 0 1 2 2v2"/>',
+    // lucide:monitor
+    monitor: '<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
     // lucide:server
     server:
       '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/>' +

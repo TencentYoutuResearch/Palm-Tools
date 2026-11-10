@@ -20,6 +20,9 @@ paths:
   - apps/gui/src/lib/PairingDialog.svelte
   - apps/gui/src/lib/AccountPane.svelte
   - apps/gui/src/lib/AccountMenu.svelte
+  - apps/gui/src/lib/DevicesSection.svelte
+  - apps/gui/src/lib/DeviceSession.svelte
+  - crates/kode-bridge/src/remote_devices.rs
   - apps/mobile/lib/src/api/account_client.dart
   - apps/mobile/lib/src/state/providers.dart
   - deploy/Dockerfile.relay
@@ -114,6 +117,24 @@ so phones waiting on `command.status` through history keep working.
 
 Phones close relay sockets when the app leaves the foreground, which lets
 the lease lapse and the desktop stop uploading.
+
+## Desktop viewer
+
+A signed-in desktop can view and converse with the account's other desktops
+through the same phone API, using its own account token (the relay does not
+distinguish viewers). The workbench service exposes only
+`POST /api/v1/messaging/cloud/account/devices` with a typed request
+(`kode-bridge::remote_devices::Request`): `devices`, `sessions`, `history`
+and `command` with `op` in `input | interrupt | answer | plan_response`.
+Session creation, deletion, mode and model changes stay phone/owner-only.
+
+- `devices` adds `self_device_id` (this installation) so the GUI hides itself.
+- The device list does not extend a viewing lease. Session lists load only
+  for devices the user expands, and the open conversation polls `/history`
+  every 2 s while the window is visible, so a remote desktop streams only
+  while someone is looking at it.
+- Grouped AskUserQuestion answers are sent in order, each waiting for its
+  `command.status` receipt, with `submit` on the last one (same as mobile).
 
 ## Client configuration
 

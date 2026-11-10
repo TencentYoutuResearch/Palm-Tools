@@ -207,6 +207,7 @@ pub fn run() {
             cloud_sync::account_default_relay,
             cloud_sync::cloud_account_profile,
             cloud_sync::cloud_account_set_name,
+            cloud_sync::cloud_account_devices,
             palm_capture::palm_capture,
             cloud_sync::cloud_palm_sign_in,
             cloud_sync::cloud_palm_start,
