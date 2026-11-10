@@ -168,7 +168,21 @@ fn copy_tree(source: &Path, target: &Path, count: &mut usize, depth: usize) -> R
             #[cfg(unix)]
             std::os::unix::fs::symlink(link, &to)?;
             #[cfg(not(unix))]
-            bail!("symbolic links are unsupported on this Host");
+            {
+                // Windows symlinks require elevated/Developer Mode and often
+                // fail. A plugin snapshot only needs the linked content, so
+                // materialize it as a regular file/directory instead.
+                let target = if link.is_absolute() {
+                    link
+                } else {
+                    from.parent().unwrap_or_else(|| Path::new(".")).join(link)
+                };
+                if target.is_dir() {
+                    copy_tree(&target, &to, count, depth + 1)?;
+                } else {
+                    fs::copy(target, to)?;
+                }
+            }
         } else if ty.is_dir() {
             copy_tree(&from, &to, count, depth + 1)?
         } else if ty.is_file() {
@@ -769,7 +783,15 @@ fn make(link: &Value) -> Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::symlink(link_path(link, "to")?, link_path(link, "path")?)?;
     #[cfg(not(unix))]
-    bail!("managed skill links unsupported on this Host");
+    {
+        let to = link_path(link, "to")?;
+        let path = link_path(link, "path")?;
+        if to.is_dir() {
+            copy_tree(&to, &path, &mut 0, 0)?;
+        } else {
+            fs::copy(to, path)?;
+        }
+    }
     Ok(())
 }
 pub fn replace(

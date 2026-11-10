@@ -30,6 +30,9 @@ fn echo_config() -> Config {
         "echo".to_string(),
         BackendConfig {
             protocol: None,
+            #[cfg(windows)]
+            command: r"C:\Program Files\Git\usr\bin\cat.exe".into(),
+            #[cfg(not(windows))]
             command: "/bin/cat".into(),
             args: vec![],
             default_model: None,

@@ -88,11 +88,13 @@ impl Backend {
         match self {
             Backend::Codebuddy => {
                 // ~/.codebuddy/projects/<slug>/<sid>.jsonl
-                // slug:去掉开头 /,/ 换成 -
+                // slug:去掉开头 /,并把路径分隔符和 Windows 盘符冒号换成 -。
                 let slug = cwd
                     .to_string_lossy()
+                    .replace('\\', "/")
                     .trim_start_matches('/')
-                    .replace('/', "-");
+                    .replace('/', "-")
+                    .replace(':', "-");
                 Some(
                     home.join(".codebuddy")
                         .join("projects")
@@ -1719,9 +1721,18 @@ mod tests {
     }
     #[test]
     fn codebuddy_slug_strips_leading_slash_and_replaces_seps() {
+        #[cfg(windows)]
+        let p = PathBuf::from(r"C:\Users\tester\Projects\example\kode");
+        #[cfg(not(windows))]
         let p = PathBuf::from("/Users/tester/Projects/example/kode");
         let path = Backend::Codebuddy.session_path(&p, "abc").unwrap();
         let s = path.to_string_lossy();
+        #[cfg(windows)]
+        assert!(
+            s.contains(r".codebuddy\projects\C--Users-tester-Projects-example-kode\abc.jsonl"),
+            "got {s}"
+        );
+        #[cfg(not(windows))]
         assert!(
             s.contains("/.codebuddy/projects/Users-tester-Projects-example-kode/abc.jsonl"),
             "got {s}"
@@ -1730,9 +1741,18 @@ mod tests {
 
     #[test]
     fn claude_slug_has_leading_dash() {
+        #[cfg(windows)]
+        let p = PathBuf::from(r"C:\Users\tester\Projects\example\kode");
+        #[cfg(not(windows))]
         let p = PathBuf::from("/Users/tester/Projects/example/kode");
         let path = Backend::Claude.session_path(&p, "abc").unwrap();
         let s = path.to_string_lossy();
+        #[cfg(windows)]
+        assert!(
+            s.contains(r".claude\projects\C--Users-tester-Projects-example-kode\abc.jsonl"),
+            "got {s}"
+        );
+        #[cfg(not(windows))]
         assert!(
             s.contains("/.claude/projects/-Users-tester-Projects-example-kode/abc.jsonl"),
             "got {s}"
@@ -1755,8 +1775,14 @@ mod tests {
 
     #[test]
     fn tclaude_uses_its_own_transcript_root() {
+        #[cfg(windows)]
+        let cwd = PathBuf::from(r"C:\Users\tester\Projects\example\kode");
+        #[cfg(not(windows))]
         let cwd = PathBuf::from("/Users/tester/Projects/example/kode");
         let path = Backend::Tclaude.session_path(&cwd, "abc").unwrap();
+        #[cfg(windows)]
+        assert!(path.ends_with(".tclaude/projects/C--Users-tester-Projects-example-kode/abc.jsonl"));
+        #[cfg(not(windows))]
         assert!(path.ends_with(".tclaude/projects/-Users-tester-Projects-example-kode/abc.jsonl"));
         assert!(Backend::Tclaude.accepts_transcript_path(&path));
         assert!(!Backend::Claude.accepts_transcript_path(&path));
@@ -2188,6 +2214,7 @@ mod tests {
     /// at EOF on the removed inode. The tail task must reopen the path and read
     /// the new file, otherwise later actual request metadata never reaches the tab UI.
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(not(windows))]
     async fn tail_detects_file_replacement_and_resets_state() {
         use std::io::Write;
         let tmp = tempfile_path("kode_tail_replace_test.jsonl");
