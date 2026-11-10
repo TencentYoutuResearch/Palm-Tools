@@ -41,6 +41,7 @@ pub mod hook_relay;
 pub mod mobile_setup;
 pub mod model_usage;
 pub mod semantic;
+mod session_relay;
 pub mod runtime;
 pub mod session_mcp;
 pub mod cloud_sync;

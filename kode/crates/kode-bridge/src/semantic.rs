@@ -190,14 +190,16 @@ fn is_turn_lifecycle_event(event_type: &str) -> bool {
 
 /// 公开给单元测试用(不需要文件系统)。
 pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvelope> {
-    match backend {
+    let mut events = match backend {
         Backend::Codebuddy => parse_codebuddy(id, line),
         Backend::Claude | Backend::Tclaude => parse_claude(id, line),
         Backend::Codex | Backend::Tcodex => parse_codex(id, line),
         Backend::Cursor => parse_cursor(id, line),
         // opencode 没有 transcript 行可解析;结构化事件走 ACP。
         Backend::Opencode => vec![],
-    }
+    };
+    events.iter_mut().for_each(crate::session_relay::annotate);
+    events
 }
 
 // ============================================================================
@@ -406,17 +408,15 @@ fn parse_codebuddy_function_call(id: SessionId, v: &Value) -> Vec<EventEnvelope>
                         summarize_tool_input(&name, &args)
                     }
                 });
-            vec![EventEnvelope::new(
-                id,
-                "tool_use",
-                json!({
-                    "id": call_id,
-                    "tool": name,
-                    "input_summary": summary,
-                    "output_preview": null,
-                    "status": "running",
-                }),
-            )]
+            let mut payload = json!({
+                "id": call_id,
+                "tool": name,
+                "input_summary": summary,
+                "output_preview": null,
+                "status": "running",
+            });
+            crate::session_relay::attach_tool(&mut payload, &name, &args);
+            vec![EventEnvelope::new(id, "tool_use", payload)]
         }
     }
 }
@@ -666,17 +666,15 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
                             }
                             _ => {
                                 let summary = summarize_tool_input(&tool, input);
-                                out.push(EventEnvelope::new(
-                                    id,
-                                    "tool_use",
-                                    json!({
-                                        "id": tool_id,
-                                        "tool": tool,
-                                        "input_summary": summary,
-                                        "output_preview": null,
-                                        "status": "running",
-                                    }),
-                                ));
+                                let mut payload = json!({
+                                    "id": tool_id,
+                                    "tool": tool,
+                                    "input_summary": summary,
+                                    "output_preview": null,
+                                    "status": "running",
+                                });
+                                crate::session_relay::attach_tool(&mut payload, &tool, input);
+                                out.push(EventEnvelope::new(id, "tool_use", payload));
                             }
                         }
                         tool_call_ids.push(
@@ -877,17 +875,15 @@ fn parse_cursor(id: SessionId, line: &str) -> Vec<EventEnvelope> {
             }
             let tool = item.get("name").and_then(Value::as_str).unwrap_or("?");
             let input = item.get("input").cloned().unwrap_or(Value::Null);
-            events.push(EventEnvelope::new(
-                id,
-                "tool_use",
-                json!({
-                    "id": format!("cursor-{}-{}-{}", id, fnv_hash(line), index),
-                    "tool": tool,
-                    "input_summary": summarize_tool_input(tool, &input),
-                    "output_preview": Value::Null,
-                    "status": "running",
-                }),
-            ));
+            let mut payload = json!({
+                "id": format!("cursor-{}-{}-{}", id, fnv_hash(line), index),
+                "tool": tool,
+                "input_summary": summarize_tool_input(tool, &input),
+                "output_preview": Value::Null,
+                "status": "running",
+            });
+            crate::session_relay::attach_tool(&mut payload, tool, &input);
+            events.push(EventEnvelope::new(id, "tool_use", payload));
         }
     }
     events

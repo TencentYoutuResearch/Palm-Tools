@@ -32,6 +32,19 @@ import 'message_markdown.dart';
 import 'speech_locale.dart';
 import 'session_send_button.dart';
 import 'session_glass_layout.dart';
+import 'session_relay_cards.dart';
+
+/// What communication cards need from the screen: names and incoming envelopes.
+class _RelayContext {
+  final String currentTitle;
+  final List<SessionDto> sessions;
+  final List<String> incomingTexts;
+  const _RelayContext({
+    required this.currentTitle,
+    required this.sessions,
+    required this.incomingTexts,
+  });
+}
 
 /// 一条对话气泡或工具调用卡。
 class _Item {
@@ -821,6 +834,15 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
 
     final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final relay = _RelayContext(
+      currentTitle: displayTitle,
+      sessions: sessionList,
+      incomingTexts: [
+        for (final item in _items)
+          if (item.type == 'message' && item.payload['relay'] is Map)
+            item.payload['text'] as String? ?? '',
+      ],
+    );
 
     return GlassScaffold(
       resizeToAvoidBottomInset: false,
@@ -971,6 +993,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                           _items[i],
                           backendKey: backendKey,
                           outboundMessages: queuedMessages,
+                          relay: relay,
                         ),
                       );
                     },
@@ -985,11 +1008,24 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     _Item item, {
     required String backendKey,
     required List<QueuedSessionMessage> outboundMessages,
+    required _RelayContext relay,
   }) {
     switch (item.type) {
       case 'message':
         final role = item.payload['role'] as String? ?? '?';
         final text = item.payload['text'] as String? ?? '';
+        final incoming = item.payload['relay'];
+        if (role == 'user' && incoming is Map) {
+          return RelayMessageCard(
+            relay: Map<String, dynamic>.from(incoming),
+            currentTitle: relay.currentTitle,
+            sessions: relay.sessions,
+            timestamp: (item.payload['timestamp_ms'] as num?)?.toInt(),
+          );
+        }
+        if (role == 'assistant' && isRelayEcho(text, relay.incomingTexts)) {
+          return const SizedBox.shrink();
+        }
         final messageId = item.payload['id'] as String?;
         final outboundId = item.payload['outbound_id'] as String?;
         final outbound = role == 'user'
@@ -1018,6 +1054,13 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
               : null,
         );
       case 'tool_use':
+        if (item.payload['relay_tool'] is Map) {
+          return SessionToolCard(
+            payload: item.payload,
+            currentTitle: relay.currentTitle,
+            sessions: relay.sessions,
+          );
+        }
         return _ToolUseCard(payload: item.payload);
       case 'ask_user_question':
         if (item.payload['source'] == 'acp_form' ||

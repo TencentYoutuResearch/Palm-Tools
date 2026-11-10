@@ -256,10 +256,16 @@ impl Client {
         self.requests.lock().remove(&id);
         result?
     }
-    fn emit(&self, kind: &str, payload: Value) {
+    fn emit(&self, kind: &str, mut payload: Value) {
         if let Some(ctx) = self.ctx.upgrade() {
-            ctx.bus
-                .emit(EventEnvelope::new(self.local_id, kind, payload));
+            if kind == "tool_use" {
+                let name = payload["tool"].as_str().unwrap_or_default().to_string();
+                let input = payload["input"].clone();
+                crate::session_relay::attach_tool(&mut payload, &name, &input);
+            }
+            let mut env = EventEnvelope::new(self.local_id, kind, payload);
+            crate::session_relay::annotate(&mut env);
+            ctx.bus.emit(env);
         }
     }
     fn status(&self, busy: bool) {
