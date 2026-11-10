@@ -18,6 +18,21 @@ void main() {
     expect(identity.label, 'my_custom-agent');
   });
 
+  test('Tencent wrappers resolve to distinct family identities', () {
+    final tclaude = backendIdentity('tclaude');
+    final tcodex = backendIdentity('tcodex');
+    final tcodebuddy = backendIdentity('tcodebuddy');
+
+    // Without explicit profiles these all collapsed to the same "TC" monogram.
+    expect(tclaude.asset, 'claudecode');
+    expect(tcodex.asset, 'codex');
+    expect(tcodebuddy.asset, 'codebuddy');
+    expect(tclaude.fallback, isNot(tcodex.fallback));
+    expect(tclaude.accent, isNot(tcodex.accent));
+    expect(tclaude.label, 'TClaude');
+    expect(tcodex.label, 'TCodex');
+  });
+
   testWidgets('canonical backend artwork is bundled for mobile', (_) async {
     final path = backendIdentity('codex').assetPath!;
 

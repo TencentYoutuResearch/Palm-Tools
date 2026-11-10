@@ -453,6 +453,7 @@ payload 同 4.1 的 session 对象。`session.exited` 多带 `exit_code: number 
 ```
 - `tool_calls` 列出本 message 触发的 tool_use 引用,详情走独立的 `tool_use` 事件。
 - assistant 的纯文本回复按段落聚合:同一 turn 内连续的 text 块拼成一条 `message`,不要每 token 一条。
+- 可选 `relay`(仅 `role=user`):这条输入是另一个会话发来的会话消息时附带,`{message_id, from_node, from_session, reply_to, content}`。`content` 已去掉协议头和给模型的指令;`text` 保持原样。客户端据此渲染「发送方 → 当前会话」卡片,不展示地址和消息 ID。旧客户端忽略该字段即可。
 
 #### `tool_use`
 ```json
@@ -467,6 +468,7 @@ payload 同 4.1 的 session 对象。`session.exited` 多带 `exit_code: number 
 - `input_summary`:server 端把 tool input 摘要成一行(< 120 字符);手机端展开看详情走 `output_preview`。
 - `output_preview`:截断到 4KB;完整内容不在协议里(手机端不需要)。
 - 多次 `tool_use` 事件可对同一 id 推送(`status` 从 running 变 ok/error 时再推一次)。
+- 可选 `relay_tool`:工具是 `kode_sessions_{list,send,read,wait,create}`(任意 MCP 前缀)时附带,`{op, node_id?, session_id?, in_reply_to?, title?, host?, query?, content?}`,取自工具 input。投递状态从结果 `output_preview` 的 `message.status` 读取,表示发送时的状态而非任务完成。
 
 #### `ask_user_question`
 ```json

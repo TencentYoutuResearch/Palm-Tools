@@ -1,9 +1,12 @@
 // kode mobile companion — 中心服务绑定、session 列表和会话详情入口。
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'src/state/providers.dart';
+import 'src/ui/login/login_screen.dart';
 import 'src/ui/pair/pair_screen.dart';
 import 'src/ui/devices/devices_screen.dart';
 import 'src/ui/sessions/session_detail_screen.dart';
@@ -26,7 +29,14 @@ final _routerProvider = Provider<GoRouter>((ref) {
       if (boot.isLoading) {
         return loc == '/loading' ? null : '/loading';
       }
-      if (ep == null) return loc == '/pair' ? null : '/pair';
+      if (ep == null) {
+        // Unbound phones may pair by QR or sign in; a signed-in phone picks
+        // an account desktop on /devices.
+        final signedIn = ref.read(accountProvider) != null;
+        if (loc == '/pair' || loc == '/login') return null;
+        if (loc == '/devices' && signedIn) return null;
+        return signedIn ? '/devices' : '/pair';
+      }
       if (loc == '/pair' && state.uri.queryParameters['add'] == '1') {
         return null;
       }
@@ -38,6 +48,7 @@ final _routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: '/loading', builder: (_, _) => const _LoadingScreen()),
       GoRoute(path: '/pair', builder: (_, _) => const PairScreen()),
+      GoRoute(path: '/login', builder: (_, _) => const LoginScreen()),
       GoRoute(path: '/devices', builder: (_, _) => const DevicesScreen()),
       GoRoute(path: '/sessions', builder: (_, _) => const SessionsScreen()),
       GoRoute(
@@ -62,15 +73,20 @@ class _RouterRefresh extends ChangeNotifier {
       endpointBootstrapProvider,
       (_, _) => notifyListeners(),
     );
+    _accountSub = ref.listen(accountProvider, (previous, next) {
+      if ((previous == null) != (next == null)) notifyListeners();
+    });
   }
   final Ref ref;
   late final ProviderSubscription _epSub;
   late final ProviderSubscription _bootSub;
+  late final ProviderSubscription _accountSub;
 
   @override
   void dispose() {
     _epSub.close();
     _bootSub.close();
+    _accountSub.close();
     super.dispose();
   }
 }
@@ -94,11 +110,43 @@ class _LoadingScreen extends StatelessWidget {
   }
 }
 
-class KodeApp extends ConsumerWidget {
+class KodeApp extends ConsumerStatefulWidget {
   const KodeApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<KodeApp> createState() => _KodeAppState();
+}
+
+class _KodeAppState extends ConsumerState<KodeApp> {
+  late final AppLifecycleListener _lifecycle;
+
+  @override
+  void initState() {
+    super.initState();
+    // Account desktops stream only while this app is visible.
+    _lifecycle = AppLifecycleListener(
+      onStateChange: (state) {
+        final foreground = state == AppLifecycleState.resumed;
+        final current = ref.read(appForegroundProvider);
+        if (state == AppLifecycleState.inactive || current == foreground) {
+          return;
+        }
+        ref.read(appForegroundProvider.notifier).state = foreground;
+        if (foreground) {
+          unawaited(ref.read(accountProvider.notifier).ensureFresh());
+        }
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _lifecycle.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     ref.watch(endpointBootstrapProvider);
     final router = ref.watch(_routerProvider);
 

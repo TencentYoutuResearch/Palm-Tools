@@ -111,6 +111,7 @@
   }
   .msg {
     overflow-wrap: anywhere;
+    white-space: pre-line;
     margin-top: var(--sp-2);
     font-size: var(--fs-sm);
     color: var(--fg-secondary);

@@ -20,6 +20,9 @@ This contract replaces direct desktop-LAN pairing for Kode Mobile. The direct
 Bridge protocol remains available for SSH/remote-desktop transports, but the
 mobile companion uses only the centralized service.
 
+The multi-account [account relay](./account-relay-protocol.md) reuses these
+agent frames for signed-in desktops; this single-user server is unchanged.
+
 ## Trust and execution model
 
 - The desktop is the only process allowed to write to a local PTY.

@@ -32,6 +32,8 @@ kode/
 │   ├── kode-core/       PTY、Session、Config、cost、model alias、CoreEvent
 │   ├── kode-bridge/     纯 axum HTTP/WS bridge、协议路由、语义事件解析、headless bridge bin
 │   ├── kode-sync-server/中心化 session 镜像、一次性绑定、在线命令路由
+│   ├── kode-relay/      多账号内存中继:账号 token 鉴权、按租户隔离、手机在看才同步
+│   ├── kode-relay-protocol/ 桌面 agent ↔ 中心的共享帧类型
 │   ├── kode-memory/     shared memory store、MCP server、CLI、hooks、git sync
 │   └── kode-tui/        legacy TUI,已冻结,只修 P0
 ├── apps/
@@ -68,6 +70,7 @@ Cargo workspace 只包含 Rust crate 和 `apps/gui/src-tauri`。`apps/mobile`、
 - 不要把硬编码 backend 名塞进 `memory_mcp` 或其它业务逻辑;能从 config 读就从 config 读。
 - GUI 的 BackendChooser 使用启动时的冷快照。Manage backends 写盘后会 emit refresh,但新 backend 要重启 GUI 才能完整参与 spawn 选择。
 - `backend_admin::KNOWN_CANDIDATES` 只负责 PATH 自动探测候选;新增候选要改数组并发版。
+- Settings → Backends → Add 走 `backend_install.rs`:先探测,已装一键启用 + 接 memory MCP;未装则在 GUI 确认后按平台配方安装再配置。配方按 `unix_recipes` (macOS/Linux,登录 shell) / `windows_recipes` (PowerShell) 分开维护,只写官方安装方式;没有官方方式的 key(如 claude-internal / tcodex / tclaude)留空,UI 提示手动安装。
 - `codebuddy`、`claude`、`codex` 默认 args 不能加 positional。positional 很可能被 CLI 当作初始 prompt 发给 LLM;相关回归测试已覆盖。
 - Codex 权限映射不同:没有 codebuddy/claude 的 `--permission-mode`;spawn 层会把 bypass 映射成 `--ask-for-approval never --sandbox danger-full-access`。
 
@@ -121,6 +124,7 @@ Codex 的会话展示名优先读取 `~/.codex/state_5.sqlite` 中对应 `thread
 
 - 协议文档:[`.specops/specs/remote-protocol.md`](./.specops/specs/remote-protocol.md)
 - 手机中心同步协议:[`.specops/specs/cloud-sync-protocol.md`](./.specops/specs/cloud-sync-protocol.md)
+- 多账号中继协议:[`.specops/specs/account-relay-protocol.md`](./.specops/specs/account-relay-protocol.md)。租户只能由 token 的 `sub` 决定;新增设备路由必须加入跨租户测试。
 - `crates/kode-bridge` 是可独立运行的 headless bridge,默认端口 `47870`。
 - GUI 内也启动同协议 bridge,共享 sessions/bus/token。
 - `apps/mobile` 通过中心服务看 session、历史、输入、状态,不再发现 LAN bridge 或读取桌面永久 token。

@@ -13,6 +13,22 @@ pub struct Config {
     pub backends: HashMap<String, BackendConfig>,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default, skip_serializing_if = "AccountConfig::is_empty")]
+    pub account: AccountConfig,
+}
+
+/// `[account]`: the Kode account relay this machine signs in to by default.
+/// Unset in source builds, so nobody is pointed at someone else's relay.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct AccountConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+}
+
+impl AccountConfig {
+    fn is_empty(&self) -> bool {
+        self.relay_url.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -356,6 +372,7 @@ impl Default for Config {
             default_backend: default_backend_key(),
             backends,
             ui: UiConfig::default(),
+            account: AccountConfig::default(),
         }
     }
 }
@@ -526,6 +543,14 @@ permission_mode_flag = "--custom-permission"
         assert_eq!(opencode.model_flag, None);
         assert_eq!(cfg.backend("codebuddy").unwrap().acp, Some(AcpSpec::flag()));
         assert!(cfg.backend("codex").unwrap().acp.is_none());
+    }
+
+    #[test]
+    fn account_relay_url_reads_from_the_account_table() {
+        let cfg: Config = toml::from_str("[account]\nrelay_url = \"https://relay.example.com\"\n").unwrap();
+        assert_eq!(cfg.account.relay_url.as_deref(), Some("https://relay.example.com"));
+        assert_eq!(Config::default().account.relay_url, None);
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("[account]"));
     }
 
     /// GUI 首次探测会把 `[backends.opencode]` 落盘(没有 acp 字段),加载时要补上出厂 ACP 能力。
@@ -852,6 +877,7 @@ sidebar_width = 31
                     default_backend: key.into(),
                     backends: HashMap::from([(key.into(), backend.clone())]),
                     ui: UiConfig::default(),
+                    account: AccountConfig::default(),
                 };
                 let txt = toml::to_string(&cfg).unwrap();
                 let loaded = load_test_config_without_rewriting(&txt);

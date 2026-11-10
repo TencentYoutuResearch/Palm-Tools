@@ -52,12 +52,13 @@ pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, Str
     }
     Ok((client, format!("{}/api/v1/messaging/workbench/documents/session-index", config.url.trim_end_matches('/')), token.trim().into()))
 }
-/// Replace a running self-managed service only when it comes from another,
-/// older binary, so a newer build wins and two installs never ping-pong.
-fn replace_running_service(running: &Value, own: &std::path::Path) -> bool {
+/// Replace a running self-managed service only when its binary is older
+/// than ours, so a newer build wins and two installs never ping-pong. The
+/// path alone proves nothing: reinstalling the app over the same path leaves
+/// the old build's service running with routes the new app needs.
+fn replace_running_service(running: &Value, _own: &std::path::Path) -> bool {
     let (_, own_built) = kode_bridge::messaging::server_binary();
     match (running["executable"].as_str(), running["built_at"].as_u64(), own_built) {
-        (Some(path), _, _) if std::path::Path::new(path) == own => false,
         (Some(_), Some(theirs), Some(ours)) => theirs < ours,
         // Services predating these fields report no pid and cannot be stopped.
         _ => false,
@@ -81,8 +82,26 @@ pub async fn load_tabs(fallback: &mut PersistedState) {
     if !response.status().is_success() { return }
     let Ok(row) = response.json::<Value>().await else { return };
     let Some(rows) = row["tabs"].as_array() else { return };
+    let opened = match client.get(&url).bearer_auth(&token).send().await {
+        Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
+        _ => None,
+    };
+    let opened = opened.as_ref().and_then(|document| document.pointer("/value/gui/tabs")).and_then(Value::as_array);
     // A malformed entry must not prevent every other session from loading.
-    fallback.tabs = rows.iter().filter_map(|row|serde_json::from_value(row.clone()).ok()).collect();
+    fallback.tabs = opened_tabs(rows, opened).into_iter().filter_map(|row|serde_json::from_value(row.clone()).ok()).collect();
+}
+
+/// `/sessions` also lists every saved native conversation, which a CLI exit or
+/// tab close intentionally keeps. Restore only what was open at last save;
+/// without a saved snapshot (first run after migration) keep everything.
+fn opened_tabs<'a>(rows: &'a [Value], opened: Option<&Vec<Value>>) -> Vec<&'a Value> {
+    let Some(opened) = opened else { return rows.iter().collect() };
+    let key = |row: &Value| {
+        let endpoint = if row["endpoint_id"].is_null() || row["endpoint_id"]["kind"] == "local" { Value::Null } else { row["endpoint_id"]["id"].clone() };
+        (endpoint.to_string(), row["backend_key"].to_string(), row["session_id"].to_string())
+    };
+    let keys: std::collections::HashSet<_> = opened.iter().map(key).collect();
+    rows.iter().filter(|row| keys.contains(&key(row))).collect()
 }
 pub async fn save(state: &PersistedState) -> anyhow::Result<()> {
     let Ok((client,url,token)) = connection().await else { return Ok(()) };
@@ -161,18 +180,37 @@ mod tests {
 }
 
 #[cfg(test)]
+mod opened_tabs_tests {
+    use super::*;
+
+    #[test]
+    fn restore_skips_saved_sessions_that_are_no_longer_open() {
+        let tab = |backend: &str, id: &str| json!({"backend_key":backend,"session_id":id,"endpoint_id":null});
+        let remote = json!({"backend_key":"codex","session_id":"r1","endpoint_id":{"kind":"remote","id":"host.example"}});
+        let rows = vec![tab("tclaude","open"), tab("tclaude","exited"), tab("codex","open"), remote.clone()];
+        let opened = vec![tab("tclaude","open"), json!({"backend_key":"codex","session_id":"open","endpoint_id":{"kind":"local"}}), remote];
+        let ids: Vec<_> = opened_tabs(&rows, Some(&opened)).iter().map(|row| row["session_id"].as_str().unwrap().to_string() + "@" + row["backend_key"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["open@tclaude", "open@codex", "r1@codex"]);
+        assert_eq!(opened_tabs(&rows, None).len(), 4);
+    }
+}
+
+#[cfg(test)]
 mod replacement_tests {
     use super::*;
 
     #[test]
-    fn only_older_services_from_other_binaries_are_replaced() {
+    fn only_services_from_older_builds_are_replaced() {
         let own = std::env::current_exe().unwrap();
         let (_, built) = kode_bridge::messaging::server_binary();
         let built = built.unwrap();
         let other = |at: u64| json!({"pid":1,"executable":"/other/kode-gui","built_at":at});
         assert!(replace_running_service(&other(built - 1), &own));
         assert!(!replace_running_service(&other(built + 1), &own));
-        assert!(!replace_running_service(&json!({"pid":1,"executable":own,"built_at":0}), &own));
+        // Reinstalled over the same path: the older build's service yields,
+        // the same build (equal timestamps) keeps running.
+        assert!(replace_running_service(&json!({"pid":1,"executable":own,"built_at":built - 1}), &own));
+        assert!(!replace_running_service(&json!({"pid":1,"executable":own,"built_at":built}), &own));
         assert!(!replace_running_service(&json!({"node_id":"n"}), &own));
     }
 }

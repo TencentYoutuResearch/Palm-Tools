@@ -32,6 +32,9 @@ pub async fn execute(ctx: Arc<Ctx>, kind: &str, payload: Value) -> (u16, Value) 
 /// Cloud creation must go to an attached frontend runtime. A standalone Kode
 /// service must not silently spawn a second CLI that neither frontend owns.
 pub async fn execute_hosted(ctx:Arc<Ctx>,kind:&str,mut payload:Value)->(u16,Value){
+    if kind==kode_relay_protocol::SETUP_KIND_HISTORY{
+        return history(&ctx,&payload);
+    }
     if kind=="backends"{
         let mut rows=vec![];
         for runtime in ["dsh","gui"].into_iter().filter(|runtime|ctx.runtimes.available(runtime)){
@@ -50,6 +53,42 @@ pub async fn execute_hosted(ctx:Arc<Ctx>,kind:&str,mut payload:Value)->(u16,Valu
         }
     }
     execute(ctx,kind,payload).await
+}
+
+/// One history page for the account relay, which keeps no timeline of its own.
+/// `from == 0` asks for the newest window, as the sync server's history does.
+/// Terminal frames and status projections never enter the mobile timeline.
+fn history(ctx: &Ctx, payload: &Value) -> (u16, Value) {
+    let Some(id) = payload["local_session_id"].as_u64() else {
+        return (400, json!({"error":"bad_request","detail":"local_session_id is required"}));
+    };
+    let from = payload["from"].as_u64().unwrap_or(0);
+    let limit = payload["limit"].as_u64().unwrap_or(1000).clamp(1, 2000) as usize;
+    let events = if ctx.runtimes.contains(id) {
+        match ctx.runtimes.history(id, from, 10000) {
+            Ok(events) => events,
+            Err(error) => {
+                return (503, json!({"error":"runtime_unavailable","detail":error.to_string()}))
+            }
+        }
+    } else {
+        ctx.bus.history_for(id, from, usize::MAX)
+    };
+    let mut events: Vec<EventEnvelope> = events
+        .into_iter()
+        .filter(|event| {
+            !matches!(
+                event.r#type.as_str(),
+                "pty_bytes" | "shell.pty_bytes" | "session.status"
+            )
+        })
+        .collect();
+    if from == 0 && events.len() > limit {
+        events.drain(..events.len() - limit);
+    } else {
+        events.truncate(limit);
+    }
+    (200, json!({ "events": events }))
 }
 
 async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Value, ApiError> {
@@ -159,6 +198,41 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn relay_history_returns_the_newest_semantic_window() {
+        let ctx = build_test_ctx(Config::default(), "test-history".into());
+        for (index, kind) in ["message", "session.status", "message", "message"].iter().enumerate() {
+            let mut event = EventEnvelope::new(7, *kind, json!({ "n": index }));
+            event.ts = 100 + index as u64;
+            ctx.bus.emit(event);
+        }
+        let (status, body) = execute_hosted(
+            ctx.clone(),
+            kode_relay_protocol::SETUP_KIND_HISTORY,
+            json!({"local_session_id": 7, "from": 0, "limit": 2}),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let numbers: Vec<u64> = body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["payload"]["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(numbers, [2, 3], "newest window, chronological, without status");
+
+        let (_, body) = execute_hosted(
+            ctx.clone(),
+            kode_relay_protocol::SETUP_KIND_HISTORY,
+            json!({"local_session_id": 7, "from": 101, "limit": 1}),
+        )
+        .await;
+        assert_eq!(body["events"][0]["payload"]["n"], 2, "a cursor pages forward");
+        let (status, _) =
+            execute_hosted(ctx, kode_relay_protocol::SETUP_KIND_HISTORY, json!({})).await;
+        assert_eq!(status, 400);
+    }
 
     #[tokio::test]
     async fn setup_validates_paths_and_preserves_model_and_session_visibility() {

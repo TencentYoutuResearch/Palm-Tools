@@ -44,6 +44,7 @@ fn echo_config() -> Config {
         default_backend: "echo".into(),
         backends,
         ui: UiConfig::default(),
+        account: Default::default(),
     }
 }
 

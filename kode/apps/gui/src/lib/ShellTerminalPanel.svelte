@@ -78,7 +78,7 @@
   // xterm 实例 + 容器 + unsubscribe,按 shell ID 索引
   const termInstances = new Map<
     ShellId,
-    { term: any; fitAddon: any; unsub: (() => Promise<void>) | null; resizeObs: ResizeObserver | null; container: HTMLDivElement | null; markDisposed: () => void }
+    { term: any; fitAddon: any; unsub: (() => Promise<void>) | null; resizeObs: ResizeObserver | null; container: HTMLDivElement | null; markDisposed: () => void; syncSize: () => void }
   >()
   let containerEls = new Map<ShellId, HTMLDivElement>()
   // 正在 init 的 shell id,防止并发 init(action 触发 + effect fallback 同时跑)
@@ -136,25 +136,18 @@
     if (next === fontSize) return
     appearance = updateTerminalFontSize('shell', next)
     fontSize = appearance.fontSize
-    for (const { term, fitAddon, container } of termInstances.values()) {
-      try {
-        term.options.fontSize = fontSize
-        if (container?.offsetWidth && container?.offsetHeight) {
-          try { fitAddon?.fit() } catch {}
-        }
-      } catch {}
-    }
+    applyFontSize()
   }
   function resetFontSize() {
     appearance = updateTerminalFontSize('shell', TERMINAL_FONT_SIZE_DEFAULT)
     fontSize = appearance.fontSize
-    for (const { term, fitAddon, container } of termInstances.values()) {
-      try {
-        term.options.fontSize = fontSize
-        if (container?.offsetWidth && container?.offsetHeight) {
-          try { fitAddon?.fit() } catch {}
-        }
-      } catch {}
+    applyFontSize()
+  }
+  /// 字号变了容器尺寸不变,ResizeObserver 不会触发,必须主动把新行列数同步给 PTY。
+  function applyFontSize() {
+    for (const { term, syncSize } of termInstances.values()) {
+      try { term.options.fontSize = fontSize } catch {}
+      window.setTimeout(syncSize, 0)
     }
   }
 
@@ -182,9 +175,17 @@
       dims?.css?.canvas?.height > 0 && dims?.device?.cell?.height > 0
     )
   }
+  /// 只有新尺寸不低于 MIN_COLS/MIN_ROWS 才 fit。xterm 和 PTY 必须同进同退:
+  /// 先 fit 再检查会让 xterm 缩到 2 列而 PTY 留在旧宽度,shell 按旧宽度
+  /// 输出的提示符就被硬折成一列。
   function safeFit(term: any, fitAddon: any): boolean {
     if (!term || !fitAddon || !hasHealthyRenderDimensions(term)) return false
-    try { fitAddon.fit(); return true } catch { return false }
+    try {
+      const dims = fitAddon.proposeDimensions()
+      if (!dims || dims.cols < MIN_COLS || dims.rows < MIN_ROWS) return false
+      fitAddon.fit()
+      return true
+    } catch { return false }
   }
 
   /// 初始化一个 shell 的 xterm 实例。在容器 DOM 就绪后调用(registerContainer action 触发)。
@@ -371,6 +372,13 @@
         return
       }
 
+      const syncSize = () => {
+        if (!state.alive || !term) return
+        if (container.offsetWidth === 0 || container.offsetHeight === 0) return
+        if (!safeFit(term, fitAddon)) return
+        shellIpc.resize(shellId, term.cols, term.rows, shellTab.endpointId).catch(() => {})
+      }
+
       // 首次 resize
       if (term.cols >= MIN_COLS && term.rows >= MIN_ROWS) {
         shellIpc.resize(shellId, term.cols, term.rows, shellTab.endpointId).catch(() => {})
@@ -380,17 +388,11 @@
       let resizeTimer: number | null = null
       const resizeObs = new ResizeObserver(() => {
         if (resizeTimer != null) clearTimeout(resizeTimer)
-        resizeTimer = window.setTimeout(() => {
-          if (!state.alive || !term) return
-          if (container.offsetWidth === 0 || container.offsetHeight === 0) return
-          if (!safeFit(term, fitAddon)) return
-          if (term.cols < MIN_COLS || term.rows < MIN_ROWS) return
-          shellIpc.resize(shellId, term.cols, term.rows, shellTab.endpointId).catch(() => {})
-        }, 50)
+        resizeTimer = window.setTimeout(syncSize, 50)
       })
       resizeObs.observe(container)
 
-      termInstances.set(shellId, { term, fitAddon, unsub, resizeObs, container, markDisposed: () => { state.alive = false } })
+      termInstances.set(shellId, { term, fitAddon, unsub, resizeObs, container, markDisposed: () => { state.alive = false }, syncSize })
     } finally {
       initializing.delete(shellId)
     }
@@ -427,16 +429,14 @@
   }
 
   function applyAppearance(next = appearance) {
-    for (const { term, fitAddon, container } of termInstances.values()) {
+    for (const { term, syncSize } of termInstances.values()) {
       try {
         term.options.fontFamily = resolvedFontFamily(next.fontFamily)
         term.options.fontSize = next.fontSize
         term.options.theme = buildXtermTheme(isDark, next.themeMode)
         try { term.clearTextureAtlas?.() } catch {}
         term.refresh(0, term.rows - 1)
-        if (container?.offsetWidth && container?.offsetHeight) {
-          window.setTimeout(() => { try { fitAddon?.fit() } catch {} }, 0)
-        }
+        window.setTimeout(syncSize, 0)
       } catch {}
     }
   }

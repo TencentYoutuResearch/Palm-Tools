@@ -54,6 +54,8 @@ impl PtyHost {
         for a in args {
             cmd.arg(a);
         }
+        let cwd = simplify_windows_path(cwd);
+        let cwd = cwd.as_path();
         cmd.cwd(cwd);
         // portable-pty 只 chdir,不改 PWD;从终端启动 kode 时子进程会继承启动目录的 PWD。
         // opencode 等按 $PWD 记录会话目录,必须和真实 cwd 一致。
@@ -236,6 +238,15 @@ pub fn apply_terminal_theme_env(cmd: &mut CommandBuilder, extra_env: &[(String, 
     }
 }
 
+/// 去掉 Windows `canonicalize` 产出的 `\\?\` verbatim 前缀(能安全去掉时)。
+///
+/// npm 安装的 CLI 在 Windows 上是 `.cmd` shim,由 cmd.exe 执行;cmd.exe 不支持把
+/// `\\?\C:\...` 当作当前目录,会提示 "UNC paths are not supported" 并退回
+/// `C:\Windows`。所有交给子进程的 cwd 都要先过这里。非 Windows 上原样返回。
+pub fn simplify_windows_path(path: &Path) -> PathBuf {
+    dunce::simplified(path).to_path_buf()
+}
+
 pub fn resolve_spawn_command(command: &str) -> String {
     if command.contains('/') || command.contains('\\') {
         return command.to_string();
@@ -377,6 +388,16 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::time::timeout;
+
+    #[cfg(windows)]
+    #[test]
+    fn child_cwd_drops_verbatim_prefix_that_cmd_exe_rejects() {
+        let verbatim = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        assert!(verbatim.to_string_lossy().starts_with(r"\\?\"));
+        let cwd = simplify_windows_path(&verbatim);
+        assert!(!cwd.to_string_lossy().starts_with(r"\\?\"));
+        assert!(cwd.is_dir());
+    }
 
     #[cfg(windows)]
     #[test]

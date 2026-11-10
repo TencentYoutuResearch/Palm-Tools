@@ -4,8 +4,10 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/account_client.dart';
 import '../api/api_client.dart';
 import '../protocol/protocol.dart';
+import '../storage/account_storage.dart';
 import '../storage/endpoint_storage.dart';
 
 final endpointStorageProvider = Provider<EndpointStorage>(
@@ -15,6 +17,124 @@ final endpointStorageProvider = Provider<EndpointStorage>(
 /// 当前激活的 endpoint。null = 未配对,App 路由到 /pair。
 final endpointProvider = StateProvider<Endpoint?>((ref) => null);
 final savedEndpointsProvider = StateProvider<List<Endpoint>>((ref) => const []);
+
+final accountStorageProvider = Provider<AccountStorage>(
+  (ref) => AccountStorage(),
+);
+final accountClientProvider = Provider<AccountClient>((ref) => AccountClient());
+
+/// Whether the app is in the foreground. Account-relay sockets close in the
+/// background so the desktop stops uploading while nobody is looking.
+final appForegroundProvider = StateProvider<bool>((ref) => true);
+
+/// Set by sign-in so the devices screen offers a name and palm enrolment once.
+final accountOnboardingProvider = StateProvider<bool>((ref) => false);
+
+/// The signed-in Kode account, shared by every account-relay desktop.
+///
+/// The access token is refreshed shortly before it expires and swapped into
+/// relay endpoints in place, so screens keep working across rotations.
+class AccountNotifier extends Notifier<AccountSession?> {
+  Timer? _refreshTimer;
+
+  @override
+  AccountSession? build() {
+    ref.onDispose(() => _refreshTimer?.cancel());
+    return null;
+  }
+
+  Future<AccountSession?> restore() async {
+    final saved = await ref.read(accountStorageProvider).load();
+    if (saved == null) return null;
+    state = saved;
+    return ensureFresh();
+  }
+
+  Future<void> signIn(AccountSession session) async {
+    await ref.read(accountStorageProvider).save(session);
+    _apply(session);
+  }
+
+  Future<void> setName(String name) async {
+    final session = await ensureFresh();
+    if (session == null) return;
+    final next = await ref.read(accountClientProvider).setName(session, name);
+    await signIn(next);
+  }
+
+  /// Forgets the account and every account desktop saved on this phone.
+  Future<void> signOut() async {
+    _refreshTimer?.cancel();
+    state = null;
+    await ref.read(accountStorageProvider).clear();
+    final storage = ref.read(endpointStorageProvider);
+    var collection = await storage.loadCollection();
+    for (final endpoint in collection.endpoints.where((e) => e.isRelay)) {
+      collection = await storage.remove(endpoint.storageKey);
+    }
+    ref.read(savedEndpointsProvider.notifier).state = collection.endpoints;
+    if (ref.read(endpointProvider)?.isRelay ?? false) {
+      ref.read(endpointProvider.notifier).state = collection.active;
+    }
+  }
+
+  Future<AccountSession?> ensureFresh() async {
+    final session = state;
+    if (session == null) return null;
+    if (!session.needsRefresh(DateTime.now())) {
+      _schedule(session);
+      return session;
+    }
+    try {
+      final next = await ref.read(accountClientProvider).refresh(session);
+      await ref.read(accountStorageProvider).save(next);
+      _apply(next);
+      return next;
+    } on ApiException catch (error) {
+      // The provider rejected the refresh token: the session is over.
+      if (error.status >= 400 && error.status < 500) {
+        await signOut();
+        return null;
+      }
+    } catch (_) {}
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer(const Duration(seconds: 30), () {
+      unawaited(ensureFresh());
+    });
+    return session;
+  }
+
+  void _apply(AccountSession session) {
+    state = session;
+    _schedule(session);
+    Endpoint withToken(Endpoint endpoint) =>
+        endpoint.isRelay && endpoint.baseUrl == session.serverUrl
+        ? endpoint.copyWith(token: session.accessToken)
+        : endpoint;
+    final current = ref.read(endpointProvider);
+    if (current != null && withToken(current).token != current.token) {
+      ref.read(endpointProvider.notifier).state = withToken(current);
+    }
+    ref.read(savedEndpointsProvider.notifier).state = [
+      for (final endpoint in ref.read(savedEndpointsProvider))
+        withToken(endpoint),
+    ];
+  }
+
+  void _schedule(AccountSession session) {
+    _refreshTimer?.cancel();
+    final due = DateTime.fromMillisecondsSinceEpoch(
+      session.expiresAt,
+    ).subtract(accountRefreshMargin).difference(DateTime.now());
+    _refreshTimer = Timer(due.isNegative ? Duration.zero : due, () {
+      unawaited(ensureFresh());
+    });
+  }
+}
+
+final accountProvider = NotifierProvider<AccountNotifier, AccountSession?>(
+  AccountNotifier.new,
+);
 
 /// 启动时一次性 bootstrap:
 ///   1. 优先用 secure storage 里曾经的 endpoint;但**先 probe 一遍** —— 如果不通
@@ -37,13 +157,26 @@ final endpointBootstrapProvider = FutureProvider<Endpoint?>((ref) async {
   }
 
   final collection = await storage.loadCollection();
-  ref.read(savedEndpointsProvider.notifier).state = collection.endpoints;
-  if (collection.endpoints.isEmpty) return null;
+  // Account desktops carry the account's current token; without a session
+  // for their relay they cannot be used and are left out.
+  final account = await ref.read(accountProvider.notifier).restore();
+  final endpoints = [
+    for (final endpoint in collection.endpoints)
+      if (!endpoint.isRelay)
+        endpoint
+      else if (account != null && endpoint.baseUrl == account.serverUrl)
+        endpoint.copyWith(token: account.accessToken),
+  ];
+  ref.read(savedEndpointsProvider.notifier).state = endpoints;
+  if (endpoints.isEmpty) return null;
 
-  final preferred = collection.active ?? collection.endpoints.first;
+  final active = collection.active;
+  final preferred =
+      endpoints.where((e) => e.storageKey == active?.storageKey).firstOrNull ??
+      endpoints.first;
   final candidates = [
     preferred,
-    ...collection.endpoints.where(
+    ...endpoints.where(
       (endpoint) => endpoint.storageKey != preferred.storageKey,
     ),
   ];
@@ -72,6 +205,8 @@ final apiClientProvider = Provider<ApiClient?>((ref) {
 final wsClientProvider = Provider<WSClient?>((ref) {
   final ep = ref.watch(endpointProvider);
   if (ep == null) return null;
+  // An open socket keeps an account desktop uploading; drop it in background.
+  if (ep.isRelay && !ref.watch(appForegroundProvider)) return null;
   final ws = WSClient(ep);
   ws.connect();
   ref.onDispose(ws.dispose);

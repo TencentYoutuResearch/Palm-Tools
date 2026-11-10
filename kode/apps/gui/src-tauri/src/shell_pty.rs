@@ -141,7 +141,7 @@ pub async fn spawn_shell(
     // Resolve shell: $SHELL > /bin/zsh
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut cmd = CommandBuilder::new(&shell);
-    cmd.cwd(Path::new(&cwd));
+    cmd.cwd(kode_core::pty::simplify_windows_path(Path::new(&cwd)));
 
     // TERM/COLORTERM/locale fallbacks (same logic as PtyHost::spawn)
     if std::env::var_os("TERM").is_none() {
