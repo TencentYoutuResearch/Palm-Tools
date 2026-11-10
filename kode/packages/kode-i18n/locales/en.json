@@ -1793,6 +1793,7 @@
   "pairing.account.title": { "message": "Kode account" },
   "pairing.account.sidebarSignIn": { "message": "Sign in to Kode" },
   "pairing.account.inactive": { "message": "Not in use on this desktop" },
+  "pairing.account.expired": { "message": "Sign-in expired — sign in again" },
   "pairing.account.inactiveHint": { "message": "This desktop is syncing through a QR relay, so your account's phones can't reach it." },
   "pairing.account.activate": { "message": "Use this account" },
   "pairing.switchFromAccount": { "message": "This desktop is syncing through your Kode account. Switching to a QR relay stops that until you switch back." },

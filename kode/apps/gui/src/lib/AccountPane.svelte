@@ -446,7 +446,9 @@
             ? tr('pairing.account.viewing')
             : status?.connected
               ? tr('pairing.account.standby')
-              : tr('pairing.offline')}
+              : status?.last_error?.startsWith('account session expired')
+                ? tr('pairing.account.expired')
+                : tr('pairing.offline')}
       </span>
     </section>
     {#if !accountActive}

@@ -402,7 +402,13 @@ impl CloudSyncManager {
             return saved();
         }
         let _guard = self.inner.refresh_lock.lock().await;
-        // Another caller may have refreshed while this one waited.
+        // The GUI and its workbench service are separate processes reading the
+        // same config. Refresh tokens are single-use: two processes refreshing
+        // together (e.g. both reconnecting after a network change) present the
+        // same token and the provider revokes it. Serialize across processes
+        // and adopt a session another process already saved.
+        let _file_lock = lock_refresh(&self.inner.config_path).await?;
+        self.adopt_saved_session(backend_id);
         let session = saved()?;
         if !session.needs_refresh(now_ms()) {
             return Ok(session);
@@ -414,6 +420,24 @@ impl CloudSyncManager {
         }
         save_config(&self.inner.config_path, &config)?;
         Ok(session)
+    }
+
+    /// Take the on-disk session for `backend_id` when another process has
+    /// refreshed it since this one loaded the config.
+    fn adopt_saved_session(&self, backend_id: &str) {
+        let Some(disk) = load_config(&self.inner.config_path).and_then(|config| {
+            config.backends.into_iter().find(|b| b.id == backend_id).and_then(|b| b.account)
+        }) else {
+            return;
+        };
+        let mut config = self.inner.config.lock();
+        if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
+            if let Some(mine) = current.account.as_ref() {
+                if mine.user_id == disk.user_id && disk.expires_at > mine.expires_at {
+                    current.account = Some(disk);
+                }
+            }
+        }
     }
 
     pub async fn account_login_methods(&self, server_url: String) -> Result<Vec<LoginMethodInfo>, String> {
@@ -1346,6 +1370,28 @@ fn config_path() -> PathBuf {
         .join("cloud-sync.json")
 }
 
+/// Exclusive lock beside the config, held for one refresh. Released on drop.
+async fn lock_refresh(config_path: &Path) -> Result<std::fs::File, String> {
+    use fs2::FileExt;
+    let path = config_path.with_extension("refresh.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("create refresh lock directory: {error}"))?;
+    }
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("open refresh lock: {error}"))?;
+        file.lock_exclusive().map_err(|error| format!("lock refresh: {error}"))?;
+        Ok(file)
+    })
+    .await
+    .map_err(|error| format!("refresh lock task failed: {error}"))?
+}
+
 fn load_config(path: &Path) -> Option<CloudSyncConfig> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
@@ -1570,6 +1616,58 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two managers stand in for the GUI and its workbench service: separate
+    /// in-memory state over one config file. The mock issuer rotates refresh
+    /// tokens and, like the real one, revokes a token presented twice.
+    #[tokio::test]
+    async fn processes_sharing_a_config_refresh_once() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::atomic::AtomicUsize;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let used = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
+        let app = Router::new().route("/auth/v1/token", post({
+            let (calls, used) = (calls.clone(), used.clone());
+            move |Json(body): Json<Value>| async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                // Hold the response so a racing caller would overlap.
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let token = body["refresh_token"].as_str().unwrap_or_default().to_string();
+                if !used.lock().insert(token) {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"})));
+                }
+                (axum::http::StatusCode::OK, Json(json!({"access_token": format!("access-{n}"), "refresh_token": format!("refresh-{n}"), "expires_in": 7200})))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cloud-sync.json");
+        std::fs::write(&config_path, json!({
+            "installation_id": "install-race",
+            "active_backend_id": "acct",
+            "backends": [{
+                "id": "acct", "name": "Account", "server_url": "https://relay.example.com",
+                "kind": "account_relay",
+                "account": {"issuer": issuer, "email": "", "user_id": "alice",
+                    "access_token": "expired", "refresh_token": "refresh-0", "expires_at": 1}
+            }]
+        }).to_string()).unwrap();
+        std::env::set_var("KODE_CLOUD_SYNC_CONFIG", &config_path);
+        let gui = CloudSyncManager::new(crate::build_test_ctx(kode_core::config::Config::default(), "race-gui".into()));
+        let service = CloudSyncManager::new(crate::build_test_ctx(kode_core::config::Config::default(), "race-svc".into()));
+        std::env::remove_var("KODE_CLOUD_SYNC_CONFIG");
+
+        let (a, b) = tokio::join!(gui.fresh_session("acct"), service.fresh_session("acct"));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only one process may spend the refresh token");
+        assert_eq!(a.access_token, "access-1");
+        assert_eq!(b.access_token, "access-1");
+        let disk = load_config(&config_path).unwrap();
+        assert_eq!(disk.backends[0].account.as_ref().unwrap().refresh_token, "refresh-1");
+    }
 
     #[test]
     fn validates_and_converts_server_urls() {

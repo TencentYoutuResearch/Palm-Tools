@@ -665,6 +665,7 @@
   "pairing.account.title": { "message": "Kode 账号" },
   "pairing.account.sidebarSignIn": { "message": "登录 Kode 账号" },
   "pairing.account.inactive": { "message": "这台桌面未使用该账号" },
+  "pairing.account.expired": { "message": "登录已过期，请重新登录" },
   "pairing.account.inactiveHint": { "message": "这台桌面正在通过二维码中继同步，登录该账号的手机暂时连不到它。" },
   "pairing.account.activate": { "message": "使用这个账号" },
   "pairing.switchFromAccount": { "message": "这台桌面正在通过 Kode 账号同步。切换到二维码中继后，账号同步会停止，直到你切回来。" },
