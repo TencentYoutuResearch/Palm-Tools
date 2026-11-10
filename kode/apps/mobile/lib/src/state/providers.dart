@@ -18,6 +18,14 @@ final endpointStorageProvider = Provider<EndpointStorage>(
 final endpointProvider = StateProvider<Endpoint?>((ref) => null);
 final savedEndpointsProvider = StateProvider<List<Endpoint>>((ref) => const []);
 
+/// Workers registered on the active sync server. Switching one only changes
+/// the monitor target; the secure-storage token remains bound to its issuer.
+final workersProvider = FutureProvider<List<WorkerDto>>((ref) async {
+  final api = ref.watch(apiClientProvider);
+  if (api == null) return const [];
+  return api.listWorkers();
+});
+
 final accountStorageProvider = Provider<AccountStorage>(
   (ref) => AccountStorage(),
 );

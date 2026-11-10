@@ -321,10 +321,17 @@ fn codex_fallback_paths() -> Vec<PathBuf> {
 /// 共用(cursor-agent / kimi / opencode / grok / kiro-cli 等官方安装脚本都倾向
 /// 把二进制放在这个目录)。找不到候选文件或非可执行时返回 `None`。
 fn local_bin_fallback(command: &str) -> Option<PathBuf> {
-    let dir = dirs::home_dir()?.join(".local").join("bin");
+    let dir = home_dir_for_resolution()?.join(".local").join("bin");
     command_candidates(&dir, command)
         .into_iter()
         .find(|cand| is_executable(cand))
+}
+
+fn home_dir_for_resolution() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -388,6 +395,26 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::time::timeout;
+
+    #[cfg(windows)]
+    fn shell_command() -> &'static str {
+        "powershell.exe"
+    }
+
+    #[cfg(windows)]
+    fn shell_args(script: &str) -> Vec<String> {
+        vec!["-NoProfile".into(), "-Command".into(), script.into()]
+    }
+
+    #[cfg(not(windows))]
+    fn shell_command() -> &'static str {
+        "bash"
+    }
+
+    #[cfg(not(windows))]
+    fn shell_args(script: &str) -> Vec<String> {
+        vec!["-c".into(), script.into()]
+    }
 
     #[cfg(windows)]
     #[test]
@@ -474,6 +501,8 @@ mod tests {
     fn resolve_command_falls_back_to_local_bin_when_path_misses() {
         let saved_path = std::env::var_os("PATH");
         let saved_home = std::env::var_os("HOME");
+        #[cfg(windows)]
+        let saved_profile = std::env::var_os("USERPROFILE");
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -481,6 +510,9 @@ mod tests {
         let home_dir = std::env::temp_dir().join(format!("kode-local-bin-home-test-{stamp}"));
         let local_bin = home_dir.join(".local").join("bin");
         std::fs::create_dir_all(&local_bin).unwrap();
+        #[cfg(windows)]
+        let fake = local_bin.join("cursor-agent.exe");
+        #[cfg(not(windows))]
         let fake = local_bin.join("cursor-agent");
         std::fs::write(&fake, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
@@ -493,6 +525,8 @@ mod tests {
         unsafe {
             std::env::set_var("PATH", "");
             std::env::set_var("HOME", &home_dir);
+            #[cfg(windows)]
+            std::env::set_var("USERPROFILE", &home_dir);
         }
         let resolved = resolve_spawn_command("cursor-agent");
         assert_eq!(resolved, fake.display().to_string());
@@ -506,24 +540,34 @@ mod tests {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
             }
+            #[cfg(windows)]
+            match saved_profile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
         }
         let _ = std::fs::remove_dir_all(&home_dir);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "multi_thread")]
     async fn spawn_reads_echo_output() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let host = PtyHost::spawn(
             42,
-            "bash",
-            &["-c".into(), "echo HELLO_FROM_PTY; sleep 0.2".into()],
+            shell_command(),
+            &shell_args(if cfg!(windows) {
+                "Write-Output HELLO_FROM_PTY"
+            } else {
+                "echo HELLO_FROM_PTY; sleep 0.2"
+            }),
             portable_pty::PtySize {
                 cols: 80,
                 rows: 24,
                 pixel_width: 0,
                 pixel_height: 0,
             },
-            std::path::Path::new("/tmp"),
+            std::env::temp_dir().as_path(),
             tx,
             &[],
         )
@@ -551,20 +595,21 @@ mod tests {
         assert!(s.contains("HELLO_FROM_PTY"), "got: {:?}", s);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "multi_thread")]
     async fn exit_code_propagates() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let host = PtyHost::spawn(
             7,
-            "bash",
-            &["-c".into(), "exit 13".into()],
+            shell_command(),
+            &shell_args(if cfg!(windows) { "exit 13" } else { "exit 13" }),
             portable_pty::PtySize {
                 cols: 80,
                 rows: 24,
                 pixel_width: 0,
                 pixel_height: 0,
             },
-            std::path::Path::new("/tmp"),
+            std::env::temp_dir().as_path(),
             tx,
             &[],
         )
@@ -591,6 +636,7 @@ mod tests {
     /// 用 SAFETY:`std::env::remove_var` 在 spawn 前临时移除父进程的终端能力和
     /// 主题提示,模拟 launchd 启动场景;spawn 后立即恢复,避免影响其他测试。
     /// 依赖 `--test-threads=1`(CODEBUDDY.md 已固定)。
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "multi_thread")]
     async fn spawn_sets_term_when_parent_env_missing() {
         let saved_term = std::env::var_os("TERM");
@@ -608,18 +654,19 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let host = PtyHost::spawn(
             99,
-            "bash",
-            &[
-                "-c".into(),
-                "echo TERM=$TERM CT=$COLORTERM TT=$TERM_THEME CFG=$COLORFGBG; sleep 0.1".into(),
-            ],
+            shell_command(),
+            &shell_args(if cfg!(windows) {
+                "Write-Output \"TERM=$env:TERM CT=$env:COLORTERM TT=$env:TERM_THEME CFG=$env:COLORFGBG\""
+            } else {
+                "echo TERM=$TERM CT=$COLORTERM TT=$TERM_THEME CFG=$COLORFGBG; sleep 0.1"
+            }),
             portable_pty::PtySize {
                 cols: 80,
                 rows: 24,
                 pixel_width: 0,
                 pixel_height: 0,
             },
-            std::path::Path::new("/tmp"),
+            std::env::temp_dir().as_path(),
             tx,
             &[],
         )
@@ -733,24 +780,26 @@ mod tests {
         assert_eq!(cmd.get_env("COLORFGBG"), Some(std::ffi::OsStr::new("15;0")));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "multi_thread")]
     async fn extra_env_overrides_default_terminal_theme() {
         let extra = terminal_theme_env(false);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let host = PtyHost::spawn(
             98,
-            "bash",
-            &[
-                "-c".into(),
-                "echo TT=$TERM_THEME CFG=$COLORFGBG; sleep 0.1".into(),
-            ],
+            shell_command(),
+            &shell_args(if cfg!(windows) {
+                "Write-Output \"TT=$env:TERM_THEME CFG=$env:COLORFGBG\""
+            } else {
+                "echo TT=$TERM_THEME CFG=$COLORFGBG; sleep 0.1"
+            }),
             portable_pty::PtySize {
                 cols: 80,
                 rows: 24,
                 pixel_width: 0,
                 pixel_height: 0,
             },
-            std::path::Path::new("/tmp"),
+            std::env::temp_dir().as_path(),
             tx,
             &extra,
         )
@@ -778,6 +827,7 @@ mod tests {
     /// 回归:从终端启动 kode 时父进程 PWD 是启动目录;子进程的 PWD 必须是 tab cwd
     /// (opencode 按 $PWD 记录会话目录)。用 env 而非 bash,bash 会自己校正 PWD。
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(not(windows))]
     async fn child_pwd_matches_spawn_cwd() {
         let cwd = std::env::temp_dir().join(format!("kode-pwd-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
@@ -820,21 +870,26 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "multi_thread")]
     async fn write_then_read() {
         // bash 读一行 echo 回去
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let host = PtyHost::spawn(
             1,
-            "bash",
-            &["-c".into(), "read line; echo GOT:$line; sleep 0.1".into()],
+            shell_command(),
+            &shell_args(if cfg!(windows) {
+                "$line = Read-Host; Write-Output \"GOT:$line\""
+            } else {
+                "read line; echo GOT:$line; sleep 0.1"
+            }),
             portable_pty::PtySize {
                 cols: 80,
                 rows: 24,
                 pixel_width: 0,
                 pixel_height: 0,
             },
-            std::path::Path::new("/tmp"),
+            std::env::temp_dir().as_path(),
             tx,
             &[],
         )

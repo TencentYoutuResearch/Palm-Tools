@@ -112,7 +112,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
       appBar: GlassAppBar(
         title: InkWell(
           borderRadius: BorderRadius.circular(8),
-          onTap: () => context.push('/devices'),
+          onTap: () => context.push('/workers'),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
             child: Row(
@@ -120,7 +120,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
               children: [
                 Flexible(
                   child: Text(
-                    endpoint?.deviceName ?? 'Sessions',
+                    endpoint?.activeWorkerName ?? endpoint?.deviceName ?? 'Sessions',
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),

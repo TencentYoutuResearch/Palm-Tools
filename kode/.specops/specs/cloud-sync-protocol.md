@@ -45,8 +45,10 @@ agent frames for signed-in desktops; this single-user server is unchanged.
    shown only through the QR/copy action, and stored server-side as SHA-256.
 4. Mobile claims it through `POST /api/v1/pairings/:id/claim` and stores the
    returned mobile access token in platform secure storage.
-5. A binding grants exactly `sessions.read`, `sessions.content.read`, and
-   `sessions.send`. Server authorization is mandatory for every REST/WS path.
+5. A binding grants `sessions.read`, `sessions.content.read`,
+   `sessions.send`, and `workers.monitor`. Server authorization is mandatory
+   for every REST/WS path. Older bindings without `workers.monitor` remain
+   scoped to their issuing Worker.
 6. `DELETE /api/v1/bindings/current` revokes the current mobile token. When the
    last binding is revoked, the desktop agent immediately stops uploading.
 
@@ -124,6 +126,15 @@ The center intentionally preserves the existing v1 mobile read surface:
 - `POST /api/v1/sessions/:id/input`
 - `DELETE /api/v1/sessions/:id`
 - `GET /ws` with the mobile bearer header; access tokens are never accepted in URLs
+
+Mobile monitor routing adds the optional `X-Kode-Worker-Id` header to every
+session, setup-catalogue and mobile WebSocket request. The bearer token remains
+bound to the Worker that issued the pairing. A different target is authorized
+only when the binding has `workers.monitor`; the header never changes command
+execution ownership, which remains the selected Worker. The WebSocket hello
+returns both the selected `device_id` and the credential-owning
+`bound_device_id`. Omitting the header preserves single-Worker behavior for
+older mobile clients.
 
 `POST input` accepts `{ "text": "…" }`, requires `sessions.send`, validates a
 64 KiB maximum, and accepts `Idempotency-Key`. It returns `202` only after the
@@ -228,3 +239,24 @@ and command receipt ledger. Switching a backend restarts the outbound agent
 generation and never copies credentials or uncertain command receipts across
 origins. Existing single-backend configs migrate in place without changing the
 installation identity or losing credentials.
+
+### Worker directory and read-only inventory
+
+The center exposes a Worker directory over the existing bearer model:
+
+- `GET /api/v1/workers` returns registered Workers with stable Worker id, name,
+  online state, last-seen time, Kode version, OS, architecture and inventory
+  capability.
+- `GET /api/v1/workers/:worker_id/inventory` returns a read-only snapshot of
+  system, CPU, memory, disks, configured Agents and attached ADB devices.
+
+Inventory is an allowlisted setup request. An Agent advertises
+`capabilities: ["inventory.v1"]` in its hello; older Agents remain usable and
+report `inventory_capable: false`. Inventory never accepts caller-supplied
+commands or arguments, never returns credentials, and never bypasses Worker
+isolation.
+
+Cross-Worker inventory is disabled by default. A controlled single-tenant
+deployment can set `KODE_SYNC_ALLOW_SHARED_INVENTORY=1` to allow one registered
+Worker to inspect another's read-only inventory. Session data, events and
+commands remain scoped to each Worker independently of this flag.

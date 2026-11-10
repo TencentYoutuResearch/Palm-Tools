@@ -145,8 +145,14 @@ class TokensDto {
 class Endpoint {
   final String serverUrl;
   final String token;
+
+  /// Worker that issued the pairing. This remains the credential owner.
   final String deviceId;
   final String deviceName;
+
+  /// Monitor target selected by this phone. Null means the bound Worker.
+  final String? workerId;
+  final String? workerName;
   final String? serverKind;
 
   Endpoint({
@@ -154,6 +160,8 @@ class Endpoint {
     required this.token,
     required this.deviceId,
     required this.deviceName,
+    this.workerId,
+    this.workerName,
     this.serverKind,
   });
 
@@ -164,6 +172,8 @@ class Endpoint {
   bool get isRelay => serverKind == relayKind;
   String get baseUrl => serverUrl.replaceAll(RegExp(r'/+$'), '');
   String get storageKey => '$baseUrl::$deviceId';
+  String get activeWorkerId => workerId ?? deviceId;
+  String get activeWorkerName => workerName ?? deviceName;
   String get wsUrl {
     final uri = Uri.parse(baseUrl);
     return uri
@@ -180,6 +190,8 @@ class Endpoint {
     'token': token,
     'device_id': deviceId,
     'device_name': deviceName,
+    if (workerId != null) 'worker_id': workerId,
+    if (workerName != null) 'worker_name': workerName,
     if (serverKind != null) 'server_kind': serverKind,
   };
 
@@ -188,6 +200,8 @@ class Endpoint {
     token: j['token'] as String,
     deviceId: j['device_id'] as String,
     deviceName: j['device_name'] as String? ?? 'Kode Desktop',
+    workerId: j['worker_id'] as String?,
+    workerName: j['worker_name'] as String?,
     serverKind: j['server_kind'] as String?,
   );
 
@@ -196,13 +210,53 @@ class Endpoint {
     String? token,
     String? deviceId,
     String? deviceName,
+    String? workerId,
+    String? workerName,
     String? serverKind,
   }) => Endpoint(
     serverUrl: serverUrl ?? this.serverUrl,
     token: token ?? this.token,
     deviceId: deviceId ?? this.deviceId,
     deviceName: deviceName ?? this.deviceName,
+    workerId: workerId ?? this.workerId,
+    workerName: workerName ?? this.workerName,
     serverKind: serverKind ?? this.serverKind,
+  );
+}
+
+class WorkerDto {
+  final String workerId;
+  final String name;
+  final bool online;
+  final int lastSeenAt;
+  final String? kodeVersion;
+  final String? os;
+  final String? arch;
+  final bool inventoryCapable;
+  final bool bound;
+
+  const WorkerDto({
+    required this.workerId,
+    required this.name,
+    required this.online,
+    required this.lastSeenAt,
+    required this.kodeVersion,
+    required this.os,
+    required this.arch,
+    required this.inventoryCapable,
+    required this.bound,
+  });
+
+  factory WorkerDto.fromJson(Map<String, dynamic> json) => WorkerDto(
+    workerId: json['worker_id'] as String,
+    name: json['name'] as String? ?? 'Kode Worker',
+    online: json['online'] as bool? ?? false,
+    lastSeenAt: (json['last_seen_at'] as num?)?.toInt() ?? 0,
+    kodeVersion: json['kode_version'] as String?,
+    os: json['os'] as String?,
+    arch: json['arch'] as String?,
+    inventoryCapable: json['inventory_capable'] as bool? ?? false,
+    bound: json['bound'] as bool? ?? false,
   );
 }
 

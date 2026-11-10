@@ -9,6 +9,7 @@ import 'src/state/providers.dart';
 import 'src/ui/login/login_screen.dart';
 import 'src/ui/pair/pair_screen.dart';
 import 'src/ui/devices/devices_screen.dart';
+import 'src/ui/devices/workers_screen.dart';
 import 'src/ui/sessions/session_detail_screen.dart';
 import 'src/ui/sessions/sessions_screen.dart';
 import 'src/ui/sessions/new_session_screen.dart';
@@ -50,6 +51,7 @@ final _routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/pair', builder: (_, _) => const PairScreen()),
       GoRoute(path: '/login', builder: (_, _) => const LoginScreen()),
       GoRoute(path: '/devices', builder: (_, _) => const DevicesScreen()),
+      GoRoute(path: '/workers', builder: (_, _) => const WorkersScreen()),
       GoRoute(path: '/sessions', builder: (_, _) => const SessionsScreen()),
       GoRoute(
         path: '/sessions/new',

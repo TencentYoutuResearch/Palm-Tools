@@ -36,10 +36,8 @@
   import ConfirmDialog from './lib/ConfirmDialog.svelte'
   import BackendChooser from './lib/BackendChooser.svelte'
   import PairingDialog from './lib/PairingDialog.svelte'
-  import AccountDialog from './lib/AccountDialog.svelte'
-  import AccountMenu from './lib/AccountMenu.svelte'
-  import type { Tab as SettingsTab } from './lib/SettingsPanel.svelte'
-  import type { AccountDevice, AccountDeviceSession, CloudSyncStatus } from './lib/ipc'
+  import WorkerDirectoryDialog from './lib/WorkerDirectoryDialog.svelte'
+  import ModeSwitcher from './lib/ModeSwitcher.svelte'
   import EndpointDialog from './lib/EndpointDialog.svelte'
   import PathsBanner from './lib/PathsBanner.svelte'
   import MemoryPanel from './lib/MemoryPanel.svelte'
@@ -51,8 +49,6 @@
   import DeployPanel from './lib/DeployPanel.svelte'
   import MetricsHoverCard from './lib/MetricsHoverCard.svelte'
   import WorkspacePanel from './lib/WorkspacePanel.svelte'
-  import DevicesSection from './lib/DevicesSection.svelte'
-  import DeviceSession from './lib/DeviceSession.svelte'
   import ShellTerminalPanel, { type ShellTerminalPosition } from './lib/ShellTerminalPanel.svelte'
   import Icon from './lib/Icon.svelte'
   import BackendIcon from './lib/BackendIcon.svelte'
@@ -88,7 +84,7 @@
   import type { DndEvent } from 'svelte-dnd-action'
   import { longpressGate, TAB_DRAG_LONG_PRESS_MS } from './lib/longpress_gate'
   import { outsidePressClose } from './lib/outside_close'
-  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode } from './lib/ipc'
+  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry, type WorkerSessionDto } from './lib/ipc'
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
@@ -156,58 +152,26 @@
   let chooserWorkspace = $state<WsGroup | null>(null)
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
-  let accountOpen = $state(false)
-  let accountMenuOpen = $state(false)
-  let accountStatus = $state<CloudSyncStatus | null>(null)
-  let sidebarAccount = $derived(accountStatus?.backends.find((b) => b.kind === 'account_relay') ?? null)
-  /** Sidebar identity. Read on start, when the menu opens and when an
-   *  account surface closes; never polled, so an idle window stays idle. */
-  async function refreshAccountStatus() {
-    try {
-      accountStatus = await ipc.cloudSyncStatus()
-    } catch {
-      // The service may still be starting; the label stays until it answers.
-    }
-  }
-  $effect(() => {
-    if (!accountOpen && !settingsOpen) void refreshAccountStatus()
-  })
-  let settingsTab = $state<SettingsTab>('backends')
-  function openSettings(tab: SettingsTab = 'backends') {
-    settingsTab = tab
-    accountMenuOpen = false
-    settingsOpen = true
-  }
-  async function signOutFromMenu() {
-    accountMenuOpen = false
-    if (!sidebarAccount) return
-    try {
-      accountStatus = await ipc.cloudAccountSignOut(sidebarAccount.id)
-    } catch {
-      openSettings('account')
-    }
-  }
-  /** A session on another desktop of the account, shown over the tabs.
-   *  Not a tab: it is never persisted or restored, and any local tab
-   *  activation or new-session flow closes it. */
-  let deviceView = $state<{ device: AccountDevice; session: AccountDeviceSession; sessions: AccountDeviceSession[] } | null>(null)
-  let deviceViewTab: number | null = null
-  $effect(() => {
-    // Keyboard tab switching and new sessions also leave the device view.
-    const id = $activeId
-    if (chooserOpen || id !== deviceViewTab) deviceView = null
-    deviceViewTab = id
-  })
-  $effect(() => {
-    if (!sidebarAccount?.active) deviceView = null
-  })
-  function activateTab(id: number) {
-    deviceView = null
-    selectTab(id)
-  }
-  function accountInitial(label: string | null | undefined): string {
-    return ((label ?? '').split('@')[0].trim().slice(0, 1) || 'K').toUpperCase()
-  }
+  /** Read-only Worker discovery and inventory. */
+  let workersOpen = $state(false)
+  type WorkMode = 'worker' | 'monitor'
+  let workMode = $state<WorkMode>(
+    typeof localStorage !== 'undefined' && localStorage.getItem('kode.workMode') === 'monitor'
+      ? 'monitor'
+      : 'worker',
+  )
+  let monitorWorkerId = $state<string | null>(
+    typeof localStorage !== 'undefined' ? localStorage.getItem('kode.monitorWorkerId') : null,
+  )
+  let workers = $state<WorkerDirectoryEntry[]>([])
+  let monitorSessions = $state<WorkerSessionDto[]>([])
+  let monitorSessionsLoading = $state(false)
+  let localWorkerName = $state('Local worker')
+  let activeModeWorkerName = $derived(
+    workMode === 'monitor'
+      ? workers.find((worker) => worker.worker_id === monitorWorkerId)?.name ?? 'Unknown worker'
+      : localWorkerName,
+  )
   /** Phase 11.4 远端 endpoint 配置面板 */
   let endpointsOpen = $state(false)
   /** 路径配置 banner —— 默认隐藏;用户可用 Cmd+, 打开 */
@@ -269,6 +233,49 @@
       endpoints = await endpointIpc.list()
     } catch {
       // endpoint 指示器不是主流程,失败时保持旧快照。
+    }
+  }
+
+  async function refreshWorkerDirectory() {
+    try {
+      workers = (await ipc.cloudSyncWorkers()).workers ?? []
+      const local = workers.find((worker) => worker.bound)
+      if (local) localWorkerName = local.name
+      if (workMode === 'monitor' && monitorWorkerId && !workers.some((worker) => worker.worker_id === monitorWorkerId)) {
+        monitorWorkerId = null
+      }
+    } catch {
+      workers = []
+    }
+  }
+
+  function selectWorkMode(mode: WorkMode, worker?: WorkerDirectoryEntry) {
+    workMode = mode
+    monitorWorkerId = mode === 'monitor' ? (worker?.worker_id ?? monitorWorkerId) : null
+    if (mode === 'worker') {
+      monitorSessions = []
+      monitorSessionsLoading = false
+    } else if (monitorWorkerId) {
+      void refreshMonitorSessions(monitorWorkerId)
+    }
+    try {
+      localStorage.setItem('kode.workMode', mode)
+      if (monitorWorkerId) localStorage.setItem('kode.monitorWorkerId', monitorWorkerId)
+      else localStorage.removeItem('kode.monitorWorkerId')
+    } catch {
+      // 非关键状态,不阻断模式切换。
+    }
+  }
+
+  async function refreshMonitorSessions(workerId: string) {
+    monitorSessionsLoading = true
+    try {
+      const response = await ipc.cloudSyncWorkerSessions(workerId)
+      monitorSessions = response.sessions ?? []
+    } catch {
+      monitorSessions = []
+    } finally {
+      monitorSessionsLoading = false
     }
   }
 
@@ -1043,7 +1050,6 @@
       renameOpen ||
       chooserOpen ||
       pairingOpen ||
-      accountOpen ||
       endpointsOpen ||
       pathsOpen ||
       memoryPanelOpen ||
@@ -1252,6 +1258,11 @@
       } catch {
         // 没有 endpoint 也不影响启动
       }
+      void refreshWorkerDirectory().then(() => {
+        if (workMode === 'monitor' && monitorWorkerId) {
+          void refreshMonitorSessions(monitorWorkerId)
+        }
+      })
       advanceBoot(5)
       // M4 memory:订阅 pending 数变化(后端 1.5s 轮询 + review/propose 后即时 emit)
       try {
@@ -1531,13 +1542,8 @@
       if (memoryPanelOpen) { memoryPanelOpen = false; e.preventDefault(); return }
       if (workspacePanelOpen) { workspacePanelOpen = false; e.preventDefault(); return }
       if (memoryPromptPreviewText !== null) { memoryPromptPreviewText = null; e.preventDefault(); return }
-      // Layers opened from Settings sit above it and close first.
-      if (deployOpen) return
-      if (pluginPanelOpen) { pluginPanelOpen = false; e.preventDefault(); return }
-      if (memorySyncOpen) { memorySyncOpen = false; e.preventDefault(); return }
-      if (memoryBrowseOpen) { memoryBrowseOpen = false; e.preventDefault(); return }
-      if (accountMenuOpen) { accountMenuOpen = false; e.preventDefault(); return }
       if (settingsOpen) { settingsOpen = false; e.preventDefault(); return }
+      if (pluginPanelOpen) { pluginPanelOpen = false; e.preventDefault(); return }
       if (chooserOpen && $tabs.length > 0) {
         chooserOpen = false; e.preventDefault(); return
       }
@@ -1815,12 +1821,6 @@
       group: 'other',
       run: () => { pairingOpen = true },
     },
-    {
-      id: 'kode-account',
-      label: t('pairing.account.title'),
-      group: 'other',
-      run: () => openSettings('account'),
-    },
     ]
   })
 
@@ -1828,7 +1828,7 @@
   // 标题格式: "<序号>. <active tab title>";没有 active tab 时回落到品牌名。
   // active tab 由 (tabs, activeId) 共同决定 — 任一变化都需要刷新。
   const appWindow = getCurrentWindow()
-  const topbarTitle = $derived(deviceView ? `${deviceView.session.title?.trim() || deviceView.session.backend_key} · ${deviceView.device.name}` : $activeTab ? $activeTab.title : 'Kill la Code')
+  const topbarTitle = $derived($activeTab ? $activeTab.title : 'Kill la Code')
 
   // 标题栏拖拽:`data-tauri-drag-region` 不会冒泡到子元素(Tauri 设计行为,
   // 保护按钮/input),所以手动监听 mousedown:左键单击 startDragging,双击 toggleMaximize
@@ -1871,8 +1871,8 @@
     aria-current={t.id === $activeId ? 'true' : undefined}
     aria-label={`${t.title}, ${sessionStatus.text}, ${shortModelName(t.model)}`}
     title={`${t.title} · ${shortModelName(t.model)}`}
-    onclick={() => { activateTab(t.id); if (menuOpenId !== null) closeMenu() }}
-    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTab(t.id) } }}
+    onclick={() => { selectTab(t.id); if (menuOpenId !== null) closeMenu() }}
+    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectTab(t.id) } }}
     oncontextmenu={(e) => onTabContext(e, t.id)}
   >
     <div class="tab-rail">
@@ -2065,6 +2065,17 @@
       </button>
     </div>
 
+    <ModeSwitcher
+      mode={workMode}
+      workerName={activeModeWorkerName}
+      {workers}
+      onSelect={selectWorkMode}
+      onDetails={() => {
+        workersOpen = true
+        void refreshWorkerDirectory()
+      }}
+    />
+
     <!-- tab-list 是滚动容器;onclick 处理空白处点击关闭侧栏。
          dndzone 已下沉到每个 .ws-group-tabs(每组独立,禁止跨 workspace 拖拽)。 -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -2075,7 +2086,28 @@
       tabindex="-1"
       onscroll={closeMenu}
     >
-      {#if $tabs.length === 0}
+      {#if workMode === 'monitor'}
+        {#if monitorSessionsLoading}
+          <div class="placeholder">{tr('workers.monitorLoading')}</div>
+        {:else if monitorSessions.length === 0}
+          <div class="placeholder">{tr('workers.noMonitorSessions')}</div>
+        {:else}
+          <div class="monitor-session-list">
+            {#each monitorSessions as session (session.id)}
+              <div class="monitor-session-row">
+                <span class="monitor-status" class:busy={session.status === 'busy'}></span>
+                <span class="monitor-session-copy">
+                  <strong>{session.title || session.backend_key}</strong>
+                  <small>
+                    {session.model || session.backend_key}
+                    {#if session.cwd} · {session.cwd}{/if}
+                  </small>
+                </span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {:else if $tabs.length === 0}
         <div class="placeholder">No sessions</div>
       {:else}
         <!-- 多 workspace 且非 compact:渲染可折叠的分组 header + 每组独立 dndzone。
@@ -2158,64 +2190,6 @@
         </div>
       {/if}
     </div>
-    {#if sidebarAccount?.active && sidebarMode !== 'compact'}
-      <DevicesSection
-        active={deviceView ? { deviceId: deviceView.device.device_id, sessionId: deviceView.session.id } : null}
-        onOpen={(device, session, sessions) => { chooserOpen = false; deviceView = { device, session, sessions } }}
-      />
-    {/if}
-    <div class="sidebar-account">
-      <button
-        class="account-trigger"
-        aria-haspopup="menu"
-        aria-expanded={accountMenuOpen}
-        title={sidebarAccount?.account_label ?? tr('pairing.account.sidebarSignIn')}
-        onclick={() => {
-          accountMenuOpen = !accountMenuOpen
-          if (accountMenuOpen) void refreshAccountStatus()
-        }}
-      >
-        <span class="account-avatar" class:empty={!sidebarAccount} aria-hidden="true">
-          {#if sidebarAccount?.account_picture}
-            <img src={sidebarAccount.account_picture} alt="" referrerpolicy="no-referrer" />
-          {:else if sidebarAccount}{accountInitial(sidebarAccount.account_label)}{:else}<Icon name="user" size={14} />{/if}
-          {#if sidebarAccount?.active}
-            <span class="presence" class:on={accountStatus?.connected} class:live={accountStatus?.sync_enabled}></span>
-          {/if}
-        </span>
-        <span class="account-copy">
-          <strong>{sidebarAccount?.account_label ?? tr('pairing.account.sidebarSignIn')}</strong>
-          {#if sidebarAccount}
-            <span>
-              {!sidebarAccount.active
-                ? tr('pairing.account.inactive')
-                : accountStatus?.sync_enabled
-                  ? tr('pairing.account.viewing')
-                  : accountStatus?.connected
-                    ? tr('pairing.account.standby')
-                    : tr('pairing.offline')}
-            </span>
-          {/if}
-        </span>
-      </button>
-      <button
-        class="icon-btn account-gear"
-        title={tr('settings.open')}
-        aria-label={tr('settings.open')}
-        onclick={() => openSettings()}
-      >
-        <Icon name="settings" size={16} />
-      </button>
-      {#if accountMenuOpen}
-        <AccountMenu
-          status={accountStatus}
-          onAccountSettings={() => openSettings('account')}
-          onRelaySettings={() => openSettings('relay')}
-          onSignOut={() => void signOutFromMenu()}
-          onClose={() => (accountMenuOpen = false)}
-        />
-      {/if}
-    </div>
   </aside>
 
   <main class="main" class:drag-over={dragOver} style={bottomTerminalVisible ? `--bottom-terminal-h:${terminalHeight}px` : ''} data-workspace-reference-target use:workspaceReferenceTarget={{ hover: (active) => { dragOver = active }, drop: receiveWorkspaceReference }} ondragovercapture={onMainDragOver} ondropcapture={onOverlayDrop} ondragleave={onMainDragLeave}>
@@ -2238,14 +2212,6 @@
           onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
         >
           <Icon name="plus" size={16} />
-        </button>
-        <button
-          class="icon-btn hidden-fallback-add"
-          title={tr('settings.open')}
-          aria-label={tr('settings.open')}
-          onclick={() => openSettings()}
-        >
-          <Icon name="settings" size={16} />
         </button>
       {/if}
       <div class="main-title-center" data-tauri-drag-region>
@@ -2363,7 +2329,7 @@
       {/key}
     {/if}
     {#each $mountedIds as id (id)}
-      {@const isActive = id === $activeId && !chooserOpen && !deviceView}
+      {@const isActive = id === $activeId && !chooserOpen}
       {@const tab = $tabs.find((t) => t.id === id)}
       <!-- inert 兜底:visibility:hidden 仍可能被 Tab 键焦点穿透,inert 完全屏蔽
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
@@ -2381,16 +2347,6 @@
         {/if}
       </div>
     {/each}
-    {#if deviceView}
-      {#key `${deviceView.device.device_id}:${deviceView.session.id}`}
-        <DeviceSession
-          device={deviceView.device}
-          session={deviceView.session}
-          sessions={deviceView.sessions}
-          onClose={() => (deviceView = null)}
-        />
-      {/key}
-    {/if}
     {#if bottomTerminalVisible}
       <div class="bottom-terminal" style="height: {terminalHeight}px">
         <div
@@ -2608,15 +2564,13 @@
 
 {#if settingsOpen}
   <SettingsPanel
-    initialTab={settingsTab}
-    childOpen={memorySyncOpen || pluginPanelOpen || deployOpen || memoryPanelOpen || memoryBrowseOpen}
     onClose={() => (settingsOpen = false)}
     onOpenMemorySync={() => { memorySyncOpen = true }}
     onOpenMemoryReview={() => { memoryPanelOpen = true }}
     onOpenMemoryBrowse={() => { memoryBrowseOpen = true }}
     onOpenDeploy={() => { deployOpen = true }}
     onEndpointsChanged={() => void refreshEndpoints()}
-    onAccountChanged={() => void refreshAccountStatus()}
+    onAccountChanged={() => {}}
     onOpenPlugins={() => { pluginPanelOpen = true }}
     onTakeScreenshot={() => void runConfiguredScreenshot()}
     {locale}
@@ -2644,8 +2598,8 @@
   <PairingDialog onClose={() => (pairingOpen = false)} />
 {/if}
 
-{#if accountOpen}
-  <AccountDialog onClose={() => (accountOpen = false)} />
+{#if workersOpen}
+  <WorkerDirectoryDialog onClose={() => (workersOpen = false)} />
 {/if}
 
 {#if endpointsOpen}
@@ -3088,68 +3042,6 @@
     color: var(--acc);
   }
 
-  /* Slack-style identity row: avatar + name/status opens the account menu,
-     the gear opens Settings. */
-  .sidebar-account {
-    position: relative;
-    display: flex;
-    flex-shrink: 0;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-    padding: 6px 8px;
-    border-top: 1px solid var(--bd-default);
-  }
-  .account-trigger {
-    display: flex;
-    flex: 1;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    padding: 4px;
-    border: 0;
-    border-radius: var(--rad-sm);
-    background: transparent;
-    color: var(--fg-primary);
-    font: var(--fs-sm) var(--font-ui);
-    text-align: left;
-    cursor: pointer;
-  }
-  .account-trigger:hover { background: var(--bg-tab-hover); }
-  .account-avatar {
-    position: relative;
-    display: grid;
-    width: 28px;
-    height: 28px;
-    flex: 0 0 auto;
-    place-items: center;
-    border-radius: var(--rad-sm);
-    background: var(--acc);
-    color: var(--fg-on-accent);
-    font-weight: 700;
-  }
-  .account-avatar.empty { background: var(--bg-input); color: var(--fg-tertiary); }
-  .account-avatar img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
-  .presence {
-    position: absolute;
-    right: -3px;
-    bottom: -3px;
-    width: 10px;
-    height: 10px;
-    box-sizing: border-box;
-    border: 2px solid var(--bg-sidebar);
-    border-radius: 50%;
-    background: var(--fg-tertiary);
-  }
-  .presence.on { background: var(--st-warn); }
-  .presence.live { background: var(--st-ok); }
-  .account-copy { display: grid; min-width: 0; gap: 1px; }
-  .account-copy strong { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-  .account-copy span { overflow: hidden; color: var(--fg-tertiary); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
-  .account-gear { flex: 0 0 auto; }
-  .sidebar.compact .sidebar-account { flex-direction: column; padding: 6px 4px; }
-  .sidebar.compact .account-trigger { flex: 0 0 auto; justify-content: center; }
-  .sidebar.compact .account-copy { display: none; }
   .tab-list {
     flex: 1;
     overflow-y: auto;
@@ -3165,6 +3057,51 @@
     font-size: var(--fs-sm);
   }
   .boot-error { color: var(--st-err); white-space: pre-wrap; }
+  .monitor-session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .monitor-session-row {
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr);
+    gap: 9px;
+    align-items: center;
+    padding: 8px 9px;
+    border-radius: var(--rad-sm);
+  }
+  .monitor-session-row:hover {
+    background: var(--bg-tab-hover);
+  }
+  .monitor-status {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--st-idle);
+  }
+  .monitor-status.busy {
+    background: var(--st-busy);
+  }
+  .monitor-session-copy {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+  }
+  .monitor-session-copy strong,
+  .monitor-session-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .monitor-session-copy strong {
+    color: var(--fg-primary);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+  }
+  .monitor-session-copy small {
+    color: var(--fg-tertiary);
+    font-size: 10px;
+  }
 
   /* ===== workspace 分组容器 =====
      .ws-list 是外层 dndzone 容器(workspace 级拖拽);

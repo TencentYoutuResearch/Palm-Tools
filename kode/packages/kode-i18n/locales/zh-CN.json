@@ -787,66 +787,142 @@
   "workspace.files.differentEndpoint": {
     "message": "暂不支持在不同端点之间复制。"
   },
-  "settings.backends.add.title": { "message": "添加 backend" },
-  "settings.backends.add.description": { "message": "Kode 会探测本机已安装的 AI CLI：已安装的一键配置，未安装的可以帮你自动安装。" },
-  "settings.backends.add.custom": { "message": "自定义 backend…" },
-  "settings.backends.add.back": { "message": "返回" },
-  "settings.backends.add.loading": { "message": "正在探测本机 CLI…" },
-  "settings.backends.add.ready": { "message": "已配置" },
-  "settings.backends.add.installed": { "message": "已安装" },
-  "settings.backends.add.notInstalled": { "message": "未安装" },
-  "settings.backends.add.configure": { "message": "配置" },
-  "settings.backends.add.install": { "message": "安装" },
-  "settings.backends.add.installing": { "message": "安装中…" },
-  "settings.backends.add.configuring": { "message": "配置中…" },
-  "settings.backends.add.needs": { "message": "需要先安装 {tools}" },
-  "settings.backends.add.manual": { "message": "本平台暂无自动安装方式，请手动安装" },
-  "settings.backends.add.confirmTitle": { "message": "安装 {key}？" },
-  "settings.backends.add.confirmMessage": { "message": "本机未检测到 {key}。Kode 将在本机执行以下命令，安装完成后自动配置：\n\n{script}" },
-  "settings.backends.add.done": { "message": "{key} 已配置完成" },
-  "settings.backends.add.mcpWarning": { "message": "{key} 已可用，但 memory MCP 接入失败：{error}" },
-  "settings.backends.add.log": { "message": "安装日志" },
-  "devices.title": { "message": "其他设备" },
-  "devices.online": { "message": "在线" },
-  "devices.offline": { "message": "离线" },
-  "devices.offlineHint": { "message": "该设备离线。在它上面打开 Kode 后即可看到会话。" },
-  "devices.loadFailed": { "message": "会话加载失败" },
-  "devices.loading": { "message": "加载中…" },
-  "devices.noSessions": { "message": "没有运行中的会话" },
-  "devices.sessionLabel": { "message": "{device} 上的 {session}" },
-  "devices.close": { "message": "关闭" },
-  "devices.emptyHistory": { "message": "暂无对话" },
-  "devices.you": { "message": "你" },
-  "devices.question": { "message": "提问" },
-  "devices.answerOnDevice": { "message": "请在该设备上回答这个问题。" },
-  "devices.answered": { "message": "已回答" },
-  "devices.plan": { "message": "计划" },
-  "devices.accept": { "message": "接受" },
-  "devices.reject": { "message": "拒绝" },
-  "devices.submit": { "message": "提交回答" },
-  "devices.submitAll": { "message": "提交全部回答" },
-  "devices.unconfirmed": { "message": "设备没有及时确认这次回答。" },
-  "devices.commandFailed": { "message": "未送达：{error}" },
-  "devices.exited": { "message": "该会话已结束" },
-  "devices.placeholder": { "message": "给 {device} 上的会话发消息" },
-  "devices.stop": { "message": "停止" },
-  "devices.send": { "message": "发送" },
-  "devices.status.busy": { "message": "工作中" },
-  "devices.status.idle": { "message": "空闲" },
-  "devices.status.starting": { "message": "启动中" },
-  "devices.status.exited": { "message": "已结束" },
-  "devices.relay.unknownSession": { "message": "会话名称不可用" },
-  "devices.relay.sent": { "message": "发来一条消息" },
-  "devices.relay.replied": { "message": "回复了这个对话" },
-  "devices.tool.list": { "message": "查找会话" },
-  "devices.tool.create": { "message": "创建协作会话" },
-  "devices.tool.send": { "message": "发送会话消息" },
-  "devices.tool.reply": { "message": "回复会话" },
-  "devices.tool.read": { "message": "读取会话消息" },
-  "devices.tool.wait": { "message": "等待会话回复" },
-  "devices.tool.other": { "message": "会话通信" },
-  "devices.tool.failed": { "message": "调用失败" },
-  "devices.tool.running": { "message": "进行中" },
-  "devices.tool.delivery": { "message": "发送时：{status}" },
-  "devices.tool.returned": { "message": "已返回" }
+  "workers.title": {
+    "message": "Workers"
+  },
+  "workers.worker": {
+    "message": "Worker"
+  },
+  "workers.monitor": {
+    "message": "Monitor"
+  },
+  "workers.monitorLoading": {
+    "message": "正在加载 Monitor 会话…"
+  },
+  "workers.noMonitorSessions": {
+    "message": "该 Worker 没有会话。"
+  },
+  "workers.local": {
+    "message": "本地"
+  },
+  "workers.localWorker": {
+    "message": "本地 Worker"
+  },
+  "workers.deviceDetails": {
+    "message": "设备详情"
+  },
+  "workers.syncServer": {
+    "message": "同步服务器"
+  },
+  "workers.refresh": {
+    "message": "刷新 Worker 列表"
+  },
+  "workers.list": {
+    "message": "Worker 列表"
+  },
+  "workers.loading": {
+    "message": "正在加载 Workers…"
+  },
+  "workers.empty": {
+    "message": "当前同步服务器还没有注册 Worker。"
+  },
+  "workers.unknownOs": {
+    "message": "未知系统"
+  },
+  "workers.current": {
+    "message": "当前"
+  },
+  "workers.versionUnavailable": {
+    "message": "版本不可用"
+  },
+  "workers.legacy": {
+    "message": "旧版"
+  },
+  "workers.select": {
+    "message": "选择一个 Worker。"
+  },
+  "workers.online": {
+    "message": "在线"
+  },
+  "workers.lastSeen": {
+    "message": "最后在线 {time}"
+  },
+  "workers.offlineInventory": {
+    "message": "Worker 已离线，无法获取实时资源信息。"
+  },
+  "workers.legacyInventory": {
+    "message": "该 Worker 运行的是不支持资源详情的旧版 Kode。"
+  },
+  "workers.reading": {
+    "message": "正在读取 Worker 资源…"
+  },
+  "workers.system": {
+    "message": "系统"
+  },
+  "workers.kode": {
+    "message": "Kode"
+  },
+  "workers.uptime": {
+    "message": "已运行 {age}"
+  },
+  "workers.cpu": {
+    "message": "CPU"
+  },
+  "workers.cores": {
+    "message": "{count} 核"
+  },
+  "workers.unknownCpu": {
+    "message": "未知 CPU"
+  },
+  "workers.load": {
+    "message": "负载"
+  },
+  "workers.resources": {
+    "message": "资源"
+  },
+  "workers.observed": {
+    "message": "采集于 {time}"
+  },
+  "workers.memory": {
+    "message": "内存"
+  },
+  "workers.freeOf": {
+    "message": "剩余 {free} / {total}"
+  },
+  "workers.agents": {
+    "message": "Agents"
+  },
+  "workers.availableCount": {
+    "message": "{count} 个可用"
+  },
+  "workers.notInstalled": {
+    "message": "未安装"
+  },
+  "workers.ready": {
+    "message": "可用"
+  },
+  "workers.disabled": {
+    "message": "已禁用"
+  },
+  "workers.missing": {
+    "message": "缺失"
+  },
+  "workers.adbDevices": {
+    "message": "ADB 设备"
+  },
+  "workers.adbReady": {
+    "message": "ADB 可用"
+  },
+  "workers.adbMissing": {
+    "message": "未找到 ADB"
+  },
+  "workers.noDevices": {
+    "message": "没有连接 Android 设备。"
+  },
+  "workers.noAdb": {
+    "message": "ADB 不可用。"
+  },
+  "workers.androidDevice": {
+    "message": "Android 设备"
+  }
 }

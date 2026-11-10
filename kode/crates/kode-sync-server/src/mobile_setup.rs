@@ -105,7 +105,7 @@ async fn dispatch(
     payload: Value,
 ) -> Result<Response, ApiError> {
     let creating = kind == "create_session";
-    let auth = mobile_auth_from_headers(
+    let auth = worker_auth_from_headers(
         state,
         headers,
         if creating {
@@ -116,7 +116,7 @@ async fn dispatch(
     )?;
     let id = format!("setup_{}", Uuid::new_v4().simple());
     // Keep the desktop connection stable through insertion and dispatch.
-    let agent = state.inner.agents.lock().get(&auth.device_id).cloned();
+    let agent = state.inner.agents.lock().get(&auth.worker_id).cloned();
     if creating {
         let key = headers
             .get("Idempotency-Key")
@@ -150,12 +150,12 @@ async fn dispatch(
             ));
         }
         db.execute("INSERT INTO session_creates(id,binding_id,device_id,idempotency_key,payload_json) VALUES(?1,?2,?3,?4,?5)",
-            params![id, auth.binding_id, auth.device_id, key, payload.to_string()])?;
+            params![id, auth.binding_id, auth.worker_id, key, payload.to_string()])?;
     }
     let agent = agent
         .ok_or_else(|| ApiError::Conflict("Desktop is offline; connect it and retry".into()))?;
     let (tx, rx) = oneshot::channel();
-    let pending_key = (auth.device_id.clone(), id.clone());
+    let pending_key = (auth.worker_id.clone(), id.clone());
     state
         .inner
         .setup_pending
@@ -177,14 +177,14 @@ async fn dispatch(
             json!({"error":"desktop_offline","detail":"Desktop disconnected; request was not sent"}),
         );
         if creating {
-            store_result(state, &auth.device_id, &id, &reply)?;
+            store_result(state, &auth.worker_id, &id, &reply)?;
         }
         return Ok(response(reply));
     }
     let result = tokio::time::timeout(Duration::from_secs(50), rx).await;
     drop(guard);
     // Recheck revocation after the desktop read has completed.
-    mobile_auth_from_headers(
+    worker_auth_from_headers(
         state,
         headers,
         if creating {
@@ -200,6 +200,57 @@ async fn dispatch(
             json!({"error": if creating {"creation_unconfirmed"} else {"desktop_timeout"},
             "detail": if creating {"Creation result is unknown. Check again using the same request; do not create another session."}
                 else {"Desktop did not respond. Update the desktop and sync server, then retry."}}),
+        ),
+    }))
+}
+
+/// Read-only inventory is safe to retry and never gets a durable creation
+/// receipt. Authentication and Worker ownership are checked by the caller.
+pub(super) async fn dispatch_worker_inventory(
+    state: &ServerState,
+    device_id: &str,
+) -> Result<Response, ApiError> {
+    let id = format!("inventory_{}", Uuid::new_v4().simple());
+    let agent = state
+        .inner
+        .agents
+        .lock()
+        .get(device_id)
+        .cloned()
+        .ok_or_else(|| ApiError::Conflict("Worker is offline".into()))?;
+    let (tx, rx) = oneshot::channel();
+    let pending_key = (device_id.to_string(), id.clone());
+    state
+        .inner
+        .setup_pending
+        .lock()
+        .insert(pending_key.clone(), tx);
+    let guard = PendingGuard {
+        state: state.clone(),
+        key: pending_key,
+    };
+    let frame = ServerFrame::SetupRequest {
+        request_id: id,
+        kind: "worker_inventory".into(),
+        payload: json!({}),
+        expires_at: now_ms() + COMMAND_TTL_MS,
+    };
+    if agent.tx.send(frame).is_err() {
+        return Ok(response((
+            409,
+            json!({"error":"worker_offline","detail":"Worker disconnected; inventory was not requested"}),
+        )));
+    }
+    let result = tokio::time::timeout(Duration::from_secs(20), rx).await;
+    drop(guard);
+    Ok(response(match result {
+        Ok(Ok(reply)) => reply,
+        _ => (
+            504,
+            json!({
+                "error": "inventory_timeout",
+                "detail": "Worker did not return inventory before the timeout; refresh and retry."
+            }),
         ),
     }))
 }

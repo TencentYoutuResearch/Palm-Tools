@@ -1915,66 +1915,142 @@
   "workspace.files.differentEndpoint": {
     "message": "Copy between different endpoints is not supported."
   },
-  "settings.backends.add.title": { "message": "Add backend" },
-  "settings.backends.add.description": { "message": "Kode checks which AI CLIs are installed. Installed ones are configured in one click; missing ones can be installed for you." },
-  "settings.backends.add.custom": { "message": "Custom backend…" },
-  "settings.backends.add.back": { "message": "Back" },
-  "settings.backends.add.loading": { "message": "Checking installed CLIs…" },
-  "settings.backends.add.ready": { "message": "Ready" },
-  "settings.backends.add.installed": { "message": "Installed" },
-  "settings.backends.add.notInstalled": { "message": "Not installed" },
-  "settings.backends.add.configure": { "message": "Configure" },
-  "settings.backends.add.install": { "message": "Install" },
-  "settings.backends.add.installing": { "message": "Installing…" },
-  "settings.backends.add.configuring": { "message": "Configuring…" },
-  "settings.backends.add.needs": { "message": "Requires {tools}" },
-  "settings.backends.add.manual": { "message": "No automatic installer on this platform" },
-  "settings.backends.add.confirmTitle": { "message": "Install {key}?" },
-  "settings.backends.add.confirmMessage": { "message": "{key} is not installed. Kode will run this command on your computer and then configure it:\n\n{script}" },
-  "settings.backends.add.done": { "message": "{key} is ready" },
-  "settings.backends.add.mcpWarning": { "message": "{key} is ready, but memory MCP setup failed: {error}" },
-  "settings.backends.add.log": { "message": "Install log" },
-  "devices.title": { "message": "Other devices" },
-  "devices.online": { "message": "Online" },
-  "devices.offline": { "message": "Offline" },
-  "devices.offlineHint": { "message": "This device is offline. Open Kode on it to see its sessions." },
-  "devices.loadFailed": { "message": "Couldn't load sessions" },
-  "devices.loading": { "message": "Loading…" },
-  "devices.noSessions": { "message": "No running sessions" },
-  "devices.sessionLabel": { "message": "{session} on {device}" },
-  "devices.close": { "message": "Close" },
-  "devices.emptyHistory": { "message": "No conversation yet" },
-  "devices.you": { "message": "You" },
-  "devices.question": { "message": "Question" },
-  "devices.answerOnDevice": { "message": "Answer this on the device itself." },
-  "devices.answered": { "message": "Answered" },
-  "devices.plan": { "message": "Plan" },
-  "devices.accept": { "message": "Accept" },
-  "devices.reject": { "message": "Reject" },
-  "devices.submit": { "message": "Submit answer" },
-  "devices.submitAll": { "message": "Submit all answers" },
-  "devices.unconfirmed": { "message": "The device did not confirm the answer in time." },
-  "devices.commandFailed": { "message": "Not delivered: {error}" },
-  "devices.exited": { "message": "This session has ended" },
-  "devices.placeholder": { "message": "Message the session on {device}" },
-  "devices.stop": { "message": "Stop" },
-  "devices.send": { "message": "Send" },
-  "devices.status.busy": { "message": "Working" },
-  "devices.status.idle": { "message": "Idle" },
-  "devices.status.starting": { "message": "Starting" },
-  "devices.status.exited": { "message": "Ended" },
-  "devices.relay.unknownSession": { "message": "Session name unavailable" },
-  "devices.relay.sent": { "message": "Sent a message" },
-  "devices.relay.replied": { "message": "Replied to this conversation" },
-  "devices.tool.list": { "message": "Find sessions" },
-  "devices.tool.create": { "message": "Create collaborator session" },
-  "devices.tool.send": { "message": "Send session message" },
-  "devices.tool.reply": { "message": "Reply to session" },
-  "devices.tool.read": { "message": "Read session messages" },
-  "devices.tool.wait": { "message": "Wait for session reply" },
-  "devices.tool.other": { "message": "Session communication" },
-  "devices.tool.failed": { "message": "Call failed" },
-  "devices.tool.running": { "message": "In progress" },
-  "devices.tool.delivery": { "message": "At send: {status}" },
-  "devices.tool.returned": { "message": "Returned" }
+  "workers.title": {
+    "message": "Workers"
+  },
+  "workers.worker": {
+    "message": "Worker"
+  },
+  "workers.monitor": {
+    "message": "Monitor"
+  },
+  "workers.monitorLoading": {
+    "message": "Loading monitor sessions…"
+  },
+  "workers.noMonitorSessions": {
+    "message": "No sessions on this Worker."
+  },
+  "workers.local": {
+    "message": "Local"
+  },
+  "workers.localWorker": {
+    "message": "Local worker"
+  },
+  "workers.deviceDetails": {
+    "message": "Device details"
+  },
+  "workers.syncServer": {
+    "message": "Sync server"
+  },
+  "workers.refresh": {
+    "message": "Refresh Worker directory"
+  },
+  "workers.list": {
+    "message": "Worker list"
+  },
+  "workers.loading": {
+    "message": "Loading Workers…"
+  },
+  "workers.empty": {
+    "message": "No Workers registered on this sync server."
+  },
+  "workers.unknownOs": {
+    "message": "unknown OS"
+  },
+  "workers.current": {
+    "message": "current"
+  },
+  "workers.versionUnavailable": {
+    "message": "version unavailable"
+  },
+  "workers.legacy": {
+    "message": "legacy"
+  },
+  "workers.select": {
+    "message": "Select a Worker."
+  },
+  "workers.online": {
+    "message": "online"
+  },
+  "workers.lastSeen": {
+    "message": "last seen {time}"
+  },
+  "workers.offlineInventory": {
+    "message": "Worker is offline; live inventory is unavailable."
+  },
+  "workers.legacyInventory": {
+    "message": "This Worker is running an older Kode build without inventory support."
+  },
+  "workers.reading": {
+    "message": "Reading Worker inventory…"
+  },
+  "workers.system": {
+    "message": "System"
+  },
+  "workers.kode": {
+    "message": "Kode"
+  },
+  "workers.uptime": {
+    "message": "up {age}"
+  },
+  "workers.cpu": {
+    "message": "CPU"
+  },
+  "workers.cores": {
+    "message": "{count} cores"
+  },
+  "workers.unknownCpu": {
+    "message": "unknown CPU"
+  },
+  "workers.load": {
+    "message": "Load"
+  },
+  "workers.resources": {
+    "message": "Resources"
+  },
+  "workers.observed": {
+    "message": "observed {time}"
+  },
+  "workers.memory": {
+    "message": "Memory"
+  },
+  "workers.freeOf": {
+    "message": "{free} free / {total}"
+  },
+  "workers.agents": {
+    "message": "Agents"
+  },
+  "workers.availableCount": {
+    "message": "{count} available"
+  },
+  "workers.notInstalled": {
+    "message": "not installed"
+  },
+  "workers.ready": {
+    "message": "ready"
+  },
+  "workers.disabled": {
+    "message": "disabled"
+  },
+  "workers.missing": {
+    "message": "missing"
+  },
+  "workers.adbDevices": {
+    "message": "ADB devices"
+  },
+  "workers.adbReady": {
+    "message": "adb ready"
+  },
+  "workers.adbMissing": {
+    "message": "adb missing"
+  },
+  "workers.noDevices": {
+    "message": "No Android devices attached."
+  },
+  "workers.noAdb": {
+    "message": "ADB is not available."
+  },
+  "workers.androidDevice": {
+    "message": "Android device"
+  }
 }

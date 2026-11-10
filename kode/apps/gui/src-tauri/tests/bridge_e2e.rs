@@ -26,6 +26,9 @@ fn test_config() -> Config {
         "echo".to_string(),
         BackendConfig {
             protocol: None,
+            #[cfg(windows)]
+            command: r"C:\Program Files\Git\usr\bin\cat.exe".to_string(),
+            #[cfg(not(windows))]
             command: "/bin/cat".to_string(),
             args: vec![],
             default_model: None,
@@ -624,7 +627,10 @@ async fn fs_list_endpoint_normal_and_security() {
     // /data/workspace、/mnt、/opt 等 HOME 外路径,fs.list 只校验路径有效性。
     let resp = client
         .get(format!("http://{addr}/api/v1/fs/list"))
-        .query(&[("path", "/etc")])
+        .query(&[(
+            "path",
+            if cfg!(windows) { r"C:\Windows" } else { "/etc" },
+        )])
         .headers(auth_headers())
         .send()
         .await

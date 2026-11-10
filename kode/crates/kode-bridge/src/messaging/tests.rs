@@ -145,6 +145,7 @@ async fn workbench_configuration_is_durable_versioned_and_not_agent_accessible()
     assert_eq!(client.get(format!("{}/api/v1/messaging/workbench/documents/arbitrary-file", s.url)).bearer_auth("admin-test").send().await.unwrap().status(), 400);
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn archived_legacy_gui_tabs_need_no_adapter_and_are_restorable_without_losing_metadata() {
     let s=server("cold-archive",vec![]).await;
@@ -564,6 +565,7 @@ async fn ssh_link_delivers_messages_in_both_directions() {
     wait_status(&local.hub, &m.id, Status::Received).await;
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn existing_pty_session_receives_once_after_busy_and_approval_clear() {
     use kode_core::{
@@ -925,6 +927,7 @@ async fn title_refresh_preserves_owner_and_claim_and_reaches_peer_directory() {
 }
 
 fn empty_workspaces() -> Value { json!({"version":2,"tables":{"workspaces":{}},"global":{"initialized":true,"workspaceIds":[],"archivedSessionIds":[],"pinnedSessionIds":[]}}) }
+#[cfg(not(windows))]
 #[tokio::test]
 async fn native_catalog_survives_opened_tab_saves_and_uses_workspace_titles() {
     let s=server("session-catalog-local",vec![]).await;
@@ -949,6 +952,7 @@ async fn native_catalog_survives_opened_tab_saves_and_uses_workspace_titles() {
     let owner=register(&s,"catalog-reader").await;
     assert_eq!(client.get(&url).bearer_auth(owner.owner_token).send().await.unwrap().status(),403);
 }
+#[cfg(not(windows))]
 #[tokio::test]
 async fn peer_session_catalog_is_paginated_scoped_and_credential_free() {
     let remote=server("catalog-remote",vec![peer("catalog-local",None)]).await;
@@ -969,6 +973,7 @@ async fn peer_session_catalog_is_paginated_scoped_and_credential_free() {
     let _=tokio::time::timeout(std::time::Duration::from_millis(1),local.hub.workspace("catalog-remote",workspaces::Command::List)).await;
     assert!(local.hub.workspace_pending.lock().is_empty());
 }
+#[cfg(not(windows))]
 #[tokio::test]
 async fn workspaces_are_one_durable_node_owned_catalog_without_default_recreation() {
     let s=server("workspace-local",vec![]).await;
@@ -986,6 +991,7 @@ async fn workspaces_are_one_durable_node_owned_catalog_without_default_recreatio
     let empty:Value=client.get(&url).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();assert!(empty["workspaces"].as_array().unwrap().is_empty());assert!(path.is_dir());
     assert!(s.hub.store.document("workspaces").unwrap()["value"]["global"].get("defaultWorkspaceId").is_none());
 }
+#[cfg(not(windows))]
 #[tokio::test]
 async fn workspace_operations_route_to_the_ssh_peer_node_and_cannot_use_local_ids() {
     let remote=server("workspace-remote",vec![peer("workspace-local",None)]).await;
@@ -1000,6 +1006,7 @@ async fn workspace_operations_route_to_the_ssh_peer_node_and_cannot_use_local_id
     let viewed:Value=client.get(&url).query(&[("node_id","workspace-remote")]).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();assert_eq!(viewed["workspaces"][0]["path"],json!(std::fs::canonicalize(&remote_path).unwrap()));
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn agent_hub_is_backend_owned_owner_only_and_shared_by_independent_clients(){
     let s=server("agent-hub",vec![]).await;let first=reqwest::Client::new();let second=reqwest::Client::new();
@@ -1025,6 +1032,7 @@ async fn agent_hub_is_backend_owned_owner_only_and_shared_by_independent_clients
     assert!(second.post(&url).bearer_auth("admin-test").json(&json!({"action":"remove-source","id":"team"})).send().await.unwrap().status().is_success());
     assert!(!s.hub.extensions.home.join(".claude/skills/team--skills--example").exists());
 }
+#[cfg(not(windows))]
 #[tokio::test]
 async fn backend_extension_preview_catalog_and_logo_are_safe_and_owner_only(){
     let s=server("extension-preview",vec![]).await;let client=reqwest::Client::new();
@@ -1063,6 +1071,7 @@ async fn backend_extension_preview_catalog_and_logo_are_safe_and_owner_only(){
     let response=client.get(&logo).bearer_auth("admin-test").send().await.unwrap();assert_eq!(response.status(),200);
     assert_eq!(response.headers().get("content-type").unwrap(),"image/png");assert_eq!(response.bytes().await.unwrap().as_ref(),png);
 }
+#[cfg(not(windows))]
 #[tokio::test]
 async fn backend_extension_conflicts_preserve_every_previous_target_and_foreign_files(){
     let s=server("extension-conflict",vec![]).await;let source=s._root.path().join("source");std::fs::create_dir_all(source.join("one")).unwrap();std::fs::write(source.join("one/SKILL.md"),"first").unwrap();

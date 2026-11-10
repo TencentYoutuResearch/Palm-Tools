@@ -104,10 +104,14 @@ class GatewaySession {
     );
   }
 
-  Future<Map<String, String>> websocketHeaders(String bearerToken) async {
+  Future<Map<String, String>> websocketHeaders(
+    String bearerToken,
+    String workerId,
+  ) async {
     await ensureReady();
     final headers = <String, String>{
       HttpHeaders.authorizationHeader: 'Bearer $bearerToken',
+      'X-Kode-Worker-Id': workerId,
     };
     final cookie = _cookieHeader;
     if (cookie.isNotEmpty) headers[HttpHeaders.cookieHeader] = cookie;

@@ -301,6 +301,89 @@ impl CloudSyncManager {
         status
     }
 
+    pub async fn list_workers(&self) -> Result<Value, String> {
+        let (server_url, token) = self.device_http_context()?;
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/workers"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker directory response: {error}"))
+    }
+
+    pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
+        if !worker_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let (server_url, token) = self.device_http_context()?;
+        let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/workers/{worker}/inventory"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker inventory response: {error}"))
+    }
+
+    pub async fn worker_sessions(&self, worker_id: &str) -> Result<Value, String> {
+        if !worker_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let (server_url, token) = self.device_http_context()?;
+        let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/workers/{worker}/sessions"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker session response: {error}"))
+    }
+
+    fn device_http_context(&self) -> Result<(String, String), String> {
+        let config = self.inner.config.lock();
+        let backend = config
+            .active_backend()
+            .ok_or_else(|| "cloud sync server is not configured".to_string())?;
+        let token = backend
+            .device_token
+            .clone()
+            .ok_or_else(|| "Worker is not registered with the sync server".to_string())?;
+        Ok((backend.server_url.clone(), token))
+    }
+
     /// Emails a sign-in code for the account relay at `server_url`.
     pub async fn account_send_code(&self, server_url: String, email: String) -> Result<u64, String> {
         let server_url = normalize_server_url(&server_url)?;
@@ -957,6 +1040,7 @@ impl CloudSyncManager {
             status.state = idle_state(kind).into();
             status.last_error = None;
         }
+        self.send_metadata_hello(&mut socket).await?;
         let mut setup_tasks = futures_util::stream::FuturesUnordered::<
             tokio::task::JoinHandle<(String, u16, Value)>,
         >::new();
@@ -1025,7 +1109,10 @@ impl CloudSyncManager {
                                     ).await?;
                                 }
                                 ServerFrame::SetupRequest { request_id, kind, payload, expires_at } => {
-                                    if !sync_enabled || expires_at <= now_ms() || setup_tasks.len() >= 8 {
+                                    if (!sync_enabled && kind != "worker_inventory")
+                                        || expires_at <= now_ms()
+                                        || setup_tasks.len() >= 8
+                                    {
                                         send_json(&mut socket, &json!({
                                             "type":"setup.result", "request_id": request_id,
                                             "boot_id":self.inner.boot_id, "status":409,
@@ -1122,10 +1209,34 @@ impl CloudSyncManager {
                 "type": "hello",
                 "boot_id": self.inner.boot_id,
                 "sessions": sessions,
+                "kode_version": env!("CARGO_PKG_VERSION"),
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "capabilities": crate::worker_inventory::worker_capabilities(),
             }),
         )
         .await?;
         Ok(session_ids)
+    }
+
+    async fn send_metadata_hello<S>(&self, socket: &mut S) -> Result<(), String>
+    where
+        S: SinkExt<Message> + Unpin,
+        S::Error: std::fmt::Display,
+    {
+        send_json(
+            socket,
+            &json!({
+                "type": "hello",
+                "boot_id": self.inner.boot_id,
+                "sessions": [],
+                "kode_version": env!("CARGO_PKG_VERSION"),
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "capabilities": crate::worker_inventory::worker_capabilities(),
+            }),
+        )
+        .await
     }
 
     async fn send_snapshot_and_history<S>(&self, socket: &mut S) -> Result<HashSet<u64>, String>

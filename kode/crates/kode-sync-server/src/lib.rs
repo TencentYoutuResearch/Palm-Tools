@@ -36,7 +36,13 @@ mod mobile_setup;
 const PAIRING_TTL_MS: u64 = 2 * 60 * 1000;
 const COMMAND_TTL_MS: u64 = 30 * 1000;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
-const DEFAULT_SCOPES: [&str; 3] = ["sessions.read", "sessions.content.read", "sessions.send"];
+const DEFAULT_SCOPES: [&str; 4] = [
+    "sessions.read",
+    "sessions.content.read",
+    "sessions.send",
+    "workers.monitor",
+];
+const WORKER_HEADER: &str = "x-kode-worker-id";
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -52,6 +58,8 @@ pub struct ServerState {
 struct Inner {
     db: parking_lot::Mutex<Connection>,
     public_url: String,
+    allow_shared_inventory: parking_lot::Mutex<bool>,
+    mirror_all_workers: bool,
     agents: parking_lot::Mutex<HashMap<String, AgentConnection>>,
     setup_pending: parking_lot::Mutex<mobile_setup::Pending>,
     mobile_buses: parking_lot::Mutex<HashMap<String, broadcast::Sender<CloudEnvelope>>>,
@@ -61,6 +69,10 @@ struct Inner {
 struct AgentConnection {
     connection_id: String,
     tx: mpsc::UnboundedSender<ServerFrame>,
+    kode_version: Option<String>,
+    os: Option<String>,
+    arch: Option<String>,
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +213,14 @@ impl ServerState {
             inner: Arc::new(Inner {
                 db: parking_lot::Mutex::new(db),
                 public_url: normalize_server_url(&config.public_url)?,
+                allow_shared_inventory: parking_lot::Mutex::new(
+                    std::env::var("KODE_SYNC_ALLOW_SHARED_INVENTORY")
+                        .ok()
+                        .is_some_and(|value| value == "1"),
+                ),
+                mirror_all_workers: std::env::var("KODE_SYNC_MIRROR_ALL_WORKERS")
+                    .ok()
+                    .is_some_and(|value| value == "1"),
                 agents: parking_lot::Mutex::new(HashMap::new()),
                 setup_pending: parking_lot::Mutex::new(HashMap::new()),
                 mobile_buses: parking_lot::Mutex::new(HashMap::new()),
@@ -220,6 +240,12 @@ impl ServerState {
         let _ = self.mobile_bus(device_id).send(env);
     }
 
+    fn publish_all_mobile(&self, env: CloudEnvelope) {
+        for bus in self.inner.mobile_buses.lock().values() {
+            let _ = bus.send(env.clone());
+        }
+    }
+
     fn binding_count(&self, device_id: &str) -> Result<u64, ApiError> {
         let db = self.inner.db.lock();
         let count = db.query_row(
@@ -228,6 +254,10 @@ impl ServerState {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(count.max(0) as u64)
+    }
+
+    fn sync_enabled(&self, device_id: &str) -> Result<bool, ApiError> {
+        Ok(self.inner.mirror_all_workers || self.binding_count(device_id)? > 0)
     }
 
     fn device_authorized(&self, device_id: &str, token: &str) -> Result<bool, ApiError> {
@@ -287,6 +317,15 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/devices/register", post(register_device))
         .route("/api/v1/devices/:id/pairings", post(create_pairing))
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
+        .route("/api/v1/workers", get(list_workers))
+        .route(
+            "/api/v1/workers/:worker_id/inventory",
+            get(get_worker_inventory),
+        )
+        .route(
+            "/api/v1/workers/:worker_id/sessions",
+            get(list_worker_sessions),
+        )
         .route("/api/v1/agent/ws", get(agent_ws_upgrade))
         .route("/api/v1/bindings/current", delete(revoke_current_binding))
         .route(
@@ -383,6 +422,135 @@ async fn register_device(
         device_id,
         device_token,
     }))
+}
+
+/// Resolve either a monitor binding or a Worker's own device bearer to the
+/// Worker it may inspect. Worker list uses a read scope; inventory still
+/// requires the selected Worker id to equal this identity.
+fn worker_viewer_from_headers(
+    state: &ServerState,
+    headers: &HeaderMap,
+    scope: &str,
+) -> Result<String, ApiError> {
+    let token = bearer(headers).ok_or(ApiError::Unauthorized)?;
+    match state.mobile_auth(&token, scope) {
+        Ok(auth) => Ok(auth.device_id),
+        Err(ApiError::Unauthorized) => {
+            let db = state.inner.db.lock();
+            db.query_row(
+                "SELECT id FROM devices WHERE token_hash=?1 AND revoked_at IS NULL",
+                [token_hash(&token)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(ApiError::Unauthorized)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn touch_worker(state: &ServerState, device_id: &str) -> Result<(), ApiError> {
+    state.inner.db.lock().execute(
+        "UPDATE devices SET last_seen_at=?1 WHERE id=?2 AND revoked_at IS NULL",
+        params![now_ms() as i64, device_id],
+    )?;
+    Ok(())
+}
+
+async fn list_workers(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.read")?;
+    let rows = {
+        let db = state.inner.db.lock();
+        let mut stmt =
+            db.prepare("SELECT id,name,last_seen_at FROM devices WHERE revoked_at IS NULL ORDER BY name,id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let agents = state.inner.agents.lock();
+    let workers = rows
+        .into_iter()
+        .map(|(worker_id, name, last_seen_at)| {
+            let agent = agents.get(&worker_id);
+            json!({
+                "worker_id": worker_id,
+                "name": name,
+                "online": agent.is_some(),
+                "last_seen_at": last_seen_at,
+                "kode_version": agent.and_then(|value| value.kode_version.clone()),
+                "os": agent.and_then(|value| value.os.clone()),
+                "arch": agent.and_then(|value| value.arch.clone()),
+                "inventory_capable": agent.is_some_and(|value| {
+                    value.capabilities.iter().any(|item| item == "inventory.v1")
+                }),
+                "bound": worker_id == viewer_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "workers": workers })))
+}
+
+async fn get_worker_inventory(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(worker_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.content.read")?;
+    if viewer_id != worker_id && !*state.inner.allow_shared_inventory.lock() {
+        return Err(ApiError::NotFound(format!("worker {worker_id}")));
+    }
+    let agent = state
+        .inner
+        .agents
+        .lock()
+        .get(&worker_id)
+        .cloned()
+        .ok_or_else(|| ApiError::Conflict("Worker is offline".into()))?;
+    if !agent
+        .capabilities
+        .iter()
+        .any(|item| item == "inventory.v1")
+    {
+        return Err(ApiError::Conflict(
+            "Worker does not support inventory.v1; update Kode on that Worker".into(),
+        ));
+    }
+    mobile_setup::dispatch_worker_inventory(&state, &worker_id).await
+}
+
+async fn list_worker_sessions(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(worker_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.read")?;
+    if viewer_id != worker_id && !*state.inner.allow_shared_inventory.lock() {
+        return Err(ApiError::NotFound(format!("worker {worker_id}")));
+    }
+    let db = state.inner.db.lock();
+    let mut stmt = db.prepare(
+        "SELECT dto_json FROM sessions
+         WHERE device_id=?1
+           AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'
+         ORDER BY updated_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map([worker_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let sessions = rows
+        .into_iter()
+        .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "sessions": sessions })))
 }
 
 #[derive(Deserialize)]
@@ -556,14 +724,15 @@ async fn revoke_current_binding(
     let binding_count = state.binding_count(&auth.device_id)?;
     if let Some(agent) = state.inner.agents.lock().get(&auth.device_id).cloned() {
         let _ = agent.tx.send(ServerFrame::BindingChanged {
-            sync_enabled: binding_count > 0,
+            sync_enabled: state.sync_enabled(&auth.device_id)?,
             binding_count,
         });
     }
-    state.publish(
-        &auth.device_id,
-        CloudEnvelope::new(0, "binding.revoked", json!({"binding_id": auth.binding_id})),
-    );
+    state.publish_all_mobile(CloudEnvelope::new(
+        0,
+        "binding.revoked",
+        json!({"binding_id": auth.binding_id}),
+    ));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -599,6 +768,14 @@ enum AgentFrame {
     Hello {
         boot_id: String,
         sessions: Vec<AgentSession>,
+        #[serde(default)]
+        kode_version: Option<String>,
+        #[serde(default)]
+        os: Option<String>,
+        #[serde(default)]
+        arch: Option<String>,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     #[serde(rename = "event")]
     Event {
@@ -697,15 +874,20 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
             AgentConnection {
                 connection_id: connection_id.clone(),
                 tx: tx.clone(),
+                kode_version: None,
+                os: None,
+                arch: None,
+                capabilities: Vec::new(),
             },
         );
     }
     let binding_count = state.binding_count(&device_id).unwrap_or(0);
+    let sync_enabled = state.sync_enabled(&device_id).unwrap_or(false);
     let _ = tx.send(ServerFrame::Hello {
-        sync_enabled: binding_count > 0,
+        sync_enabled,
         binding_count,
     });
-    if binding_count > 0 {
+    if sync_enabled {
         if let Ok(pending) = pending_commands(&state, &device_id) {
             for frame in pending {
                 let _ = tx.send(frame);
@@ -761,8 +943,25 @@ fn handle_agent_frame(
     tx: &mpsc::UnboundedSender<ServerFrame>,
 ) -> Result<(), ApiError> {
     match frame {
-        AgentFrame::Hello { boot_id, sessions } => {
-            if state.binding_count(device_id)? == 0 {
+        AgentFrame::Hello {
+            boot_id,
+            sessions,
+            kode_version,
+            os,
+            arch,
+            capabilities,
+        } => {
+            {
+                let mut agents = state.inner.agents.lock();
+                if let Some(agent) = agents.get_mut(device_id) {
+                    agent.kode_version = kode_version;
+                    agent.os = os;
+                    agent.arch = arch;
+                    agent.capabilities = capabilities;
+                }
+            }
+            touch_worker(state, device_id)?;
+            if !state.sync_enabled(device_id)? {
                 return Ok(());
             }
             sync_session_snapshot(state, device_id, &boot_id, sessions)?;
@@ -775,7 +974,7 @@ fn handle_agent_frame(
             local_session_id,
             event,
         } => {
-            if state.binding_count(device_id)? == 0 {
+            if !state.sync_enabled(device_id)? {
                 return Ok(());
             }
             persist_agent_event(state, device_id, &boot_id, local_session_id, event)?;
@@ -794,6 +993,7 @@ fn handle_agent_frame(
             mobile_setup::complete(state, device_id, &request_id, &boot_id, status, body)?;
         }
         AgentFrame::Ping => {
+            touch_worker(state, device_id)?;
             let _ = tx.send(ServerFrame::Pong);
         }
     }
@@ -1058,18 +1258,71 @@ struct BindingAuth {
     scopes: Vec<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct WorkerAuth {
+    pub(crate) binding_id: String,
+    pub(crate) bound_device_id: String,
+    pub(crate) worker_id: String,
+    pub(crate) scopes: Vec<String>,
+}
+
+pub(crate) fn worker_auth_from_headers(
+    state: &ServerState,
+    headers: &HeaderMap,
+    scope: &str,
+) -> Result<WorkerAuth, ApiError> {
+    let auth = mobile_auth_from_headers(state, headers, scope)?;
+    let selected = headers
+        .get(WORKER_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&auth.device_id)
+        .to_string();
+    if selected.len() > 200 {
+        return Err(ApiError::BadRequest("invalid Worker id".into()));
+    }
+    if selected != auth.device_id {
+        if !auth.scopes.iter().any(|item| item == "workers.monitor") {
+            return Err(ApiError::Forbidden(
+                "binding does not grant workers.monitor".into(),
+            ));
+        }
+        let exists = state
+            .inner
+            .db
+            .lock()
+            .query_row(
+                "SELECT 1 FROM devices WHERE id=?1 AND revoked_at IS NULL",
+                [&selected],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(ApiError::NotFound(format!("Worker {selected}")));
+        }
+    }
+    Ok(WorkerAuth {
+        binding_id: auth.binding_id,
+        bound_device_id: auth.device_id,
+        worker_id: selected,
+        scopes: auth.scopes,
+    })
+}
+
 async fn list_sessions(
     axum::extract::State(state): axum::extract::State<ServerState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let auth = mobile_auth_from_headers(&state, &headers, "sessions.read")?;
+    let auth = worker_auth_from_headers(&state, &headers, "sessions.read")?;
     let db = state.inner.db.lock();
     let mut stmt = db.prepare(
         "SELECT dto_json FROM sessions
          WHERE device_id=?1 AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'
          ORDER BY updated_at DESC, id DESC",
     )?;
-    let rows = stmt.query_map([auth.device_id], |row| row.get::<_, String>(0))?;
+    let rows = stmt.query_map([auth.worker_id], |row| row.get::<_, String>(0))?;
     let mut sessions = Vec::new();
     for row in rows {
         let raw = row?;
@@ -1085,14 +1338,14 @@ async fn get_session(
     Path(session_id): Path<i64>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let auth = mobile_auth_from_headers(&state, &headers, "sessions.read")?;
+    let auth = worker_auth_from_headers(&state, &headers, "sessions.read")?;
     let db = state.inner.db.lock();
     let raw = db
         .query_row(
             "SELECT dto_json FROM sessions
              WHERE id=?1 AND device_id=?2
                AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
-            params![session_id, auth.device_id],
+            params![session_id, auth.worker_id],
             |row| row.get::<_, String>(0),
         )
         .optional()?
@@ -1114,13 +1367,13 @@ async fn get_history(
     Query(query): Query<HistoryQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let auth = mobile_auth_from_headers(&state, &headers, "sessions.content.read")?;
+    let auth = worker_auth_from_headers(&state, &headers, "sessions.content.read")?;
     let limit = query.limit.unwrap_or(1000).clamp(1, 2000) as i64;
     let db = state.inner.db.lock();
     let owns = db
         .query_row(
             "SELECT 1 FROM sessions WHERE id=?1 AND device_id=?2",
-            params![session_id, auth.device_id],
+            params![session_id, auth.worker_id],
             |_| Ok(()),
         )
         .optional()?
@@ -1298,7 +1551,7 @@ fn dispatch_mobile_command(
     kind: &str,
     payload: Value,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let auth = mobile_auth_from_headers(state, headers, "sessions.send")?;
+    let auth = worker_auth_from_headers(state, headers, "sessions.send")?;
     let idempotency_key = headers
         .get("Idempotency-Key")
         .and_then(|v| v.to_str().ok())
@@ -1311,7 +1564,7 @@ fn dispatch_mobile_command(
         .inner
         .agents
         .lock()
-        .get(&auth.device_id)
+        .get(&auth.worker_id)
         .cloned()
         .ok_or_else(|| ApiError::Conflict("desktop is offline; message was not queued".into()))?;
     let now = now_ms();
@@ -1340,7 +1593,7 @@ fn dispatch_mobile_command(
                     "SELECT local_id FROM sessions
                      WHERE id=?1 AND device_id=?2
                        AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
-                    params![session_id, auth.device_id],
+                    params![session_id, auth.worker_id],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?
@@ -1354,7 +1607,7 @@ fn dispatch_mobile_command(
                 params![
                     command_id,
                     auth.binding_id,
-                    auth.device_id,
+                    auth.worker_id,
                     session_id,
                     local_id,
                     idempotency_key,
@@ -1383,7 +1636,7 @@ fn dispatch_mobile_command(
     if agent.tx.send(frame).is_err() {
         update_command_result(
             state,
-            &auth.device_id,
+            &auth.worker_id,
             &command_id,
             "failed",
             Some("desktop connection closed"),
@@ -1393,7 +1646,7 @@ fn dispatch_mobile_command(
         ));
     }
     state.publish(
-        &auth.device_id,
+        &auth.worker_id,
         CloudEnvelope::new(
             session_id,
             "command.status",
@@ -1481,24 +1734,24 @@ async fn mobile_ws_upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    let token = bearer(&headers).ok_or(ApiError::Unauthorized)?;
-    let auth = state.mobile_auth(&token, "sessions.content.read")?;
+    let auth = worker_auth_from_headers(&state, &headers, "sessions.content.read")?;
     Ok(ws
         .on_upgrade(move |socket| mobile_socket(socket, state, auth))
         .into_response())
 }
 
-async fn mobile_socket(socket: WebSocket, state: ServerState, auth: BindingAuth) {
-    let mut events = state.mobile_bus(&auth.device_id).subscribe();
+async fn mobile_socket(socket: WebSocket, state: ServerState, auth: WorkerAuth) {
+    let mut events = state.mobile_bus(&auth.worker_id).subscribe();
     let (mut sink, mut source) = socket.split();
     let hello = CloudEnvelope::new(
         0,
         "connection.hello",
         json!({
             "server_kind": "kode-sync-server",
-            "device_id": auth.device_id,
+            "device_id": auth.worker_id,
+            "bound_device_id": auth.bound_device_id,
             "scopes": auth.scopes,
-            "desktop_online": state.inner.agents.lock().contains_key(&auth.device_id),
+            "desktop_online": state.inner.agents.lock().contains_key(&auth.worker_id),
         }),
     );
     if let Ok(raw) = serde_json::to_string(&hello) {
