@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1.7
+# Multi-account kode relay. Stateless: no volume, no database.
+FROM rust:1.88-bookworm AS builder
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p kode-relay
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --uid 10001 kode
+COPY --from=builder /src/target/release/kode-relay /usr/local/bin/kode-relay
+USER kode
+EXPOSE 8080
+# KODE_RELAY_ISSUER must be set at deploy time, e.g.
+#   https://<env-id>.api.tcloudbasegateway.com
+ENV PORT=8080 \
+    RUST_LOG=info,kode_relay=info
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${PORT}/api/v1/healthz" || exit 1
+ENTRYPOINT ["/usr/local/bin/kode-relay"]

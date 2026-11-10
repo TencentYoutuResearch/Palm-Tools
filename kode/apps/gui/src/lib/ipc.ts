@@ -426,6 +426,50 @@ export const ipc = {
     invoke<WorkerSessionResponse>('cloud_sync_worker_sessions', { workerId }),
   cloudSyncDeploy: (req: CloudDeployReq) =>
     invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
+  cloudAccountSendCode: (serverUrl: string, email: string) =>
+    invoke<{ expires_in: number }>('cloud_account_send_code', { serverUrl, email }),
+  cloudAccountSignIn: (code: string) =>
+    invoke<CloudSyncStatus>('cloud_account_sign_in', { code }),
+  cloudAccountSignOut: (backendId: string) =>
+    invoke<CloudSyncStatus>('cloud_account_sign_out', { backendId }),
+  cloudAccountMethods: (serverUrl: string) =>
+    invoke<{ methods: LoginMethodInfo[] }>('cloud_account_methods', { serverUrl }),
+  cloudAccountLinked: () => invoke<{ linked: string[] }>('cloud_account_linked'),
+  cloudPalmxStart: (purpose: 'sign_in' | 'bind', serverUrl?: string) =>
+    invoke<PalmxProgress>('cloud_palmx_start', { purpose, serverUrl: serverUrl ?? null }),
+  cloudPalmxPoll: () => invoke<PalmxProgress>('cloud_palmx_poll'),
+  cloudPalmxCancel: () => invoke<unknown>('cloud_palmx_cancel'),
+  cloudPalmxUnbind: () => invoke<unknown>('cloud_palmx_unbind'),
+  /** Runtime default relay from KODE_RELAY_URL or config.toml `[account]`. */
+  accountDefaultRelay: () => invoke<string>('account_default_relay'),
+  cloudAccountProfile: () => invoke<CloudSyncStatus>('cloud_account_profile'),
+  cloudAccountSetName: (name: string) => invoke<CloudSyncStatus>('cloud_account_set_name', { name }),
+  /** Other desktops on the signed-in account, through the relay's phone API. */
+  accountDevices: () =>
+    invoke<{ devices: AccountDevice[]; self_device_id: string }>('cloud_account_devices', { request: { action: 'devices' } }),
+  accountDeviceSessions: (deviceId: string) =>
+    invoke<{ sessions: AccountDeviceSession[] }>('cloud_account_devices', { request: { action: 'sessions', device_id: deviceId } }),
+  accountDeviceHistory: (deviceId: string, sessionId: number, limit = 500) =>
+    invoke<{ events: AccountDeviceEvent[] }>('cloud_account_devices', {
+      request: { action: 'history', device_id: deviceId, session_id: sessionId, from: 0, limit },
+    }),
+  accountDeviceCommand: (
+    deviceId: string,
+    sessionId: number,
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response',
+    body: Record<string, unknown> = {},
+  ) =>
+    invoke<{ command_id?: string; status?: string }>('cloud_account_devices', {
+      request: { action: 'command', device_id: deviceId, session_id: sessionId, op, body },
+    }),
+  /** Runs the relay's palm capture page in a camera window on this Mac. */
+  palmCapture: (serverUrl: string, appId: string, sdkOrigin: string | null, locale: string) =>
+    invoke<PalmCaptureResult>('palm_capture', { serverUrl, appId, sdkOrigin, locale }),
+  cloudPalmSignIn: (serverUrl: string, sessionId: string) =>
+    invoke<CloudSyncStatus>('cloud_palm_sign_in', { serverUrl, sessionId }),
+  cloudPalmStart: (serverUrl: string) => invoke<PalmxProgress>('cloud_palm_start', { serverUrl }),
+  cloudPalmPoll: () => invoke<PalmxProgress>('cloud_palm_poll'),
+  cloudPalmCancel: () => invoke<unknown>('cloud_palm_cancel'),
 
   // 路径配置(GUI 启动 banner / 命令面板用)
   getPathsConfig: () => invoke<PathsConfig>('get_paths_config'),
@@ -628,7 +672,37 @@ export interface BackendSaveRequest {
   enabled: boolean | null
 }
 
+/// 后端 `backend_install::CatalogEntry` 镜像:Add 选择器的一行。
+export interface BackendCatalogEntry {
+  key: string
+  command: string
+  /** null = 本机未安装 */
+  command_path: string | null
+  configured: boolean
+  enabled: boolean
+  read_only: boolean
+  /** 本平台将执行的安装脚本(macOS/Linux 走登录 shell,Windows 走 PowerShell) */
+  install_script: string | null
+  /** 所有安装方式缺的前置工具;为空且无 install_script = 本平台无自动安装 */
+  install_missing: string[]
+}
+
+export interface BackendConfigureOutcome {
+  key: string
+  command_path: string
+  /** memory MCP 接入失败原因;backend 本身已可用 */
+  mcp_warning: string | null
+}
+
 export const backendAdminIpc = {
+  /** 全部已知 CLI + 本机安装/配置状态 + 本平台安装方式 */
+  catalog: () => invoke<BackendCatalogEntry[]>('backend_catalog'),
+  /** 安装(未装时)并配置;安装输出经 onInstallLog 推送 */
+  install: (key: string) => invoke<BackendConfigureOutcome>('backend_install', { key }),
+  /** 已安装的 CLI:启用 + 接入 memory MCP */
+  configure: (key: string) => invoke<BackendConfigureOutcome>('backend_configure', { key }),
+  onInstallLog: (cb: (log: { key: string; line: string }) => void): Promise<UnlistenFn> =>
+    listen<{ key: string; line: string }>('backend-install-log', (e) => cb(e.payload)),
   /** 扫 PATH 上的内置已知 candidate(codebuddy / claude / claude-internal / codex) */
   detect: () => invoke<DetectedBackend[]>('detect_known_backends'),
   /** 创建或更新 backend。保存后新 tab 选择列表立即刷新。 */
@@ -885,11 +959,45 @@ export interface CloudSyncStatus {
   device_id: string | null
   active_backend_id: string | null
   backends: CloudBackendSummary[]
-  state: 'not_configured' | 'connecting' | 'waiting_for_pairing' | 'syncing' | 'offline' | string
+  state: 'not_configured' | 'connecting' | 'waiting_for_pairing' | 'standby' | 'syncing' | 'offline' | string
   connected: boolean
   sync_enabled: boolean
   binding_count: number
   last_error: string | null
+  /** Signed-in account of the active backend, when it is an account relay. */
+  account_email?: string | null
+  account_label?: string | null
+  account_method?: LoginMethodId | null
+  /** Display name from the account profile, when set. */
+  account_name?: string | null
+  /** HTTPS avatar URL from the account profile, when set. */
+  account_picture?: string | null
+}
+
+/** Sign-in methods a relay can offer; unknown ids are ignored by the UI. */
+export type LoginMethodId = 'email' | 'palmx' | 'palm'
+
+export interface LoginMethodInfo {
+  id: string
+  app_id?: string
+  base_url?: string
+  /** Palm H5 SDK loader (palm). */
+  sdk_url?: string
+}
+
+/** What the palm capture page reports; code 0 with a sessionId is a scan. */
+export interface PalmCaptureResult {
+  code: number
+  message?: string
+  data?: { sessionId?: string } | null
+}
+
+export interface PalmxProgress {
+  state: 'pending' | 'scanned' | 'confirmed' | 'denied' | 'expired' | string
+  qr_payload: string
+  /** Epoch seconds. */
+  expires_at: number
+  done: boolean
 }
 
 export interface WorkerDirectoryEntry {
@@ -994,6 +1102,11 @@ export interface CloudBackendSummary {
   remote_deploy_dir: string | null
   managed: boolean
   active: boolean
+  kind: 'self_hosted' | 'account_relay'
+  account_email: string | null
+  account_label: string | null
+  account_method: LoginMethodId | null
+  account_picture: string | null
 }
 
 export interface CloudDeployReq {
@@ -1507,3 +1620,16 @@ export const agentHub = {
   handoff: (payload: { source_session_id: string; source_runtime: 'gui' | 'dsh'; profile_id: string; target_runtime: 'gui' | 'dsh'; request_id: string }) =>
     invoke<{ sessionId: string; runtime: 'gui' | 'dsh'; id: number; sourceId: number }>('shared_session_handoff', { payload }),
 }
+
+export type AccountDevice = { device_id: string; name: string; online: boolean; last_seen_at: number | null }
+export type AccountDeviceSession = {
+  id: number
+  backend_key: string
+  title: string | null
+  model: string | null
+  status: string
+  cwd: string
+  session_uuid?: string | null
+  transport_kind?: string
+}
+export type AccountDeviceEvent = { type: string; ts: number; session_id?: number; payload: Record<string, any> }

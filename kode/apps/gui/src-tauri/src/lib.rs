@@ -14,6 +14,7 @@
 mod app_updates;
 mod attachments;
 mod backend_admin;
+mod backend_install;
 mod bridge;
 mod cloud_deploy;
 mod cloud_sync;
@@ -26,6 +27,7 @@ mod memory;
 mod memory_mcp;
 mod model_monitor;
 mod model_usage;
+mod palm_capture;
 mod persistence;
 mod plugins;
 mod screenshot;
@@ -89,8 +91,6 @@ pub fn run() {
     let builder = if std::env::var("KODE_DISABLE_SINGLE_INSTANCE").as_deref() == Ok("1") {
         builder
     } else {
-        // Must be the first plugin. A second GUI process would otherwise restore
-        // and persist its own tab list into the same state.json.
         builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
@@ -203,6 +203,24 @@ pub fn run() {
             cloud_sync::cloud_sync_workers,
             cloud_sync::cloud_sync_worker_inventory,
             cloud_sync::cloud_sync_worker_sessions,
+            cloud_sync::cloud_account_send_code,
+            cloud_sync::cloud_account_sign_in,
+            cloud_sync::cloud_account_sign_out,
+            cloud_sync::cloud_account_methods,
+            cloud_sync::cloud_account_linked,
+            cloud_sync::cloud_palmx_start,
+            cloud_sync::cloud_palmx_poll,
+            cloud_sync::cloud_palmx_cancel,
+            cloud_sync::cloud_palmx_unbind,
+            cloud_sync::account_default_relay,
+            cloud_sync::cloud_account_profile,
+            cloud_sync::cloud_account_set_name,
+            cloud_sync::cloud_account_devices,
+            palm_capture::palm_capture,
+            cloud_sync::cloud_palm_sign_in,
+            cloud_sync::cloud_palm_start,
+            cloud_sync::cloud_palm_poll,
+            cloud_sync::cloud_palm_cancel,
             cloud_deploy::deploy_cloud_sync,
             commands::get_paths_config,
             commands::set_session_cwd,
@@ -285,6 +303,9 @@ pub fn run() {
             backend_admin::backend_save,
             backend_admin::backend_delete,
             backend_admin::backend_set_enabled,
+            backend_install::backend_catalog,
+            backend_install::backend_install,
+            backend_install::backend_configure,
             commands::list_all_backends,
             // Phase 11.4 远端 endpoint 配置
             endpoints::endpoint_list,

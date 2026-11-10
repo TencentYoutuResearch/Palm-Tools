@@ -40,6 +40,7 @@ fn test_config() -> Config {
         default_backend: "echo".to_string(),
         backends,
         ui: UiConfig::default(),
+        account: Default::default(),
     }
 }
 

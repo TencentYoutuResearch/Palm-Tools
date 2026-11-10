@@ -22,8 +22,11 @@
   import { outsidePressClose } from './outside_close'
   import { currentLocale, t } from './i18n'
 
-  type Props = { onClose: () => void }
-  let { onClose }: Props = $props()
+  /** `embedded` renders the body inside Settings: no backdrop, no Escape
+   *  handling (Settings owns both), and `onChanged` replaces close-time
+   *  refreshes of the status-bar endpoint list. */
+  type Props = { onClose?: () => void; embedded?: boolean; onChanged?: () => void }
+  let { onClose = () => {}, embedded = false, onChanged }: Props = $props()
 
   let endpoints = $state<EndpointSummary[]>([])
   let loadError = $state('')
@@ -69,7 +72,7 @@
   })
 
   onMount(() => {
-    window.addEventListener('keydown', onKeyCapture, { capture: true })
+    if (!embedded) window.addEventListener('keydown', onKeyCapture, { capture: true })
     refresh()
   })
 
@@ -77,9 +80,13 @@
     window.removeEventListener('keydown', onKeyCapture, { capture: true })
   })
 
+  let loadedOnce = false
   async function refresh() {
     try {
       endpoints = await endpointIpc.list()
+      // Mutations reload the list; tell the host so it can refresh too.
+      if (loadedOnce) onChanged?.()
+      loadedOnce = true
       nameDrafts = Object.fromEntries(endpoints.map((e) => [e.id, e.display_name || e.id]))
       attachmentDrafts = Object.fromEntries(endpoints.map((e) => [e.id, e.ssh_attachment_dir]))
       loadError = ''
@@ -283,12 +290,13 @@
   }
 </script>
 
-<div class="backdrop" use:outsidePressClose={{ onClose }} role="presentation">
-  <div class="dialog" role="dialog" aria-label={tr('endpoint.title')} data-locale={$currentLocale}>
-    <header>
-      <h2>{tr('endpoint.title')}</h2>
-      <button class="close" onclick={onClose} aria-label={tr('memory.common.close')}>×</button>
-    </header>
+{#snippet body()}
+    {#if !embedded}
+      <header>
+        <h2>{tr('endpoint.title')}</h2>
+        <button class="close" onclick={onClose} aria-label={tr('memory.common.close')}>×</button>
+      </header>
+    {/if}
 
     {#if loadError}
       <p class="err">{loadError}</p>
@@ -496,8 +504,17 @@
     <footer>
       <p class="footnote">{tr('endpoint.footer')}</p>
     </footer>
+{/snippet}
+
+{#if embedded}
+  <div class="embedded" data-locale={$currentLocale}>{@render body()}</div>
+{:else}
+  <div class="backdrop" use:outsidePressClose={{ onClose }} role="presentation">
+    <div class="dialog" role="dialog" aria-label={tr('endpoint.title')} data-locale={$currentLocale}>
+      {@render body()}
+    </div>
   </div>
-</div>
+{/if}
 
 <style>
   .backdrop {
@@ -511,6 +528,13 @@
     justify-content: center;
     align-items: flex-start;
     padding-top: 6vh;
+  }
+  .embedded {
+    display: flex;
+    flex-direction: column;
+    color: var(--fg-primary);
+    font-family: var(--font-ui);
+    font-size: var(--fs-md);
   }
   .dialog {
     width: 540px;

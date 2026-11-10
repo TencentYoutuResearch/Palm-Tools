@@ -287,7 +287,8 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.42);
-    z-index: 800;
+    /* Above Settings (820), which can open it. */
+    z-index: 1050;
     display: flex;
     align-items: center;
     justify-content: center;

@@ -20,6 +20,9 @@ import '../protocol/protocol.dart';
 import '../protocol/session_setup.dart';
 import 'gateway_session.dart';
 
+/// Names the target desktop on account-relay requests.
+const relayDeviceHeader = 'X-Kode-Device';
+
 class ApiException implements Exception {
   final int status;
   final String error;
@@ -52,6 +55,7 @@ class ApiClient {
           'Authorization': 'Bearer ${endpoint.token}',
           'X-Kode-Worker-Id': endpoint.activeWorkerId,
           'Content-Type': 'application/json',
+          if (endpoint.isRelay) relayDeviceHeader: endpoint.deviceId,
         },
         connectTimeout: const Duration(seconds: 5),
         receiveTimeout: const Duration(seconds: 15),

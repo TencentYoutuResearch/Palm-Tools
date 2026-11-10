@@ -23,7 +23,17 @@ pub async fn call(path: &str, body: Option<Value>) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
     let status = response.status();
-    let value: Value = response.json().await.map_err(|e| e.to_string())?;
+    // A service from an older build answers routes it lacks with an empty 404.
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return Err(if status == reqwest::StatusCode::NOT_FOUND {
+            "The Kode background service is older than this app. Quit Kode, stop the running \
+             `kode-gui --kode-workbench-server` process, then open Kode again."
+                .into()
+        } else {
+            format!("Kode backend returned an unreadable response ({status})")
+        });
+    };
     if !status.is_success() {
         return Err(value["error"]
             .as_str()

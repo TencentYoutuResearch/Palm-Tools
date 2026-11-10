@@ -2566,6 +2566,11 @@
   <SettingsPanel
     onClose={() => (settingsOpen = false)}
     onOpenMemorySync={() => { memorySyncOpen = true }}
+    onOpenMemoryReview={() => { memoryPanelOpen = true }}
+    onOpenMemoryBrowse={() => { memoryBrowseOpen = true }}
+    onOpenDeploy={() => { deployOpen = true }}
+    onEndpointsChanged={() => void refreshEndpoints()}
+    onAccountChanged={() => {}}
     onOpenPlugins={() => { pluginPanelOpen = true }}
     onTakeScreenshot={() => void runConfiguredScreenshot()}
     {locale}

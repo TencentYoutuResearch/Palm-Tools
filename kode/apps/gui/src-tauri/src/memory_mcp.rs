@@ -176,7 +176,7 @@ pub fn memory_mcp_check(state: State<'_, AppState>) -> Result<CheckResult, Strin
 /// 这是数据驱动后的「**唯一**」setup 路径 —— 老的硬编码 `run_codebuddy_setup` /
 /// `run_claude_internal_setup` 已被这函数取代。新增 backend(codex / gemini)只要在
 /// config.toml 里声明 mcp_setup 就能享受相同流程,无需改代码。
-fn run_setup_for_backend(spec: &McpSetupSpec) -> Result<(), String> {
+pub(crate) fn run_setup_for_backend(spec: &McpSetupSpec) -> Result<(), String> {
     let bin = resolve_binary().ok_or_else(|| {
         format!(
             "{} not found. Run `cargo install --path crates/kode-memory --bin {}` first.",

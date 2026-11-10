@@ -19,13 +19,21 @@ fn initial() -> Value { json!({"version":2,"tables":{"workspaces":{}},"global":{
 fn state_path() -> Option<std::path::PathBuf> { std::env::var_os("KODE_GUI_STATE_PATH").map(Into::into).or_else(|| dirs::config_dir().map(|path| path.join("kode/state.json"))) }
 fn canonical(path: &str) -> Result<String> {
     if path.len()>4096 || !Path::new(path).is_absolute() { bail!("workspace path must be an absolute directory on this node") }
-    let path=std::fs::canonicalize(path)?;
+    // Windows canonicalize yields `\\?\C:\...`; cmd.exe-run CLIs reject that cwd and fall back to C:\Windows.
+    let path=kode_core::pty::simplify_windows_path(&std::fs::canonicalize(path)?);
     if !path.is_dir() { bail!("workspace path is not a directory") }
     Ok(path.to_string_lossy().into())
 }
 fn title(value: &str) -> Result<String> { let value=value.trim(); if value.is_empty() || value.len()>512 { bail!("workspace title must contain 1–512 bytes") }; Ok(value.into()) }
+fn simplified(path: &str) -> String { kode_core::pty::simplify_windows_path(Path::new(path)).to_string_lossy().into() }
+/// Rewrites catalog rows registered before verbatim prefixes were stripped.
+fn simplify_paths(value: &mut Value) {
+    for row in value["tables"]["workspaces"].as_object_mut().unwrap().values_mut() {
+        if let Some(path)=row["path"].as_str().map(simplified) { row["path"]=json!(path) }
+    }
+}
 fn insert(value: &mut Value, path: String, name: Option<String>) -> Result<String> {
-    if let Some((id,_))=value["tables"]["workspaces"].as_object().unwrap().iter().find(|(_,row)| row["path"].as_str()==Some(&path)) { return Ok(id.clone()) }
+    if let Some((id,_))=value["tables"]["workspaces"].as_object().unwrap().iter().find(|(_,row)| row["path"].as_str().map(simplified).as_deref()==Some(&path)) { return Ok(id.clone()) }
     let id=uuid::Uuid::new_v4().to_string();
     let name=title(&name.unwrap_or_else(|| Path::new(&path).file_name().unwrap_or_default().to_string_lossy().into()))?;
     let now=stamp();
@@ -73,6 +81,7 @@ pub(super) fn local(hub: &Hub, command: Command) -> Result<Value> {
     if let Command::SessionCatalog { offset } = command { return super::session_catalog::local(hub,offset) }
     let _gate=hub.gate.lock();
     let stored=ensure(hub)?; let mut value=stored["value"].clone();
+    simplify_paths(&mut value);
     let id=match command {
         Command::SessionCatalog { .. } => unreachable!(),
         Command::List=>None,
@@ -85,3 +94,21 @@ pub(super) fn local(hub: &Hub, command: Command) -> Result<Value> {
     Ok(json!({"node_id":hub.node_id(),"revision":stored["revision"],"workspaces":items,"workspace_id":id}))
 }
 pub(super) async fn execute(hub: Arc<Hub>, command: Command) -> Result<Value> { tokio::task::spawn_blocking(move || local(&hub,command)).await? }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn workspace_paths_never_keep_the_verbatim_prefix() {
+        let dir=tempfile::tempdir().unwrap();
+        let path=canonical(dir.path().to_str().unwrap()).unwrap();
+        assert!(!path.starts_with(r"\\?\"), "{path}");
+        // Rows registered by older builds are rewritten and deduplicated against new registrations.
+        let mut value=initial();
+        let legacy=std::fs::canonicalize(dir.path()).unwrap().to_string_lossy().into_owned();
+        let id=insert(&mut value,legacy,None).unwrap();
+        simplify_paths(&mut value);
+        assert_eq!(value["tables"]["workspaces"][&id]["path"],json!(path));
+        assert_eq!(insert(&mut value,path,None).unwrap(),id);
+    }
+}

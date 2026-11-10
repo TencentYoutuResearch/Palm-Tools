@@ -13,14 +13,16 @@
   import { currentLocale, t } from './i18n'
   import { outsidePressClose } from './outside_close'
 
-  type Props = { onClose: () => void }
-  type View = 'pair' | 'deploy'
+  /** `embedded` renders the body inside Settings, which owns the frame,
+   *  Escape and focus. */
+  type Props = { onClose?: () => void; embedded?: boolean }
+  type View = 'pair' | 'deploy' | 'switch'
   type DeployMode = 'ssh' | 'existing'
   type SshDeployKind = 'standalone' | 'docker'
   type BusyKind = '' | 'pairing' | 'switching' | 'deploying'
   type StepStatus = 'pending' | 'running' | 'done' | 'failed'
 
-  let { onClose }: Props = $props()
+  let { onClose = () => {}, embedded = false }: Props = $props()
 
   const DEPLOY_STEPS = [
     'CheckingHost',
@@ -57,7 +59,7 @@
   let deploySteps = $state(
     DEPLOY_STEPS.map((step) => ({ step, status: 'pending' as StepStatus })),
   )
-  let dialogEl: HTMLDivElement
+  let dialogEl = $state<HTMLDivElement | null>(null)
   let sshHostInput = $state<HTMLInputElement | null>(null)
   let publicUrlInput = $state<HTMLInputElement | null>(null)
   let remoteDeployDirInput = $state<HTMLInputElement | null>(null)
@@ -70,8 +72,10 @@
     pairing ? Math.max(0, Math.ceil((pairing.expires_at - now) / 1000)) : 0,
   )
   let redeployingCurrent = $derived(Boolean(redeployBackendId))
+  // Account backends have no QR pairing; they are managed from AccountDialog.
+  let qrBackends = $derived(status?.backends.filter((backend) => backend.kind !== 'account_relay') ?? [])
   let activeBackend = $derived<CloudBackendSummary | null>(
-    status?.backends.find((backend) => backend.id === status?.active_backend_id) ?? null,
+    qrBackends.find((backend) => backend.id === status?.active_backend_id) ?? null,
   )
   let tr = $derived.by(() => {
     void $currentLocale
@@ -121,9 +125,13 @@
         },
       )
       await refreshStatus()
-      if ((status?.backends.length ?? 0) > 0) {
+      if (activeBackend) {
         view = 'pair'
-        await createPairing(status?.server_url ?? '')
+        await createPairing(activeBackend.server_url)
+      } else if (qrBackends.length > 0) {
+        // The account is active. Creating a code here would silently move
+        // this desktop off the account, so make switching explicit.
+        view = 'switch'
       } else {
         view = 'deploy'
         queueMicrotask(() => sshHostInput?.focus())
@@ -172,6 +180,7 @@
       status = await ipc.cloudSyncActivateBackend(backendId)
       selectedBackendId = backendId
       busy = ''
+      view = 'pair'
       await createPairing(status.server_url)
     } catch (reason) {
       error = tr('pairing.switchFailed', { error: String(reason) })
@@ -325,6 +334,7 @@
   }
 
   function onKey(event: KeyboardEvent) {
+    if (embedded) return
     if (event.key === 'Escape') {
       if (!busy) onClose()
       return
@@ -350,39 +360,13 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div
-  class="backdrop"
-  use:outsidePressClose={{ onClose, disabled: Boolean(busy) }}
-  role="presentation"
->
-  <div
-    bind:this={dialogEl}
-    class="dialog"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="cloud-relay-title"
-    aria-describedby="cloud-relay-description"
-  >
-    <header>
-      <div class="title-lockup">
-        <span class="eyebrow">{tr('pairing.eyebrow')}</span>
-        <h2 id="cloud-relay-title">{tr('pairing.relayTitle')}</h2>
-      </div>
-      <button
-        type="button"
-        class="icon-button"
-        onclick={onClose}
-        disabled={Boolean(busy)}
-        aria-label={tr('pairing.close')}
-      >
-        <Icon name="x" />
-      </button>
-    </header>
-
+{#snippet body()}
     <div class="body">
       <p id="cloud-relay-description" class="intro">
         {view === 'pair'
           ? tr('pairing.readyDescription')
+          : view === 'switch'
+            ? tr('pairing.switchFromAccount')
           : redeployingCurrent
             ? tr('pairing.deploy.redeployDescription')
             : tr('pairing.deploy.description')}
@@ -407,7 +391,7 @@
                 void switchBackend((event.currentTarget as HTMLSelectElement).value)}
               disabled={Boolean(busy)}
             >
-              {#each status?.backends ?? [] as backend (backend.id)}
+              {#each qrBackends as backend (backend.id)}
                 <option value={backend.id}>{backend.name}</option>
               {/each}
             </select>
@@ -519,6 +503,19 @@
               </button>
             </div>
           </section>
+        </div>
+      {:else if view === 'switch'}
+        <div class="backend-actions">
+          {#each qrBackends as backend (backend.id)}
+            <button type="button" class="button secondary" onclick={() => void switchBackend(backend.id)} disabled={Boolean(busy)}>
+              <Icon name="server" size={14} />
+              {tr('pairing.switchTo', { name: backend.name })}
+            </button>
+          {/each}
+          <button type="button" class="text-button" onclick={showDeploy} disabled={Boolean(busy)}>
+            <Icon name="plus" size={13} />
+            {tr('pairing.deployAnother')}
+          </button>
         </div>
       {:else if view === 'deploy'}
         <div class="deploy-mode" aria-label={tr('pairing.deploy.modeLabel')}>
@@ -776,10 +773,48 @@
         {/if}
       {/if}
     </div>
+{/snippet}
+
+{#if embedded}
+  <div class="embedded" bind:this={dialogEl}>{@render body()}</div>
+{:else}
+<div
+  class="backdrop"
+  use:outsidePressClose={{ onClose, disabled: Boolean(busy) }}
+  role="presentation"
+>
+  <div
+    bind:this={dialogEl}
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="cloud-relay-title"
+    aria-describedby="cloud-relay-description"
+  >
+    <header>
+      <div class="title-lockup">
+        <span class="eyebrow">{tr('pairing.eyebrow')}</span>
+        <h2 id="cloud-relay-title">{tr('pairing.relayTitle')}</h2>
+      </div>
+      <button
+        type="button"
+        class="icon-button"
+        onclick={onClose}
+        disabled={Boolean(busy)}
+        aria-label={tr('pairing.close')}
+      >
+        <Icon name="x" />
+      </button>
+    </header>
+
+    {@render body()}
   </div>
 </div>
+{/if}
 
 <style>
+  .embedded { display: flex; flex-direction: column; color: var(--fg-primary); font: var(--fs-md) var(--font-ui); }
+  .embedded .body { padding: 0; }
   .backdrop {
     position: fixed;
     inset: 0;

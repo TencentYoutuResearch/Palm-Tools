@@ -2,6 +2,8 @@
 //!
 //! The server never dials this process. A one-time QR claim enables upload;
 //! before that the agent connection carries only registration/heartbeats.
+//! Account-relay backends skip registration and pairing: the desktop signs in
+//! with its owner's account and uploads only while a phone is viewing it.
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -21,9 +23,18 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
 };
+use kode_relay_protocol::ServerFrame;
 use uuid::Uuid;
 
+use crate::account::{
+    AccountClient, AccountSession, LoginMethod, LoginMethodInfo, PalmHandoff, PalmxPending, PalmxStatus,
+    PendingSignIn,
+};
+
 const MAX_COMMAND_RECEIPTS: usize = 512;
+/// A connection that stayed up this long resets the reconnect backoff, so a
+/// relay closing an expiring token's socket is followed by a quick reconnect.
+const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudSyncStatus {
@@ -36,6 +47,47 @@ pub struct CloudSyncStatus {
     pub sync_enabled: bool,
     pub binding_count: u64,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub account_email: Option<String>,
+    /// Display label of the active account: name, else address, else a
+    /// short account id.
+    #[serde(default)]
+    pub account_label: Option<String>,
+    #[serde(default)]
+    pub account_method: Option<LoginMethod>,
+    #[serde(default)]
+    pub account_name: Option<String>,
+    /// HTTPS avatar URL from the account profile.
+    #[serde(default)]
+    pub account_picture: Option<String>,
+}
+
+/// Why a PalmX QR is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PalmxPurpose {
+    SignIn,
+    /// Link the palm to the signed-in account.
+    Bind,
+}
+
+/// What the PalmX dialog shows. `done` means the purpose was fulfilled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PalmxProgress {
+    pub state: String,
+    pub qr_payload: String,
+    pub expires_at: u64,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendKind {
+    /// A user-deployed kode-sync-server paired by QR code.
+    #[default]
+    SelfHosted,
+    /// The multi-account kode-relay; identity comes from an account sign-in.
+    AccountRelay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +102,11 @@ pub struct CloudBackendSummary {
     pub remote_deploy_dir: Option<String>,
     pub managed: bool,
     pub active: bool,
+    pub kind: BackendKind,
+    pub account_email: Option<String>,
+    pub account_label: Option<String>,
+    pub account_method: Option<LoginMethod>,
+    pub account_picture: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +138,10 @@ struct CloudBackendConfig {
     device_token: Option<String>,
     #[serde(default)]
     command_receipts: VecDeque<CommandReceipt>,
+    #[serde(default)]
+    kind: BackendKind,
+    #[serde(default)]
+    account: Option<AccountSession>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +212,14 @@ pub struct Inner {
     generation: AtomicU64,
     boot_id: String,
     client: reqwest::Client,
+    account: AccountClient,
+    pending_sign_in: Mutex<Option<PendingSignIn>>,
+    pending_palmx: tokio::sync::Mutex<Option<(PalmxPending, PalmxPurpose)>>,
+    pending_palm: tokio::sync::Mutex<Option<PalmHandoff>>,
+    /// CloudBase rotates refresh tokens: a second refresh with the same
+    /// token fails and signs the account out. One refresh at a time, and
+    /// each re-reads the saved session first.
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl CloudSyncManager {
@@ -187,6 +256,11 @@ impl CloudSyncManager {
             sync_enabled: false,
             binding_count: 0,
             last_error: None,
+            account_email: None,
+            account_label: None,
+            account_method: None,
+            account_name: None,
+            account_picture: None,
         };
         let manager = Self {
             inner: Arc::new(Inner {
@@ -201,6 +275,11 @@ impl CloudSyncManager {
                     .timeout(Duration::from_secs(15))
                     .build()
                     .expect("cloud sync HTTP client"),
+                account: AccountClient::default(),
+                pending_sign_in: Mutex::new(None),
+                pending_palmx: tokio::sync::Mutex::new(None),
+                pending_palm: tokio::sync::Mutex::new(None),
+                refresh_lock: tokio::sync::Mutex::new(()),
             }),
         };
         *shared = Arc::downgrade(&manager.inner);
@@ -218,6 +297,7 @@ impl CloudSyncManager {
         let config = self.inner.config.lock();
         status.backends = backend_summaries(&config);
         status.active_backend_id = config.active_backend_id.clone();
+        apply_account(&mut status, config.active_backend().and_then(|backend| backend.account.as_ref()));
         status
     }
 
@@ -252,9 +332,7 @@ impl CloudSyncManager {
         let response = self
             .inner
             .client
-            .get(format!(
-                "{server_url}/api/v1/workers/{worker}/inventory"
-            ))
+            .get(format!("{server_url}/api/v1/workers/{worker}/inventory"))
             .bearer_auth(token)
             .send()
             .await
@@ -304,6 +382,347 @@ impl CloudSyncManager {
             .clone()
             .ok_or_else(|| "Worker is not registered with the sync server".to_string())?;
         Ok((backend.server_url.clone(), token))
+    }
+
+    /// Emails a sign-in code for the account relay at `server_url`.
+    pub async fn account_send_code(&self, server_url: String, email: String) -> Result<u64, String> {
+        let server_url = normalize_server_url(&server_url)?;
+        let (pending, expires_in) = self.inner.account.send_code(&server_url, &email).await?;
+        *self.inner.pending_sign_in.lock() = Some(pending);
+        Ok(expires_in)
+    }
+
+    /// Completes sign-in with the emailed code and activates the relay.
+    pub async fn account_sign_in(&self, code: String) -> Result<CloudSyncStatus, String> {
+        let pending = self
+            .inner
+            .pending_sign_in
+            .lock()
+            .clone()
+            .ok_or_else(|| "request a sign-in code first".to_string())?;
+        let session = self.inner.account.sign_in(&pending, &code, now_ms()).await?;
+        self.inner.pending_sign_in.lock().take();
+        self.store_account_session(&pending.server_url, session)
+    }
+
+    /// Saves a signed-in session as the relay's account backend, makes it
+    /// active and reconnects. Shared by every sign-in method.
+    fn store_account_session(&self, server_url: &str, session: AccountSession) -> Result<CloudSyncStatus, String> {
+        {
+            let mut config = self.inner.config.lock();
+            let existing = config
+                .backends
+                .iter()
+                .find(|backend| backend.kind == BackendKind::AccountRelay && backend.server_url == server_url)
+                .map(|backend| backend.id.clone());
+            let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+            let name = format!("Kode account · {}", session.label());
+            if let Some(backend) = config.backends.iter_mut().find(|backend| backend.id == id) {
+                // A different account on the same relay is a new identity; old
+                // receipts belong to the previous one.
+                if backend.account.as_ref().map(|a| &a.user_id) != Some(&session.user_id) {
+                    backend.command_receipts.clear();
+                }
+                backend.name = name;
+                backend.account = Some(session);
+            } else {
+                config.backends.push(CloudBackendConfig {
+                    id: id.clone(),
+                    name,
+                    server_url: server_url.to_string(),
+                    ssh_host: None,
+                    ssh_port: None,
+                    remote_port: None,
+                    deployment_kind: None,
+                    remote_deploy_dir: None,
+                    managed: false,
+                    device_id: None,
+                    device_token: None,
+                    command_receipts: VecDeque::new(),
+                    kind: BackendKind::AccountRelay,
+                    account: Some(session),
+                });
+            }
+            config.active_backend_id = Some(id);
+            save_config(&self.inner.config_path, &config)?;
+        }
+        self.reset_status_for_active_backend();
+        self.restart_agent();
+        Ok(self.status())
+    }
+
+    /// The saved account relay, whether or not it is the active backend.
+    fn account_backend(&self) -> Option<CloudBackendConfig> {
+        self.inner
+            .config
+            .lock()
+            .backends
+            .iter()
+            .find(|backend| backend.kind == BackendKind::AccountRelay && backend.account.is_some())
+            .cloned()
+    }
+
+    /// A fresh access token for the saved account, refreshing if needed.
+    async fn account_token(&self) -> Result<(String, String), String> {
+        let backend = self.account_backend().ok_or("sign in to a Kode account first")?;
+        let session = self.fresh_session(&backend.id).await?;
+        Ok((backend.server_url, session.access_token))
+    }
+
+    /// Relay URL, fresh access token and this desktop's own device id, for
+    /// viewing the account's other devices.
+    pub(crate) async fn account_viewer(&self) -> Result<(String, String, String), String> {
+        let (server_url, token) = self.account_token().await?;
+        Ok((server_url, token, self.inner.config.lock().installation_id.clone()))
+    }
+
+    /// The saved session of `backend_id`, refreshed when close to expiry.
+    async fn fresh_session(&self, backend_id: &str) -> Result<AccountSession, String> {
+        let saved = || {
+            self.inner
+                .config
+                .lock()
+                .backends
+                .iter()
+                .find(|b| b.id == backend_id)
+                .and_then(|b| b.account.clone())
+                .ok_or_else(|| "sign in to a Kode account first".to_string())
+        };
+        if !saved()?.needs_refresh(now_ms()) {
+            return saved();
+        }
+        let _guard = self.inner.refresh_lock.lock().await;
+        // The GUI and its workbench service are separate processes reading the
+        // same config. Refresh tokens are single-use: two processes refreshing
+        // together (e.g. both reconnecting after a network change) present the
+        // same token and the provider revokes it. Serialize across processes
+        // and adopt a session another process already saved.
+        let _file_lock = lock_refresh(&self.inner.config_path).await?;
+        self.adopt_saved_session(backend_id);
+        let session = saved()?;
+        if !session.needs_refresh(now_ms()) {
+            return Ok(session);
+        }
+        let session = self.inner.account.refresh(&session, now_ms()).await?;
+        let mut config = self.inner.config.lock();
+        if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
+            current.account = Some(session.clone());
+        }
+        save_config(&self.inner.config_path, &config)?;
+        Ok(session)
+    }
+
+    /// Take the on-disk session for `backend_id` when another process has
+    /// refreshed it since this one loaded the config.
+    fn adopt_saved_session(&self, backend_id: &str) {
+        let Some(disk) = load_config(&self.inner.config_path).and_then(|config| {
+            config.backends.into_iter().find(|b| b.id == backend_id).and_then(|b| b.account)
+        }) else {
+            return;
+        };
+        let mut config = self.inner.config.lock();
+        if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
+            if let Some(mine) = current.account.as_ref() {
+                if mine.user_id == disk.user_id && disk.expires_at > mine.expires_at {
+                    current.account = Some(disk);
+                }
+            }
+        }
+    }
+
+    pub async fn account_login_methods(&self, server_url: String) -> Result<Vec<LoginMethodInfo>, String> {
+        let server_url = normalize_server_url(&server_url)?;
+        self.inner.account.login_methods(&server_url).await
+    }
+
+    /// Shows a PalmX QR for signing in, or for linking a palm to the saved
+    /// account (`server_url` is then the account's relay).
+    pub async fn palmx_start(&self, server_url: Option<String>, purpose: PalmxPurpose) -> Result<PalmxProgress, String> {
+        let server_url = match (purpose, server_url) {
+            (PalmxPurpose::Bind, _) => self.account_token().await?.0,
+            (PalmxPurpose::SignIn, Some(url)) => normalize_server_url(&url)?,
+            (PalmxPurpose::SignIn, None) => return Err("enter the account relay URL".into()),
+        };
+        let pending = self.inner.account.palmx_start(&server_url).await?;
+        let progress = PalmxProgress {
+            state: "pending".into(),
+            qr_payload: pending.qr_payload.clone(),
+            expires_at: pending.expires_at,
+            done: false,
+        };
+        *self.inner.pending_palmx.lock().await = Some((pending, purpose));
+        Ok(progress)
+    }
+
+    /// Advances the PalmX flow one step; the dialog calls this every ~2 s.
+    /// The lock serialises polls so a confirmed code is redeemed once.
+    pub async fn palmx_poll(&self) -> Result<PalmxProgress, String> {
+        let mut slot = self.inner.pending_palmx.lock().await;
+        let (pending, purpose) = slot.clone().ok_or("start PalmX sign-in first")?;
+        let progress = |state: &str, done: bool| PalmxProgress {
+            state: state.into(),
+            qr_payload: pending.qr_payload.clone(),
+            expires_at: pending.expires_at,
+            done,
+        };
+        let code = match self.inner.account.palmx_poll(&pending).await? {
+            PalmxStatus::Pending => return Ok(progress("pending", false)),
+            PalmxStatus::Scanned => return Ok(progress("scanned", false)),
+            PalmxStatus::Denied => {
+                *slot = None;
+                return Ok(progress("denied", false));
+            }
+            PalmxStatus::Expired => {
+                *slot = None;
+                return Ok(progress("expired", false));
+            }
+            PalmxStatus::Confirmed { code } => code,
+        };
+        // The code is single-use whatever happens next.
+        *slot = None;
+        match purpose {
+            PalmxPurpose::SignIn => {
+                let session = self.inner.account.palmx_sign_in(&pending, &code, now_ms()).await?;
+                self.store_account_session(&pending.server_url, session)?;
+            }
+            PalmxPurpose::Bind => {
+                let (_, token) = self.account_token().await?;
+                self.inner.account.palmx_bind(&pending, &code, &token).await?;
+            }
+        }
+        Ok(progress("confirmed", true))
+    }
+
+    pub async fn palmx_cancel(&self) {
+        self.inner.pending_palmx.lock().await.take();
+    }
+
+    /// Signs in with a palm capture run on this Mac.
+    pub async fn palm_sign_in(&self, server_url: String, session_id: String) -> Result<CloudSyncStatus, String> {
+        let server_url = normalize_server_url(&server_url)?;
+        let session = self.inner.account.palm_sign_in(&server_url, &session_id, now_ms()).await?;
+        self.store_account_session(&server_url, session)
+    }
+
+    /// Shows a `kode://palm-login` QR that a phone approves with a palm scan.
+    pub async fn palm_handoff_start(&self, server_url: String) -> Result<PalmxProgress, String> {
+        let server_url = normalize_server_url(&server_url)?;
+        let handoff = self.inner.account.palm_handoff_start(&server_url, now_ms()).await?;
+        let progress = PalmxProgress {
+            state: "pending".into(),
+            qr_payload: handoff.qr_payload.clone(),
+            expires_at: handoff.expires_at,
+            done: false,
+        };
+        *self.inner.pending_palm.lock().await = Some(handoff);
+        Ok(progress)
+    }
+
+    /// The dialog calls this every ~2 s; the relay releases tokens once.
+    pub async fn palm_handoff_poll(&self) -> Result<PalmxProgress, String> {
+        let mut slot = self.inner.pending_palm.lock().await;
+        let handoff = slot.clone().ok_or("start palm sign-in first")?;
+        let progress = |state: &str, done: bool| PalmxProgress {
+            state: state.into(),
+            qr_payload: handoff.qr_payload.clone(),
+            expires_at: handoff.expires_at,
+            done,
+        };
+        if now_ms() / 1000 > handoff.expires_at {
+            *slot = None;
+            return Ok(progress("expired", false));
+        }
+        match self.inner.account.palm_handoff_poll(&handoff, now_ms()).await? {
+            None => Ok(progress("pending", false)),
+            Some(session) => {
+                *slot = None;
+                self.store_account_session(&handoff.server_url, session)?;
+                Ok(progress("confirmed", true))
+            }
+        }
+    }
+
+    pub async fn palm_handoff_cancel(&self) {
+        self.inner.pending_palm.lock().await.take();
+    }
+
+    /// Sign-in methods linked to the saved account (e.g. `["palmx"]`), plus
+    /// `palm` when a palm is enrolled for Kode's own palm sign-in.
+    pub async fn account_linked_methods(&self) -> Result<Vec<String>, String> {
+        let (server_url, token) = self.account_token().await?;
+        let mut linked = self.inner.account.linked_methods(&server_url, &token).await?;
+        // Relays without palm answer 404; that just means "not enrolled".
+        if self.inner.account.palm_enrolled(&server_url, &token).await.unwrap_or(false) {
+            linked.push("palm".into());
+        }
+        Ok(linked)
+    }
+
+    /// Re-reads the account profile so names set on a phone show here.
+    pub async fn account_profile(&self) -> Result<CloudSyncStatus, String> {
+        self.account_token().await?;
+        let backend = self.account_backend().ok_or("sign in to a Kode account first")?;
+        let session = backend.account.clone().ok_or("sign in to a Kode account first")?;
+        let session = self.inner.account.with_profile(session).await;
+        self.save_account(&backend.id, session)
+    }
+
+    pub async fn account_set_name(&self, name: String) -> Result<CloudSyncStatus, String> {
+        self.account_token().await?;
+        let backend = self.account_backend().ok_or("sign in to a Kode account first")?;
+        let session = backend.account.clone().ok_or("sign in to a Kode account first")?;
+        let session = self.inner.account.set_name(&session, &name).await?;
+        self.save_account(&backend.id, session)
+    }
+
+    /// Saves profile fields only: tokens may have rotated since `session`
+    /// was read, and writing an old refresh token back would sign out.
+    fn save_account(&self, backend_id: &str, session: AccountSession) -> Result<CloudSyncStatus, String> {
+        {
+            let mut config = self.inner.config.lock();
+            if let Some(backend) = config.backends.iter_mut().find(|b| b.id == backend_id) {
+                if let Some(current) = backend.account.as_mut() {
+                    current.name = session.name;
+                    current.picture = session.picture;
+                    current.email = session.email;
+                    backend.name = format!("Kode account · {}", current.label());
+                }
+            }
+            save_config(&self.inner.config_path, &config)?;
+        }
+        Ok(self.status())
+    }
+
+    pub async fn palmx_unbind(&self) -> Result<(), String> {
+        let (server_url, token) = self.account_token().await?;
+        self.inner.account.palmx_unbind(&server_url, &token).await
+    }
+
+    /// Forgets the account backend. Another saved backend becomes active.
+    pub fn account_sign_out(&self, backend_id: &str) -> Result<CloudSyncStatus, String> {
+        let restart = {
+            let mut config = self.inner.config.lock();
+            let before = config.backends.len();
+            config.backends.retain(|backend| {
+                !(backend.id == backend_id && backend.kind == BackendKind::AccountRelay)
+            });
+            if config.backends.len() == before {
+                return Err("account backend was not found".into());
+            }
+            if config.active_backend_id.as_deref() == Some(backend_id) {
+                config.active_backend_id = config.backends.first().map(|backend| backend.id.clone());
+            }
+            save_config(&self.inner.config_path, &config)?;
+            config.active_backend_id.is_some()
+        };
+        self.reset_status_for_active_backend();
+        if restart {
+            self.restart_agent();
+        } else {
+            // Stop the current loop without starting another.
+            self.inner.generation.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(self.status())
     }
 
     pub fn activate_backend(&self, backend_id: &str) -> Result<CloudSyncStatus, String> {
@@ -369,6 +788,8 @@ impl CloudSyncManager {
                     device_id: None,
                     device_token: None,
                     command_receipts: VecDeque::new(),
+                    kind: BackendKind::SelfHosted,
+                    account: None,
                 });
             }
             config.active_backend_id = Some(id.clone());
@@ -402,6 +823,7 @@ impl CloudSyncManager {
         status.sync_enabled = false;
         status.binding_count = 0;
         status.last_error = None;
+        apply_account(&mut status, active.and_then(|backend| backend.account.as_ref()));
     }
 
     pub async fn configure_and_create_pairing(
@@ -411,6 +833,11 @@ impl CloudSyncManager {
         let server_url = normalize_server_url(&server_url)?;
         let switched = {
             let mut config = self.inner.config.lock();
+            if config.backends.iter().any(|backend| {
+                backend.server_url == server_url && backend.kind == BackendKind::AccountRelay
+            }) {
+                return Err("account relays pair phones by signing in on the phone".into());
+            }
             let backend_id = match config
                 .backends
                 .iter()
@@ -432,6 +859,8 @@ impl CloudSyncManager {
                         device_id: None,
                         device_token: None,
                         command_receipts: VecDeque::new(),
+                        kind: BackendKind::SelfHosted,
+                        account: None,
                     });
                     id
                 }
@@ -526,7 +955,12 @@ impl CloudSyncManager {
             if self.inner.generation.load(Ordering::SeqCst) != generation {
                 return;
             }
-            match self.run_agent_once(generation).await {
+            let started = tokio::time::Instant::now();
+            let result = self.run_agent_once(generation).await;
+            if started.elapsed() >= STABLE_CONNECTION {
+                backoff = Duration::from_secs(1);
+            }
+            match result {
                 Ok(()) => {}
                 Err(error) => {
                     let mut status = self.inner.status.lock();
@@ -542,8 +976,32 @@ impl CloudSyncManager {
         }
     }
 
+    /// Device id and bearer token for the agent socket. Self-hosted servers
+    /// register the installation; account relays use the owner's token and
+    /// name the desktop by its installation id.
+    async fn agent_credentials(&self) -> Result<(String, String, BackendKind), String> {
+        let (backend, installation_id) = {
+            let config = self.inner.config.lock();
+            let backend = config
+                .active_backend()
+                .cloned()
+                .ok_or_else(|| "cloud sync server is not configured".to_string())?;
+            (backend, config.installation_id.clone())
+        };
+        if backend.kind == BackendKind::SelfHosted {
+            let registration = self.ensure_registered().await?;
+            return Ok((registration.device_id, registration.device_token, backend.kind));
+        }
+        if backend.account.is_none() {
+            return Err("sign in to the account relay first".into());
+        }
+        let session = self.fresh_session(&backend.id).await?;
+        self.inner.status.lock().device_id = Some(installation_id.clone());
+        Ok((installation_id, session.access_token, backend.kind))
+    }
+
     async fn run_agent_once(&self, generation: u64) -> Result<(), String> {
-        let registration = self.ensure_registered().await?;
+        let (device_id, token, kind) = self.agent_credentials().await?;
         if self.inner.generation.load(Ordering::SeqCst) != generation {
             return Ok(());
         }
@@ -554,17 +1012,18 @@ impl CloudSyncManager {
             .active_backend()
             .map(|backend| backend.server_url.clone())
             .ok_or_else(|| "cloud sync server is not configured".to_string())?;
-        let ws_url = websocket_url(&format!(
-            "{server_url}/api/v1/agent/ws?device_id={}",
-            url::form_urlencoded::byte_serialize(registration.device_id.as_bytes())
-                .collect::<String>()
-        ))?;
+        let encode = |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
+        let mut agent_url = format!("{server_url}/api/v1/agent/ws?device_id={}", encode(&device_id));
+        if kind == BackendKind::AccountRelay {
+            agent_url.push_str(&format!("&name={}", encode(&host_name())));
+        }
+        let ws_url = websocket_url(&agent_url)?;
         let mut request = ws_url
             .into_client_request()
             .map_err(|error| format!("invalid WebSocket request: {error}"))?;
         request.headers_mut().insert(
             "Authorization",
-            HeaderValue::from_str(&format!("Bearer {}", registration.device_token))
+            HeaderValue::from_str(&format!("Bearer {token}"))
                 .map_err(|_| "invalid device token".to_string())?,
         );
         {
@@ -578,7 +1037,7 @@ impl CloudSyncManager {
         {
             let mut status = self.inner.status.lock();
             status.connected = true;
-            status.state = "waiting_for_pairing".into();
+            status.state = idle_state(kind).into();
             status.last_error = None;
         }
         self.send_metadata_hello(&mut socket).await?;
@@ -615,7 +1074,7 @@ impl CloudSyncManager {
                             match frame {
                                 ServerFrame::Hello { sync_enabled: enabled, binding_count } => {
                                     sync_enabled = enabled;
-                                    self.set_binding_status(enabled, binding_count);
+                                    self.set_binding_status(kind, enabled, binding_count);
                                     if enabled {
                                         snapshotted_session_ids =
                                             self.send_snapshot_and_history(&mut socket).await?;
@@ -625,13 +1084,13 @@ impl CloudSyncManager {
                                 }
                                 ServerFrame::PairingBound { binding_count } => {
                                     sync_enabled = true;
-                                    self.set_binding_status(true, binding_count);
+                                    self.set_binding_status(kind, true, binding_count);
                                     snapshotted_session_ids =
                                         self.send_snapshot_and_history(&mut socket).await?;
                                 }
                                 ServerFrame::BindingChanged { sync_enabled: enabled, binding_count } => {
                                     sync_enabled = enabled;
-                                    self.set_binding_status(enabled, binding_count);
+                                    self.set_binding_status(kind, enabled, binding_count);
                                     if enabled {
                                         snapshotted_session_ids =
                                             self.send_snapshot_and_history(&mut socket).await?;
@@ -728,17 +1187,12 @@ impl CloudSyncManager {
         }
     }
 
-    fn set_binding_status(&self, enabled: bool, binding_count: u64) {
+    fn set_binding_status(&self, kind: BackendKind, enabled: bool, binding_count: u64) {
         let mut status = self.inner.status.lock();
         status.connected = true;
         status.sync_enabled = enabled;
         status.binding_count = binding_count;
-        status.state = if enabled {
-            "syncing"
-        } else {
-            "waiting_for_pairing"
-        }
-        .into();
+        status.state = if enabled { "syncing" } else { idle_state(kind) }.into();
         status.last_error = None;
     }
 
@@ -955,40 +1409,6 @@ struct Registration {
     device_token: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum ServerFrame {
-    #[serde(rename = "server.hello")]
-    Hello {
-        sync_enabled: bool,
-        binding_count: u64,
-    },
-    #[serde(rename = "pairing.bound")]
-    PairingBound { binding_count: u64 },
-    #[serde(rename = "binding.changed")]
-    BindingChanged {
-        sync_enabled: bool,
-        binding_count: u64,
-    },
-    #[serde(rename = "setup.request")]
-    SetupRequest {
-        request_id: String,
-        kind: String,
-        payload: Value,
-        expires_at: u64,
-    },
-    #[serde(rename = "command")]
-    Command {
-        command_id: String,
-        local_session_id: u64,
-        kind: String,
-        payload: Value,
-        expires_at: u64,
-    },
-    #[serde(rename = "pong")]
-    Pong,
-}
-
 pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
     let mut snapshots: Vec<Value> = ctx
         .sessions
@@ -1076,6 +1496,28 @@ fn config_path() -> PathBuf {
         .join("cloud-sync.json")
 }
 
+/// Exclusive lock beside the config, held for one refresh. Released on drop.
+async fn lock_refresh(config_path: &Path) -> Result<std::fs::File, String> {
+    use fs2::FileExt;
+    let path = config_path.with_extension("refresh.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("create refresh lock directory: {error}"))?;
+    }
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("open refresh lock: {error}"))?;
+        file.lock_exclusive().map_err(|error| format!("lock refresh: {error}"))?;
+        Ok(file)
+    })
+    .await
+    .map_err(|error| format!("refresh lock task failed: {error}"))?
+}
+
 fn load_config(path: &Path) -> Option<CloudSyncConfig> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
@@ -1098,6 +1540,8 @@ fn migrate_legacy_backend(config: &mut CloudSyncConfig) {
                 device_id: config.device_id.take(),
                 device_token: config.device_token.take(),
                 command_receipts: std::mem::take(&mut config.command_receipts),
+                kind: BackendKind::SelfHosted,
+                account: None,
             });
             config.active_backend_id = Some(id);
         }
@@ -1129,6 +1573,19 @@ fn backend_summaries(config: &CloudSyncConfig) -> Vec<CloudBackendSummary> {
             remote_deploy_dir: backend.remote_deploy_dir.clone(),
             managed: backend.managed,
             active: config.active_backend_id.as_deref() == Some(backend.id.as_str()),
+            kind: backend.kind,
+            account_email: backend
+                .account
+                .as_ref()
+                .map(|account| account.email.clone())
+                .filter(|email| !email.is_empty()),
+            account_label: backend.account.as_ref().map(AccountSession::label),
+            account_method: backend.account.as_ref().map(|account| account.method),
+            account_picture: backend
+                .account
+                .as_ref()
+                .map(|account| account.picture.clone())
+                .filter(|picture| !picture.is_empty()),
         })
         .collect()
 }
@@ -1200,6 +1657,48 @@ fn websocket_url(http_url: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+fn apply_account(status: &mut CloudSyncStatus, account: Option<&AccountSession>) {
+    status.account_email = account
+        .map(|account| account.email.clone())
+        .filter(|email| !email.is_empty());
+    status.account_label = account.map(AccountSession::label);
+    status.account_name = account.map(|account| account.name.clone()).filter(|name| !name.is_empty());
+    status.account_picture = account
+        .map(|account| account.picture.clone())
+        .filter(|picture| !picture.is_empty());
+    status.account_method = account.map(|account| account.method);
+}
+
+/// Status shown while connected but not uploading: self-hosted servers wait
+/// for a QR pairing, account relays for a phone to open this desktop.
+fn idle_state(kind: BackendKind) -> &'static str {
+    match kind {
+        BackendKind::SelfHosted => "waiting_for_pairing",
+        BackendKind::AccountRelay => "standby",
+    }
+}
+
+/// The machine's name for the account device list. GUI processes on macOS
+/// usually lack `HOSTNAME`, so ask the OS.
+fn host_name() -> String {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: the buffer is valid for its full length and gethostname
+        // NUL-terminates on success.
+        let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+        if ok {
+            let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+            let name = String::from_utf8_lossy(&buf[..end]);
+            let name = name.trim().trim_end_matches(".local");
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    desktop_name()
+}
+
 fn desktop_name() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -1243,6 +1742,58 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two managers stand in for the GUI and its workbench service: separate
+    /// in-memory state over one config file. The mock issuer rotates refresh
+    /// tokens and, like the real one, revokes a token presented twice.
+    #[tokio::test]
+    async fn processes_sharing_a_config_refresh_once() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::atomic::AtomicUsize;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let used = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
+        let app = Router::new().route("/auth/v1/token", post({
+            let (calls, used) = (calls.clone(), used.clone());
+            move |Json(body): Json<Value>| async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                // Hold the response so a racing caller would overlap.
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let token = body["refresh_token"].as_str().unwrap_or_default().to_string();
+                if !used.lock().insert(token) {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"})));
+                }
+                (axum::http::StatusCode::OK, Json(json!({"access_token": format!("access-{n}"), "refresh_token": format!("refresh-{n}"), "expires_in": 7200})))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cloud-sync.json");
+        std::fs::write(&config_path, json!({
+            "installation_id": "install-race",
+            "active_backend_id": "acct",
+            "backends": [{
+                "id": "acct", "name": "Account", "server_url": "https://relay.example.com",
+                "kind": "account_relay",
+                "account": {"issuer": issuer, "email": "", "user_id": "alice",
+                    "access_token": "expired", "refresh_token": "refresh-0", "expires_at": 1}
+            }]
+        }).to_string()).unwrap();
+        std::env::set_var("KODE_CLOUD_SYNC_CONFIG", &config_path);
+        let gui = CloudSyncManager::new(crate::build_test_ctx(kode_core::config::Config::default(), "race-gui".into()));
+        let service = CloudSyncManager::new(crate::build_test_ctx(kode_core::config::Config::default(), "race-svc".into()));
+        std::env::remove_var("KODE_CLOUD_SYNC_CONFIG");
+
+        let (a, b) = tokio::join!(gui.fresh_session("acct"), service.fresh_session("acct"));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only one process may spend the refresh token");
+        assert_eq!(a.access_token, "access-1");
+        assert_eq!(b.access_token, "access-1");
+        let disk = load_config(&config_path).unwrap();
+        assert_eq!(disk.backends[0].account.as_ref().unwrap().refresh_token, "refresh-1");
+    }
 
     #[test]
     fn validates_and_converts_server_urls() {
@@ -1323,6 +1874,108 @@ mod tests {
         assert_eq!(backend.command_receipts.len(), 1);
     }
 
+    /// The real desktop agent against the real relay: account token auth,
+    /// device listing, and the viewer gate turning uploads on and off.
+    #[tokio::test]
+    async fn desktop_agent_streams_to_the_account_relay_only_while_viewed() {
+        use kode_relay::{build_router, identity::StaticVerifier, RelayState, RelayTimings};
+
+        let verifier = StaticVerifier::new([("tok-alice".to_string(), "alice".to_string())]);
+        let relay = RelayState::new(
+            verifier,
+            RelayTimings {
+                viewer_lease: Duration::from_millis(500),
+                sweep_interval: Duration::from_millis(50),
+                ..RelayTimings::default()
+            },
+        );
+        relay.spawn_sweeper();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = build_router(relay);
+        tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cloud-sync.json");
+        std::fs::write(
+            &config_path,
+            json!({
+                "installation_id": "install-e2e",
+                "active_backend_id": "acct",
+                "backends": [{
+                    "id": "acct", "name": "Account", "server_url": base,
+                    "kind": "account_relay",
+                    "account": {
+                        "issuer": "https://id.example.com", "email": "a@example.com",
+                        "user_id": "alice", "access_token": "tok-alice",
+                        "refresh_token": "r", "expires_at": now_ms() + 3_600_000
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("KODE_CLOUD_SYNC_CONFIG", &config_path);
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "relay-e2e".into());
+        let manager = CloudSyncManager::new(ctx);
+        std::env::remove_var("KODE_CLOUD_SYNC_CONFIG");
+        manager.start_saved();
+
+        let wait_for = |state: &'static str| {
+            let manager = manager.clone();
+            async move {
+                for _ in 0..100 {
+                    if manager.status().state == state {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                panic!("desktop never reached {state}: {:?}", manager.status());
+            }
+        };
+        wait_for("standby").await;
+        assert_eq!(manager.status().account_email.as_deref(), Some("a@example.com"));
+
+        let http = reqwest::Client::new();
+        let devices: Value = http
+            .get(format!("{base}/api/v1/account/devices"))
+            .bearer_auth("tok-alice")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(devices["devices"][0]["device_id"], "install-e2e");
+        assert_eq!(devices["devices"][0]["online"], true);
+
+        let sessions = http
+            .get(format!("{base}/api/v1/sessions"))
+            .bearer_auth("tok-alice")
+            .header("X-Kode-Device", "install-e2e")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sessions.status(), 200);
+        wait_for("syncing").await;
+        wait_for("standby").await;
+    }
+
+    #[test]
+    fn configs_written_before_account_relays_stay_self_hosted() {
+        let config: CloudSyncConfig = serde_json::from_value(json!({
+            "installation_id": "install-1",
+            "active_backend_id": "b",
+            "backends": [{"id": "b", "name": "Home", "server_url": "https://sync.example.com"}]
+        }))
+        .expect("legacy config");
+        let backend = config.active_backend().unwrap();
+        assert_eq!(backend.kind, BackendKind::SelfHosted);
+        assert!(backend.account.is_none());
+        assert_eq!(idle_state(BackendKind::SelfHosted), "waiting_for_pairing");
+        assert_eq!(idle_state(BackendKind::AccountRelay), "standby");
+    }
+
     #[test]
     fn backend_summaries_mark_only_the_active_backend() {
         let mut config = CloudSyncConfig::default();
@@ -1340,6 +1993,8 @@ mod tests {
                 device_id: None,
                 device_token: None,
                 command_receipts: VecDeque::new(),
+                kind: BackendKind::SelfHosted,
+                account: None,
             },
             CloudBackendConfig {
                 id: "two".into(),
@@ -1354,6 +2009,8 @@ mod tests {
                 device_id: None,
                 device_token: None,
                 command_receipts: VecDeque::new(),
+                kind: BackendKind::SelfHosted,
+                account: None,
             },
         ];
         config.active_backend_id = Some("two".into());

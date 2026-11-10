@@ -16,7 +16,7 @@ use crate::state::AppState;
 /// 写盘 / 自动探测时使用的 backend candidate 列表。**只有这几个**会被
 /// `detect_known_backends` 扫到,跟用户在 plan 阶段确认的「只在内置列表里扫」
 /// 决策对齐。新增 candidate 需要发版 — 主动减小自动探测的攻击面 / 误报。
-const KNOWN_CANDIDATES: &[KnownBackend] = &[
+pub(crate) const KNOWN_CANDIDATES: &[KnownBackend] = &[
     KnownBackend {
         key: "codebuddy",
         command: "codebuddy",
@@ -140,9 +140,9 @@ const KNOWN_CANDIDATES: &[KnownBackend] = &[
     },
 ];
 
-struct KnownBackend {
-    key: &'static str,
-    command: &'static str,
+pub(crate) struct KnownBackend {
+    pub(crate) key: &'static str,
+    pub(crate) command: &'static str,
     suggested_setup_style: &'static str,
     suggested_setup_cli: &'static str,
     suggested_json_path: Option<&'static str>,
@@ -531,13 +531,13 @@ fn upsert_backend_table(doc: &mut DocumentMut, key: &str, backend: &BackendConfi
 /// 跟 `memory_mcp::which` 同义 —— 这俩模块都需要 PATH 扫描,但**故意不共享**:
 /// memory_mcp 是独立关注点(MCP setup),将来可能加 `KODE_MCP_BIN_OVERRIDE` env 之类
 /// 的搜索增强而不影响这里。复制一份函数体可以接受。
-fn which(name: &str) -> Option<PathBuf> {
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let path_ext = std::env::var_os("PATHEXT");
     which_in(name, &path, path_ext.as_deref())
 }
 
-fn which_in(
+pub(crate) fn which_in(
     name: &str,
     path: &std::ffi::OsStr,
     path_ext: Option<&std::ffi::OsStr>,

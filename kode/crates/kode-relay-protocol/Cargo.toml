@@ -1,0 +1,9 @@
+[package]
+name = "kode-relay-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Wire types shared by the kode desktop agent and the account relay"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
