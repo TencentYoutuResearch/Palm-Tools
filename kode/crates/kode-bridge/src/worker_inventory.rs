@@ -82,7 +82,7 @@ fn system_resources() -> Value {
 async fn agent_inventory(backends: HashMap<String, kode_core::config::BackendConfig>) -> Vec<Value> {
     let mut rows = backends.into_iter().collect::<Vec<_>>();
     rows.sort_by(|left, right| left.0.cmp(&right.0));
-    join_all(rows.into_iter().map(|(key, config)| async move {
+    let inventory = join_all(rows.into_iter().map(|(key, config)| async move {
         let executable = backend_probe::which(&config.command);
         let version = match executable.as_deref() {
             Some(path) => probe_version(path).await,
@@ -99,7 +99,11 @@ async fn agent_inventory(backends: HashMap<String, kode_core::config::BackendCon
             "available": available,
         })
     }))
-    .await
+    .await;
+    inventory
+        .into_iter()
+        .filter(|row| row["available"] == true)
+        .collect()
 }
 
 async fn probe_version(command: &Path) -> Option<String> {
