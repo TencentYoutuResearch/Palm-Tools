@@ -2589,7 +2589,7 @@ async fn list_backend_models(
     let cfg = backends
         .get(&key)
         .ok_or_else(|| ApiError::NotFound(format!("backend {key}")))?;
-    model_discovery::discover_models_with_config(&key, cfg)
+    model_discovery::discover_models_with_config_cached(&key, cfg, false)
         .await
         .map(Json)
         .map_err(ApiError::BadRequest)

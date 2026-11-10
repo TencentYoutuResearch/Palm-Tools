@@ -367,6 +367,11 @@ impl BackendProfile for CodexProfile {
         let Some(home) = jsonl_tail::codex_home(self.0) else {
             return Vec::new();
         };
+        if let Some((sessions, _)) =
+            codex_sessions_from_db(&home.join("state_5.sqlite"), cwd, 0, usize::MAX)
+        {
+            return sessions;
+        }
         let names = codex_title::thread_names(&home.join("state_5.sqlite"));
         let mut candidates = Vec::new();
         collect_codex_candidates(&home.join("sessions"), cwd, &mut candidates);
@@ -387,6 +392,11 @@ impl BackendProfile for CodexProfile {
         let Some(home) = jsonl_tail::codex_home(self.0) else {
             return (Vec::new(), false);
         };
+        if let Some(page) =
+            codex_sessions_from_db(&home.join("state_5.sqlite"), cwd, offset, limit)
+        {
+            return page;
+        }
         let mut candidates = Vec::new();
         collect_codex_candidates(&home.join("sessions"), cwd, &mut candidates);
         let (page, has_more) = page_candidates(candidates, offset, limit);
@@ -416,6 +426,51 @@ impl BackendProfile for CodexProfile {
     }
     fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
         codex_file_events(path, self.usage_key(), fallback_ms)
+    }
+}
+
+fn codex_sessions_from_db(
+    db_path: &Path,
+    cwd: &Path,
+    offset: usize,
+    limit: usize,
+) -> Option<(Vec<ListedSession>, bool)> {
+    let rows = codex_title::thread_rows(db_path)?;
+    let sessions: Vec<_> = rows
+        .into_iter()
+        .filter(|row| row.rollout_path.is_file() && same_session_path(&row.cwd, cwd))
+        .map(|row| ListedSession {
+            session_id: row.id,
+            title: row
+                .name
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| (!row.title.trim().is_empty()).then_some(row.title))
+                .or_else(|| {
+                    row.first_user_message
+                        .filter(|value| !value.trim().is_empty())
+                }),
+            model: row.model.filter(|value| !value.trim().is_empty()),
+            total_tokens: (row.tokens_used > 0).then_some(row.tokens_used),
+            last_modified_secs: row.updated_at,
+        })
+        .collect();
+    let has_more = sessions.len() > offset.saturating_add(limit);
+    Some((
+        sessions.into_iter().skip(offset).take(limit).collect(),
+        has_more,
+    ))
+}
+
+fn same_session_path(left: &Path, right: &Path) -> bool {
+    let left = dunce::simplified(left).to_string_lossy().replace('/', "\\");
+    let right = dunce::simplified(right).to_string_lossy().replace('/', "\\");
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(&right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
     }
 }
 
@@ -1180,6 +1235,42 @@ mod tests {
         let (page, more) = page_candidates(all, 2, 2);
         assert_eq!(page.len(), 1);
         assert!(!more);
+    }
+
+    #[test]
+    fn codex_thread_paths_normalize_windows_verbatim_prefixes() {
+        #[cfg(windows)]
+        {
+            assert!(same_session_path(
+                Path::new(r"\\?\D:\kode\kode"),
+                Path::new(r"d:\kode\kode"),
+            ));
+            assert!(!same_session_path(
+                Path::new(r"D:\kode\kode"),
+                Path::new(r"D:\kode\other"),
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(same_session_path(
+                Path::new("/tmp/kode"),
+                Path::new("/tmp/kode"),
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires KODE_BENCH_CWD and a local Codex/Tcodex state database"]
+    fn live_codex_history_page_benchmark() {
+        let cwd = std::env::var("KODE_BENCH_CWD").expect("KODE_BENCH_CWD");
+        let started = std::time::Instant::now();
+        let (page, _) = profile(Backend::Tcodex).list_sessions_page(Path::new(&cwd), 0, 5);
+        eprintln!(
+            "tcodex history page: {} rows in {:?}",
+            page.len(),
+            started.elapsed()
+        );
+        assert!(!page.is_empty());
     }
 
     #[test]

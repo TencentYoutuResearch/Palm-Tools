@@ -121,7 +121,17 @@ impl Session {
         let effective_model: Option<String> = model
             .map(|s| s.to_string())
             .or_else(|| backend.default_model.clone());
-        let model_label = effective_model.clone().unwrap_or_else(|| "auto".into());
+        // Codex/Tcodex can select a model from config without a --model flag.
+        // Reflect that configured model immediately, but do not inject it as a
+        // launch override when the child process was intentionally left on auto.
+        let display_model = effective_model.clone().or_else(|| {
+            let backend_kind = jsonl_tail::Backend::from_backend_key(protocol_key)?;
+            backend::profile_for_key(protocol_key)
+                .is_some_and(|profile| profile.kind().is_codex_family())
+                .then(|| jsonl_tail::configured_codex_model(backend_kind, &backend.args))
+                .flatten()
+        });
+        let model_label = display_model.unwrap_or_else(|| "auto".into());
         let mut state = SessionState::new(title, model_label);
         state.status = Status::Starting;
 

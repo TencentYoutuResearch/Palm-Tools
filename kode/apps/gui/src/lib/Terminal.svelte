@@ -34,11 +34,12 @@
   } from './terminal_settings'
   import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
   import { TerminalOutputBacklog } from './terminal_output_backlog'
+  import { TerminalImeOutputGate } from './terminal_ime'
   import { installConptyCursorGuard, shouldInstallConptyCursorGuard } from './conpty_cursor'
+  import { installCodexMouseSelection, supportsCodexMouseSelection } from './codex_mouse_selection'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import { ConsecutiveCtrlCGuard } from './consecutive_ctrl_c_guard'
-  import { installCodexMouseSelection } from './codex_mouse_selection'
 
   /**
    * 健康尺寸下限。低于此值的 cols/rows 一律视为容器还没准备好,
@@ -100,8 +101,12 @@
   let terminalSettingsUnsubscribe: (() => void) | null = null
   const ansiThemeAdapter = new TerminalAnsiThemeAdapter()
   const hiddenOutput = new TerminalOutputBacklog()
+  const imeOutput = new TerminalImeOutputGate()
+  let disposeImeComposition: (() => void) | undefined
   function writeTerminalBytes(bytes: Uint8Array) {
-    const themedBytes = ansiThemeAdapter.transform(bytes)
+    const ready = imeOutput.push(bytes)
+    if (!ready) return
+    const themedBytes = ansiThemeAdapter.transform(ready)
     if (themedBytes.length > 0) term.write(themedBytes)
   }
   let disposeCursorGuard: (() => void) | undefined
@@ -265,7 +270,25 @@
     // 再异步加 WebglAddon。FitAddon 不读 renderer 内部,放 open 前后都行。
     term.open(containerEl)
     if (destroyed || !term) return
-    if (get(tabs).find((tab) => tab.id === sessionId)?.backendKey === 'codex') {
+    const textarea = (term as any).textarea ?? (term as any)._core?.textarea
+    if (textarea) {
+      const onCompositionStart = () => imeOutput.begin()
+      const onCompositionEnd = () => {
+        const pending = imeOutput.end()
+        if (!pending) return
+        requestAnimationFrame(() => {
+          if (!destroyed && term) writeTerminalBytes(pending)
+        })
+      }
+      textarea.addEventListener('compositionstart', onCompositionStart, true)
+      textarea.addEventListener('compositionend', onCompositionEnd, true)
+      disposeImeComposition = () => {
+        textarea.removeEventListener('compositionstart', onCompositionStart, true)
+        textarea.removeEventListener('compositionend', onCompositionEnd, true)
+      }
+    }
+    const backendKey = get(tabs).find((tab) => tab.id === sessionId)?.backendKey ?? ''
+    if (supportsCodexMouseSelection(backendKey)) {
       disposeCodexMouseSelection = installCodexMouseSelection(containerEl, term)
     }
     syncCursorBlink()
@@ -1554,6 +1577,8 @@
     window.removeEventListener('blur', syncCursorBlink)
     document.removeEventListener('visibilitychange', syncCursorBlink)
     hiddenOutput.clear()
+    imeOutput.clear()
+    disposeImeComposition?.()
     disposeCursorGuard?.()
     disposeCodexMouseSelection?.()
     webglLoadGeneration++

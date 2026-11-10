@@ -43,6 +43,7 @@
   import RemoteCwdPicker from './RemoteCwdPicker.svelte'
   import Combobox from './Combobox.svelte'
   import BackendIcon from './BackendIcon.svelte'
+  import { isAbsoluteSessionCwd } from './session_history_path'
 
   type Props = {
     backends: BackendInfo[]
@@ -124,7 +125,7 @@
     try {
       const result = ep.kind === 'remote'
         ? await endpointIpc.discoverBackendModels(ep.id, b.key)
-        : await ipc.discoverBackendModels(b.key)
+        : await ipc.discoverBackendModels(b.key, force)
       const currentKey = selectedEndpoint.kind === 'remote'
         ? `${selectedEndpoint.id}:${selected?.key}`
         : `local:${selected?.key}`
@@ -192,6 +193,7 @@
   let sessionsFetchId = 0 // 递增 id,防止竞态(旧的 fetch 回来后覆盖新结果)
   /// 首屏只解析最近几条 transcript;"More" 每次再追加一页。
   const SESSION_PAGE_SIZE = 5
+  const SESSION_HISTORY_DEBOUNCE_MS = 120
 
   function fetchSessionPage(offset: number) {
     const key = selected?.key
@@ -234,7 +236,7 @@
     const ep = selectedEndpoint
     // 只有 configure 阶段 + 有 backend 和绝对 cwd 才查
     void ep // 依赖:切换 endpoint 时重新拉首页
-    if (phase !== 'configure' || !key || !dir || !dir.startsWith('/')) {
+    if (phase !== 'configure' || !key || !isAbsoluteSessionCwd(dir)) {
       sessionsFetchId++
       sessions = []
       sessionsHasMore = false
@@ -260,7 +262,7 @@
           sessionsLoading = false
         }
       }
-    }, 500)
+    }, SESSION_HISTORY_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   })
 

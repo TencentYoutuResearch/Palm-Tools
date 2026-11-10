@@ -501,13 +501,19 @@ pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo
 #[tauri::command]
 pub async fn discover_backend_models(
     backend_key: String,
+    force: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<kode_bridge::model_discovery::ModelDiscoveryResult, String> {
     let backends = crate::shared_agents::refresh(&state).await?.backends;
     let cfg = backends
         .get(&backend_key)
         .ok_or_else(|| format!("backend '{backend_key}' not found"))?;
-    kode_bridge::model_discovery::discover_models_with_config(&backend_key, cfg).await
+    kode_bridge::model_discovery::discover_models_with_config_cached(
+        &backend_key,
+        cfg,
+        force.unwrap_or(false),
+    )
+    .await
 }
 
 /// Settings 面板用:返回**全部** backend(含被关掉的),附带 enabled。
@@ -609,31 +615,35 @@ pub async fn spawn_session(
         EndpointId::Local => "local",
         EndpointId::Remote { id } => id.as_str(),
     };
-    let cwd_path = match cwd_path {
+    let (cwd_path, memory_context) = match cwd_path {
         // Restoring history must not recreate a deleted workspace registration.
         Some(path)
             if resume_session_id
                 .as_deref()
                 .is_some_and(|id| !id.trim().is_empty()) =>
         {
-            Some(path)
+            let memory =
+                build_memory_context_if_local(&endpoint_id, &memory_handle, Some(&path)).await;
+            (Some(path), memory)
         }
-        Some(path) => Some(std::path::PathBuf::from(
-            crate::workbench_state::ensure_workspace(bucket, &path.to_string_lossy())
-                .await
-                .map_err(|error| format!("Kode workspace registration failed: {error}"))?,
-        )),
+        Some(path) => {
+            let memory =
+                build_memory_context_if_local(&endpoint_id, &memory_handle, Some(&path));
+            let path_string = path.to_string_lossy().into_owned();
+            let (workspace, memory) = tokio::join!(
+                crate::workbench_state::ensure_workspace(bucket, &path_string),
+                memory,
+            );
+            (
+                Some(std::path::PathBuf::from(workspace.map_err(|error| {
+                    format!("Kode workspace registration failed: {error}")
+                })?)),
+                memory,
+            )
+        }
         None => {
             return Err("Select a workspace on the SSH server before creating a session".into())
         }
-    };
-
-    // 仅 Local endpoint + prompt 注入开启时，预查项目 memory 快照，让 agent 一开始就看到。
-    // 查询失败 / 空结果静默忽略，不阻断 spawn。
-    let memory_context = if matches!(endpoint_id, EndpointId::Local) {
-        build_memory_context(&memory_handle, cwd_path.as_deref()).await
-    } else {
-        None
     };
 
     let model = sanitize_spawn_model(model);
@@ -782,6 +792,18 @@ async fn build_memory_context(handle: &Arc<MemoryHandle>, cwd: Option<&Path>) ->
         .collect::<Vec<_>>()
         .join("\n");
     Some(text)
+}
+
+async fn build_memory_context_if_local(
+    endpoint_id: &EndpointId,
+    handle: &Arc<MemoryHandle>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    if matches!(endpoint_id, EndpointId::Local) {
+        build_memory_context(handle, cwd).await
+    } else {
+        None
+    }
 }
 
 /// 解析 session cwd:显式参数 > GUI 持久化的 session_cwd_override > KODE_CWD env
