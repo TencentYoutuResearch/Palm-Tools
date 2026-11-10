@@ -71,6 +71,20 @@ Envelope _userMessageEvent(String text) => Envelope(
   },
 );
 
+/// Alternating turns, so finished turns have nothing to fold.
+Envelope _historyEvent(int index) {
+  final event = _assistantMessageEvent(index);
+  if (index.isOdd) return event;
+  return Envelope(
+    protocolVersion: event.protocolVersion,
+    schemaVersion: event.schemaVersion,
+    sessionId: event.sessionId,
+    ts: event.ts,
+    type: event.type,
+    payload: {...event.payload, 'id': 'user-$index', 'role': 'user'},
+  );
+}
+
 Envelope _assistantMessageEvent(int index) => Envelope(
   protocolVersion: 'v1',
   schemaVersion: 1,
@@ -205,14 +219,19 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Fixture command · failed'), findsOneWidget);
-      expect(find.text('Fixture command · pending'), findsNothing);
-      await tester.tap(find.text('Fixture command · failed'));
+      // The finished turn folds; the merged call sits behind it.
+      await tester.tap(find.textContaining('Completed in'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Called tools'));
+      await tester.pumpAndSettle();
+      expect(find.text('Fixture command'), findsOneWidget);
+      expect(find.byIcon(Icons.close_rounded), findsOneWidget);
+      await tester.tap(find.text('Fixture command'));
       await tester.pumpAndSettle();
       expect(find.textContaining('fixture operation'), findsOneWidget);
       events.add(api.history.last);
       await tester.pump();
-      expect(find.text('Fixture command · failed'), findsOneWidget);
+      expect(find.text('Fixture command'), findsOneWidget);
     },
   );
   test('semantic message id matches bridge UTF-8 FNV-1a', () {
@@ -374,7 +393,7 @@ void main() {
       container.read(sessionMessageQueueProvider)[7]!.single.status,
       SessionMessageQueueStatus.submitting,
     );
-    expect(find.text('SENT'), findsOneWidget);
+    expect(find.text('Sent'), findsOneWidget);
 
     receipt.complete(
       const InputDispatchReceipt(
@@ -383,7 +402,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.text('SENT'), findsOneWidget);
+    expect(find.text('Sent'), findsOneWidget);
 
     // Leaving/reopening before the canonical message arrives must retain SENT.
     // First remain on this exact route through receipts and status redraws.
@@ -401,7 +420,7 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 250));
       expect(find.text('keep this visible'), findsOneWidget);
-      expect(find.text('SENT'), findsOneWidget);
+      expect(find.text('Sent'), findsOneWidget);
     }
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpWidget(
@@ -414,7 +433,7 @@ void main() {
       ),
     );
     expect(find.text('keep this visible'), findsOneWidget);
-    expect(find.text('SENT'), findsOneWidget);
+    expect(find.text('Sent'), findsOneWidget);
     await tester.pump();
     expect(find.text('keep this visible'), findsOneWidget);
 
@@ -425,7 +444,7 @@ void main() {
       SessionMessageQueueStatus.processed,
     );
     expect(find.text('keep this visible'), findsOneWidget);
-    expect(find.text('PROCESSED'), findsOneWidget);
+    expect(find.text('Processed'), findsOneWidget);
   });
 
   testWidgets('repeated user text keeps both message bubbles after sync', (
@@ -465,7 +484,7 @@ void main() {
     await sendRepeatedMessage();
 
     expect(find.text('same message'), findsNWidgets(2));
-    expect(find.text('PROCESSED'), findsNWidgets(2));
+    expect(find.text('Processed'), findsNWidgets(2));
   });
 
   testWidgets('tapping outside the composer dismisses the software keyboard', (
@@ -709,8 +728,7 @@ void main() {
   testWidgets(
     'opens at latest message and offers a jump back after scrolling',
     (tester) async {
-      final api = _FakeApiClient()
-        ..history = List.generate(160, _assistantMessageEvent);
+      final api = _FakeApiClient()..history = List.generate(160, _historyEvent);
       final events = StreamController<Envelope>();
       addTearDown(events.close);
       final container = ProviderContainer(

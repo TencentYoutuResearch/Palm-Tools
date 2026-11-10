@@ -2052,5 +2052,9 @@
   },
   "workers.androidDevice": {
     "message": "Android device"
-  }
+  },
+  "pairing.account.palm.consent.title": { "message": "Palm sign-in privacy notice" },
+  "pairing.account.palm.consent.body": { "message": "To sign you in, Kode opens this Mac's camera and sends a short palm capture to Tencent Palm, which compares it with palms enrolled to Kode accounts. Kode does not store the camera images, and the camera turns off when the scan ends. Continue only if you agree to this processing of your palm features." },
+  "pairing.account.palm.consent.agree": { "message": "Agree and scan" },
+  "pairing.account.palm.consent.cancel": { "message": "Cancel" }
 }
