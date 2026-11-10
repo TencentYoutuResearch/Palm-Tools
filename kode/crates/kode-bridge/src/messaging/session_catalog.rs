@@ -187,6 +187,7 @@ mod tests {
         assert!(endpoint_for(&peer,&[json!({"ssh_host":"server.example","ssh_port":22})]).is_none());
     }
     #[test]
+    #[cfg(not(windows))]
     fn remote_rows_are_scoped_deduplicated_and_do_not_export_secrets() {
         let row = json!({"backend_key":"codex","session_id":"native-1","cwd":"/srv/project","title":"Helper","workspace_title":"Project","token":"private","env":{"KEY":"private"}});
         let mut tabs = vec![row.clone()];

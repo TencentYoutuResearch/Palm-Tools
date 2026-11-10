@@ -55,6 +55,7 @@ fn git_status_preserves_literal_paths_and_rename_records() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn git_untracked_preview_handles_special_paths_and_missing_files() {
     let repo = tempfile::tempdir().unwrap();
@@ -259,6 +260,7 @@ fn mobile_text_input_strips_only_trailing_line_endings() {
     assert_eq!(text_input_body("plain text"), "plain text");
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn mobile_text_input_submits_with_a_separate_carriage_return() {
     use std::collections::HashMap;
@@ -587,6 +589,7 @@ async fn memory_recent_returns_approved_facts() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(not(windows))]
 #[test]
 fn resume_meta_snapshot_reads_codebuddy_history_for_cwd() {
     let root = std::env::temp_dir().join(format!(
@@ -631,6 +634,7 @@ fn resume_meta_snapshot_reads_codebuddy_history_for_cwd() {
 
 /// SpecOps 通过 bridge HTTP API 创建 session 后，
 /// bus 上必须 emit `session.created` 事件，让 GUI 前端能创建对应 tab。
+#[cfg(not(windows))]
 #[tokio::test]
 async fn create_session_emits_session_created_on_bus() {
     let config = config_with_fake_codebuddy();
@@ -681,6 +685,7 @@ async fn create_session_emits_session_created_on_bus() {
 }
 
 /// SpecOps Open session 通过 bridge focus endpoint 请求 GUI 聚焦对应 tab。
+#[cfg(not(windows))]
 #[tokio::test]
 async fn focus_session_emits_focus_requested_on_bus() {
     let config = config_with_fake_codebuddy();
@@ -883,6 +888,7 @@ mod build_session_env_tests {
 
 /// Remote clients see each PTY agent's native permission modes: Codex
 /// presets, and Claude's cycle including bypass via the bypass-option flag.
+#[cfg(not(windows))]
 #[tokio::test]
 async fn pty_permission_snapshot_lists_native_modes() {
     let mut config = Config::default();

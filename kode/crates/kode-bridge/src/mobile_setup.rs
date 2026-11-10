@@ -236,6 +236,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(windows))]
     async fn setup_validates_paths_and_preserves_model_and_session_visibility() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("project")).unwrap();

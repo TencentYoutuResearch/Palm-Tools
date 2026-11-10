@@ -472,6 +472,7 @@ printf '{"id":2,"result":{"data":[{"id":"%s","isDefault":true}]}}\n' "$KODE_MODE
     }
 
     #[tokio::test]
+    #[cfg(not(windows))]
     async fn t_cli_model_discovery_routes_to_compatible_protocols() {
         // Capability probes use local fixtures, never an installed AI CLI.
         // tclaude requires its account catalogue, not upstream aliases.

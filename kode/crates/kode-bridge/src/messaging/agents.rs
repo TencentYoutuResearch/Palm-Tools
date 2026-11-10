@@ -674,6 +674,9 @@ mod tests {
             Some("codex")
         );
         assert_eq!(ctx.backends()["work-agent"], shared.backends["work-agent"]);
+        #[cfg(windows)]
+        assert_eq!(shared.backends["work-agent"].command, "env");
+        #[cfg(not(windows))]
         assert_eq!(shared.backends["work-agent"].command, "/usr/bin/env");
         let config = shared.backends["work-agent"].clone();
         change(
