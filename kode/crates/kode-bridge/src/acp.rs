@@ -95,6 +95,8 @@ impl Client {
         model: Option<&str>,
         resume: Option<&str>,
     ) -> Result<Arc<Self>, String> {
+        let cwd = kode_core::pty::simplify_windows_path(cwd);
+        let cwd = cwd.as_path();
         if resume.is_some_and(|sid| {
             ctx.acp
                 .0

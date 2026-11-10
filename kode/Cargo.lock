@@ -2695,6 +2695,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs 5.0.1",
+ "dunce",
  "kode-memory",
  "portable-pty",
  "rusqlite",
