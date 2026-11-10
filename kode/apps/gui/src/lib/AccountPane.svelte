@@ -18,6 +18,7 @@
     type PalmxProgress,
   } from './ipc'
   import Icon, { type IconName } from './Icon.svelte'
+  import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
 
   type Props = { onSignedIn?: () => void }
@@ -205,10 +206,14 @@
     })
   }
 
+  /** Palm images are biometric data: ask before every capture, like mobile. */
+  let palmConsentOpen = $state(false)
+
   /** Scans the palm with this Mac's camera through the relay's capture page. */
   function scanPalmHere() {
     const palm = methods.find((m) => m.id === 'palm')
     if (!palm?.app_id) return
+    palmConsentOpen = false
     void run(async () => {
       cancelPalmx()
       localStorage.setItem(RELAY_URL_KEY, relayUrl.trim())
@@ -531,7 +536,7 @@
           <button type="button" class="button secondary" onclick={startPalm} disabled={busy}>
             <Icon name="smartphone" size={14} />{tr('pairing.account.palm.start')}
           </button>
-          <button type="button" class="button primary" onclick={scanPalmHere} disabled={busy}>
+          <button type="button" class="button primary" onclick={() => (palmConsentOpen = true)} disabled={busy}>
             {#if busy}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="hand" size={14} />{/if}
             {tr('pairing.account.palm.scanHere')}
           </button>
@@ -649,3 +654,14 @@
   .qr-frame .spinner { color: #555; width: 20px; height: 20px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
+
+{#if palmConsentOpen}
+  <ConfirmDialog
+    title={tr('pairing.account.palm.consent.title')}
+    message={tr('pairing.account.palm.consent.body')}
+    confirmLabel={tr('pairing.account.palm.consent.agree')}
+    cancelLabel={tr('pairing.account.palm.consent.cancel')}
+    onConfirm={scanPalmHere}
+    onClose={() => (palmConsentOpen = false)}
+  />
+{/if}
