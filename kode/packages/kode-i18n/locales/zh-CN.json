@@ -717,6 +717,12 @@
   "workers.monitor": {
     "message": "Monitor"
   },
+  "workers.monitorLoading": {
+    "message": "正在加载 Monitor 会话…"
+  },
+  "workers.noMonitorSessions": {
+    "message": "该 Worker 没有会话。"
+  },
   "workers.local": {
     "message": "本地"
   },

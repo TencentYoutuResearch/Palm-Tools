@@ -38,6 +38,17 @@ flutter analyze
 此功能需要同时更新 Flutter App、桌面 GUI 和 `kode-sync-server`。
 桌面必须在线；创建超时会保留请求并显示 **Check creation result**，重复查询不会再次创建。
 
+## 切换监控 Worker
+
+同一个 sync server 可以连接多台 Worker。点击 session 列表顶部的
+`kode · <Worker>` 打开 Worker 列表；在线 Worker 可以直接切换，选择会持久化，
+冷启动后仍监控上次选择的 Worker。会话列表、创建 session 的桌面目录/backend
+目录、消息命令和 WebSocket 事件都会跟随当前 Worker。
+
+配对 token 仍归属于最初扫码的 Worker；跨 Worker 切换由服务端
+`workers.monitor` scope 授权。旧版服务端或旧绑定没有该 scope 时保持原有的
+单 Worker 行为。
+
 ## 配对流程
 
 1. 桌面 kode GUI:`Cmd+P` → "Show Pairing QR…"

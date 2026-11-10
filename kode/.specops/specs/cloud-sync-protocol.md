@@ -42,8 +42,10 @@ mobile companion uses only the centralized service.
    shown only through the QR/copy action, and stored server-side as SHA-256.
 4. Mobile claims it through `POST /api/v1/pairings/:id/claim` and stores the
    returned mobile access token in platform secure storage.
-5. A binding grants exactly `sessions.read`, `sessions.content.read`, and
-   `sessions.send`. Server authorization is mandatory for every REST/WS path.
+5. A binding grants `sessions.read`, `sessions.content.read`,
+   `sessions.send`, and `workers.monitor`. Server authorization is mandatory
+   for every REST/WS path. Older bindings without `workers.monitor` remain
+   scoped to their issuing Worker.
 6. `DELETE /api/v1/bindings/current` revokes the current mobile token. When the
    last binding is revoked, the desktop agent immediately stops uploading.
 
@@ -121,6 +123,15 @@ The center intentionally preserves the existing v1 mobile read surface:
 - `POST /api/v1/sessions/:id/input`
 - `DELETE /api/v1/sessions/:id`
 - `GET /ws` with the mobile bearer header; access tokens are never accepted in URLs
+
+Mobile monitor routing adds the optional `X-Kode-Worker-Id` header to every
+session, setup-catalogue and mobile WebSocket request. The bearer token remains
+bound to the Worker that issued the pairing. A different target is authorized
+only when the binding has `workers.monitor`; the header never changes command
+execution ownership, which remains the selected Worker. The WebSocket hello
+returns both the selected `device_id` and the credential-owning
+`bound_device_id`. Omitting the header preserves single-Worker behavior for
+older mobile clients.
 
 `POST input` accepts `{ "text": "…" }`, requires `sessions.send`, validates a
 64 KiB maximum, and accepts `Idempotency-Key`. It returns `202` only after the

@@ -1845,6 +1845,12 @@
   "workers.monitor": {
     "message": "Monitor"
   },
+  "workers.monitorLoading": {
+    "message": "Loading monitor sessions…"
+  },
+  "workers.noMonitorSessions": {
+    "message": "No sessions on this Worker."
+  },
   "workers.local": {
     "message": "Local"
   },

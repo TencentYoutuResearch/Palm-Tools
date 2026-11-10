@@ -268,6 +268,32 @@ impl CloudSyncManager {
             .map_err(|error| format!("invalid Worker inventory response: {error}"))
     }
 
+    pub async fn worker_sessions(&self, worker_id: &str) -> Result<Value, String> {
+        if !worker_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let (server_url, token) = self.device_http_context()?;
+        let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/workers/{worker}/sessions"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker session response: {error}"))
+    }
+
     fn device_http_context(&self) -> Result<(String, String), String> {
         let config = self.inner.config.lock();
         let backend = config

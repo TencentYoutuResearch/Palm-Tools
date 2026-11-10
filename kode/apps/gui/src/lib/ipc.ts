@@ -422,6 +422,8 @@ export const ipc = {
   cloudSyncWorkers: () => invoke<WorkerDirectoryResponse>('cloud_sync_workers'),
   cloudSyncWorkerInventory: (workerId: string) =>
     invoke<WorkerInventory>('cloud_sync_worker_inventory', { workerId }),
+  cloudSyncWorkerSessions: (workerId: string) =>
+    invoke<WorkerSessionResponse>('cloud_sync_worker_sessions', { workerId }),
   cloudSyncDeploy: (req: CloudDeployReq) =>
     invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
 
@@ -904,6 +906,19 @@ export interface WorkerDirectoryEntry {
 
 export interface WorkerDirectoryResponse {
   workers: WorkerDirectoryEntry[]
+}
+
+export interface WorkerSessionDto {
+  id: number
+  title: string
+  backend_key: string
+  model?: string
+  status?: string
+  cwd?: string | null
+}
+
+export interface WorkerSessionResponse {
+  sessions: WorkerSessionDto[]
 }
 
 export interface WorkerInventoryAgent {

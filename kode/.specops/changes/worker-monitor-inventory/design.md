@@ -6,7 +6,8 @@
   `device_id`.
 - The desktop agent has one outbound WebSocket and already serves allowlisted
   ephemeral setup reads through `setup.request/setup.result`.
-- Mobile bindings already identify exactly one Worker.
+- Mobile bindings identify one credential-owning Worker; the monitor target can
+  now be selected independently when the binding grants `workers.monitor`.
 - There is no user account, Worker inventory or ADB inventory implementation.
 
 ## Protocol
@@ -30,6 +31,11 @@ The Worker inventory is requested through the existing setup channel:
 setup.request { kind: "worker_inventory", payload: {} }
 setup.result  { body: WorkerInventory }
 ```
+
+Mobile worker switching reuses the same bearer and sends
+`X-Kode-Worker-Id: <worker_id>` on session reads, setup catalogues, commands and
+the mobile WebSocket. The default remains the bound Worker. Cross-Worker
+selection requires the `workers.monitor` scope, which new pairings receive.
 
 The Agent hello gains an optional capability list. The server rejects inventory
 requests for Workers that do not advertise `inventory.v1`, so an older Worker
@@ -80,18 +86,20 @@ The sidebar gets a Worker inventory button. It opens a focused dialog with:
 - ADB device states and attached model/product identity.
 - Explicit refresh and offline/unsupported states.
 
-The dialog is observational. It does not become the monitor session view in
-this change.
+The dialog remains observational on desktop. Mobile gets a Worker selector that
+changes the monitor target while keeping the original server binding and secure
+token.
 
 ## Isolation
 
-This change does not modify:
+This change preserves:
 
 - session or event table keys;
 - command routing;
 - pairing token semantics;
 - cross-Agent `Message` schema;
-- mobile endpoint storage.
+- one secure token per server binding; only the selected monitor target is
+  added to that saved endpoint.
 
 The only sync-server persistence additions, if needed, are derived directory
 metadata. Worker inventory is ephemeral and read on demand.

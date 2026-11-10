@@ -29,6 +29,11 @@ impl CloudSyncManager {
             .worker_inventory(worker_id)
             .await
     }
+    pub async fn worker_sessions(&self, worker_id: &str) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_sessions(worker_id)
+            .await
+    }
     pub async fn configure_and_create_pairing(
         &self,
         server_url: String,
@@ -78,6 +83,13 @@ pub async fn cloud_sync_worker_inventory(
     worker_id: String,
 ) -> Result<Value, String> {
     manager.worker_inventory(&worker_id).await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_sessions(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+) -> Result<Value, String> {
+    manager.worker_sessions(&worker_id).await
 }
 #[tauri::command]
 pub async fn cloud_sync_create_pairing(

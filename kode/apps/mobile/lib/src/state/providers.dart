@@ -16,6 +16,14 @@ final endpointStorageProvider = Provider<EndpointStorage>(
 final endpointProvider = StateProvider<Endpoint?>((ref) => null);
 final savedEndpointsProvider = StateProvider<List<Endpoint>>((ref) => const []);
 
+/// Workers registered on the active sync server. Switching one only changes
+/// the monitor target; the secure-storage token remains bound to its issuer.
+final workersProvider = FutureProvider<List<WorkerDto>>((ref) async {
+  final api = ref.watch(apiClientProvider);
+  if (api == null) return const [];
+  return api.listWorkers();
+});
+
 /// 启动时一次性 bootstrap:
 ///   1. 优先用 secure storage 里曾经的 endpoint;但**先 probe 一遍** —— 如果不通
 ///      (端口变了 / token 失效),不要直接拿空白带进 /sessions 屏挂掉

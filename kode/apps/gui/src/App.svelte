@@ -84,7 +84,7 @@
   import type { DndEvent } from 'svelte-dnd-action'
   import { longpressGate, TAB_DRAG_LONG_PRESS_MS } from './lib/longpress_gate'
   import { outsidePressClose } from './lib/outside_close'
-  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry } from './lib/ipc'
+  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry, type WorkerSessionDto } from './lib/ipc'
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
@@ -164,6 +164,8 @@
     typeof localStorage !== 'undefined' ? localStorage.getItem('kode.monitorWorkerId') : null,
   )
   let workers = $state<WorkerDirectoryEntry[]>([])
+  let monitorSessions = $state<WorkerSessionDto[]>([])
+  let monitorSessionsLoading = $state(false)
   let localWorkerName = $state('Local worker')
   let activeModeWorkerName = $derived(
     workMode === 'monitor'
@@ -250,12 +252,30 @@
   function selectWorkMode(mode: WorkMode, worker?: WorkerDirectoryEntry) {
     workMode = mode
     monitorWorkerId = mode === 'monitor' ? (worker?.worker_id ?? monitorWorkerId) : null
+    if (mode === 'worker') {
+      monitorSessions = []
+      monitorSessionsLoading = false
+    } else if (monitorWorkerId) {
+      void refreshMonitorSessions(monitorWorkerId)
+    }
     try {
       localStorage.setItem('kode.workMode', mode)
       if (monitorWorkerId) localStorage.setItem('kode.monitorWorkerId', monitorWorkerId)
       else localStorage.removeItem('kode.monitorWorkerId')
     } catch {
       // 非关键状态,不阻断模式切换。
+    }
+  }
+
+  async function refreshMonitorSessions(workerId: string) {
+    monitorSessionsLoading = true
+    try {
+      const response = await ipc.cloudSyncWorkerSessions(workerId)
+      monitorSessions = response.sessions ?? []
+    } catch {
+      monitorSessions = []
+    } finally {
+      monitorSessionsLoading = false
     }
   }
 
@@ -1238,7 +1258,11 @@
       } catch {
         // 没有 endpoint 也不影响启动
       }
-      void refreshWorkerDirectory()
+      void refreshWorkerDirectory().then(() => {
+        if (workMode === 'monitor' && monitorWorkerId) {
+          void refreshMonitorSessions(monitorWorkerId)
+        }
+      })
       advanceBoot(5)
       // M4 memory:订阅 pending 数变化(后端 1.5s 轮询 + review/propose 后即时 emit)
       try {
@@ -2062,7 +2086,28 @@
       tabindex="-1"
       onscroll={closeMenu}
     >
-      {#if $tabs.length === 0}
+      {#if workMode === 'monitor'}
+        {#if monitorSessionsLoading}
+          <div class="placeholder">{tr('workers.monitorLoading')}</div>
+        {:else if monitorSessions.length === 0}
+          <div class="placeholder">{tr('workers.noMonitorSessions')}</div>
+        {:else}
+          <div class="monitor-session-list">
+            {#each monitorSessions as session (session.id)}
+              <div class="monitor-session-row">
+                <span class="monitor-status" class:busy={session.status === 'busy'}></span>
+                <span class="monitor-session-copy">
+                  <strong>{session.title || session.backend_key}</strong>
+                  <small>
+                    {session.model || session.backend_key}
+                    {#if session.cwd} · {session.cwd}{/if}
+                  </small>
+                </span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {:else if $tabs.length === 0}
         <div class="placeholder">No sessions</div>
       {:else}
         <!-- 多 workspace 且非 compact:渲染可折叠的分组 header + 每组独立 dndzone。
@@ -3007,6 +3052,51 @@
     font-size: var(--fs-sm);
   }
   .boot-error { color: var(--st-err); white-space: pre-wrap; }
+  .monitor-session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .monitor-session-row {
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr);
+    gap: 9px;
+    align-items: center;
+    padding: 8px 9px;
+    border-radius: var(--rad-sm);
+  }
+  .monitor-session-row:hover {
+    background: var(--bg-tab-hover);
+  }
+  .monitor-status {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--st-idle);
+  }
+  .monitor-status.busy {
+    background: var(--st-busy);
+  }
+  .monitor-session-copy {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+  }
+  .monitor-session-copy strong,
+  .monitor-session-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .monitor-session-copy strong {
+    color: var(--fg-primary);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+  }
+  .monitor-session-copy small {
+    color: var(--fg-tertiary);
+    font-size: 10px;
+  }
 
   /* ===== workspace 分组容器 =====
      .ws-list 是外层 dndzone 容器(workspace 级拖拽);

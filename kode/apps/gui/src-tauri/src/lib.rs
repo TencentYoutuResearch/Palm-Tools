@@ -202,6 +202,7 @@ pub fn run() {
             cloud_sync::cloud_sync_activate_backend,
             cloud_sync::cloud_sync_workers,
             cloud_sync::cloud_sync_worker_inventory,
+            cloud_sync::cloud_sync_worker_sessions,
             cloud_deploy::deploy_cloud_sync,
             commands::get_paths_config,
             commands::set_session_cwd,

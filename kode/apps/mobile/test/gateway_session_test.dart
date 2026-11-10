@@ -85,8 +85,12 @@ void main() {
       expect(healthRequests, 2);
       expect(claimRequests, 1);
       expect(
-        await session.websocketHeaders('mobile-token'),
+        await session.websocketHeaders('mobile-token', 'worker-1'),
         containsPair(HttpHeaders.cookieHeader, 'aio_access=granted'),
+      );
+      expect(
+        await session.websocketHeaders('mobile-token', 'worker-1'),
+        containsPair('X-Kode-Worker-Id', 'worker-1'),
       );
     } finally {
       await subscription.cancel();

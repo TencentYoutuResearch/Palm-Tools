@@ -49,6 +49,84 @@ async fn worker_directory_lists_same_server_workers_and_marks_the_viewer() {
 }
 
 #[tokio::test]
+async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "home"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(worker)],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('office','office','phone',?1,?2,1)",
+            params![
+                token_hash("office"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    for (worker, title) in [("office", "office session"), ("home", "home session")] {
+        sync_session_snapshot(
+            &state,
+            worker,
+            "boot",
+            vec![AgentSession {
+                local_id: 7,
+                dto: json!({
+                    "id": 7,
+                    "backend_key": "codex",
+                    "title": title,
+                    "status": "idle",
+                    "tokens": {}
+                }),
+            }],
+        )
+        .unwrap();
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office".parse().unwrap());
+    headers.insert("X-Kode-Worker-Id", "home".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers)
+        .await
+        .unwrap();
+    assert_eq!(list["sessions"][0]["title"], "home session");
+
+    state
+        .inner
+        .db
+        .lock()
+        .execute(
+            "UPDATE bindings SET scopes_json=?1 WHERE id='office'",
+            [serde_json::to_string(&[
+                "sessions.read",
+                "sessions.content.read",
+                "sessions.send",
+            ])
+            .unwrap()],
+        )
+        .unwrap();
+    let mut legacy_headers = HeaderMap::new();
+    legacy_headers.insert("Authorization", "Bearer office".parse().unwrap());
+    legacy_headers.insert("X-Kode-Worker-Id", "home".parse().unwrap());
+    let denied = list_sessions(axum::extract::State(state), legacy_headers).await;
+    assert!(matches!(
+        denied,
+        Err(ApiError::Forbidden(message)) if message.contains("workers.monitor")
+    ));
+}
+
+#[tokio::test]
 async fn worker_inventory_rejects_legacy_and_cross_worker_access_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {

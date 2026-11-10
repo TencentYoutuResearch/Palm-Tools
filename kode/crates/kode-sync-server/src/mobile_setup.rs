@@ -105,7 +105,7 @@ async fn dispatch(
     payload: Value,
 ) -> Result<Response, ApiError> {
     let creating = kind == "create_session";
-    let auth = mobile_auth_from_headers(
+    let auth = worker_auth_from_headers(
         state,
         headers,
         if creating {
@@ -116,7 +116,7 @@ async fn dispatch(
     )?;
     let id = format!("setup_{}", Uuid::new_v4().simple());
     // Keep the desktop connection stable through insertion and dispatch.
-    let agent = state.inner.agents.lock().get(&auth.device_id).cloned();
+    let agent = state.inner.agents.lock().get(&auth.worker_id).cloned();
     if creating {
         let key = headers
             .get("Idempotency-Key")
@@ -150,12 +150,12 @@ async fn dispatch(
             ));
         }
         db.execute("INSERT INTO session_creates(id,binding_id,device_id,idempotency_key,payload_json) VALUES(?1,?2,?3,?4,?5)",
-            params![id, auth.binding_id, auth.device_id, key, payload.to_string()])?;
+            params![id, auth.binding_id, auth.worker_id, key, payload.to_string()])?;
     }
     let agent = agent
         .ok_or_else(|| ApiError::Conflict("Desktop is offline; connect it and retry".into()))?;
     let (tx, rx) = oneshot::channel();
-    let pending_key = (auth.device_id.clone(), id.clone());
+    let pending_key = (auth.worker_id.clone(), id.clone());
     state
         .inner
         .setup_pending
@@ -177,14 +177,14 @@ async fn dispatch(
             json!({"error":"desktop_offline","detail":"Desktop disconnected; request was not sent"}),
         );
         if creating {
-            store_result(state, &auth.device_id, &id, &reply)?;
+            store_result(state, &auth.worker_id, &id, &reply)?;
         }
         return Ok(response(reply));
     }
     let result = tokio::time::timeout(Duration::from_secs(50), rx).await;
     drop(guard);
     // Recheck revocation after the desktop read has completed.
-    mobile_auth_from_headers(
+    worker_auth_from_headers(
         state,
         headers,
         if creating {

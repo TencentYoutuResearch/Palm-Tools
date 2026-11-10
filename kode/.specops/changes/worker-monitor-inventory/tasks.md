@@ -8,6 +8,9 @@
 - [x] Add Tauri IPC and cloud-client methods for Worker directory and inventory.
 - [x] Add sidebar Worker Details entry and the desktop directory/detail dialog.
 - [x] Add frontend data normalization tests where practical.
+- [x] Add mobile Worker directory API, persisted monitor target and Worker selector.
+- [x] Route mobile REST catalogues, session operations and WebSocket by selected Worker.
+- [x] Add server and Flutter tests for scoped cross-Worker monitoring.
 - [x] Run focused Rust tests, `pnpm check`, and relevant desktop build checks.
 - [x] Start one local sync server plus two isolated debug Kode Workers and verify discovery and inventory.
 - [x] Verify legacy behavior remains intact and document remaining limitations.

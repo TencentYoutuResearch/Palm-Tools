@@ -41,6 +41,8 @@ ADB devices without granting any new command execution surface.
 - Collect OS, host, Kode version, CPU, memory, disk, Agent availability/version,
   ADB version and ADB device metadata on the Worker.
 - Add a desktop Worker directory/detail dialog accessible from the sidebar.
+- Add a mobile Worker selector so one server binding can monitor multiple
+  Workers, one active Worker at a time.
 - Keep session, binding, command and messaging persistence unchanged.
 
 ## Acceptance criteria
@@ -56,10 +58,14 @@ ADB devices without granting any new command execution surface.
       arguments, environment variables or credentials.
 - [ ] Desktop users can open Worker Details from the session sidebar, refresh
       the directory and inspect system, resources, Agents and ADB devices.
+- [ ] Mobile users can list Workers on the paired server, switch the active
+      monitor Worker, and keep the selection after app restart.
+- [ ] Mobile session reads, new-session catalogues, commands and WebSocket
+      events all follow the selected Worker.
 - [ ] Offline Workers retain their last known directory status without showing
       fabricated live inventory.
-- [ ] Existing pairing, session synchronization, command routing and mobile
-      behavior remain compatible.
+- [ ] Existing pairing, session synchronization and command routing remain
+      compatible; bindings without `workers.monitor` stay bound to one Worker.
 - [ ] Rust and Svelte checks pass.
 - [ ] A local sync server and at least two isolated debug Kode Workers can be
       discovered and inspected through the new flow.

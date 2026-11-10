@@ -50,6 +50,7 @@ class ApiClient {
         baseUrl: endpoint.baseUrl,
         headers: {
           'Authorization': 'Bearer ${endpoint.token}',
+          'X-Kode-Worker-Id': endpoint.activeWorkerId,
           'Content-Type': 'application/json',
         },
         connectTimeout: const Duration(seconds: 5),
@@ -119,6 +120,15 @@ class ApiClient {
     return list
         .map((e) => SessionDto.fromJson(e as Map<String, dynamic>))
         .where((session) => session.status != 'exited')
+        .toList(growable: false);
+  }
+
+  Future<List<WorkerDto>> listWorkers() async {
+    final resp = await _get('/api/v1/workers');
+    _check(resp);
+    final list = (resp.data['workers'] as List?) ?? const [];
+    return list
+        .map((entry) => WorkerDto.fromJson(entry as Map<String, dynamic>))
         .toList(growable: false);
   }
 
@@ -499,7 +509,10 @@ class WSClient {
     _connecting = true;
     _connState.add(WSConnState.connecting);
     try {
-      final headers = await _gateway.websocketHeaders(endpoint.token);
+      final headers = await _gateway.websocketHeaders(
+        endpoint.token,
+        endpoint.activeWorkerId,
+      );
       if (_disposed) return;
       _channel = IOWebSocketChannel.connect(
         Uri.parse(endpoint.wsUrl),
