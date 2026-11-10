@@ -1839,6 +1839,21 @@
   "workers.title": {
     "message": "Workers"
   },
+  "workers.worker": {
+    "message": "Worker"
+  },
+  "workers.monitor": {
+    "message": "Monitor"
+  },
+  "workers.local": {
+    "message": "Local"
+  },
+  "workers.localWorker": {
+    "message": "Local worker"
+  },
+  "workers.deviceDetails": {
+    "message": "Device details"
+  },
   "workers.syncServer": {
     "message": "Sync server"
   },

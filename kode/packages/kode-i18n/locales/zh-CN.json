@@ -711,6 +711,21 @@
   "workers.title": {
     "message": "Workers"
   },
+  "workers.worker": {
+    "message": "Worker"
+  },
+  "workers.monitor": {
+    "message": "Monitor"
+  },
+  "workers.local": {
+    "message": "本地"
+  },
+  "workers.localWorker": {
+    "message": "本地 Worker"
+  },
+  "workers.deviceDetails": {
+    "message": "设备详情"
+  },
   "workers.syncServer": {
     "message": "同步服务器"
   },

@@ -51,6 +51,8 @@
     | 'minimize-2'
     | 'grip-vertical'
     | 'terminal'
+    | 'monitor'
+    | 'info'
 
   /// 24×24 viewBox 下的 stroke path 片段。新增图标在这里加。
   /// 内容不包括 <svg> 外层 —— 由组件统一加。
@@ -218,6 +220,16 @@
     terminal:
       '<polyline points="4 17 10 11 4 5"/>' +
       '<line x1="12" y1="19" x2="20" y2="19"/>',
+    // lucide:monitor
+    monitor:
+      '<rect width="20" height="14" x="2" y="3" rx="2" ry="2"/>' +
+      '<line x1="8" x2="16" y1="21" y2="21"/>' +
+      '<line x1="12" x2="12" y1="17" y2="21"/>',
+    // lucide:info
+    info:
+      '<circle cx="12" cy="12" r="10"/>' +
+      '<path d="M12 16v-4"/>' +
+      '<path d="M12 8h.01"/>',
   }
 
   export function pathOf(name: IconName): string {

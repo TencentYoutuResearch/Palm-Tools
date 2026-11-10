@@ -37,6 +37,7 @@
   import BackendChooser from './lib/BackendChooser.svelte'
   import PairingDialog from './lib/PairingDialog.svelte'
   import WorkerDirectoryDialog from './lib/WorkerDirectoryDialog.svelte'
+  import ModeSwitcher from './lib/ModeSwitcher.svelte'
   import EndpointDialog from './lib/EndpointDialog.svelte'
   import PathsBanner from './lib/PathsBanner.svelte'
   import MemoryPanel from './lib/MemoryPanel.svelte'
@@ -83,7 +84,7 @@
   import type { DndEvent } from 'svelte-dnd-action'
   import { longpressGate, TAB_DRAG_LONG_PRESS_MS } from './lib/longpress_gate'
   import { outsidePressClose } from './lib/outside_close'
-  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode } from './lib/ipc'
+  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry } from './lib/ipc'
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
@@ -153,6 +154,22 @@
   let pairingOpen = $state(false)
   /** Read-only Worker discovery and inventory. */
   let workersOpen = $state(false)
+  type WorkMode = 'worker' | 'monitor'
+  let workMode = $state<WorkMode>(
+    typeof localStorage !== 'undefined' && localStorage.getItem('kode.workMode') === 'monitor'
+      ? 'monitor'
+      : 'worker',
+  )
+  let monitorWorkerId = $state<string | null>(
+    typeof localStorage !== 'undefined' ? localStorage.getItem('kode.monitorWorkerId') : null,
+  )
+  let workers = $state<WorkerDirectoryEntry[]>([])
+  let localWorkerName = $state('Local worker')
+  let activeModeWorkerName = $derived(
+    workMode === 'monitor'
+      ? workers.find((worker) => worker.worker_id === monitorWorkerId)?.name ?? 'Unknown worker'
+      : localWorkerName,
+  )
   /** Phase 11.4 远端 endpoint 配置面板 */
   let endpointsOpen = $state(false)
   /** 路径配置 banner —— 默认隐藏;用户可用 Cmd+, 打开 */
@@ -214,6 +231,31 @@
       endpoints = await endpointIpc.list()
     } catch {
       // endpoint 指示器不是主流程,失败时保持旧快照。
+    }
+  }
+
+  async function refreshWorkerDirectory() {
+    try {
+      workers = (await ipc.cloudSyncWorkers()).workers ?? []
+      const local = workers.find((worker) => worker.bound)
+      if (local) localWorkerName = local.name
+      if (workMode === 'monitor' && monitorWorkerId && !workers.some((worker) => worker.worker_id === monitorWorkerId)) {
+        monitorWorkerId = null
+      }
+    } catch {
+      workers = []
+    }
+  }
+
+  function selectWorkMode(mode: WorkMode, worker?: WorkerDirectoryEntry) {
+    workMode = mode
+    monitorWorkerId = mode === 'monitor' ? (worker?.worker_id ?? monitorWorkerId) : null
+    try {
+      localStorage.setItem('kode.workMode', mode)
+      if (monitorWorkerId) localStorage.setItem('kode.monitorWorkerId', monitorWorkerId)
+      else localStorage.removeItem('kode.monitorWorkerId')
+    } catch {
+      // 非关键状态,不阻断模式切换。
     }
   }
 
@@ -1196,6 +1238,7 @@
       } catch {
         // 没有 endpoint 也不影响启动
       }
+      void refreshWorkerDirectory()
       advanceBoot(5)
       // M4 memory:订阅 pending 数变化(后端 1.5s 轮询 + review/propose 后即时 emit)
       try {
@@ -1990,14 +2033,6 @@
       </div>
       <button
         class="icon-btn"
-        title={tr('workers.title')}
-        aria-label={tr('workers.title')}
-        onclick={() => (workersOpen = true)}
-      >
-        <Icon name="server" size={16} />
-      </button>
-      <button
-        class="icon-btn"
         title={tr('tab.action.newTabTooltip')}
         aria-label={tr('tab.action.newTab')}
         onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
@@ -2005,6 +2040,17 @@
         <Icon name="plus" size={16} />
       </button>
     </div>
+
+    <ModeSwitcher
+      mode={workMode}
+      workerName={activeModeWorkerName}
+      {workers}
+      onSelect={selectWorkMode}
+      onDetails={() => {
+        workersOpen = true
+        void refreshWorkerDirectory()
+      }}
+    />
 
     <!-- tab-list 是滚动容器;onclick 处理空白处点击关闭侧栏。
          dndzone 已下沉到每个 .ws-group-tabs(每组独立,禁止跨 workspace 拖拽)。 -->
