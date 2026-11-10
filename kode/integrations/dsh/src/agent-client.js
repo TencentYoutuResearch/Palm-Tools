@@ -1149,7 +1149,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const states = new Map()
     for (const [id, row] of Object.entries(rows)) {
       const status = statuses.get(id), running = status?.running ?? row.running, completed = status?.completionUnread ?? row.completed, awaiting = status ? status.pendingInteraction : row.pendingInteraction
-      const state = preferredAvatarState(awaiting ? 'awaiting' : undefined, completed ? 'done' : undefined, running ? 'ongoing' : undefined)
+      // A previous unread completion can remain set after the next turn starts.
+      const state = awaiting ? 'awaiting' : running ? 'ongoing' : completed ? 'done' : undefined
       if (state) states.set(id, state)
     }
     return states
@@ -1225,7 +1226,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const [targets, setTargets] = useState([]), [workspaceTargets, setWorkspaceTargets] = useState([])
     const profileKey = Object.entries(rows).filter(([, row]) => row.agent).map(([id, row]) => `${id}:${row.agent.type}:${row.agent.avatar?.id}:${row.agent.avatar?.url}`).sort().join('|')
     const workspaceKey = workspaces.map(item => `${item.workspaceId}:${item.sessionIds.join(',')}`).join('|')
-    const statusKey = Object.entries(rows).map(([id, row]) => { const status = statuses.get(id); return `${id}:${status?.running}:${status?.completionUnread}:${Boolean(status?.pendingInteraction)}:${row.running}:${row.completed}` }).sort().join('|')
+    const statusKey = Object.entries(rows).map(([id, row]) => { const status = statuses.get(id); return `${id}:${status?.running}:${status?.completionUnread}:${Boolean(status?.pendingInteraction)}:${row.running}:${row.completed}:${Boolean(row.pendingInteraction)}` }).sort().join('|')
     useEffect(() => {
       const scope = root.current
       if (!scope || typeof MutationObserver === 'undefined') return
@@ -1237,7 +1238,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         for (const row of scope.querySelectorAll('[data-row-key^="session:"]')) {
           const id = row.getAttribute('data-row-key').slice(8), seat = row.firstElementChild
           const nativeState = seat?.querySelector(':scope > [data-state]')?.getAttribute('data-state')
-          const state = preferredAvatarState(sessionStates.get(id), nativeState)
+          // Native DOM attributes may lag behind the live store during a new turn.
+          const state = statuses.has(id) || rows[id] ? sessionStates.get(id) : nativeState
           if (state) sessionStates.set(id, state)
           if (!rows[id]?.agent || !seat) continue
           if (state) next.push({ id, seat, state })
