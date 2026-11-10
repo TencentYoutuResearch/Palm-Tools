@@ -125,16 +125,16 @@ function KodeTokenIsland({ activity, appearance } = {}) {
   const ctx = kodeWorkbenchContext, transport = ctx?.get('kodeTransport')
   const preferences = react.useSyncExternalStore(appearance?.subscribe ?? (() => () => {}), appearance?.getSnapshot ?? (() => defaultIslandAppearance))
   const enabled = preferences.tokenIsland, tokenPeriod = preferences.tokenPeriod ?? 'today'
-  const tokenPeriodLabel = { today: '今日', month: '本月', all: '全部' }[tokenPeriod]
+  const followRange = tokenPeriod === 'follow'
   const status = react.useSyncExternalStore(activity?.subscribe ?? (() => () => {}), activity?.getSnapshot ?? (() => idleIslandActivity))
   const host = react.useSyncExternalStore(react.useCallback(fn => transport?.subscribe(fn) ?? (() => {}), [transport]), () => transport?.current ?? 'local')
-  const [open, setOpen] = react.useState(false), [present, setPresent] = react.useState(false), [period, setPeriod] = react.useState(tokenPeriod)
+  const [open, setOpen] = react.useState(false), [present, setPresent] = react.useState(false), [period, setPeriod] = react.useState(followRange ? 'today' : tokenPeriod)
   const [dimension, setDimension] = react.useState('backend'), [selected, setSelected] = react.useState(null)
   const [result, setResult] = react.useState(null), [error, setError] = react.useState(''), [loading, setLoading] = react.useState(false), [refresh, setRefresh] = react.useState(0)
   const root = react.useRef(null), trigger = react.useRef(null), panelId = react.useId()
   const [rangeInputs, setRangeInputs] = react.useState({ start: null, end: null }), [range, setRange] = react.useState(null)
   const [nativeWindow, setNativeWindow] = react.useState(null)
-  react.useEffect(() => { setPeriod(tokenPeriod); setRange(null); setRangeInputs({ start: null, end: null }); setSelected(null) }, [tokenPeriod])
+  react.useEffect(() => { if (followRange) return; setPeriod(tokenPeriod); setRange(null); setRangeInputs({ start: null, end: null }); setSelected(null) }, [tokenPeriod])
   react.useEffect(() => {
     if (!enabled) { setNativeWindow(null); setOpen(false); setPresent(false); return }
     if (!globalThis.kodeDesktop?.island) return
@@ -153,7 +153,9 @@ function KodeTokenIsland({ activity, appearance } = {}) {
     if (enabled && nativeWindow) globalThis.kodeDesktop?.resizeIsland({ width: open ? 640 : 240, height: open ? Math.min(820, nativeWindow.screen.availHeight - 32) : 28 })
   }, [enabled, nativeWindow, open])
   const bucketPeriod = usagePeriod(period, range?.since, range?.until)
+  const tokenPeriodLabel = { today: '今日', month: '本月', all: '全部', custom: '所选范围' }[followRange ? period : tokenPeriod]
   const current = result?.host === host ? result : null
+  const meter = current?.tokenPeriod === tokenPeriod && (!followRange || (current.period === period && current.range === range)) ? current.meter : null
   react.useEffect(() => {
     if (open) { setPresent(true); return }
     const timer = setTimeout(() => setPresent(false), 280)
@@ -177,8 +179,9 @@ function KodeTokenIsland({ activity, appearance } = {}) {
           if (!response.ok) throw new Error(value.error ?? '读取 token 统计失败，请重试。')
           return value
         }
-        const meter = await read(tokenPeriod), snapshot = open && (period !== tokenPeriod || range) ? await read(bucketPeriod, range?.since, range?.until) : meter
-        if (alive) setResult({ host, meter, tokenPeriod, snapshot, range: open ? range : null, period: open ? period : tokenPeriod })
+        const meter = followRange ? await read(bucketPeriod, range?.since, range?.until) : await read(tokenPeriod)
+        const snapshot = open && !followRange && (period !== tokenPeriod || range) ? await read(bucketPeriod, range?.since, range?.until) : meter
+        if (alive) setResult({ host, meter, tokenPeriod, snapshot, range: open || followRange ? range : null, period: open || followRange ? period : tokenPeriod })
       } catch (error) { if (alive && !controller.signal.aborted) setError(error.message) }
       finally { pending = false; if (alive) setLoading(false) }
     }
@@ -228,8 +231,8 @@ function KodeTokenIsland({ activity, appearance } = {}) {
   const content = h('div', { className: 'kode-token-rail', ref: root, onKeyDown: event => {
     if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus() }
   } },
-    h('button', { type: 'button', ref: trigger, className: 'kode-token-notch', 'aria-expanded': open, 'aria-controls': panelId, onClick: () => setOpen(!open), title: `当前主机的${tokenPeriodLabel} CLI 历史 token 用量`, 'aria-label': `${status.label}；${tokenPeriodLabel} tokens：${usageNumber(current?.tokenPeriod === tokenPeriod ? current.meter?.totals?.total_tokens : undefined)}` },
-      h('span', { className: 'kode-island-host' }, h('i', { 'data-state': status.state, role: 'img', 'aria-label': status.label, title: status.label }), h('span', { className: 'kode-island-name' }, host === 'local' ? 'Kode' : '远端')), h('span', { className: 'kode-island-usage' }, h('strong', null, usageNumber(current?.tokenPeriod === tokenPeriod ? current.meter?.totals?.total_tokens : undefined)), h('span', { className: 'kode-island-period-label' }, `${tokenPeriodLabel} tokens`)),
+    h('button', { type: 'button', ref: trigger, className: 'kode-token-notch', 'aria-expanded': open, 'aria-controls': panelId, onClick: () => setOpen(!open), title: `当前主机的${tokenPeriodLabel} CLI 历史 token 用量`, 'aria-label': `${status.label}；${tokenPeriodLabel} tokens：${usageNumber(meter?.totals?.total_tokens)}` },
+      h('span', { className: 'kode-island-host' }, h('i', { 'data-state': status.state, role: 'img', 'aria-label': status.label, title: status.label }), h('span', { className: 'kode-island-name' }, host === 'local' ? 'Kode' : '远端')), h('span', { className: 'kode-island-usage' }, h('strong', null, usageNumber(meter?.totals?.total_tokens)), h('span', { className: 'kode-island-period-label' }, `${tokenPeriodLabel} tokens`)),
       h(IconChevronDownOutlineRegular, { size: 12, style: { transform: open ? 'rotate(180deg)' : undefined } })),
     present && h('section', { id: panelId, className: 'kode-token-panel', 'data-open': open, inert: !open ? '' : undefined, 'aria-hidden': !open || undefined, 'aria-label': 'Token 用量', 'aria-busy': loading },
       h('header', null, h('div', null, h('strong', null, 'Token 用量'), h('p', null, `${host === 'local' ? '本机' : host} · CLI 历史统计`)),

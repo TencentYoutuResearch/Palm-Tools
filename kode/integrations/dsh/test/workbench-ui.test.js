@@ -39,8 +39,8 @@ test('worktree search lives inside the dropdown and preserves selection while fi
   assert.equal(value, 'refs/remotes/origin/FEATURE'); assert.match(find(tree, node => node.props.role === 'status').children[0], /没有匹配/)
 })
 
-test('token island loads selected-host statistics, changes period, and never displays a previous host snapshot', async () => {
-  let enabled = true, meterPeriod = 'today', poll
+for (const initialPeriod of ['today', 'follow']) test(`token island (${initialPeriod}) loads selected-host statistics, changes period, and never displays a previous host snapshot`, async () => {
+  let enabled = true, meterPeriod = initialPeriod, poll
   let cursor = 0, host = 'local', activityState = { state: 'awaiting', label: '全局：2 个会话等待操作' }
   const state = [], effects = [], requests = [], listeners = new Map()
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
@@ -50,7 +50,7 @@ test('token island loads selected-host statistics, changes period, and never dis
     useEffect(fn, deps) { const i = cursor++, previous = state[i]; if (!previous || deps.some((value, j) => value !== previous.deps[j])) { previous?.cleanup?.(); const effect = { deps }; state[i] = effect; effects.push(() => { effect.cleanup = fn() }) } } }
   const transport = { get current() { return host }, subscribe: () => () => {}, async fetch(path, options, selected) {
     requests.push({ path, selected, options })
-    return { ok: true, json: async () => ({ totals: { total_tokens: selected === 'local' ? 1200 : 9000 }, rows: [], daily: [] }) }
+    return { ok: true, json: async () => ({ totals: { total_tokens: selected !== 'local' ? 9000 : path.includes('since_ms=') ? 4800 : path.includes('period=all') ? 3600 : path.includes('period=month') ? 2400 : 1200 }, rows: [], daily: [] }) }
   } }
   const popups = []
   const scope = { kodeDesktop: { island: true, resizeIsland() {} }, window: { open() {
@@ -109,6 +109,30 @@ test('token island loads selected-host statistics, changes period, and never dis
   begin().props.onChange({ target: { value: '2026-01-14T08:23' } }); tree = render(); await settle(); tree = render()
   assert.equal(begin().props['aria-invalid'], true)
   assert.equal(requests.length, requestCount)
+  meterPeriod = 'follow'; tree = render()
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '—')
+  await settle(); tree = render()
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '4.8K')
+  assert.match(find(tree, node => node.props.className === 'kode-token-notch').props['aria-label'], /所选范围/)
+  assert.ok(requests.at(-1).path.includes(`until_ms=${new Date('2026-01-13T12:00').getTime()}`))
+  tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); tree = render(); await settle(); tree = render()
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '4.8K', 'closing details preserves the custom meter range')
+  poll(); await settle(); tree = render()
+  assert.ok(requests.at(-1).path.includes('since_ms='))
+  find(tree, node => node.props.className === 'kode-token-notch').props.onClick(); tree = render(); await settle(); tree = render()
+  for (const [label, total] of [['本月', '2.4K'], ['全部', '3.6K']]) {
+    const before = requests.length
+    find(tree, node => node.type === 'button' && node.children.includes(label)).props.onClick()
+    tree = render()
+    assert.equal(find(tree, node => node.type === 'strong').children[0], '—')
+    await settle(); tree = render()
+    assert.equal(find(tree, node => node.type === 'strong').children[0], total)
+    assert.equal(requests.length, before + 1, 'following details reuses one statistics request')
+    assert.equal(requests.at(-1).path.includes('since_ms='), false)
+  }
+  assert.equal(requests.some(row => row.path.includes('period=follow')), false)
+  meterPeriod = 'today'; tree = render(); await settle(); tree = render(); await settle(); tree = render()
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '1.2K', 'fixed scope is restored when follow mode is disabled')
   host = 'remote:fixture.example'; tree = render()
   assert.equal(find(tree, node => node.type === 'strong').children[0], '—')
   await settle(); tree = render(); assert.equal(find(tree, node => node.type === 'strong').children[0], '9K')

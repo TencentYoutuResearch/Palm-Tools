@@ -1,6 +1,6 @@
 /** Device-local interface preferences shared by settings and the token island. */
 export function installInterfacePreferences(ctx, env = globalThis) {
-  const key = 'kode.interface.v1', listeners = new Set(), periods = ['today', 'month', 'all']
+  const key = 'kode.interface.v1', listeners = new Set(), periods = ['today', 'month', 'all', 'follow']
   const read = () => {
     try { const value = JSON.parse(env.localStorage?.getItem(key) ?? '{}'); return { tokenIsland: value?.tokenIsland !== false, tokenPeriod: periods.includes(value?.tokenPeriod) ? value.tokenPeriod : 'today' } }
     catch { return { tokenIsland: true, tokenPeriod: 'today' } }

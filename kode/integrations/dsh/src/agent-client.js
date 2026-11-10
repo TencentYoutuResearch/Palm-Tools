@@ -747,10 +747,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h('input', { type: 'checkbox', role: 'switch', checked: snapshot.tokenIsland, disabled: !service, onChange: event => {
           setError(''); try { service.update({ tokenIsland: event.target.checked }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
         } })),
-      h(SelectField, { label: '刘海用量范围', value: snapshot.tokenPeriod ?? 'today', disabled: !service, options: [{ value: 'today', label: '今日 Token' }, { value: 'month', label: '本月 Token' }, { value: 'all', label: '全部 Token' }], onChange: tokenPeriod => {
+      h(SelectField, { label: '刘海用量范围', value: snapshot.tokenPeriod ?? 'today', disabled: !service, options: [{ value: 'today', label: '今日 Token' }, { value: 'month', label: '本月 Token' }, { value: 'all', label: '全部 Token' }, { value: 'follow', label: '跟随统计范围' }], onChange: tokenPeriod => {
         setError(''); try { service.update({ tokenPeriod }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
       } }),
-      h('p', { className: 'kode-config-note' }, '刘海屏仅显示状态点与用量数字；展开后仍可查看范围并切换统计。'),
+      h('p', { className: 'kode-config-note' }, '选择“跟随统计范围”后，刘海显示详情中所选时间范围的用量，包括自定义起止时间。刘海屏仅显示状态点与用量数字。'),
       h(Failure, { text: error }))
   }
   function NotificationSettingsBody() {
