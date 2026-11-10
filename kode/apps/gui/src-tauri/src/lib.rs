@@ -83,16 +83,23 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     disable_apple_press_and_hold();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Isolated debug Workers use different state/config paths and opt out so
+    // they can coexist on one developer machine.
+    let builder = if std::env::var("KODE_DISABLE_SINGLE_INSTANCE").as_deref() == Ok("1") {
+        builder
+    } else {
         // Must be the first plugin. A second GUI process would otherwise restore
         // and persist its own tab list into the same state.json.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
         }))
+    };
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -193,6 +200,8 @@ pub fn run() {
             cloud_sync::cloud_sync_status,
             cloud_sync::cloud_sync_create_pairing,
             cloud_sync::cloud_sync_activate_backend,
+            cloud_sync::cloud_sync_workers,
+            cloud_sync::cloud_sync_worker_inventory,
             cloud_deploy::deploy_cloud_sync,
             commands::get_paths_config,
             commands::set_session_cwd,

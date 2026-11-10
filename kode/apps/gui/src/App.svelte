@@ -36,6 +36,7 @@
   import ConfirmDialog from './lib/ConfirmDialog.svelte'
   import BackendChooser from './lib/BackendChooser.svelte'
   import PairingDialog from './lib/PairingDialog.svelte'
+  import WorkerDirectoryDialog from './lib/WorkerDirectoryDialog.svelte'
   import EndpointDialog from './lib/EndpointDialog.svelte'
   import PathsBanner from './lib/PathsBanner.svelte'
   import MemoryPanel from './lib/MemoryPanel.svelte'
@@ -150,6 +151,8 @@
   let chooserWorkspace = $state<WsGroup | null>(null)
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
+  /** Read-only Worker discovery and inventory. */
+  let workersOpen = $state(false)
   /** Phase 11.4 远端 endpoint 配置面板 */
   let endpointsOpen = $state(false)
   /** 路径配置 banner —— 默认隐藏;用户可用 Cmd+, 打开 */
@@ -1987,6 +1990,14 @@
       </div>
       <button
         class="icon-btn"
+        title={tr('workers.title')}
+        aria-label={tr('workers.title')}
+        onclick={() => (workersOpen = true)}
+      >
+        <Icon name="server" size={16} />
+      </button>
+      <button
+        class="icon-btn"
         title={tr('tab.action.newTabTooltip')}
         aria-label={tr('tab.action.newTab')}
         onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
@@ -2489,6 +2500,10 @@
 
 {#if pairingOpen}
   <PairingDialog onClose={() => (pairingOpen = false)} />
+{/if}
+
+{#if workersOpen}
+  <WorkerDirectoryDialog onClose={() => (workersOpen = false)} />
 {/if}
 
 {#if endpointsOpen}

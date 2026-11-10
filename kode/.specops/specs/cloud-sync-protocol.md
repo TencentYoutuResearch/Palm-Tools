@@ -225,3 +225,24 @@ and command receipt ledger. Switching a backend restarts the outbound agent
 generation and never copies credentials or uncertain command receipts across
 origins. Existing single-backend configs migrate in place without changing the
 installation identity or losing credentials.
+
+### Worker directory and read-only inventory
+
+The center exposes a Worker directory over the existing bearer model:
+
+- `GET /api/v1/workers` returns registered Workers with stable Worker id, name,
+  online state, last-seen time, Kode version, OS, architecture and inventory
+  capability.
+- `GET /api/v1/workers/:worker_id/inventory` returns a read-only snapshot of
+  system, CPU, memory, disks, configured Agents and attached ADB devices.
+
+Inventory is an allowlisted setup request. An Agent advertises
+`capabilities: ["inventory.v1"]` in its hello; older Agents remain usable and
+report `inventory_capable: false`. Inventory never accepts caller-supplied
+commands or arguments, never returns credentials, and never bypasses Worker
+isolation.
+
+Cross-Worker inventory is disabled by default. A controlled single-tenant
+deployment can set `KODE_SYNC_ALLOW_SHARED_INVENTORY=1` to allow one registered
+Worker to inspect another's read-only inventory. Session data, events and
+commands remain scoped to each Worker independently of this flag.

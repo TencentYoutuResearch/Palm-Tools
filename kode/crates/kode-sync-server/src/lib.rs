@@ -52,6 +52,7 @@ pub struct ServerState {
 struct Inner {
     db: parking_lot::Mutex<Connection>,
     public_url: String,
+    allow_shared_inventory: parking_lot::Mutex<bool>,
     agents: parking_lot::Mutex<HashMap<String, AgentConnection>>,
     setup_pending: parking_lot::Mutex<mobile_setup::Pending>,
     mobile_buses: parking_lot::Mutex<HashMap<String, broadcast::Sender<CloudEnvelope>>>,
@@ -61,6 +62,10 @@ struct Inner {
 struct AgentConnection {
     connection_id: String,
     tx: mpsc::UnboundedSender<ServerFrame>,
+    kode_version: Option<String>,
+    os: Option<String>,
+    arch: Option<String>,
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +206,11 @@ impl ServerState {
             inner: Arc::new(Inner {
                 db: parking_lot::Mutex::new(db),
                 public_url: normalize_server_url(&config.public_url)?,
+                allow_shared_inventory: parking_lot::Mutex::new(
+                    std::env::var("KODE_SYNC_ALLOW_SHARED_INVENTORY")
+                        .ok()
+                        .is_some_and(|value| value == "1"),
+                ),
                 agents: parking_lot::Mutex::new(HashMap::new()),
                 setup_pending: parking_lot::Mutex::new(HashMap::new()),
                 mobile_buses: parking_lot::Mutex::new(HashMap::new()),
@@ -287,6 +297,11 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/devices/register", post(register_device))
         .route("/api/v1/devices/:id/pairings", post(create_pairing))
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
+        .route("/api/v1/workers", get(list_workers))
+        .route(
+            "/api/v1/workers/:worker_id/inventory",
+            get(get_worker_inventory),
+        )
         .route("/api/v1/agent/ws", get(agent_ws_upgrade))
         .route("/api/v1/bindings/current", delete(revoke_current_binding))
         .route(
@@ -383,6 +398,109 @@ async fn register_device(
         device_id,
         device_token,
     }))
+}
+
+/// Resolve either a monitor binding or a Worker's own device bearer to the
+/// Worker it may inspect. Worker list uses a read scope; inventory still
+/// requires the selected Worker id to equal this identity.
+fn worker_viewer_from_headers(
+    state: &ServerState,
+    headers: &HeaderMap,
+    scope: &str,
+) -> Result<String, ApiError> {
+    let token = bearer(headers).ok_or(ApiError::Unauthorized)?;
+    match state.mobile_auth(&token, scope) {
+        Ok(auth) => Ok(auth.device_id),
+        Err(ApiError::Unauthorized) => {
+            let db = state.inner.db.lock();
+            db.query_row(
+                "SELECT id FROM devices WHERE token_hash=?1 AND revoked_at IS NULL",
+                [token_hash(&token)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(ApiError::Unauthorized)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn touch_worker(state: &ServerState, device_id: &str) -> Result<(), ApiError> {
+    state.inner.db.lock().execute(
+        "UPDATE devices SET last_seen_at=?1 WHERE id=?2 AND revoked_at IS NULL",
+        params![now_ms() as i64, device_id],
+    )?;
+    Ok(())
+}
+
+async fn list_workers(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.read")?;
+    let rows = {
+        let db = state.inner.db.lock();
+        let mut stmt =
+            db.prepare("SELECT id,name,last_seen_at FROM devices WHERE revoked_at IS NULL ORDER BY name,id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let agents = state.inner.agents.lock();
+    let workers = rows
+        .into_iter()
+        .map(|(worker_id, name, last_seen_at)| {
+            let agent = agents.get(&worker_id);
+            json!({
+                "worker_id": worker_id,
+                "name": name,
+                "online": agent.is_some(),
+                "last_seen_at": last_seen_at,
+                "kode_version": agent.and_then(|value| value.kode_version.clone()),
+                "os": agent.and_then(|value| value.os.clone()),
+                "arch": agent.and_then(|value| value.arch.clone()),
+                "inventory_capable": agent.is_some_and(|value| {
+                    value.capabilities.iter().any(|item| item == "inventory.v1")
+                }),
+                "bound": worker_id == viewer_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "workers": workers })))
+}
+
+async fn get_worker_inventory(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(worker_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.content.read")?;
+    if viewer_id != worker_id && !*state.inner.allow_shared_inventory.lock() {
+        return Err(ApiError::NotFound(format!("worker {worker_id}")));
+    }
+    let agent = state
+        .inner
+        .agents
+        .lock()
+        .get(&worker_id)
+        .cloned()
+        .ok_or_else(|| ApiError::Conflict("Worker is offline".into()))?;
+    if !agent
+        .capabilities
+        .iter()
+        .any(|item| item == "inventory.v1")
+    {
+        return Err(ApiError::Conflict(
+            "Worker does not support inventory.v1; update Kode on that Worker".into(),
+        ));
+    }
+    mobile_setup::dispatch_worker_inventory(&state, &worker_id).await
 }
 
 #[derive(Deserialize)]
@@ -599,6 +717,14 @@ enum AgentFrame {
     Hello {
         boot_id: String,
         sessions: Vec<AgentSession>,
+        #[serde(default)]
+        kode_version: Option<String>,
+        #[serde(default)]
+        os: Option<String>,
+        #[serde(default)]
+        arch: Option<String>,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     #[serde(rename = "event")]
     Event {
@@ -697,6 +823,10 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
             AgentConnection {
                 connection_id: connection_id.clone(),
                 tx: tx.clone(),
+                kode_version: None,
+                os: None,
+                arch: None,
+                capabilities: Vec::new(),
             },
         );
     }
@@ -761,7 +891,24 @@ fn handle_agent_frame(
     tx: &mpsc::UnboundedSender<ServerFrame>,
 ) -> Result<(), ApiError> {
     match frame {
-        AgentFrame::Hello { boot_id, sessions } => {
+        AgentFrame::Hello {
+            boot_id,
+            sessions,
+            kode_version,
+            os,
+            arch,
+            capabilities,
+        } => {
+            {
+                let mut agents = state.inner.agents.lock();
+                if let Some(agent) = agents.get_mut(device_id) {
+                    agent.kode_version = kode_version;
+                    agent.os = os;
+                    agent.arch = arch;
+                    agent.capabilities = capabilities;
+                }
+            }
+            touch_worker(state, device_id)?;
             if state.binding_count(device_id)? == 0 {
                 return Ok(());
             }
@@ -794,6 +941,7 @@ fn handle_agent_frame(
             mobile_setup::complete(state, device_id, &request_id, &boot_id, status, body)?;
         }
         AgentFrame::Ping => {
+            touch_worker(state, device_id)?;
             let _ = tx.send(ServerFrame::Pong);
         }
     }

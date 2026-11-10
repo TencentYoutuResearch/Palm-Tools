@@ -204,6 +204,57 @@ async fn dispatch(
     }))
 }
 
+/// Read-only inventory is safe to retry and never gets a durable creation
+/// receipt. Authentication and Worker ownership are checked by the caller.
+pub(super) async fn dispatch_worker_inventory(
+    state: &ServerState,
+    device_id: &str,
+) -> Result<Response, ApiError> {
+    let id = format!("inventory_{}", Uuid::new_v4().simple());
+    let agent = state
+        .inner
+        .agents
+        .lock()
+        .get(device_id)
+        .cloned()
+        .ok_or_else(|| ApiError::Conflict("Worker is offline".into()))?;
+    let (tx, rx) = oneshot::channel();
+    let pending_key = (device_id.to_string(), id.clone());
+    state
+        .inner
+        .setup_pending
+        .lock()
+        .insert(pending_key.clone(), tx);
+    let guard = PendingGuard {
+        state: state.clone(),
+        key: pending_key,
+    };
+    let frame = ServerFrame::SetupRequest {
+        request_id: id,
+        kind: "worker_inventory".into(),
+        payload: json!({}),
+        expires_at: now_ms() + COMMAND_TTL_MS,
+    };
+    if agent.tx.send(frame).is_err() {
+        return Ok(response((
+            409,
+            json!({"error":"worker_offline","detail":"Worker disconnected; inventory was not requested"}),
+        )));
+    }
+    let result = tokio::time::timeout(Duration::from_secs(20), rx).await;
+    drop(guard);
+    Ok(response(match result {
+        Ok(Ok(reply)) => reply,
+        _ => (
+            504,
+            json!({
+                "error": "inventory_timeout",
+                "detail": "Worker did not return inventory before the timeout; refresh and retry."
+            }),
+        ),
+    }))
+}
+
 struct PendingGuard {
     state: ServerState,
     key: (String, String),

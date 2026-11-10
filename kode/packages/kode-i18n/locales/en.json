@@ -1835,5 +1835,122 @@
   },
   "workspace.files.differentEndpoint": {
     "message": "Copy between different endpoints is not supported."
+  },
+  "workers.title": {
+    "message": "Workers"
+  },
+  "workers.syncServer": {
+    "message": "Sync server"
+  },
+  "workers.refresh": {
+    "message": "Refresh Worker directory"
+  },
+  "workers.list": {
+    "message": "Worker list"
+  },
+  "workers.loading": {
+    "message": "Loading Workers…"
+  },
+  "workers.empty": {
+    "message": "No Workers registered on this sync server."
+  },
+  "workers.unknownOs": {
+    "message": "unknown OS"
+  },
+  "workers.current": {
+    "message": "current"
+  },
+  "workers.versionUnavailable": {
+    "message": "version unavailable"
+  },
+  "workers.legacy": {
+    "message": "legacy"
+  },
+  "workers.select": {
+    "message": "Select a Worker."
+  },
+  "workers.online": {
+    "message": "online"
+  },
+  "workers.lastSeen": {
+    "message": "last seen {time}"
+  },
+  "workers.offlineInventory": {
+    "message": "Worker is offline; live inventory is unavailable."
+  },
+  "workers.legacyInventory": {
+    "message": "This Worker is running an older Kode build without inventory support."
+  },
+  "workers.reading": {
+    "message": "Reading Worker inventory…"
+  },
+  "workers.system": {
+    "message": "System"
+  },
+  "workers.kode": {
+    "message": "Kode"
+  },
+  "workers.uptime": {
+    "message": "up {age}"
+  },
+  "workers.cpu": {
+    "message": "CPU"
+  },
+  "workers.cores": {
+    "message": "{count} cores"
+  },
+  "workers.unknownCpu": {
+    "message": "unknown CPU"
+  },
+  "workers.load": {
+    "message": "Load"
+  },
+  "workers.resources": {
+    "message": "Resources"
+  },
+  "workers.observed": {
+    "message": "observed {time}"
+  },
+  "workers.memory": {
+    "message": "Memory"
+  },
+  "workers.freeOf": {
+    "message": "{free} free / {total}"
+  },
+  "workers.agents": {
+    "message": "Agents"
+  },
+  "workers.availableCount": {
+    "message": "{count} available"
+  },
+  "workers.notInstalled": {
+    "message": "not installed"
+  },
+  "workers.ready": {
+    "message": "ready"
+  },
+  "workers.disabled": {
+    "message": "disabled"
+  },
+  "workers.missing": {
+    "message": "missing"
+  },
+  "workers.adbDevices": {
+    "message": "ADB devices"
+  },
+  "workers.adbReady": {
+    "message": "adb ready"
+  },
+  "workers.adbMissing": {
+    "message": "adb missing"
+  },
+  "workers.noDevices": {
+    "message": "No Android devices attached."
+  },
+  "workers.noAdb": {
+    "message": "ADB is not available."
+  },
+  "workers.androidDevice": {
+    "message": "Android device"
   }
 }

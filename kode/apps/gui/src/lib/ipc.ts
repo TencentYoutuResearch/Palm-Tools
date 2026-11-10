@@ -419,6 +419,9 @@ export const ipc = {
     invoke<CloudPairingPayload>('cloud_sync_create_pairing', { serverUrl }),
   cloudSyncActivateBackend: (backendId: string) =>
     invoke<CloudSyncStatus>('cloud_sync_activate_backend', { backendId }),
+  cloudSyncWorkers: () => invoke<WorkerDirectoryResponse>('cloud_sync_workers'),
+  cloudSyncWorkerInventory: (workerId: string) =>
+    invoke<WorkerInventory>('cloud_sync_worker_inventory', { workerId }),
   cloudSyncDeploy: (req: CloudDeployReq) =>
     invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
 
@@ -885,6 +888,84 @@ export interface CloudSyncStatus {
   sync_enabled: boolean
   binding_count: number
   last_error: string | null
+}
+
+export interface WorkerDirectoryEntry {
+  worker_id: string
+  name: string
+  online: boolean
+  last_seen_at: number
+  kode_version: string | null
+  os: string | null
+  arch: string | null
+  inventory_capable: boolean
+  bound: boolean
+}
+
+export interface WorkerDirectoryResponse {
+  workers: WorkerDirectoryEntry[]
+}
+
+export interface WorkerInventoryAgent {
+  key: string
+  name: string
+  command: string
+  command_path: string | null
+  version: string | null
+  enabled: boolean
+  available: boolean
+}
+
+export interface WorkerInventoryAdbDevice {
+  serial: string
+  state: string
+  model?: string
+  product?: string
+  device?: string
+  transport_id?: string
+  connection?: string
+}
+
+export interface WorkerInventory {
+  observed_at: number
+  worker: {
+    kode_version: string
+    os: string
+    arch: string
+    hostname: string | null
+    uptime_seconds: number
+    details?: {
+      name?: string | null
+      os_version?: string | null
+      kernel_version?: string | null
+      host_name?: string | null
+    }
+  }
+  resources: {
+    cpu_count: number
+    cpu_brand?: string | null
+    load_1m: number
+    load_5m: number
+    load_15m: number
+    memory_total: number
+    memory_available: number
+    disks: Array<{
+      name: string
+      mount: string
+      filesystem?: string
+      total: number
+      available: number
+    }>
+  }
+  agents: WorkerInventoryAgent[]
+  adb: {
+    available: boolean
+    version: string | null
+    command_path?: string
+    devices: WorkerInventoryAdbDevice[]
+    error?: string | null
+  }
+  capabilities: string[]
 }
 
 export interface CloudBackendSummary {

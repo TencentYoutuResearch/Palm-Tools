@@ -2,6 +2,168 @@
 use super::*;
 
 #[tokio::test]
+async fn worker_directory_lists_same_server_workers_and_marks_the_viewer() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "home"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(worker)],
+            )
+            .unwrap();
+        }
+    }
+    for worker in ["office", "home"] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.inner.agents.lock().insert(
+            worker.into(),
+            AgentConnection {
+                connection_id: worker.into(),
+                tx,
+                kode_version: Some("0.2.2-test".into()),
+                os: Some(if worker == "office" { "macos" } else { "linux" }.into()),
+                arch: Some("arm64".into()),
+                capabilities: vec!["inventory.v1".into()],
+            },
+        );
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office".parse().unwrap());
+    let Json(directory) = list_workers(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    let workers = directory["workers"].as_array().unwrap();
+    assert_eq!(workers.len(), 2);
+    assert_eq!(workers[0]["worker_id"], "home");
+    assert_eq!(workers[0]["bound"], false);
+    assert_eq!(workers[1]["worker_id"], "office");
+    assert_eq!(workers[1]["bound"], true);
+    assert_eq!(workers[1]["inventory_capable"], true);
+}
+
+#[tokio::test]
+async fn worker_inventory_rejects_legacy_and_cross_worker_access_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "home"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(worker)],
+            )
+            .unwrap();
+        }
+    }
+    let (tx, _rx) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "home".into(),
+        AgentConnection {
+            connection_id: "home".into(),
+            tx,
+            kode_version: Some("0.1.0".into()),
+            os: Some("linux".into()),
+            arch: Some("x86_64".into()),
+            capabilities: Vec::new(),
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer home".parse().unwrap());
+    let legacy = get_worker_inventory(
+        axum::extract::State(state.clone()),
+        Path("home".into()),
+        headers.clone(),
+    )
+    .await;
+    assert!(matches!(
+        legacy,
+        Err(ApiError::Conflict(message)) if message.contains("inventory.v1")
+    ));
+    let foreign = get_worker_inventory(
+        axum::extract::State(state),
+        Path("office".into()),
+        headers,
+    )
+    .await;
+    assert!(matches!(foreign, Err(ApiError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn worker_inventory_relays_a_typed_setup_result_to_an_online_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    *state.inner.allow_shared_inventory.lock() = true;
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "home"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(worker)],
+            )
+            .unwrap();
+        }
+    }
+    let (tx, mut agent) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "home".into(),
+        AgentConnection {
+            connection_id: "home".into(),
+            tx,
+            kode_version: Some("0.2.2-test".into()),
+            os: Some("linux".into()),
+            arch: Some("x86_64".into()),
+            capabilities: vec!["inventory.v1".into()],
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office".parse().unwrap());
+    let request = tokio::spawn(get_worker_inventory(
+        axum::extract::State(state.clone()),
+        Path("home".into()),
+        headers,
+    ));
+    let frame = agent.recv().await.unwrap();
+    let ServerFrame::SetupRequest { request_id, kind, .. } = frame else {
+        panic!("expected setup request");
+    };
+    assert_eq!(kind, "worker_inventory");
+    mobile_setup::complete(
+        &state,
+        "home",
+        &request_id,
+        "boot",
+        200,
+        serde_json::json!({
+            "worker": {"kode_version": "0.2.2-test"},
+            "resources": {},
+            "agents": [],
+            "adb": {"available": false, "devices": []},
+            "capabilities": ["inventory.v1"]
+        }),
+    )
+    .unwrap();
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn independent_devices_share_server_without_sharing_sessions_or_commands() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {
@@ -41,6 +203,10 @@ async fn independent_devices_share_server_without_sharing_sessions_or_commands()
             AgentConnection {
                 connection_id: device.into(),
                 tx,
+                kode_version: Some("0.2.2-test".into()),
+                os: Some("test".into()),
+                arch: Some("arm64".into()),
+                capabilities: vec!["inventory.v1".into()],
             },
         );
         agents.push(rx);
@@ -196,6 +362,10 @@ async fn delete_session_dispatches_a_close_command_to_the_owning_desktop() {
         AgentConnection {
             connection_id: "office".into(),
             tx,
+            kode_version: Some("0.2.2-test".into()),
+            os: Some("test".into()),
+            arch: Some("arm64".into()),
+            capabilities: vec!["inventory.v1".into()],
         },
     );
     sync_session_snapshot(

@@ -707,5 +707,122 @@
   },
   "workspace.files.differentEndpoint": {
     "message": "暂不支持在不同端点之间复制。"
+  },
+  "workers.title": {
+    "message": "Workers"
+  },
+  "workers.syncServer": {
+    "message": "同步服务器"
+  },
+  "workers.refresh": {
+    "message": "刷新 Worker 列表"
+  },
+  "workers.list": {
+    "message": "Worker 列表"
+  },
+  "workers.loading": {
+    "message": "正在加载 Workers…"
+  },
+  "workers.empty": {
+    "message": "当前同步服务器还没有注册 Worker。"
+  },
+  "workers.unknownOs": {
+    "message": "未知系统"
+  },
+  "workers.current": {
+    "message": "当前"
+  },
+  "workers.versionUnavailable": {
+    "message": "版本不可用"
+  },
+  "workers.legacy": {
+    "message": "旧版"
+  },
+  "workers.select": {
+    "message": "选择一个 Worker。"
+  },
+  "workers.online": {
+    "message": "在线"
+  },
+  "workers.lastSeen": {
+    "message": "最后在线 {time}"
+  },
+  "workers.offlineInventory": {
+    "message": "Worker 已离线，无法获取实时资源信息。"
+  },
+  "workers.legacyInventory": {
+    "message": "该 Worker 运行的是不支持资源详情的旧版 Kode。"
+  },
+  "workers.reading": {
+    "message": "正在读取 Worker 资源…"
+  },
+  "workers.system": {
+    "message": "系统"
+  },
+  "workers.kode": {
+    "message": "Kode"
+  },
+  "workers.uptime": {
+    "message": "已运行 {age}"
+  },
+  "workers.cpu": {
+    "message": "CPU"
+  },
+  "workers.cores": {
+    "message": "{count} 核"
+  },
+  "workers.unknownCpu": {
+    "message": "未知 CPU"
+  },
+  "workers.load": {
+    "message": "负载"
+  },
+  "workers.resources": {
+    "message": "资源"
+  },
+  "workers.observed": {
+    "message": "采集于 {time}"
+  },
+  "workers.memory": {
+    "message": "内存"
+  },
+  "workers.freeOf": {
+    "message": "剩余 {free} / {total}"
+  },
+  "workers.agents": {
+    "message": "Agents"
+  },
+  "workers.availableCount": {
+    "message": "{count} 个可用"
+  },
+  "workers.notInstalled": {
+    "message": "未安装"
+  },
+  "workers.ready": {
+    "message": "可用"
+  },
+  "workers.disabled": {
+    "message": "已禁用"
+  },
+  "workers.missing": {
+    "message": "缺失"
+  },
+  "workers.adbDevices": {
+    "message": "ADB 设备"
+  },
+  "workers.adbReady": {
+    "message": "ADB 可用"
+  },
+  "workers.adbMissing": {
+    "message": "未找到 ADB"
+  },
+  "workers.noDevices": {
+    "message": "没有连接 Android 设备。"
+  },
+  "workers.noAdb": {
+    "message": "ADB 不可用。"
+  },
+  "workers.androidDevice": {
+    "message": "Android 设备"
   }
 }

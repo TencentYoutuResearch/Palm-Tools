@@ -60,6 +60,7 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
         }
     }
     match kind {
+        "worker_inventory" => Ok(crate::worker_inventory::collect(ctx).await),
         "backends" => {
             let Json(mut value) = list_backends(Extension(ctx.clone())).await;
             value["home"] = json!(dirs::home_dir().map(|path| path.to_string_lossy().into_owned()));
