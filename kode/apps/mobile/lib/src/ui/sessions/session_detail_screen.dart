@@ -6,14 +6,14 @@
 ///
 /// 当前实现的 9.2.3 第一刀:
 ///   - 用户 / 助手对话气泡(MarkdownBody 渲染 GFM)
-///   - tool_use 折叠卡(展开看 input_summary / output_preview)
+///   - 按轮次展示(transcript_turns.dart):进行中的轮次把连续工具调用合并成一行,
+///     结束的轮次把中间过程折叠成「Completed in …」,只露出最终回复
 ///   - meta 不渲染为消息(只在 AppBar 显模型 / token / context %)
 ///   - ask_user_question / plan_proposed:见到事件先弹 SnackBar 提醒用户(占位)
 ///   - 输入框:发文本 → POST /input
 library;
 
 import 'dart:async';
-import 'dart:convert';
 import 'acp_form_card.dart';
 import 'session_model_sheet.dart';
 
@@ -33,6 +33,8 @@ import 'speech_locale.dart';
 import 'session_send_button.dart';
 import 'session_glass_layout.dart';
 import 'session_relay_cards.dart';
+import 'transcript_turns.dart';
+import 'transcript_widgets.dart';
 
 /// What communication cards need from the screen: names and incoming envelopes.
 class _RelayContext {
@@ -77,6 +79,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
 
   /// 已见 key 去重(message id / tool_use id;同 tool_use 的 running→ok 会更新而非重复)
   final _byKey = <String, int>{};
+
+  /// Opened tool groups and finished-turn folds, by entry key. Kept here so
+  /// rows scrolled out of the list keep their state.
+  final _expanded = <String>{};
 
   /// meta 事件累积的字段(model / title 等;tokens / context_pct 不再展示)
   Map<String, dynamic> _meta = const {};
@@ -843,6 +849,23 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
             item.payload['text'] as String? ?? '',
       ],
     );
+    final entries = buildTranscript([
+      for (final item in _items)
+        TurnInput(
+          key: item.key,
+          type: item.type,
+          ts: item.ts,
+          payload: item.payload,
+          hidden:
+              item.type == 'message' &&
+              item.payload['role'] == 'assistant' &&
+              isRelayEcho(
+                item.payload['text'] as String? ?? '',
+                relay.incomingTexts,
+              ),
+        ),
+    ], running: sessionStatus == 'busy');
+    final entryIndex = {for (final (i, entry) in entries.indexed) entry.key: i};
 
     return GlassScaffold(
       resizeToAvoidBottomInset: false,
@@ -981,16 +1004,16 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                     keyboardDismissBehavior:
                         ScrollViewKeyboardDismissBehavior.onDrag,
                     padding: padding,
-                    itemCount: _items.length,
+                    itemCount: entries.length,
                     // History/live events can insert before an active answer,
                     // and discarding an outbound message shifts later rows.
                     findChildIndexCallback: (key) =>
-                        key is ValueKey<String> ? _byKey[key.value] : null,
+                        key is ValueKey<String> ? entryIndex[key.value] : null,
                     itemBuilder: (_, i) {
                       return KeyedSubtree(
-                        key: ValueKey(_items[i].key),
-                        child: _buildItem(
-                          _items[i],
+                        key: ValueKey(entries[i].key),
+                        child: _buildEntry(
+                          entries[i],
                           backendKey: backendKey,
                           outboundMessages: queuedMessages,
                           relay: relay,
@@ -1004,8 +1027,60 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     );
   }
 
+  void _toggle(String key) => setState(() {
+    if (!_expanded.remove(key)) _expanded.add(key);
+  });
+
+  Widget _buildEntry(
+    TranscriptEntry entry, {
+    required String backendKey,
+    required List<QueuedSessionMessage> outboundMessages,
+    required _RelayContext relay,
+  }) {
+    switch (entry) {
+      case ItemEntry():
+        return _buildItem(
+          _items[entry.index],
+          backendKey: backendKey,
+          outboundMessages: outboundMessages,
+          relay: relay,
+          turnDurationMs: entry.turnDurationMs,
+        );
+      case ToolGroupEntry():
+        return ToolGroupRow(
+          group: entry,
+          open: _expanded.contains(entry.key),
+          onToggle: () => _toggle(entry.key),
+        );
+      case TurnFoldEntry():
+        final open = _expanded.contains(entry.key);
+        return TurnFoldRow(
+          fold: entry,
+          open: open,
+          onToggle: () => _toggle(entry.key),
+          children: open
+              ? [
+                  for (final child in entry.children)
+                    KeyedSubtree(
+                      key: ValueKey(child.key),
+                      child: _buildEntry(
+                        child,
+                        backendKey: backendKey,
+                        outboundMessages: outboundMessages,
+                        relay: relay,
+                      ),
+                    ),
+                ]
+              : const [],
+        );
+      case RunningEntry():
+        return RunningRow(startTs: entry.startTs);
+    }
+  }
+
   Widget _buildItem(
     _Item item, {
+    int? turnDurationMs,
     required String backendKey,
     required List<QueuedSessionMessage> outboundMessages,
     required _RelayContext relay,
@@ -1042,6 +1117,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
           role: role,
           text: text,
           backendKey: backendKey,
+          turnDurationMs: turnDurationMs,
           timestamp: (item.payload['timestamp_ms'] as num?)?.toInt(),
           deliveryStatus: outbound?.status,
           onRetry: outbound?.status == SessionMessageQueueStatus.failed
@@ -1061,7 +1137,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
             sessions: relay.sessions,
           );
         }
-        return _ToolUseCard(payload: item.payload);
+        return ToolStepRow(payload: item.payload);
       case 'ask_user_question':
         if (item.payload['source'] == 'acp_form' ||
             item.payload['source'] == 'acp_questions') {
@@ -1085,7 +1161,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
         return _PlanCard(sessionId: widget.sessionId, payload: item.payload);
       case 'task_create':
       case 'task_update':
-        return _TaskCard(payload: item.payload);
+        return TaskStepRow(payload: item.payload);
       case 'system':
         return Container(
           margin: const EdgeInsets.symmetric(vertical: 8),
@@ -1560,11 +1636,15 @@ class _ScrollToBottomButton extends StatelessWidget {
   }
 }
 
+/// dsh-style message rows: the user's text in a soft right-aligned bubble,
+/// the agent's reply as full-width markdown with a quiet tail (time, turn
+/// duration, copy). No avatars or role labels.
 class _MessageBubble extends StatelessWidget {
   final String role;
   final String text;
   final String backendKey;
   final int? timestamp;
+  final int? turnDurationMs;
   final SessionMessageQueueStatus? deliveryStatus;
   final VoidCallback? onRetry;
   final VoidCallback? onDiscard;
@@ -1574,185 +1654,198 @@ class _MessageBubble extends StatelessWidget {
     required this.text,
     required this.backendKey,
     required this.timestamp,
+    this.turnDurationMs,
     this.deliveryStatus,
     this.onRetry,
     this.onDiscard,
   });
 
+  MarkdownStyleSheet _markdown(ColorScheme colors, Color accent) {
+    final textColor = colors.onSurface;
+    return MarkdownStyleSheet(
+      p: TextStyle(fontSize: 15, color: textColor, height: 1.5),
+      code: TextStyle(
+        fontFamily: 'Menlo',
+        fontSize: 12.5,
+        color: textColor,
+        backgroundColor: colors.onSurface.withValues(alpha: 0.08),
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      codeblockPadding: const EdgeInsets.all(10),
+      blockquotePadding: const EdgeInsets.only(left: 10),
+      blockquoteDecoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(color: accent.withValues(alpha: 0.6), width: 2),
+        ),
+      ),
+      blockquote: TextStyle(color: colors.onSurfaceVariant, height: 1.5),
+      strong: TextStyle(color: textColor, fontWeight: FontWeight.w700),
+      em: TextStyle(color: textColor),
+      listBullet: TextStyle(color: textColor, fontSize: 15),
+      h1: TextStyle(
+        color: textColor,
+        fontSize: 20,
+        fontWeight: FontWeight.w700,
+      ),
+      h2: TextStyle(
+        color: textColor,
+        fontSize: 18,
+        fontWeight: FontWeight.w700,
+      ),
+      h3: TextStyle(
+        color: textColor,
+        fontSize: 16,
+        fontWeight: FontWeight.w700,
+      ),
+      a: TextStyle(
+        color: colors.primary,
+        decoration: TextDecoration.underline,
+        decorationColor: colors.primary,
+      ),
+    );
+  }
+
+  String _time(BuildContext context) => timestamp == null || timestamp! <= 0
+      ? ''
+      : MaterialLocalizations.of(context).formatTimeOfDay(
+          TimeOfDay.fromDateTime(
+            DateTime.fromMillisecondsSinceEpoch(timestamp!),
+          ),
+          alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+        );
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final isUser = role == 'user';
-    final isSystem = role == 'system';
-    final deliveryFailed = deliveryStatus == SessionMessageQueueStatus.failed;
+    if (role == 'user') return _user(context, colors);
+    if (role == 'system') {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Center(
+          child: Text(
+            text,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12),
+          ),
+        ),
+      );
+    }
     final identity = backendIdentity(backendKey);
-    final timestampLabel = timestamp == null || timestamp! <= 0
-        ? ''
-        : MaterialLocalizations.of(context).formatTimeOfDay(
-            TimeOfDay.fromDateTime(
-              DateTime.fromMillisecondsSinceEpoch(timestamp!),
-            ),
-            alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
-          );
-    final label = isUser
-        ? 'YOU'
-        : (isSystem ? 'SYSTEM' : identity.label.toUpperCase());
-    final accentColor = isSystem
-        ? colors.onSurfaceVariant
-        : (isUser
-              ? (deliveryFailed
-                    ? colors.error
-                    : colors.onPrimary.withValues(alpha: 0.78))
-              : identity.accent);
-    final textColor = isSystem
-        ? colors.onSurfaceVariant
-        : (isUser
-              ? (deliveryFailed ? colors.onSurface : colors.onPrimary)
-              : colors.onSurface);
-    final bubbleColor = isSystem
-        ? colors.surfaceContainerHighest
-        : (isUser
-              ? (deliveryFailed
-                    ? colors.error.withValues(alpha: 0.11)
-                    : colors.primary)
-              : colors.surface.withValues(alpha: .84));
-    final bubbleBorder = isSystem
-        ? colors.outline
-        : (isUser
-              ? (deliveryFailed ? colors.error : colors.primary)
-              : identity.accent.withValues(alpha: 0.28));
-    final delivery = switch (deliveryStatus) {
-      SessionMessageQueueStatus.submitting ||
-      SessionMessageQueueStatus.queued ||
-      SessionMessageQueueStatus.sent => (Icons.done_rounded, 'SENT'),
-      SessionMessageQueueStatus.processed => (
-        Icons.done_all_rounded,
-        'PROCESSED',
-      ),
-      SessionMessageQueueStatus.failed => (
-        Icons.error_outline_rounded,
-        'NOT SENT',
-      ),
-      null => null,
-    };
-    final bubble = Container(
-      constraints: const BoxConstraints(maxWidth: 540),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-      decoration: BoxDecoration(
-        color: isUser || isSystem ? bubbleColor : Colors.transparent,
-        borderRadius: BorderRadius.circular(14),
-        border: isUser || isSystem ? Border.all(color: bubbleBorder) : null,
-      ),
+    final muted = TextStyle(color: colors.onSurfaceVariant, fontSize: 12);
+    final time = _time(context);
+    final tail = [
+      if (time.isNotEmpty) time,
+      if (turnDurationMs != null)
+        'Completed in ${formatDuration(turnDurationMs!)}',
+    ].join(' · ');
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 10,
-                  color: accentColor,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1.2,
-                ),
-              ),
-              if (timestampLabel.isNotEmpty) ...[
-                const SizedBox(width: 6),
-                Text(
-                  '· $timestampLabel',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: textColor.withValues(alpha: 0.62),
-                    fontFamily: 'Menlo',
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-              if (isUser && delivery != null) ...[
-                const SizedBox(width: 7),
-                Icon(delivery.$1, size: 12, color: accentColor),
-                const SizedBox(width: 3),
-                Text(
-                  delivery.$2,
-                  style: TextStyle(
-                    fontSize: 9,
-                    color: accentColor,
-                    fontFamily: 'Menlo',
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.45,
-                  ),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 4),
           // MarkdownBody(不是 Markdown):后者自带滚动容器,在 ListView 里会冲突。
-          // selectable=true 替代原 SelectableText,长按选中复制。
           MarkdownBody(
             data: normalizeMessageMarkdown(text),
             selectable: true,
-            styleSheet: MarkdownStyleSheet(
-              p: TextStyle(fontSize: 14, color: textColor, height: 1.45),
-              code: TextStyle(
-                fontFamily: 'Menlo',
-                fontSize: 12,
-                color: isUser ? colors.onPrimary : colors.onSurface,
-                fontWeight: FontWeight.w700,
-                backgroundColor: isUser
-                    ? colors.onPrimary.withValues(alpha: 0.12)
-                    : colors.onSurface.withValues(alpha: 0.1),
+            styleSheet: _markdown(colors, identity.accent),
+          ),
+          Row(
+            children: [
+              if (tail.isNotEmpty) Text(tail, style: muted),
+              IconButton(
+                tooltip: 'Copy reply',
+                visualDensity: VisualDensity.compact,
+                iconSize: 16,
+                color: colors.onSurfaceVariant,
+                icon: const Icon(Icons.copy_rounded),
+                onPressed: () => Clipboard.setData(ClipboardData(text: text)),
               ),
-              codeblockDecoration: BoxDecoration(
-                color: isUser
-                    ? colors.onPrimary.withValues(alpha: 0.1)
-                    : colors.onSurface.withValues(alpha: 0.08),
-                border: Border.all(
-                  color: isUser
-                      ? colors.onPrimary.withValues(alpha: 0.28)
-                      : colors.outline,
-                ),
-                borderRadius: BorderRadius.circular(8),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _user(BuildContext context, ColorScheme colors) {
+    final failed = deliveryStatus == SessionMessageQueueStatus.failed;
+    final maxWidth = MediaQuery.sizeOf(context).width * 0.82;
+    final muted = TextStyle(color: colors.onSurfaceVariant, fontSize: 11);
+    final delivery = switch (deliveryStatus) {
+      SessionMessageQueueStatus.submitting ||
+      SessionMessageQueueStatus.queued ||
+      SessionMessageQueueStatus.sent => (Icons.done_rounded, 'Sent'),
+      SessionMessageQueueStatus.processed => (
+        Icons.done_all_rounded,
+        'Processed',
+      ),
+      SessionMessageQueueStatus.failed => (
+        Icons.error_outline_rounded,
+        'Not sent',
+      ),
+      null => null,
+    };
+    final time = _time(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 14, bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxWidth),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: failed
+                    ? colors.error.withValues(alpha: 0.08)
+                    : colors.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(18),
+                border: failed ? Border.all(color: colors.error) : null,
               ),
-              blockquotePadding: const EdgeInsets.only(left: 10),
-              blockquoteDecoration: BoxDecoration(
-                border: Border(
-                  left: BorderSide(
-                    color: isUser
-                        ? colors.onPrimary.withValues(alpha: 0.62)
-                        : identity.accent.withValues(alpha: 0.72),
-                    width: 2,
-                  ),
-                ),
-              ),
-              blockquote: TextStyle(
-                color: isUser ? colors.onPrimary : colors.onSurface,
-                fontWeight: FontWeight.w500,
-                height: 1.45,
-              ),
-              strong: TextStyle(color: textColor, fontWeight: FontWeight.w800),
-              em: TextStyle(color: textColor.withValues(alpha: 0.95)),
-              listBullet: TextStyle(color: textColor),
-              a: TextStyle(
-                color: isUser ? colors.onPrimary : colors.primary,
-                fontWeight: FontWeight.w700,
-                decoration: TextDecoration.underline,
-                decorationColor: isUser ? colors.onPrimary : colors.primary,
+              child: MarkdownBody(
+                data: normalizeMessageMarkdown(text),
+                selectable: true,
+                styleSheet: _markdown(colors, colors.primary),
               ),
             ),
           ),
-          if (deliveryFailed && onRetry != null && onDiscard != null) ...[
-            const SizedBox(height: 7),
+          if (delivery != null || time.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, right: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (time.isNotEmpty) Text(time, style: muted),
+                  if (delivery != null) ...[
+                    if (time.isNotEmpty) const SizedBox(width: 6),
+                    Icon(
+                      delivery.$1,
+                      size: 12,
+                      color: failed ? colors.error : colors.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      delivery.$2,
+                      style: failed
+                          ? muted.copyWith(color: colors.error)
+                          : muted,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          if (failed && onRetry != null && onDiscard != null)
             Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 TextButton(
                   onPressed: onDiscard,
                   style: TextButton.styleFrom(
                     foregroundColor: colors.onSurfaceVariant,
                     visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
                   ),
                   child: const Text('Discard'),
                 ),
@@ -1763,164 +1856,11 @@ class _MessageBubble extends StatelessWidget {
                     foregroundColor: colors.error,
                     side: BorderSide(color: colors.error),
                     visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 9),
                   ),
                   icon: const Icon(Icons.refresh_rounded, size: 15),
                   label: const Text('Retry'),
                 ),
               ],
-            ),
-          ],
-        ],
-      ),
-    );
-    final avatar = isUser
-        ? const _MessageRoleAvatar.user()
-        : isSystem
-        ? const _MessageRoleAvatar.system()
-        : BackendAvatar(backendKey: backendKey);
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        mainAxisAlignment: isUser
-            ? MainAxisAlignment.end
-            : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: isUser
-            ? [Flexible(child: bubble), const SizedBox(width: 8), avatar]
-            : [avatar, const SizedBox(width: 8), Flexible(child: bubble)],
-      ),
-    );
-  }
-}
-
-class _MessageRoleAvatar extends StatelessWidget {
-  final bool system;
-
-  const _MessageRoleAvatar.user() : system = false;
-  const _MessageRoleAvatar.system() : system = true;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final foreground = system ? colors.onSurfaceVariant : colors.primary;
-    final label = system ? 'System message' : 'You';
-    return Semantics(
-      label: label,
-      image: true,
-      child: Container(
-        width: 32,
-        height: 32,
-        decoration: BoxDecoration(
-          color: system
-              ? colors.surfaceContainerHighest
-              : colors.primary.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: foreground.withValues(alpha: 0.34)),
-        ),
-        child: Icon(
-          system ? Icons.settings_rounded : Icons.person_rounded,
-          size: 18,
-          color: foreground,
-        ),
-      ),
-    );
-  }
-}
-
-class _ToolUseCard extends StatefulWidget {
-  final Map<String, dynamic> payload;
-  const _ToolUseCard({required this.payload});
-  @override
-  State<_ToolUseCard> createState() => _ToolUseCardState();
-}
-
-class _ToolUseCardState extends State<_ToolUseCard> {
-  bool _open = false;
-  @override
-  Widget build(BuildContext context) {
-    final p = widget.payload;
-    final colors = Theme.of(context).colorScheme;
-    final tool = (p['tool'] ?? p['name']) as String?;
-    final summary = p['input_summary'] as String?;
-    final preview =
-        p['output_preview'] as String? ??
-        [
-          if (p['input'] != null)
-            const JsonEncoder.withIndent('  ').convert(p['input']),
-          if (p['output'] != null)
-            p['output'] is String
-                ? p['output'] as String
-                : const JsonEncoder.withIndent('  ').convert(p['output']),
-          if (p['content'] != null)
-            const JsonEncoder.withIndent('  ').convert(p['content']),
-        ].join('\n\n');
-    final status = p['status'] as String? ?? 'running';
-
-    final dot = KillLaColors.toolStatus(status);
-
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      decoration: BoxDecoration(
-        color: colors.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: colors.outline),
-      ),
-      child: Column(
-        children: [
-          InkWell(
-            onTap: () => setState(() => _open = !_open),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              child: Row(
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(color: dot),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      summary ?? (tool != null ? '$tool · $status' : status),
-                      style: TextStyle(
-                        fontFamily: 'Menlo',
-                        fontSize: 12,
-                        color: colors.onSurface,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  Icon(
-                    _open ? Icons.expand_less : Icons.expand_more,
-                    size: 18,
-                    color: colors.onSurfaceVariant,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (_open && preview.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: colors.surfaceContainerHighest,
-                  border: Border.all(color: colors.outline),
-                ),
-                child: SelectableText(
-                  preview,
-                  style: TextStyle(
-                    fontFamily: 'Menlo',
-                    fontSize: 11,
-                    color: colors.onSurfaceVariant,
-                  ),
-                ),
-              ),
             ),
         ],
       ),
@@ -2235,81 +2175,59 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
   @override
   Widget build(BuildContext context) {
     final planMd = widget.payload['plan_md'] as String? ?? '';
+    final colors = Theme.of(context).colorScheme;
+    final decided = _accepted != null || widget.payload['resolved'] == true;
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: KillLaColors.warning.withValues(alpha: 0.10),
-        border: const Border(
-          left: BorderSide(color: KillLaColors.warning, width: 4),
-          top: BorderSide(color: KillLaColors.warning),
-          right: BorderSide(color: KillLaColors.warning),
-          bottom: BorderSide(color: KillLaColors.warning),
-        ),
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: colors.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
-              Icon(Icons.list_alt, color: KillLaColors.warning, size: 18),
-              SizedBox(width: 6),
+              Icon(Icons.checklist_rounded, color: colors.primary, size: 20),
+              const SizedBox(width: 8),
               Text(
-                'PLAN PROPOSED',
+                decided ? 'Plan' : 'Review the plan',
                 style: TextStyle(
-                  color: KillLaColors.warning,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 12,
-                  letterSpacing: 1.2,
+                  color: colors.onSurface,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: KillLaColors.bgPrimary,
-              border: Border.all(color: KillLaColors.border),
-            ),
-            child: MarkdownBody(
-              data: planMd,
-              selectable: true,
-              styleSheet: MarkdownStyleSheet(
-                p: const TextStyle(
-                  fontSize: 13,
-                  color: KillLaColors.textPrimary,
-                ),
-                code: const TextStyle(
-                  fontFamily: 'Menlo',
-                  fontSize: 12,
-                  color: KillLaColors.warning,
-                  backgroundColor: Color(0x33000000),
-                ),
-                codeblockDecoration: BoxDecoration(
-                  color: KillLaColors.bgSecondary,
-                  border: Border.all(color: KillLaColors.border),
-                ),
-                listBullet: const TextStyle(
-                  fontSize: 13,
-                  color: KillLaColors.textPrimary,
-                ),
-                checkbox: const TextStyle(
-                  fontSize: 13,
-                  color: KillLaColors.textPrimary,
-                ),
+          const SizedBox(height: 10),
+          MarkdownBody(
+            data: planMd,
+            selectable: true,
+            styleSheet: MarkdownStyleSheet(
+              p: TextStyle(fontSize: 14, color: colors.onSurface, height: 1.5),
+              code: TextStyle(
+                fontFamily: 'Menlo',
+                fontSize: 12,
+                color: colors.onSurface,
+                backgroundColor: colors.onSurface.withValues(alpha: 0.08),
               ),
+              codeblockDecoration: BoxDecoration(
+                color: colors.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              listBullet: TextStyle(fontSize: 14, color: colors.onSurface),
+              checkbox: TextStyle(fontSize: 14, color: colors.onSurface),
             ),
           ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                _error!,
-                style: const TextStyle(color: KillLaColors.danger),
-              ),
+              child: Text(_error!, style: TextStyle(color: colors.error)),
             ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
           Row(
             children: [
               FilledButton(
@@ -2319,7 +2237,7 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
                         widget.payload['resolved'] == true
                     ? null
                     : () => _respond(true),
-                child: Text(_accepted == true ? '✓ ACCEPTED' : 'ACCEPT'),
+                child: Text(_accepted == true ? 'Accepted' : 'Accept'),
               ),
               const SizedBox(width: 8),
               OutlinedButton(
@@ -2329,7 +2247,7 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
                         widget.payload['resolved'] == true
                     ? null
                     : () => _respond(false),
-                child: Text(_accepted == false ? '✗ REJECTED' : 'REJECT'),
+                child: Text(_accepted == false ? 'Rejected' : 'Reject'),
               ),
             ],
           ),
@@ -2364,82 +2282,6 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
-  }
-}
-
-/// 任务卡 —— task_create 创建时显示 subject/description,task_update 来时
-/// 通过外层 _ingest 的 patch 更新 status(本 widget 直接读 payload['status'])。
-class _TaskCard extends StatelessWidget {
-  final Map<String, dynamic> payload;
-  const _TaskCard({required this.payload});
-
-  @override
-  Widget build(BuildContext context) {
-    final subject = payload['subject'] as String? ?? '';
-    final description = payload['description'] as String?;
-    final status = payload['status'] as String? ?? 'pending';
-
-    final (color, icon, label) = KillLaColors.taskStyle(status);
-
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        border: Border(
-          left: BorderSide(color: color, width: 3),
-          top: BorderSide(color: KillLaColors.border),
-          right: BorderSide(color: KillLaColors.border),
-          bottom: BorderSide(color: KillLaColors.border),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 14, color: color),
-              const SizedBox(width: 6),
-              Text(
-                label.toUpperCase(),
-                style: TextStyle(
-                  color: color,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.8,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  subject.isEmpty ? '(no subject)' : subject,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: KillLaColors.textPrimary,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          if (description != null && description.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Padding(
-              padding: const EdgeInsets.only(left: 20),
-              child: Text(
-                description,
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: KillLaColors.textMuted,
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
   }
 }
 

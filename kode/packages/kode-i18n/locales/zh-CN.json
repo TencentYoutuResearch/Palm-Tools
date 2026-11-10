@@ -924,5 +924,9 @@
   },
   "workers.androidDevice": {
     "message": "Android 设备"
-  }
+  },
+  "pairing.account.palm.consent.title": { "message": "刷掌登录隐私说明" },
+  "pairing.account.palm.consent.body": { "message": "为完成登录，Kode 会打开这台 Mac 的摄像头，并把一段简短的掌部画面发送给腾讯刷掌服务，与已录入 Kode 账号的掌纹进行比对。Kode 不保存摄像头画面，刷掌结束后摄像头即关闭。同意对你的掌纹特征进行上述处理后再继续。" },
+  "pairing.account.palm.consent.agree": { "message": "同意并刷掌" },
+  "pairing.account.palm.consent.cancel": { "message": "取消" }
 }
