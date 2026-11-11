@@ -4,6 +4,7 @@ import WatchKit
 struct SessionView: View {
   let sessionID: Int
   @EnvironmentObject private var store: WatchStore
+  @State private var dictationError: String?
 
   var body: some View {
     let row = store.row(sessionID)
@@ -52,16 +53,35 @@ struct SessionView: View {
             }
             .listRowBackground(Color.clear)
           }
-          if row.pending == nil {
-            VoiceComposer(sessionID: sessionID)
-              .id(Self.bottomID)
+          if let dictationError {
+            Text(dictationError).font(.footnote).foregroundStyle(.red)
+              .listRowBackground(Color.clear)
           }
+          // Scroll anchor that stays above the pinned microphone.
+          Color.clear.frame(height: 1)
+            .listRowBackground(Color.clear)
+            .id(Self.bottomID)
         } else {
           Text("This session is no longer running.")
             .foregroundStyle(.secondary)
         }
       }
       .navigationTitle(row?.summary.displayTitle ?? "Session")
+      .toolbar {
+        // Pinned so the microphone is reachable however long the chat is.
+        if row != nil, row?.pending == nil {
+          ToolbarItemGroup(placement: .bottomBar) {
+            Spacer()
+            Button {
+              dictate()
+            } label: {
+              Image(systemName: "mic.fill")
+            }
+            .tint(.accentColor)
+            .accessibilityLabel("Speak a message")
+          }
+        }
+      }
       .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
       .onChange(of: row?.transcript.last?.id) { _, _ in
         withAnimation { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
@@ -72,7 +92,27 @@ struct SessionView: View {
     }
   }
 
-  private static let bottomID = "composer"
+  private static let bottomID = "bottom"
+
+  /// SwiftUI has no dictation API on watchOS. WatchKit's text input
+  /// controller with no suggestions and plain mode skips the suggestion list;
+  /// watches with a keyboard still open on the keyboard first.
+  private func dictate() {
+    guard let controller = WKApplication.shared().visibleInterfaceController else {
+      dictationError = "Dictation is unavailable here."
+      return
+    }
+    controller.presentTextInputController(withSuggestions: nil, allowedInputMode: .plain) {
+      results in
+      let text = (results ?? []).compactMap { $0 as? String }.joined(separator: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !text.isEmpty else { return }
+      DispatchQueue.main.async {
+        dictationError = nil
+        store.send(sessionID: sessionID, text: text)
+      }
+    }
+  }
 }
 
 /// Delivery label under a user bubble, mirroring the phone composer.
@@ -280,50 +320,6 @@ struct PlanApprovalView: View {
     } catch {
       self.error = error.localizedDescription
       WKHaptics.failure()
-    }
-  }
-}
-
-/// Dictation is sent as soon as the input sheet is confirmed; the bubble
-/// above then tracks Sending → Sent → Processed like the phone composer.
-struct VoiceComposer: View {
-  let sessionID: Int
-  @EnvironmentObject private var store: WatchStore
-  @State private var error: String?
-
-  var body: some View {
-    VStack(spacing: 4) {
-      Button {
-        dictate()
-      } label: {
-        Label("Speak", systemImage: "mic.fill")
-          .frame(maxWidth: .infinity)
-      }
-      .tint(.accentColor)
-      if let error {
-        Text(error).font(.footnote).foregroundStyle(.red)
-      }
-    }
-    .listRowBackground(Color.clear)
-  }
-
-  /// SwiftUI has no dictation API on watchOS. WatchKit's text input
-  /// controller with no suggestions and plain mode skips the suggestion list;
-  /// watches with a keyboard still open on the keyboard first.
-  private func dictate() {
-    guard let controller = WKApplication.shared().visibleInterfaceController else {
-      error = "Dictation is unavailable here."
-      return
-    }
-    controller.presentTextInputController(withSuggestions: nil, allowedInputMode: .plain) {
-      results in
-      let text = (results ?? []).compactMap { $0 as? String }.joined(separator: " ")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !text.isEmpty else { return }
-      DispatchQueue.main.async {
-        error = nil
-        store.send(sessionID: sessionID, text: text)
-      }
     }
   }
 }
