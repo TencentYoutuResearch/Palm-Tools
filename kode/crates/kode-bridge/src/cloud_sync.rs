@@ -262,6 +262,9 @@ impl CloudSyncManager {
             account_name: None,
             account_picture: None,
         };
+        // The installation id already names this desktop to the relay; it is
+        // also its CloudBase device id so sign-ins never evict other devices.
+        let account = AccountClient::for_device(config.installation_id.clone());
         let manager = Self {
             inner: Arc::new(Inner {
                 ctx: ctx.clone(),
@@ -275,7 +278,7 @@ impl CloudSyncManager {
                     .timeout(Duration::from_secs(15))
                     .build()
                     .expect("cloud sync HTTP client"),
-                account: AccountClient::default(),
+                account,
                 pending_sign_in: Mutex::new(None),
                 pending_palmx: tokio::sync::Mutex::new(None),
                 pending_palm: tokio::sync::Mutex::new(None),

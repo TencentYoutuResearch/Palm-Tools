@@ -270,7 +270,10 @@ class PendingSignIn {
 }
 
 class AccountClient {
-  AccountClient({Dio? dio})
+  /// [deviceId] supplies this install's stable CloudBase device id. Every
+  /// relay sign-in and CloudBase refresh carries it, so signing in here never
+  /// evicts the account's sessions on other phones or desktops.
+  AccountClient({Dio? dio, Future<String> Function()? deviceId})
     : _dio =
           dio ??
           Dio(
@@ -280,7 +283,18 @@ class AccountClient {
               headers: const {'Content-Type': 'application/json'},
               validateStatus: (_) => true,
             ),
-          );
+          ) {
+    if (deviceId != null) {
+      _dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) async {
+            options.headers['x-device-id'] = await deviceId();
+            handler.next(options);
+          },
+        ),
+      );
+    }
+  }
 
   final Dio _dio;
 

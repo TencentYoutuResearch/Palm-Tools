@@ -136,6 +136,11 @@ pub struct PendingSignIn {
 #[derive(Clone)]
 pub struct AccountClient {
     http: reqwest::Client,
+    /// Stable id of this installation, sent as `x-device-id` on every
+    /// sign-in and refresh (as the CloudBase SDK does). When all sign-ins
+    /// shared one id, each new one revoked the previous session's refresh
+    /// token, so two installs must never share an id.
+    device_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -156,11 +161,23 @@ impl Default for AccountClient {
                 .timeout(Duration::from_secs(15))
                 .build()
                 .expect("account HTTP client"),
+            device_id: None,
         }
     }
 }
 
 impl AccountClient {
+    pub fn for_device(device_id: String) -> Self {
+        Self { device_id: Some(device_id), ..Self::default() }
+    }
+
+    fn with_device(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.device_id {
+            Some(id) => request.header("x-device-id", id),
+            None => request,
+        }
+    }
+
     async fn health(&self, server_url: &str) -> Result<Value, String> {
         let health: Value = self
             .http
@@ -399,8 +416,7 @@ impl AccountClient {
     /// Best effort: an unreachable profile keeps what the session had.
     pub async fn with_profile(&self, session: AccountSession) -> AccountSession {
         let profile: Option<Value> = async {
-            self.http
-                .get(format!("{}/auth/v1/user/me", session.issuer))
+            self.with_device(self.http.get(format!("{}/auth/v1/user/me", session.issuer)))
                 .bearer_auth(&session.access_token)
                 .send()
                 .await
@@ -583,7 +599,7 @@ impl AccountClient {
         access_token: Option<&str>,
         body: Option<Value>,
     ) -> Result<Value, String> {
-        let mut request = self.http.request(method, format!("{server_url}{path}"));
+        let mut request = self.with_device(self.http.request(method, format!("{server_url}{path}")));
         if let Some(token) = access_token {
             request = request.bearer_auth(token);
         }
@@ -629,8 +645,7 @@ impl AccountClient {
 
     async fn post(&self, issuer: &str, path: &str, body: Value) -> Result<Value, String> {
         let response = self
-            .http
-            .post(format!("{issuer}{path}"))
+            .with_device(self.http.post(format!("{issuer}{path}")))
             .json(&body)
             .send()
             .await

@@ -157,6 +157,23 @@ be HTTPS (plain HTTP only on loopback).
    The documented `/auth/v1/token/refresh` path does not exist. CloudBase
    rotates the refresh token on use, so clients must save the new one.
 
+### Device ids and concurrent sessions
+
+Every client keeps one `x-device-id` per install and sends it on all
+sign-in and refresh calls, to CloudBase and to the relay's sign-in routes
+(`/api/v1/auth/palm`, `…/palm/register/finish`, `…/palm/handoff`,
+`/api/v1/auth/palmx`). Desktops use their `installation_id`; phones store a
+v4 UUID in app-private storage (not the Keychain, so a reinstall is a new
+device). The relay forwards it to `/auth/v1/signin/custom`; a handoff is
+signed in with the id the waiting desktop sent to `…/handoff`, not the
+approving phone's. Ids must be 8–64 characters of `[A-Za-z0-9_-]`; missing
+or malformed ids get a fresh random id per sign-in.
+
+When the relay signed everyone in with one fixed id, each sign-in revoked
+the previous session's refresh token, so a phone sign-in logged the desktop
+out. The environment's client `MaxDevice` (最大会话数) caps sessions per
+user; it is 5, and the sixth sign-in evicts the oldest session.
+
 ## Sign-in methods
 
 `/api/v1/healthz` lists `login_methods` in the relay's preferred order, e.g.
