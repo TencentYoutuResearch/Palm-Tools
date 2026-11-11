@@ -5,7 +5,27 @@ struct SessionRow: Identifiable {
   let summary: SessionSummary
   let pending: PendingInteraction?
   let transcript: [TranscriptLine]
+  /// Every user message in the fetched window, to confirm watch sends.
+  let userMessages: [TranscriptLine]
   var id: Int { summary.id }
+}
+
+/// Same lifecycle labels as the phone composer: Sent once the desktop
+/// executed the input, Processed once the CLI transcript shows it.
+enum OutboundStatus: Equatable {
+  case sending
+  case sent
+  case failed(String)
+}
+
+struct OutboundMessage: Identifiable {
+  let id = UUID()
+  let sessionID: Int
+  let text: String
+  var status: OutboundStatus = .sending
+  /// User message ids already in the transcript when this was sent; a new
+  /// id with the same text is this message coming back from the CLI.
+  let knownUserIDs: Set<String>
 }
 
 enum WatchPhase: Equatable {
@@ -24,6 +44,9 @@ final class WatchStore: ObservableObject {
   @Published private(set) var bindings: BindingSet?
   @Published private(set) var rows: [SessionRow] = []
   @Published private(set) var phase: WatchPhase = .unpaired
+  @Published private(set) var outbound: [OutboundMessage] = []
+  /// Transcript lines that are watch sends confirmed by the CLI.
+  @Published private(set) var processedLineIDs = Set<String>()
   @Published var selectedKey: String? {
     didSet {
       UserDefaults.standard.set(selectedKey, forKey: Self.selectedKeyDefault)
@@ -88,7 +111,8 @@ final class WatchStore: ObservableObject {
             return SessionRow(
               summary: session,
               pending: pendingInteraction(in: events),
-              transcript: recentTranscript(in: events))
+              transcript: recentTranscript(in: events),
+              userMessages: userMessages(in: events))
           }
         }
         var rows: [SessionRow] = []
@@ -99,6 +123,7 @@ final class WatchStore: ObservableObject {
       guard api === self.api else { return }
       rows = loaded.sorted(by: Self.order)
       phase = .ready
+      reconcileOutbound()
       buzzForNewPrompts()
     } catch let error as APIError where error.isAuth {
       phase = .needsPhone("Sign-in expired. Open Kode on your iPhone to refresh it.")
@@ -132,9 +157,61 @@ final class WatchStore: ObservableObject {
     await refresh()
   }
 
-  func send(sessionID: Int, text: String) async throws {
-    try await api?.sendText(sessionID, text: text)
-    await refresh()
+  func outbound(for sessionID: Int) -> [OutboundMessage] {
+    outbound.filter { $0.sessionID == sessionID }
+  }
+
+  /// Queues the text and returns immediately; the bubble shows progress.
+  func send(sessionID: Int, text: String) {
+    let known = Set(row(sessionID)?.userMessages.map(\.id) ?? [])
+    let message = OutboundMessage(sessionID: sessionID, text: text, knownUserIDs: known)
+    outbound.append(message)
+    deliver(message.id)
+  }
+
+  func retry(_ id: UUID) {
+    guard let index = outbound.firstIndex(where: { $0.id == id }) else { return }
+    outbound[index].status = .sending
+    deliver(id)
+  }
+
+  func discard(_ id: UUID) {
+    outbound.removeAll { $0.id == id }
+  }
+
+  private func deliver(_ id: UUID) {
+    guard let api, let message = outbound.first(where: { $0.id == id }) else { return }
+    Task {
+      do {
+        try await api.sendText(message.sessionID, text: message.text)
+        update(id) { $0.status = .sent }
+        WKHaptics.success()
+        await refresh()
+      } catch {
+        update(id) { $0.status = .failed(error.localizedDescription) }
+        WKHaptics.failure()
+      }
+    }
+  }
+
+  private func update(_ id: UUID, _ change: (inout OutboundMessage) -> Void) {
+    guard let index = outbound.firstIndex(where: { $0.id == id }) else { return }
+    change(&outbound[index])
+  }
+
+  /// Hands a sent bubble over to its transcript line once the CLI echoes it.
+  private func reconcileOutbound() {
+    var claimed = processedLineIDs
+    outbound.removeAll { message in
+      guard message.status == .sent, let row = row(message.sessionID) else { return false }
+      let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard let line = row.userMessages.first(where: {
+        !message.knownUserIDs.contains($0.id) && !claimed.contains($0.id) && $0.text == text
+      }) else { return false }
+      claimed.insert(line.id)
+      return true
+    }
+    processedLineIDs = claimed
   }
 
   private func apply(_ context: [String: Any]) {
