@@ -1,4 +1,5 @@
 import SwiftUI
+import WatchKit
 
 struct SessionView: View {
   let sessionID: Int
@@ -6,39 +7,159 @@ struct SessionView: View {
 
   var body: some View {
     let row = store.row(sessionID)
-    List {
-      if let row {
-        switch row.pending {
-        case .questions(let questions):
-          QuestionApprovalView(sessionID: sessionID, questions: questions)
-            // A new prompt must not inherit the previous prompt's selection.
-            .id(row.pending?.key)
-        case .plan(let planID, let markdown):
-          PlanApprovalView(sessionID: sessionID, planID: planID, markdown: markdown)
-            .id(planID)
-        case .phoneOnly:
-          Label("This form needs the iPhone app.", systemImage: "iphone")
-            .font(.footnote)
-            .foregroundStyle(.orange)
-        case nil:
-          VoiceComposer(sessionID: sessionID)
-        }
-        Section {
-          ForEach(row.transcript.reversed()) { line in
-            Text(line.text)
-              .font(.caption2)
-              .lineLimit(line.role == "user" ? 3 : 8)
-              .foregroundStyle(line.role == "user" ? Color.accentColor : .primary)
+    let outbound = store.outbound(for: sessionID)
+    ScrollViewReader { proxy in
+      List {
+        if let row {
+          switch row.pending {
+          case .questions(let questions):
+            QuestionApprovalView(sessionID: sessionID, questions: questions)
+              // A new prompt must not inherit the previous prompt's selection.
+              .id(row.pending?.key)
+          case .plan(let planID, let markdown):
+            PlanApprovalView(sessionID: sessionID, planID: planID, markdown: markdown)
+              .id(planID)
+          case .phoneOnly:
+            Label("This form needs the iPhone app.", systemImage: "iphone")
+              .font(.footnote)
+              .foregroundStyle(.orange)
+          case nil:
+            EmptyView()
           }
-        } header: {
-          Text(row.summary.status == "busy" ? "Working…" : "Recent")
+          // Oldest first, like the phone transcript; the view opens at the end.
+          ForEach(row.transcript) { line in
+            if line.role == "user" {
+              UserBubble(
+                text: line.text,
+                status: store.processedLineIDs.contains(line.id) ? .processed : nil)
+            } else {
+              AgentBubble(text: line.text)
+            }
+          }
+          ForEach(outbound) { message in
+            UserBubble(text: message.text, status: .outbound(message.status))
+              .onTapGesture {
+                if case .failed = message.status { store.retry(message.id) }
+              }
+              .swipeActions {
+                Button("Discard", role: .destructive) { store.discard(message.id) }
+              }
+          }
+          if row.summary.status == "busy" {
+            HStack(spacing: 6) {
+              ProgressView().frame(width: 16, height: 16)
+              Text("Working…").font(.caption2).foregroundStyle(.secondary)
+            }
+            .listRowBackground(Color.clear)
+          }
+          if row.pending == nil {
+            VoiceComposer(sessionID: sessionID)
+              .id(Self.bottomID)
+          }
+        } else {
+          Text("This session is no longer running.")
+            .foregroundStyle(.secondary)
         }
-      } else {
-        Text("This session is no longer running.")
-          .foregroundStyle(.secondary)
+      }
+      .navigationTitle(row?.summary.displayTitle ?? "Session")
+      .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+      .onChange(of: row?.transcript.last?.id) { _, _ in
+        withAnimation { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+      }
+      .onChange(of: outbound.count) { _, _ in
+        withAnimation { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
       }
     }
-    .navigationTitle(row?.summary.displayTitle ?? "Session")
+  }
+
+  private static let bottomID = "composer"
+}
+
+/// Delivery label under a user bubble, mirroring the phone composer.
+enum BubbleStatus {
+  case outbound(OutboundStatus)
+  case processed
+}
+
+private struct UserBubble: View {
+  let text: String
+  let status: BubbleStatus?
+
+  var body: some View {
+    VStack(alignment: .trailing, spacing: 2) {
+      Text(text)
+        .font(.footnote)
+        .foregroundStyle(.black)
+        .lineLimit(6)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(failed ? Color.red.opacity(0.85) : Color.accentColor, in: bubbleShape)
+      if let label {
+        HStack(spacing: 3) {
+          if case .outbound(.sending) = status {
+            ProgressView().frame(width: 10, height: 10).scaleEffect(0.5)
+          } else {
+            Image(systemName: label.icon)
+          }
+          Text(label.text)
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(failed ? .red : .secondary)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .trailing)
+    .padding(.leading, 18)
+    .listRowBackground(Color.clear)
+    .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
+  }
+
+  private var bubbleShape: UnevenRoundedRectangle {
+    UnevenRoundedRectangle(
+      topLeadingRadius: 14, bottomLeadingRadius: 14, bottomTrailingRadius: 4,
+      topTrailingRadius: 14)
+  }
+
+  private var failed: Bool {
+    if case .outbound(.failed) = status { return true }
+    return false
+  }
+
+  private var label: (icon: String, text: String)? {
+    switch status {
+    case .outbound(.sending): return ("", "Sending…")
+    case .outbound(.sent): return ("checkmark", "Sent")
+    case .outbound(.failed): return ("exclamationmark.circle", "Not sent · Tap to retry")
+    case .processed: return ("checkmark.circle.fill", "Processed")
+    case nil: return nil
+    }
+  }
+}
+
+private struct AgentBubble: View {
+  let text: String
+
+  var body: some View {
+    Text(markdown)
+      .font(.footnote)
+      .lineLimit(12)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .background(
+        Color.gray.opacity(0.25),
+        in: UnevenRoundedRectangle(
+          topLeadingRadius: 14, bottomLeadingRadius: 4, bottomTrailingRadius: 14,
+          topTrailingRadius: 14)
+      )
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.trailing, 12)
+      .listRowBackground(Color.clear)
+      .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
+  }
+
+  private var markdown: AttributedString {
+    let options = AttributedString.MarkdownParsingOptions(
+      interpretedSyntax: .inlineOnlyPreservingWhitespace)
+    return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
   }
 }
 
@@ -163,56 +284,46 @@ struct PlanApprovalView: View {
   }
 }
 
-/// Dictation goes into an editable draft; nothing is sent until Send is
-/// tapped, matching the phone composer.
+/// Dictation is sent as soon as the input sheet is confirmed; the bubble
+/// above then tracks Sending → Sent → Processed like the phone composer.
 struct VoiceComposer: View {
   let sessionID: Int
   @EnvironmentObject private var store: WatchStore
-  @State private var draft = ""
-  @State private var sending = false
   @State private var error: String?
 
   var body: some View {
-    Section {
-      // watchOS presents dictation / Scribble / keyboard when tapped.
-      TextField(text: $draft, axis: .vertical) {
-        Label("Speak a message", systemImage: "mic.fill")
+    VStack(spacing: 4) {
+      Button {
+        dictate()
+      } label: {
+        Label("Speak", systemImage: "mic.fill")
+          .frame(maxWidth: .infinity)
       }
-      .disabled(sending)
-      if !trimmed.isEmpty {
-        Button {
-          Task { await send() }
-        } label: {
-          if sending {
-            ProgressView()
-          } else {
-            Label("Send", systemImage: "arrow.up.circle.fill")
-          }
-        }
-        .tint(.accentColor)
-        .disabled(sending)
-      }
+      .tint(.accentColor)
       if let error {
         Text(error).font(.footnote).foregroundStyle(.red)
       }
     }
+    .listRowBackground(Color.clear)
   }
 
-  private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-  private func send() async {
-    let text = trimmed
-    guard !text.isEmpty else { return }
-    sending = true
-    error = nil
-    defer { sending = false }
-    do {
-      try await store.send(sessionID: sessionID, text: text)
-      draft = ""
-      WKHaptics.success()
-    } catch {
-      self.error = error.localizedDescription
-      WKHaptics.failure()
+  /// SwiftUI has no dictation API on watchOS. WatchKit's text input
+  /// controller with no suggestions and plain mode skips the suggestion list;
+  /// watches with a keyboard still open on the keyboard first.
+  private func dictate() {
+    guard let controller = WKApplication.shared().visibleInterfaceController else {
+      error = "Dictation is unavailable here."
+      return
+    }
+    controller.presentTextInputController(withSuggestions: nil, allowedInputMode: .plain) {
+      results in
+      let text = (results ?? []).compactMap { $0 as? String }.joined(separator: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !text.isEmpty else { return }
+      DispatchQueue.main.async {
+        error = nil
+        store.send(sessionID: sessionID, text: text)
+      }
     }
   }
 }

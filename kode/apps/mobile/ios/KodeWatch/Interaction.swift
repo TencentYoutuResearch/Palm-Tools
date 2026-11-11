@@ -112,7 +112,7 @@ struct TranscriptLine: Identifiable {
 }
 
 /// Recent user/assistant messages for the glanceable session view.
-func recentTranscript(in events: [KodeEvent], limit: Int = 6) -> [TranscriptLine] {
+func recentTranscript(in events: [KodeEvent], limit: Int = 10) -> [TranscriptLine] {
   var lines: [TranscriptLine] = []
   var index: [String: Int] = [:]
   for event in events where event.type == "message" {
@@ -132,4 +132,9 @@ func recentTranscript(in events: [KodeEvent], limit: Int = 6) -> [TranscriptLine
     }
   }
   return Array(lines.suffix(limit))
+}
+
+/// All user messages in the window, oldest first.
+func userMessages(in events: [KodeEvent]) -> [TranscriptLine] {
+  recentTranscript(in: events, limit: .max).filter { $0.role == "user" }
 }
