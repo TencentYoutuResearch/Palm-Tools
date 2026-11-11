@@ -68,12 +68,20 @@ pub trait PalmServices: Send + Sync + 'static {
     /// Enrolled palm directions (1 left, 2 right); empty when none.
     fn enrolled<'a>(&'a self, user_id: &'a str) -> BoxFuture<'a, Result<Vec<u8>, PalmError>>;
     fn forget<'a>(&'a self, user_id: &'a str) -> BoxFuture<'a, Result<(), PalmError>>;
-    fn sign_in<'a>(&'a self, uid: &'a str) -> BoxFuture<'a, Result<TokenSet, PalmError>>;
+    /// CloudBase tokens for `uid`, as a session of the client `device_id`.
+    fn sign_in<'a>(
+        &'a self,
+        uid: &'a str,
+        device_id: &'a str,
+    ) -> BoxFuture<'a, Result<TokenSet, PalmError>>;
 }
 
 struct Handoff {
     secret_hash: [u8; 32],
     expires: tokio::time::Instant,
+    /// The waiting desktop's device id: the session is the desktop's, not
+    /// the approving phone's.
+    device_id: String,
     tokens: Option<TokenSet>,
 }
 
@@ -135,9 +143,9 @@ impl Palm {
         Ok(session.user_id)
     }
 
-    async fn sign_in_session(&self, session_id: &str) -> Result<TokenSet, ApiError> {
+    async fn sign_in_session(&self, session_id: &str, device_id: &str) -> Result<TokenSet, ApiError> {
         let uid = self.verify(session_id).await?;
-        let tokens = self.services.sign_in(&uid).await.map_err(map)?;
+        let tokens = self.services.sign_in(&uid, device_id).await.map_err(map)?;
         tracing::info!(sub = %tokens.sub, "palm sign-in");
         Ok(tokens)
     }
@@ -239,9 +247,11 @@ pub(crate) struct SessionRequest {
 /// `POST /api/v1/auth/palm`: sign in with a capture session.
 pub(crate) async fn sign_in(
     State(state): State<RelayState>,
+    headers: HeaderMap,
     Json(req): Json<SessionRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let tokens = palm(&state)?.sign_in_session(&req.session_id).await?;
+    let device_id = crate::client_device_id(&headers);
+    let tokens = palm(&state)?.sign_in_session(&req.session_id, &device_id).await?;
     Ok(Json(tokens_json(&tokens)))
 }
 
@@ -290,6 +300,7 @@ pub(crate) struct RegisterFinish {
 /// for the minted id; create the account and sign it in.
 pub(crate) async fn register_finish(
     State(state): State<RelayState>,
+    headers: HeaderMap,
     Json(req): Json<RegisterFinish>,
 ) -> Result<Json<Value>, ApiError> {
     let palm = palm(&state)?;
@@ -319,7 +330,8 @@ pub(crate) async fn register_finish(
         return Err(ApiError::Conflict("this palm scan was already used".into()));
     }
     palm.registrations.lock().remove(&req.registration_id);
-    let tokens = palm.services.sign_in(&user_id).await.map_err(map)?;
+    let device_id = crate::client_device_id(&headers);
+    let tokens = palm.services.sign_in(&user_id, &device_id).await.map_err(map)?;
     tracing::info!(sub = %tokens.sub, "palm sign-up");
     Ok(Json(tokens_json(&tokens)))
 }
@@ -394,6 +406,7 @@ fn random_id() -> String {
 /// the id.
 pub(crate) async fn handoff_start(
     State(state): State<RelayState>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let palm = palm(&state)?;
     let id = random_id();
@@ -409,6 +422,7 @@ pub(crate) async fn handoff_start(
         Handoff {
             secret_hash: digest(&secret),
             expires: now + HANDOFF_TTL,
+            device_id: crate::client_device_id(&headers),
             tokens: None,
         },
     );
@@ -466,12 +480,16 @@ pub(crate) async fn handoff_approve(
             .get(&id)
             .is_some_and(|h| h.expires > tokio::time::Instant::now() && h.tokens.is_none())
     };
-    if !live(&palm.handoffs.lock()) {
-        return Err(ApiError::NotFound(
-            "this sign-in request expired; start again".into(),
-        ));
-    }
-    let tokens = palm.sign_in_session(&req.session_id).await?;
+    let device_id = {
+        let handoffs = palm.handoffs.lock();
+        if !live(&handoffs) {
+            return Err(ApiError::NotFound(
+                "this sign-in request expired; start again".into(),
+            ));
+        }
+        handoffs[&id].device_id.clone()
+    };
+    let tokens = palm.sign_in_session(&req.session_id, &device_id).await?;
     let mut handoffs = palm.handoffs.lock();
     if !live(&handoffs) {
         return Err(ApiError::NotFound(
@@ -603,9 +621,13 @@ impl PalmServices for CloudServices {
         })
     }
 
-    fn sign_in<'a>(&'a self, uid: &'a str) -> BoxFuture<'a, Result<TokenSet, PalmError>> {
+    fn sign_in<'a>(
+        &'a self,
+        uid: &'a str,
+        device_id: &'a str,
+    ) -> BoxFuture<'a, Result<TokenSet, PalmError>> {
         Box::pin(async move {
-            PalmxServices::sign_in(self, uid)
+            PalmxServices::sign_in(self, uid, device_id)
                 .await
                 .map_err(|error| PalmError::Upstream(format!("custom sign-in: {error:?}")))
         })
@@ -624,6 +646,8 @@ pub(crate) mod fake {
         pub claimed: Mutex<HashSet<String>>,
         pub enrolled: Mutex<HashMap<String, Vec<u8>>>,
         pub tokens_for: Mutex<Vec<String>>,
+        /// `x-device-id` of every sign-in, in order.
+        pub devices: Mutex<Vec<String>>,
     }
 
     impl FakePalm {
@@ -676,7 +700,12 @@ pub(crate) mod fake {
             self.enrolled.lock().remove(user);
             Box::pin(async move { Ok(()) })
         }
-        fn sign_in<'a>(&'a self, uid: &'a str) -> BoxFuture<'a, Result<TokenSet, PalmError>> {
+        fn sign_in<'a>(
+            &'a self,
+            uid: &'a str,
+            device_id: &'a str,
+        ) -> BoxFuture<'a, Result<TokenSet, PalmError>> {
+            self.devices.lock().push(device_id.into());
             Box::pin(async move {
                 Ok(TokenSet {
                     access_token: format!("tok-{uid}"),

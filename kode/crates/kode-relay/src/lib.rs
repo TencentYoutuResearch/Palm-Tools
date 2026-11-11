@@ -390,6 +390,24 @@ pub(crate) fn device_from_headers(headers: &HeaderMap) -> Result<String, ApiErro
         .ok_or_else(|| ApiError::BadRequest(format!("{DEVICE_HEADER} header is required")))
 }
 
+/// The signing-in client's own CloudBase device id (`x-device-id`).
+///
+/// Each phone or desktop keeps one stable id. When every sign-in used the
+/// same id, a new sign-in revoked the previous session's refresh token even
+/// with MaxDevice above 1. Clients that predate the header get a fresh id
+/// per sign-in, which never collides with another device.
+pub(crate) fn client_device_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-device-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|id| {
+            (8..=64).contains(&id.len())
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
 pub(crate) fn idempotency_key(headers: &HeaderMap) -> Option<String> {
     headers
         .get("Idempotency-Key")

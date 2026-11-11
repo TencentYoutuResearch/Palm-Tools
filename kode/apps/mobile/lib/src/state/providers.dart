@@ -8,6 +8,7 @@ import '../api/account_client.dart';
 import '../api/api_client.dart';
 import '../protocol/protocol.dart';
 import '../storage/account_storage.dart';
+import '../storage/install_id.dart';
 import '../storage/endpoint_storage.dart';
 
 final endpointStorageProvider = Provider<EndpointStorage>(
@@ -29,7 +30,9 @@ final workersProvider = FutureProvider<List<WorkerDto>>((ref) async {
 final accountStorageProvider = Provider<AccountStorage>(
   (ref) => AccountStorage(),
 );
-final accountClientProvider = Provider<AccountClient>((ref) => AccountClient());
+final accountClientProvider = Provider<AccountClient>(
+  (ref) => AccountClient(deviceId: InstallId.load),
+);
 
 /// Whether the app is in the foreground. Account-relay sockets close in the
 /// background so the desktop stops uploading while nobody is looking.

@@ -22,9 +22,15 @@ struct SessionListView: View {
             }
           }
           statusSection
-          ForEach(store.rows) { row in
-            NavigationLink(value: row.id) {
-              SessionRowView(row: row)
+          ForEach(store.folders) { group in
+            Section {
+              ForEach(group.rows) { row in
+                NavigationLink(value: row.id) {
+                  SessionRowView(row: row)
+                }
+              }
+            } header: {
+              FolderHeader(group: group)
             }
           }
         }
@@ -114,5 +120,68 @@ private struct DesktopPickerView: View {
       }
     }
     .navigationTitle("Desktop")
+  }
+}
+
+/// Sessions sharing one working directory, like the phone's path groups
+/// (`_buildGroups` in lib/src/ui/sessions/sessions_screen.dart). Ordered by
+/// `StickyOrder` instead of name so active folders stay on top.
+struct FolderGroup: Identifiable {
+  let id: String
+  let leaf: String
+  let parent: String
+  let rows: [SessionRow]
+  var pendingCount: Int { rows.filter { $0.pending != nil }.count }
+}
+
+func folderKey(_ path: String?) -> String {
+  guard let raw = path?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return "__unset__" }
+  return raw.replacingOccurrences(of: "\\", with: "/")
+}
+
+func pathLeaf(_ path: String?) -> String {
+  guard let path, !path.trimmingCharacters(in: .whitespaces).isEmpty else { return "workspace unset" }
+  let parts = path.replacingOccurrences(of: "\\", with: "/").split(separator: "/")
+  return parts.last.map(String.init) ?? path
+}
+
+func pathParent(_ path: String?) -> String {
+  guard let path, !path.trimmingCharacters(in: .whitespaces).isEmpty else { return "No working directory" }
+  let normalized = path.replacingOccurrences(of: "\\", with: "/")
+  guard let slash = normalized.lastIndex(of: "/"), slash > normalized.startIndex else { return normalized }
+  return String(normalized[..<slash])
+}
+
+private struct FolderHeader: View {
+  let group: FolderGroup
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack(spacing: 4) {
+        Image(systemName: "folder.fill")
+        Text(group.leaf).lineLimit(1)
+        Spacer(minLength: 2)
+        if group.pendingCount > 0 {
+          Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+        }
+        Text("\(group.rows.count)").foregroundStyle(.secondary)
+      }
+      .font(.footnote.weight(.semibold))
+      Text(abbreviatedParent)
+        .font(.system(size: 10))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.head)
+    }
+    .textCase(nil)
+  }
+
+  /// `/Users/<name>/…` reads as `~/…`, as on the desktop.
+  private var abbreviatedParent: String {
+    let parts = group.parent.split(separator: "/", omittingEmptySubsequences: false)
+    if parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" || parts[1] == "home" {
+      return (["~"] + parts.dropFirst(3)).joined(separator: "/")
+    }
+    return group.parent
   }
 }

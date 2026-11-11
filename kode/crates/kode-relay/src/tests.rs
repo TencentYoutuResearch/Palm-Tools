@@ -993,3 +993,65 @@ async fn palm_sign_ups_are_rate_limited() {
     }
     assert_eq!(post(&base, "/api/v1/auth/palm/register", None, json!({})).await.0, 429);
 }
+
+async fn post_as_device(base: &str, path: &str, device: &str, body: Value) -> (u16, Value) {
+    let response = reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .header("x-device-id", device)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    (
+        response.status().as_u16(),
+        response.json().await.unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn palm_sessions_belong_to_the_signing_in_device() {
+    let (base, fake) = palm_relay().await;
+
+    // Each client keeps one id; a second sign-in from the same phone reuses
+    // it, a different install has its own.
+    fake.scan("sess-a", "alice");
+    let (status, _) = post_as_device(
+        &base,
+        "/api/v1/auth/palm",
+        "phone-install-0001",
+        json!({"session_id": "sess-a"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // A phone approving a waiting desktop signs the *desktop* in.
+    let (_, handoff) = post_as_device(
+        &base,
+        "/api/v1/auth/palm/handoff",
+        "desktop-install-0001",
+        json!({}),
+    )
+    .await;
+    let id = handoff["handoff_id"].as_str().unwrap();
+    fake.scan("sess-b", "alice");
+    let (status, _) = post_as_device(
+        &base,
+        &format!("/api/v1/auth/palm/handoff/{id}/approve"),
+        "phone-install-0001",
+        json!({"session_id": "sess-b"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // Old clients without the header (or with a malformed one) never share
+    // an id, so they cannot evict each other.
+    fake.scan("sess-c", "alice");
+    fake.scan("sess-d", "alice");
+    post(&base, "/api/v1/auth/palm", None, json!({"session_id": "sess-c"})).await;
+    post_as_device(&base, "/api/v1/auth/palm", "bad id!", json!({"session_id": "sess-d"})).await;
+
+    let devices = fake.devices.lock().clone();
+    assert_eq!(devices[..2], ["phone-install-0001", "desktop-install-0001"]);
+    assert_ne!(devices[2], devices[3]);
+    assert!(devices[2..].iter().all(|id| id.len() == 36), "{devices:?}");
+}

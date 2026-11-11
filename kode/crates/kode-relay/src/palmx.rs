@@ -68,8 +68,13 @@ pub trait PalmxServices: Send + Sync + 'static {
         code: &'a str,
         verifier: &'a str,
     ) -> BoxFuture<'a, Result<String, PalmxError>>;
-    /// CloudBase tokens for `uid` via a signed custom-login ticket.
-    fn sign_in<'a>(&'a self, uid: &'a str) -> BoxFuture<'a, Result<TokenSet, PalmxError>>;
+    /// CloudBase tokens for `uid` via a signed custom-login ticket, as a
+    /// session of the client device `device_id`.
+    fn sign_in<'a>(
+        &'a self,
+        uid: &'a str,
+        device_id: &'a str,
+    ) -> BoxFuture<'a, Result<TokenSet, PalmxError>>;
     fn bound_user<'a>(
         &'a self,
         open_id: &'a str,
@@ -172,6 +177,7 @@ fn palmx(state: &RelayState) -> Result<&Palmx, ApiError> {
 /// `POST /api/v1/auth/palmx`: sign in with a confirmed PalmX authorization.
 pub(crate) async fn sign_in(
     State(state): State<RelayState>,
+    headers: HeaderMap,
     Json(req): Json<CodeRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let palmx = palmx(&state)?;
@@ -185,7 +191,8 @@ pub(crate) async fn sign_in(
         Some(user_id) => user_id,
         None => derived_uid(&open_id),
     };
-    let tokens = palmx.services.sign_in(&uid).await.map_err(upstream)?;
+    let device_id = crate::client_device_id(&headers);
+    let tokens = palmx.services.sign_in(&uid, &device_id).await.map_err(upstream)?;
     tracing::info!(sub = %tokens.sub, "palmx sign-in");
     Ok(Json(json!({
         "token_type": "Bearer",
@@ -415,12 +422,16 @@ impl PalmxServices for CloudServices {
         })
     }
 
-    fn sign_in<'a>(&'a self, uid: &'a str) -> BoxFuture<'a, Result<TokenSet, PalmxError>> {
+    fn sign_in<'a>(
+        &'a self,
+        uid: &'a str,
+        device_id: &'a str,
+    ) -> BoxFuture<'a, Result<TokenSet, PalmxError>> {
         Box::pin(async move {
             let response = self
                 .http
                 .post(format!("{}/auth/v1/signin/custom", self.issuer))
-                .header("x-device-id", "kode-relay")
+                .header("x-device-id", device_id)
                 .json(&json!({"provider_id": "custom", "ticket": self.ticket(uid)}))
                 .send()
                 .await
@@ -535,7 +546,11 @@ pub(crate) mod fake {
                 .ok_or(PalmxError::InvalidCode);
             Box::pin(async move { result })
         }
-        fn sign_in<'a>(&'a self, uid: &'a str) -> BoxFuture<'a, Result<TokenSet, PalmxError>> {
+        fn sign_in<'a>(
+            &'a self,
+            uid: &'a str,
+            _device_id: &'a str,
+        ) -> BoxFuture<'a, Result<TokenSet, PalmxError>> {
             self.signed.lock().push(uid.into());
             Box::pin(async move {
                 Ok(TokenSet {
@@ -656,7 +671,7 @@ mod live {
         )
         .unwrap();
         let tokens = services
-            .sign_in("px_kodelivetest0001")
+            .sign_in("px_kodelivetest0001", "kode-live-test-device")
             .await
             .expect("custom sign-in");
         assert_eq!(tokens.sub, "px_kodelivetest0001");
