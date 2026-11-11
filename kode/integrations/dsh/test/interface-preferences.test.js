@@ -64,6 +64,8 @@ test('meter period persists independently of visibility and migrates old prefere
  service.update({ tokenIsland: true }); assert.equal(service.getSnapshot().tokenPeriod, 'month')
  assert.equal(installInterfacePreferences({ provide() {}, effect() {} }, preferences(p.stored).env).getSnapshot().tokenPeriod, 'month')
  service.update({ tokenPeriod: 'all' }); assert.equal(service.getSnapshot().tokenPeriod, 'all')
+ service.update({ tokenPeriod: 'follow' }); assert.equal(service.getSnapshot().tokenPeriod, 'follow')
+ assert.equal(installInterfacePreferences({ provide() {}, effect() {} }, preferences(p.stored).env).getSnapshot().tokenPeriod, 'follow')
  assert.throws(() => service.update({ tokenPeriod: 'invalid' }), /无效/)
  p.external('{"tokenIsland":true,"tokenPeriod":"month"}'); assert.equal(service.getSnapshot().tokenPeriod, 'month')
  p.external('{"tokenPeriod":"bad"}'); assert.equal(service.getSnapshot().tokenPeriod, 'today')

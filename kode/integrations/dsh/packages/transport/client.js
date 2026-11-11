@@ -1504,7 +1504,7 @@ function showConnectionProgress(label, document2 = globalThis.document) {
 
 // packages/transport/interface.js
 function installInterfacePreferences(ctx, env = globalThis) {
-  const key = "kode.interface.v1", listeners = /* @__PURE__ */ new Set(), periods = ["today", "month", "all"];
+  const key = "kode.interface.v1", listeners = /* @__PURE__ */ new Set(), periods = ["today", "month", "all", "follow"];
   const read = () => {
     try {
       const value = JSON.parse(env.localStorage?.getItem(key) ?? "{}");

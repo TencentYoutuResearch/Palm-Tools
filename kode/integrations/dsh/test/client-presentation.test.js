@@ -551,7 +551,7 @@ test('the sidebar status overlay preserves base avatars and maps running, awaiti
 test('workspace status gives awaiting highest priority, then completion, then running',()=>{
  const scope={};vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function SessionStatusAvatars')),scope)
  const collapsed=scope.sessionStateMap({busy:{running:false},done:{},review:{},idle:{}},new Map([['busy',{running:true}],['done',{running:true,completionUnread:true}],['review',{running:true,completionUnread:true,pendingInteraction:{kind:'approval'}}],['idle',{running:false}]]))
- assert.equal(collapsed.get('busy'),'ongoing');assert.equal(collapsed.get('done'),'done');assert.equal(collapsed.get('review'),'awaiting');assert.equal(collapsed.has('idle'),false)
+ assert.equal(collapsed.get('busy'),'ongoing');assert.equal(collapsed.get('done'),'ongoing');assert.equal(collapsed.get('review'),'awaiting');assert.equal(collapsed.has('idle'),false)
  const statuses=new Map([['busy','ongoing'],['done','done'],['review','awaiting'],['idle','idle']])
  assert.deepEqual({...scope.workspaceStatusSummary(['busy','done','review','idle'],statuses)},{ongoing:1,done:1,awaiting:1})
  assert.deepEqual({...scope.workspaceStatusSummary(['done','idle'],statuses)},{ongoing:0,done:1,awaiting:0})
@@ -712,6 +712,27 @@ test('/clear creates a same-name fresh session for each Agent without copying it
 })
 
 
+test('workspace badges ignore stale native completion when a session restarts or becomes idle', () => {
+ const seat=()=>({setAttribute(){},removeAttribute(){},querySelector:()=>({getAttribute:()=> 'done'})})
+ const sessionSeat=seat(),workspaceSeat=seat()
+ const root={current:{querySelectorAll:selector=>selector.includes('session:')?[{getAttribute:()=> 'session:live',firstElementChild:sessionSeat}]:[{getAttribute:()=> 'workspace:project',firstElementChild:workspaceSeat}]}}
+ const scope={React:{Fragment:'fragment'},h:()=>({}),createPortal:element=>element,MutationObserver:class {observe(){} disconnect(){}},useEffect:fn=>fn()}
+ vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
+ const rows={live:{agent:{type:'codex'},running:true,completed:true}}
+ for(const [status,expected] of [[{running:true,completionUnread:true},'ongoing'],[{running:false,completionUnread:false},undefined],[{running:true,pendingInteraction:true},'awaiting']]){
+  const values=[[],[]];let cursor=0
+  scope.useState=()=>{const i=cursor++;return [[],next=>{values[i]=typeof next==='function'?next(values[i]):next}]}
+  scope.SessionStatusAvatars({root,rows,workspaces:[{workspaceId:'project',sessionIds:['live']}],statuses:new Map([['live',status]])})
+  assert.equal(values[0][0]?.state,expected)
+  if(expected)assert.equal(values[1][0][expected],1)
+  else assert.equal(values[1].length,0,'idle live state clears stale DOM completion')
+ }
+ const states=scope.sessionStateMap({live:{running:true,completed:true}},new Map())
+ assert.equal(states.get('live'),'ongoing','catalog-only and remote running sessions ignore old completion flags')
+ const activity=scope.globalSessionActivity({current:'local',hosts:[]},{byId:rows},new Map([['live',{running:true,completionUnread:true}]]))
+ assert.equal(activity.state,'ongoing');assert.equal(activity.counts.done,0)
+})
+
 test('global activity uses project priority across Hosts and updates without mounting the workspace browser', () => {
  const scope={};vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function SessionStatusAvatars')),scope)
  const data={current:'local',hosts:[{id:'local',sessions:[{id:'same',completed:true},{id:'review',pendingInteraction:true},{id:'archived',pendingInteraction:true}],archivedSessionIds:['archived']},{id:'worker.example',status:'online',sessions:[{id:'same',running:true},{id:'hidden',pendingInteraction:true}],hiddenSessionIds:['hidden']},{id:'offline.example',status:'offline',sessions:[{id:'stale',pendingInteraction:true}]}]}
@@ -746,7 +767,8 @@ test('interface settings toggle the device service directly and report save fail
  let tree = component(), toggle = findNode(tree, node => node.props.role === 'switch')
  assert.equal(toggle.props.checked, true); assert.equal(toggle.props.disabled, false)
  const period = findNode(tree, node => node.type === 'select' && node.props.label === '刘海用量范围')
- assert.equal(period.props.value, 'today'); assert.deepEqual(Array.from(period.props.options, item => item.value), ['today','month','all'])
+ assert.equal(period.props.value, 'today'); assert.deepEqual(Array.from(period.props.options, item => item.value), ['today','month','all','follow'])
+ period.props.onChange('follow'); assert.equal(received.tokenPeriod, 'follow')
  period.props.onChange('month'); assert.equal(received.tokenPeriod, 'month')
  toggle.props.onChange({ target: { checked: false } }); assert.equal(received.tokenIsland, false)
  tree = component(); assert.equal(findNode(tree, node => node.props.role === 'switch').props.checked, false)
