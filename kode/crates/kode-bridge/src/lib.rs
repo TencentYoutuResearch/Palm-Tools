@@ -2365,7 +2365,7 @@ async fn shell_spawn(
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut cmd = CommandBuilder::new(&shell);
-    cmd.cwd(FsPath::new(&req.cwd));
+    cmd.cwd(kode_core::pty::simplify_windows_path(FsPath::new(&req.cwd)));
     if std::env::var_os("TERM").is_none() {
         cmd.env("TERM", "xterm-256color");
     }

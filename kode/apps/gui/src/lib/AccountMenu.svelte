@@ -15,8 +15,14 @@
     onRelaySettings: () => void
     onSignOut: () => void
     onClose: () => void
+    /** Trigger rect in the compact sidebar: the sidebar clips overflow, so the
+     *  menu is fixed beside the trigger instead of above it. */
+    anchor?: DOMRect | null
   }
-  let { status, onAccountSettings, onRelaySettings, onSignOut, onClose }: Props = $props()
+  let { status, onAccountSettings, onRelaySettings, onSignOut, onClose, anchor = null }: Props = $props()
+  let anchorStyle = $derived(
+    anchor ? `position:fixed;left:${anchor.right + 8}px;bottom:${window.innerHeight - anchor.bottom}px` : '',
+  )
 
   let menuEl: HTMLDivElement
   let account = $derived(status?.backends.find((b) => b.kind === 'account_relay') ?? null)
@@ -63,7 +69,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="menu" role="menu" tabindex="-1" bind:this={menuEl} onkeydown={onKey}>
+<div class="menu" role="menu" tabindex="-1" bind:this={menuEl} onkeydown={onKey} style={anchorStyle}>
   <div class="identity">
     {#if account?.account_picture}
       <img class="avatar" src={account.account_picture} alt="" referrerpolicy="no-referrer" />

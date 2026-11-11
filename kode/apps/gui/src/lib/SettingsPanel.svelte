@@ -25,11 +25,11 @@
    * 开关 / 探测落地写盘后当前进程立刻反映;已 spawn 的 tab 不受影响,
    * BackendChooser 下次打开即生效。
    */
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount, onDestroy, tick } from 'svelte'
   import { ipc, backendAdminIpc, memoryMcpIpc } from './ipc'
   import type {
     BackendListItem,
-    DetectedBackend,
+    BackendCatalogEntry,
     BackendSaveRequest,
     MemoryMcpCheckResult,
     LocaleMode,
@@ -37,6 +37,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event'
   import BackendIcon from './BackendIcon.svelte'
   import BackendAddPicker from './BackendAddPicker.svelte'
+  import ConfirmDialog from './ConfirmDialog.svelte'
   import UpdateSettings from './UpdateSettings.svelte'
   import IntegrationSettings from './IntegrationSettings.svelte'
   import { currentLocale, systemLanguageLabel, t } from './i18n'
@@ -100,7 +101,8 @@
   let tab: Tab = $state(initialTab)
 
   let backends: BackendListItem[] = $state([])
-  let detected: DetectedBackend[] = $state([])
+  /** 全部已知 CLI(含未配置/未安装),列表据此补齐并决定开启时是否先安装。 */
+  let catalog: BackendCatalogEntry[] = $state([])
   let mcp: MemoryMcpCheckResult | null = $state(null)
   let busy = $state(false)
   let err: string | null = $state(null)
@@ -117,6 +119,11 @@
   let adding = $state(false)
   let addKey: string | null = $state(null)
   let addLocked = $state(false)
+  /** 列表内开关触发的安装/配置:确认中 / 进行中的 backend 与实时日志。 */
+  let confirmInstall: BackendCatalogEntry | null = $state(null)
+  let installing: string | null = $state(null)
+  let installLog: string[] = $state([])
+  let installLogEl: HTMLPreElement | undefined = $state()
 
   let memoryPromptEnabled = $state(true)
   let ptyAppearance = $state<TerminalAppearance>(loadTerminalAppearance('pty'))
@@ -133,13 +140,14 @@
 
   async function refreshBackends() {
     try {
-      const [bs, det, m] = await Promise.all([
+      const [bs, cat, m] = await Promise.all([
         ipc.listAllBackends(),
-        backendAdminIpc.detect(),
+        // 老后台服务没有 backend_catalog:退化为只列已配置的 backend
+        backendAdminIpc.catalog().catch(() => [] as BackendCatalogEntry[]),
         memoryMcpIpc.check(),
       ])
       backends = bs
-      detected = det
+      catalog = cat
       mcp = m
     } catch (e) {
       err = String(e)
@@ -161,6 +169,12 @@
     await Promise.all([refreshBackends(), refreshMemoryPrompt()])
     unlistens.push(await backendAdminIpc.onChanged(refreshBackends))
     unlistens.push(await memoryMcpIpc.onChanged(refreshBackends))
+    unlistens.push(await backendAdminIpc.onInstallLog(async ({ key, line }) => {
+      if (key !== installing) return
+      installLog = [...installLog.slice(-499), line]
+      await tick()
+      installLogEl?.scrollTo({ top: installLogEl.scrollHeight })
+    }))
   })
 
   onDestroy(() => {
@@ -171,8 +185,15 @@
   })
 
   // ---- backend 开关 ----
+  /** 关 → 直接关;开 → 已知 CLI 先确保本机已安装(未装则确认后按本平台配方安装),再启用并接 memory MCP。 */
   async function toggleEnabled(b: BackendListItem) {
-    if (busy) return
+    if (busy || installing) return
+    const entry = catalogEntry(b.key)
+    if (!b.enabled && entry && !entry.read_only) {
+      if (entry.command_path) void runInstall(entry, false)
+      else requestInstall(entry)
+      return
+    }
     busy = true
     const next = !b.enabled
     b.enabled = next // 乐观更新
@@ -185,6 +206,39 @@
     } finally {
       busy = false
     }
+  }
+
+  function requestInstall(entry: BackendCatalogEntry) {
+    err = null
+    if (entry.install_script) confirmInstall = entry
+    else if (entry.install_missing.length > 0)
+      err = tr('settings.backends.installNeeds', { key: entry.key, tools: entry.install_missing.join(' / ') })
+    else err = tr('settings.backends.installFirst', { key: entry.key })
+  }
+
+  async function runInstall(entry: BackendCatalogEntry, install: boolean) {
+    if (installing) return
+    installing = entry.key
+    installLog = []
+    err = null
+    try {
+      const r = install ? await backendAdminIpc.install(entry.key) : await backendAdminIpc.configure(entry.key)
+      showToast(r.mcp_warning
+        ? tr('settings.backends.add.mcpWarning', { key: r.key, error: r.mcp_warning })
+        : tr('settings.backends.add.done', { key: r.key }))
+      installLog = []
+    } catch (e) {
+      err = String(e)
+    } finally {
+      installing = null
+      await refreshBackends()
+    }
+  }
+
+  function confirmInstallStart() {
+    const entry = confirmInstall
+    confirmInstall = null
+    if (entry) void runInstall(entry, true)
   }
 
   // ---- 编辑 / 新增 ----
@@ -215,23 +269,6 @@
     adding = false
     agentArgsText = '[]'
     editing = newRequest()
-    isNew = true
-    err = null
-  }
-
-  function startAddFromDetected(d: DetectedBackend) {
-    agentArgsText = '[]'
-    editing = newRequest({
-      protocol: ['codex', 'tcodex', 'claude', 'tclaude', 'codebuddy','cursor'].includes(d.suggested_key) ? d.suggested_key : null,
-      key: d.suggested_key,
-      command: d.command,
-      permission_mode_flag: d.suggested_key === 'codex' || d.suggested_key === 'tcodex'
-        ? '--ask-for-approval'
-        : '--permission-mode',
-      setup_style: d.suggested_setup_style,
-      setup_cli: d.suggested_setup_cli,
-      setup_json_path: d.suggested_json_path ?? '',
-    })
     isNew = true
     err = null
   }
@@ -373,7 +410,7 @@
 
   function onKeyCapture(e: KeyboardEvent) {
     // 选择器的确认框自己处理 Esc;安装进行中不允许离开。
-    if (e.key !== 'Escape' || childOpen || (adding && addLocked)) return
+    if (e.key !== 'Escape' || childOpen || (adding && addLocked) || confirmInstall || installing) return
     e.preventDefault()
     e.stopImmediatePropagation()
     if (editing) cancelEdit()
@@ -382,12 +419,24 @@
   }
 
   // 派生:installed 状态 + 排序
+  function catalogEntry(key: string): BackendCatalogEntry | undefined {
+    return catalog.find((e) => e.key === key)
+  }
   function isInstalled(key: string): boolean | null {
+    const entry = catalogEntry(key)
+    if (entry) return entry.command_path !== null
     const s = mcp?.backends?.[key]
     return s ? s.command_available : null
   }
+  /** 已配置的 backend + 尚未写入配置的已知 CLI(默认关闭,打开即安装/配置)。 */
+  let allBackends: BackendListItem[] = $derived([
+    ...backends,
+    ...catalog
+      .filter((e) => !backends.some((b) => b.key === e.key))
+      .map((e) => ({ key: e.key, command: e.command, default_model: null, enabled: false })),
+  ])
   let sortedBackends = $derived(
-    [...backends].sort((a, b) => {
+    [...allBackends].sort((a, b) => {
       // 已安装的排前面,然后按 key
       const ia = isInstalled(a.key) === true ? 0 : 1
       const ib = isInstalled(b.key) === true ? 0 : 1
@@ -396,8 +445,6 @@
     })
   )
   let enabledCount = $derived(backends.filter((b) => b.enabled).length)
-  // 探测到但还没加进 config 的(可一键添加)
-  let addable = $derived(detected.filter((d) => !d.already_in_config))
   let needsCli = $derived.by(() => {
     const style = editing?.setup_style
     return style === 'codebuddy' || style === 'claude' || style === 'codex'
@@ -634,6 +681,8 @@
           <ul class="list">
             {#each sortedBackends as b (b.key)}
               {@const inst = isInstalled(b.key)}
+              {@const entry = catalogEntry(b.key)}
+              {@const configured = backends.some((x) => x.key === b.key)}
               <li class="item" class:off={!b.enabled}>
                 <div class="item-icon" class:installed={inst === true} class:missing={inst === false}>
                   <BackendIcon backendKey={b.key} command={b.command} size={20} muted={inst === false} />
@@ -644,8 +693,10 @@
                     {#if inst === true}
                       <span class="tag ok">installed</span>
                     {:else if inst === false}
-                      <span class="tag warn">not on PATH</span>
-                      <button class="link" onclick={() => openAddPicker(b.key)} disabled={busy}>{tr('settings.backends.add.install')}</button>
+                      <span class="tag warn">{tr('settings.backends.add.notInstalled')}</span>
+                      {#if entry?.install_script && !entry.read_only && installing !== b.key}
+                        <button class="link" onclick={() => requestInstall(entry)} disabled={busy || installing !== null}>{tr('settings.backends.add.install')}</button>
+                      {/if}
                     {/if}
                     {#if b.default_model}
                       <span class="tag dim">{b.default_model}</span>
@@ -654,21 +705,24 @@
                   <code class="item-cmd">{b.command}</code>
                 </div>
                 <div class="item-actions">
-                  <button class="icon-btn" onclick={() => startEdit(b)} disabled={busy || b.read_only} title="Edit" aria-label={`Edit ${b.key}`}>
+                  {#if installing === b.key}
+                    <span class="sub">{inst ? tr('settings.backends.add.configuring') : tr('settings.backends.add.installing')}</span>
+                  {/if}
+                  <button class="icon-btn" onclick={() => startEdit(b)} disabled={busy || b.read_only || !configured} title="Edit" aria-label={`Edit ${b.key}`}>
                     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
                   </button>
-                  <button class="icon-btn danger" onclick={() => deleteBackend(b.key)} disabled={busy || b.read_only} title="Delete" aria-label={`Delete ${b.key}`}>
+                  <button class="icon-btn danger" onclick={() => deleteBackend(b.key)} disabled={busy || b.read_only || !configured} title="Delete" aria-label={`Delete ${b.key}`}>
                     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg>
                   </button>
                   <button
                     class="switch"
                     class:on={b.enabled}
                     onclick={() => toggleEnabled(b)}
-                    disabled={busy || b.read_only}
+                    disabled={busy || installing !== null || b.read_only}
                     role="switch"
                     aria-checked={b.enabled}
                     aria-label={`Toggle ${b.key}`}
-                    title={b.enabled ? 'Enabled' : 'Disabled'}
+                    title={b.enabled ? 'Enabled' : entry && !inst ? tr('settings.backends.toggleTitle', { key: b.key }) : 'Disabled'}
                   >
                     <span class="knob"></span>
                   </button>
@@ -677,22 +731,18 @@
             {/each}
           </ul>
 
-          {#if addable.length > 0}
-            <div class="detect">
-              <div class="detect-head">
-                <span>Detected on PATH</span>
-                <button class="link" onclick={refreshBackends} disabled={busy}>Re-scan</button>
-              </div>
-              <div class="detect-chips">
-                {#each addable as d (d.command_path)}
-                  <button class="chip-add" onclick={() => startAddFromDetected(d)} disabled={busy} title={d.command_path}>
-                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
-                    <BackendIcon backendKey={d.suggested_key} command={d.command} size={14} />
-                    {d.suggested_key}
-                  </button>
-                {/each}
-              </div>
-            </div>
+          {#if installing && installLog.length > 0}
+            <div class="log-head">{tr('settings.backends.add.log')} · {installing}</div>
+            <pre class="log" bind:this={installLogEl}>{installLog.join('\n')}</pre>
+          {/if}
+          {#if confirmInstall}
+            <ConfirmDialog
+              title={tr('settings.backends.add.confirmTitle', { key: confirmInstall.key })}
+              message={tr('settings.backends.add.confirmMessage', { key: confirmInstall.key, script: confirmInstall.install_script ?? '' })}
+              confirmLabel={tr('settings.backends.add.install')}
+              onConfirm={confirmInstallStart}
+              onClose={() => (confirmInstall = null)}
+            />
           {/if}
         {/if}
       {:else if tab === 'account'}
@@ -1219,46 +1269,26 @@
   }
   .switch.on .knob { transform: translateX(16px); }
 
-  /* ---- 探测 chips ---- */
-  .detect {
+  /* ---- 安装日志 ---- */
+  .log-head {
     margin-top: var(--sp-4);
-    padding-top: var(--sp-4);
-    border-top: 1px dashed var(--bd-muted);
-  }
-  .detect-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    margin-bottom: var(--sp-2);
-  }
-  .detect-head span {
     font-size: var(--fs-xs);
-    font-weight: var(--fw-semi);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
     color: var(--fg-tertiary);
   }
-  .detect-chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
-  .chip-add {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    border: 1px solid var(--bd-default);
-    background: var(--bg-card);
-    border-radius: 999px;
-    font-size: var(--fs-sm);
-    font-family: inherit;
+  .log {
+    margin: var(--sp-1) 0 0;
+    max-height: 180px;
+    overflow: auto;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--bg-chip);
+    border: 1px solid var(--bd-muted);
+    border-radius: var(--rad-md);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
     color: var(--fg-secondary);
-    cursor: pointer;
-    transition: all var(--t-fast);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
-  .chip-add:hover {
-    border-color: var(--acc);
-    color: var(--acc);
-    background: var(--acc-soft);
-  }
-  .chip-add:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* ---- 表单 ---- */
   .form {

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'src/platform/watch_link.dart';
 import 'src/state/providers.dart';
 import 'src/ui/login/login_screen.dart';
 import 'src/ui/pair/pair_screen.dart';
@@ -150,6 +151,7 @@ class _KodeAppState extends ConsumerState<KodeApp> {
   @override
   Widget build(BuildContext context) {
     ref.watch(endpointBootstrapProvider);
+    ref.watch(watchLinkProvider);
     final router = ref.watch(_routerProvider);
 
     return MaterialApp.router(
