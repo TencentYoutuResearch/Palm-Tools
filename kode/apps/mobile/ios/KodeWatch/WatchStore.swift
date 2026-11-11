@@ -7,7 +7,9 @@ struct SessionRow: Identifiable {
   let transcript: [TranscriptLine]
   /// Every user message in the fetched window, to confirm watch sends.
   let userMessages: [TranscriptLine]
+  let lastActivity: Date?
   var id: Int { summary.id }
+  var busy: Bool { summary.status == "busy" }
 }
 
 /// Same lifecycle labels as the phone composer: Sent once the desktop
@@ -45,6 +47,10 @@ final class WatchStore: ObservableObject {
   @Published private(set) var rows: [SessionRow] = []
   @Published private(set) var phase: WatchPhase = .unpaired
   @Published private(set) var outbound: [OutboundMessage] = []
+  /// Rows grouped by working directory, in sticky activity order.
+  @Published private(set) var folders: [FolderGroup] = []
+  private var sessionOrder = StickyOrder()
+  private var folderOrder = StickyOrder()
   /// Transcript lines that are watch sends confirmed by the CLI.
   @Published private(set) var processedLineIDs = Set<String>()
   @Published var selectedKey: String? {
@@ -112,7 +118,8 @@ final class WatchStore: ObservableObject {
               summary: session,
               pending: pendingInteraction(in: events),
               transcript: recentTranscript(in: events),
-              userMessages: userMessages(in: events))
+              userMessages: userMessages(in: events),
+              lastActivity: lastActivity(in: events))
           }
         }
         var rows: [SessionRow] = []
@@ -121,7 +128,8 @@ final class WatchStore: ObservableObject {
       }
       // Ignore results for a desktop the user switched away from meanwhile.
       guard api === self.api else { return }
-      rows = loaded.sorted(by: Self.order)
+      rows = loaded
+      folders = arrange(loaded)
       phase = .ready
       reconcileOutbound()
       buzzForNewPrompts()
@@ -254,12 +262,35 @@ final class WatchStore: ObservableObject {
     notifiedPending = current
   }
 
-  private static func order(_ a: SessionRow, _ b: SessionRow) -> Bool {
-    if (a.pending != nil) != (b.pending != nil) { return a.pending != nil }
-    let aBusy = a.summary.status == "busy"
-    let bBusy = b.summary.status == "busy"
-    if aBusy != bBusy { return aBusy }
-    return a.id > b.id
+  private func arrange(_ rows: [SessionRow]) -> [FolderGroup] {
+    let now = Date()
+    let sessionRanks = Dictionary(
+      uniqueKeysWithValues: rows.map { row in
+        (
+          row.id,
+          sessionOrder.rank(
+            "s\(row.id)", pending: row.pending != nil, busy: row.busy,
+            lastActivity: row.lastActivity, now: now)
+        )
+      })
+    sessionOrder.retain(Set(rows.map { "s\($0.id)" }))
+    let groups = Dictionary(grouping: rows) { folderKey($0.summary.cwd) }
+    let ranked = groups.map { key, members -> (StickyOrder.Rank, FolderGroup) in
+      let sorted = members.sorted { sessionRanks[$0.id]! < sessionRanks[$1.id]! }
+      let rank = folderOrder.rank(
+        "f" + key,
+        pending: members.contains { $0.pending != nil },
+        busy: members.contains(where: \.busy),
+        lastActivity: members.compactMap(\.lastActivity).max(),
+        now: now)
+      let cwd = sorted.first?.summary.cwd
+      return (
+        rank,
+        FolderGroup(id: key, leaf: pathLeaf(cwd), parent: pathParent(cwd), rows: sorted)
+      )
+    }
+    folderOrder.retain(Set(groups.keys.map { "f" + $0 }))
+    return ranked.sorted { $0.0 < $1.0 }.map(\.1)
   }
 }
 

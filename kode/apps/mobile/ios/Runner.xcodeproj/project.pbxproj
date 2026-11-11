@@ -25,6 +25,7 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		A22833CD6A9AC3979A45B821 /* StickyOrder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 861CDBB3871187916BB8D4A6 /* StickyOrder.swift */; };
 		A8D909C40D7B110E5C0B0D9A /* SessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DE69484CDBA47996D3D8E50 /* SessionView.swift */; };
 		C2EE88FBAD1A646DA2A68966 /* PhoneLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26D54AFA8A8BCF0115B92889 /* PhoneLink.swift */; };
 		CD39BB40FE7C4EAC54C8CE94 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 082135C389957A2F3D017997 /* Assets.xcassets */; };
@@ -97,6 +98,7 @@
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		839B6E306B8D275627C77248 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/WatchOS.platform/Developer/SDKs/WatchOS11.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		861CDBB3871187916BB8D4A6 /* StickyOrder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StickyOrder.swift; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
 		97C146EE1CF9000F007C117D /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -166,6 +168,7 @@
 				4069C5A70B42EC9A20C52ACA /* SessionListView.swift */,
 				6DE69484CDBA47996D3D8E50 /* SessionView.swift */,
 				082135C389957A2F3D017997 /* Assets.xcassets */,
+				861CDBB3871187916BB8D4A6 /* StickyOrder.swift */,
 			);
 			name = KodeWatch;
 			path = KodeWatch;
@@ -518,6 +521,7 @@
 				68B6123427EAC9A249A2ECFF /* WatchStore.swift in Sources */,
 				06497BCC2908855F147C82FD /* SessionListView.swift in Sources */,
 				A8D909C40D7B110E5C0B0D9A /* SessionView.swift in Sources */,
+				A22833CD6A9AC3979A45B821 /* StickyOrder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
