@@ -7,20 +7,39 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		06497BCC2908855F147C82FD /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4069C5A70B42EC9A20C52ACA /* SessionListView.swift */; };
 		0F5ACE5691AE24E73A41E56F /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 096F7F0814AD8D19D15CC3C3 /* Pods_RunnerTests.framework */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		2238ED2F9653665F06C38453 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C47EE899E7F4E471CBAF25FA /* Pods_Runner.framework */; };
+		266F260E6DFDE33FA4B11A24 /* ServerBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = E70775480BC94FE2059827D7 /* ServerBinding.swift */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
+		4683DCF3134AF61F35D8573E /* KodeAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ACF0325CC71D0E0F107F7E9 /* KodeAPI.swift */; };
+		68B6123427EAC9A249A2ECFF /* WatchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0042ED9D9721BFE2E32C377 /* WatchStore.swift */; };
+		6C040794C8D1668E9E1F3F5A /* KodeWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = A57ED55C3B04B95771634810 /* KodeWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
+		78388A21C9ADB28E620402CF /* Interaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = F929FE277F07ADA4383ED81E /* Interaction.swift */; };
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
+		7A832D9337FA82ED13884A0B /* KodeWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE9A687F30B588C8B6EB5AF0 /* KodeWatchApp.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		A8D909C40D7B110E5C0B0D9A /* SessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DE69484CDBA47996D3D8E50 /* SessionView.swift */; };
+		C2EE88FBAD1A646DA2A68966 /* PhoneLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26D54AFA8A8BCF0115B92889 /* PhoneLink.swift */; };
+		CD39BB40FE7C4EAC54C8CE94 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 082135C389957A2F3D017997 /* Assets.xcassets */; };
+		D218397E2DF05A2E58B9D84B /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 839B6E306B8D275627C77248 /* Foundation.framework */; };
+		D9D8D5A2418A800ADD0A2202 /* WatchBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC04D197783D39934701F32B /* WatchBridge.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		237171DA2698CB51445B058C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E111D85968BC50C2CCEF6753;
+			remoteInfo = KodeWatch;
+		};
 		331C8085294A63A400263BE5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
@@ -41,24 +60,43 @@
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A2DCF3EA6B3FF08A06702D1E /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				6C040794C8D1668E9E1F3F5A /* KodeWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		082135C389957A2F3D017997 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		096F7F0814AD8D19D15CC3C3 /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		1286A6A5DC2DC6F7F3286307 /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
+		1CF9747E7D5E85C745408D33 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		26D54AFA8A8BCF0115B92889 /* PhoneLink.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PhoneLink.swift; sourceTree = "<group>"; };
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		331C8081294A63A400263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		373A3860AAE7D7DFD4649B12 /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
 		3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = AppFrameworkInfo.plist; path = Flutter/AppFrameworkInfo.plist; sourceTree = "<group>"; };
+		4069C5A70B42EC9A20C52ACA /* SessionListView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
 		4707FC88828D22EB4A7AD3BD /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		621DB4119C50944FBDE45121 /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
+		6ACF0325CC71D0E0F107F7E9 /* KodeAPI.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KodeAPI.swift; sourceTree = "<group>"; };
+		6D8505449FCE3F4D4540BE8E /* KodeWatch.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; path = KodeWatch.xcconfig; sourceTree = "<group>"; };
+		6DE69484CDBA47996D3D8E50 /* SessionView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SessionView.swift; sourceTree = "<group>"; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
+		839B6E306B8D275627C77248 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/WatchOS.platform/Developer/SDKs/WatchOS11.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
 		97C146EE1CF9000F007C117D /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -66,12 +104,26 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A57ED55C3B04B95771634810 /* KodeWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KodeWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AE9A687F30B588C8B6EB5AF0 /* KodeWatchApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KodeWatchApp.swift; sourceTree = "<group>"; };
 		B918C9A41127CA03A3C462E3 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
 		C47EE899E7F4E471CBAF25FA /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		D0042ED9D9721BFE2E32C377 /* WatchStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchStore.swift; sourceTree = "<group>"; };
 		D55F534989251B72E3288A22 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
+		DC04D197783D39934701F32B /* WatchBridge.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchBridge.swift; sourceTree = "<group>"; };
+		E70775480BC94FE2059827D7 /* ServerBinding.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ServerBinding.swift; sourceTree = "<group>"; };
+		F929FE277F07ADA4383ED81E /* Interaction.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Interaction.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		49C10BEA9A92DD77F6ACB2CE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D218397E2DF05A2E58B9D84B /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		97C146EB1CF9000F007C117D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -100,6 +152,25 @@
 			path = RunnerTests;
 			sourceTree = "<group>";
 		};
+		411A005F3A628EA5AF3D515D /* KodeWatch */ = {
+			isa = PBXGroup;
+			children = (
+				6D8505449FCE3F4D4540BE8E /* KodeWatch.xcconfig */,
+				1CF9747E7D5E85C745408D33 /* Info.plist */,
+				AE9A687F30B588C8B6EB5AF0 /* KodeWatchApp.swift */,
+				E70775480BC94FE2059827D7 /* ServerBinding.swift */,
+				26D54AFA8A8BCF0115B92889 /* PhoneLink.swift */,
+				6ACF0325CC71D0E0F107F7E9 /* KodeAPI.swift */,
+				F929FE277F07ADA4383ED81E /* Interaction.swift */,
+				D0042ED9D9721BFE2E32C377 /* WatchStore.swift */,
+				4069C5A70B42EC9A20C52ACA /* SessionListView.swift */,
+				6DE69484CDBA47996D3D8E50 /* SessionView.swift */,
+				082135C389957A2F3D017997 /* Assets.xcassets */,
+			);
+			name = KodeWatch;
+			path = KodeWatch;
+			sourceTree = "<group>";
+		};
 		9740EEB11CF90186004384FC /* Flutter */ = {
 			isa = PBXGroup;
 			children = (
@@ -121,6 +192,7 @@
 				331C8082294A63A400263BE5 /* RunnerTests */,
 				C9664FA7CD19B64838D742B5 /* Pods */,
 				C876E164618BC5901A05201F /* Frameworks */,
+				411A005F3A628EA5AF3D515D /* KodeWatch */,
 			);
 			sourceTree = "<group>";
 		};
@@ -129,6 +201,7 @@
 			children = (
 				97C146EE1CF9000F007C117D /* Runner.app */,
 				331C8081294A63A400263BE5 /* RunnerTests.xctest */,
+				A57ED55C3B04B95771634810 /* KodeWatch.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -145,6 +218,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
+				DC04D197783D39934701F32B /* WatchBridge.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -154,6 +228,7 @@
 			children = (
 				C47EE899E7F4E471CBAF25FA /* Pods_Runner.framework */,
 				096F7F0814AD8D19D15CC3C3 /* Pods_RunnerTests.framework */,
+				E55E0665EB158836664119BE /* watchOS */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -169,6 +244,14 @@
 				B918C9A41127CA03A3C462E3 /* Pods-RunnerTests.profile.xcconfig */,
 			);
 			path = Pods;
+			sourceTree = "<group>";
+		};
+		E55E0665EB158836664119BE /* watchOS */ = {
+			isa = PBXGroup;
+			children = (
+				839B6E306B8D275627C77248 /* Foundation.framework */,
+			);
+			name = watchOS;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -203,6 +286,7 @@
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
+				A2DCF3EA6B3FF08A06702D1E /* Embed Watch Content */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
 				A9355EA5F58D6FF02384B66C /* [CP] Embed Pods Frameworks */,
 				6B44FDAF1B162B2EDEF361BC /* [CP] Copy Pods Resources */,
@@ -210,6 +294,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				9833CA6D14380E9820499400 /* PBXTargetDependency */,
 			);
 			name = Runner;
 			packageProductDependencies = (
@@ -217,6 +302,23 @@
 			);
 			productName = Runner;
 			productReference = 97C146EE1CF9000F007C117D /* Runner.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E111D85968BC50C2CCEF6753 /* KodeWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1BFF3815C0687951E3D8040D /* Build configuration list for PBXNativeTarget "KodeWatch" */;
+			buildPhases = (
+				1277C85BF6533CE74E3C2C70 /* Sources */,
+				49C10BEA9A92DD77F6ACB2CE /* Frameworks */,
+				157599F2C1B7DD40F4723503 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = KodeWatch;
+			productName = KodeWatch;
+			productReference = A57ED55C3B04B95771634810 /* KodeWatch.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -257,11 +359,20 @@
 			targets = (
 				97C146ED1CF9000F007C117D /* Runner */,
 				331C8080294A63A400263BE5 /* RunnerTests */,
+				E111D85968BC50C2CCEF6753 /* KodeWatch */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		157599F2C1B7DD40F4723503 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CD39BB40FE7C4EAC54C8CE94 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		331C807F294A63A400263BE5 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -395,6 +506,21 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		1277C85BF6533CE74E3C2C70 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7A832D9337FA82ED13884A0B /* KodeWatchApp.swift in Sources */,
+				266F260E6DFDE33FA4B11A24 /* ServerBinding.swift in Sources */,
+				C2EE88FBAD1A646DA2A68966 /* PhoneLink.swift in Sources */,
+				4683DCF3134AF61F35D8573E /* KodeAPI.swift in Sources */,
+				78388A21C9ADB28E620402CF /* Interaction.swift in Sources */,
+				68B6123427EAC9A249A2ECFF /* WatchStore.swift in Sources */,
+				06497BCC2908855F147C82FD /* SessionListView.swift in Sources */,
+				A8D909C40D7B110E5C0B0D9A /* SessionView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		331C807D294A63A400263BE5 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -410,6 +536,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
+				D9D8D5A2418A800ADD0A2202 /* WatchBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -420,6 +547,12 @@
 			isa = PBXTargetDependency;
 			target = 97C146ED1CF9000F007C117D /* Runner */;
 			targetProxy = 331C8085294A63A400263BE5 /* PBXContainerItemProxy */;
+		};
+		9833CA6D14380E9820499400 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = KodeWatch;
+			target = E111D85968BC50C2CCEF6753 /* KodeWatch */;
+			targetProxy = 237171DA2698CB51445B058C /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -443,6 +576,33 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
+		1DF9D053BA1A15C37333E3DE /* Profile */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 6D8505449FCE3F4D4540BE8E /* KodeWatch.xcconfig */;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CRY5MTFJN7;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = KodeWatch/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tencent.kodeMobile.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				VALIDATE_PRODUCT = YES;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Profile;
+		};
 		249021D3217E4FDB00AE95B9 /* Profile */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -566,6 +726,32 @@
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Runner.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Runner";
 			};
 			name = Profile;
+		};
+		5F5304EAAADF57CB68140C10 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 6D8505449FCE3F4D4540BE8E /* KodeWatch.xcconfig */;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CRY5MTFJN7;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = KodeWatch/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tencent.kodeMobile.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
 		};
 		97C147031CF9000F007C117D /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -723,9 +909,46 @@
 			};
 			name = Release;
 		};
+		AD91D666A456C0994206B283 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 6D8505449FCE3F4D4540BE8E /* KodeWatch.xcconfig */;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CRY5MTFJN7;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = KodeWatch/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tencent.kodeMobile.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				VALIDATE_PRODUCT = YES;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1BFF3815C0687951E3D8040D /* Build configuration list for PBXNativeTarget "KodeWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AD91D666A456C0994206B283 /* Release */,
+				5F5304EAAADF57CB68140C10 /* Debug */,
+				1DF9D053BA1A15C37333E3DE /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		331C8087294A63A400263BE5 /* Build configuration list for PBXNativeTarget "RunnerTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

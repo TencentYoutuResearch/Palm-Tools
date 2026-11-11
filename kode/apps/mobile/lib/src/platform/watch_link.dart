@@ -23,7 +23,8 @@ const watchChannel = MethodChannel('kode/watch');
 Map<String, Object?> watchContext(List<Endpoint> endpoints, Endpoint? active) {
   final all = [
     ...endpoints,
-    if (active != null && !endpoints.any((e) => e.storageKey == active.storageKey))
+    if (active != null &&
+        !endpoints.any((e) => e.storageKey == active.storageKey))
       active,
   ];
   return {
@@ -32,7 +33,8 @@ Map<String, Object?> watchContext(List<Endpoint> endpoints, Endpoint? active) {
       for (final endpoint in all)
         {...endpoint.toJson(), 'storage_key': endpoint.storageKey},
     ],
-    'active': active?.storageKey,
+    // Application contexts accept property-list values only, never null.
+    'active': ?active?.storageKey,
   };
 }
 

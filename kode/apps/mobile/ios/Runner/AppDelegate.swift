@@ -4,9 +4,15 @@ import UIKit
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let appChannelName = "kode/app"
+  private var watchBridge: WatchBridge?
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let watchRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "KodeWatchChannel"
+    ) {
+      watchBridge = WatchBridge(messenger: watchRegistrar.messenger())
+    }
     guard let registrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "KodeAppChannel"
     ) else {

@@ -1,0 +1,3 @@
+// Shares the Flutter build name/number so the embedded watch app always
+// matches the iOS app version (App Store / TestFlight reject mismatches).
+#include? "../Flutter/Generated.xcconfig"

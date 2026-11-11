@@ -263,9 +263,10 @@ impl AccountClient {
             name: String::new(),
             picture: String::new(),
             user_id,
-            access_token: tokens.access_token,
+            access_token: tokens.access_token.clone(),
             refresh_token,
-            expires_at: now_ms + tokens.expires_in * 1000,
+            expires_at: jwt_expires_at_ms(&tokens.access_token)
+                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
         };
         Ok(self.with_profile(session).await)
     }
@@ -286,11 +287,12 @@ impl AccountClient {
         // Picks up a name or avatar set from another device.
         Ok(self
             .with_profile(AccountSession {
-                access_token: tokens.access_token,
+                access_token: tokens.access_token.clone(),
                 refresh_token: tokens
                     .refresh_token
                     .unwrap_or_else(|| session.refresh_token.clone()),
-                expires_at: now_ms + tokens.expires_in * 1000,
+                expires_at: jwt_expires_at_ms(&tokens.access_token)
+                    .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
                 ..session.clone()
             })
             .await)
@@ -385,9 +387,10 @@ impl AccountClient {
                 Some(sub) => sub,
                 None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
             },
-            access_token: tokens.access_token,
+            access_token: tokens.access_token.clone(),
             refresh_token: tokens.refresh_token.ok_or("the relay returned no refresh token")?,
-            expires_at: now_ms + tokens.expires_in * 1000,
+            expires_at: jwt_expires_at_ms(&tokens.access_token)
+                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
         };
         Ok(self.with_profile(session).await)
     }
@@ -462,9 +465,10 @@ impl AccountClient {
                 Some(sub) => sub,
                 None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
             },
-            access_token: tokens.access_token,
+            access_token: tokens.access_token.clone(),
             refresh_token: tokens.refresh_token.ok_or("the relay returned no refresh token")?,
-            expires_at: now_ms + tokens.expires_in * 1000,
+            expires_at: jwt_expires_at_ms(&tokens.access_token)
+                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
         };
         Ok(self.with_profile(session).await)
     }
@@ -525,9 +529,10 @@ impl AccountClient {
                 Some(sub) => sub,
                 None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
             },
-            access_token: tokens.access_token,
+            access_token: tokens.access_token.clone(),
             refresh_token: tokens.refresh_token.ok_or("the relay returned no refresh token")?,
-            expires_at: now_ms + tokens.expires_in * 1000,
+            expires_at: jwt_expires_at_ms(&tokens.access_token)
+                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
         };
         Ok(Some(self.with_profile(session).await))
     }
@@ -729,6 +734,17 @@ fn jwt_subject(token: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Extracts the `exp` claim from a JWT and returns it as epoch milliseconds.
+/// Returns None if the token is malformed or has no `exp` claim.
+fn jwt_expires_at_ms(token: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let exp_seconds = serde_json::from_slice::<Value>(&bytes).ok()?["exp"].as_u64()?;
+    Some(exp_seconds * 1000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,6 +843,18 @@ mod tests {
             .encode(br#"{"sub":"user-42","exp":1}"#);
         assert_eq!(jwt_subject(&format!("h.{payload}.s")).as_deref(), Some("user-42"));
         assert_eq!(jwt_subject("garbage"), None);
+    }
+
+    #[test]
+    fn reads_expiry_from_jwt_payload() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"sub":"user-42","exp":1794372658}"#);
+        let token = format!("h.{payload}.s");
+        assert_eq!(jwt_expires_at_ms(&token), Some(1794372658000));
+        assert_eq!(jwt_expires_at_ms("garbage"), None);
+        let no_exp = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"sub":"user-42"}"#);
+        assert_eq!(jwt_expires_at_ms(&format!("h.{no_exp}.s")), None);
     }
 
     #[test]
