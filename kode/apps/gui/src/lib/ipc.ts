@@ -274,8 +274,8 @@ export type LocaleMode = 'en' | 'zh-CN' | 'system'
 
 export const ipc = {
   listBackends: () => invoke<BackendInfo[]>('list_backends'),
-  discoverBackendModels: (backendKey: string) =>
-    invoke<ModelDiscoveryResult>('discover_backend_models', { backendKey }),
+  discoverBackendModels: (backendKey: string, force = false) =>
+    invoke<ModelDiscoveryResult>('discover_backend_models', { backendKey, force }),
   /** Settings 面板用:返回全部 backend(含 disabled),带 enabled 字段 */
   listAllBackends: () => invoke<BackendListItem[]>('list_all_backends'),
   listAvatarLibrary: () => invoke<AvatarLibrary>('list_avatar_library'),

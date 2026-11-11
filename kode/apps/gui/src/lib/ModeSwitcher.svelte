@@ -2,7 +2,7 @@
   import type { WorkerDirectoryEntry } from './ipc'
   import Icon from './Icon.svelte'
   import { currentLocale, t } from './i18n'
-  import { outsidePressClose } from './outside_close'
+  import { outsideElementPressClose } from './outside_close'
 
   type Props = {
     mode: 'worker' | 'monitor'
@@ -31,7 +31,7 @@
   }
 </script>
 
-<div class="mode-switch" use:outsidePressClose={{ onClose: close }}>
+<div class="mode-switch" use:outsideElementPressClose={{ onClose: close, disabled: !open }}>
   <button
     class="trigger"
     class:open

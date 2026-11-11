@@ -12,6 +12,7 @@
 //! - Claude 优先采用 ai-title；缺失时用第一条非命令前缀的 user message 作 title fallback
 
 use std::fs;
+use std::io::{BufRead, BufReader as StdBufReader};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::time::SystemTime;
@@ -227,8 +228,37 @@ pub fn codex_state_path(backend: Backend) -> Option<PathBuf> {
     codex_home(backend).map(|home| home.join("state_5.sqlite"))
 }
 
+/// Read the model Codex/Tcodex will use without an explicit `--model` flag.
+/// This is display metadata only; callers must not treat it as a launch override.
+pub(crate) fn configured_codex_model(backend: Backend, args: &[String]) -> Option<String> {
+    configured_codex_model_from_home(&codex_home(backend)?, args)
+}
+
+fn configured_codex_model_from_home(home: &Path, args: &[String]) -> Option<String> {
+    let text = fs::read_to_string(home.join("config.toml")).ok()?;
+    let config: toml::Value = toml::from_str(&text).ok()?;
+    let profile_arg = args
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--profile").then_some(pair[1].as_str()))
+        .or_else(|| {
+            args.iter().find_map(|arg| {
+                arg.strip_prefix("--profile=")
+                    .filter(|value| !value.is_empty())
+            })
+        });
+    let profile = profile_arg.or_else(|| config.get("profile").and_then(toml::Value::as_str));
+    profile
+        .and_then(|name| config.get("profiles")?.get(name)?.get("model")?.as_str())
+        .or_else(|| config.get("model").and_then(toml::Value::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
 pub fn find_codex_session_by_id(backend: Backend, session_id: &str) -> Option<PathBuf> {
-    find_codex_session_by_id_under(&codex_home(backend)?.join("sessions"), session_id)
+    let home = codex_home(backend)?;
+    codex_title::thread_rollout_path(&home.join("state_5.sqlite"), session_id)
+        .or_else(|| find_codex_session_by_id_under(&home.join("sessions"), session_id))
 }
 
 /// 兼容旧 API 名(只用于 codebuddy);新代码请用 `Backend::session_path` 或 `session_path_for`。
@@ -1421,6 +1451,20 @@ fn parse_codex_line(backend: Backend, line: &str, state: &mut TailState) -> Line
                 upd.new_title = apply_codex_name(state, Some(name));
             }
         }
+        // Some Codex-family builds record the effective launch model in
+        // provenance before the first turn_context is written. Surface it
+        // immediately so an idle tab does not remain on "auto".
+        if let Some(model) = entry
+            .payload
+            .get("provenance")
+            .and_then(|provenance| provenance.get("model"))
+            .or_else(|| entry.payload.get("model"))
+            .and_then(|value| value.as_str())
+        {
+            if state.last_emitted_model.as_deref() != Some(model) {
+                upd.new_model = Some(model.to_string());
+            }
+        }
     }
 
     if entry.r#type.as_deref() == Some("turn_context") {
@@ -1593,11 +1637,8 @@ fn collect_codex_session_by_id(dir: &Path, session_id: &str, found: &mut Option<
 }
 
 pub fn codex_session_meta_id(path: &Path) -> Option<String> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return None;
-    };
-    for line in text.lines().take(8) {
-        let Ok(entry) = serde_json::from_str::<CodexEntry>(line) else {
+    for line in std_prefix_lines(path, 8) {
+        let Ok(entry) = serde_json::from_str::<CodexEntry>(&line) else {
             continue;
         };
         if entry.r#type.as_deref() != Some("session_meta") {
@@ -1614,11 +1655,8 @@ pub fn codex_session_meta_id(path: &Path) -> Option<String> {
 }
 
 pub fn codex_session_cwd(path: &Path) -> Option<(String, PathBuf)> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return None;
-    };
-    for line in text.lines().take(8) {
-        let Ok(entry) = serde_json::from_str::<CodexEntry>(line) else {
+    for line in std_prefix_lines(path, 8) {
+        let Ok(entry) = serde_json::from_str::<CodexEntry>(&line) else {
             continue;
         };
         if entry.r#type.as_deref() != Some("session_meta") {
@@ -1633,6 +1671,14 @@ pub fn codex_session_cwd(path: &Path) -> Option<(String, PathBuf)> {
         return Some((sid.to_string(), PathBuf::from(cwd)));
     }
     None
+}
+
+fn std_prefix_lines(path: &Path, limit: usize) -> impl Iterator<Item = String> {
+    fs::File::open(path)
+        .ok()
+        .into_iter()
+        .flat_map(move |file| StdBufReader::new(file).lines().take(limit))
+        .map_while(Result::ok)
 }
 
 // ============================================================================
@@ -1786,6 +1832,45 @@ mod tests {
         assert!(path.ends_with(".tclaude/projects/-Users-tester-Projects-example-kode/abc.jsonl"));
         assert!(Backend::Tclaude.accepts_transcript_path(&path));
         assert!(!Backend::Claude.accepts_transcript_path(&path));
+    }
+
+    #[test]
+    fn codex_config_model_is_used_as_an_initial_label() {
+        let root = tempfile_dir("kode-codex-config-model");
+        fs::write(
+            root.join("config.toml"),
+            "model = \"deepseek-v4.1-flash\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured_codex_model_from_home(&root, &[]).as_deref(),
+            Some("deepseek-v4.1-flash")
+        );
+        assert_eq!(
+            configured_codex_model_from_home(&root, &["--profile".into(), "work".into()])
+                .as_deref(),
+            Some("deepseek-v4.1-flash")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_codex_profile_model_wins_over_top_level_model() {
+        let root = tempfile_dir("kode-codex-profile-model");
+        fs::write(
+            root.join("config.toml"),
+            "model = \"top-level\"\nprofile = \"work\"\n[profiles.work]\nmodel = \"profile-model\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured_codex_model_from_home(&root, &[]).as_deref(),
+            Some("profile-model")
+        );
+        assert_eq!(
+            configured_codex_model_from_home(&root, &["--profile=other".into()]).as_deref(),
+            Some("top-level")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2942,6 +3027,14 @@ mod tests {
     }
 
     #[test]
+    fn codex_session_meta_surfaces_provenance_model() {
+        let line = r#"{"type":"session_meta","payload":{"id":"thread-id","provenance":{"type":"model","model":"deepseek-v4.1-flash"}}}"#;
+        let mut state = TailState::new();
+        let upd = parse_codex_line(Backend::Tcodex, line, &mut state);
+        assert_eq!(upd.new_model.as_deref(), Some("deepseek-v4.1-flash"));
+    }
+
+    #[test]
     fn codex_name_overrides_prompt_and_tracks_renames() {
         let mut state = TailState::new();
         let meta = r#"{"type":"session_meta","payload":{"id":"session-without-local-db"}}"#;
@@ -3398,6 +3491,20 @@ mod tests {
         // input_total = raw input + cached = 1000 + 300 = 1300
         assert_eq!(got_input, Some(1300));
         assert_eq!(got_cached, Some(300));
+    }
+
+    #[test]
+    #[ignore = "requires KODE_BENCH_SESSION and a local Codex/Tcodex state database"]
+    fn live_codex_resume_lookup_benchmark() {
+        let session_id = std::env::var("KODE_BENCH_SESSION").expect("KODE_BENCH_SESSION");
+        let started = std::time::Instant::now();
+        let path = find_codex_session_by_id(Backend::Tcodex, &session_id);
+        eprintln!(
+            "tcodex resume path lookup: {:?} in {:?}",
+            path.as_deref(),
+            started.elapsed()
+        );
+        assert!(path.is_some());
     }
 
     fn tempfile_path(name: &str) -> PathBuf {

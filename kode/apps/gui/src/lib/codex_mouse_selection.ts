@@ -6,7 +6,11 @@ type MouseSelectionTerminal = {
   rows: number
   buffer: { active: { viewportY: number } }
   select: (column: number, row: number, length: number) => void
+  selectLines: (start: number, end: number) => void
   _core?: {
+    _selectionService?: {
+      _selectWordAtCursor: (event: MouseEvent, allowWhitespaceOnlySelection: boolean) => boolean
+    }
     _mouseService?: {
       getCoords: (
         event: MouseEvent,
@@ -22,9 +26,13 @@ type MouseSelectionTerminal = {
 type Cell = { col: number; row: number }
 const DRAG_DISTANCE_SQUARED = 25
 
+export function supportsCodexMouseSelection(backendKey: string): boolean {
+  return backendKey === 'codex' || backendKey === 'tcodex'
+}
+
 export function installCodexMouseSelection(host: HTMLElement, term: MouseSelectionTerminal): () => void {
   const doc = host.ownerDocument
-  let pending: { down: MouseEvent; target: Element; start: Cell; dragging: boolean } | null = null
+  let pending: { down: MouseEvent; target: Element; start: Cell; detail: number; dragging: boolean } | null = null
   let replaying = false
 
   function cellAt(event: MouseEvent, selectionEnd: boolean): Cell | null {
@@ -80,14 +88,28 @@ export function installCodexMouseSelection(host: HTMLElement, term: MouseSelecti
     }
   }
 
+  function selectClickIntent(gesture: NonNullable<typeof pending>) {
+    if (gesture.detail >= 3) {
+      term.selectLines(gesture.start.row, gesture.start.row)
+      return
+    }
+    if (gesture.detail === 2 && term._core?._selectionService?._selectWordAtCursor(
+      gesture.down,
+      true,
+    )) {
+      return
+    }
+    term.select(gesture.start.col, gesture.start.row, 1)
+  }
+
   function onDown(event: MouseEvent) {
     if (replaying || event.button !== 0 || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return
     if (term.modes.mouseTrackingMode === 'none' || !term.element?.contains(event.target as Node)) return
     const start = cellAt(event, false)
     if (!start || !(event.target instanceof Element)) return
     event.preventDefault()
-    event.stopPropagation()
-    pending = { down: event, target: event.target, start, dragging: false }
+    event.stopImmediatePropagation()
+    pending = { down: event, target: event.target, start, detail: event.detail, dragging: false }
     doc.addEventListener('mousemove', onMove, true)
     doc.addEventListener('mouseup', onUp, true)
     doc.defaultView?.addEventListener('blur', cancel, { once: true })
@@ -101,7 +123,7 @@ export function installCodexMouseSelection(host: HTMLElement, term: MouseSelecti
       return
     }
     event.preventDefault()
-    event.stopPropagation()
+    event.stopImmediatePropagation()
     if (!gesture.dragging) {
       const dx = event.clientX - gesture.down.clientX
       const dy = event.clientY - gesture.down.clientY
@@ -115,9 +137,10 @@ export function installCodexMouseSelection(host: HTMLElement, term: MouseSelecti
     const gesture = pending
     if (!gesture) return
     event.preventDefault()
-    event.stopPropagation()
+    event.stopImmediatePropagation()
     cancel()
     if (gesture.dragging) selectTo(event, gesture)
+    else if (gesture.detail > 1) selectClickIntent(gesture)
     else replayClick(gesture, event)
   }
 

@@ -14,9 +14,9 @@
       {
         "title": "kode",
         "width": 1100,
-        "height": 700,
+        "height": 820,
         "minWidth": 600,
-        "minHeight": 400,
+        "minHeight": 640,
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,

@@ -6,12 +6,41 @@
 
 use kode_core::config::BackendConfig;
 use kode_core::session::jsonl_tail::Backend;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{timeout, Duration};
+
+const MODEL_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+fn cli_command(program: &str) -> Command {
+    let resolved = kode_core::pty::resolve_spawn_command(program);
+    #[cfg(windows)]
+    if matches!(
+        std::path::Path::new(&resolved)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("cmd" | "bat")
+    ) {
+        // Rust's CreateProcess path does not execute npm .cmd shims directly.
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/S", "/C"]).arg(resolved);
+        return command;
+    }
+    Command::new(resolved)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiscoveredModel {
@@ -33,6 +62,120 @@ pub struct ModelDiscoveryResult {
     pub models: Vec<DiscoveredModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+#[derive(Clone)]
+struct ProcessCacheEntry {
+    cached_at: u64,
+    result: ModelDiscoveryResult,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DiskCacheEntry {
+    cached_at: u64,
+    result: ModelDiscoveryResult,
+}
+
+fn process_cache() -> &'static Mutex<HashMap<String, ProcessCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, ProcessCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn discovery_locks() -> &'static Mutex<HashMap<String, Arc<AsyncMutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn cache_is_fresh(cached_at: u64) -> bool {
+    now_secs().saturating_sub(cached_at) <= MODEL_CACHE_TTL_SECS
+}
+
+fn disk_cache_path(cache_key: &str) -> Option<PathBuf> {
+    dirs::cache_dir().map(|root| {
+        root.join("kode")
+            .join("model-catalog")
+            .join(format!("{cache_key}.json"))
+    })
+}
+
+fn discovery_cache_key(backend: &str, config: &BackendConfig) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"kode-model-catalog-v1\0");
+    hasher.update(backend.as_bytes());
+    hasher.update(serde_json::to_vec(config).unwrap_or_default());
+    let resolved = kode_core::pty::resolve_spawn_command(&config.command);
+    if let Ok(metadata) = fs::metadata(&resolved) {
+        hasher.update(metadata.len().to_le_bytes());
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                hasher.update(duration.as_nanos().to_le_bytes());
+            }
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn cached_discovery(cache_key: &str) -> Option<ModelDiscoveryResult> {
+    if let Some(entry) = process_cache().lock().get(cache_key) {
+        if cache_is_fresh(entry.cached_at) {
+            return Some(entry.result.clone());
+        }
+    }
+    let path = disk_cache_path(cache_key)?;
+    let entry: DiskCacheEntry = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    if !cache_is_fresh(entry.cached_at) {
+        return None;
+    }
+    process_cache().lock().insert(
+        cache_key.to_string(),
+        ProcessCacheEntry {
+            cached_at: entry.cached_at,
+            result: entry.result.clone(),
+        },
+    );
+    Some(entry.result)
+}
+
+fn store_discovery(cache_key: &str, result: &ModelDiscoveryResult) {
+    let cached_at = now_secs();
+    process_cache().lock().insert(
+        cache_key.to_string(),
+        ProcessCacheEntry {
+            cached_at,
+            result: result.clone(),
+        },
+    );
+    let Some(path) = disk_cache_path(cache_key) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let entry = DiskCacheEntry {
+        cached_at,
+        result: result.clone(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&entry) {
+        let _ = fs::write(path, bytes);
+    }
+}
+
+fn key_lock(cache_key: &str) -> Arc<AsyncMutex<()>> {
+    discovery_locks()
+        .lock()
+        .entry(cache_key.to_string())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
 }
 
 async fn write_line(child: &mut Child, value: Value) -> Result<(), String> {
@@ -102,7 +245,7 @@ async fn discover_codex(
     command: &str,
     args: &[String],
 ) -> Result<ModelDiscoveryResult, String> {
-    let mut child = Command::new(command)
+    let mut child = cli_command(command)
         .args(args)
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
@@ -120,7 +263,7 @@ async fn discover_codex(
     let mut cursor: Option<String> = None;
     let mut models = Vec::new();
     loop {
-        let mut params = json!({"includeHidden":false});
+        let mut params = json!({"includeHidden":false,"limit":100});
         if let Some(value) = cursor.as_ref() {
             params["cursor"] = Value::String(value.clone());
         }
@@ -188,7 +331,7 @@ fn parse_codebuddy_models(result: &Value) -> Vec<DiscoveredModel> {
 }
 
 async fn discover_codebuddy(backend: &str, command: &str, args: &[String]) -> Result<ModelDiscoveryResult, String> {
-    let mut child = Command::new(command)
+    let mut child = cli_command(command)
         .args(args)
         .args([
             "--print",
@@ -241,7 +384,7 @@ async fn discover_codebuddy(backend: &str, command: &str, args: &[String]) -> Re
 async fn discover_claude(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
     let output = timeout(
         Duration::from_secs(5),
-        Command::new(command)
+        cli_command(command)
             .arg("--help")
             .kill_on_drop(true)
             .output(),
@@ -300,6 +443,29 @@ pub async fn discover_models_with_config(
     .await
 }
 
+pub async fn discover_models_with_config_cached(
+    backend: &str,
+    config: &BackendConfig,
+    force: bool,
+) -> Result<ModelDiscoveryResult, String> {
+    let cache_key = discovery_cache_key(backend, config);
+    if !force {
+        if let Some(result) = cached_discovery(&cache_key) {
+            return Ok(result);
+        }
+    }
+    let lock = key_lock(&cache_key);
+    let _guard = lock.lock().await;
+    if !force {
+        if let Some(result) = cached_discovery(&cache_key) {
+            return Ok(result);
+        }
+    }
+    let result = discover_models_with_config(backend, config).await?;
+    store_discovery(&cache_key, &result);
+    Ok(result)
+}
+
 async fn discover_models_with_args(
     backend: &str,
     protocol: &str,
@@ -322,7 +488,7 @@ async fn discover_tclaude(command: &str) -> Result<ModelDiscoveryResult, String>
     // accepted by this wrapper, so returning Claude's aliases is incorrect.
     let output = timeout(
         Duration::from_secs(10),
-        Command::new(command)
+        cli_command(command)
             .args(["--model", "kode-model-discovery", "--", "--help"])
             .kill_on_drop(true)
             .output(),
@@ -400,7 +566,7 @@ fn parse_cursor_models(text: &str) -> Vec<DiscoveredModel> {
 async fn discover_cursor(backend: &str, command: &str) -> Result<ModelDiscoveryResult, String> {
     let output = timeout(
         Duration::from_secs(20),
-        Command::new(command)
+        cli_command(command)
             .arg("--list-models")
             .env("NO_COLOR", "1")
             .env("FORCE_COLOR", "0")
@@ -430,6 +596,34 @@ async fn discover_cursor(backend: &str, command: &str) -> Result<ModelDiscoveryR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npm_shims_run_through_cmd_exe() {
+        let command = cli_command(r"C:\tools\tcodex.cmd");
+        let program = command.as_std().get_program().to_string_lossy();
+        assert_eq!(
+            std::path::Path::new(program.as_ref())
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("cmd.exe")
+        );
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&args[..3], ["/D", "/S", "/C"]);
+        assert_eq!(args[3], r"C:\tools\tcodex.cmd");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires an installed and authenticated tcodex CLI"]
+    async fn windows_live_tcodex_discovery_returns_the_catalogue() {
+        let result = discover_models("tcodex", "tcodex").await.unwrap();
+        assert!(result.models.len() > 1);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -524,5 +718,45 @@ printf '{"id":2,"result":{"data":[{"id":"%s","isDefault":true}]}}\n' "$KODE_MODE
         );
         assert_eq!(models[0].id, "x");
         assert_eq!(models[0].label, "Model X");
+    }
+
+    #[test]
+    fn model_cache_key_tracks_backend_configuration() {
+        let mut config = kode_core::config::Config::default()
+            .backend("codex")
+            .unwrap()
+            .clone();
+        let first = discovery_cache_key("tcodex", &config);
+        config.args.push("--profile".into());
+        config.args.push("work".into());
+        let second = discovery_cache_key("tcodex", &config);
+        assert_ne!(first, second);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires an installed and authenticated tcodex CLI"]
+    async fn live_tcodex_model_cache_reuses_the_catalogue() {
+        let config = kode_core::config::Config::default()
+            .backend("tcodex")
+            .unwrap()
+            .clone();
+        let started = std::time::Instant::now();
+        let first = discover_models_with_config_cached("tcodex", &config, true)
+            .await
+            .unwrap();
+        let cold = started.elapsed();
+        let started = std::time::Instant::now();
+        let warm = discover_models_with_config_cached("tcodex", &config, false)
+            .await
+            .unwrap();
+        eprintln!(
+            "tcodex model catalogue: cold={:?} warm={:?} models={}",
+            cold,
+            started.elapsed(),
+            warm.models.len()
+        );
+        assert_eq!(first.models, warm.models);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }
