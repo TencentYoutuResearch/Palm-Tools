@@ -1,4 +1,5 @@
 import SwiftUI
+import WatchKit
 
 struct SessionView: View {
   let sessionID: Int
@@ -174,12 +175,16 @@ struct VoiceComposer: View {
 
   var body: some View {
     Section {
-      // watchOS presents dictation / Scribble / keyboard when tapped.
-      TextField(text: $draft, axis: .vertical) {
-        Label("Speak a message", systemImage: "mic.fill")
+      Button {
+        dictate()
+      } label: {
+        Label(trimmed.isEmpty ? "Speak" : "Speak again", systemImage: "mic.fill")
       }
       .disabled(sending)
       if !trimmed.isEmpty {
+        // The transcript stays editable (tap to fix with keyboard/Scribble).
+        TextField("Message", text: $draft, axis: .vertical)
+          .disabled(sending)
         Button {
           Task { await send() }
         } label: {
@@ -194,6 +199,26 @@ struct VoiceComposer: View {
       }
       if let error {
         Text(error).font(.footnote).foregroundStyle(.red)
+      }
+    }
+  }
+
+  /// SwiftUI has no dictation API on watchOS. WatchKit's text input
+  /// controller with no suggestions and plain mode skips the suggestion list;
+  /// watches with a keyboard still open on the keyboard first.
+  private func dictate() {
+    guard let controller = WKApplication.shared().visibleInterfaceController else {
+      error = "Dictation is unavailable here."
+      return
+    }
+    controller.presentTextInputController(withSuggestions: nil, allowedInputMode: .plain) {
+      results in
+      guard let text = results?.compactMap({ $0 as? String }).joined(separator: " "),
+        !text.isEmpty
+      else { return }
+      DispatchQueue.main.async {
+        error = nil
+        draft = trimmed.isEmpty ? text : trimmed + " " + text
       }
     }
   }
