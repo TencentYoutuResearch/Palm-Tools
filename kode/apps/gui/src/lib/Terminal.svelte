@@ -36,7 +36,11 @@
   import { TerminalOutputBacklog } from './terminal_output_backlog'
   import { TerminalImeOutputGate } from './terminal_ime'
   import { installConptyCursorGuard, shouldInstallConptyCursorGuard } from './conpty_cursor'
-  import { installCodexMouseSelection, supportsCodexMouseSelection } from './codex_mouse_selection'
+  import {
+    CODEX_MULTI_CLICK_MS,
+    installCodexMouseSelection,
+    supportsCodexMouseSelection,
+  } from './codex_mouse_selection'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import { ConsecutiveCtrlCGuard } from './consecutive_ctrl_c_guard'
@@ -289,7 +293,8 @@
     }
     const backendKey = get(tabs).find((tab) => tab.id === sessionId)?.backendKey ?? ''
     if (supportsCodexMouseSelection(backendKey)) {
-      disposeCodexMouseSelection = installCodexMouseSelection(containerEl, term)
+      const singleClickDelay = /Windows/i.test(navigator.userAgent) ? CODEX_MULTI_CLICK_MS : 0
+      disposeCodexMouseSelection = installCodexMouseSelection(containerEl, term, undefined, singleClickDelay)
     }
     syncCursorBlink()
     if (shouldInstallConptyCursorGuard(navigator.userAgent, endpointId?.kind === 'remote')) {

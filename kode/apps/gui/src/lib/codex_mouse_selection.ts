@@ -24,8 +24,15 @@ type MouseSelectionTerminal = {
 }
 
 type Cell = { col: number; row: number }
+type Gesture = {
+  down: MouseEvent
+  target: Element
+  start: Cell
+  detail: number
+  dragging: boolean
+}
 const DRAG_DISTANCE_SQUARED = 25
-const MULTI_CLICK_MS = 500
+export const CODEX_MULTI_CLICK_MS = 500
 const MULTI_CLICK_DISTANCE_SQUARED = 16
 
 export function supportsCodexMouseSelection(backendKey: string): boolean {
@@ -36,9 +43,15 @@ export function installCodexMouseSelection(
   host: HTMLElement,
   term: MouseSelectionTerminal,
   now: () => number = () => performance.now(),
+  deferSingleClickMs = 0,
 ): () => void {
   const doc = host.ownerDocument
-  let pending: { down: MouseEvent; target: Element; start: Cell; detail: number; dragging: boolean } | null = null
+  let pending: Gesture | null = null
+  let deferredClick: {
+    gesture: Gesture
+    up: MouseEvent
+    timer: ReturnType<typeof setTimeout>
+  } | null = null
   let replaying = false
   let lastClick: { at: number; x: number; y: number; detail: number } | null = null
 
@@ -50,7 +63,7 @@ export function installCodexMouseSelection(
       const elapsed = now() - previous.at
       if (
         elapsed >= 0
-        && elapsed <= MULTI_CLICK_MS
+        && elapsed <= CODEX_MULTI_CLICK_MS
         && dx * dx + dy * dy <= MULTI_CLICK_DISTANCE_SQUARED
       ) {
         return Math.max(2, Math.min(3, previous.detail + 1), event.detail)
@@ -68,7 +81,7 @@ export function installCodexMouseSelection(
     return { col: coords[0] - 1, row: term.buffer.active.viewportY + coords[1] - 1 }
   }
 
-  function selectTo(event: MouseEvent, gesture: NonNullable<typeof pending>) {
+  function selectTo(event: MouseEvent, gesture: Gesture) {
     const end = cellAt(event, true)
     if (!end) return
     const startIndex = gesture.start.row * term.cols + gesture.start.col
@@ -85,10 +98,17 @@ export function installCodexMouseSelection(
 
   function cancel() {
     pending = null
+    cancelDeferredClick()
     removeDocumentListeners()
   }
 
-  function replayClick(gesture: NonNullable<typeof pending>, up: MouseEvent) {
+  function cancelDeferredClick() {
+    if (!deferredClick) return
+    clearTimeout(deferredClick.timer)
+    deferredClick = null
+  }
+
+  function replayClick(gesture: Gesture, up: MouseEvent) {
     const target = gesture.target.isConnected ? gesture.target : term.element
     if (!target) return
     replaying = true
@@ -112,7 +132,22 @@ export function installCodexMouseSelection(
     }
   }
 
-  function selectClickIntent(gesture: NonNullable<typeof pending>) {
+  function finishClick(gesture: Gesture, up: MouseEvent) {
+    if (deferSingleClickMs <= 0) {
+      replayClick(gesture, up)
+      return
+    }
+    let timer: ReturnType<typeof setTimeout>
+    timer = setTimeout(() => {
+      if (!deferredClick || deferredClick.timer !== timer) return
+      const queued = deferredClick
+      deferredClick = null
+      replayClick(queued.gesture, queued.up)
+    }, deferSingleClickMs)
+    deferredClick = { gesture, up, timer }
+  }
+
+  function selectClickIntent(gesture: Gesture) {
     if (gesture.detail >= 3) {
       term.selectLines(gesture.start.row, gesture.start.row)
       return
@@ -131,6 +166,10 @@ export function installCodexMouseSelection(
     if (term.modes.mouseTrackingMode === 'none' || !term.element?.contains(event.target as Node)) return
     const start = cellAt(event, false)
     if (!start || !(event.target instanceof Element)) return
+    // A second click must prevent the first click from reaching the TUI at all.
+    // WebView2 can lose MouseEvent.detail across TUI redraws, so waiting for
+    // the multi-click window is more reliable than replaying immediately.
+    cancelDeferredClick()
     event.preventDefault()
     event.stopImmediatePropagation()
     pending = { down: event, target: event.target, start, detail: clickDetail(event), dragging: false }
@@ -169,7 +208,7 @@ export function installCodexMouseSelection(
       return
     }
     if (gesture.detail > 1) selectClickIntent(gesture)
-    else replayClick(gesture, event)
+    else finishClick(gesture, event)
     lastClick = {
       at: now(),
       x: event.clientX,

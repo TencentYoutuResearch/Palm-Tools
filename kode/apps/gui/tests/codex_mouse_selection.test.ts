@@ -31,7 +31,7 @@ class FakeElement extends EventTarget {
 
 Object.assign(globalThis, { Element: FakeElement, MouseEvent: FakeMouseEvent })
 
-function setup(clock = { now: 0 }) {
+function setup(clock = { now: 0 }, singleClickDelay = 0) {
   const host = new FakeElement()
   const selections: Array<[number, number, number]> = []
   const lineSelections: Array<[number, number]> = []
@@ -58,6 +58,7 @@ function setup(clock = { now: 0 }) {
     host as unknown as HTMLElement,
     terminal as any,
     () => clock.now,
+    singleClickDelay,
   )
   return { host, selections, lineSelections, getWordSelections: () => wordSelections, clock, dispose }
 }
@@ -111,6 +112,46 @@ test('double-click selects a word locally without replaying terminal mouse input
   assert.equal(downs, 0)
   assert.equal(ups, 0)
   assert.deepEqual(selections, [])
+  dispose()
+})
+
+test('Windows defers a lone click until the multi-click window closes', async () => {
+  const { host, dispose } = setup({ now: 0 }, 20)
+  let downs = 0
+  let ups = 0
+  host.addEventListener('mousedown', () => downs++)
+  host.addEventListener('mouseup', () => ups++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10 }))
+  assert.equal(downs, 0)
+  assert.equal(ups, 0)
+
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(downs, 1)
+  assert.equal(ups, 1)
+  dispose()
+})
+
+test('a second click prevents the deferred first click from reaching TCodex', async () => {
+  const { host, getWordSelections, clock, dispose } = setup({ now: 0 }, 20)
+  let downs = 0
+  let ups = 0
+  host.addEventListener('mousedown', () => downs++)
+  host.addEventListener('mouseup', () => ups++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10 }))
+  clock.now = 100
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 11, clientY: 10, buttons: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 11, clientY: 10 }))
+
+  assert.equal(getWordSelections(), 1)
+  assert.equal(downs, 0)
+  assert.equal(ups, 0)
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(downs, 0)
+  assert.equal(ups, 0)
   dispose()
 })
 
