@@ -54,6 +54,8 @@
     "externalBin": ["binaries/kode-memory", "binaries/kode-memory-mcp", "binaries/specops"],
     "resources": ["resources"],
     "category": "DeveloperTool",
+    "publisher": "TencentYoutuResearch",
+    "copyright": "Copyright © 2026 Tencent. All rights reserved.",
     "shortDescription": "Multi-tab AI session manager",
     "longDescription": "kode — manage multiple codebuddy / claude code sessions in one window.",
     "macOS": {

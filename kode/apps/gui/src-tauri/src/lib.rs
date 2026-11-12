@@ -137,7 +137,7 @@ pub fn run() {
             app.manage(app_state);
             app.manage(cloud_sync);
             app.manage(shell_pty::ShellPtyManager::new());
-            // Phase 9.1:启动远程桥(0.0.0.0:47870 默认)
+            // Phase 9.1:启动本地协议桥(127.0.0.1:47870 默认)
             spawn_bridge(ctx_for_bridge, BridgeConfig::default());
             // M4:memory review queue —— 共享 ~/.kode-memory(env KODE_MEMORY_ROOT 可覆盖),
             // 与 CLI / MCP 子进程同一份数据;打不开就静默降级,GUI 仍能跑。

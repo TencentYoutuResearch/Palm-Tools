@@ -1,11 +1,14 @@
 # GitHub Release 签名与 Beta 更新
 
-## 两种签名
+## 三类签名
 
 - **Apple Developer ID Application 签名与公证**：macOS 外部分发身份。`Apple Development` 开发证书不是 Developer ID 分发证书；ad-hoc 也不等于 Apple 认证。
+- **Windows Authenticode 签名**：Windows 外部分发身份。必须同时签 `kode-gui.exe`、sidecar 和 NSIS 安装包；未签名的开发包不应作为正式安装包分发。
 - **Tauri updater 签名**：应用下载 `.app.tar.gz` 时验证来源。与 Apple 证书独立，必须使用匹配 `apps/gui/src-tauri/tauri.conf.json` 中 `plugins.updater.pubkey` 的 minisign 私钥。
 
 DMG 用于首次手动安装；应用内更新使用 `.app.tar.gz`、`.sig` 和 `latest.json`，只有 DMG 的 Release 不能提供应用内更新。
+
+Tauri updater 签名与 Windows Authenticode 也是两套独立机制。updater 签名只保护应用内更新，不能让 SmartScreen、Defender 或其他安全产品把安装包识别为已知发布者。
 
 ## GitHub 配置
 
@@ -43,6 +46,8 @@ Apple 公证的三个 Secret 必须一起配置。证书从钥匙串「我的证
 4. 在装有同一公钥、版本更低的测试应用上开启 Beta、检查更新、安装并手动重启，核实显示的版本、启动和会话恢复。Apple 正式发布还应验证完整签名和公证结果。
 
 当前 `0.2.2-dev` 的 SemVer 排序高于 `0.2.2-alpha.2`，正常更新需发布更高版本，例如 `0.2.3-beta.1`。测试同版安装或降级时，可在设置 → 软件更新开启「调试：忽略本地版本号」：仅跳过本地版本比较，仍选择当前通道最高版本的非草稿 Release，并校验平台资产、manifest 与 tag 一致性以及更新包签名。开关默认关闭，仅本次运行有效，重启后关闭；测试预发布版还需开启 Beta。开关变化立即重新检查，安装期间不可切换。
+
+Windows 正式发布应使用稳定的组织 Authenticode 证书，以 SHA-256 摘要和 RFC 3161 时间戳签名，并保持 Publisher、安装目录和文件名稳定。更换发布者或签发方式会丢失已有 SmartScreen/Defender 信誉。疑似误报应同时向 Microsoft Security Intelligence 提交样包复核，而不是通过混淆、关闭安全日志或规避扫描解决。
 
 通过 `./run.sh app` 构建的应用同样可以从 GitHub 更新：构建时的公钥必须匹配 Release 签名，且应用所在目录可写。建议将完整 `.app` 放到 Applications 后运行；不要从只读 DMG 内测试安装。运行时不需要私钥，私钥仅用于构建签名更新产物。下载、安装仍需用户点击，调试开关不会自动开始安装。
 

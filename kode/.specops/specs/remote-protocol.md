@@ -28,6 +28,7 @@ paths:
 2. **后端可替换** — Rust 桥(联调)和 Go server(生产)实现同一组 REST + WS 端点;手机 App 切 endpoint 即可换。
 3. **手机端原生交互** — `ask_user_question` 用原生 picker;`plan_proposed` 用全屏 markdown viewer;不要把 PTY 文本搬到手机。
 4. **安全默认** — bearer token 强制鉴权;HTTPS 由反代(Tailscale / caddy)提供,server 自己只跑 HTTP。
+   桌面 Bridge 默认只监听 loopback,跨网段直连必须显式设置 `KODE_BRIDGE_BIND`。
 
 ## 2. 版本与兼容
 

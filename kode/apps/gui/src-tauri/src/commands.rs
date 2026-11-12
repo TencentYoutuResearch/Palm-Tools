@@ -1494,8 +1494,13 @@ pub fn get_pairing_payload(state: State<'_, AppState>) -> PairingPayload {
 
     match addr_opt {
         Some(addr) => {
-            // 默认 host 用本机 LAN IP,前端可再改
-            let host = detect_lan_ip();
+            // Loopback listeners must advertise a loopback host. LAN discovery
+            // remains opt-in through KODE_BRIDGE_BIND=0.0.0.0.
+            let host = if addr.ip().is_loopback() {
+                addr.ip().to_string()
+            } else {
+                detect_lan_ip()
+            };
             let port = addr.port();
             let uri = format!("kode://pair?host={host}&port={port}&token={token}");
             PairingPayload {

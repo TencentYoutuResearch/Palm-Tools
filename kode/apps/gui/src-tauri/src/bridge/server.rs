@@ -1,4 +1,4 @@
-//! 启动 axum server 监听 0.0.0.0:47870(env `KODE_BRIDGE_PORT` 可覆盖)。
+//! 启动 axum server 监听 127.0.0.1:47870(env `KODE_BRIDGE_PORT` 可覆盖)。
 //!
 //! 不阻塞 setup 钩子 — 后台 task。失败时只 log,不 panic。
 
@@ -28,10 +28,7 @@ impl BridgeConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_PORT);
-        let host: Ipv4Addr = std::env::var(ENV_BIND)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let host = resolve_host(std::env::var(ENV_BIND).ok().as_deref());
         let disabled = match std::env::var(ENV_DISABLE).ok().as_deref() {
             Some("1") | Some("true") | Some("yes") | Some("on") => true,
             _ => false,
@@ -41,6 +38,11 @@ impl BridgeConfig {
             disabled,
         }
     }
+}
+
+fn resolve_host(raw: Option<&str>) -> Ipv4Addr {
+    raw.and_then(|value| value.parse().ok())
+        .unwrap_or(Ipv4Addr::LOCALHOST)
 }
 
 /// 后台启动 server。
@@ -109,7 +111,7 @@ async fn bind_listener(bind: SocketAddr) -> std::io::Result<(tokio::net::TcpList
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use super::bind_listener;
+    use super::{bind_listener, resolve_host};
 
     #[tokio::test]
     async fn occupied_port_falls_back_to_an_available_port() {
@@ -132,6 +134,12 @@ mod tests {
 
         assert!(!used_fallback);
         assert_ne!(listener.local_addr().unwrap().port(), 0);
+    }
+
+    #[test]
+    fn default_bind_is_loopback_only() {
+        assert_eq!(resolve_host(None), Ipv4Addr::LOCALHOST);
+        assert_eq!(resolve_host(Some("0.0.0.0")), Ipv4Addr::UNSPECIFIED);
     }
 
     /// loopback 被别的进程占用时,绑 0.0.0.0 不能静默成功(否则流量被劫),
