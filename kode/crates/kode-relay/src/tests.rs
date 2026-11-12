@@ -1055,3 +1055,236 @@ async fn palm_sessions_belong_to_the_signing_in_device() {
     assert_ne!(devices[2], devices[3]);
     assert!(devices[2..].iter().all(|id| id.len() == 36), "{devices:?}");
 }
+
+/// A palm relay that issues per-device sessions, plus a phone/desktop
+/// harness over the same state.
+async fn session_relay() -> (Harness, std::sync::Arc<crate::palm::fake::FakePalm>) {
+    let verifier = StaticVerifier::new([(ALICE.to_string(), "alice".to_string())]);
+    let fake = std::sync::Arc::new(crate::palm::fake::FakePalm::default());
+    let palm = crate::palm::Palm::new(
+        "app_test".into(),
+        "https://palm.example.com/palm/x/jssdk/loader/palm-mobile-manager.js".into(),
+        fake.clone(),
+    );
+    let sessions = crate::session::Sessions::new(
+        b"test-session-secret-0123456789-0123456789",
+        std::sync::Arc::new(crate::session::MemoryStore::default()),
+    )
+    .unwrap();
+    let timings = RelayTimings {
+        reverify_interval: Duration::from_millis(200),
+        ..RelayTimings::default()
+    };
+    let state = RelayState::new(verifier.clone(), timings)
+        .with_issuer("https://issuer.example.com")
+        .with_palm(palm)
+        .with_sessions(sessions);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    (
+        Harness {
+            base: format!("http://{addr}"),
+            verifier,
+            state,
+            http: reqwest::Client::new(),
+        },
+        fake,
+    )
+}
+
+async fn palm_session(base: &str, fake: &crate::palm::fake::FakePalm, device: &str, name: &str) -> Value {
+    let scan = format!("scan-{device}");
+    fake.scan(&scan, "alice");
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/v1/auth/palm"))
+        .header("x-device-id", device)
+        .header("x-kode-session", "relay")
+        .header("x-kode-device-name", name)
+        .json(&json!({"session_id": scan}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    response.json().await.unwrap()
+}
+
+async fn refresh(base: &str, token: &str) -> (u16, Value) {
+    post(base, "/api/v1/auth/token", None, json!({"refresh_token": token})).await
+}
+
+#[tokio::test]
+async fn every_device_of_an_account_stays_signed_in_at_once() {
+    let (h, fake) = session_relay().await;
+    let health: Value = reqwest::get(format!("{}/api/v1/healthz", h.base)).await.unwrap().json().await.unwrap();
+    assert_eq!(health["sessions"], true);
+
+    let mac = palm_session(&h.base, &fake, "desktop-install-mac1", "Mac%20mini").await;
+    let laptop = palm_session(&h.base, &fake, "desktop-install-mbp2", "MacBook").await;
+    let phone = palm_session(&h.base, &fake, "phone-install-0001", "%E9%BB%91%E9%92%9B%E6%9C%BA").await;
+    assert_eq!(mac["token_issuer"], "relay");
+    assert_eq!(phone["sub"], "alice");
+
+    // Both desktops connect; signing in the phone evicted neither.
+    let _mac_agent = h.agent(mac["access_token"].as_str().unwrap(), "desktop-install-mac1").await;
+    let _laptop_agent = h.agent(laptop["access_token"].as_str().unwrap(), "desktop-install-mbp2").await;
+    for issued in [&mac, &laptop, &phone] {
+        let (status, next) = refresh(&h.base, issued["refresh_token"].as_str().unwrap()).await;
+        assert_eq!(status, 200, "{next}");
+        assert_ne!(next["refresh_token"], issued["refresh_token"], "refresh tokens rotate");
+    }
+
+    // The phone sees and can open both desktops.
+    let phone_token = phone["access_token"].as_str().unwrap();
+    let (status, devices) = h.get("/api/v1/account/devices", phone_token, "x").await;
+    assert_eq!(status, 200);
+    let mut ids: Vec<_> = devices["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["online"] == true)
+        .map(|d| d["device_id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["desktop-install-mac1", "desktop-install-mbp2"]);
+
+    let (_, sessions) = h.get("/api/v1/account/sessions", phone_token, "x").await;
+    let names: Vec<_> = sessions["sessions"].as_array().unwrap().iter().map(|s| s["device_name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names.len(), 3);
+    assert!(names.contains(&"黑钛机".to_string()) && names.contains(&"Mac mini".to_string()), "{names:?}");
+    let current: Vec<_> = sessions["sessions"].as_array().unwrap().iter().filter(|s| s["current"] == true).collect();
+    assert_eq!(current.len(), 1);
+}
+
+#[tokio::test]
+async fn removing_a_device_signs_only_that_device_out() {
+    let (h, fake) = session_relay().await;
+    let mac = palm_session(&h.base, &fake, "desktop-install-mac1", "Mac").await;
+    let phone = palm_session(&h.base, &fake, "phone-install-0001", "Phone").await;
+    let mut agent = h.agent(mac["access_token"].as_str().unwrap(), "desktop-install-mac1").await;
+    let phone_token = phone["access_token"].as_str().unwrap();
+
+    let path = format!("/api/v1/account/sessions/{}", mac["session_id"].as_str().unwrap());
+    let (status, _) = h.call(reqwest::Method::DELETE, &path, phone_token, "x", None).await;
+    assert_eq!(status, 200);
+    let closed = tokio::time::timeout(WAIT, async {
+        loop {
+            match agent.socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the removed desktop's socket closes");
+    assert_eq!(refresh(&h.base, mac["refresh_token"].as_str().unwrap()).await.0, 401);
+    assert_eq!(h.get("/api/v1/account/devices", mac["access_token"].as_str().unwrap(), "x").await.0, 401);
+    assert_eq!(h.get("/api/v1/account/devices", phone_token, "x").await.0, 200, "the phone stays in");
+}
+
+#[tokio::test]
+async fn sessions_and_profiles_are_tenant_scoped() {
+    let (h, fake) = session_relay().await;
+    let alice = palm_session(&h.base, &fake, "phone-install-0001", "Phone").await;
+    fake.scan("scan-bob", "bob");
+    let (_, bob) = post_as_device_with(&h.base, "/api/v1/auth/palm", "desktop-install-bob1", json!({"session_id": "scan-bob"})).await;
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let path = format!("/api/v1/account/sessions/{}", alice["session_id"].as_str().unwrap());
+    let (status, _) = h.call(reqwest::Method::DELETE, &path, bob_token, "x", None).await;
+    assert_eq!(status, 404, "another account's session cannot be removed");
+    let (_, list) = h.get("/api/v1/account/sessions", bob_token, "x").await;
+    assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
+
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let (status, profile) = h.call(reqwest::Method::PATCH, "/api/v1/account/profile", alice_token, "x", Some(json!({"name": " marx "}))).await;
+    assert_eq!(status, 200);
+    assert_eq!(profile["profile"]["name"], "marx");
+    assert_eq!(h.get("/api/v1/account/profile", bob_token, "x").await.1["profile"]["name"], "");
+    // Every later refresh carries the name set on another device.
+    let (_, next) = refresh(&h.base, alice["refresh_token"].as_str().unwrap()).await;
+    assert_eq!(next["profile"]["name"], "marx");
+}
+
+async fn post_as_device_with(base: &str, path: &str, device: &str, body: Value) -> (u16, Value) {
+    let response = reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .header("x-device-id", device)
+        .header("x-kode-session", "relay")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    (response.status().as_u16(), response.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn clients_without_session_support_keep_provider_tokens() {
+    let (h, fake) = session_relay().await;
+    fake.scan("scan-old", "alice");
+    let (status, tokens) = post_as_device(&h.base, "/api/v1/auth/palm", "phone-install-0001", json!({"session_id": "scan-old"})).await;
+    assert_eq!(status, 200);
+    assert!(tokens.get("token_issuer").is_none(), "{tokens}");
+    assert_eq!(tokens["refresh_token"], "r", "the provider refresh token, unchanged");
+    // Provider tokens still authenticate relay calls.
+    assert_eq!(h.get("/api/v1/account/devices", ALICE, "x").await.0, 200);
+}
+
+#[tokio::test]
+async fn provider_sessions_migrate_through_exchange() {
+    let (h, _) = session_relay().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v1/auth/session", h.base))
+        .header("x-device-id", "desktop-install-mac1")
+        .header("x-kode-device-name", "Mac")
+        .json(&json!({"provider_token": ALICE, "method": "email", "email": "a@example.com"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let issued: Value = response.json().await.unwrap();
+    assert_eq!(issued["sub"], "alice");
+    assert_eq!(issued["profile"]["email"], "a@example.com");
+    let (status, _) = post(&h.base, "/api/v1/auth/session", None, json!({"provider_token": "forged"})).await;
+    assert_eq!(status, 401);
+    // A relay token is not a provider proof and cannot mint more sessions.
+    let (status, _) = post(&h.base, "/api/v1/auth/session", None, json!({"provider_token": issued["access_token"]})).await;
+    assert_eq!(status, 401);
+
+    // Signing out ends only this session.
+    let token = issued["access_token"].as_str().unwrap();
+    assert_eq!(post(&h.base, "/api/v1/auth/signout", Some(token), json!({})).await.0, 200);
+    assert_eq!(h.get("/api/v1/account/devices", token, "x").await.0, 401);
+    assert_eq!(h.get("/api/v1/account/devices", ALICE, "x").await.0, 200);
+}
+
+#[tokio::test]
+async fn a_handoff_session_belongs_to_the_waiting_desktop() {
+    let (h, fake) = session_relay().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v1/auth/palm/handoff", h.base))
+        .header("x-device-id", "desktop-install-mac1")
+        .header("x-kode-session", "relay")
+        .header("x-kode-device-name", "Mac")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let handoff: Value = response.json().await.unwrap();
+    fake.scan("scan-h", "alice");
+    // The phone approving it does not ask for a session itself.
+    let id = handoff["handoff_id"].as_str().unwrap();
+    let (status, _) = post(&h.base, &format!("/api/v1/auth/palm/handoff/{id}/approve"), None, json!({"session_id": "scan-h"})).await;
+    assert_eq!(status, 200);
+    let polled: Value = reqwest::get(format!("{}/api/v1/auth/palm/handoff/{id}?secret={}", h.base, handoff["secret"].as_str().unwrap()))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(polled["tokens"]["token_issuer"], "relay");
+    let token = polled["tokens"]["access_token"].as_str().unwrap();
+    let (_, sessions) = h.get("/api/v1/account/sessions", token, "x").await;
+    assert_eq!(sessions["sessions"][0]["device_id"], "desktop-install-mac1");
+    assert_eq!(sessions["sessions"][0]["device_name"], "Mac");
+}

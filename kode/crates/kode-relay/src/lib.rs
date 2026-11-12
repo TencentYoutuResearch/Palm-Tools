@@ -1,9 +1,10 @@
 //! Multi-account relay between kode desktops and their owners' phones.
 //!
-//! Unlike `kode-sync-server`, nothing here is persisted: session lists are the
-//! desktop's last hello snapshot, history is fetched from the desktop on
-//! demand, and the desktop uploads only while a phone is viewing it. Every
-//! request is bound to the tenant named by its verified token's `sub`.
+//! Unlike `kode-sync-server`, no session content is persisted: session lists
+//! are the desktop's last hello snapshot, history is fetched from the desktop
+//! on demand, and the desktop uploads only while a phone is viewing it. Only
+//! account sign-in sessions ([`session`]) live in a database. Every request
+//! is bound to the tenant named by its verified token's `sub`.
 
 use std::{
     collections::HashMap,
@@ -26,6 +27,7 @@ pub mod identity;
 mod mobile;
 pub mod palm;
 pub mod palmx;
+pub mod session;
 mod setup;
 mod tenant;
 
@@ -88,6 +90,9 @@ struct Inner {
     palmx: Option<palmx::Palmx>,
     /// Kode's own 1:N palm sign-in through the H5 SDK.
     palm: Option<palm::Palm>,
+    /// Relay-issued per-device sessions; absent without a session secret,
+    /// and then clients keep the provider's tokens.
+    sessions: Option<session::Sessions>,
     timings: RelayTimings,
     tenants: Mutex<HashMap<String, Arc<Mutex<Tenant>>>>,
 }
@@ -95,6 +100,8 @@ struct Inner {
 /// An authenticated request. `tenant` is the only state it can reach.
 pub(crate) struct Caller {
     pub(crate) user_id: String,
+    /// Set when the token is a relay session's.
+    pub(crate) session_id: Option<String>,
     pub(crate) token: String,
     pub(crate) tenant: Arc<Mutex<Tenant>>,
 }
@@ -107,6 +114,7 @@ impl RelayState {
                 issuer: None,
                 palmx: None,
                 palm: None,
+                sessions: None,
                 timings,
                 tenants: Mutex::new(HashMap::new()),
             }),
@@ -137,6 +145,18 @@ impl RelayState {
         self
     }
 
+    /// Must be called before the state is shared with the router.
+    pub fn with_sessions(mut self, sessions: session::Sessions) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("configure the relay before sharing its state")
+            .sessions = Some(sessions);
+        self
+    }
+
+    pub(crate) fn sessions(&self) -> Option<&session::Sessions> {
+        self.inner.sessions.as_ref()
+    }
+
     pub(crate) fn palm(&self) -> Option<&palm::Palm> {
         self.inner.palm.as_ref()
     }
@@ -161,12 +181,24 @@ impl RelayState {
             .clone();
         Ok(Caller {
             user_id: identity.user_id,
+            session_id: identity.session_id,
             token,
             tenant,
         })
     }
 
+    /// A relay session token, else a provider token.
     pub(crate) async fn verify(&self, token: &str) -> Result<identity::Identity, ApiError> {
+        if let Some(result) = match self.sessions() {
+            Some(sessions) => sessions.verify(token).await,
+            None => None,
+        } {
+            return result;
+        }
+        self.verify_provider(token).await
+    }
+
+    pub(crate) async fn verify_provider(&self, token: &str) -> Result<identity::Identity, ApiError> {
         self.inner
             .verifier
             .verify(token)
@@ -246,6 +278,15 @@ pub fn build_router(state: RelayState) -> Router {
         .route("/api/v1/agent/ws", get(agent::upgrade))
         .route("/api/v1/account/devices", get(mobile::devices))
         .route("/api/v1/account/logins", get(palmx::linked))
+        .route("/api/v1/account/sessions", get(session::list))
+        .route("/api/v1/account/sessions/:id", delete(session::remove))
+        .route(
+            "/api/v1/account/profile",
+            get(session::get_profile).patch(session::set_profile),
+        )
+        .route("/api/v1/auth/session", post(session::exchange))
+        .route("/api/v1/auth/token", post(session::refresh))
+        .route("/api/v1/auth/signout", post(session::sign_out))
         .route("/palm/capture", get(palm::capture))
         .route("/api/v1/palm", get(palm::status).delete(palm::forget))
         .route("/api/v1/palm/enroll_token", post(palm::enroll_token))
@@ -315,6 +356,8 @@ async fn healthz(axum::extract::State(state): axum::extract::State<RelayState>) 
         "server_kind": "kode-relay",
         "issuer": state.inner.issuer,
         "login_methods": login_methods,
+        // Clients that see this ask sign-ins for relay sessions.
+        "sessions": state.sessions().is_some(),
         "version": env!("CARGO_PKG_VERSION"),
         "deployment_id": std::env::var("KODE_RELAY_DEPLOYMENT_ID").ok(),
     }))
@@ -390,12 +433,9 @@ pub(crate) fn device_from_headers(headers: &HeaderMap) -> Result<String, ApiErro
         .ok_or_else(|| ApiError::BadRequest(format!("{DEVICE_HEADER} header is required")))
 }
 
-/// The signing-in client's own CloudBase device id (`x-device-id`).
-///
-/// Each phone or desktop keeps one stable id. When every sign-in used the
-/// same id, a new sign-in revoked the previous session's refresh token even
-/// with MaxDevice above 1. Clients that predate the header get a fresh id
-/// per sign-in, which never collides with another device.
+/// The signing-in client's own device id (`x-device-id`), forwarded to
+/// CloudBase and recorded on relay sessions. Clients that predate the header
+/// get a fresh id per sign-in, which never collides with another device.
 pub(crate) fn client_device_id(headers: &HeaderMap) -> String {
     headers
         .get("x-device-id")

@@ -16,10 +16,30 @@ everything in memory: there is no database and no volume. See
 | `KODE_RELAY_PALMX_API_KEY` | for PalmX | PalmX OpenAPI key; redeems authorization codes. |
 | `KODE_RELAY_CUSTOM_LOGIN_KEY` | for PalmX | CloudBase custom-login key JSON (`env_id`, `private_key_id`, `private_key`). |
 | `KODE_RELAY_SERVICE_KEY` | for PalmX | CloudBase `api_key` (service role) for the `kode_palmx_bindings` table. |
+| `KODE_RELAY_SESSION_SECRET` | recommended | At least 32 random bytes (`openssl rand -base64 48`). Enables per-device relay sessions; without it every sign-in shares CloudBase's single session per account and devices sign each other out. Rotating it signs every device out. |
 | `KODE_RELAY_PALMX_BASE` | no | PalmX API origin; defaults to `https://open.intl.palm.tencent.com`. |
 | `KODE_RELAY_PALM_SDK_URL` | no | Palm H5 SDK loader for `/palm/capture`; defaults to `<PALMX_BASE>/palm/x/jssdk/loader/palm-mobile-manager.js`. Palm 1:N sign-in reuses the PalmX app id, API key and service key, and also needs the `kode_palm_sessions(session_id text primary key, used_at timestamptz default now())` table with RLS on and no policies. |
 
 PalmX stays disabled unless all four PalmX values are set.
+
+Relay sessions persist in two CloudBase tables reached with
+`KODE_RELAY_SERVICE_KEY` (create them before enabling the secret):
+
+```sql
+create table kode_relay_sessions (
+  session_id text primary key, user_id text not null, device_id text not null,
+  device_name text not null default '', method text not null default '',
+  salt text not null, generation bigint not null default 0,
+  rotated_at bigint not null, created_at bigint not null,
+  last_used_at bigint not null, expires_at bigint not null, revoked_at bigint);
+create index kode_relay_sessions_user on kode_relay_sessions (user_id);
+create table kode_relay_profiles (
+  user_id text primary key, name text not null default '',
+  picture text not null default '', email text not null default '');
+alter table kode_relay_sessions enable row level security;
+alter table kode_relay_profiles enable row level security;
+revoke all on kode_relay_sessions, kode_relay_profiles from anon, authenticated;
+```
 
 The `tcb cloudrun deploy` CLI asks whether to use a gray release when the
 service already exists, even with `--force`; answer with a newline

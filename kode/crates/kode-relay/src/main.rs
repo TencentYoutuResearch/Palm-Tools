@@ -7,6 +7,7 @@ use kode_relay::{
     identity::{JwksConfig, JwksVerifier},
     palm::Palm,
     palmx::{CloudServices, CustomLoginKey, Palmx},
+    session::{MemoryStore, RestStore, Sessions},
     RelayState, RelayTimings,
 };
 use tracing_subscriber::EnvFilter;
@@ -49,6 +50,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(app_id = %palm.app_id, "palm sign-in enabled");
         state = state.with_palm(palm);
     }
+    if let Some(sessions) = sessions_from_env(&issuer)? {
+        state = state.with_sessions(sessions);
+    }
     state.spawn_sweeper();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, %issuer, "kode relay listening");
@@ -56,6 +60,26 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Per-device relay sessions need `KODE_RELAY_SESSION_SECRET` (at least 32
+/// bytes). With the service key they persist in CloudBase; without it they
+/// live in memory and end with the process, which only suits local runs.
+fn sessions_from_env(issuer: &str) -> anyhow::Result<Option<Sessions>> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let Some(secret) = var("KODE_RELAY_SESSION_SECRET") else {
+        tracing::warn!("KODE_RELAY_SESSION_SECRET is unset; clients keep provider sessions");
+        return Ok(None);
+    };
+    let store: Arc<dyn kode_relay::session::SessionStore> = match var("KODE_RELAY_SERVICE_KEY") {
+        Some(service_key) => Arc::new(RestStore::new(issuer, service_key)?),
+        None => {
+            tracing::warn!("no KODE_RELAY_SERVICE_KEY; relay sessions are kept in memory only");
+            Arc::new(MemoryStore::default())
+        }
+    };
+    tracing::info!("relay sessions enabled");
+    Ok(Some(Sessions::new(secret.trim().as_bytes(), store)?))
 }
 
 /// Containers stop with SIGTERM; local runs with Ctrl-C.

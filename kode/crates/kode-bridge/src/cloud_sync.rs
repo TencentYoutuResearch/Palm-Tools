@@ -220,15 +220,23 @@ pub struct Inner {
     /// token fails and signs the account out. One refresh at a time, and
     /// each re-reads the saved session first.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// The relay answered that it issues no sessions; stop asking until
+    /// the next start.
+    relay_sessions_unsupported: std::sync::atomic::AtomicBool,
+    /// After a failed exchange, epoch ms before which none is retried.
+    upgrade_retry_at: AtomicU64,
 }
 
 impl CloudSyncManager {
     pub fn new(ctx: Arc<crate::Ctx>) -> Self {
+        Self::with_config_path(ctx, config_path())
+    }
+
+    fn with_config_path(ctx: Arc<crate::Ctx>, config_path: PathBuf) -> Self {
         let mut shared = ctx.cloud_sync.lock();
         if let Some(inner) = shared.upgrade() {
             return Self { inner };
         }
-        let config_path = config_path();
         let mut config = load_config(&config_path).unwrap_or_default();
         migrate_legacy_backend(&mut config);
         let default_server = std::env::var("KODE_SYNC_SERVER_URL")
@@ -263,8 +271,8 @@ impl CloudSyncManager {
             account_picture: None,
         };
         // The installation id already names this desktop to the relay; it is
-        // also its CloudBase device id so sign-ins never evict other devices.
-        let account = AccountClient::for_device(config.installation_id.clone());
+        // also its device id on sign-ins and relay sessions.
+        let account = AccountClient::for_device(config.installation_id.clone(), host_name());
         let manager = Self {
             inner: Arc::new(Inner {
                 ctx: ctx.clone(),
@@ -283,6 +291,8 @@ impl CloudSyncManager {
                 pending_palmx: tokio::sync::Mutex::new(None),
                 pending_palm: tokio::sync::Mutex::new(None),
                 refresh_lock: tokio::sync::Mutex::new(()),
+                relay_sessions_unsupported: std::sync::atomic::AtomicBool::new(false),
+                upgrade_retry_at: AtomicU64::new(0),
             }),
         };
         *shared = Arc::downgrade(&manager.inner);
@@ -479,7 +489,9 @@ impl CloudSyncManager {
         Ok((server_url, token, self.inner.config.lock().installation_id.clone()))
     }
 
-    /// The saved session of `backend_id`, refreshed when close to expiry.
+    /// The saved session of `backend_id`, refreshed when close to expiry. A
+    /// provider session from before relay sessions is exchanged for one,
+    /// so it stops sharing CloudBase's single session with other devices.
     async fn fresh_session(&self, backend_id: &str) -> Result<AccountSession, String> {
         let saved = || {
             self.inner
@@ -488,11 +500,17 @@ impl CloudSyncManager {
                 .backends
                 .iter()
                 .find(|b| b.id == backend_id)
-                .and_then(|b| b.account.clone())
+                .and_then(|b| b.account.clone().map(|account| (b.server_url.clone(), account)))
                 .ok_or_else(|| "sign in to a Kode account first".to_string())
         };
-        if !saved()?.needs_refresh(now_ms()) {
-            return saved();
+        let wants_upgrade = |session: &AccountSession| {
+            session.relay.is_none()
+                && !self.inner.relay_sessions_unsupported.load(Ordering::Relaxed)
+                && self.inner.upgrade_retry_at.load(Ordering::Relaxed) <= now_ms()
+        };
+        let (_, session) = saved()?;
+        if !session.needs_refresh(now_ms()) && !wants_upgrade(&session) {
+            return Ok(session);
         }
         let _guard = self.inner.refresh_lock.lock().await;
         // The GUI and its workbench service are separate processes reading the
@@ -502,11 +520,29 @@ impl CloudSyncManager {
         // and adopt a session another process already saved.
         let _file_lock = lock_refresh(&self.inner.config_path).await?;
         self.adopt_saved_session(backend_id);
-        let session = saved()?;
-        if !session.needs_refresh(now_ms()) {
+        let (server_url, mut session) = saved()?;
+        let mut changed = false;
+        if session.needs_refresh(now_ms()) {
+            session = self.inner.account.refresh(&session, now_ms()).await?;
+            changed = true;
+        }
+        if wants_upgrade(&session) {
+            match self.inner.account.upgrade(&server_url, &session, now_ms()).await {
+                Ok(Some(upgraded)) => {
+                    session = upgraded;
+                    changed = true;
+                }
+                Ok(None) => self.inner.relay_sessions_unsupported.store(true, Ordering::Relaxed),
+                // The provider session still works; try again later.
+                Err(error) => {
+                    self.inner.upgrade_retry_at.store(now_ms() + 5 * 60 * 1000, Ordering::Relaxed);
+                    tracing::warn!(%error, "could not exchange for a relay session");
+                }
+            }
+        }
+        if !changed {
             return Ok(session);
         }
-        let session = self.inner.account.refresh(&session, now_ms()).await?;
         let mut config = self.inner.config.lock();
         if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
             current.account = Some(session.clone());
@@ -526,7 +562,10 @@ impl CloudSyncManager {
         let mut config = self.inner.config.lock();
         if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
             if let Some(mine) = current.account.as_ref() {
-                if mine.user_id == disk.user_id && disk.expires_at > mine.expires_at {
+                // A relay session saved by the other process replaces a
+                // provider one even when it expires sooner.
+                let upgraded = disk.relay.is_some() && mine.relay.is_none();
+                if mine.user_id == disk.user_id && (upgraded || disk.expires_at > mine.expires_at) {
                     current.account = Some(disk);
                 }
             }
@@ -703,6 +742,18 @@ impl CloudSyncManager {
 
     /// Forgets the account backend. Another saved backend becomes active.
     pub fn account_sign_out(&self, backend_id: &str) -> Result<CloudSyncStatus, String> {
+        let session = self
+            .inner
+            .config
+            .lock()
+            .backends
+            .iter()
+            .find(|backend| backend.id == backend_id)
+            .and_then(|backend| backend.account.clone());
+        if let (Some(session), Ok(runtime)) = (session, tokio::runtime::Handle::try_current()) {
+            let account = self.inner.account.clone();
+            runtime.spawn(async move { account.sign_out(&session).await });
+        }
         let restart = {
             let mut config = self.inner.config.lock();
             let before = config.backends.len();
@@ -1796,6 +1847,73 @@ mod tests {
         assert_eq!(b.access_token, "access-1");
         let disk = load_config(&config_path).unwrap();
         assert_eq!(disk.backends[0].account.as_ref().unwrap().refresh_token, "refresh-1");
+    }
+
+    /// A provider session saved before relay sessions is exchanged on its
+    /// next use, and from then on refreshes at the relay, not the issuer.
+    #[tokio::test]
+    async fn provider_sessions_move_to_relay_sessions_on_next_use() {
+        use axum::{routing::{get, post}, Json, Router};
+        use base64::Engine;
+        let now = now_ms() / 1000;
+        let jwt = |sub: &str, exp: u64| {
+            let b64 = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+            format!("{}.{}.sig", b64(json!({"alg": "HS256"})), b64(json!({"sub": sub, "exp": exp})))
+        };
+        let relay_token = jwt("alice", now + 3600);
+        let app = Router::new()
+            .route("/auth/v1/token", post(|| async {
+                (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"})))
+            }))
+            .route("/api/v1/auth/session", post({
+                let relay_token = relay_token.clone();
+                move |headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["x-device-id"], "install-upgrade");
+                    assert_eq!(body["provider_token"], "provider-access");
+                    Json(json!({"token_issuer": "relay", "access_token": relay_token, "refresh_token": "kr1.a.0",
+                        "expires_in": 3600, "sub": "alice", "profile": {"name": "marx"}}))
+                }
+            }))
+            .route("/api/v1/auth/token", post({
+                let relay_token = relay_token.clone();
+                move |Json(body): Json<Value>| async move {
+                    assert_eq!(body["refresh_token"], "kr1.a.0");
+                    Json(json!({"token_issuer": "relay", "access_token": relay_token, "refresh_token": "kr1.a.1",
+                        "expires_in": 3600, "sub": "alice", "profile": {"name": "marx"}}))
+                }
+            }))
+            .route("/api/v1/account/profile", get(|| async { Json(json!({"profile": {"name": "marx"}})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cloud-sync.json");
+        std::fs::write(&config_path, json!({
+            "installation_id": "install-upgrade",
+            "active_backend_id": "acct",
+            "backends": [{
+                "id": "acct", "name": "Account", "server_url": base, "kind": "account_relay",
+                "account": {"issuer": base, "email": "", "method": "palm", "user_id": "alice",
+                    "access_token": "provider-access", "refresh_token": "provider-refresh",
+                    "expires_at": (now + 7000) * 1000}
+            }]
+        }).to_string()).unwrap();
+        let manager = CloudSyncManager::with_config_path(
+            crate::build_test_ctx(kode_core::config::Config::default(), "upgrade".into()),
+            config_path.clone(),
+        );
+        let session = manager.fresh_session("acct").await.unwrap();
+        assert_eq!(session.relay.as_deref(), Some(base.as_str()));
+        assert_eq!(session.refresh_token, "kr1.a.0");
+        assert_eq!(session.name, "marx");
+        let disk = load_config(&config_path).unwrap();
+        assert_eq!(disk.backends[0].account.as_ref().unwrap().refresh_token, "kr1.a.0");
+
+        // Near expiry it refreshes at the relay; the issuer would refuse.
+        let refreshed = manager.inner.account.refresh(&session, now_ms()).await.unwrap();
+        assert_eq!(refreshed.refresh_token, "kr1.a.1");
+        assert_eq!(refreshed.relay, session.relay);
     }
 
     #[test]
