@@ -78,4 +78,42 @@ void main() {
       );
     }
   }
+
+  test('rename session sends a worker-scoped title update', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final subscription = server.listen((req) async {
+      if (req.method != 'PATCH' || req.uri.path != '/api/v1/sessions/8') {
+        req.response.statusCode = 404;
+        await req.response.close();
+        return;
+      }
+      expect(req.headers.value('Idempotency-Key'), isNotEmpty);
+      expect(jsonDecode(await utf8.decoder.bind(req).join()), {
+        'title': 'Renamed session',
+      });
+      req.response.headers.contentType = ContentType.json;
+      req.response.statusCode = 202;
+      req.response.write(jsonEncode({
+        'command_id': 'rename-1',
+        'status': 'accepted',
+      }));
+      await req.response.close();
+    });
+    try {
+      final api = ApiClient(
+        Endpoint(
+          serverUrl: 'http://${server.address.host}:${server.port}',
+          token: 'test',
+          deviceId: 'desktop',
+          deviceName: 'Desktop',
+        ),
+      );
+      final receipt = await api.renameSession(8, 'Renamed session');
+      expect(receipt.commandId, 'rename-1');
+      expect(receipt.status, 'accepted');
+    } finally {
+      await subscription.cancel();
+      await server.close(force: true);
+    }
+  });
 }

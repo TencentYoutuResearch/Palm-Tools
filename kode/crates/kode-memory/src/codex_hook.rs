@@ -8,7 +8,7 @@
 //!   but no memory proposal was made.
 
 use std::collections::HashSet;
-#[cfg(all(unix, not(test)))]
+#[cfg(all(any(unix, windows), not(test)))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -291,7 +291,13 @@ fn write_unix_line(path: &Path, line: &str) -> Result<()> {
 }
 
 #[cfg(all(not(unix), not(test)))]
-fn write_unix_line(_path: &Path, _line: &str) -> Result<()> {
+fn write_unix_line(path: &Path, line: &str) -> Result<()> {
+    let mut stream = match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(()),
+    };
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
     Ok(())
 }
 

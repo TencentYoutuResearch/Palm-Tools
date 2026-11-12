@@ -231,6 +231,23 @@ class ApiClient {
     return const InputDispatchReceipt(commandId: null, status: 'executed');
   }
 
+  Future<InputDispatchReceipt> renameSession(int id, String title) async {
+    final resp = await _dio.patch(
+      '/api/v1/sessions/$id',
+      data: {'title': title},
+      options: Options(headers: {'Idempotency-Key': _idempotencyKey()}),
+    );
+    _check(resp);
+    final body = resp.data;
+    if (body is Map) {
+      return InputDispatchReceipt(
+        commandId: body['command_id'] as String?,
+        status: body['status'] as String? ?? 'dispatched',
+      );
+    }
+    return const InputDispatchReceipt(commandId: null, status: 'executed');
+  }
+
   Future<InputDispatchReceipt> sendInputText(int id, String text) async {
     final resp = await _dio.post(
       '/api/v1/sessions/$id/input',

@@ -2,6 +2,81 @@
 use super::*;
 
 #[tokio::test]
+async fn worker_display_name_survives_registration_and_hostname_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("sync.db");
+    {
+        let db = Connection::open(&database_path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE devices(
+               id TEXT PRIMARY KEY,
+               installation_id TEXT NOT NULL UNIQUE,
+               name TEXT NOT NULL,
+               token_hash TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               last_seen_at INTEGER NOT NULL,
+               revoked_at INTEGER
+             );",
+        )
+        .unwrap();
+    }
+    let state = ServerState::open(ServerConfig {
+        database_path,
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    let Json(first) = register_device(
+        axum::extract::State(state.clone()),
+        Json(RegisterDeviceReq {
+            installation_id: "install".into(),
+            name: "Kode Desktop".into(),
+            hostname: Some("OFFICE-PC".into()),
+            device_token: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        format!("Bearer {}", first.device_token.clone())
+            .parse()
+            .unwrap(),
+    );
+    let Json(renamed) = update_worker_profile(
+        axum::extract::State(state.clone()),
+        Path(first.device_id.clone()),
+        headers.clone(),
+        Json(UpdateWorkerProfileReq {
+            display_name: "Office Windows".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(renamed["display_name"], "Office Windows");
+
+    let _ = register_device(
+        axum::extract::State(state.clone()),
+        Json(RegisterDeviceReq {
+            installation_id: "install".into(),
+            name: "Kode Desktop".into(),
+            hostname: Some("OFFICE-PC-NEW".into()),
+            device_token: Some(first.device_token),
+        }),
+    )
+    .await
+    .unwrap();
+    let Json(directory) = list_workers(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    let worker = &directory["workers"][0];
+    assert_eq!(worker["worker_id"], first.device_id);
+    assert_eq!(worker["name"], "Office Windows");
+    assert_eq!(worker["display_name"], "Office Windows");
+    assert_eq!(worker["hostname"], "OFFICE-PC-NEW");
+}
+
+#[tokio::test]
 async fn worker_directory_lists_same_server_workers_and_marks_the_viewer() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {
@@ -46,6 +121,40 @@ async fn worker_directory_lists_same_server_workers_and_marks_the_viewer() {
     assert_eq!(workers[1]["worker_id"], "office");
     assert_eq!(workers[1]["bound"], true);
     assert_eq!(workers[1]["inventory_capable"], true);
+}
+
+#[tokio::test]
+async fn desktop_monitor_binding_does_not_count_as_a_mobile_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('office','office','office',?1,1,1)",
+            [token_hash("office-token")],
+        )
+        .unwrap();
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office-token".parse().unwrap());
+    let Json(binding) = create_monitor_binding(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("office".into()),
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.binding_count("office").unwrap(), 0);
+    assert!(!state.sync_enabled("office").unwrap());
+    let auth = state
+        .mobile_auth(&binding.access_token, "workers.monitor")
+        .unwrap();
+    assert_eq!(auth.device_id, "office");
 }
 
 #[tokio::test]
@@ -409,7 +518,7 @@ async fn independent_devices_share_server_without_sharing_sessions_or_commands()
 }
 
 #[tokio::test]
-async fn delete_session_dispatches_a_close_command_to_the_owning_desktop() {
+async fn session_management_dispatches_rename_and_delete_to_the_owning_desktop() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {
         database_path: dir.path().join("sync.db"),
@@ -462,6 +571,25 @@ async fn delete_session_dispatches_a_close_command_to_the_owning_desktop() {
         .await
         .unwrap();
     let session_id = list["sessions"][0]["id"].as_i64().unwrap();
+    let (status, _) = rename_session(
+        axum::extract::State(state.clone()),
+        Path(session_id),
+        headers.clone(),
+        Json(json!({"title":"renamed"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(matches!(
+        agent.try_recv().unwrap(),
+        ServerFrame::Command {
+            local_session_id: 7,
+            ref kind,
+            ref payload,
+            ..
+        } if kind == "rename" && payload["title"] == "renamed"
+    ));
+
     let (status, _) = delete_session(
         axum::extract::State(state),
         Path(session_id),

@@ -40,6 +40,7 @@
   import type { Tab as SettingsTab } from './lib/SettingsPanel.svelte'
   import type { AccountDevice, AccountDeviceSession, CloudSyncStatus } from './lib/ipc'
   import WorkerDetailsPanel from './lib/WorkerDetailsPanel.svelte'
+  import MonitorNewSessionDialog from './lib/MonitorNewSessionDialog.svelte'
   import ModeSwitcher from './lib/ModeSwitcher.svelte'
   import EndpointDialog from './lib/EndpointDialog.svelte'
   import PathsBanner from './lib/PathsBanner.svelte'
@@ -193,7 +194,13 @@
   /** A session on another desktop of the account, opened from Monitor mode
    *  and shown over the tabs. Not a tab: it is never persisted or restored,
    *  and any local tab activation or new-session flow closes it. */
-  let deviceView = $state<{ device: AccountDevice; session: AccountDeviceSession; sessions: AccountDeviceSession[] } | null>(null)
+  type DeviceView = {
+    device: AccountDevice
+    session: AccountDeviceSession
+    sessions: AccountDeviceSession[]
+    workerScoped?: boolean
+  }
+  let deviceView = $state<DeviceView | null>(null)
   let deviceViewTab: number | null = null
   $effect(() => {
     // Keyboard tab switching and new sessions also leave the device view.
@@ -202,7 +209,7 @@
     deviceViewTab = id
   })
   $effect(() => {
-    if (!sidebarAccount?.active) deviceView = null
+    if (!sidebarAccount?.active && !deviceView?.workerScoped) deviceView = null
   })
   function activateTab(id: number) {
     deviceView = null
@@ -229,11 +236,23 @@
   function accountDeviceId(workerId: string | null): string | null {
     return workerId?.startsWith(ACCOUNT_WORKER_PREFIX) ? workerId.slice(ACCOUNT_WORKER_PREFIX.length) : null
   }
+  function workerSessionForView(session: WorkerSessionDto): AccountDeviceSession {
+    return {
+      id: session.id,
+      backend_key: session.backend_key,
+      title: session.title || null,
+      model: session.model ?? null,
+      status: session.status ?? 'idle',
+      cwd: session.cwd ?? '',
+    }
+  }
   let modeWorkers = $derived<WorkerDirectoryEntry[]>([
     ...workers,
     ...accountDevices.map((device) => ({
       worker_id: `${ACCOUNT_WORKER_PREFIX}${device.device_id}`,
       name: device.name,
+      display_name: device.name,
+      hostname: null,
       online: device.online,
       last_seen_at: device.last_seen_at ?? 0,
       kode_version: null,
@@ -245,6 +264,7 @@
   ])
   let monitorSessions = $state<WorkerSessionDto[]>([])
   let monitorSessionsLoading = $state(false)
+  let monitorNewOpen = $state(false)
   let localWorkerName = $state('Local worker')
   let activeModeWorkerName = $derived(
     workMode === 'monitor'
@@ -364,7 +384,8 @@
   function selectWorkMode(mode: WorkMode, worker?: WorkerDirectoryEntry) {
     workMode = mode
     monitorWorkerId = mode === 'monitor' ? (worker?.worker_id ?? monitorWorkerId) : null
-    deviceView = null
+    // The open conversation owns its source Worker. Navigation, mode and list
+    // selection changes never close it; only an explicit session click/close does.
     if (mode === 'worker') {
       monitorSessions = []
       accountDeviceSessions = []
@@ -412,17 +433,61 @@
     const workerId = monitorWorkerId
     const timer = setInterval(() => {
       if (!document.hidden) void refreshMonitorSessions(workerId, true)
-    }, 30_000)
+    }, 2_000)
     return () => clearInterval(timer)
   })
 
   function openMonitorSession(session: WorkerSessionDto) {
     const deviceId = accountDeviceId(monitorWorkerId)
-    const device = deviceId ? accountDevices.find((d) => d.device_id === deviceId) : undefined
-    const full = accountDeviceSessions.find((s) => s.id === session.id)
-    if (!device || !full) return
+    if (deviceId) {
+      const device = accountDevices.find((d) => d.device_id === deviceId)
+      const full = accountDeviceSessions.find((s) => s.id === session.id)
+      if (!device || !full) return
+      chooserOpen = false
+      deviceView = { device, session: full, sessions: accountDeviceSessions }
+      return
+    }
+    const worker = workers.find((entry) => entry.worker_id === monitorWorkerId)
+    if (!worker) return
+    const sessions = monitorSessions.map(workerSessionForView)
+    const full = sessions.find((entry) => entry.id === session.id)
+    if (!full) return
     chooserOpen = false
-    deviceView = { device, session: full, sessions: accountDeviceSessions }
+    deviceView = {
+      device: {
+        device_id: worker.worker_id,
+        name: worker.name,
+        online: worker.online,
+        last_seen_at: worker.last_seen_at,
+      },
+      session: full,
+      sessions,
+      workerScoped: true,
+    }
+  }
+
+  function isOpenMonitorSession(workerId: string | null, sessionId: number): boolean {
+    if (!workerId) return false
+    const deviceId = accountDeviceId(workerId) ?? workerId
+    return deviceView?.device.device_id === deviceId && deviceView.session.id === sessionId
+  }
+
+  function startNewSession() {
+    sessionStartError = null
+    chooserWorkspace = null
+    if (workMode === 'monitor' && monitorWorkerId) {
+      monitorNewOpen = true
+      return
+    }
+    chooserOpen = true
+  }
+
+  async function monitorSessionCreated(session: WorkerSessionDto) {
+    monitorNewOpen = false
+    if (!monitorWorkerId) return
+    await refreshMonitorSessions(monitorWorkerId)
+    const created = monitorSessions.find((candidate) => candidate.id === session.id)
+    if (created) openMonitorSession(created)
   }
 
   async function onDeployCompleted() {
@@ -2233,7 +2298,7 @@
         class="icon-btn"
         title={tr('tab.action.newTabTooltip')}
         aria-label={tr('tab.action.newTab')}
-        onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
+        onclick={startNewSession}
       >
         <Icon name="plus" size={16} />
       </button>
@@ -2263,12 +2328,13 @@
         {:else}
           <div class="monitor-session-list">
             {#each monitorSessions as session (session.id)}
-              {@const openable = accountDeviceSessions.some((s) => s.id === session.id)}
+              {@const openable = accountDeviceSessions.some((s) => s.id === session.id)
+                || Boolean(monitorWorkerId && !accountDeviceId(monitorWorkerId))}
               <svelte:element
                 this={openable ? 'button' : 'div'}
                 class="monitor-session-row"
                 class:openable
-                class:active={deviceView?.session.id === session.id}
+                class:active={isOpenMonitorSession(monitorWorkerId, session.id)}
                 role={openable ? undefined : 'listitem'}
                 onclick={openable ? () => openMonitorSession(session) : undefined}
               >
@@ -2444,7 +2510,7 @@
           class="icon-btn hidden-fallback-add"
           title={tr('tab.action.newTabTooltip')}
           aria-label={tr('tab.action.newTab')}
-          onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
+          onclick={startNewSession}
         >
           <Icon name="plus" size={16} />
         </button>
@@ -2597,7 +2663,11 @@
           device={deviceView.device}
           session={deviceView.session}
           sessions={deviceView.sessions}
+          workerScoped={deviceView.workerScoped ?? false}
           onClose={() => (deviceView = null)}
+          onChanged={() => {
+            if (monitorWorkerId) void refreshMonitorSessions(monitorWorkerId, true)
+          }}
         />
       {/key}
     {/if}
@@ -2862,6 +2932,15 @@
 
 {#if pairingOpen}
   <PairingDialog onClose={() => (pairingOpen = false)} />
+{/if}
+
+{#if monitorNewOpen && monitorWorkerId}
+  <MonitorNewSessionDialog
+    workerId={monitorWorkerId}
+    workerName={modeWorkers.find((worker) => worker.worker_id === monitorWorkerId)?.name ?? monitorWorkerId}
+    onClose={() => (monitorNewOpen = false)}
+    onCreated={monitorSessionCreated}
+  />
 {/if}
 
 
