@@ -20,6 +20,12 @@ pub struct Identity {
     pub user_id: String,
     /// Token expiry in epoch seconds, when the token carries one.
     pub expires_at: Option<u64>,
+    /// The relay session a relay-issued token belongs to; `None` for
+    /// provider tokens.
+    pub session_id: Option<String>,
+    /// Display name the provider token carries, used once to seed the
+    /// relay profile.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +88,8 @@ struct Claims {
     role: Option<String>,
     #[serde(default)]
     user_type: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 impl JwksVerifier {
@@ -183,6 +191,8 @@ impl JwksVerifier {
         Ok(Identity {
             user_id: claims.sub,
             expires_at: Some(claims.exp),
+            session_id: None,
+            name: claims.name.filter(|name| !name.trim().is_empty()),
         })
     }
 }
@@ -230,6 +240,8 @@ impl IdentityVerifier for StaticVerifier {
             .map(|user_id| Identity {
                 user_id: user_id.clone(),
                 expires_at: None,
+                session_id: None,
+                name: None,
             })
             .ok_or(VerifyError::Invalid);
         Box::pin(async move { result })
@@ -289,7 +301,9 @@ mod tests {
             identity,
             Identity {
                 user_id: "user-1".into(),
-                expires_at: Some(exp)
+                expires_at: Some(exp),
+                session_id: None,
+                name: None,
             }
         );
     }

@@ -1,9 +1,13 @@
 //! Sign-in for the account relay: CloudBase email codes and PalmX palm scan.
 //!
 //! The relay advertises its OIDC issuer and the enabled sign-in methods from
-//! `/api/v1/healthz`, so the desktop only needs the relay URL. Every method
-//! ends with the provider's own CloudBase access/refresh pair; the relay
-//! verifies access tokens against the issuer's JWKS.
+//! `/api/v1/healthz`, so the desktop only needs the relay URL. CloudBase
+//! keeps one session per account, so a sign-in on the phone revoked the
+//! desktop's. Relays with `sessions: true` therefore issue their own
+//! per-device session: palm sign-ins ask for one (`x-kode-session: relay`),
+//! email sign-ins exchange the provider token for one, and older saved
+//! sessions are exchanged on their next use. Such sessions refresh and read
+//! the profile at the relay; provider sessions keep using the issuer.
 //!
 //! PalmX: the desktop shows PalmX's QR (no secret involved) and polls it;
 //! the confirmed code plus our PKCE verifier go to the relay, which holds the
@@ -67,6 +71,10 @@ pub struct AccountSession {
     pub refresh_token: String,
     /// Access-token expiry in epoch milliseconds.
     pub expires_at: u64,
+    /// The relay that issued this session. `None` for a provider session
+    /// from before relay sessions, which refreshes at the issuer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 impl AccountSession {
@@ -141,6 +149,8 @@ pub struct AccountClient {
     /// shared one id, each new one revoked the previous session's refresh
     /// token, so two installs must never share an id.
     device_id: Option<String>,
+    /// Names this desktop in the account's signed-in device list.
+    device_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,13 +172,14 @@ impl Default for AccountClient {
                 .build()
                 .expect("account HTTP client"),
             device_id: None,
+            device_name: None,
         }
     }
 }
 
 impl AccountClient {
-    pub fn for_device(device_id: String) -> Self {
-        Self { device_id: Some(device_id), ..Self::default() }
+    pub fn for_device(device_id: String, device_name: String) -> Self {
+        Self { device_id: Some(device_id), device_name: Some(device_name), ..Self::default() }
     }
 
     fn with_device(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -264,33 +275,109 @@ impl AccountClient {
                 json!({"email": pending.email, "verification_token": verification_token}),
             )
             .await?;
-        let tokens: TokenResponse = serde_json::from_value(body)
-            .map_err(|_| "sign-in provider returned no tokens".to_string())?;
-        let refresh_token = tokens
-            .refresh_token
-            .ok_or("sign-in provider returned no refresh token")?;
-        let user_id = match tokens.sub {
-            Some(sub) => sub,
-            None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
-        };
-        let session = AccountSession {
-            issuer: pending.issuer.clone(),
-            email: pending.email.clone(),
-            method: LoginMethod::Email,
-            name: String::new(),
-            picture: String::new(),
-            user_id,
-            access_token: tokens.access_token.clone(),
-            refresh_token,
-            expires_at: jwt_expires_at_ms(&tokens.access_token)
-                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
+        let session = session_from(
+            body,
+            SessionSource {
+                issuer: &pending.issuer,
+                server_url: &pending.server_url,
+                method: LoginMethod::Email,
+                email: &pending.email,
+            },
+            now_ms,
+        )?;
+        // Signing in never fails over the exchange: the provider session
+        // works, and the next use tries the exchange again.
+        let session = match self.upgrade(&pending.server_url, &session, now_ms).await {
+            Ok(Some(upgraded)) => upgraded,
+            Ok(None) => session,
+            Err(error) => {
+                tracing::warn!(%error, "could not exchange for a relay session");
+                session
+            }
         };
         Ok(self.with_profile(session).await)
     }
 
-    /// Standard OIDC refresh grant. Providers that rotate refresh tokens
-    /// return a new one; otherwise the old one stays valid.
+    /// Exchanges a provider session for a relay session of this device.
+    /// `Ok(None)` when the relay does not issue sessions.
+    pub async fn upgrade(
+        &self,
+        server_url: &str,
+        session: &AccountSession,
+        now_ms: u64,
+    ) -> Result<Option<AccountSession>, String> {
+        let method = match session.method {
+            LoginMethod::Email => "email",
+            LoginMethod::Palmx => "palmx",
+            LoginMethod::Palm => "palm",
+        };
+        let (status, body) = self
+            .relay_send(
+                reqwest::Method::POST,
+                server_url,
+                "/api/v1/auth/session",
+                None,
+                Some(json!({"provider_token": session.access_token, "method": method, "email": session.email})),
+            )
+            .await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(relay_error(status, &body));
+        }
+        let source = SessionSource {
+            issuer: &session.issuer,
+            server_url,
+            method: session.method,
+            email: &session.email,
+        };
+        let upgraded = session_from(body, source, now_ms)?;
+        Ok(Some(AccountSession {
+            name: if upgraded.name.is_empty() { session.name.clone() } else { upgraded.name },
+            picture: if upgraded.picture.is_empty() { session.picture.clone() } else { upgraded.picture },
+            ..upgraded
+        }))
+    }
+
+    /// Ends a relay session at the relay. Provider sessions have nothing
+    /// to revoke here; best effort either way.
+    pub async fn sign_out(&self, session: &AccountSession) {
+        if let Some(relay) = &session.relay {
+            let _ = self
+                .relay_call(reqwest::Method::POST, relay, "/api/v1/auth/signout", Some(&session.access_token), None)
+                .await;
+        }
+    }
+
+    /// Relay sessions refresh at the relay (which rotates the refresh token
+    /// and returns the current profile); provider sessions use the
+    /// standard OIDC refresh grant at the issuer.
     pub async fn refresh(&self, session: &AccountSession, now_ms: u64) -> Result<AccountSession, String> {
+        if let Some(relay) = &session.relay {
+            let body = self
+                .relay_call(
+                    reqwest::Method::POST,
+                    relay,
+                    "/api/v1/auth/token",
+                    None,
+                    Some(json!({"refresh_token": session.refresh_token})),
+                )
+                .await
+                .map_err(|error| format!("account session expired; sign in again ({error})"))?;
+            let source = SessionSource {
+                issuer: &session.issuer,
+                server_url: relay,
+                method: session.method,
+                email: &session.email,
+            };
+            let next = session_from(body, source, now_ms)?;
+            return Ok(AccountSession {
+                name: if next.name.is_empty() { session.name.clone() } else { next.name },
+                picture: if next.picture.is_empty() { session.picture.clone() } else { next.picture },
+                ..next
+            });
+        }
         let body = self
             .post(
                 &session.issuer,
@@ -392,29 +479,27 @@ impl AccountClient {
                 Some(json!({"code": code, "code_verifier": pending.verifier})),
             )
             .await?;
-        let tokens: TokenResponse = serde_json::from_value(body)
-            .map_err(|_| "the relay returned no tokens".to_string())?;
-        let session = AccountSession {
-            issuer: pending.issuer.clone(),
-            email: String::new(),
+        let source = SessionSource {
+            issuer: &pending.issuer,
+            server_url: &pending.server_url,
             method: LoginMethod::Palmx,
-            name: String::new(),
-            picture: String::new(),
-            user_id: match tokens.sub {
-                Some(sub) => sub,
-                None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
-            },
-            access_token: tokens.access_token.clone(),
-            refresh_token: tokens.refresh_token.ok_or("the relay returned no refresh token")?,
-            expires_at: jwt_expires_at_ms(&tokens.access_token)
-                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
+            email: "",
         };
-        Ok(self.with_profile(session).await)
+        Ok(self.with_profile(session_from(body, source, now_ms)?).await)
     }
 
     /// Copies the CloudBase profile (name, avatar, address) onto a session.
     /// Best effort: an unreachable profile keeps what the session had.
     pub async fn with_profile(&self, session: AccountSession) -> AccountSession {
+        if let Some(relay) = &session.relay {
+            return match self
+                .relay_call(reqwest::Method::GET, relay, "/api/v1/account/profile", Some(&session.access_token), None)
+                .await
+            {
+                Ok(body) => apply_profile(session, &body["profile"]),
+                Err(_) => session,
+            };
+        }
         let profile: Option<Value> = async {
             self.with_device(self.http.get(format!("{}/auth/v1/user/me", session.issuer)))
                 .bearer_auth(&session.access_token)
@@ -437,6 +522,18 @@ impl AccountClient {
     /// Sets the account's display name on the CloudBase profile.
     pub async fn set_name(&self, session: &AccountSession, name: &str) -> Result<AccountSession, String> {
         let name = valid_name(name)?;
+        if let Some(relay) = &session.relay {
+            let body = self
+                .relay_call(
+                    reqwest::Method::PATCH,
+                    relay,
+                    "/api/v1/account/profile",
+                    Some(&session.access_token),
+                    Some(json!({"name": name})),
+                )
+                .await?;
+            return Ok(apply_profile(AccountSession { name: name.to_string(), ..session.clone() }, &body["profile"]));
+        }
         let response = self
             .http
             .patch(format!("{}/auth/v1/user/profile", session.issuer))
@@ -469,24 +566,8 @@ impl AccountClient {
                 Some(json!({"session_id": session_id})),
             )
             .await?;
-        let tokens: TokenResponse = serde_json::from_value(body)
-            .map_err(|_| "the relay returned no tokens".to_string())?;
-        let session = AccountSession {
-            issuer,
-            email: String::new(),
-            method: LoginMethod::Palm,
-            name: String::new(),
-            picture: String::new(),
-            user_id: match tokens.sub {
-                Some(sub) => sub,
-                None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
-            },
-            access_token: tokens.access_token.clone(),
-            refresh_token: tokens.refresh_token.ok_or("the relay returned no refresh token")?,
-            expires_at: jwt_expires_at_ms(&tokens.access_token)
-                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
-        };
-        Ok(self.with_profile(session).await)
+        let source = SessionSource { issuer: &issuer, server_url, method: LoginMethod::Palm, email: "" };
+        Ok(self.with_profile(session_from(body, source, now_ms)?).await)
     }
 
     /// Asks the relay for a handoff a phone can approve with a palm scan.
@@ -533,24 +614,13 @@ impl AccountClient {
         if body["state"] != "approved" {
             return Ok(None);
         }
-        let tokens: TokenResponse = serde_json::from_value(body["tokens"].clone())
-            .map_err(|_| "the relay returned no tokens".to_string())?;
-        let session = AccountSession {
-            issuer: handoff.issuer.clone(),
-            email: String::new(),
+        let source = SessionSource {
+            issuer: &handoff.issuer,
+            server_url: &handoff.server_url,
             method: LoginMethod::Palm,
-            name: String::new(),
-            picture: String::new(),
-            user_id: match tokens.sub {
-                Some(sub) => sub,
-                None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
-            },
-            access_token: tokens.access_token.clone(),
-            refresh_token: tokens.refresh_token.ok_or("the relay returned no refresh token")?,
-            expires_at: jwt_expires_at_ms(&tokens.access_token)
-                .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
+            email: "",
         };
-        Ok(Some(self.with_profile(session).await))
+        Ok(Some(self.with_profile(session_from(body["tokens"].clone(), source, now_ms)?).await))
     }
 
     /// Whether the account has a palm enrolled (enrolment happens on phones).
@@ -599,7 +669,30 @@ impl AccountClient {
         access_token: Option<&str>,
         body: Option<Value>,
     ) -> Result<Value, String> {
-        let mut request = self.with_device(self.http.request(method, format!("{server_url}{path}")));
+        let (status, body) = self.relay_send(method, server_url, path, access_token, body).await?;
+        if status.is_success() {
+            Ok(body)
+        } else {
+            Err(relay_error(status, &body))
+        }
+    }
+
+    /// Every relay call asks sign-ins for a relay session and names this
+    /// desktop; relays without sessions ignore both headers.
+    async fn relay_send(
+        &self,
+        method: reqwest::Method,
+        server_url: &str,
+        path: &str,
+        access_token: Option<&str>,
+        body: Option<Value>,
+    ) -> Result<(reqwest::StatusCode, Value), String> {
+        let mut request = self
+            .with_device(self.http.request(method, format!("{server_url}{path}")))
+            .header("x-kode-session", "relay");
+        if let Some(name) = &self.device_name {
+            request = request.header("x-kode-device-name", url_component(name));
+        }
         if let Some(token) = access_token {
             request = request.bearer_auth(token);
         }
@@ -612,13 +705,7 @@ impl AccountClient {
             .map_err(|error| format!("cannot reach the account relay: {error}"))?;
         let status = response.status();
         let body: Value = response.json().await.unwrap_or(Value::Null);
-        if status.is_success() {
-            return Ok(body);
-        }
-        Err(body["detail"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("account relay returned {status}")))
+        Ok((status, body))
     }
 
     /// PalmX answers HTTP 200 with a business `code`; non-zero is an error.
@@ -661,6 +748,47 @@ impl AccountClient {
             .map(str::to_string)
             .unwrap_or_else(|| format!("sign-in provider returned {status}")))
     }
+}
+
+fn relay_error(status: reqwest::StatusCode, body: &Value) -> String {
+    body["detail"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("account relay returned {status}"))
+}
+
+/// Where a sign-in response came from, for building its session.
+struct SessionSource<'a> {
+    issuer: &'a str,
+    server_url: &'a str,
+    method: LoginMethod,
+    email: &'a str,
+}
+
+/// Builds a session from a sign-in or refresh response: a relay session
+/// (`token_issuer: "relay"`, with the profile inline) or provider tokens.
+fn session_from(body: Value, source: SessionSource, now_ms: u64) -> Result<AccountSession, String> {
+    let relay = body["token_issuer"] == "relay";
+    let profile = body["profile"].clone();
+    let tokens: TokenResponse =
+        serde_json::from_value(body).map_err(|_| "the sign-in returned no tokens".to_string())?;
+    let session = AccountSession {
+        issuer: source.issuer.to_string(),
+        email: source.email.to_string(),
+        method: source.method,
+        name: String::new(),
+        picture: String::new(),
+        user_id: match tokens.sub {
+            Some(sub) => sub,
+            None => jwt_subject(&tokens.access_token).ok_or("access token has no subject")?,
+        },
+        refresh_token: tokens.refresh_token.ok_or("the sign-in returned no refresh token")?,
+        expires_at: jwt_expires_at_ms(&tokens.access_token)
+            .unwrap_or_else(|| now_ms + tokens.expires_in * 1000),
+        access_token: tokens.access_token,
+        relay: relay.then(|| source.server_url.to_string()),
+    };
+    Ok(apply_profile(session, &profile))
 }
 
 fn parse_login_methods(health: &Value) -> Vec<LoginMethodInfo> {
@@ -776,6 +904,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: "r".into(),
             expires_at: 10 * 60 * 1000,
+            relay: None,
         };
         assert!(!session.needs_refresh(0));
         assert!(session.needs_refresh(6 * 60 * 1000));

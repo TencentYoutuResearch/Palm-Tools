@@ -2,10 +2,14 @@
 // and CloudBase email codes.
 //
 // The relay advertises its OIDC issuer and enabled sign-in methods from
-// /api/v1/healthz, so the phone only needs the relay URL. Every method ends
-// with CloudBase access/refresh tokens the relay verifies itself. Palm
-// sign-up needs no other account: the relay mints the account id and the
-// phone enrols a palm for it.
+// /api/v1/healthz, so the phone only needs the relay URL. CloudBase keeps one
+// session per account, so a sign-in on one device revoked the others'.
+// Relays with `sessions: true` therefore issue each device its own session:
+// palm sign-ins ask for one (`x-kode-session: relay`), email sign-ins
+// exchange the CloudBase token for one, and saved CloudBase sessions are
+// exchanged on their next refresh. Relay sessions refresh and keep the
+// profile at the relay. Palm sign-up needs no other account: the relay
+// mints the account id and the phone enrols a palm for it.
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -52,6 +56,10 @@ class AccountSession {
   /// Access-token expiry in epoch milliseconds.
   final int expiresAt;
 
+  /// Issued by the relay rather than CloudBase: refreshes and the profile
+  /// go to the relay.
+  final bool relaySession;
+
   const AccountSession({
     required this.serverUrl,
     required this.issuer,
@@ -63,6 +71,7 @@ class AccountSession {
     required this.accessToken,
     required this.refreshToken,
     required this.expiresAt,
+    this.relaySession = false,
   });
 
   /// What the UI calls this account: its name, else its address, else a
@@ -99,6 +108,7 @@ class AccountSession {
     'access_token': accessToken,
     'refresh_token': refreshToken,
     'expires_at': expiresAt,
+    'relay_session': relaySession,
   };
 
   factory AccountSession.fromJson(Map<String, dynamic> j) => AccountSession(
@@ -112,6 +122,7 @@ class AccountSession {
     accessToken: j['access_token'] as String,
     refreshToken: j['refresh_token'] as String,
     expiresAt: (j['expires_at'] as num).toInt(),
+    relaySession: j['relay_session'] as bool? ?? false,
   );
 
   AccountSession copyWith({
@@ -121,6 +132,7 @@ class AccountSession {
     String? accessToken,
     String? refreshToken,
     int? expiresAt,
+    bool? relaySession,
   }) => AccountSession(
     serverUrl: serverUrl,
     issuer: issuer,
@@ -132,6 +144,7 @@ class AccountSession {
     accessToken: accessToken ?? this.accessToken,
     refreshToken: refreshToken ?? this.refreshToken,
     expiresAt: expiresAt ?? this.expiresAt,
+    relaySession: relaySession ?? this.relaySession,
   );
 }
 
@@ -270,11 +283,14 @@ class PendingSignIn {
 }
 
 class AccountClient {
-  /// [deviceId] supplies this install's stable CloudBase device id. Every
-  /// relay sign-in and CloudBase refresh carries it, so signing in here never
-  /// evicts the account's sessions on other phones or desktops.
-  AccountClient({Dio? dio, Future<String> Function()? deviceId})
-    : _dio =
+  /// [deviceId] supplies this install's stable device id and [deviceName]
+  /// what the account's device list calls it. Every relay sign-in carries
+  /// both, so the relay issues this phone its own session.
+  AccountClient({
+    Dio? dio,
+    Future<String> Function()? deviceId,
+    this.deviceName,
+  }) : _dio =
           dio ??
           Dio(
             BaseOptions(
@@ -297,6 +313,7 @@ class AccountClient {
   }
 
   final Dio _dio;
+  final Future<String> Function()? deviceName;
 
   static String normalizeServerUrl(String raw) =>
       raw.trim().replaceAll(RegExp(r'/+$'), '');
@@ -359,6 +376,48 @@ class AccountClient {
       body: {'session_id': sessionId},
     );
     return _withProfile(_sessionFrom(body, server, issuer, LoginMethod.palm));
+  }
+
+  /// Exchanges a CloudBase session for a relay session of this phone.
+  /// `null` when the relay does not issue sessions.
+  Future<AccountSession?> upgrade(AccountSession session) async {
+    try {
+      final body = await _relay(
+        'POST',
+        '${session.serverUrl}/api/v1/auth/session',
+        body: {
+          'provider_token': session.accessToken,
+          'method': session.method.name,
+          'email': session.email,
+        },
+      );
+      final upgraded = _sessionFrom(
+        body,
+        session.serverUrl,
+        session.issuer,
+        session.method,
+        email: session.email,
+      );
+      return upgraded.copyWith(
+        name: upgraded.name.isEmpty ? session.name : null,
+        picture: upgraded.picture.isEmpty ? session.picture : null,
+      );
+    } on ApiException catch (error) {
+      if (error.status == 404) return null;
+      rethrow;
+    }
+  }
+
+  /// Ends a relay session at the relay; best effort.
+  Future<void> signOut(AccountSession session) async {
+    if (!session.relaySession) return;
+    try {
+      await _relay(
+        'POST',
+        '${session.serverUrl}/api/v1/auth/signout',
+        token: session.accessToken,
+      );
+    } catch (_) {}
   }
 
   Future<PalmRegistration> palmRegisterStart(String serverUrl) async {
@@ -429,12 +488,20 @@ class AccountClient {
     Map<String, dynamic>? body,
     String? token,
   }) async {
+    final name = await deviceName?.call();
     final response = await _dio.request<dynamic>(
       url,
       data: body,
       options: Options(
         method: method,
-        headers: {if (token != null) 'Authorization': 'Bearer $token'},
+        headers: {
+          if (token != null) 'Authorization': 'Bearer $token',
+          // Sign-ins return a relay session for this phone; relays without
+          // sessions ignore both headers.
+          'x-kode-session': 'relay',
+          if (name != null && name.isNotEmpty)
+            'x-kode-device-name': Uri.encodeComponent(name),
+        },
       ),
     );
     final data = _map(response.data);
@@ -447,32 +514,55 @@ class AccountClient {
     );
   }
 
+  /// A relay session (`token_issuer: relay`, profile inline) or CloudBase
+  /// tokens.
   AccountSession _sessionFrom(
     Map<String, dynamic> body,
     String server,
     String issuer,
-    LoginMethod method,
-  ) {
+    LoginMethod method, {
+    String email = '',
+  }) {
     final access = body['access_token'] as String?;
     final refresh = body['refresh_token'] as String?;
     if (access == null || refresh == null) {
       throw ApiException(0, 'no_tokens', 'Sign-in returned no tokens.');
     }
-    return AccountSession(
+    final session = AccountSession(
       serverUrl: server,
       issuer: issuer,
-      email: '',
+      email: email,
       method: method,
       userId: body['sub'] as String? ?? jwtSubject(access) ?? '',
       accessToken: access,
       refreshToken: refresh,
-      expiresAt: _expiry(body),
+      expiresAt: _expiry(body, access),
+      relaySession: body['token_issuer'] == 'relay',
     );
+    final profile = body['profile'];
+    return profile is Map<String, dynamic>
+        ? applyProfile(session, profile)
+        : session;
   }
 
-  /// Copies the CloudBase profile (name, avatar, address) onto a session.
-  /// Best effort: an unreachable profile keeps what the session had.
+  /// Copies the profile (name, avatar, address) onto a session, from the
+  /// relay for relay sessions, else CloudBase. Best effort: an unreachable
+  /// profile keeps what the session had.
   Future<AccountSession> withProfile(AccountSession session) async {
+    if (session.relaySession) {
+      try {
+        final body = await _relay(
+          'GET',
+          '${session.serverUrl}/api/v1/account/profile',
+          token: session.accessToken,
+        );
+        final profile = body['profile'];
+        if (profile is Map<String, dynamic>) {
+          return applyProfile(session, profile);
+        }
+      } catch (_) {}
+      return session;
+    }
     try {
       final response = await _dio.get<dynamic>(
         '${session.issuer}/auth/v1/user/me',
@@ -495,6 +585,18 @@ class AccountClient {
     final name = raw.trim();
     if (name.isEmpty || name.runes.length > 32) {
       throw ApiException(0, 'bad_name', 'Enter a name of 1–32 characters.');
+    }
+    if (session.relaySession) {
+      final body = await _relay(
+        'PATCH',
+        '${session.serverUrl}/api/v1/account/profile',
+        body: {'name': name},
+        token: session.accessToken,
+      );
+      final profile = body['profile'];
+      return profile is Map<String, dynamic>
+          ? applyProfile(session.copyWith(name: name), profile)
+          : session.copyWith(name: name);
     }
     final response = await _dio.patch<dynamic>(
       '${session.issuer}/auth/v1/user/profile',
@@ -587,22 +689,54 @@ class AccountClient {
     if (userId == null) {
       throw ApiException(0, 'no_subject', 'Access token has no subject.');
     }
-    return _withProfile(
-      AccountSession(
-        serverUrl: pending.serverUrl,
-        issuer: pending.issuer,
-        email: pending.email,
-        userId: userId,
-        accessToken: access,
-        refreshToken: refresh,
-        expiresAt: _expiry(body),
-      ),
+    final session = AccountSession(
+      serverUrl: pending.serverUrl,
+      issuer: pending.issuer,
+      email: pending.email,
+      userId: userId,
+      accessToken: access,
+      refreshToken: refresh,
+      expiresAt: _expiry(body, access),
     );
+    // Signing in never fails over the exchange: the CloudBase session
+    // works, and the next refresh tries the exchange again.
+    AccountSession? upgraded;
+    try {
+      upgraded = await upgrade(session);
+    } catch (_) {}
+    return _withProfile(upgraded ?? session);
   }
 
-  /// Standard OIDC refresh grant; keeps the old refresh token unless the
-  /// provider rotates it.
+  /// Relay sessions refresh at the relay, which rotates the refresh token
+  /// and returns the current profile. CloudBase sessions use the standard
+  /// OIDC refresh grant and keep the old refresh token unless rotated.
   Future<AccountSession> refresh(AccountSession session) async {
+    if (session.relaySession) {
+      final Map<String, dynamic> body;
+      try {
+        body = await _relay(
+          'POST',
+          '${session.serverUrl}/api/v1/auth/token',
+          body: {'refresh_token': session.refreshToken},
+        );
+      } on ApiException catch (error) {
+        if (error.status == 401) {
+          throw ApiException(401, 'expired', 'Account session expired.');
+        }
+        rethrow;
+      }
+      final next = _sessionFrom(
+        body,
+        session.serverUrl,
+        session.issuer,
+        session.method,
+        email: session.email,
+      );
+      return next.copyWith(
+        name: next.name.isEmpty ? session.name : null,
+        picture: next.picture.isEmpty ? session.picture : null,
+      );
+    }
     final body = await _post(session.issuer, '/auth/v1/token', {
       'grant_type': 'refresh_token',
       'refresh_token': session.refreshToken,
@@ -616,7 +750,7 @@ class AccountClient {
       session.copyWith(
         accessToken: access,
         refreshToken: body['refresh_token'] as String?,
-        expiresAt: _expiry(body),
+        expiresAt: _expiry(body, access),
       ),
     );
   }
@@ -643,9 +777,12 @@ class AccountClient {
         .toList(growable: false);
   }
 
-  int _expiry(Map<String, dynamic> body) => DateTime.now()
-      .add(Duration(seconds: (body['expires_in'] as num?)?.toInt() ?? 3600))
-      .millisecondsSinceEpoch;
+  /// The token's own `exp`, else `expires_in` from now.
+  int _expiry(Map<String, dynamic> body, String access) =>
+      jwtExpiry(access) ??
+      DateTime.now()
+          .add(Duration(seconds: (body['expires_in'] as num?)?.toInt() ?? 3600))
+          .millisecondsSinceEpoch;
 
   Future<Map<String, dynamic>> _post(
     String issuer,
@@ -698,6 +835,22 @@ String? jwtSubject(String token) {
     );
     final json = jsonDecode(payload);
     return json is Map<String, dynamic> ? json['sub'] as String? : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Reads `exp` (epoch seconds) from a JWT payload as epoch milliseconds.
+int? jwtExpiry(String token) {
+  final parts = token.split('.');
+  if (parts.length < 2) return null;
+  try {
+    final payload = utf8.decode(
+      base64Url.decode(base64Url.normalize(parts[1])),
+    );
+    final json = jsonDecode(payload);
+    final exp = json is Map<String, dynamic> ? json['exp'] : null;
+    return exp is num ? exp.toInt() * 1000 : null;
   } catch (_) {
     return null;
   }

@@ -112,7 +112,11 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
       appBar: GlassAppBar(
         title: InkWell(
           borderRadius: BorderRadius.circular(8),
-          onTap: () => context.push('/workers'),
+          // Account relays list the account's desktops; only self-hosted
+          // sync servers have Workers (`/api/v1/workers`).
+          onTap: () => context.push(
+            endpoint?.isRelay ?? false ? '/devices' : '/workers',
+          ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
             child: Row(
@@ -120,7 +124,9 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
               children: [
                 Flexible(
                   child: Text(
-                    endpoint?.activeWorkerName ?? endpoint?.deviceName ?? 'Sessions',
+                    endpoint?.activeWorkerName ??
+                        endpoint?.deviceName ??
+                        'Sessions',
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),

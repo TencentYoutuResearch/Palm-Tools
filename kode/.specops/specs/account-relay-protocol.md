@@ -11,6 +11,7 @@ paths:
   - crates/kode-relay
   - crates/kode-relay/src/palmx.rs
   - crates/kode-relay/src/palm.rs
+  - crates/kode-relay/src/session.rs
   - crates/kode-relay/src/palm_capture.html
   - apps/mobile/lib/src/ui/palm/palm_capture_screen.dart
   - crates/kode-relay-protocol
@@ -157,22 +158,67 @@ be HTTPS (plain HTTP only on loopback).
    The documented `/auth/v1/token/refresh` path does not exist. CloudBase
    rotates the refresh token on use, so clients must save the new one.
 
-### Device ids and concurrent sessions
+### Device ids
 
 Every client keeps one `x-device-id` per install and sends it on all
-sign-in and refresh calls, to CloudBase and to the relay's sign-in routes
-(`/api/v1/auth/palm`, `…/palm/register/finish`, `…/palm/handoff`,
-`/api/v1/auth/palmx`). Desktops use their `installation_id`; phones store a
-v4 UUID in app-private storage (not the Keychain, so a reinstall is a new
-device). The relay forwards it to `/auth/v1/signin/custom`; a handoff is
-signed in with the id the waiting desktop sent to `…/handoff`, not the
-approving phone's. Ids must be 8–64 characters of `[A-Za-z0-9_-]`; missing
-or malformed ids get a fresh random id per sign-in.
+sign-in calls, to CloudBase and to the relay. Desktops use their
+`installation_id`; phones store a v4 UUID in app-private storage (not the
+Keychain, so a reinstall is a new device). Ids must be 8–64 characters of
+`[A-Za-z0-9_-]`; missing or malformed ids get a fresh random id per sign-in.
+Clients also send `x-kode-device-name` (percent-encoded UTF-8) for the
+signed-in device list.
 
-When the relay signed everyone in with one fixed id, each sign-in revoked
-the previous session's refresh token, so a phone sign-in logged the desktop
-out. The environment's client `MaxDevice` (最大会话数) caps sessions per
-user; it is 5, and the sixth sign-in evicts the oldest session.
+## Relay sessions
+
+CloudBase keeps **one session per custom-login user**, whatever the device
+id or the client's `MaxDevice` (which applies to OAuth logins only): each
+`/auth/v1/signin/custom` revokes the previous refresh token with
+`invalid refresh token … refreshed by other process`. A phone sign-in
+therefore logged the desktop out once its access token expired. So the
+provider only proves who signed in, and the relay issues each device its
+own session (`crates/kode-relay/src/session.rs`). Relays advertise this
+with `sessions: true` in `/api/v1/healthz`; it needs
+`KODE_RELAY_SESSION_SECRET`.
+
+- **Opt-in.** Sign-ins (`/api/v1/auth/palm`, `…/palm/register/finish`,
+  `…/palm/handoff`, `/api/v1/auth/palmx`) return a relay session only when
+  the request carries `x-kode-session: relay`; older clients keep getting
+  CloudBase tokens, which the relay still accepts. A handoff session is the
+  waiting desktop's: its device, name and opt-in come from `…/handoff`.
+- **Response.** `{token_issuer:"relay", access_token, refresh_token,
+  expires_in, sub, session_id, provider, profile:{name, picture, email}}`.
+- **Access tokens** are HS256 JWTs (`iss:"kode-relay"`, `sub`, `sid`), one
+  hour. They verify locally; session state is re-read at most every 60 s, so
+  a revoked session stops within a minute (at once on the same instance).
+  Open sockets re-verify every 5 minutes and close when revoked.
+- **Refresh tokens** are `kr1.<sid>.<mac>`, `mac = HMAC-SHA256(secret,
+  sid.salt.generation)`, 30 days sliding. The database stores no token,
+  only the generation. `POST /api/v1/auth/token {refresh_token}` bumps the
+  generation (compare-and-set) and returns a new pair plus the profile. The
+  previous generation within 60 s returns the current token again, so two
+  processes refreshing together both succeed; an older generation is a
+  replay and revokes the session.
+- **Exchange.** `POST /api/v1/auth/session {provider_token, method?,
+  email?}` turns a valid CloudBase access token into a relay session for the
+  calling device: email sign-in uses it right after CloudBase sign-in, and
+  clients migrate a saved CloudBase session on its next use. Relay tokens
+  are not accepted as `provider_token`.
+- **Profile.** Name, avatar and address live at the relay
+  (`GET/PATCH /api/v1/account/profile {name}`), seeded on first sign-in from
+  the name CloudBase puts in its token, or the email.
+- **Devices.** `GET /api/v1/account/sessions` lists the account's signed-in
+  devices (`device_name`, `method`, `last_used_at`, `current`);
+  `DELETE /api/v1/account/sessions/:id` signs one out; `POST
+  /api/v1/auth/signout` ends the caller's own session. All are tenant
+  scoped like every other route.
+- **Storage.** CloudBase PostgreSQL tables `kode_relay_sessions` and
+  `kode_relay_profiles` through the REST API with the service key (RLS on,
+  no policies). Without `KODE_RELAY_SERVICE_KEY` sessions are in memory and
+  end with the process (local runs only).
+
+Clients serialize refreshes (desktop: in-process and file locks across the
+GUI and its workbench service; phone: one in-flight refresh), and a failed
+exchange never fails a sign-in; it is retried after five minutes.
 
 ## Sign-in methods
 

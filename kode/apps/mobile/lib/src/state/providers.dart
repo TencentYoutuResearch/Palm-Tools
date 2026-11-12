@@ -8,6 +8,7 @@ import '../api/account_client.dart';
 import '../api/api_client.dart';
 import '../protocol/protocol.dart';
 import '../storage/account_storage.dart';
+import '../storage/device_name.dart';
 import '../storage/install_id.dart';
 import '../storage/endpoint_storage.dart';
 
@@ -31,7 +32,8 @@ final accountStorageProvider = Provider<AccountStorage>(
   (ref) => AccountStorage(),
 );
 final accountClientProvider = Provider<AccountClient>(
-  (ref) => AccountClient(deviceId: InstallId.load),
+  (ref) =>
+      AccountClient(deviceId: InstallId.load, deviceName: DeviceName.load),
 );
 
 /// Whether the app is in the foreground. Account-relay sockets close in the
@@ -47,6 +49,21 @@ final accountOnboardingProvider = StateProvider<bool>((ref) => false);
 /// relay endpoints in place, so screens keep working across rotations.
 class AccountNotifier extends Notifier<AccountSession?> {
   Timer? _refreshTimer;
+
+  /// The refresh in flight. Screens, app resume and the watch all ask for
+  /// a fresh token; relay refresh tokens rotate, so they share one refresh.
+  Future<AccountSession?>? _inflight;
+
+  /// The relay answered that it issues no sessions; keep the CloudBase one.
+  bool _sessionsUnsupported = false;
+
+  /// After a failed exchange, no new attempt before this time.
+  DateTime _upgradeRetryAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool _wantsUpgrade(AccountSession session) =>
+      !session.relaySession &&
+      !_sessionsUnsupported &&
+      DateTime.now().isAfter(_upgradeRetryAt);
 
   @override
   AccountSession? build() {
@@ -76,6 +93,10 @@ class AccountNotifier extends Notifier<AccountSession?> {
   /// Forgets the account and every account desktop saved on this phone.
   Future<void> signOut() async {
     _refreshTimer?.cancel();
+    final session = state;
+    if (session != null) {
+      unawaited(ref.read(accountClientProvider).signOut(session));
+    }
     state = null;
     await ref.read(accountStorageProvider).clear();
     final storage = ref.read(endpointStorageProvider);
@@ -89,15 +110,41 @@ class AccountNotifier extends Notifier<AccountSession?> {
     }
   }
 
-  Future<AccountSession?> ensureFresh() async {
+  Future<AccountSession?> ensureFresh() {
     final session = state;
-    if (session == null) return null;
-    if (!session.needsRefresh(DateTime.now())) {
+    if (session == null) return Future.value(null);
+    if (!session.needsRefresh(DateTime.now()) && !_wantsUpgrade(session)) {
       _schedule(session);
-      return session;
+      return Future.value(session);
     }
+    return _inflight ??= _refresh(session).whenComplete(() => _inflight = null);
+  }
+
+  Future<AccountSession?> _refresh(AccountSession session) async {
+    final client = ref.read(accountClientProvider);
     try {
-      final next = await ref.read(accountClientProvider).refresh(session);
+      var next = session.needsRefresh(DateTime.now())
+          ? await client.refresh(session)
+          : session;
+      // A CloudBase session moves to a relay session of this phone, so a
+      // sign-in elsewhere no longer revokes it.
+      if (_wantsUpgrade(next)) {
+        try {
+          final upgraded = await client.upgrade(next);
+          if (upgraded == null) {
+            _sessionsUnsupported = true;
+          } else {
+            next = upgraded;
+          }
+        } catch (_) {
+          // The CloudBase session still works; try again later.
+          _upgradeRetryAt = DateTime.now().add(const Duration(minutes: 5));
+        }
+      }
+      if (identical(next, session)) {
+        _schedule(session);
+        return session;
+      }
       await ref.read(accountStorageProvider).save(next);
       _apply(next);
       return next;

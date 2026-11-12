@@ -191,17 +191,10 @@ pub(crate) async fn sign_in(
         Some(user_id) => user_id,
         None => derived_uid(&open_id),
     };
-    let device_id = crate::client_device_id(&headers);
-    let tokens = palmx.services.sign_in(&uid, &device_id).await.map_err(upstream)?;
+    let device = crate::session::SignInDevice::from_headers(&headers);
+    let tokens = palmx.services.sign_in(&uid, &device.device_id).await.map_err(upstream)?;
     tracing::info!(sub = %tokens.sub, "palmx sign-in");
-    Ok(Json(json!({
-        "token_type": "Bearer",
-        "access_token": tokens.access_token,
-        "refresh_token": tokens.refresh_token,
-        "expires_in": tokens.expires_in,
-        "sub": tokens.sub,
-        "provider": "palmx",
-    })))
+    Ok(Json(crate::session::finish_sign_in(&state, &device, &tokens, "palmx").await?))
 }
 
 /// `POST /api/v1/auth/palmx/bind`: link the scanned palm to the caller's

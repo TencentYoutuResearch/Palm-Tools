@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     palmx::{BoxFuture, CloudServices, PalmxServices, TokenSet},
+    session::{finish_sign_in, SignInDevice},
     ApiError, RelayState,
 };
 
@@ -79,10 +80,11 @@ pub trait PalmServices: Send + Sync + 'static {
 struct Handoff {
     secret_hash: [u8; 32],
     expires: tokio::time::Instant,
-    /// The waiting desktop's device id: the session is the desktop's, not
-    /// the approving phone's.
-    device_id: String,
-    tokens: Option<TokenSet>,
+    /// The waiting desktop: the session is the desktop's, not the
+    /// approving phone's.
+    device: SignInDevice,
+    /// The finished sign-in response, released once.
+    tokens: Option<Value>,
 }
 
 struct Registration {
@@ -195,17 +197,6 @@ fn palm(state: &RelayState) -> Result<&Palm, ApiError> {
         .ok_or_else(|| ApiError::NotFound("palm sign-in is not enabled on this relay".into()))
 }
 
-fn tokens_json(tokens: &TokenSet) -> Value {
-    json!({
-        "token_type": "Bearer",
-        "access_token": tokens.access_token,
-        "refresh_token": tokens.refresh_token,
-        "expires_in": tokens.expires_in,
-        "sub": tokens.sub,
-        "provider": "palm",
-    })
-}
-
 /// `GET /palm/capture`: the page hosts load to run the H5 SDK.
 pub(crate) async fn capture(State(state): State<RelayState>) -> Result<Response, ApiError> {
     let palm = palm(&state)?;
@@ -250,9 +241,9 @@ pub(crate) async fn sign_in(
     headers: HeaderMap,
     Json(req): Json<SessionRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let device_id = crate::client_device_id(&headers);
-    let tokens = palm(&state)?.sign_in_session(&req.session_id, &device_id).await?;
-    Ok(Json(tokens_json(&tokens)))
+    let device = SignInDevice::from_headers(&headers);
+    let tokens = palm(&state)?.sign_in_session(&req.session_id, &device.device_id).await?;
+    Ok(Json(finish_sign_in(&state, &device, &tokens, "palm").await?))
 }
 
 /// `POST /api/v1/auth/palm/register`: starts a palm-only sign-up. The
@@ -330,10 +321,10 @@ pub(crate) async fn register_finish(
         return Err(ApiError::Conflict("this palm scan was already used".into()));
     }
     palm.registrations.lock().remove(&req.registration_id);
-    let device_id = crate::client_device_id(&headers);
-    let tokens = palm.services.sign_in(&user_id, &device_id).await.map_err(map)?;
+    let device = SignInDevice::from_headers(&headers);
+    let tokens = palm.services.sign_in(&user_id, &device.device_id).await.map_err(map)?;
     tracing::info!(sub = %tokens.sub, "palm sign-up");
-    Ok(Json(tokens_json(&tokens)))
+    Ok(Json(finish_sign_in(&state, &device, &tokens, "palm").await?))
 }
 
 /// `POST /api/v1/palm/enroll_token`: a short-lived SDK token that can only
@@ -422,7 +413,7 @@ pub(crate) async fn handoff_start(
         Handoff {
             secret_hash: digest(&secret),
             expires: now + HANDOFF_TTL,
-            device_id: crate::client_device_id(&headers),
+            device: SignInDevice::from_headers(&headers),
             tokens: None,
         },
     );
@@ -460,7 +451,7 @@ pub(crate) async fn handoff_poll(
         Some(tokens) => {
             handoffs.remove(&id);
             Ok(Json(
-                json!({ "state": "approved", "tokens": tokens_json(&tokens) }),
+                json!({ "state": "approved", "tokens": tokens }),
             ))
         }
         None => Ok(Json(json!({ "state": "pending" }))),
@@ -480,16 +471,17 @@ pub(crate) async fn handoff_approve(
             .get(&id)
             .is_some_and(|h| h.expires > tokio::time::Instant::now() && h.tokens.is_none())
     };
-    let device_id = {
+    let device = {
         let handoffs = palm.handoffs.lock();
         if !live(&handoffs) {
             return Err(ApiError::NotFound(
                 "this sign-in request expired; start again".into(),
             ));
         }
-        handoffs[&id].device_id.clone()
+        handoffs[&id].device.clone()
     };
-    let tokens = palm.sign_in_session(&req.session_id, &device_id).await?;
+    let tokens = palm.sign_in_session(&req.session_id, &device.device_id).await?;
+    let tokens = finish_sign_in(&state, &device, &tokens, "palm").await?;
     let mut handoffs = palm.handoffs.lock();
     if !live(&handoffs) {
         return Err(ApiError::NotFound(
