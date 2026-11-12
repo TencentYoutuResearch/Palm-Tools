@@ -1048,12 +1048,22 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
             }
         }
     }
-    let mut agents = state.inner.agents.lock();
-    if agents
-        .get(&device_id)
-        .is_some_and(|current| current.connection_id == connection_id)
-    {
-        agents.remove(&device_id);
+    let removed = {
+        let mut agents = state.inner.agents.lock();
+        if agents
+            .get(&device_id)
+            .is_some_and(|current| current.connection_id == connection_id)
+        {
+            agents.remove(&device_id);
+            true
+        } else {
+            false
+        }
+    };
+    if removed {
+        if let Err(error) = expire_worker_sessions(&state, &device_id, None) {
+            tracing::warn!(%device_id, ?error, "failed to expire disconnected Worker sessions");
+        }
     }
 }
 
@@ -1185,6 +1195,48 @@ fn sync_session_snapshot(
         state.publish(
             device_id,
             CloudEnvelope::new(cloud_id, "session.updated", dto),
+        );
+    }
+    Ok(())
+}
+
+/// Remove a disconnected Worker's sessions from the monitor's actionable list.
+/// The Worker re-publishes its live sessions in the next hello snapshot.
+fn expire_worker_sessions(
+    state: &ServerState,
+    device_id: &str,
+    session_id: Option<i64>,
+) -> Result<(), ApiError> {
+    let expired = {
+        let mut db = state.inner.db.lock();
+        let tx = db.transaction()?;
+        let ids = tx
+            .prepare(
+                "SELECT id FROM sessions
+                 WHERE device_id=?1
+                   AND (?2 IS NULL OR id=?2)
+                   AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            )?
+            .query_map(params![device_id, session_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.execute(
+            "UPDATE sessions SET dto_json=json_set(dto_json, '$.status', 'exited'), updated_at=?1
+             WHERE device_id=?2
+               AND (?3 IS NULL OR id=?3)
+               AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            params![now_ms() as i64, device_id, session_id],
+        )?;
+        tx.commit()?;
+        ids
+    };
+    for cloud_id in expired {
+        state.publish(
+            device_id,
+            CloudEnvelope::new(
+                cloud_id,
+                "session.exited",
+                json!({"reason":"worker_offline"}),
+            ),
         );
     }
     Ok(())
@@ -1707,8 +1759,23 @@ fn dispatch_mobile_command(
         .agents
         .lock()
         .get(&auth.worker_id)
-        .cloned()
-        .ok_or_else(|| ApiError::Conflict("desktop is offline; message was not queued".into()))?;
+        .cloned();
+    let Some(agent) = agent else {
+        if kind == "delete" {
+            expire_worker_sessions(state, &auth.worker_id, Some(session_id))?;
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "command_id": null,
+                    "status": "executed",
+                    "offline_cleanup": true,
+                })),
+            ));
+        }
+        return Err(ApiError::Conflict(
+            "desktop is offline; message was not queued".into(),
+        ));
+    };
     let now = now_ms();
     let expires_at = now + COMMAND_TTL_MS;
     let (command_id, local_session_id, existing_status) = {

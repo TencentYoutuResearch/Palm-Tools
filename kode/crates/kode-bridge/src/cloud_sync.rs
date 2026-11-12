@@ -1694,10 +1694,11 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
         .lock()
         .values()
         .filter(|session| {
-            !matches!(
-                session.state.status,
-                kode_core::session::state::Status::Exited(_)
-            )
+            session.pty.as_ref().is_some_and(|pty| pty.is_alive())
+                && !matches!(
+                    session.state.status,
+                    kode_core::session::state::Status::Exited(_)
+                )
         })
         .map(|session| {
             let status = match session.state.status {
@@ -1739,9 +1740,8 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
             .into_iter()
             .filter(|s| {
                 s["dto"]["status"] != "exited"
-                    && !(s["dto"]["runtime"] == "gui"
-                        && s["dto"]["native_process_id"].as_u64().is_some()
-                        && s["dto"]["owner_alive"] == false)
+                    && (s["dto"]["runtime"] != "gui"
+                        || s["dto"]["owner_alive"] == true)
             }),
     );
     snapshots
@@ -2175,17 +2175,31 @@ mod tests {
         let ctx = crate::build_test_ctx(Default::default(), "test".into());
         let path = dir.path().join("runtime.sqlite");
         ctx.runtimes.open(&path).unwrap();
-        for (runtime, pid) in [("gui", i32::MAX as u64), ("dsh", 0)] {
-            let input = serde_json::from_value(json!({
-                "runtime": runtime, "boot_id": "test",
-                "sessions": [{
+        let gui = serde_json::from_value(json!({
+            "runtime": "gui", "boot_id": "test",
+            "sessions": [
+                {
                     "session_id": "history",
-                    "dto": {"status": "idle", "native_process_id": pid},
+                    "dto": {"status": "idle", "native_process_id": i32::MAX},
                     "events": [{"key": "1", "kind": "message", "payload": {"text": "retained"}}]
-                }]
-            })).unwrap();
-            ctx.runtimes.publish(&ctx, input).unwrap();
-        }
+                },
+                {
+                    "session_id": "missing-owner",
+                    "dto": {"status": "idle"},
+                    "events": [{"key": "2", "kind": "message", "payload": {"text": "stale"}}]
+                }
+            ]
+        })).unwrap();
+        ctx.runtimes.publish(&ctx, gui).unwrap();
+        let dsh = serde_json::from_value(json!({
+            "runtime": "dsh", "boot_id": "test",
+            "sessions": [{
+                "session_id": "history",
+                "dto": {"status": "idle", "native_process_id": 0},
+                "events": [{"key": "1", "kind": "message", "payload": {"text": "retained"}}]
+            }]
+        })).unwrap();
+        ctx.runtimes.publish(&ctx, dsh).unwrap();
         let db = rusqlite::Connection::open(path).unwrap();
         db.execute("UPDATE runtime_hosts SET seen=0", []).unwrap();
         let snapshots = session_snapshots(&ctx);
@@ -2193,7 +2207,7 @@ mod tests {
         assert_eq!(snapshots[0]["dto"]["runtime"], "dsh");
         assert_eq!(snapshots[0]["dto"]["runtime_online"], false);
         let saved = ctx.runtimes.snapshots();
-        assert_eq!(saved.len(), 2);
+        assert_eq!(saved.len(), 3);
         for session in saved {
             assert_eq!(ctx.runtimes.history(session["local_id"].as_u64().unwrap(), 0, 10).unwrap().len(), 1);
         }

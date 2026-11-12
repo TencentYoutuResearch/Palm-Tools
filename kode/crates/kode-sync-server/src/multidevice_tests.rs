@@ -607,3 +607,119 @@ async fn session_management_dispatches_rename_and_delete_to_the_owning_desktop()
         } if kind == "delete"
     ));
 }
+
+#[tokio::test]
+async fn offline_worker_sessions_are_removed_and_can_still_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('offline','offline','offline','device-token-hash',1,1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('offline','offline','phone',?1,?2,1)",
+            params![
+                token_hash("offline"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    sync_session_snapshot(
+        &state,
+        "offline",
+        "boot",
+        vec![AgentSession {
+            local_id: 11,
+            dto: json!({
+                "id":11,
+                "backend_key":"tcodex",
+                "title":"stale",
+                "status":"idle",
+                "tokens":{}
+            }),
+        }],
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer offline".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let session_id = list["sessions"][0]["id"].as_i64().unwrap();
+
+    let (status, Json(receipt)) = delete_session(
+        axum::extract::State(state.clone()),
+        Path(session_id),
+        headers.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(receipt["status"], "executed");
+    assert_eq!(receipt["offline_cleanup"], true);
+
+    let Json(list) = list_sessions(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    assert!(list["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn disconnect_expires_every_live_session_for_that_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('worker','worker','worker','hash',1,1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('worker','worker','phone',?1,?2,1)",
+            params![
+                token_hash("worker"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let sessions = [21, 22]
+        .into_iter()
+        .map(|local_id| AgentSession {
+            local_id,
+            dto: json!({
+                "id":local_id,
+                "backend_key":"tcodex",
+                "title":format!("session-{local_id}"),
+                "status":"idle",
+                "tokens":{}
+            }),
+        })
+        .collect();
+    sync_session_snapshot(&state, "worker", "boot", sessions).unwrap();
+    expire_worker_sessions(&state, "worker", None).unwrap();
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer worker".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    assert!(list["sessions"].as_array().unwrap().is_empty());
+}
