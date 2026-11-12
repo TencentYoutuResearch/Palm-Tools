@@ -1822,6 +1822,9 @@
   "pairing.deploy.modeLabel": { "message": "Sync backend setup method" },
   "pairing.deploy.modeSsh": { "message": "Deploy over SSH" },
   "pairing.deploy.modeExisting": { "message": "Connect existing" },
+  "pairing.deploy.joinTitle": { "message": "Joining a server that is already running?" },
+  "pairing.deploy.joinMobile": { "message": "On mobile, scan the current Worker's pairing QR code." },
+  "pairing.deploy.joinDesktop": { "message": "On another desktop, choose Connect existing and enter the current server URL. Do not deploy again unless you intend to update that server." },
   "pairing.deploy.installType": { "message": "Deployment type" },
   "pairing.deploy.installStandalone": { "message": "Standalone service" },
   "pairing.deploy.installDocker": { "message": "Docker + Caddy" },
@@ -1927,6 +1930,16 @@
   "workers.monitorLoading": {
     "message": "Loading monitor sessions…"
   },
+  "monitorNew.title": { "message": "New session" },
+  "monitorNew.loading": { "message": "Loading Agents…" },
+  "monitorNew.noAgents": { "message": "No available Agent is configured on this Worker." },
+  "monitorNew.agent": { "message": "Agent" },
+  "monitorNew.cwd": { "message": "Working directory" },
+  "monitorNew.cwdPlaceholder": { "message": "Worker home directory" },
+  "monitorNew.model": { "message": "Model" },
+  "monitorNew.modelPlaceholder": { "message": "Agent default" },
+  "monitorNew.create": { "message": "Create session" },
+  "monitorNew.creating": { "message": "Creating…" },
   "workers.noMonitorSessions": {
     "message": "No sessions on this Worker."
   },
@@ -1938,6 +1951,21 @@
   },
   "workers.deviceDetails": {
     "message": "Device details"
+  },
+  "workers.rename": {
+    "message": "Rename Worker"
+  },
+  "workers.renameSave": {
+    "message": "Save Worker name"
+  },
+  "workers.renameCancel": {
+    "message": "Cancel renaming"
+  },
+  "workers.renameRequired": {
+    "message": "Worker name cannot be empty."
+  },
+  "workers.hostname": {
+    "message": "PC name: {name}"
   },
   "workers.syncServer": {
     "message": "Sync server"
@@ -2088,6 +2116,14 @@
   "devices.noSessions": { "message": "No running sessions" },
   "devices.sessionLabel": { "message": "{session} on {device}" },
   "devices.close": { "message": "Close" },
+  "devices.rename": { "message": "Rename session" },
+  "devices.renameLabel": { "message": "Session name" },
+  "devices.renameSave": { "message": "Save session name" },
+  "devices.delete": { "message": "Delete session" },
+  "devices.deleteTitle": { "message": "Delete session?" },
+  "devices.deleteMessage": { "message": "“{title}” will be stopped on the Worker. This cannot be undone." },
+  "devices.deleteConfirm": { "message": "Delete" },
+  "devices.cancel": { "message": "Cancel" },
   "devices.emptyHistory": { "message": "No conversation yet" },
   "devices.you": { "message": "You" },
   "devices.question": { "message": "Question" },

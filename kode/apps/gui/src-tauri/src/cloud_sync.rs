@@ -24,6 +24,11 @@ impl CloudSyncManager {
             .list_workers()
             .await
     }
+    pub async fn rename_worker(&self, worker_id: &str, display_name: &str) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .rename_worker(worker_id, display_name)
+            .await
+    }
     pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
         kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
             .worker_inventory(worker_id)
@@ -32,6 +37,42 @@ impl CloudSyncManager {
     pub async fn worker_sessions(&self, worker_id: &str) -> Result<Value, String> {
         kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
             .worker_sessions(worker_id)
+            .await
+    }
+    pub async fn worker_session_history(
+        &self,
+        worker_id: &str,
+        session_id: i64,
+        from: u64,
+        limit: usize,
+    ) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_session_history(worker_id, session_id, from, limit)
+            .await
+    }
+    pub async fn worker_session_command(
+        &self,
+        worker_id: &str,
+        session_id: i64,
+        op: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_session_command(worker_id, session_id, op, body)
+            .await
+    }
+    pub async fn worker_backends(&self, worker_id: &str) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_backends(worker_id)
+            .await
+    }
+    pub async fn worker_create_session(
+        &self,
+        worker_id: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_create_session(worker_id, body)
             .await
     }
     pub async fn configure_and_create_pairing(
@@ -100,6 +141,14 @@ pub async fn cloud_sync_workers(
     manager.list_workers().await
 }
 #[tauri::command]
+pub async fn cloud_sync_rename_worker(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    display_name: String,
+) -> Result<Value, String> {
+    manager.rename_worker(&worker_id, &display_name).await
+}
+#[tauri::command]
 pub async fn cloud_sync_worker_inventory(
     manager: State<'_, CloudSyncManager>,
     worker_id: String,
@@ -112,6 +161,45 @@ pub async fn cloud_sync_worker_sessions(
     worker_id: String,
 ) -> Result<Value, String> {
     manager.worker_sessions(&worker_id).await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_history(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    session_id: i64,
+    from: u64,
+    limit: usize,
+) -> Result<Value, String> {
+    manager
+        .worker_session_history(&worker_id, session_id, from, limit)
+        .await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_command(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    session_id: i64,
+    op: String,
+    body: Value,
+) -> Result<Value, String> {
+    manager
+        .worker_session_command(&worker_id, session_id, &op, body)
+        .await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_backends(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+) -> Result<Value, String> {
+    manager.worker_backends(&worker_id).await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_create_session(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    body: Value,
+) -> Result<Value, String> {
+    manager.worker_create_session(&worker_id, body).await
 }
 #[tauri::command]
 pub async fn cloud_sync_create_pairing(

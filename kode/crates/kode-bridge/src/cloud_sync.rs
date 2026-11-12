@@ -32,6 +32,7 @@ use crate::account::{
 };
 
 const MAX_COMMAND_RECEIPTS: usize = 512;
+const WORKER_HEADER: &str = "X-Kode-Worker-Id";
 /// A connection that stayed up this long resets the reconnect backoff, so a
 /// relay closing an expiring token's socket is followed by a quick reconnect.
 const STABLE_CONNECTION: Duration = Duration::from_secs(60);
@@ -136,6 +137,9 @@ struct CloudBackendConfig {
     device_id: Option<String>,
     #[serde(default)]
     device_token: Option<String>,
+    /// Desktop-owned binding used only to inspect and control sibling Workers.
+    #[serde(default)]
+    monitor_token: Option<String>,
     #[serde(default)]
     command_receipts: VecDeque<CommandReceipt>,
     #[serde(default)]
@@ -333,6 +337,44 @@ impl CloudSyncManager {
             .map_err(|error| format!("invalid Worker directory response: {error}"))
     }
 
+    pub async fn rename_worker(
+        &self,
+        worker_id: &str,
+        display_name: &str,
+    ) -> Result<Value, String> {
+        if !worker_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let display_name = display_name.trim();
+        if display_name.is_empty()
+            || display_name.len() > 128
+            || display_name.chars().any(char::is_control)
+        {
+            return Err("Worker name must be 1-128 visible characters".into());
+        }
+        let (server_url, token) = self.device_http_context()?;
+        let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .patch(format!("{server_url}/api/v1/workers/{worker}"))
+            .bearer_auth(token)
+            .json(&json!({ "display_name": display_name }))
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker profile response: {error}"))
+    }
+
     pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
         if !worker_id
             .bytes()
@@ -383,6 +425,184 @@ impl CloudSyncManager {
             .json::<Value>()
             .await
             .map_err(|error| format!("invalid Worker session response: {error}"))
+    }
+
+    pub async fn worker_session_history(
+        &self,
+        worker_id: &str,
+        session_id: i64,
+        from: u64,
+        limit: usize,
+    ) -> Result<Value, String> {
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/sessions/{session_id}/history"))
+            .query(&[("from", from), ("limit", limit.clamp(1, 2000) as u64)])
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker session history: {error}"))
+    }
+
+    pub async fn worker_session_command(
+        &self,
+        worker_id: &str,
+        session_id: i64,
+        op: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        if !matches!(
+            op,
+            "input" | "interrupt" | "answer" | "plan_response" | "delete" | "rename"
+        ) {
+            return Err(format!("unsupported Worker command: {op}"));
+        }
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let url = match op {
+            "delete" | "rename" => format!("{server_url}/api/v1/sessions/{session_id}"),
+            _ => format!("{server_url}/api/v1/sessions/{session_id}/{op}"),
+        };
+        let request = match op {
+            "delete" => self.inner.client.delete(url),
+            "rename" => self.inner.client.patch(url),
+            _ => self.inner.client.post(url),
+        };
+        let response = request
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&body)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker command response: {error}"))
+    }
+
+    pub async fn worker_backends(&self, worker_id: &str) -> Result<Value, String> {
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/backends"))
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker backend response: {error}"))
+    }
+
+    pub async fn worker_create_session(
+        &self,
+        worker_id: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let response = self
+            .inner
+            .client
+            .post(format!("{server_url}/api/v1/sessions"))
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&body)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker session create response: {error}"))
+    }
+
+    async fn monitor_http_context(
+        &self,
+        worker_id: &str,
+    ) -> Result<(String, String, String), String> {
+        if worker_id.is_empty()
+            || !worker_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let backend = self
+            .inner
+            .config
+            .lock()
+            .active_backend()
+            .cloned()
+            .ok_or_else(|| "cloud sync server is not configured".to_string())?;
+        if let Some(token) = backend.monitor_token.clone() {
+            return Ok((backend.server_url, token, worker_id.to_string()));
+        }
+        let device_id = backend
+            .device_id
+            .clone()
+            .ok_or_else(|| "Worker is not registered with the sync server".to_string())?;
+        let device_token = backend
+            .device_token
+            .clone()
+            .ok_or_else(|| "Worker is not registered with the sync server".to_string())?;
+        let device = url::form_urlencoded::byte_serialize(device_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .post(format!(
+                "{}/api/v1/devices/{device}/monitor-binding",
+                backend.server_url
+            ))
+            .bearer_auth(device_token)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        let value = response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid monitor binding response: {error}"))?;
+        let token = value["access_token"]
+            .as_str()
+            .ok_or_else(|| "monitor binding response omitted access_token".to_string())?
+            .to_string();
+        {
+            let mut config = self.inner.config.lock();
+            let current = config
+                .backends
+                .iter_mut()
+                .find(|candidate| candidate.id == backend.id)
+                .ok_or_else(|| "cloud sync backend changed during monitor binding".to_string())?;
+            current.monitor_token = Some(token.clone());
+            save_config(&self.inner.config_path, &config)?;
+        }
+        Ok((backend.server_url, token, worker_id.to_string()))
     }
 
     fn device_http_context(&self) -> Result<(String, String), String> {
@@ -451,6 +671,7 @@ impl CloudSyncManager {
                     managed: false,
                     device_id: None,
                     device_token: None,
+                    monitor_token: None,
                     command_receipts: VecDeque::new(),
                     kind: BackendKind::AccountRelay,
                     account: Some(session),
@@ -841,6 +1062,7 @@ impl CloudSyncManager {
                     managed: true,
                     device_id: None,
                     device_token: None,
+                    monitor_token: None,
                     command_receipts: VecDeque::new(),
                     kind: BackendKind::SelfHosted,
                     account: None,
@@ -912,6 +1134,7 @@ impl CloudSyncManager {
                         managed: false,
                         device_id: None,
                         device_token: None,
+                        monitor_token: None,
                         command_receipts: VecDeque::new(),
                         kind: BackendKind::SelfHosted,
                         account: None,
@@ -969,13 +1192,15 @@ impl CloudSyncManager {
             .cloned()
             .ok_or_else(|| "cloud sync server is not configured".to_string())?;
         let server_url = backend.server_url.clone();
+        let worker_name = host_name();
         let response = self
             .inner
             .client
             .post(format!("{server_url}/api/v1/devices/register"))
             .json(&json!({
                 "installation_id": snapshot.installation_id,
-                "name": desktop_name(),
+                "name": worker_name,
+                "hostname": worker_name,
                 "device_token": backend.device_token,
             }))
             .send()
@@ -1593,6 +1818,7 @@ fn migrate_legacy_backend(config: &mut CloudSyncConfig) {
                 managed: false,
                 device_id: config.device_id.take(),
                 device_token: config.device_token.take(),
+                monitor_token: None,
                 command_receipts: std::mem::take(&mut config.command_receipts),
                 kind: BackendKind::SelfHosted,
                 account: None,
@@ -1754,9 +1980,11 @@ fn host_name() -> String {
 }
 
 fn desktop_name() -> String {
-    std::env::var("HOSTNAME")
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
         .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
         .unwrap_or_else(|| "Kode Desktop".into())
 }
 
@@ -2113,6 +2341,7 @@ mod tests {
                 managed: true,
                 device_id: None,
                 device_token: None,
+                monitor_token: None,
                 command_receipts: VecDeque::new(),
                 kind: BackendKind::SelfHosted,
                 account: None,
@@ -2129,6 +2358,7 @@ mod tests {
                 managed: false,
                 device_id: None,
                 device_token: None,
+                monitor_token: None,
                 command_receipts: VecDeque::new(),
                 kind: BackendKind::SelfHosted,
                 account: None,
@@ -2159,6 +2389,27 @@ pub async fn execute_local_command(
         },
         "interrupt" => crate::interrupt_session(ctx, id).map_err(|error| error.to_string()),
         "delete" => crate::delete_session(ctx, id),
+        "rename" => {
+            let title = payload
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty() && title.len() <= 200)
+                .ok_or("rename command requires a 1-200 character title")?;
+            let mut sessions = ctx.sessions.lock();
+            let session = sessions
+                .get_mut(&id)
+                .ok_or_else(|| format!("no session {id}"))?;
+            session.state.title = title.to_string();
+            session.state.title_pinned = true;
+            drop(sessions);
+            ctx.bus.emit(crate::EventEnvelope::new(
+                id,
+                "meta",
+                json!({ "title": title }),
+            ));
+            Ok(())
+        }
         "answer" if payload.get("response").is_some() => {
             match (ctx.acp.get(id), payload["request_id"].as_str()) {
                 (Some(client), Some(request_id)) => {

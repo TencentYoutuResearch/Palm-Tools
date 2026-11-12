@@ -420,10 +420,42 @@ export const ipc = {
   cloudSyncActivateBackend: (backendId: string) =>
     invoke<CloudSyncStatus>('cloud_sync_activate_backend', { backendId }),
   cloudSyncWorkers: () => invoke<WorkerDirectoryResponse>('cloud_sync_workers'),
+  cloudSyncRenameWorker: (workerId: string, displayName: string) =>
+    invoke<{ worker_id: string; name: string; display_name: string }>('cloud_sync_rename_worker', {
+      workerId,
+      displayName,
+    }),
   cloudSyncWorkerInventory: (workerId: string) =>
     invoke<WorkerInventory>('cloud_sync_worker_inventory', { workerId }),
   cloudSyncWorkerSessions: (workerId: string) =>
     invoke<WorkerSessionResponse>('cloud_sync_worker_sessions', { workerId }),
+  cloudSyncWorkerHistory: (workerId: string, sessionId: number, limit = 500, from = 0) =>
+    invoke<{ events: AccountDeviceEvent[] }>('cloud_sync_worker_history', {
+      workerId,
+      sessionId,
+      from,
+      limit,
+    }),
+  cloudSyncWorkerCommand: (
+    workerId: string,
+    sessionId: number,
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename',
+    body: Record<string, unknown> = {},
+  ) =>
+    invoke<{ command_id?: string; status?: string }>('cloud_sync_worker_command', {
+      workerId,
+      sessionId,
+      op,
+      body,
+    }),
+  cloudSyncWorkerBackends: (workerId: string) =>
+    invoke<{ backends: WorkerBackendOption[]; home?: string | null }>('cloud_sync_worker_backends', {
+      workerId,
+    }),
+  cloudSyncWorkerCreateSession: (
+    workerId: string,
+    body: { backend_key: string; cwd?: string; model?: string },
+  ) => invoke<WorkerSessionDto>('cloud_sync_worker_create_session', { workerId, body }),
   cloudSyncDeploy: (req: CloudDeployReq) =>
     invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
   cloudAccountSendCode: (serverUrl: string, email: string) =>
@@ -1003,6 +1035,8 @@ export interface PalmxProgress {
 export interface WorkerDirectoryEntry {
   worker_id: string
   name: string
+  display_name: string
+  hostname: string | null
   online: boolean
   last_seen_at: number
   kode_version: string | null
@@ -1027,6 +1061,12 @@ export interface WorkerSessionDto {
 
 export interface WorkerSessionResponse {
   sessions: WorkerSessionDto[]
+}
+
+export interface WorkerBackendOption {
+  key: string
+  display_name: string
+  enabled?: boolean
 }
 
 export interface WorkerInventoryAgent {

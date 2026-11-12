@@ -602,6 +602,21 @@ class SessionsNotifier extends AsyncNotifier<List<SessionDto>> {
     state = AsyncData([...current, session]);
   }
 
+  Future<void> rename(int id, String title) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) throw StateError('Desktop connection unavailable');
+    final normalized = title.trim();
+    if (normalized.isEmpty) throw ArgumentError.value(title, 'title');
+    await api.renameSession(id, normalized);
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(
+      current
+          .map((session) => session.id == id ? session.copyWith(title: normalized) : session)
+          .toList(growable: false),
+    );
+  }
+
   /// Ask the desktop to stop [id]. A 204 or `executed` receipt is final. A
   /// 202 waits for `session.exited` or the matching command receipt.
   Future<void> delete(int id) async {

@@ -25,15 +25,39 @@ type MouseSelectionTerminal = {
 
 type Cell = { col: number; row: number }
 const DRAG_DISTANCE_SQUARED = 25
+const MULTI_CLICK_MS = 500
+const MULTI_CLICK_DISTANCE_SQUARED = 16
 
 export function supportsCodexMouseSelection(backendKey: string): boolean {
   return backendKey === 'codex' || backendKey === 'tcodex'
 }
 
-export function installCodexMouseSelection(host: HTMLElement, term: MouseSelectionTerminal): () => void {
+export function installCodexMouseSelection(
+  host: HTMLElement,
+  term: MouseSelectionTerminal,
+  now: () => number = () => performance.now(),
+): () => void {
   const doc = host.ownerDocument
   let pending: { down: MouseEvent; target: Element; start: Cell; detail: number; dragging: boolean } | null = null
   let replaying = false
+  let lastClick: { at: number; x: number; y: number; detail: number } | null = null
+
+  function clickDetail(event: MouseEvent): number {
+    const previous = lastClick
+    if (previous) {
+      const dx = event.clientX - previous.x
+      const dy = event.clientY - previous.y
+      const elapsed = now() - previous.at
+      if (
+        elapsed >= 0
+        && elapsed <= MULTI_CLICK_MS
+        && dx * dx + dy * dy <= MULTI_CLICK_DISTANCE_SQUARED
+      ) {
+        return Math.max(2, Math.min(3, previous.detail + 1), event.detail)
+      }
+    }
+    return Math.max(1, event.detail)
+  }
 
   function cellAt(event: MouseEvent, selectionEnd: boolean): Cell | null {
     const element = term.element
@@ -109,7 +133,7 @@ export function installCodexMouseSelection(host: HTMLElement, term: MouseSelecti
     if (!start || !(event.target instanceof Element)) return
     event.preventDefault()
     event.stopImmediatePropagation()
-    pending = { down: event, target: event.target, start, detail: event.detail, dragging: false }
+    pending = { down: event, target: event.target, start, detail: clickDetail(event), dragging: false }
     doc.addEventListener('mousemove', onMove, true)
     doc.addEventListener('mouseup', onUp, true)
     doc.defaultView?.addEventListener('blur', cancel, { once: true })
@@ -139,9 +163,19 @@ export function installCodexMouseSelection(host: HTMLElement, term: MouseSelecti
     event.preventDefault()
     event.stopImmediatePropagation()
     cancel()
-    if (gesture.dragging) selectTo(event, gesture)
-    else if (gesture.detail > 1) selectClickIntent(gesture)
+    if (gesture.dragging) {
+      lastClick = null
+      selectTo(event, gesture)
+      return
+    }
+    if (gesture.detail > 1) selectClickIntent(gesture)
     else replayClick(gesture, event)
+    lastClick = {
+      at: now(),
+      x: event.clientX,
+      y: event.clientY,
+      detail: Math.min(3, gesture.detail),
+    }
   }
 
   host.addEventListener('mousedown', onDown, true)
