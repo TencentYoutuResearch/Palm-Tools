@@ -18,7 +18,7 @@ use axum::{
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use base64::Engine;
@@ -148,6 +148,8 @@ impl ServerState {
                id TEXT PRIMARY KEY,
                installation_id TEXT NOT NULL UNIQUE,
                name TEXT NOT NULL,
+               hostname TEXT,
+               display_name TEXT,
                token_hash TEXT NOT NULL,
                created_at INTEGER NOT NULL,
                last_seen_at INTEGER NOT NULL,
@@ -208,6 +210,7 @@ impl ServerState {
                UNIQUE(binding_id, idempotency_key)
              );",
         )?;
+        ensure_worker_profile_columns(&db)?;
         db.execute_batch(mobile_setup::SCHEMA)?;
         Ok(Self {
             inner: Arc::new(Inner {
@@ -307,6 +310,20 @@ impl ServerState {
     }
 }
 
+fn ensure_worker_profile_columns(db: &Connection) -> rusqlite::Result<()> {
+    let mut statement = db.prepare("PRAGMA table_info(devices)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "hostname") {
+        db.execute_batch("ALTER TABLE devices ADD COLUMN hostname TEXT")?;
+    }
+    if !columns.iter().any(|column| column == "display_name") {
+        db.execute_batch("ALTER TABLE devices ADD COLUMN display_name TEXT")?;
+    }
+    Ok(())
+}
+
 pub fn build_router(state: ServerState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -318,6 +335,7 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/devices/:id/pairings", post(create_pairing))
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
         .route("/api/v1/workers", get(list_workers))
+        .route("/api/v1/workers/:worker_id", patch(update_worker_profile))
         .route(
             "/api/v1/workers/:worker_id/inventory",
             get(get_worker_inventory),
@@ -363,6 +381,8 @@ async fn healthz() -> Json<Value> {
 struct RegisterDeviceReq {
     installation_id: String,
     name: String,
+    #[serde(default)]
+    hostname: Option<String>,
     device_token: Option<String>,
 }
 
@@ -376,10 +396,14 @@ async fn register_device(
     axum::extract::State(state): axum::extract::State<ServerState>,
     Json(req): Json<RegisterDeviceReq>,
 ) -> Result<Json<RegisterDeviceResp>, ApiError> {
-    if req.installation_id.trim().is_empty() || req.name.trim().is_empty() {
-        return Err(ApiError::BadRequest(
-            "installation_id and name are required".into(),
-        ));
+    let name = valid_worker_name(&req.name, "name")?;
+    let hostname = req
+        .hostname
+        .as_deref()
+        .map(|value| valid_worker_name(value, "hostname"))
+        .transpose()?;
+    if req.installation_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("installation_id is required".into()));
     }
     let db = state.inner.db.lock();
     let existing = db
@@ -397,8 +421,8 @@ async fn register_device(
             return Err(ApiError::Unauthorized);
         }
         db.execute(
-            "UPDATE devices SET name=?1, last_seen_at=?2 WHERE id=?3",
-            params![req.name.trim(), now_ms() as i64, device_id],
+            "UPDATE devices SET name=?1, hostname=COALESCE(?2, hostname), last_seen_at=?3 WHERE id=?4",
+            params![name, hostname, now_ms() as i64, device_id],
         )?;
         return Ok(Json(RegisterDeviceResp {
             device_id,
@@ -408,12 +432,13 @@ async fn register_device(
     let device_id = format!("dev_{}", Uuid::new_v4().simple());
     let device_token = random_token("kdev");
     db.execute(
-        "INSERT INTO devices(id, installation_id, name, token_hash, created_at, last_seen_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?5)",
+        "INSERT INTO devices(id, installation_id, name, hostname, token_hash, created_at, last_seen_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![
             device_id,
             req.installation_id.trim(),
-            req.name.trim(),
+            name,
+            hostname,
             token_hash(&device_token),
             now_ms() as i64
         ],
@@ -422,6 +447,46 @@ async fn register_device(
         device_id,
         device_token,
     }))
+}
+
+fn valid_worker_name(value: &str, field: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 || trimmed.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(format!(
+            "{field} must be 1-128 visible characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Deserialize)]
+struct UpdateWorkerProfileReq {
+    display_name: String,
+}
+
+async fn update_worker_profile(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(worker_id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateWorkerProfileReq>,
+) -> Result<Json<Value>, ApiError> {
+    let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.read")?;
+    if viewer_id != worker_id && !*state.inner.allow_shared_inventory.lock() {
+        return Err(ApiError::NotFound(format!("Worker {worker_id}")));
+    }
+    let display_name = valid_worker_name(&req.display_name, "display_name")?;
+    let changed = state.inner.db.lock().execute(
+        "UPDATE devices SET display_name=?1 WHERE id=?2 AND revoked_at IS NULL",
+        params![display_name, worker_id],
+    )?;
+    if changed == 0 {
+        return Err(ApiError::NotFound(format!("Worker {worker_id}")));
+    }
+    Ok(Json(json!({
+        "worker_id": worker_id,
+        "name": display_name,
+        "display_name": display_name,
+    })))
 }
 
 /// Resolve either a monitor binding or a Worker's own device bearer to the
@@ -464,13 +529,18 @@ async fn list_workers(
     let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.read")?;
     let rows = {
         let db = state.inner.db.lock();
-        let mut stmt =
-            db.prepare("SELECT id,name,last_seen_at FROM devices WHERE revoked_at IS NULL ORDER BY name,id")?;
+        let mut stmt = db.prepare(
+            "SELECT id,name,hostname,display_name,last_seen_at
+             FROM devices WHERE revoked_at IS NULL
+             ORDER BY COALESCE(NULLIF(display_name,''),NULLIF(hostname,''),name),id",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -479,11 +549,17 @@ async fn list_workers(
     let agents = state.inner.agents.lock();
     let workers = rows
         .into_iter()
-        .map(|(worker_id, name, last_seen_at)| {
+        .map(|(worker_id, legacy_name, hostname, display_name, last_seen_at)| {
             let agent = agents.get(&worker_id);
+            let display_name = display_name
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| hostname.clone())
+                .unwrap_or(legacy_name);
             json!({
                 "worker_id": worker_id,
-                "name": name,
+                "name": display_name,
+                "display_name": display_name,
+                "hostname": hostname,
                 "online": agent.is_some(),
                 "last_seen_at": last_seen_at,
                 "kode_version": agent.and_then(|value| value.kode_version.clone()),

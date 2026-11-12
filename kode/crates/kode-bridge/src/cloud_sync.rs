@@ -323,6 +323,44 @@ impl CloudSyncManager {
             .map_err(|error| format!("invalid Worker directory response: {error}"))
     }
 
+    pub async fn rename_worker(
+        &self,
+        worker_id: &str,
+        display_name: &str,
+    ) -> Result<Value, String> {
+        if !worker_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let display_name = display_name.trim();
+        if display_name.is_empty()
+            || display_name.len() > 128
+            || display_name.chars().any(char::is_control)
+        {
+            return Err("Worker name must be 1-128 visible characters".into());
+        }
+        let (server_url, token) = self.device_http_context()?;
+        let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .patch(format!("{server_url}/api/v1/workers/{worker}"))
+            .bearer_auth(token)
+            .json(&json!({ "display_name": display_name }))
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker profile response: {error}"))
+    }
+
     pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
         if !worker_id
             .bytes()
@@ -918,13 +956,15 @@ impl CloudSyncManager {
             .cloned()
             .ok_or_else(|| "cloud sync server is not configured".to_string())?;
         let server_url = backend.server_url.clone();
+        let worker_name = host_name();
         let response = self
             .inner
             .client
             .post(format!("{server_url}/api/v1/devices/register"))
             .json(&json!({
                 "installation_id": snapshot.installation_id,
-                "name": desktop_name(),
+                "name": worker_name,
+                "hostname": worker_name,
                 "device_token": backend.device_token,
             }))
             .send()
@@ -1703,9 +1743,11 @@ fn host_name() -> String {
 }
 
 fn desktop_name() -> String {
-    std::env::var("HOSTNAME")
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
         .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
         .unwrap_or_else(|| "Kode Desktop".into())
 }
 

@@ -29,6 +29,11 @@
   let loadingInventory = $state(false)
   let error = $state('')
   let inventoryError = $state('')
+  let renaming = $state(false)
+  let renameValue = $state('')
+  let renameBusy = $state(false)
+  let renameError = $state('')
+  let renameInput: HTMLInputElement | null = $state(null)
   let tr = $derived.by(() => {
     void $currentLocale
     return t
@@ -75,6 +80,8 @@
   async function selectWorker(worker: WorkerDirectoryEntry, showLoading = true) {
     if (selectedId === worker.worker_id && inventory && !showLoading) return
     selectedId = worker.worker_id
+    renaming = false
+    renameError = ''
     inventory = null
     inventoryError = ''
     if (!worker.online) {
@@ -123,6 +130,47 @@
   function pick(event: Event) {
     const worker = workers.find((w) => w.worker_id === (event.currentTarget as HTMLSelectElement).value)
     if (worker) void selectWorker(worker)
+  }
+
+  function beginRename() {
+    if (!selected) return
+    renameValue = selected.name
+    renameError = ''
+    renaming = true
+    requestAnimationFrame(() => {
+      renameInput?.focus()
+      renameInput?.select()
+    })
+  }
+
+  function cancelRename() {
+    if (renameBusy) return
+    renaming = false
+    renameError = ''
+  }
+
+  async function saveRename() {
+    if (!selected || renameBusy) return
+    const displayName = renameValue.trim()
+    if (!displayName) {
+      renameError = tr('workers.renameRequired')
+      return
+    }
+    renameBusy = true
+    renameError = ''
+    try {
+      const updated = await ipc.cloudSyncRenameWorker(selected.worker_id, displayName)
+      workers = workers.map((worker) =>
+        worker.worker_id === selected.worker_id
+          ? { ...worker, name: updated.name, display_name: updated.display_name }
+          : worker,
+      )
+      renaming = false
+    } catch (reason) {
+      renameError = String(reason)
+    } finally {
+      renameBusy = false
+    }
   }
 </script>
 
@@ -177,11 +225,63 @@
       {#if selected}
         <div class="detail-head">
           <div class="head-copy">
-            <h3>{selected.name}</h3>
+            {#if renaming}
+              <form
+                class="rename-form"
+                onsubmit={(event) => {
+                  event.preventDefault()
+                  void saveRename()
+                }}
+              >
+                <input
+                  bind:this={renameInput}
+                  bind:value={renameValue}
+                  maxlength="128"
+                  aria-label={tr('workers.rename')}
+                  disabled={renameBusy}
+                />
+                <button
+                  class="tool"
+                  type="submit"
+                  title={tr('workers.renameSave')}
+                  aria-label={tr('workers.renameSave')}
+                  disabled={renameBusy}
+                >
+                  <Icon name="check" size={14} />
+                </button>
+                <button
+                  class="tool"
+                  type="button"
+                  title={tr('workers.renameCancel')}
+                  aria-label={tr('workers.renameCancel')}
+                  disabled={renameBusy}
+                  onclick={cancelRename}
+                >
+                  <Icon name="x" size={14} />
+                </button>
+              </form>
+            {:else}
+              <div class="name-row">
+                <h3>{selected.name}</h3>
+                <button
+                  class="tool rename-trigger"
+                  type="button"
+                  title={tr('workers.rename')}
+                  aria-label={tr('workers.rename')}
+                  onclick={beginRename}
+                >
+                  <Icon name="pencil" size={13} />
+                </button>
+              </div>
+            {/if}
             <p>
               {selected.os ?? tr('workers.unknownOs')} · {selected.arch ?? '?'}
               · <span class="mono">{selected.kode_version ?? tr('workers.versionUnavailable')}</span>
             </p>
+            {#if selected.hostname && selected.hostname !== selected.name}
+              <p class="hostname">{tr('workers.hostname', { name: selected.hostname })}</p>
+            {/if}
+            {#if renameError}<p class="rename-error" role="alert">{renameError}</p>{/if}
           </div>
           <span class="state" class:online={selected.online}>
             {selected.online ? tr('workers.online') : tr('workers.lastSeen', { time: formatTime(selected.last_seen_at) })}
@@ -328,6 +428,14 @@
     font-size: var(--fs-sm);
     font-weight: 600;
   }
+  .name-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .name-row h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rename-trigger { flex: 0 0 auto; width: 24px; height: 24px; }
+  .rename-form { display: flex; align-items: center; gap: 2px; min-width: 0; }
+  .rename-form input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--bd-focus); border-radius: var(--rad-sm); background: var(--bg-input); color: var(--fg-primary); font: var(--fs-sm) var(--font-ui); outline: none; }
+  .rename-form .tool { flex: 0 0 auto; }
+  .hostname { color: var(--fg-tertiary); }
+  .rename-error { color: var(--st-err); }
   .nav-top-actions { display: flex; gap: 2px; -webkit-app-region: no-drag; }
   .tool {
     width: 28px;

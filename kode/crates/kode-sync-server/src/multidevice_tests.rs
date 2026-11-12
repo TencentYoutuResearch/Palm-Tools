@@ -2,6 +2,81 @@
 use super::*;
 
 #[tokio::test]
+async fn worker_display_name_survives_registration_and_hostname_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("sync.db");
+    {
+        let db = Connection::open(&database_path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE devices(
+               id TEXT PRIMARY KEY,
+               installation_id TEXT NOT NULL UNIQUE,
+               name TEXT NOT NULL,
+               token_hash TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               last_seen_at INTEGER NOT NULL,
+               revoked_at INTEGER
+             );",
+        )
+        .unwrap();
+    }
+    let state = ServerState::open(ServerConfig {
+        database_path,
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    let Json(first) = register_device(
+        axum::extract::State(state.clone()),
+        Json(RegisterDeviceReq {
+            installation_id: "install".into(),
+            name: "Kode Desktop".into(),
+            hostname: Some("OFFICE-PC".into()),
+            device_token: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        format!("Bearer {}", first.device_token.clone())
+            .parse()
+            .unwrap(),
+    );
+    let Json(renamed) = update_worker_profile(
+        axum::extract::State(state.clone()),
+        Path(first.device_id.clone()),
+        headers.clone(),
+        Json(UpdateWorkerProfileReq {
+            display_name: "Office Windows".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(renamed["display_name"], "Office Windows");
+
+    let _ = register_device(
+        axum::extract::State(state.clone()),
+        Json(RegisterDeviceReq {
+            installation_id: "install".into(),
+            name: "Kode Desktop".into(),
+            hostname: Some("OFFICE-PC-NEW".into()),
+            device_token: Some(first.device_token),
+        }),
+    )
+    .await
+    .unwrap();
+    let Json(directory) = list_workers(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    let worker = &directory["workers"][0];
+    assert_eq!(worker["worker_id"], first.device_id);
+    assert_eq!(worker["name"], "Office Windows");
+    assert_eq!(worker["display_name"], "Office Windows");
+    assert_eq!(worker["hostname"], "OFFICE-PC-NEW");
+}
+
+#[tokio::test]
 async fn worker_directory_lists_same_server_workers_and_marks_the_viewer() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {

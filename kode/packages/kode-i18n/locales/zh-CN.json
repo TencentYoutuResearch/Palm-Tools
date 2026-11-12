@@ -694,6 +694,9 @@
   "pairing.deploy.modeLabel": { "message": "同步后端接入方式" },
   "pairing.deploy.modeSsh": { "message": "SSH 自动部署" },
   "pairing.deploy.modeExisting": { "message": "连接已有服务" },
+  "pairing.deploy.joinTitle": { "message": "服务已经在运行？" },
+  "pairing.deploy.joinMobile": { "message": "手机端扫描当前 Worker 的配对二维码即可绑定。" },
+  "pairing.deploy.joinDesktop": { "message": "其他桌面选择「连接已有服务」并填写当前服务地址；除非确实要更新该服务，否则不要重复部署。" },
   "pairing.deploy.installType": { "message": "部署类型" },
   "pairing.deploy.installStandalone": { "message": "独立服务" },
   "pairing.deploy.installDocker": { "message": "Docker + Caddy" },
@@ -810,6 +813,21 @@
   },
   "workers.deviceDetails": {
     "message": "设备详情"
+  },
+  "workers.rename": {
+    "message": "重命名 Worker"
+  },
+  "workers.renameSave": {
+    "message": "保存 Worker 名称"
+  },
+  "workers.renameCancel": {
+    "message": "取消重命名"
+  },
+  "workers.renameRequired": {
+    "message": "Worker 名称不能为空。"
+  },
+  "workers.hostname": {
+    "message": "PC 名称：{name}"
   },
   "workers.syncServer": {
     "message": "同步服务器"

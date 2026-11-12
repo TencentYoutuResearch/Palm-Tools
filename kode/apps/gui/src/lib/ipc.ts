@@ -420,6 +420,11 @@ export const ipc = {
   cloudSyncActivateBackend: (backendId: string) =>
     invoke<CloudSyncStatus>('cloud_sync_activate_backend', { backendId }),
   cloudSyncWorkers: () => invoke<WorkerDirectoryResponse>('cloud_sync_workers'),
+  cloudSyncRenameWorker: (workerId: string, displayName: string) =>
+    invoke<{ worker_id: string; name: string; display_name: string }>('cloud_sync_rename_worker', {
+      workerId,
+      displayName,
+    }),
   cloudSyncWorkerInventory: (workerId: string) =>
     invoke<WorkerInventory>('cloud_sync_worker_inventory', { workerId }),
   cloudSyncWorkerSessions: (workerId: string) =>
@@ -1003,6 +1008,8 @@ export interface PalmxProgress {
 export interface WorkerDirectoryEntry {
   worker_id: string
   name: string
+  display_name: string
+  hostname: string | null
   online: boolean
   last_seen_at: number
   kode_version: string | null

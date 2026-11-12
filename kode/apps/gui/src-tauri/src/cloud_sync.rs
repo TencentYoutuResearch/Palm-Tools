@@ -24,6 +24,11 @@ impl CloudSyncManager {
             .list_workers()
             .await
     }
+    pub async fn rename_worker(&self, worker_id: &str, display_name: &str) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .rename_worker(worker_id, display_name)
+            .await
+    }
     pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
         kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
             .worker_inventory(worker_id)
@@ -98,6 +103,14 @@ pub async fn cloud_sync_workers(
     manager: State<'_, CloudSyncManager>,
 ) -> Result<Value, String> {
     manager.list_workers().await
+}
+#[tauri::command]
+pub async fn cloud_sync_rename_worker(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    display_name: String,
+) -> Result<Value, String> {
+    manager.rename_worker(&worker_id, &display_name).await
 }
 #[tauri::command]
 pub async fn cloud_sync_worker_inventory(

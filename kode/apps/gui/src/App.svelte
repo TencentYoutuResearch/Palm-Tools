@@ -234,6 +234,8 @@
     ...accountDevices.map((device) => ({
       worker_id: `${ACCOUNT_WORKER_PREFIX}${device.device_id}`,
       name: device.name,
+      display_name: device.name,
+      hostname: null,
       online: device.online,
       last_seen_at: device.last_seen_at ?? 0,
       kode_version: null,

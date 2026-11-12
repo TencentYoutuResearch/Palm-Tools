@@ -539,6 +539,15 @@
           </button>
         </div>
 
+        <div class="join-hint">
+          <Icon name="link" size={14} />
+          <div>
+            <strong>{tr('pairing.deploy.joinTitle')}</strong>
+            <span>{tr('pairing.deploy.joinMobile')}</span>
+            <span>{tr('pairing.deploy.joinDesktop')}</span>
+          </div>
+        </div>
+
         {#if deployMode === 'ssh'}
           <div class="deploy-layout">
             <form
@@ -1006,6 +1015,22 @@
   .deploy-mode { display: flex; width: fit-content; gap: 2px; margin-bottom: var(--sp-4); border: 1px solid var(--bd-default); border-radius: var(--rad-md); padding: 2px; background: var(--bg-input); }
   .deploy-mode button { min-height: 30px; border: 0; background: transparent; color: var(--fg-tertiary); }
   .deploy-mode button.active { background: var(--bg-elevated); color: var(--fg-primary); box-shadow: inset 0 0 0 1px var(--bd-default); }
+  .join-hint {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: calc(var(--sp-4) * -1) 0 var(--sp-4);
+    padding: 9px 11px;
+    color: var(--fg-secondary);
+    background: var(--bg-card);
+    border: 1px solid var(--bd-muted);
+    border-radius: var(--rad-sm);
+    font-size: var(--fs-xs);
+    line-height: 1.5;
+  }
+  .join-hint > :global(svg) { flex: 0 0 auto; margin-top: 2px; color: var(--acc); }
+  .join-hint div { display: grid; gap: 2px; min-width: 0; }
+  .join-hint strong { color: var(--fg-primary); font-weight: 600; }
   .field-label,
   .field label { color: var(--fg-secondary); font-size: var(--fs-xs); font-weight: 600; }
   .deploy-kind { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; border: 1px solid var(--bd-default); border-radius: var(--rad-md); padding: 2px; background: var(--bg-input); }

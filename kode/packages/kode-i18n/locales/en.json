@@ -1822,6 +1822,9 @@
   "pairing.deploy.modeLabel": { "message": "Sync backend setup method" },
   "pairing.deploy.modeSsh": { "message": "Deploy over SSH" },
   "pairing.deploy.modeExisting": { "message": "Connect existing" },
+  "pairing.deploy.joinTitle": { "message": "Joining a server that is already running?" },
+  "pairing.deploy.joinMobile": { "message": "On mobile, scan the current Worker's pairing QR code." },
+  "pairing.deploy.joinDesktop": { "message": "On another desktop, choose Connect existing and enter the current server URL. Do not deploy again unless you intend to update that server." },
   "pairing.deploy.installType": { "message": "Deployment type" },
   "pairing.deploy.installStandalone": { "message": "Standalone service" },
   "pairing.deploy.installDocker": { "message": "Docker + Caddy" },
@@ -1938,6 +1941,21 @@
   },
   "workers.deviceDetails": {
     "message": "Device details"
+  },
+  "workers.rename": {
+    "message": "Rename Worker"
+  },
+  "workers.renameSave": {
+    "message": "Save Worker name"
+  },
+  "workers.renameCancel": {
+    "message": "Cancel renaming"
+  },
+  "workers.renameRequired": {
+    "message": "Worker name cannot be empty."
+  },
+  "workers.hostname": {
+    "message": "PC name: {name}"
   },
   "workers.syncServer": {
     "message": "Sync server"
