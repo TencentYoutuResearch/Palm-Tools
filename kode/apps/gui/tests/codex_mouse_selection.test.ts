@@ -31,7 +31,7 @@ class FakeElement extends EventTarget {
 
 Object.assign(globalThis, { Element: FakeElement, MouseEvent: FakeMouseEvent })
 
-function setup() {
+function setup(clock = { now: 0 }) {
   const host = new FakeElement()
   const selections: Array<[number, number, number]> = []
   const lineSelections: Array<[number, number]> = []
@@ -54,8 +54,12 @@ function setup() {
       _mouseService: { getCoords: (event: FakeMouseEvent) => [Math.floor(event.clientX / 10) + 1, Math.floor(event.clientY / 10) + 1] as [number, number] },
     },
   }
-  const dispose = installCodexMouseSelection(host as unknown as HTMLElement, terminal as any)
-  return { host, selections, lineSelections, getWordSelections: () => wordSelections, dispose }
+  const dispose = installCodexMouseSelection(
+    host as unknown as HTMLElement,
+    terminal as any,
+    () => clock.now,
+  )
+  return { host, selections, lineSelections, getWordSelections: () => wordSelections, clock, dispose }
 }
 
 test('short mouse gesture replays a CLI click without selecting text', () => {
@@ -107,6 +111,43 @@ test('double-click selects a word locally without replaying terminal mouse input
   assert.equal(downs, 0)
   assert.equal(ups, 0)
   assert.deepEqual(selections, [])
+  dispose()
+})
+
+test('rapid second click selects a word even when WebView resets detail to one', () => {
+  const { host, getWordSelections, clock, dispose } = setup()
+  let downs = 0
+  let ups = 0
+  host.addEventListener('mousedown', () => downs++)
+  host.addEventListener('mouseup', () => ups++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 1 }))
+  clock.now = 120
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 11, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 11, clientY: 10, detail: 1 }))
+
+  assert.equal(getWordSelections(), 1)
+  assert.equal(downs, 1)
+  assert.equal(ups, 1)
+  dispose()
+})
+
+test('slow or displaced clicks remain independent CLI clicks', () => {
+  const { host, clock, dispose } = setup()
+  let downs = 0
+  host.addEventListener('mousedown', () => downs++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 1 }))
+  clock.now = 700
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 1 }))
+  clock.now = 800
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 30, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 30, clientY: 10, detail: 1 }))
+
+  assert.equal(downs, 3)
   dispose()
 })
 
