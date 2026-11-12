@@ -96,7 +96,7 @@ class ApiClient {
             : 'http_$code',
         body is Map<String, dynamic>
             ? body['detail'] as String? ?? 'pairing rejected'
-            : _plainErrorDetail(body),
+            : _plainErrorDetail(body, empty: 'pairing rejected'),
       );
     }
     final responseBody = response.data as Map<String, dynamic>;
@@ -456,9 +456,9 @@ class ApiClient {
   }
 }
 
-String _plainErrorDetail(dynamic body) {
+String _plainErrorDetail(dynamic body, {String empty = 'request failed'}) {
   final text = body?.toString().trim() ?? '';
-  if (text.isEmpty) return 'pairing rejected';
+  if (text.isEmpty) return empty;
   return text.length <= 300 ? text : '${text.substring(0, 300)}…';
 }
 
