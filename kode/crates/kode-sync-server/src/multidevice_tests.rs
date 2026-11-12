@@ -443,7 +443,7 @@ async fn independent_devices_share_server_without_sharing_sessions_or_commands()
 }
 
 #[tokio::test]
-async fn delete_session_dispatches_a_close_command_to_the_owning_desktop() {
+async fn session_management_dispatches_rename_and_delete_to_the_owning_desktop() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {
         database_path: dir.path().join("sync.db"),
@@ -496,6 +496,25 @@ async fn delete_session_dispatches_a_close_command_to_the_owning_desktop() {
         .await
         .unwrap();
     let session_id = list["sessions"][0]["id"].as_i64().unwrap();
+    let (status, _) = rename_session(
+        axum::extract::State(state.clone()),
+        Path(session_id),
+        headers.clone(),
+        Json(json!({"title":"renamed"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(matches!(
+        agent.try_recv().unwrap(),
+        ServerFrame::Command {
+            local_session_id: 7,
+            ref kind,
+            ref payload,
+            ..
+        } if kind == "rename" && payload["title"] == "renamed"
+    ));
+
     let (status, _) = delete_session(
         axum::extract::State(state),
         Path(session_id),

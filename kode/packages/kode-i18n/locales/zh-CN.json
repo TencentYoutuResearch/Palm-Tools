@@ -799,6 +799,16 @@
   "workers.monitorLoading": {
     "message": "正在加载 Monitor 会话…"
   },
+  "monitorNew.title": { "message": "新建会话" },
+  "monitorNew.loading": { "message": "正在加载 Agent…" },
+  "monitorNew.noAgents": { "message": "该 Worker 没有可用的 Agent 配置。" },
+  "monitorNew.agent": { "message": "Agent" },
+  "monitorNew.cwd": { "message": "工作目录" },
+  "monitorNew.cwdPlaceholder": { "message": "Worker 用户目录" },
+  "monitorNew.model": { "message": "模型" },
+  "monitorNew.modelPlaceholder": { "message": "使用 Agent 默认模型" },
+  "monitorNew.create": { "message": "创建会话" },
+  "monitorNew.creating": { "message": "创建中…" },
   "workers.noMonitorSessions": {
     "message": "该 Worker 没有会话。"
   },
@@ -960,6 +970,14 @@
   "devices.noSessions": { "message": "没有运行中的会话" },
   "devices.sessionLabel": { "message": "{device} 上的 {session}" },
   "devices.close": { "message": "关闭" },
+  "devices.rename": { "message": "重命名会话" },
+  "devices.renameLabel": { "message": "会话名称" },
+  "devices.renameSave": { "message": "保存会话名称" },
+  "devices.delete": { "message": "删除会话" },
+  "devices.deleteTitle": { "message": "删除会话？" },
+  "devices.deleteMessage": { "message": "将在 Worker 上停止「{title}」，此操作无法撤销。" },
+  "devices.deleteConfirm": { "message": "删除" },
+  "devices.cancel": { "message": "取消" },
   "devices.emptyHistory": { "message": "暂无对话" },
   "devices.you": { "message": "你" },
   "devices.question": { "message": "提问" },

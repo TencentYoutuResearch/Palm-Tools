@@ -1927,6 +1927,16 @@
   "workers.monitorLoading": {
     "message": "Loading monitor sessions…"
   },
+  "monitorNew.title": { "message": "New session" },
+  "monitorNew.loading": { "message": "Loading Agents…" },
+  "monitorNew.noAgents": { "message": "No available Agent is configured on this Worker." },
+  "monitorNew.agent": { "message": "Agent" },
+  "monitorNew.cwd": { "message": "Working directory" },
+  "monitorNew.cwdPlaceholder": { "message": "Worker home directory" },
+  "monitorNew.model": { "message": "Model" },
+  "monitorNew.modelPlaceholder": { "message": "Agent default" },
+  "monitorNew.create": { "message": "Create session" },
+  "monitorNew.creating": { "message": "Creating…" },
   "workers.noMonitorSessions": {
     "message": "No sessions on this Worker."
   },
@@ -2088,6 +2098,14 @@
   "devices.noSessions": { "message": "No running sessions" },
   "devices.sessionLabel": { "message": "{session} on {device}" },
   "devices.close": { "message": "Close" },
+  "devices.rename": { "message": "Rename session" },
+  "devices.renameLabel": { "message": "Session name" },
+  "devices.renameSave": { "message": "Save session name" },
+  "devices.delete": { "message": "Delete session" },
+  "devices.deleteTitle": { "message": "Delete session?" },
+  "devices.deleteMessage": { "message": "“{title}” will be stopped on the Worker. This cannot be undone." },
+  "devices.deleteConfirm": { "message": "Delete" },
+  "devices.cancel": { "message": "Cancel" },
   "devices.emptyHistory": { "message": "No conversation yet" },
   "devices.you": { "message": "You" },
   "devices.question": { "message": "Question" },

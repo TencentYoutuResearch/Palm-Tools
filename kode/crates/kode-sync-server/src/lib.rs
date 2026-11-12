@@ -341,7 +341,10 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/backends", get(mobile_setup::backends))
         .route("/api/v1/backends/:key/models", get(mobile_setup::models))
         .route("/api/v1/fs/list", get(mobile_setup::directories))
-        .route("/api/v1/sessions/:id", get(get_session).delete(delete_session))
+        .route(
+            "/api/v1/sessions/:id",
+            get(get_session).delete(delete_session).patch(rename_session),
+        )
         .route("/api/v1/sessions/:id/history", get(get_history))
         .route("/api/v1/sessions/:id/input", post(post_input))
         .route("/api/v1/sessions/:id/interrupt", post(post_interrupt))
@@ -1508,6 +1511,27 @@ async fn delete_session(
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     dispatch_mobile_command(&state, session_id, &headers, "delete", json!({}))
+}
+
+async fn rename_session(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(session_id): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && title.len() <= 200)
+        .ok_or_else(|| ApiError::BadRequest("title must be 1-200 characters".into()))?;
+    dispatch_mobile_command(
+        &state,
+        session_id,
+        &headers,
+        "rename",
+        json!({ "title": title }),
+    )
 }
 
 async fn post_answer(

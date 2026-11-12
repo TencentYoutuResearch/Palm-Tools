@@ -434,7 +434,7 @@ export const ipc = {
   cloudSyncWorkerCommand: (
     workerId: string,
     sessionId: number,
-    op: 'input' | 'interrupt' | 'answer' | 'plan_response',
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename',
     body: Record<string, unknown> = {},
   ) =>
     invoke<{ command_id?: string; status?: string }>('cloud_sync_worker_command', {
@@ -443,6 +443,14 @@ export const ipc = {
       op,
       body,
     }),
+  cloudSyncWorkerBackends: (workerId: string) =>
+    invoke<{ backends: WorkerBackendOption[]; home?: string | null }>('cloud_sync_worker_backends', {
+      workerId,
+    }),
+  cloudSyncWorkerCreateSession: (
+    workerId: string,
+    body: { backend_key: string; cwd?: string; model?: string },
+  ) => invoke<WorkerSessionDto>('cloud_sync_worker_create_session', { workerId, body }),
   cloudSyncDeploy: (req: CloudDeployReq) =>
     invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
   cloudAccountSendCode: (serverUrl: string, email: string) =>
@@ -1046,6 +1054,12 @@ export interface WorkerSessionDto {
 
 export interface WorkerSessionResponse {
   sessions: WorkerSessionDto[]
+}
+
+export interface WorkerBackendOption {
+  key: string
+  display_name: string
+  enabled?: boolean
 }
 
 export interface WorkerInventoryAgent {

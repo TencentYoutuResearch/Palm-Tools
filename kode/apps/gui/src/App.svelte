@@ -40,6 +40,7 @@
   import type { Tab as SettingsTab } from './lib/SettingsPanel.svelte'
   import type { AccountDevice, AccountDeviceSession, CloudSyncStatus } from './lib/ipc'
   import WorkerDetailsPanel from './lib/WorkerDetailsPanel.svelte'
+  import MonitorNewSessionDialog from './lib/MonitorNewSessionDialog.svelte'
   import ModeSwitcher from './lib/ModeSwitcher.svelte'
   import EndpointDialog from './lib/EndpointDialog.svelte'
   import PathsBanner from './lib/PathsBanner.svelte'
@@ -261,6 +262,7 @@
   ])
   let monitorSessions = $state<WorkerSessionDto[]>([])
   let monitorSessionsLoading = $state(false)
+  let monitorNewOpen = $state(false)
   let localWorkerName = $state('Local worker')
   let activeModeWorkerName = $derived(
     workMode === 'monitor'
@@ -428,7 +430,7 @@
     const workerId = monitorWorkerId
     const timer = setInterval(() => {
       if (!document.hidden) void refreshMonitorSessions(workerId, true)
-    }, 30_000)
+    }, 2_000)
     return () => clearInterval(timer)
   })
 
@@ -459,6 +461,24 @@
       sessions,
       workerScoped: true,
     }
+  }
+
+  function startNewSession() {
+    sessionStartError = null
+    chooserWorkspace = null
+    if (workMode === 'monitor' && monitorWorkerId) {
+      monitorNewOpen = true
+      return
+    }
+    chooserOpen = true
+  }
+
+  async function monitorSessionCreated(session: WorkerSessionDto) {
+    monitorNewOpen = false
+    if (!monitorWorkerId) return
+    await refreshMonitorSessions(monitorWorkerId)
+    const created = monitorSessions.find((candidate) => candidate.id === session.id)
+    if (created) openMonitorSession(created)
   }
 
   async function onDeployCompleted() {
@@ -2269,7 +2289,7 @@
         class="icon-btn"
         title={tr('tab.action.newTabTooltip')}
         aria-label={tr('tab.action.newTab')}
-        onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
+        onclick={startNewSession}
       >
         <Icon name="plus" size={16} />
       </button>
@@ -2481,7 +2501,7 @@
           class="icon-btn hidden-fallback-add"
           title={tr('tab.action.newTabTooltip')}
           aria-label={tr('tab.action.newTab')}
-          onclick={() => { sessionStartError = null; chooserWorkspace = null; chooserOpen = true }}
+          onclick={startNewSession}
         >
           <Icon name="plus" size={16} />
         </button>
@@ -2636,6 +2656,9 @@
           sessions={deviceView.sessions}
           workerScoped={deviceView.workerScoped ?? false}
           onClose={() => (deviceView = null)}
+          onChanged={() => {
+            if (monitorWorkerId) void refreshMonitorSessions(monitorWorkerId, true)
+          }}
         />
       {/key}
     {/if}
@@ -2900,6 +2923,15 @@
 
 {#if pairingOpen}
   <PairingDialog onClose={() => (pairingOpen = false)} />
+{/if}
+
+{#if monitorNewOpen && monitorWorkerId}
+  <MonitorNewSessionDialog
+    workerId={monitorWorkerId}
+    workerName={modeWorkers.find((worker) => worker.worker_id === monitorWorkerId)?.name ?? monitorWorkerId}
+    onClose={() => (monitorNewOpen = false)}
+    onCreated={monitorSessionCreated}
+  />
 {/if}
 
 

@@ -413,14 +413,23 @@ impl CloudSyncManager {
         op: &str,
         body: Value,
     ) -> Result<Value, String> {
-        if !matches!(op, "input" | "interrupt" | "answer" | "plan_response") {
+        if !matches!(
+            op,
+            "input" | "interrupt" | "answer" | "plan_response" | "delete" | "rename"
+        ) {
             return Err(format!("unsupported Worker command: {op}"));
         }
         let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
-        let response = self
-            .inner
-            .client
-            .post(format!("{server_url}/api/v1/sessions/{session_id}/{op}"))
+        let url = match op {
+            "delete" | "rename" => format!("{server_url}/api/v1/sessions/{session_id}"),
+            _ => format!("{server_url}/api/v1/sessions/{session_id}/{op}"),
+        };
+        let request = match op {
+            "delete" => self.inner.client.delete(url),
+            "rename" => self.inner.client.patch(url),
+            _ => self.inner.client.post(url),
+        };
+        let response = request
             .bearer_auth(token)
             .header(WORKER_HEADER, &worker_id)
             .header("Idempotency-Key", Uuid::new_v4().to_string())
@@ -435,6 +444,52 @@ impl CloudSyncManager {
             .json::<Value>()
             .await
             .map_err(|error| format!("invalid Worker command response: {error}"))
+    }
+
+    pub async fn worker_backends(&self, worker_id: &str) -> Result<Value, String> {
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/backends"))
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker backend response: {error}"))
+    }
+
+    pub async fn worker_create_session(
+        &self,
+        worker_id: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let response = self
+            .inner
+            .client
+            .post(format!("{server_url}/api/v1/sessions"))
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&body)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker session create response: {error}"))
     }
 
     async fn monitor_http_context(
@@ -2174,6 +2229,27 @@ pub async fn execute_local_command(
         },
         "interrupt" => crate::interrupt_session(ctx, id).map_err(|error| error.to_string()),
         "delete" => crate::delete_session(ctx, id),
+        "rename" => {
+            let title = payload
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty() && title.len() <= 200)
+                .ok_or("rename command requires a 1-200 character title")?;
+            let mut sessions = ctx.sessions.lock();
+            let session = sessions
+                .get_mut(&id)
+                .ok_or_else(|| format!("no session {id}"))?;
+            session.state.title = title.to_string();
+            session.state.title_pinned = true;
+            drop(sessions);
+            ctx.bus.emit(crate::EventEnvelope::new(
+                id,
+                "meta",
+                json!({ "title": title }),
+            ));
+            Ok(())
+        }
         "answer" if payload.get("response").is_some() => {
             match (ctx.acp.get(id), payload["request_id"].as_str()) {
                 (Some(client), Some(request_id)) => {

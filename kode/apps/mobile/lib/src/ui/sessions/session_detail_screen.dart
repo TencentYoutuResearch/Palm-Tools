@@ -806,6 +806,48 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     }
   }
 
+  Future<void> _renameSession(String currentTitle) async {
+    final controller = TextEditingController(text: currentTitle);
+    final title = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename session'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 200,
+          decoration: const InputDecoration(labelText: 'Session name'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final normalized = title?.trim() ?? '';
+    if (normalized.isEmpty || normalized == currentTitle || !mounted) return;
+    try {
+      await ref.read(sessionsProvider.notifier).rename(widget.sessionId, normalized);
+      if (!mounted) return;
+      setState(() {
+        _meta = {..._meta, 'title': normalized};
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not rename this session: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final metaModel = _meta['model'] as String? ?? '';
@@ -919,6 +961,11 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                       status: sessionStatus,
                       cwd: cwd,
                     ),
+                  ),
+                  IconButton(
+                    tooltip: 'Rename session',
+                    onPressed: () => _renameSession(displayTitle),
+                    icon: const Icon(Icons.edit_outlined, size: 19),
                   ),
                 ],
               ),

@@ -10,6 +10,7 @@
   import { onMount, tick } from 'svelte'
   import { ipc, type AccountDevice, type AccountDeviceEvent, type AccountDeviceSession } from './ipc'
   import Icon from './Icon.svelte'
+  import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import {
     buildTimeline,
@@ -26,8 +27,9 @@
     sessions: AccountDeviceSession[]
     workerScoped?: boolean
     onClose: () => void
+    onChanged?: () => void
   }
-  let { device, session, sessions, workerScoped = false, onClose }: Props = $props()
+  let { device, session, sessions, workerScoped = false, onClose, onChanged }: Props = $props()
   let tr = $derived.by(() => {
     void $currentLocale
     return t
@@ -39,6 +41,11 @@
   let draft = $state('')
   let sending = $state(false)
   let error = $state('')
+  let localTitle = $state('')
+  let renameOpen = $state(false)
+  let renameDraft = $state('')
+  let deleteOpen = $state(false)
+  let deleting = $state(false)
   let sentCommands: string[] = []
   let transcript: HTMLDivElement | undefined = $state()
   let pinnedToBottom = true
@@ -48,7 +55,7 @@
   let busy = $derived(status === 'busy')
   let exited = $derived(status === 'exited')
   let agentName = $derived(session.backend_key)
-  let sessionTitle = $derived(session.title?.trim() || session.backend_key)
+  let sessionTitle = $derived(localTitle || session.title?.trim() || session.backend_key)
 
   function loadHistory(limit = 500) {
     return workerScoped
@@ -57,12 +64,14 @@
   }
 
   function sendCommand(
-    op: 'input' | 'interrupt' | 'answer' | 'plan_response',
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename',
     body: Record<string, unknown> = {},
   ) {
-    return workerScoped
-      ? ipc.cloudSyncWorkerCommand(device.device_id, session.id, op, body)
-      : ipc.accountDeviceCommand(device.device_id, session.id, op, body)
+    if (workerScoped) return ipc.cloudSyncWorkerCommand(device.device_id, session.id, op, body)
+    if (op === 'delete' || op === 'rename') {
+      return Promise.reject(new Error('Session management requires a self-hosted Worker'))
+    }
+    return ipc.accountDeviceCommand(device.device_id, session.id, op, body)
   }
 
   async function refresh() {
@@ -103,7 +112,10 @@
     pinnedToBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40
   }
 
-  async function command(op: 'input' | 'interrupt' | 'answer' | 'plan_response', body: Record<string, unknown> = {}) {
+  async function command(
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename',
+    body: Record<string, unknown> = {},
+  ) {
     if (sending) return false
     sending = true
     error = ''
@@ -173,6 +185,52 @@
     }
   }
 
+  function openRename() {
+    renameDraft = sessionTitle
+    renameOpen = true
+  }
+
+  async function rename() {
+    const title = renameDraft.trim()
+    if (!title || title === sessionTitle) {
+      renameOpen = false
+      return
+    }
+    sending = true
+    error = ''
+    try {
+      const receipt = await sendCommand('rename', { title })
+      if (receipt.command_id && receipt.status !== 'executed') {
+        await executed(receipt.command_id)
+      }
+      localTitle = title
+      renameOpen = false
+      onChanged?.()
+    } catch (e) {
+      error = String(e)
+    } finally {
+      sending = false
+    }
+  }
+
+  async function remove() {
+    if (deleting) return
+    deleting = true
+    error = ''
+    try {
+      const receipt = await sendCommand('delete')
+      if (receipt.command_id && receipt.status !== 'executed') {
+        await executed(receipt.command_id)
+      }
+      deleteOpen = false
+      onChanged?.()
+      onClose()
+    } catch (e) {
+      error = String(e)
+      deleting = false
+    }
+  }
+
   function relaySender(relay: Record<string, any>): string {
     return sessionNameFor(relay.from_session, sessions) ?? tr('devices.relay.unknownSession')
   }
@@ -191,10 +249,34 @@
   <header>
     <Icon name="monitor" size={14} />
     <div class="heading">
-      <strong>{sessionTitle}</strong>
+      {#if renameOpen}
+        <form
+          class="rename"
+          onsubmit={(event) => {
+            event.preventDefault()
+            void rename()
+          }}
+        >
+          <input bind:value={renameDraft} maxlength="200" aria-label={tr('devices.renameLabel')} />
+          <button type="submit" disabled={sending} title={tr('devices.renameSave')} aria-label={tr('devices.renameSave')}>
+            <Icon name="check" size={13} />
+          </button>
+          <button type="button" disabled={sending} title={tr('devices.cancel')} aria-label={tr('devices.cancel')} onclick={() => (renameOpen = false)}>
+            <Icon name="x" size={13} />
+          </button>
+        </form>
+      {:else}
+        <strong>{sessionTitle}</strong>
+      {/if}
       <span>{device.name} · {session.cwd}</span>
     </div>
     <span class="status {status}">{tr(`devices.status.${['busy', 'idle', 'starting', 'exited'].includes(status) ? status : 'idle'}`)}</span>
+    <button class="icon" title={tr('devices.rename')} aria-label={tr('devices.rename')} onclick={openRename}>
+      <Icon name="pencil" size={14} />
+    </button>
+    <button class="icon danger" title={tr('devices.delete')} aria-label={tr('devices.delete')} onclick={() => (deleteOpen = true)}>
+      <Icon name="trash-2" size={14} />
+    </button>
     <button class="icon" title={tr('devices.close')} aria-label={tr('devices.close')} onclick={onClose}>
       <Icon name="x" size={14} />
     </button>
@@ -308,12 +390,26 @@
   </form>
 </section>
 
+{#if deleteOpen}
+  <ConfirmDialog
+    title={tr('devices.deleteTitle')}
+    message={tr('devices.deleteMessage', { title: sessionTitle })}
+    confirmLabel={tr('devices.deleteConfirm')}
+    cancelLabel={tr('devices.cancel')}
+    danger
+    onConfirm={remove}
+    onClose={() => { if (!deleting) deleteOpen = false }}
+  />
+{/if}
+
 <style>
   .device-session { position: absolute; inset: 0; bottom: var(--bottom-terminal-h, 0px); z-index: 2; display: flex; flex-direction: column; padding-top: 44px; color: var(--fg-primary); background: var(--bg-base); font: var(--fs-md) var(--font-ui); }
   header { display: flex; align-items: center; gap: 10px; padding: 8px 20px; border-bottom: 1px solid var(--bd-default); color: var(--fg-secondary); }
   .heading { display: grid; flex: 1; min-width: 0; }
   .heading strong { overflow: hidden; color: var(--fg-primary); text-overflow: ellipsis; white-space: nowrap; }
   .heading span { overflow: hidden; color: var(--fg-tertiary); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .rename { display: flex; align-items: center; gap: 2px; min-width: 0; }
+  .rename input { flex: 1; min-width: 0; height: 26px; padding: 0 7px; border: 1px solid var(--bd-focus); border-radius: var(--rad-sm); background: var(--bg-input); color: var(--fg-primary); font: var(--fs-sm) var(--font-ui); outline: none; }
   .status { padding: 2px 8px; border-radius: 999px; background: var(--bg-chip); font-size: var(--fs-xs); }
   .status.busy { color: var(--st-busy); }
   .status.idle { color: var(--st-ok); }
@@ -340,6 +436,7 @@
   button:hover:not(:disabled) { background: var(--bg-hover); }
   button:disabled { opacity: .5; cursor: default; }
   button.icon { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; }
+  button.icon.danger:hover:not(:disabled) { color: var(--st-err); }
   button.selected { border-color: var(--acc); background: var(--acc-soft); }
   button.primary { border-color: var(--acc); background: var(--acc); color: var(--fg-on-accent); }
   button:focus-visible, textarea:focus-visible { outline: 2px solid var(--bd-focus); outline-offset: 2px; }
