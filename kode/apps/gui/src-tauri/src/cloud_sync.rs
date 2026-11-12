@@ -34,6 +34,28 @@ impl CloudSyncManager {
             .worker_sessions(worker_id)
             .await
     }
+    pub async fn worker_session_history(
+        &self,
+        worker_id: &str,
+        session_id: i64,
+        from: u64,
+        limit: usize,
+    ) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_session_history(worker_id, session_id, from, limit)
+            .await
+    }
+    pub async fn worker_session_command(
+        &self,
+        worker_id: &str,
+        session_id: i64,
+        op: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_session_command(worker_id, session_id, op, body)
+            .await
+    }
     pub async fn configure_and_create_pairing(
         &self,
         server_url: String,
@@ -112,6 +134,30 @@ pub async fn cloud_sync_worker_sessions(
     worker_id: String,
 ) -> Result<Value, String> {
     manager.worker_sessions(&worker_id).await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_history(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    session_id: i64,
+    from: u64,
+    limit: usize,
+) -> Result<Value, String> {
+    manager
+        .worker_session_history(&worker_id, session_id, from, limit)
+        .await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_command(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    session_id: i64,
+    op: String,
+    body: Value,
+) -> Result<Value, String> {
+    manager
+        .worker_session_command(&worker_id, session_id, &op, body)
+        .await
 }
 #[tauri::command]
 pub async fn cloud_sync_create_pairing(

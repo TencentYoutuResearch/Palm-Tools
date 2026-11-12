@@ -24,9 +24,10 @@
     device: AccountDevice
     session: AccountDeviceSession
     sessions: AccountDeviceSession[]
+    workerScoped?: boolean
     onClose: () => void
   }
-  let { device, session, sessions, onClose }: Props = $props()
+  let { device, session, sessions, workerScoped = false, onClose }: Props = $props()
   let tr = $derived.by(() => {
     void $currentLocale
     return t
@@ -49,9 +50,24 @@
   let agentName = $derived(session.backend_key)
   let sessionTitle = $derived(session.title?.trim() || session.backend_key)
 
+  function loadHistory(limit = 500) {
+    return workerScoped
+      ? ipc.cloudSyncWorkerHistory(device.device_id, session.id, limit)
+      : ipc.accountDeviceHistory(device.device_id, session.id, limit)
+  }
+
+  function sendCommand(
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response',
+    body: Record<string, unknown> = {},
+  ) {
+    return workerScoped
+      ? ipc.cloudSyncWorkerCommand(device.device_id, session.id, op, body)
+      : ipc.accountDeviceCommand(device.device_id, session.id, op, body)
+  }
+
   async function refresh() {
     try {
-      const reply = await ipc.accountDeviceHistory(device.device_id, session.id)
+      const reply = await loadHistory()
       const stick = pinnedToBottom
       events = reply.events
       loaded = true
@@ -92,7 +108,7 @@
     sending = true
     error = ''
     try {
-      const receipt = await ipc.accountDeviceCommand(device.device_id, session.id, op, body)
+      const receipt = await sendCommand(op, body)
       if (receipt.command_id) sentCommands = [...sentCommands.slice(-19), receipt.command_id]
       void refresh()
       return true
@@ -125,7 +141,7 @@
   async function executed(commandId: string) {
     const deadline = Date.now() + 35_000
     while (Date.now() < deadline) {
-      const { events: window } = await ipc.accountDeviceHistory(device.device_id, session.id, 2000)
+      const { events: window } = await loadHistory(2000)
       const receipt = window.findLast((e) => e.type === 'command.status' && e.payload.command_id === commandId)
       if (receipt?.payload.status === 'executed') return
       if (receipt?.payload.status === 'failed' || receipt?.payload.status === 'expired') {
@@ -142,7 +158,7 @@
     error = ''
     try {
       for (const [index, q] of questions.entries()) {
-        const receipt = await ipc.accountDeviceCommand(device.device_id, session.id, 'answer', {
+        const receipt = await sendCommand('answer', {
           question_id: q.question_id,
           choice_index: selections[q.question_id],
           submit: index === questions.length - 1,

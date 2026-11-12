@@ -249,7 +249,9 @@ impl ServerState {
     fn binding_count(&self, device_id: &str) -> Result<u64, ApiError> {
         let db = self.inner.db.lock();
         let count = db.query_row(
-            "SELECT COUNT(*) FROM bindings WHERE device_id=?1 AND revoked_at IS NULL",
+            "SELECT COUNT(*) FROM bindings
+             WHERE device_id=?1 AND revoked_at IS NULL
+               AND id NOT LIKE 'desktop-monitor-%'",
             [device_id],
             |row| row.get::<_, i64>(0),
         )?;
@@ -315,6 +317,10 @@ pub fn build_router(state: ServerState) -> Router {
         // that the public ingress reaches this exact sync-server process.
         .route("/api/v1/healthz", get(healthz))
         .route("/api/v1/devices/register", post(register_device))
+        .route(
+            "/api/v1/devices/:id/monitor-binding",
+            post(create_monitor_binding),
+        )
         .route("/api/v1/devices/:id/pairings", post(create_pairing))
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
         .route("/api/v1/workers", get(list_workers))
@@ -422,6 +428,42 @@ async fn register_device(
         device_id,
         device_token,
     }))
+}
+
+#[derive(Serialize)]
+struct MonitorBindingResp {
+    access_token: String,
+}
+
+/// Creates a desktop-owned monitor binding. It is intentionally excluded from
+/// the mobile binding count so desktop-to-desktop inspection does not turn on
+/// continuous session mirroring.
+async fn create_monitor_binding(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<MonitorBindingResp>, ApiError> {
+    let token = bearer(&headers).ok_or(ApiError::Unauthorized)?;
+    if !state.device_authorized(&device_id, &token)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let access_token = random_token("kmob");
+    let scopes: Vec<String> = DEFAULT_SCOPES.iter().map(|v| (*v).to_string()).collect();
+    let scopes_json = serde_json::to_string(&scopes)
+        .map_err(|_| ApiError::Internal("scope serialization failed".into()))?;
+    let binding_id = format!("desktop-monitor-{}", Uuid::new_v4().simple());
+    state.inner.db.lock().execute(
+        "INSERT INTO bindings(id, device_id, mobile_name, token_hash, scopes_json, created_at)
+         VALUES(?1, ?2, 'Kode Desktop Monitor', ?3, ?4, ?5)",
+        params![
+            binding_id,
+            device_id,
+            token_hash(&access_token),
+            scopes_json,
+            now_ms() as i64
+        ],
+    )?;
+    Ok(Json(MonitorBindingResp { access_token }))
 }
 
 /// Resolve either a monitor binding or a Worker's own device bearer to the

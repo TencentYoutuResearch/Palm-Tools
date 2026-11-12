@@ -424,6 +424,25 @@ export const ipc = {
     invoke<WorkerInventory>('cloud_sync_worker_inventory', { workerId }),
   cloudSyncWorkerSessions: (workerId: string) =>
     invoke<WorkerSessionResponse>('cloud_sync_worker_sessions', { workerId }),
+  cloudSyncWorkerHistory: (workerId: string, sessionId: number, limit = 500, from = 0) =>
+    invoke<{ events: AccountDeviceEvent[] }>('cloud_sync_worker_history', {
+      workerId,
+      sessionId,
+      from,
+      limit,
+    }),
+  cloudSyncWorkerCommand: (
+    workerId: string,
+    sessionId: number,
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response',
+    body: Record<string, unknown> = {},
+  ) =>
+    invoke<{ command_id?: string; status?: string }>('cloud_sync_worker_command', {
+      workerId,
+      sessionId,
+      op,
+      body,
+    }),
   cloudSyncDeploy: (req: CloudDeployReq) =>
     invoke<CloudDeployResult>('deploy_cloud_sync', { req }),
   cloudAccountSendCode: (serverUrl: string, email: string) =>

@@ -49,6 +49,40 @@ async fn worker_directory_lists_same_server_workers_and_marks_the_viewer() {
 }
 
 #[tokio::test]
+async fn desktop_monitor_binding_does_not_count_as_a_mobile_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('office','office','office',?1,1,1)",
+            [token_hash("office-token")],
+        )
+        .unwrap();
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office-token".parse().unwrap());
+    let Json(binding) = create_monitor_binding(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("office".into()),
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.binding_count("office").unwrap(), 0);
+    assert!(!state.sync_enabled("office").unwrap());
+    let auth = state
+        .mobile_auth(&binding.access_token, "workers.monitor")
+        .unwrap();
+    assert_eq!(auth.device_id, "office");
+}
+
+#[tokio::test]
 async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {

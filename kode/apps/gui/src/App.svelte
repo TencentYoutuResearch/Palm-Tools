@@ -193,7 +193,13 @@
   /** A session on another desktop of the account, opened from Monitor mode
    *  and shown over the tabs. Not a tab: it is never persisted or restored,
    *  and any local tab activation or new-session flow closes it. */
-  let deviceView = $state<{ device: AccountDevice; session: AccountDeviceSession; sessions: AccountDeviceSession[] } | null>(null)
+  type DeviceView = {
+    device: AccountDevice
+    session: AccountDeviceSession
+    sessions: AccountDeviceSession[]
+    workerScoped?: boolean
+  }
+  let deviceView = $state<DeviceView | null>(null)
   let deviceViewTab: number | null = null
   $effect(() => {
     // Keyboard tab switching and new sessions also leave the device view.
@@ -202,7 +208,7 @@
     deviceViewTab = id
   })
   $effect(() => {
-    if (!sidebarAccount?.active) deviceView = null
+    if (!sidebarAccount?.active && !deviceView?.workerScoped) deviceView = null
   })
   function activateTab(id: number) {
     deviceView = null
@@ -228,6 +234,16 @@
   let accountDeviceSessions = $state<AccountDeviceSession[]>([])
   function accountDeviceId(workerId: string | null): string | null {
     return workerId?.startsWith(ACCOUNT_WORKER_PREFIX) ? workerId.slice(ACCOUNT_WORKER_PREFIX.length) : null
+  }
+  function workerSessionForView(session: WorkerSessionDto): AccountDeviceSession {
+    return {
+      id: session.id,
+      backend_key: session.backend_key,
+      title: session.title || null,
+      model: session.model ?? null,
+      status: session.status ?? 'idle',
+      cwd: session.cwd ?? '',
+    }
   }
   let modeWorkers = $derived<WorkerDirectoryEntry[]>([
     ...workers,
@@ -418,11 +434,31 @@
 
   function openMonitorSession(session: WorkerSessionDto) {
     const deviceId = accountDeviceId(monitorWorkerId)
-    const device = deviceId ? accountDevices.find((d) => d.device_id === deviceId) : undefined
-    const full = accountDeviceSessions.find((s) => s.id === session.id)
-    if (!device || !full) return
+    if (deviceId) {
+      const device = accountDevices.find((d) => d.device_id === deviceId)
+      const full = accountDeviceSessions.find((s) => s.id === session.id)
+      if (!device || !full) return
+      chooserOpen = false
+      deviceView = { device, session: full, sessions: accountDeviceSessions }
+      return
+    }
+    const worker = workers.find((entry) => entry.worker_id === monitorWorkerId)
+    if (!worker) return
+    const sessions = monitorSessions.map(workerSessionForView)
+    const full = sessions.find((entry) => entry.id === session.id)
+    if (!full) return
     chooserOpen = false
-    deviceView = { device, session: full, sessions: accountDeviceSessions }
+    deviceView = {
+      device: {
+        device_id: worker.worker_id,
+        name: worker.name,
+        online: worker.online,
+        last_seen_at: worker.last_seen_at,
+      },
+      session: full,
+      sessions,
+      workerScoped: true,
+    }
   }
 
   async function onDeployCompleted() {
@@ -2263,7 +2299,8 @@
         {:else}
           <div class="monitor-session-list">
             {#each monitorSessions as session (session.id)}
-              {@const openable = accountDeviceSessions.some((s) => s.id === session.id)}
+              {@const openable = accountDeviceSessions.some((s) => s.id === session.id)
+                || Boolean(monitorWorkerId && !accountDeviceId(monitorWorkerId))}
               <svelte:element
                 this={openable ? 'button' : 'div'}
                 class="monitor-session-row"
@@ -2597,6 +2634,7 @@
           device={deviceView.device}
           session={deviceView.session}
           sessions={deviceView.sessions}
+          workerScoped={deviceView.workerScoped ?? false}
           onClose={() => (deviceView = null)}
         />
       {/key}

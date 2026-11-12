@@ -203,6 +203,8 @@ pub fn run() {
             cloud_sync::cloud_sync_workers,
             cloud_sync::cloud_sync_worker_inventory,
             cloud_sync::cloud_sync_worker_sessions,
+            cloud_sync::cloud_sync_worker_history,
+            cloud_sync::cloud_sync_worker_command,
             cloud_sync::cloud_account_send_code,
             cloud_sync::cloud_account_sign_in,
             cloud_sync::cloud_account_sign_out,
