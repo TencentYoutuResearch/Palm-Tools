@@ -364,7 +364,8 @@
   function selectWorkMode(mode: WorkMode, worker?: WorkerDirectoryEntry) {
     workMode = mode
     monitorWorkerId = mode === 'monitor' ? (worker?.worker_id ?? monitorWorkerId) : null
-    deviceView = null
+    // The open conversation owns its source Worker. Navigation, mode and list
+    // selection changes never close it; only an explicit session click/close does.
     if (mode === 'worker') {
       monitorSessions = []
       accountDeviceSessions = []
@@ -423,6 +424,12 @@
     if (!device || !full) return
     chooserOpen = false
     deviceView = { device, session: full, sessions: accountDeviceSessions }
+  }
+
+  function isOpenMonitorSession(workerId: string | null, sessionId: number): boolean {
+    if (!workerId) return false
+    const deviceId = accountDeviceId(workerId) ?? workerId
+    return deviceView?.device.device_id === deviceId && deviceView.session.id === sessionId
   }
 
   async function onDeployCompleted() {
@@ -2268,7 +2275,7 @@
                 this={openable ? 'button' : 'div'}
                 class="monitor-session-row"
                 class:openable
-                class:active={deviceView?.session.id === session.id}
+                class:active={isOpenMonitorSession(monitorWorkerId, session.id)}
                 role={openable ? undefined : 'listitem'}
                 onclick={openable ? () => openMonitorSession(session) : undefined}
               >
