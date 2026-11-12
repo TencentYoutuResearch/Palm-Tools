@@ -31,11 +31,29 @@ class FakeElement extends EventTarget {
 
 Object.assign(globalThis, { Element: FakeElement, MouseEvent: FakeMouseEvent })
 
-function setup(clock = { now: 0 }, singleClickDelay = 0) {
+function setup(
+  clock = { now: 0 },
+  forwardSingleClicks = true,
+  getBackendKey?: () => string,
+  safeMouseMode = false,
+  deferSingleClickMs = 550,
+) {
   const host = new FakeElement()
   const selections: Array<[number, number, number]> = []
   const lineSelections: Array<[number, number]> = []
   let wordSelections = 0
+  let nextTimer = 1
+  const timers = new Map<number, () => void>()
+  const scheduler = {
+    setTimeout: (callback: () => void) => {
+      const id = nextTimer++
+      timers.set(id, callback)
+      return id
+    },
+    clearTimeout: (handle: unknown) => {
+      timers.delete(handle as number)
+    },
+  }
   const terminal = {
     element: host,
     modes: { mouseTrackingMode: 'drag' },
@@ -44,6 +62,7 @@ function setup(clock = { now: 0 }, singleClickDelay = 0) {
     buffer: { active: { viewportY: 0 } },
     select: (col: number, row: number, length: number) => selections.push([col, row, length]),
     selectLines: (start: number, end: number) => lineSelections.push([start, end]),
+    clearSelection: () => {},
     _core: {
       _selectionService: {
         _selectWordAtCursor: () => {
@@ -57,20 +76,35 @@ function setup(clock = { now: 0 }, singleClickDelay = 0) {
   const dispose = installCodexMouseSelection(
     host as unknown as HTMLElement,
     terminal as any,
-    () => clock.now,
-    singleClickDelay,
+    { now: () => clock.now, scheduler, forwardSingleClicks, getBackendKey, safeMouseMode, deferSingleClickMs },
   )
-  return { host, selections, lineSelections, getWordSelections: () => wordSelections, clock, dispose }
+  const runTimers = () => {
+    const callbacks = [...timers.values()]
+    timers.clear()
+    for (const callback of callbacks) callback()
+  }
+  return {
+    host,
+    selections,
+    lineSelections,
+    getWordSelections: () => wordSelections,
+    clock,
+    dispose,
+    runTimers,
+  }
 }
 
-test('short mouse gesture replays a CLI click without selecting text', () => {
-  const { host, selections, dispose } = setup()
+test('short mouse gesture replays one delayed CLI click without selecting text', () => {
+  const { host, selections, dispose, runTimers } = setup()
   let downs = 0
   let ups = 0
   host.addEventListener('mousedown', () => downs++)
   host.addEventListener('mouseup', () => ups++)
   host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
   host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 11, clientY: 10 }))
+  assert.equal(downs, 0)
+  assert.equal(ups, 0)
+  runTimers()
   assert.equal(downs, 1)
   assert.equal(ups, 1)
   assert.deepEqual(selections, [])
@@ -101,13 +135,14 @@ test('drag selects terminal text and does not replay a CLI click', () => {
 })
 
 test('double-click selects a word locally without replaying terminal mouse input', () => {
-  const { host, selections, getWordSelections, dispose } = setup()
+  const { host, selections, getWordSelections, dispose, runTimers } = setup()
   let downs = 0
   let ups = 0
   host.addEventListener('mousedown', () => downs++)
   host.addEventListener('mouseup', () => ups++)
   host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 2 }))
   host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 2 }))
+  runTimers()
   assert.equal(getWordSelections(), 1)
   assert.equal(downs, 0)
   assert.equal(ups, 0)
@@ -115,8 +150,8 @@ test('double-click selects a word locally without replaying terminal mouse input
   dispose()
 })
 
-test('Windows defers a lone click until the multi-click window closes', async () => {
-  const { host, dispose } = setup({ now: 0 }, 20)
+test('Windows defers a lone click until the multi-click window closes', () => {
+  const { host, dispose, runTimers } = setup({ now: 0 }, true, undefined, false, 20)
   let downs = 0
   let ups = 0
   host.addEventListener('mousedown', () => downs++)
@@ -127,14 +162,26 @@ test('Windows defers a lone click until the multi-click window closes', async ()
   assert.equal(downs, 0)
   assert.equal(ups, 0)
 
-  await new Promise((resolve) => setTimeout(resolve, 30))
+  runTimers()
   assert.equal(downs, 1)
   assert.equal(ups, 1)
   dispose()
 })
 
-test('a second click prevents the deferred first click from reaching TCodex', async () => {
-  const { host, getWordSelections, clock, dispose } = setup({ now: 0 }, 20)
+test('zero-delay platforms replay a lone click immediately', () => {
+  const { host, dispose } = setup({ now: 0 }, true, undefined, false, 0)
+  let downs = 0
+  host.addEventListener('mousedown', () => downs++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10 }))
+
+  assert.equal(downs, 1)
+  dispose()
+})
+
+test('a second click prevents the deferred first click from reaching TCodex', () => {
+  const { host, getWordSelections, clock, dispose, runTimers } = setup({ now: 0 }, true, undefined, false, 20)
   let downs = 0
   let ups = 0
   host.addEventListener('mousedown', () => downs++)
@@ -149,14 +196,14 @@ test('a second click prevents the deferred first click from reaching TCodex', as
   assert.equal(getWordSelections(), 1)
   assert.equal(downs, 0)
   assert.equal(ups, 0)
-  await new Promise((resolve) => setTimeout(resolve, 30))
+  runTimers()
   assert.equal(downs, 0)
   assert.equal(ups, 0)
   dispose()
 })
 
 test('rapid second click selects a word even when WebView resets detail to one', () => {
-  const { host, getWordSelections, clock, dispose } = setup()
+  const { host, getWordSelections, clock, dispose, runTimers } = setup()
   let downs = 0
   let ups = 0
   host.addEventListener('mousedown', () => downs++)
@@ -167,15 +214,37 @@ test('rapid second click selects a word even when WebView resets detail to one',
   clock.now = 120
   host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 11, clientY: 10, buttons: 1, detail: 1 }))
   host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 11, clientY: 10, detail: 1 }))
+  runTimers()
 
   assert.equal(getWordSelections(), 1)
-  assert.equal(downs, 1)
-  assert.equal(ups, 1)
+  assert.equal(downs, 0)
+  assert.equal(ups, 0)
   dispose()
 })
 
 test('slow or displaced clicks remain independent CLI clicks', () => {
-  const { host, clock, dispose } = setup()
+  const { host, clock, dispose, runTimers } = setup()
+  let downs = 0
+  host.addEventListener('mousedown', () => downs++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 1 }))
+  runTimers()
+  clock.now = 700
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 1 }))
+  runTimers()
+  clock.now = 800
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 30, clientY: 10, buttons: 1, detail: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 30, clientY: 10, detail: 1 }))
+  runTimers()
+
+  assert.equal(downs, 3)
+  dispose()
+})
+
+test('a later independent click flushes an older queued click before queueing itself', () => {
+  const { host, clock, dispose, runTimers } = setup()
   let downs = 0
   host.addEventListener('mousedown', () => downs++)
 
@@ -184,22 +253,22 @@ test('slow or displaced clicks remain independent CLI clicks', () => {
   clock.now = 700
   host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 1 }))
   host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 1 }))
-  clock.now = 800
-  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 30, clientY: 10, buttons: 1, detail: 1 }))
-  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 30, clientY: 10, detail: 1 }))
 
-  assert.equal(downs, 3)
+  assert.equal(downs, 1)
+  runTimers()
+  assert.equal(downs, 2)
   dispose()
 })
 
 test('triple-click selects the line locally without replaying terminal mouse input', () => {
-  const { host, lineSelections, dispose } = setup()
+  const { host, lineSelections, dispose, runTimers } = setup()
   let downs = 0
   let ups = 0
   host.addEventListener('mousedown', () => downs++)
   host.addEventListener('mouseup', () => ups++)
   host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 3 }))
   host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 3 }))
+  runTimers()
   assert.deepEqual(lineSelections, [[1, 1]])
   assert.equal(downs, 0)
   assert.equal(ups, 0)
@@ -211,6 +280,87 @@ test('a lost mouseup cancels the gesture before the next click', () => {
   host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
   host.ownerDocument.dispatchEvent(new FakeMouseEvent('mousemove', { clientX: 40, clientY: 10, buttons: 0 }))
   assert.deepEqual(selections, [])
+  dispose()
+})
+
+test('disposing cancels a queued single click', () => {
+  const { host, dispose, runTimers } = setup()
+  let downs = 0
+  host.addEventListener('mousedown', () => downs++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10 }))
+  dispose()
+  runTimers()
+
+  assert.equal(downs, 0)
+})
+
+test('tcodex safe mode keeps single clicks local and forwards no mouse input', () => {
+  const { host, dispose, runTimers } = setup({ now: 0 }, true, () => 'tcodex', true)
+  let downs = 0
+  let ups = 0
+  host.addEventListener('mousedown', () => downs++)
+  host.addEventListener('mouseup', () => ups++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10 }))
+  runTimers()
+
+  assert.equal(downs, 0)
+  assert.equal(ups, 0)
+  dispose()
+})
+
+test('tcodex safe mode still selects words locally on double-click', () => {
+  const { host, getWordSelections, dispose, runTimers } = setup({ now: 0 }, true, () => 'tcodex', true)
+  let downs = 0
+  host.addEventListener('mousedown', () => downs++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1, detail: 2 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10, detail: 2 }))
+  runTimers()
+
+  assert.equal(getWordSelections(), 1)
+  assert.equal(downs, 0)
+  dispose()
+})
+
+test('tcodex swallows browser click and dblclick inside the terminal', () => {
+  const { host, dispose } = setup({ now: 0 }, true, () => 'tcodex', true)
+  let clicks = 0
+  let doubleClicks = 0
+  host.addEventListener('click', () => clicks++)
+  host.addEventListener('dblclick', () => doubleClicks++)
+
+  const click = new FakeMouseEvent('click', { clientX: 10, clientY: 10 })
+  const doubleClick = new FakeMouseEvent('dblclick', { clientX: 10, clientY: 10, detail: 2 })
+  host.dispatchEvent(click)
+  host.dispatchEvent(doubleClick)
+
+  assert.equal(click.defaultPrevented, true)
+  assert.equal(doubleClick.defaultPrevented, true)
+  assert.equal(clicks, 0)
+  assert.equal(doubleClicks, 0)
+  dispose()
+})
+
+test('non-Windows tcodex retains click forwarding and browser click events', () => {
+  const { host, dispose, runTimers } = setup({ now: 0 }, true, () => 'tcodex', false)
+  let downs = 0
+  let clicks = 0
+  host.addEventListener('mousedown', () => downs++)
+  host.addEventListener('click', () => clicks++)
+
+  host.dispatchEvent(new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 }))
+  host.ownerDocument.dispatchEvent(new FakeMouseEvent('mouseup', { clientX: 10, clientY: 10 }))
+  runTimers()
+  const click = new FakeMouseEvent('click', { clientX: 10, clientY: 10 })
+  host.dispatchEvent(click)
+
+  assert.equal(downs, 1)
+  assert.equal(click.defaultPrevented, false)
+  assert.equal(clicks, 1)
   dispose()
 })
 

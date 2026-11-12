@@ -82,6 +82,7 @@
     reorderTabs,
     duplicateTab,
     restoreTab,
+    sessionExitRecovery,
     setTabAvatar,
     type TabInfo,
   } from './lib/sessions'
@@ -925,6 +926,17 @@
   }
   function cancelCloseTab() {
     closeConfirm = null
+  }
+  function restoreExitedSession() {
+    const recovery = $sessionExitRecovery
+    sessionExitRecovery.set(null)
+    if (!recovery) return
+    void restoreTab(recovery.id).catch((error) => {
+      pushToast({ severity: 'error', title: tr('terminal.exitRecovery.restore'), detail: String(error) })
+    })
+  }
+  function deferExitedSession() {
+    sessionExitRecovery.set(null)
   }
   /** 打开 avatar picker,锚定到触发元素的位置 */
   function openAvatarPicker(
@@ -2973,6 +2985,17 @@
     danger
     onConfirm={confirmCloseTab}
     onClose={cancelCloseTab}
+  />
+{/if}
+
+{#if $sessionExitRecovery}
+  <ConfirmDialog
+    title={tr('terminal.exitRecovery.title')}
+    message={tr('terminal.exitRecovery.message', { title: $sessionExitRecovery.title })}
+    confirmLabel={tr('terminal.exitRecovery.restore')}
+    cancelLabel={tr('terminal.exitRecovery.later')}
+    onConfirm={restoreExitedSession}
+    onClose={deferExitedSession}
   />
 {/if}
 

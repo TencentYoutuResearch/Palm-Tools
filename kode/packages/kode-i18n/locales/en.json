@@ -1554,6 +1554,18 @@
     "message": "Keep session",
     "description": "Consecutive Ctrl+C cancellation action"
   },
+  "terminal.exitRecovery.title": {
+    "message": "TCodex session exited unexpectedly"
+  },
+  "terminal.exitRecovery.message": {
+    "message": "TCodex stopped while the tab was still open. Restore the conversation \"{title}\" or handle it later."
+  },
+  "terminal.exitRecovery.restore": {
+    "message": "Restore session"
+  },
+  "terminal.exitRecovery.later": {
+    "message": "Later"
+  },
   "tab.action.newTab": {
     "message": "New tab",
     "description": "New tab button aria-label"

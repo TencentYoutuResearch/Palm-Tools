@@ -333,6 +333,8 @@ fn spawn_event_router(
                     ));
                 }
                 CoreEvent::PtyExited { id, code } => {
+                    let backend_key = sessions.lock().get(&id).map(|session| session.backend_key.clone());
+                    crate::terminal_audit::record_exit(id, code, backend_key.as_deref());
                     if let Some(a) = &app {
                         let _ = a.emit(
                             "session-exited",

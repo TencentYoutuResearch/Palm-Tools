@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { windowsClipboardAction } from '../src/lib/terminal_clipboard.ts'
 
 const key = { key: 'c', ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, isComposing: false }
-test('Windows clipboard keys preserve Ctrl+C and support copy/paste', () => {
-  assert.equal(windowsClipboardAction(key, 'Windows NT 10.0'), null)
+test('Windows Ctrl+C always belongs to the clipboard path', () => {
+  assert.equal(windowsClipboardAction(key, 'Windows NT 10.0'), 'copy')
   assert.equal(windowsClipboardAction(key, 'Windows NT 10.0', true), 'copy')
   assert.equal(windowsClipboardAction({ ...key, key: 'C', shiftKey: true }, 'Windows NT 10.0'), 'copy')
   for (const shiftKey of [false, true]) {

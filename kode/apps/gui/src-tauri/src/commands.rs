@@ -902,6 +902,7 @@ pub fn write_input(
     {
         let g = state.ctx.sessions.lock();
         let s = g.get(&id).ok_or_else(|| format!("no session {id}"))?;
+        crate::terminal_audit::record_input(id, &s.backend_key, &s.backend_protocol, &bytes);
         s.write_input(&bytes);
     }
 

@@ -7,13 +7,13 @@ export function isRemoteClipboardPaste(e: Key): boolean {
 export function windowsClipboardAction(
   e: Key,
   userAgent: string,
-  hasSelection = false,
+  _hasSelection = false,
 ): 'copy' | 'paste' | null {
   if (!/Windows/i.test(userAgent) || e.isComposing || !e.ctrlKey || e.altKey || e.metaKey) return null
   const key = e.key.toLowerCase()
-  if (key === 'c' && (e.shiftKey || hasSelection)) return 'copy'
+  if (key === 'c') return 'copy'
   if (key === 'v') return 'paste'
-  return null // Bare Ctrl+C without a selection remains a terminal interrupt.
+  return null
 }
 
 export function handleWindowsClipboard(

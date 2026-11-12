@@ -34,6 +34,7 @@ mod screenshot;
 mod shell_pty;
 mod specops;
 mod state;
+mod terminal_audit;
 mod term_theme;
 mod transport;
 mod workspace;

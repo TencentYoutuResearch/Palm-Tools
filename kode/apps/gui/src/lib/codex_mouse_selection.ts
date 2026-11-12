@@ -7,6 +7,7 @@ type MouseSelectionTerminal = {
   buffer: { active: { viewportY: number } }
   select: (column: number, row: number, length: number) => void
   selectLines: (start: number, end: number) => void
+  clearSelection: () => void
   _core?: {
     _selectionService?: {
       _selectWordAtCursor: (event: MouseEvent, allowWhitespaceOnlySelection: boolean) => boolean
@@ -24,36 +25,73 @@ type MouseSelectionTerminal = {
 }
 
 type Cell = { col: number; row: number }
-type Gesture = {
-  down: MouseEvent
-  target: Element
-  start: Cell
-  detail: number
-  dragging: boolean
+type Gesture = { down: MouseEvent; target: Element; start: Cell; detail: number; dragging: boolean }
+type Scheduler = {
+  setTimeout: (callback: () => void, delayMs: number) => unknown
+  clearTimeout: (handle: unknown) => void
+}
+type InstallOptions = {
+  now?: () => number
+  scheduler?: Scheduler
+  forwardSingleClicks?: boolean
+  getBackendKey?: () => string
+  safeMouseMode?: boolean
+  deferSingleClickMs?: number
 }
 const DRAG_DISTANCE_SQUARED = 25
 export const CODEX_MULTI_CLICK_MS = 500
+const MULTI_CLICK_MS = CODEX_MULTI_CLICK_MS
 const MULTI_CLICK_DISTANCE_SQUARED = 16
+const SINGLE_CLICK_FORWARD_DELAY_MS = CODEX_MULTI_CLICK_MS + 50
+const defaultScheduler: Scheduler = {
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
+
+function isTcodexMouseBackend(backendKey: string): boolean {
+  const normalized = backendKey.trim().toLowerCase()
+  return normalized === 'tcodex' || normalized.endsWith(':tcodex')
+}
 
 export function supportsCodexMouseSelection(backendKey: string): boolean {
-  return backendKey === 'codex' || backendKey === 'tcodex'
+  const normalized = backendKey.trim().toLowerCase()
+  return normalized === 'codex' || normalized.endsWith(':codex') || isTcodexMouseBackend(normalized)
 }
 
 export function installCodexMouseSelection(
   host: HTMLElement,
   term: MouseSelectionTerminal,
-  now: () => number = () => performance.now(),
-  deferSingleClickMs = 0,
+  options: InstallOptions = {},
 ): () => void {
+  const {
+    now = () => performance.now(),
+    scheduler = defaultScheduler,
+    forwardSingleClicks = true,
+    getBackendKey,
+    safeMouseMode = false,
+    deferSingleClickMs = SINGLE_CLICK_FORWARD_DELAY_MS,
+  } = options
   const doc = host.ownerDocument
   let pending: Gesture | null = null
-  let deferredClick: {
-    gesture: Gesture
-    up: MouseEvent
-    timer: ReturnType<typeof setTimeout>
-  } | null = null
+  let deferredClick: { gesture: Gesture; up: MouseEvent; timer: unknown } | null = null
   let replaying = false
   let lastClick: { at: number; x: number; y: number; detail: number } | null = null
+
+  function currentBackendKey(): string | null {
+    const key = getBackendKey?.().trim()
+    return key ? key : null
+  }
+
+  function currentBackendSupportsSelection(): boolean {
+    const key = currentBackendKey()
+    return key === null || supportsCodexMouseSelection(key)
+  }
+
+  function currentBackendForwardsSingleClicks(): boolean {
+    const key = currentBackendKey()
+    return forwardSingleClicks
+      && (!safeMouseMode || key === null || !isTcodexMouseBackend(key))
+  }
 
   function clickDetail(event: MouseEvent): number {
     const previous = lastClick
@@ -98,14 +136,8 @@ export function installCodexMouseSelection(
 
   function cancel() {
     pending = null
-    cancelDeferredClick()
+    clearDeferredClick()
     removeDocumentListeners()
-  }
-
-  function cancelDeferredClick() {
-    if (!deferredClick) return
-    clearTimeout(deferredClick.timer)
-    deferredClick = null
   }
 
   function replayClick(gesture: Gesture, up: MouseEvent) {
@@ -132,19 +164,37 @@ export function installCodexMouseSelection(
     }
   }
 
-  function finishClick(gesture: Gesture, up: MouseEvent) {
+  function clearDeferredClick() {
+    if (!deferredClick) return
+    scheduler.clearTimeout(deferredClick.timer)
+    deferredClick = null
+  }
+
+  function flushDeferredClick() {
+    const deferred = deferredClick
+    if (!deferred) return
+    scheduler.clearTimeout(deferred.timer)
+    deferredClick = null
+    replayClick(deferred.gesture, deferred.up)
+  }
+
+  function deferSingleClick(gesture: Gesture, up: MouseEvent) {
+    clearDeferredClick()
     if (deferSingleClickMs <= 0) {
       replayClick(gesture, up)
       return
     }
-    let timer: ReturnType<typeof setTimeout>
-    timer = setTimeout(() => {
-      if (!deferredClick || deferredClick.timer !== timer) return
-      const queued = deferredClick
+    const deferred: NonNullable<typeof deferredClick> = {
+      gesture,
+      up,
+      timer: undefined,
+    }
+    deferredClick = deferred
+    deferred.timer = scheduler.setTimeout(() => {
+      if (deferredClick !== deferred) return
       deferredClick = null
-      replayClick(queued.gesture, queued.up)
-    }, deferSingleClickMs)
-    deferredClick = { gesture, up, timer }
+      replayClick(gesture, up)
+    }, SINGLE_CLICK_FORWARD_DELAY_MS)
   }
 
   function selectClickIntent(gesture: Gesture) {
@@ -163,16 +213,16 @@ export function installCodexMouseSelection(
 
   function onDown(event: MouseEvent) {
     if (replaying || event.button !== 0 || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return
+    if (!currentBackendSupportsSelection()) return
     if (term.modes.mouseTrackingMode === 'none' || !term.element?.contains(event.target as Node)) return
+    const detail = clickDetail(event)
     const start = cellAt(event, false)
     if (!start || !(event.target instanceof Element)) return
-    // A second click must prevent the first click from reaching the TUI at all.
-    // WebView2 can lose MouseEvent.detail across TUI redraws, so waiting for
-    // the multi-click window is more reliable than replaying immediately.
-    cancelDeferredClick()
     event.preventDefault()
     event.stopImmediatePropagation()
-    pending = { down: event, target: event.target, start, detail: clickDetail(event), dragging: false }
+    if (detail > 1) clearDeferredClick()
+    else flushDeferredClick()
+    pending = { down: event, target: event.target, start, detail, dragging: false }
     doc.addEventListener('mousemove', onMove, true)
     doc.addEventListener('mouseup', onUp, true)
     doc.defaultView?.addEventListener('blur', cancel, { once: true })
@@ -208,7 +258,8 @@ export function installCodexMouseSelection(
       return
     }
     if (gesture.detail > 1) selectClickIntent(gesture)
-    else finishClick(gesture, event)
+    else if (currentBackendForwardsSingleClicks()) deferSingleClick(gesture, event)
+    else term.clearSelection()
     lastClick = {
       at: now(),
       x: event.clientX,
@@ -217,9 +268,23 @@ export function installCodexMouseSelection(
     }
   }
 
+  function suppressTcodexBrowserMultiClick(event: MouseEvent) {
+    if (!safeMouseMode) return
+    const backendKey = currentBackendKey()
+    if (replaying || !backendKey || !isTcodexMouseBackend(backendKey)) return
+    if (!term.element?.contains(event.target as Node)) return
+    event.preventDefault()
+    event.stopImmediatePropagation()
+  }
+
   host.addEventListener('mousedown', onDown, true)
+  host.addEventListener('click', suppressTcodexBrowserMultiClick, true)
+  host.addEventListener('dblclick', suppressTcodexBrowserMultiClick, true)
   return () => {
     host.removeEventListener('mousedown', onDown, true)
+    host.removeEventListener('click', suppressTcodexBrowserMultiClick, true)
+    host.removeEventListener('dblclick', suppressTcodexBrowserMultiClick, true)
+    clearDeferredClick()
     cancel()
   }
 }
