@@ -40,6 +40,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::{BridgeBus, EventEnvelope};
 use kode_core::CoreEvent;
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -153,23 +155,90 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Windows 当前没有实现与 Unix 版等价的 hook relay transport。
-/// 保留空实现，使 bridge/GUI 的其余功能可以在 Windows 上构建运行；
-/// `new()` 返回错误后，调用方会按设计降级为不启用 hook relay。
-#[cfg(not(unix))]
-pub struct HookRelay;
+/// Windows hooks connect through a per-process named pipe. The path is passed
+/// to hook children through the same `KODE_HOOK_SOCK` environment variable used
+/// by Unix UDS hooks.
+#[cfg(windows)]
+pub struct HookRelay {
+    pipe_path: PathBuf,
+    server: NamedPipeServer,
+}
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 impl HookRelay {
     pub async fn new() -> Result<Self, String> {
-        Err("hook relay is not available on this platform".to_string())
+        let pipe_path = PathBuf::from(format!(
+            r"\\.\pipe\kode-hook-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&pipe_path)
+            .map_err(|error| {
+                format!("create named pipe {} failed: {error}", pipe_path.display())
+            })?;
+        tracing::info!(pipe = %pipe_path.display(), "HookRelay listening");
+        Ok(Self { pipe_path, server })
     }
 
     pub fn socket_path(&self) -> &Path {
-        Path::new("")
+        &self.pipe_path
     }
 
-    pub async fn run(self, _bus: Arc<BridgeBus>, _core_tx: mpsc::UnboundedSender<CoreEvent>) {}
+    pub async fn run(mut self, bus: Arc<BridgeBus>, core_tx: mpsc::UnboundedSender<CoreEvent>) {
+        loop {
+            if let Err(error) = self.server.connect().await {
+                tracing::warn!(%error, "HookRelay named-pipe connect failed");
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                continue;
+            }
+
+            let connected = self.server;
+            self.server = match ServerOptions::new()
+                .reject_remote_clients(true)
+                .create(&self.pipe_path)
+            {
+                Ok(server) => server,
+                Err(error) => {
+                    tracing::error!(
+                        pipe = %self.pipe_path.display(),
+                        %error,
+                        "HookRelay could not create the next named-pipe instance"
+                    );
+                    return;
+                }
+            };
+
+            let bus = Arc::clone(&bus);
+            let core_tx = core_tx.clone();
+            tokio::spawn(async move {
+                if let Err(error) = handle_pipe_connection(connected, bus, core_tx).await {
+                    tracing::warn!(%error, "HookRelay named-pipe connection error");
+                }
+            });
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn handle_pipe_connection(
+    stream: NamedPipeServer,
+    bus: Arc<BridgeBus>,
+    core_tx: mpsc::UnboundedSender<CoreEvent>,
+) -> Result<(), String> {
+    let reader = BufReader::new(stream);
+    let mut lines = reader.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        process_hook_json_with_core_tx(trimmed, &bus, &core_tx);
+    }
+
+    Ok(())
 }
 
 /// 解析一行 hook JSON 并 emit 对应的 BridgeBus 事件。
@@ -570,11 +639,6 @@ fn peer_cred(stream: &UnixStream) -> Option<(u32, u32, u32)> {
     Some((0, 0, 0))
 }
 
-#[cfg(not(unix))]
-fn peer_cred<T>(_stream: &T) -> Option<(u32, u32, u32)> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +660,38 @@ mod tests {
         drop(second);
         assert!(first.socket_path().exists());
         UnixStream::connect(first.socket_path()).await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn named_pipe_relay_routes_codex_hook_payload() {
+        let relay = HookRelay::new().await.unwrap();
+        let pipe_path = relay.socket_path().to_path_buf();
+        let bus = Arc::new(BridgeBus::new());
+        let mut rx = bus.subscribe();
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(relay.run(Arc::clone(&bus), core_tx));
+
+        use std::io::Write;
+        let mut client = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&pipe_path)
+            .unwrap();
+        client
+            .write_all(
+                b"{\"session_id\":\"42\",\"hook_event_name\":\"PermissionRequest\",\"tool_input\":{\"description\":\"named pipe works\"}}\n",
+            )
+            .unwrap();
+        drop(client);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("named-pipe hook event timeout")
+            .expect("named-pipe hook event");
+        assert_eq!(event.r#type, "ask_user_question_hint");
+        assert_eq!(event.session_id, 42);
+        assert_eq!(event.payload["message"], "named pipe works");
+        task.abort();
     }
 
     #[test]
