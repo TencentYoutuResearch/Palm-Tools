@@ -600,21 +600,28 @@ mod tests {
         .expect("spawn");
 
         let mut got = Vec::<u8>::new();
+        let mut saw_output = false;
+        let mut saw_exit = false;
         let _ = timeout(Duration::from_secs(2), async {
             while let Some(act) = rx.recv().await {
                 match act {
                     CoreEvent::PtyBytes { bytes, .. } => {
                         got.extend(bytes);
                         if String::from_utf8_lossy(&got).contains("HELLO_FROM_PTY") {
-                            break;
+                            saw_output = true;
                         }
                     }
-                    CoreEvent::PtyExited { .. } => break,
+                    CoreEvent::PtyExited { .. } => saw_exit = true,
                     _ => {}
+                }
+                if saw_output && saw_exit {
+                    break;
                 }
             }
         })
         .await;
+        assert!(saw_output, "got: {:?}", String::from_utf8_lossy(&got));
+        assert!(saw_exit, "PTY did not report exit before timeout");
         assert!(!host.is_alive());
         drop(host);
 
