@@ -937,6 +937,98 @@ async fn pty_permission_snapshot_lists_native_modes() {
     }
 }
 
+/// 恢复矩阵(代表性 backend × 真 PTY)：给 4 个有代表性的 backend 用
+/// `resume_session_uuid` 起真 PTY(command 覆写成 `/bin/sh`,不启真实 CLI),
+/// 断言各自 resume argv 形式与 kode-core 的 `ResumeStyle` 一致。
+/// 与纯逻辑矩阵互补：这里验证「配置 → 真 spawn」链路不断。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn restore_matrix_spawns_representative_backends_with_correct_resume_args() {
+    // Kode GUI 起的 agent shell 会继承 KODE_GUI_RUNTIME=1,使 create_session
+    // 去连真实 workbench 的 reserve_gui_session(runtime 租约 15s),测试会卡
+    // 20s 后以 "Another Host already owns this runtime" 失败。这是环境泄漏,
+    // 与本用例无关,临时摘掉并在 Drop 时恢复。
+    struct GuiRuntimeEnvGuard(Option<std::ffi::OsString>);
+    impl GuiRuntimeEnvGuard {
+        fn unset() -> Self {
+            let previous = std::env::var_os("KODE_GUI_RUNTIME");
+            std::env::remove_var("KODE_GUI_RUNTIME");
+            Self(previous)
+        }
+    }
+    impl Drop for GuiRuntimeEnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var("KODE_GUI_RUNTIME", value);
+            }
+        }
+    }
+    let _env_guard = GuiRuntimeEnvGuard::unset();
+
+    let mut config = Config::default();
+    for key in ["codebuddy", "claude", "codex", "opencode"] {
+        let backend = config.backends.get_mut(key).unwrap();
+        // ResumeStyle::SessionFlag 的别名含 `-c`(--continue),不能用
+        // `/bin/sh -c "sleep 30"` 做 fixture,否则 inject_resume_flag 会误判
+        // 「用户已提供续接参数」而跳过注入。该组非 codex 系,不跑
+        // codex_runtime 的 `<cmd> --help` 进程隔离检查;其余组沿用
+        // `/bin/sh`(其 --help 返回 0,能过 codex 检查)。
+        let session_flag = kode_core::session::backend::profile_for_key(key).is_some_and(|p| {
+            p.resume_style() == kode_core::session::backend::ResumeStyle::SessionFlag
+        });
+        if session_flag {
+            backend.command = "sleep".into();
+            backend.args = vec!["30".into()];
+        } else {
+            backend.command = "/bin/sh".into();
+            backend.args = vec!["-c".into(), "sleep 30".into(), "--no-daemon".into()];
+        }
+        backend.default_model = None;
+    }
+    let ctx = build_test_ctx(config, "test-token-restore-matrix".into());
+    let sid = "11111111-1111-4111-8111-111111111111";
+    for (key, resume_flag) in [
+        ("codebuddy", "--resume"),
+        ("claude", "--resume"),
+        ("codex", "resume"),
+        ("opencode", "--session"),
+    ] {
+        let req = CreateSessionReq {
+            transport: Some("pty".into()),
+            backend_key: key.into(),
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            cols: Some(80),
+            rows: Some(24),
+            permission_mode: None,
+            model: None,
+            resume_session_uuid: Some(sid.into()),
+            memory_context: None,
+            extra_args: None,
+            prompt: None,
+            headless: false,
+            term_theme: None,
+        };
+        let id = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
+            .await
+            .unwrap()
+            .id;
+        let g = ctx.sessions.lock();
+        let session = &g[&id];
+        assert_eq!(session.session_id.as_deref(), Some(sid), "{key} restored uuid");
+        let pos = session
+            .args
+            .iter()
+            .position(|arg| arg == resume_flag)
+            .unwrap_or_else(|| panic!("{key} missing {resume_flag} in {:?}", session.args));
+        assert_eq!(session.args[pos + 1], sid, "{key} resume target");
+        assert!(
+            !session.args.iter().any(|arg| arg == "--session-id"),
+            "{key} must not inject --session-id on resume"
+        );
+        session.pty.as_ref().unwrap().kill();
+    }
+}
+
 /// Claude Code 2.1 footers: auto mode must not read as default.
 #[test]
 fn detect_mode_reads_claude_cycle_footers() {

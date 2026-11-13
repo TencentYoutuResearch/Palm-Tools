@@ -28,3 +28,6 @@ pub use session::{Session, SessionId};
 pub use transport::{EndpointId, SessionTransport, SpawnSpec, SpawnedSession, TransportError};
 
 pub mod workspace_files;
+
+#[cfg(test)]
+mod backend_matrix;

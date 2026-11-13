@@ -13,6 +13,7 @@ import {
   type PermissionMode,
 } from './ipc'
 import { sanitizeModelName } from './model_alias'
+import { dedupePersistedTabs, finalizeRestore, planRestoreTabs } from './restore_plan'
 import { resolveSessionLaunchModel } from './session_launch_model'
 import {
   addOrUpdateAppEvent,
@@ -464,28 +465,6 @@ let restoring = false
 /** 上次 restore 失败的 tab(原样保留持久化项),schedulePersist 会合并它们落盘。 */
 let failedRestoreTabs: PersistedTab[] = []
 
-function persistedEndpointKey(endpointId: EndpointId | null | undefined): string {
-  if (!endpointId || endpointId.kind === 'local') return 'local'
-  return `remote:${endpointId.id}`
-}
-
-function dedupePersistedTabs(list: PersistedTab[]): PersistedTab[] {
-  const seen = new Set<string>()
-  const out: PersistedTab[] = []
-  for (const tab of list) {
-    const sessionId = tab.session_id?.trim()
-    if (!sessionId) {
-      out.push(tab)
-      continue
-    }
-    const key = `${tab.backend_key}\u0000${persistedEndpointKey(tab.endpoint_id)}\u0000${sessionId}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(tab)
-  }
-  return out
-}
-
 export function schedulePersist() {
   // restore 期间跳过 —— 见 restoring 注释。失败 tab 不应被「成功 tab 子集」覆盖。
   if (restoring) return
@@ -517,51 +496,25 @@ export async function restoreTabs(
   // 导致失败 tab 的持久化项被永久清掉。结束后按成功与否决定是否补一次 persist。
   restoring = true
   failedRestoreTabs = [] // 清空上次的,本次重新记录
-  const list = dedupePersistedTabs(persisted)
   const shared = await sharedSessions().catch(() => [] as SharedSession[])
+  // 纯决策层(restore_plan.ts):去重、shared 认领、runtime 拒绝、参数收窄、progress。
+  // I/O 与模块级状态留在本函数,便于 node --test 直接测决策。
+  const steps = planRestoreTabs(persisted, shared, { sanitizeModelName, localEndpoint: ENDPOINT_LOCAL })
   let ok = 0
   try {
-    for (const [index, p] of list.entries()) {
-      onProgress?.({ current: index + 1, total: list.length, name: p.title || p.backend_key })
+    for (const step of steps) {
+      const p = step.input
+      onProgress?.(step.progress)
       try {
-        const owner = p.session_id && shared.find(row => (row.native_thread_id === p.session_id || row.runtime_session_id === p.session_id || row.runtime_session_id === p.dsh_session_id) && row.backend_key === p.backend_key && row.status !== 'exited')
-        if (owner) {
-          const tab = sharedTab(owner)
+        if (step.kind === 'shared') {
+          const tab = sharedTab(step.owner)
           tabs.update(current => upsertSessionTab(current, tab, sessionMetadata, true))
           selectTab(tab.id); onRestored?.(tab); ok++; continue
         }
-        if (p.transport_kind === 'runtime') throw new Error('The owning runtime is unavailable. Reconnect it before reopening this shared session.')
-        // permission_mode 在持久化字段里是 "default" | "bypass" | null;
-        // 收窄到 PermissionMode 类型(字符串校验,其它值降级 null)。
-        const mode = p.permission_mode === 'bypass' || p.permission_mode === 'default'
-          ? (p.permission_mode as PermissionMode)
-          : null
-        // model 持久化值 = 上次实际用过的 model 名(jsonl_tail 同步过的 — 包括用户在子进程
-        // 里 `/model` 切换后回写的那次)。restore 时直接用同一名字注入 `--model`,
-        // 子进程首帧就跑在对的模型上(不需要等 jsonl tail)。
-        // 空字符串 / 'auto' 当 null 处理 — 这是 jsonl_tail 没回写过 model 时的占位值。
-        // 同时跑一遍 sanitize 防御历史脏持久化值:早期 jsonl_tail 没清理 codebuddy
-        // 夹带的 note 后缀(含换行),那些脏值可能已落盘到 state.json,restore 时
-        // 不清理会被原样塞进 `--model` argv 导致子进程异常。
-        const rawModel = p.model && p.model !== '' && p.model !== 'auto' ? p.model : null
-        const restoredModel = rawModel ? sanitizeModelName(rawModel) || null : null
-        // Phase 11.2 endpoint 还原。`null` / 缺失 → Local(老 tab 兼容)。
-        // Remote 还原前提是 11.4 持久化的 endpoint 已经被 restore_persisted_endpoints
-        // 注册到 transports map(在 AppState::new 里早于 restoreTabs)。
-        // 如果 endpoint 已被用户删但 tab 没删干净 → spawn 命令会返 transport not registered,
-        // catch 里跳过这条 — 不阻断别的 tab 恢复。
-        const endpointId: EndpointId | undefined =
-          p.endpoint_id && p.endpoint_id.kind === 'remote'
-            ? p.endpoint_id
-            : ENDPOINT_LOCAL
-        const restored = await newTab(p.backend_key, {
-          cwd: p.cwd || undefined,
-          transportKind: p.transport_kind ?? 'pty',
-          resumeSessionId: p.session_id ?? null,
-          permissionMode: mode,
-          model: restoredModel,
-          endpointId,
-        })
+        if (step.kind === 'failed') throw new Error(step.reason)
+        // SpawnOptions 与 NewTabOptions 结构一致;endpointId 在纯决策层是
+        // 宽类型 EndpointIdLike,这里窄回 ipc.ts::EndpointId。
+        const restored = await newTab(p.backend_key, step.options as NewTabOptions)
         if (p.title) {
           tabs.update((arr) =>
             arr.map((t) =>
@@ -590,10 +543,9 @@ export async function restoreTabs(
   }
   // 全部成功 → 清空失败列表 + 补一次 persist 落盘最新状态。
   // 有失败 → 失败 tab 留在 failedRestoreTabs,后续 schedulePersist 会合并它们落盘。
-  if (ok === list.length && ok > 0) {
-    failedRestoreTabs = []
-    schedulePersist()
-  }
+  const { clearFailed, persist } = finalizeRestore(steps.length, ok)
+  if (clearFailed) failedRestoreTabs = []
+  if (persist) schedulePersist()
   return ok
 }
 
