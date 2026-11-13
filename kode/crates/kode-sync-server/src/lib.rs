@@ -1148,6 +1148,22 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerFrame>();
     {
         let mut agents = state.inner.agents.lock();
+        let active = state
+            .inner
+            .db
+            .lock()
+            .query_row(
+                "SELECT 1 FROM devices WHERE id=?1 AND revoked_at IS NULL",
+                [&device_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some();
+        if !active {
+            return;
+        }
         if agents.contains_key(&device_id) {
             return;
         }
