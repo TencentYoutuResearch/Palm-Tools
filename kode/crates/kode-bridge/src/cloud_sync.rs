@@ -2005,6 +2005,12 @@ fn idle_state(kind: BackendKind) -> &'static str {
 /// The machine's name for the account device list. GUI processes on macOS
 /// usually lack `HOSTNAME`, so ask the OS.
 fn host_name() -> String {
+    if let Ok(name) = std::env::var("KODE_WORKER_NAME") {
+        let name = name.trim();
+        if !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control) {
+            return name.to_string();
+        }
+    }
     #[cfg(unix)]
     {
         let mut buf = [0u8; 256];

@@ -229,6 +229,11 @@ bindings without replacing existing ones, and stores credentials by server URL
 plus device ID. Tapping a saved desktop probes its API and activates that binding.
 The session header names the selected desktop.
 
+Debug builds may isolate multiple local instances with separate
+`KODE_CLOUD_SYNC_CONFIG`, `KODE_WORKBENCH_CONNECTION`, `KODE_GUI_STATE_PATH`,
+and bridge ports. `KODE_WORKER_NAME` overrides the OS hostname for that process
+only, so isolated instances register distinct, readable Worker names.
+
 Changing the selected desktop replaces the phone's API and WebSocket context;
 late refresh responses from the previous context must not overwrite the new
 session list. Switching does not revoke bindings or stop other desktops from
