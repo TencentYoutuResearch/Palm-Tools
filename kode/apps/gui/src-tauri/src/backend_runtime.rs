@@ -205,7 +205,12 @@ async fn execute(
         return Ok(body);
     }
     let key = command["session_id"].as_str().ok_or("Missing session")?;
-    let id = *native.get(key).ok_or("GUI session is no longer running")?;
+    let Some(id) = native.get(key).copied() else {
+        if kind == "delete" {
+            return Ok(json!({"accepted":true,"already_exited":true}));
+        }
+        return Err("GUI session is no longer running".into());
+    };
     kode_bridge::cloud_sync::execute_local_command(ctx, id, kind, payload).await?;
     Ok(json!({"accepted":true}))
 }

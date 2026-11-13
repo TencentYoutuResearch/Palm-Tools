@@ -147,6 +147,12 @@ published as `command.status` events.
 removes it from the mobile list. An offline desktop returns `409` and the
 session stays visible.
 
+Delete is idempotent when the cloud row outlived its local Worker mapping. The
+Worker acknowledges a missing local session as already exited; after receiving
+`command.result(status=executed)` the center marks the cloud DTO exited and
+publishes `session.exited`. Other command kinds remain strict and fail when the
+local session no longer exists.
+
 
 ## Mobile session creation and desktop catalogues
 

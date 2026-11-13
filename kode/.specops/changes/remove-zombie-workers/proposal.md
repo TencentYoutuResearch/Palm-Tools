@@ -43,6 +43,9 @@ session navigation, or everyday Worker controls.
 - [ ] Removing an Offline Worker hides it from `GET /api/v1/workers`.
 - [ ] All bindings for the removed Worker are revoked and mobile WebSockets
       bound to it receive `binding.revoked`.
+- [ ] Deleting a stale session whose local Worker mapping is already gone is
+      idempotent: the Worker acknowledges success and the server removes the
+      actionable cloud row.
 - [ ] Non-exited sessions are marked exited and monitors receive
       `session.exited` with a `worker_removed` reason.
 - [ ] A revoked installation/token cannot silently register a new Worker.

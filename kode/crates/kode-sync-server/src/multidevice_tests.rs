@@ -609,6 +609,88 @@ async fn session_management_dispatches_rename_and_delete_to_the_owning_desktop()
 }
 
 #[tokio::test]
+async fn executed_delete_cleans_up_a_stale_cloud_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('office','office','office','office',1,1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('office-binding','office','phone',?1,?2,1)",
+            params![
+                token_hash("mobile"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let (tx, mut agent) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "office".into(),
+        AgentConnection {
+            connection_id: "office".into(),
+            tx,
+            kode_version: Some("0.2.2-test".into()),
+            os: Some("macos".into()),
+            arch: Some("aarch64".into()),
+            capabilities: vec!["inventory.v1".into()],
+        },
+    );
+    sync_session_snapshot(
+        &state,
+        "office",
+        "boot",
+        vec![AgentSession {
+            local_id: 7,
+            dto: json!({"id":7,"backend_key":"codex","title":"zombie","status":"idle","tokens":{}}),
+        }],
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer mobile".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let session_id = list["sessions"][0]["id"].as_i64().unwrap();
+    let mut events = state.mobile_bus("office").subscribe();
+    let (_, Json(dispatched)) = dispatch_mobile_command(
+        &state,
+        session_id,
+        &headers,
+        "delete",
+        json!({}),
+    )
+    .unwrap();
+    let command_id = dispatched["command_id"].as_str().unwrap();
+    assert!(matches!(
+        agent.try_recv().unwrap(),
+        ServerFrame::Command { ref kind, .. } if kind == "delete"
+    ));
+
+    update_command_result(&state, "office", command_id, "executed", None).unwrap();
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers)
+        .await
+        .unwrap();
+    assert!(list["sessions"].as_array().unwrap().is_empty());
+    let mut kinds = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        kinds.push(event.kind);
+    }
+    assert!(kinds.iter().any(|kind| kind == "command.status"));
+    assert!(kinds.iter().any(|kind| kind == "session.exited"));
+}
+
+#[tokio::test]
 async fn offline_worker_sessions_are_removed_and_can_still_be_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {

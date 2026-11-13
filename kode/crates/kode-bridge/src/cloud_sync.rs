@@ -1649,6 +1649,12 @@ impl CloudSyncManager {
         self.record_command(&command_id, "accepted")?;
         self.send_command_result(socket, &command_id, "accepted", None)
             .await?;
+        let has_local_session = self
+            .inner
+            .ctx
+            .sessions
+            .lock()
+            .contains_key(&local_session_id);
         let result = if self.inner.ctx.runtimes.contains(local_session_id) {
             self.inner
                 .ctx
@@ -1657,6 +1663,8 @@ impl CloudSyncManager {
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
+        } else if kind == "delete" && !has_local_session {
+            Ok(())
         } else {
             execute_local_command(&self.inner.ctx, local_session_id, &kind, payload).await
         };

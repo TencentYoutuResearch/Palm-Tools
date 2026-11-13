@@ -82,6 +82,19 @@ The front end does not optimistically remove the row. On success it removes the
 row and selects another Worker. The parent clears `monitorWorkerId` if the
 removed Worker was the selected Monitor target.
 
+## Stale session deletion
+
+Session delete is idempotent at the cloud cleanup boundary. If the Worker no
+longer has a local PTY/runtime mapping for the command's local session id, it
+acks `delete` as already exited instead of failing the command. Input,
+interrupt, rename and answer remain strict and still fail when the local
+session is gone.
+
+When the server receives `command.result(status=executed)` for a delete, it also
+marks the corresponding cloud session DTO exited and publishes
+`session.exited`. This guarantees that a successful idempotent acknowledgement
+cannot leave a zombie row that the Worker had no local event to remove.
+
 ## Compatibility
 
 - Existing servers without the route return 404; the UI keeps the Worker and

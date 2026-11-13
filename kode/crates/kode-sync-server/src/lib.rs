@@ -2090,13 +2090,13 @@ fn update_command_result(
     if !matches!(status, "accepted" | "executed" | "failed" | "expired") {
         return Err(ApiError::BadRequest("invalid command status".into()));
     }
-    let envelope = {
+    let (envelope, deleted) = {
         let mut db = state.inner.db.lock();
         let tx = db.transaction()?;
         let prior = tx.query_row(
-            "SELECT cloud_session_id,status FROM commands WHERE id=?1 AND device_id=?2",
+            "SELECT cloud_session_id,status,kind FROM commands WHERE id=?1 AND device_id=?2",
             params![command_id, device_id],
-            |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)),
         ).optional()?.ok_or_else(||ApiError::NotFound("command not found".into()))?;
         // Reconnects can resend an old acceptance after a terminal receipt.
         if matches!(prior.1.as_str(), "executed" | "failed" | "expired") { return Ok(()); }
@@ -2105,13 +2105,33 @@ fn update_command_result(
             "UPDATE commands SET status=?1, updated_at=?2, error=?3 WHERE id=?4 AND device_id=?5",
             params![status, envelope.ts as i64, error, command_id, device_id],
         )?;
+        let deleted = if status == "executed" && prior.2 == "delete" {
+            tx.execute(
+                "UPDATE sessions SET dto_json=json_set(dto_json, '$.status', 'exited'), updated_at=?1
+                 WHERE id=?2 AND device_id=?3
+                   AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+                params![envelope.ts as i64, prior.0, device_id],
+            )? > 0
+        } else {
+            false
+        };
         // Actions wait on history as well as the socket, including when the
         // execution receipt arrived before the HTTP response or while offline.
         tx.execute("INSERT INTO events(device_id,cloud_session_id,event_key,ts,kind,envelope_json) VALUES(?1,?2,?3,?4,'command.status',?5) ON CONFLICT(event_key) DO UPDATE SET ts=excluded.ts,envelope_json=excluded.envelope_json",params![device_id,prior.0,format!("command:{command_id}"),envelope.ts as i64,serde_json::to_string(&envelope).map_err(|_|ApiError::Internal("receipt serialization failed".into()))?])?;
         tx.commit()?;
-        envelope
+        (envelope, deleted)
     };
-    state.publish(device_id,envelope);
+    state.publish(device_id,envelope.clone());
+    if deleted {
+        state.publish(
+            device_id,
+            CloudEnvelope::new(
+                envelope.session_id,
+                "session.exited",
+                json!({"reason":"deleted_by_api"}),
+            ),
+        );
+    }
     Ok(())
 }
 
