@@ -396,6 +396,12 @@ impl CloudSyncManager {
             .send()
             .await
             .map_err(friendly_network_error)?;
+        if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            return Err(
+                "This sync server is older than this Desktop build and does not support Worker removal. Upgrade the server and retry."
+                    .into(),
+            );
+        }
         if !response.status().is_success() {
             return Err(response_error(response).await);
         }
