@@ -40,6 +40,7 @@ pub enum Backend {
     Tcodex,
     Cursor,
     Opencode,
+    Kimi,
 }
 
 impl Backend {
@@ -58,6 +59,7 @@ impl Backend {
             "tcodex" => Some(Backend::Tcodex),
             "cursor" => Some(Backend::Cursor),
             "opencode" => Some(Backend::Opencode),
+            "kimi" => Some(Backend::Kimi),
             // Teams commonly wrap a supported CLI with a short prefix (for
             // example `tclaude`). It still owns the same transcript and turn
             // lifecycle, so treating it as an unknown raw PTY leaves status
@@ -126,7 +128,11 @@ impl Backend {
                     .join(format!("{session_id}.jsonl")),
                 )
             }
-            Backend::Codex | Backend::Tcodex | Backend::Cursor | Backend::Opencode => None,
+            Backend::Codex
+            | Backend::Tcodex
+            | Backend::Cursor
+            | Backend::Opencode
+            | Backend::Kimi => None,
         }
     }
 
@@ -155,8 +161,8 @@ impl Backend {
             Backend::Codex => contains_pair(".codex", "sessions"),
             Backend::Tcodex => contains_pair(".tcodex", "sessions"),
             Backend::Cursor => contains_pair(".cursor", "projects"),
-            // opencode 不发 transcript hook,也没有 transcript 文件。
-            Backend::Opencode => false,
+            // opencode / kimi 不发 transcript hook;kimi 的 wire.jsonl 由 kimi_tail 读。
+            Backend::Opencode | Backend::Kimi => false,
         }
     }
 }
@@ -196,7 +202,11 @@ fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf
         Backend::Codebuddy => home.join(".codebuddy").join("projects"),
         Backend::Claude => home.join(".claude").join("projects"),
         Backend::Tclaude => home.join(".tclaude").join("projects"),
-        Backend::Codex | Backend::Tcodex | Backend::Cursor | Backend::Opencode => return None,
+        Backend::Codex
+        | Backend::Tcodex
+        | Backend::Cursor
+        | Backend::Opencode
+        | Backend::Kimi => return None,
     };
     let filename = format!("{session_id}.jsonl");
     let entries = fs::read_dir(&projects_root).ok()?;
@@ -789,7 +799,7 @@ async fn run_with_replay_policy(
             Backend::Codebuddy => parse_codebuddy_line(line, &mut state),
             Backend::Claude | Backend::Tclaude => parse_claude_line(line, &mut state),
             Backend::Codex | Backend::Tcodex => parse_codex_line(backend, line, &mut state),
-            Backend::Cursor | Backend::Opencode => LineUpdate::default(),
+            Backend::Cursor | Backend::Opencode | Backend::Kimi => LineUpdate::default(),
         };
         // Historical requests belong to this conversation, but not to the
         // newly spawned CLI's selected model. Keep their usage and identity.
@@ -1886,6 +1896,7 @@ mod tests {
         );
         assert_eq!(Backend::from_backend_key("codex"), Some(Backend::Codex));
         assert_eq!(Backend::from_backend_key("cursor"), Some(Backend::Cursor));
+        assert_eq!(Backend::from_backend_key("kimi"), Some(Backend::Kimi));
         assert_eq!(Backend::from_backend_key("tclaude"), Some(Backend::Tclaude));
         // tcodex shares the Codex protocol but owns a separate transcript root.
         assert_eq!(Backend::from_backend_key("tcodex"), Some(Backend::Tcodex));

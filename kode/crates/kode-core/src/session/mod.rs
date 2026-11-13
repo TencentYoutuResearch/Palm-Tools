@@ -8,6 +8,7 @@ pub mod cursor_tail;
 pub mod heuristic;
 mod invocation;
 pub mod jsonl_tail;
+pub mod kimi_tail;
 pub mod opencode_tail;
 pub mod state;
 
@@ -859,7 +860,7 @@ fn inject_session_id(
 
 /// 把 `--resume <sid>` 注入 args(若用户没已显式提供)。
 /// codebuddy 用 `-r/--resume`,claude 也是 `-r/--resume`,统一注入 long form;
-/// opencode 用 `-s/--session`。
+/// opencode 用 `-s/--session`,kimi 用 `-S/--session`。
 fn inject_resume_flag(backend_key: &str, args: &[String], sid: &str) -> Vec<String> {
     let style = backend::profile_for_key(backend_key)
         .map(|p| p.resume_style())
@@ -874,7 +875,8 @@ fn inject_resume_flag(backend_key: &str, args: &[String], sid: &str) -> Vec<Stri
         return new_args;
     }
     let (flag, aliases): (&str, &[&str]) = if style == backend::ResumeStyle::SessionFlag {
-        ("--session", &["--session", "-s", "--continue", "-c"])
+        // opencode 短写 `-s`,kimi 短写 `-S`。
+        ("--session", &["--session", "-s", "-S", "--continue", "-c"])
     } else {
         ("--resume", &["--resume", "-r"])
     };
@@ -1169,6 +1171,53 @@ mod tests {
         let already = vec!["--resume".into(), "x".into()];
         let out = inject_resume_flag("codebuddy", &already, "y");
         assert_eq!(out, already);
+    }
+
+    /// 回归:kimi 走 `--session <id>`(不是默认的 `--resume`),用户已带 `-S` 时不重复注入。
+    #[test]
+    fn inject_resume_flag_uses_kimi_session_flag() {
+        assert_eq!(
+            inject_resume_flag("kimi", &[], "session_abc"),
+            vec!["--session".to_string(), "session_abc".to_string()]
+        );
+        let already = vec!["-S".into(), "session_x".into()];
+        assert_eq!(inject_resume_flag("kimi", &already, "session_y"), already);
+    }
+
+    /// 恢复(参数层)矩阵：遍历全部内置 backend 验证 resume 注入,补齐此前没有
+    /// 用例的 cursor 与 10 个 preset。style 由 `BackendProfile` 给出,
+    /// `backend_matrix::resume_style_all` 另行锁定每个 key 的 style,
+    /// 两层合起来锁定「key → style → argv」。别名已存在时不重复注入。
+    #[test]
+    fn inject_resume_flag_covers_every_builtin_backend() {
+        let mut keys: Vec<String> = crate::config::Config::default()
+            .backends
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys.len(), 17);
+        for key in &keys {
+            let style = backend::profile_for_key(key)
+                .map(|p| p.resume_style())
+                .unwrap_or(backend::ResumeStyle::Flag);
+            let (flag, alias) = match style {
+                backend::ResumeStyle::Subcommand => ("resume", "resume"),
+                backend::ResumeStyle::SessionFlag => ("--session", "-s"),
+                backend::ResumeStyle::Flag => ("--resume", "-r"),
+            };
+            assert_eq!(
+                inject_resume_flag(key, &[], "restore-me"),
+                vec![flag.to_string(), "restore-me".to_string()],
+                "{key} resume argv"
+            );
+            let existing = vec![alias.to_string(), "old".to_string()];
+            assert_eq!(
+                inject_resume_flag(key, &existing, "restore-me"),
+                existing,
+                "{key} must not double-inject resume"
+            );
+        }
     }
 
     #[test]
