@@ -341,7 +341,10 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/devices/:id/pairings", post(create_pairing))
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
         .route("/api/v1/workers", get(list_workers))
-        .route("/api/v1/workers/:worker_id", patch(update_worker_profile))
+        .route(
+            "/api/v1/workers/:worker_id",
+            patch(update_worker_profile).delete(remove_worker),
+        )
         .route(
             "/api/v1/workers/:worker_id/inventory",
             get(get_worker_inventory),
@@ -438,6 +441,25 @@ async fn register_device(
             device_token: provided,
         }));
     }
+    let revoked = db
+        .query_row(
+            "SELECT token_hash FROM devices
+             WHERE installation_id=?1 AND revoked_at IS NOT NULL
+             ORDER BY revoked_at DESC LIMIT 1",
+            [req.installation_id.trim()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if revoked.is_some_and(|expected| {
+        req.device_token
+            .as_deref()
+            .is_some_and(|provided| constant_eq(&expected, &token_hash(provided)))
+    }) {
+        return Err(ApiError::Forbidden(
+            "Worker registration was removed; reset its cloud-sync configuration to pair again"
+                .into(),
+        ));
+    }
     let device_id = format!("dev_{}", Uuid::new_v4().simple());
     let device_token = random_token("kdev");
     db.execute(
@@ -531,6 +553,145 @@ async fn update_worker_profile(
         "worker_id": worker_id,
         "name": display_name,
         "display_name": display_name,
+    })))
+}
+
+fn worker_removal_allowed(
+    state: &ServerState,
+    headers: &HeaderMap,
+    target_worker_id: &str,
+) -> Result<(), ApiError> {
+    let token = bearer(headers).ok_or(ApiError::Unauthorized)?;
+    if let Ok(auth) = state.mobile_auth(&token, "sessions.read") {
+        if target_worker_id == auth.device_id
+            || auth.scopes.iter().any(|item| item == "workers.monitor")
+        {
+            return Ok(());
+        }
+        return Err(ApiError::Forbidden(
+            "binding does not grant workers.monitor".into(),
+        ));
+    }
+    let exists = state
+        .inner
+        .db
+        .lock()
+        .query_row(
+            "SELECT 1 FROM devices WHERE token_hash=?1 AND revoked_at IS NULL",
+            [token_hash(&token)],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized)
+    }
+}
+
+async fn remove_worker(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(worker_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    if worker_id.is_empty() || worker_id.len() > 200 {
+        return Err(ApiError::BadRequest("invalid Worker id".into()));
+    }
+    worker_removal_allowed(&state, &headers, &worker_id)?;
+
+    let agents = state.inner.agents.lock();
+    if agents.contains_key(&worker_id) {
+        return Err(ApiError::Conflict(
+            "Worker is online; stop it before removing the registration".into(),
+        ));
+    }
+
+    let (session_ids, binding_ids) = {
+        let mut db = state.inner.db.lock();
+        let tx = db.transaction()?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM devices WHERE id=?1 AND revoked_at IS NULL",
+                [&worker_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(ApiError::NotFound(format!("Worker {worker_id}")));
+        }
+        let session_ids = tx
+            .prepare(
+                "SELECT id FROM sessions
+                 WHERE device_id=?1
+                   AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            )?
+            .query_map([&worker_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let binding_ids = tx
+            .prepare(
+                "SELECT id FROM bindings
+                 WHERE device_id=?1 AND revoked_at IS NULL",
+            )?
+            .query_map([&worker_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let removed_at = now_ms() as i64;
+        tx.execute(
+            "UPDATE sessions
+             SET dto_json=json_set(dto_json, '$.status', 'exited'), updated_at=?1
+             WHERE device_id=?2
+               AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            params![removed_at, worker_id],
+        )?;
+        tx.execute(
+            "UPDATE bindings SET revoked_at=?1
+             WHERE device_id=?2 AND revoked_at IS NULL",
+            params![removed_at, worker_id],
+        )?;
+        tx.execute(
+            "UPDATE devices SET revoked_at=?1
+             WHERE id=?2 AND revoked_at IS NULL",
+            params![removed_at, worker_id],
+        )?;
+        tx.commit()?;
+        (session_ids, binding_ids)
+    };
+    drop(agents);
+
+    for session_id in &session_ids {
+        state.publish(
+            &worker_id,
+            CloudEnvelope::new(
+                *session_id,
+                "session.exited",
+                json!({"reason":"worker_removed"}),
+            ),
+        );
+    }
+    for binding_id in &binding_ids {
+        state.publish(
+            &worker_id,
+            CloudEnvelope::new(
+                0,
+                "binding.revoked",
+                json!({"binding_id":binding_id}),
+            ),
+        );
+    }
+    state.publish(
+        &worker_id,
+        CloudEnvelope::new(
+            0,
+            "worker.removed",
+            json!({"worker_id":worker_id,"reason":"removed"}),
+        ),
+    );
+    Ok(Json(json!({
+        "worker_id": worker_id,
+        "removed": true,
+        "sessions_exited": session_ids.len(),
+        "bindings_revoked": binding_ids.len(),
     })))
 }
 
@@ -987,6 +1148,22 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerFrame>();
     {
         let mut agents = state.inner.agents.lock();
+        let active = state
+            .inner
+            .db
+            .lock()
+            .query_row(
+                "SELECT 1 FROM devices WHERE id=?1 AND revoked_at IS NULL",
+                [&device_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some();
+        if !active {
+            return;
+        }
         if agents.contains_key(&device_id) {
             return;
         }
@@ -1048,12 +1225,22 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
             }
         }
     }
-    let mut agents = state.inner.agents.lock();
-    if agents
-        .get(&device_id)
-        .is_some_and(|current| current.connection_id == connection_id)
-    {
-        agents.remove(&device_id);
+    let removed = {
+        let mut agents = state.inner.agents.lock();
+        if agents
+            .get(&device_id)
+            .is_some_and(|current| current.connection_id == connection_id)
+        {
+            agents.remove(&device_id);
+            true
+        } else {
+            false
+        }
+    };
+    if removed {
+        if let Err(error) = expire_worker_sessions(&state, &device_id, None) {
+            tracing::warn!(%device_id, ?error, "failed to expire disconnected Worker sessions");
+        }
     }
 }
 
@@ -1185,6 +1372,48 @@ fn sync_session_snapshot(
         state.publish(
             device_id,
             CloudEnvelope::new(cloud_id, "session.updated", dto),
+        );
+    }
+    Ok(())
+}
+
+/// Remove a disconnected Worker's sessions from the monitor's actionable list.
+/// The Worker re-publishes its live sessions in the next hello snapshot.
+fn expire_worker_sessions(
+    state: &ServerState,
+    device_id: &str,
+    session_id: Option<i64>,
+) -> Result<(), ApiError> {
+    let expired = {
+        let mut db = state.inner.db.lock();
+        let tx = db.transaction()?;
+        let ids = tx
+            .prepare(
+                "SELECT id FROM sessions
+                 WHERE device_id=?1
+                   AND (?2 IS NULL OR id=?2)
+                   AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            )?
+            .query_map(params![device_id, session_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.execute(
+            "UPDATE sessions SET dto_json=json_set(dto_json, '$.status', 'exited'), updated_at=?1
+             WHERE device_id=?2
+               AND (?3 IS NULL OR id=?3)
+               AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            params![now_ms() as i64, device_id, session_id],
+        )?;
+        tx.commit()?;
+        ids
+    };
+    for cloud_id in expired {
+        state.publish(
+            device_id,
+            CloudEnvelope::new(
+                cloud_id,
+                "session.exited",
+                json!({"reason":"worker_offline"}),
+            ),
         );
     }
     Ok(())
@@ -1707,8 +1936,23 @@ fn dispatch_mobile_command(
         .agents
         .lock()
         .get(&auth.worker_id)
-        .cloned()
-        .ok_or_else(|| ApiError::Conflict("desktop is offline; message was not queued".into()))?;
+        .cloned();
+    let Some(agent) = agent else {
+        if kind == "delete" {
+            expire_worker_sessions(state, &auth.worker_id, Some(session_id))?;
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "command_id": null,
+                    "status": "executed",
+                    "offline_cleanup": true,
+                })),
+            ));
+        }
+        return Err(ApiError::Conflict(
+            "desktop is offline; message was not queued".into(),
+        ));
+    };
     let now = now_ms();
     let expires_at = now + COMMAND_TTL_MS;
     let (command_id, local_session_id, existing_status) = {
@@ -1846,13 +2090,13 @@ fn update_command_result(
     if !matches!(status, "accepted" | "executed" | "failed" | "expired") {
         return Err(ApiError::BadRequest("invalid command status".into()));
     }
-    let envelope = {
+    let (envelope, deleted) = {
         let mut db = state.inner.db.lock();
         let tx = db.transaction()?;
         let prior = tx.query_row(
-            "SELECT cloud_session_id,status FROM commands WHERE id=?1 AND device_id=?2",
+            "SELECT cloud_session_id,status,kind FROM commands WHERE id=?1 AND device_id=?2",
             params![command_id, device_id],
-            |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)),
         ).optional()?.ok_or_else(||ApiError::NotFound("command not found".into()))?;
         // Reconnects can resend an old acceptance after a terminal receipt.
         if matches!(prior.1.as_str(), "executed" | "failed" | "expired") { return Ok(()); }
@@ -1861,13 +2105,33 @@ fn update_command_result(
             "UPDATE commands SET status=?1, updated_at=?2, error=?3 WHERE id=?4 AND device_id=?5",
             params![status, envelope.ts as i64, error, command_id, device_id],
         )?;
+        let deleted = if status == "executed" && prior.2 == "delete" {
+            tx.execute(
+                "UPDATE sessions SET dto_json=json_set(dto_json, '$.status', 'exited'), updated_at=?1
+                 WHERE id=?2 AND device_id=?3
+                   AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+                params![envelope.ts as i64, prior.0, device_id],
+            )? > 0
+        } else {
+            false
+        };
         // Actions wait on history as well as the socket, including when the
         // execution receipt arrived before the HTTP response or while offline.
         tx.execute("INSERT INTO events(device_id,cloud_session_id,event_key,ts,kind,envelope_json) VALUES(?1,?2,?3,?4,'command.status',?5) ON CONFLICT(event_key) DO UPDATE SET ts=excluded.ts,envelope_json=excluded.envelope_json",params![device_id,prior.0,format!("command:{command_id}"),envelope.ts as i64,serde_json::to_string(&envelope).map_err(|_|ApiError::Internal("receipt serialization failed".into()))?])?;
         tx.commit()?;
-        envelope
+        (envelope, deleted)
     };
-    state.publish(device_id,envelope);
+    state.publish(device_id,envelope.clone());
+    if deleted {
+        state.publish(
+            device_id,
+            CloudEnvelope::new(
+                envelope.session_id,
+                "session.exited",
+                json!({"reason":"deleted_by_api"}),
+            ),
+        );
+    }
     Ok(())
 }
 

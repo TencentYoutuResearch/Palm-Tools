@@ -82,6 +82,7 @@
     reorderTabs,
     duplicateTab,
     restoreTab,
+    sessionExitRecovery,
     setTabAvatar,
     type TabInfo,
   } from './lib/sessions'
@@ -374,6 +375,20 @@
     ) {
       monitorWorkerId = null
     }
+  }
+  function workerRemoved(workerId: string) {
+    workers = workers.filter((worker) => worker.worker_id !== workerId)
+    if (monitorWorkerId === workerId) {
+      monitorWorkerId = null
+      monitorSessions = []
+      monitorSessionsLoading = false
+      try {
+        localStorage.removeItem('kode.monitorWorkerId')
+      } catch {
+        // Navigation state is best effort; server state is authoritative.
+      }
+    }
+    void refreshWorkerDirectory()
   }
   $effect(() => {
     // Signing in or out of the account adds or removes its desktops.
@@ -925,6 +940,17 @@
   }
   function cancelCloseTab() {
     closeConfirm = null
+  }
+  function restoreExitedSession() {
+    const recovery = $sessionExitRecovery
+    sessionExitRecovery.set(null)
+    if (!recovery) return
+    void restoreTab(recovery.id).catch((error) => {
+      pushToast({ severity: 'error', title: tr('terminal.exitRecovery.restore'), detail: String(error) })
+    })
+  }
+  function deferExitedSession() {
+    sessionExitRecovery.set(null)
   }
   /** 打开 avatar picker,锚定到触发元素的位置 */
   function openAvatarPicker(
@@ -2716,6 +2742,7 @@
             <WorkerDetailsPanel
               initialWorkerId={workMode === 'monitor' ? monitorWorkerId : null}
               onClose={() => (workersOpen = false)}
+              onWorkerRemoved={workerRemoved}
               {onTitlebarMouseDown}
             />
           </div>
@@ -2973,6 +3000,17 @@
     danger
     onConfirm={confirmCloseTab}
     onClose={cancelCloseTab}
+  />
+{/if}
+
+{#if $sessionExitRecovery}
+  <ConfirmDialog
+    title={tr('terminal.exitRecovery.title')}
+    message={tr('terminal.exitRecovery.message', { title: $sessionExitRecovery.title })}
+    confirmLabel={tr('terminal.exitRecovery.restore')}
+    cancelLabel={tr('terminal.exitRecovery.later')}
+    onConfirm={restoreExitedSession}
+    onClose={deferExitedSession}
   />
 {/if}
 

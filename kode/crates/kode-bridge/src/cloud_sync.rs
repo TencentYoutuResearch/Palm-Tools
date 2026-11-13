@@ -375,6 +375,42 @@ impl CloudSyncManager {
             .map_err(|error| format!("invalid Worker profile response: {error}"))
     }
 
+    /// Retire an offline Worker registration from the active sync server.
+    /// The server rejects online Workers so removing a directory record can
+    /// never disconnect an Agent that may still be executing work.
+    pub async fn remove_worker(&self, worker_id: &str) -> Result<Value, String> {
+        if worker_id.is_empty()
+            || !worker_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let (server_url, token) = self.device_http_context()?;
+        let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .delete(format!("{server_url}/api/v1/workers/{worker}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            return Err(
+                "This sync server is older than this Desktop build and does not support Worker removal. Upgrade the server and retry."
+                    .into(),
+            );
+        }
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker removal response: {error}"))
+    }
+
     pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
         if !worker_id
             .bytes()
@@ -1613,6 +1649,12 @@ impl CloudSyncManager {
         self.record_command(&command_id, "accepted")?;
         self.send_command_result(socket, &command_id, "accepted", None)
             .await?;
+        let has_local_session = self
+            .inner
+            .ctx
+            .sessions
+            .lock()
+            .contains_key(&local_session_id);
         let result = if self.inner.ctx.runtimes.contains(local_session_id) {
             self.inner
                 .ctx
@@ -1621,6 +1663,8 @@ impl CloudSyncManager {
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
+        } else if kind == "delete" && !has_local_session {
+            Ok(())
         } else {
             execute_local_command(&self.inner.ctx, local_session_id, &kind, payload).await
         };
@@ -1694,10 +1738,11 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
         .lock()
         .values()
         .filter(|session| {
-            !matches!(
-                session.state.status,
-                kode_core::session::state::Status::Exited(_)
-            )
+            session.pty.as_ref().is_some_and(|pty| pty.is_alive())
+                && !matches!(
+                    session.state.status,
+                    kode_core::session::state::Status::Exited(_)
+                )
         })
         .map(|session| {
             let status = match session.state.status {
@@ -1739,9 +1784,8 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
             .into_iter()
             .filter(|s| {
                 s["dto"]["status"] != "exited"
-                    && !(s["dto"]["runtime"] == "gui"
-                        && s["dto"]["native_process_id"].as_u64().is_some()
-                        && s["dto"]["owner_alive"] == false)
+                    && (s["dto"]["runtime"] != "gui"
+                        || s["dto"]["owner_alive"] == true)
             }),
     );
     snapshots
@@ -1961,6 +2005,12 @@ fn idle_state(kind: BackendKind) -> &'static str {
 /// The machine's name for the account device list. GUI processes on macOS
 /// usually lack `HOSTNAME`, so ask the OS.
 fn host_name() -> String {
+    if let Ok(name) = std::env::var("KODE_WORKER_NAME") {
+        let name = name.trim();
+        if !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control) {
+            return name.to_string();
+        }
+    }
     #[cfg(unix)]
     {
         let mut buf = [0u8; 256];
@@ -2175,17 +2225,31 @@ mod tests {
         let ctx = crate::build_test_ctx(Default::default(), "test".into());
         let path = dir.path().join("runtime.sqlite");
         ctx.runtimes.open(&path).unwrap();
-        for (runtime, pid) in [("gui", i32::MAX as u64), ("dsh", 0)] {
-            let input = serde_json::from_value(json!({
-                "runtime": runtime, "boot_id": "test",
-                "sessions": [{
+        let gui = serde_json::from_value(json!({
+            "runtime": "gui", "boot_id": "test",
+            "sessions": [
+                {
                     "session_id": "history",
-                    "dto": {"status": "idle", "native_process_id": pid},
+                    "dto": {"status": "idle", "native_process_id": i32::MAX},
                     "events": [{"key": "1", "kind": "message", "payload": {"text": "retained"}}]
-                }]
-            })).unwrap();
-            ctx.runtimes.publish(&ctx, input).unwrap();
-        }
+                },
+                {
+                    "session_id": "missing-owner",
+                    "dto": {"status": "idle"},
+                    "events": [{"key": "2", "kind": "message", "payload": {"text": "stale"}}]
+                }
+            ]
+        })).unwrap();
+        ctx.runtimes.publish(&ctx, gui).unwrap();
+        let dsh = serde_json::from_value(json!({
+            "runtime": "dsh", "boot_id": "test",
+            "sessions": [{
+                "session_id": "history",
+                "dto": {"status": "idle", "native_process_id": 0},
+                "events": [{"key": "1", "kind": "message", "payload": {"text": "retained"}}]
+            }]
+        })).unwrap();
+        ctx.runtimes.publish(&ctx, dsh).unwrap();
         let db = rusqlite::Connection::open(path).unwrap();
         db.execute("UPDATE runtime_hosts SET seen=0", []).unwrap();
         let snapshots = session_snapshots(&ctx);
@@ -2193,7 +2257,7 @@ mod tests {
         assert_eq!(snapshots[0]["dto"]["runtime"], "dsh");
         assert_eq!(snapshots[0]["dto"]["runtime_online"], false);
         let saved = ctx.runtimes.snapshots();
-        assert_eq!(saved.len(), 2);
+        assert_eq!(saved.len(), 3);
         for session in saved {
             assert_eq!(ctx.runtimes.history(session["local_id"].as_u64().unwrap(), 0, 10).unwrap().len(), 1);
         }

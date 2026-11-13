@@ -5,6 +5,7 @@ pub mod reader;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
@@ -25,6 +26,8 @@ pub struct PtyHost {
     pub reader_join: Option<JoinHandle<()>>,
     pub reaper_join: Option<JoinHandle<()>>,
     pub size: PtySize,
+    alive: Arc<AtomicBool>,
+    pid: Option<u32>,
 }
 
 impl PtyHost {
@@ -109,6 +112,7 @@ impl PtyHost {
             .slave
             .spawn_command(cmd)
             .context("spawn child failed")?;
+        let pid = child.process_id();
 
         // 在把 child move 进 reaper 之前,拿一个独立的 killer 句柄
         let killer = child.clone_killer();
@@ -124,6 +128,8 @@ impl PtyHost {
             .context("take pty writer failed")?;
 
         let writer: PtyWriter = Arc::new(Mutex::new(writer_box));
+        let alive = Arc::new(AtomicBool::new(true));
+        let reaper_alive = Arc::clone(&alive);
 
         // 阻塞读线程
         let reader_join = reader::spawn_reader(id, reader, evt_tx.clone());
@@ -131,10 +137,14 @@ impl PtyHost {
         // reaper:等子进程退出,通知 App
         // child 直接 move 进 reaper 线程(不再共享),wait 不会阻塞外部
         let reaper_join = std::thread::spawn(move || {
-            let code = match child.wait() {
-                Ok(status) => status.exit_code() as i32,
-                Err(_) => -1,
+            let code = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status.exit_code() as i32,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(250)),
+                    Err(_) => break -1,
+                }
             };
+            reaper_alive.store(false, Ordering::Release);
             let _ = evt_tx.send(CoreEvent::PtyExited {
                 id,
                 code: Some(code),
@@ -148,7 +158,14 @@ impl PtyHost {
             reader_join: Some(reader_join),
             reaper_join: Some(reaper_join),
             size,
+            alive,
+            pid,
         })
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+            && self.pid.is_none_or(process_is_alive)
     }
 
     /// 调整子进程的窗口尺寸(触发 SIGWINCH)
@@ -181,6 +198,15 @@ impl PtyHost {
             let _ = guard.kill();
         }
     }
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+    system.process(pid).is_some()
 }
 
 /// Whether an inherited TERM value cannot describe the xterm-compatible PTY
@@ -574,21 +600,29 @@ mod tests {
         .expect("spawn");
 
         let mut got = Vec::<u8>::new();
+        let mut saw_output = false;
+        let mut saw_exit = false;
         let _ = timeout(Duration::from_secs(2), async {
             while let Some(act) = rx.recv().await {
                 match act {
                     CoreEvent::PtyBytes { bytes, .. } => {
                         got.extend(bytes);
                         if String::from_utf8_lossy(&got).contains("HELLO_FROM_PTY") {
-                            break;
+                            saw_output = true;
                         }
                     }
-                    CoreEvent::PtyExited { .. } => break,
+                    CoreEvent::PtyExited { .. } => saw_exit = true,
                     _ => {}
+                }
+                if saw_output && saw_exit {
+                    break;
                 }
             }
         })
         .await;
+        assert!(saw_output, "got: {:?}", String::from_utf8_lossy(&got));
+        assert!(saw_exit, "PTY did not report exit before timeout");
+        assert!(!host.is_alive());
         drop(host);
 
         let s = String::from_utf8_lossy(&got);

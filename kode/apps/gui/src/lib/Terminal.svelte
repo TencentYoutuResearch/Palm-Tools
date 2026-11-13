@@ -36,7 +36,15 @@
   import { TerminalOutputBacklog } from './terminal_output_backlog'
   import { TerminalImeOutputGate } from './terminal_ime'
   import { installConptyCursorGuard, shouldInstallConptyCursorGuard } from './conpty_cursor'
-  import { installCodexMouseSelection, supportsCodexMouseSelection } from './codex_mouse_selection'
+  import {
+    CODEX_MULTI_CLICK_MS,
+    installCodexMouseSelection,
+  } from './codex_mouse_selection'
+  import { isTcodexBackendKey } from './session_exit_guard'
+  import { isWindowsUserAgent } from './platform'
+  import { shouldConfirmTcodexCtrlC } from './terminal_ctrl_c_policy'
+  import { stripTerminalMouseReports } from './terminal_mouse_reports'
+  import { TerminalMouseTrackingGate } from './terminal_mouse_tracking'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import { ConsecutiveCtrlCGuard } from './consecutive_ctrl_c_guard'
@@ -62,6 +70,7 @@
     onCloseSession: () => void | Promise<void>
   }
   let { sessionId, visible, isDark = true, endpointId, onCloseSession }: Props = $props()
+  const windowsPlatform = isWindowsUserAgent(navigator.userAgent)
 
   let containerEl: HTMLDivElement
   let term: any = null
@@ -102,10 +111,17 @@
   const ansiThemeAdapter = new TerminalAnsiThemeAdapter()
   const hiddenOutput = new TerminalOutputBacklog()
   const imeOutput = new TerminalImeOutputGate()
+  const mouseTrackingGate = new TerminalMouseTrackingGate()
   let disposeImeComposition: (() => void) | undefined
   function writeTerminalBytes(bytes: Uint8Array) {
-    const ready = imeOutput.push(bytes)
+    let ready = imeOutput.push(bytes)
     if (!ready) return
+    if (windowsPlatform && isTcodexBackendKey(currentBackendKey())) {
+      ready = mouseTrackingGate.transform(ready)
+      if (ready.length === 0) return
+    } else {
+      mouseTrackingGate.clear()
+    }
     const themedBytes = ansiThemeAdapter.transform(ready)
     if (themedBytes.length > 0) term.write(themedBytes)
   }
@@ -126,6 +142,10 @@
   function writePtyInput(data: string) {
     const bytes = new TextEncoder().encode(data)
     ipc.writeInput(sessionId, bytes, endpointId).catch(console.error)
+  }
+
+  function currentBackendKey(): string {
+    return get(tabs).find((tab) => tab.id === sessionId)?.backendKey ?? ''
   }
 
   function cancelConsecutiveCtrlC() {
@@ -287,10 +307,11 @@
         textarea.removeEventListener('compositionend', onCompositionEnd, true)
       }
     }
-    const backendKey = get(tabs).find((tab) => tab.id === sessionId)?.backendKey ?? ''
-    if (supportsCodexMouseSelection(backendKey)) {
-      disposeCodexMouseSelection = installCodexMouseSelection(containerEl, term)
-    }
+    disposeCodexMouseSelection = installCodexMouseSelection(containerEl, term, {
+      getBackendKey: currentBackendKey,
+      safeMouseMode: windowsPlatform,
+      deferSingleClickMs: windowsPlatform ? CODEX_MULTI_CLICK_MS : 0,
+    })
     syncCursorBlink()
     if (shouldInstallConptyCursorGuard(navigator.userAgent, endpointId?.kind === 'remote')) {
       disposeCursorGuard = installConptyCursorGuard(term)
@@ -428,11 +449,21 @@
     //    JS 单线程保证 invoke 调用顺序;后端 write_input 是同步命令,
     //    在 IPC 线程上按到达顺序串行执行(参考 commands.rs 注释)。
     term.onData((data: string) => {
-      if (ctrlCGuard.inspect(data) === 'confirm') {
+      const backendKey = currentBackendKey()
+      const input = windowsPlatform && isTcodexBackendKey(backendKey)
+        ? stripTerminalMouseReports(data)
+        : data
+      if (!input) return
+      const status = get(tabs).find((tab) => tab.id === sessionId)?.status
+      if (shouldConfirmTcodexCtrlC(input, windowsPlatform, backendKey, status)) {
         ctrlCExitConfirmOpen = true
         return
       }
-      writePtyInput(data)
+      if (ctrlCGuard.inspect(input) === 'confirm') {
+        ctrlCExitConfirmOpen = true
+        return
+      }
+      writePtyInput(input)
     })
 
     // 4.5) WKWebView 文本编辑快捷键拦截。
@@ -686,7 +717,13 @@
     bytesUnsubscribe = byteSubscription.unsubscribe
     try {
       if (byteSubscription.initialBytes.length > 0) {
-        const themedInitialBytes = ansiThemeAdapter.transform(byteSubscription.initialBytes)
+        let initialBytes: Uint8Array = byteSubscription.initialBytes
+        if (windowsPlatform && isTcodexBackendKey(currentBackendKey())) {
+          initialBytes = mouseTrackingGate.transform(initialBytes)
+        }
+        const themedInitialBytes = initialBytes.length > 0
+          ? ansiThemeAdapter.transform(initialBytes)
+          : initialBytes
         await new Promise<void>((resolve) => {
           if (themedInitialBytes.length === 0) {
             resolve()
@@ -1578,6 +1615,7 @@
     document.removeEventListener('visibilitychange', syncCursorBlink)
     hiddenOutput.clear()
     imeOutput.clear()
+    mouseTrackingGate.clear()
     disposeImeComposition?.()
     disposeCursorGuard?.()
     disposeCodexMouseSelection?.()

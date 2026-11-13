@@ -498,6 +498,10 @@
   "terminal.ctrlCExitConfirm.message": { "message": "连续 Ctrl+C 已被拦截。关闭后会终止底层 CLI 会话,此操作无法撤销。" },
   "terminal.ctrlCExitConfirm.confirm": { "message": "关闭会话" },
   "terminal.ctrlCExitConfirm.cancel": { "message": "保留会话" },
+  "terminal.exitRecovery.title": { "message": "TCodex 会话意外退出" },
+  "terminal.exitRecovery.message": { "message": "TCodex 在标签页仍打开时退出。可以恢复会话“{title}”，或稍后处理。" },
+  "terminal.exitRecovery.restore": { "message": "恢复会话" },
+  "terminal.exitRecovery.later": { "message": "稍后处理" },
   "tab.action.newTab": { "message": "新建 tab" },
   "tab.action.newTabTooltip": { "message": "新建 tab (⌘T)" },
   "tab.action.doubleClickRename": { "message": "双击重命名" },
@@ -835,6 +839,27 @@
   },
   "workers.renameRequired": {
     "message": "Worker 名称不能为空。"
+  },
+  "workers.removeZone": {
+    "message": "移除离线 Worker"
+  },
+  "workers.removeZoneHint": {
+    "message": "仅用于清理已停止运行的调试记录。这里只移除服务器注册，不会删除本机 Kode 或工作区。"
+  },
+  "workers.remove": {
+    "message": "移除 Worker…"
+  },
+  "workers.removeTitle": {
+    "message": "移除 Worker“{name}”？"
+  },
+  "workers.removeMessage": {
+    "message": "将从当前同步服务器移除“{name}”的注册。它关联的设备绑定和可操作会话也会被撤销，其他设备将无法继续监控它。\n\n如需恢复，必须重新绑定此 Worker。此操作不会删除本机的工作区或会话记录。"
+  },
+  "workers.removeConfirm": {
+    "message": "确认移除"
+  },
+  "workers.removeCancel": {
+    "message": "取消"
   },
   "workers.hostname": {
     "message": "PC 名称：{name}"

@@ -29,6 +29,15 @@ impl CloudSyncManager {
             .rename_worker(worker_id, display_name)
             .await
     }
+    pub async fn remove_worker(&self, worker_id: &str) -> Result<Value, String> {
+        decode(
+            crate::backend_runtime::call(
+                "/cloud/remove_worker",
+                Some(json!({"worker_id":worker_id})),
+            )
+            .await?,
+        )
+    }
     pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
         kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
             .worker_inventory(worker_id)
@@ -147,6 +156,13 @@ pub async fn cloud_sync_rename_worker(
     display_name: String,
 ) -> Result<Value, String> {
     manager.rename_worker(&worker_id, &display_name).await
+}
+#[tauri::command]
+pub async fn cloud_sync_remove_worker(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+) -> Result<Value, String> {
+    manager.remove_worker(&worker_id).await
 }
 #[tauri::command]
 pub async fn cloud_sync_worker_inventory(

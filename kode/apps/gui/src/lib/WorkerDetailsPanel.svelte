@@ -10,6 +10,7 @@
     type WorkerDirectoryEntry,
     type WorkerInventory,
   } from './ipc'
+  import ConfirmDialog from './ConfirmDialog.svelte'
   import Icon from './Icon.svelte'
   import { currentLocale, t } from './i18n'
 
@@ -18,8 +19,14 @@
     /** Worker to show first, e.g. the one being monitored. */
     initialWorkerId?: string | null
     onTitlebarMouseDown?: (e: MouseEvent) => void
+    onWorkerRemoved?: (workerId: string) => void
   }
-  let { onClose, initialWorkerId = null, onTitlebarMouseDown }: Props = $props()
+  let {
+    onClose,
+    initialWorkerId = null,
+    onTitlebarMouseDown,
+    onWorkerRemoved = () => {},
+  }: Props = $props()
 
   let status = $state<CloudSyncStatus | null>(null)
   let workers = $state<WorkerDirectoryEntry[]>([])
@@ -34,6 +41,9 @@
   let renameBusy = $state(false)
   let renameError = $state('')
   let renameInput: HTMLInputElement | null = $state(null)
+  let removeOpen = $state(false)
+  let removing = $state(false)
+  let removeError = $state('')
   let tr = $derived.by(() => {
     void $currentLocale
     return t
@@ -170,6 +180,39 @@
       renameError = String(reason)
     } finally {
       renameBusy = false
+    }
+  }
+
+  function beginRemove() {
+    if (!selected || selected.online || removing) return
+    removeError = ''
+    removeOpen = true
+  }
+
+  async function confirmRemove() {
+    if (!selected || selected.online || removing) return
+    const workerId = selected.worker_id
+    removing = true
+    removeError = ''
+    try {
+      await ipc.cloudSyncRemoveWorker(workerId)
+      removeOpen = false
+      const remaining = workers.filter((worker) => worker.worker_id !== workerId)
+      workers = remaining
+      const preferred =
+        remaining.find((worker) => worker.bound) ??
+        remaining.find((worker) => worker.online) ??
+        remaining[0]
+      selectedId = preferred?.worker_id ?? ''
+      inventory = null
+      inventoryError = ''
+      if (preferred) await selectWorker(preferred, false)
+      onWorkerRemoved(workerId)
+    } catch (reason) {
+      removeOpen = false
+      removeError = String(reason)
+    } finally {
+      removing = false
     }
   }
 </script>
@@ -392,9 +435,36 @@
           </section>
         {/if}
       {/if}
+      {#if selected && !selected.online}
+        <section class="danger-zone" aria-label={tr('workers.removeZone')}>
+          <div>
+            <h4>{tr('workers.removeZone')}</h4>
+            <p>{tr('workers.removeZoneHint')}</p>
+          </div>
+          <button class="remove-worker" type="button" onclick={beginRemove} disabled={removing}>
+            <Icon name="trash-2" size={13} />
+            {tr('workers.remove')}
+          </button>
+          {#if removeError}<p class="remove-error" role="alert">{removeError}</p>{/if}
+        </section>
+      {/if}
     {/if}
   </div>
 </section>
+
+{#if removeOpen && selected}
+  <ConfirmDialog
+    title={tr('workers.removeTitle', { name: selected.name })}
+    message={tr('workers.removeMessage', { name: selected.name })}
+    confirmLabel={tr('workers.removeConfirm')}
+    cancelLabel={tr('workers.removeCancel')}
+    danger
+    onConfirm={() => void confirmRemove()}
+    onClose={() => {
+      if (!removing) removeOpen = false
+    }}
+  />
+{/if}
 
 <style>
   .worker-panel {
@@ -468,6 +538,40 @@
     border: 1px solid var(--bd-muted);
     border-radius: var(--rad-sm);
   }
+  .danger-zone {
+    margin: 18px 12px 20px;
+    padding: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border: 1px solid color-mix(in srgb, var(--st-err) 28%, var(--bd-muted));
+    border-radius: var(--rad-md);
+    background: color-mix(in srgb, var(--st-err) 4%, var(--bg-elevated));
+  }
+  .danger-zone > div { flex: 1 1 190px; min-width: 0; }
+  .danger-zone h4 { margin: 0; font-size: var(--fs-sm); color: var(--fg-primary); }
+  .danger-zone p { margin: 3px 0 0; color: var(--fg-tertiary); font-size: var(--fs-xs); line-height: 1.45; }
+  .remove-worker {
+    flex: 0 0 auto;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 9px;
+    color: var(--st-err);
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--st-err) 45%, var(--bd-muted));
+    border-radius: var(--rad-sm);
+    font: var(--fs-sm) var(--font-ui);
+    cursor: pointer;
+  }
+  .remove-worker:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--st-err) 9%, transparent);
+  }
+  .remove-worker:disabled { opacity: 0.5; cursor: default; }
+  .danger-zone .remove-error { flex-basis: 100%; color: var(--st-err); }
   .picker:hover { border-color: var(--bd-strong); }
   .picker select {
     flex: 1;

@@ -1554,6 +1554,18 @@
     "message": "Keep session",
     "description": "Consecutive Ctrl+C cancellation action"
   },
+  "terminal.exitRecovery.title": {
+    "message": "TCodex session exited unexpectedly"
+  },
+  "terminal.exitRecovery.message": {
+    "message": "TCodex stopped while the tab was still open. Restore the conversation \"{title}\" or handle it later."
+  },
+  "terminal.exitRecovery.restore": {
+    "message": "Restore session"
+  },
+  "terminal.exitRecovery.later": {
+    "message": "Later"
+  },
   "tab.action.newTab": {
     "message": "New tab",
     "description": "New tab button aria-label"
@@ -1963,6 +1975,27 @@
   },
   "workers.renameRequired": {
     "message": "Worker name cannot be empty."
+  },
+  "workers.removeZone": {
+    "message": "Remove offline Worker"
+  },
+  "workers.removeZoneHint": {
+    "message": "For cleaning up stopped debug registrations. This removes the server registration only; local Kode data and workspaces are not deleted."
+  },
+  "workers.remove": {
+    "message": "Remove Worker…"
+  },
+  "workers.removeTitle": {
+    "message": "Remove Worker “{name}”?"
+  },
+  "workers.removeMessage": {
+    "message": "This removes “{name}” from the current sync server. Its device bindings and actionable sessions will also be revoked, and other devices will no longer be able to monitor it.\n\nTo restore it, pair the Worker again. Local workspaces and session history are not deleted."
+  },
+  "workers.removeConfirm": {
+    "message": "Remove Worker"
+  },
+  "workers.removeCancel": {
+    "message": "Cancel"
   },
   "workers.hostname": {
     "message": "PC name: {name}"

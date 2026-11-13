@@ -22,6 +22,8 @@ import {
 import { pushToast } from './toast'
 import { currentTermTheme } from './terminal_settings'
 import { SessionMetadataBuffer, upsertSessionTab, persistableTabs, reconcileSharedSessionTabs } from './session_metadata'
+import { shouldOfferTcodexExitRecovery } from './session_exit_guard'
+import { isWindowsUserAgent } from './platform'
 
 export interface TabInfo {
   sharedRuntime?: boolean
@@ -66,6 +68,12 @@ export interface TabInfo {
 
 export const tabs = writable<TabInfo[]>([])
 export const activeId = writable<SessionId | null>(null)
+export type SessionExitRecovery = {
+  id: SessionId
+  backendKey: string
+  title: string
+}
+export const sessionExitRecovery = writable<SessionExitRecovery | null>(null)
 
 /**
  * 已 mount 的 xterm 实例 id 列表。
@@ -152,6 +160,7 @@ export async function newTab(
 export async function closeTab(id: SessionId) {
   const tab = get(tabs).find((t) => t.id === id)
   await ipc.killSession(id, tab?.endpointId ?? null).catch(() => {})
+  sessionExitRecovery.update((current) => current?.id === id ? null : current)
   sessionStatuses.delete(id)
   sessionMetadata.delete(id)
   clearAppEventsForSession(id)
@@ -291,6 +300,16 @@ export async function startEventSubscriptions() {
       detail: exitTitle,
       source: tab?.backendKey,
     })
+    if (isWindowsUserAgent(navigator.userAgent) && shouldOfferTcodexExitRecovery(tab, m.code)) {
+      tabs.update((arr) => arr.map((t) => t.id === m.id ? { ...t, exited: 0, status: 'exited' } : t))
+      sessionExitRecovery.set({
+        id: m.id,
+        backendKey: tab!.backendKey,
+        title: tab!.title || `Session ${m.id}`,
+      })
+      schedulePersist()
+      return
+    }
     // Keep failed resumes inspectable for this run; persistableTabs drops them on restart.
     if (m.code !== 0) {
       tabs.update((arr) => arr.map((t) => t.id === m.id ? { ...t, exited: m.code, status: 'exited' } : t))

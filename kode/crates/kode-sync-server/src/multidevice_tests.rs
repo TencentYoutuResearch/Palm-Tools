@@ -607,3 +607,386 @@ async fn session_management_dispatches_rename_and_delete_to_the_owning_desktop()
         } if kind == "delete"
     ));
 }
+
+#[tokio::test]
+async fn executed_delete_cleans_up_a_stale_cloud_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('office','office','office','office',1,1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('office-binding','office','phone',?1,?2,1)",
+            params![
+                token_hash("mobile"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let (tx, mut agent) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "office".into(),
+        AgentConnection {
+            connection_id: "office".into(),
+            tx,
+            kode_version: Some("0.2.2-test".into()),
+            os: Some("macos".into()),
+            arch: Some("aarch64".into()),
+            capabilities: vec!["inventory.v1".into()],
+        },
+    );
+    sync_session_snapshot(
+        &state,
+        "office",
+        "boot",
+        vec![AgentSession {
+            local_id: 7,
+            dto: json!({"id":7,"backend_key":"codex","title":"zombie","status":"idle","tokens":{}}),
+        }],
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer mobile".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let session_id = list["sessions"][0]["id"].as_i64().unwrap();
+    let mut events = state.mobile_bus("office").subscribe();
+    let (_, Json(dispatched)) = dispatch_mobile_command(
+        &state,
+        session_id,
+        &headers,
+        "delete",
+        json!({}),
+    )
+    .unwrap();
+    let command_id = dispatched["command_id"].as_str().unwrap();
+    assert!(matches!(
+        agent.try_recv().unwrap(),
+        ServerFrame::Command { ref kind, .. } if kind == "delete"
+    ));
+
+    update_command_result(&state, "office", command_id, "executed", None).unwrap();
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers)
+        .await
+        .unwrap();
+    assert!(list["sessions"].as_array().unwrap().is_empty());
+    let mut kinds = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        kinds.push(event.kind);
+    }
+    assert!(kinds.iter().any(|kind| kind == "command.status"));
+    assert!(kinds.iter().any(|kind| kind == "session.exited"));
+}
+
+#[tokio::test]
+async fn offline_worker_sessions_are_removed_and_can_still_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('offline','offline','offline','device-token-hash',1,1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('offline','offline','phone',?1,?2,1)",
+            params![
+                token_hash("offline"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    sync_session_snapshot(
+        &state,
+        "offline",
+        "boot",
+        vec![AgentSession {
+            local_id: 11,
+            dto: json!({
+                "id":11,
+                "backend_key":"tcodex",
+                "title":"stale",
+                "status":"idle",
+                "tokens":{}
+            }),
+        }],
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer offline".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let session_id = list["sessions"][0]["id"].as_i64().unwrap();
+
+    let (status, Json(receipt)) = delete_session(
+        axum::extract::State(state.clone()),
+        Path(session_id),
+        headers.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(receipt["status"], "executed");
+    assert_eq!(receipt["offline_cleanup"], true);
+
+    let Json(list) = list_sessions(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    assert!(list["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn disconnect_expires_every_live_session_for_that_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        db.execute(
+            "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+             VALUES('worker','worker','worker','hash',1,1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('worker','worker','phone',?1,?2,1)",
+            params![
+                token_hash("worker"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let sessions = [21, 22]
+        .into_iter()
+        .map(|local_id| AgentSession {
+            local_id,
+            dto: json!({
+                "id":local_id,
+                "backend_key":"tcodex",
+                "title":format!("session-{local_id}"),
+                "status":"idle",
+                "tokens":{}
+            }),
+        })
+        .collect();
+    sync_session_snapshot(&state, "worker", "boot", sessions).unwrap();
+    expire_worker_sessions(&state, "worker", None).unwrap();
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer worker".parse().unwrap());
+    let Json(list) = list_sessions(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    assert!(list["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn offline_worker_removal_revokes_bindings_sessions_and_directory_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "zombie"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(&format!("{worker}-token"))],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('zombie-binding','zombie','phone',?1,?2,1)",
+            params![
+                token_hash("zombie-token"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    sync_session_snapshot(
+        &state,
+        "zombie",
+        "boot",
+        vec![AgentSession {
+            local_id: 7,
+            dto: json!({
+                "id": 7,
+                "backend_key": "codex",
+                "title": "stale debug session",
+                "status": "idle",
+                "tokens": {}
+            }),
+        }],
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        "Bearer office-token".parse().unwrap(),
+    );
+
+    let Json(removed) = remove_worker(
+        axum::extract::State(state.clone()),
+        Path("zombie".into()),
+        headers.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed["removed"], true);
+    assert_eq!(removed["sessions_exited"], 1);
+    assert_eq!(removed["bindings_revoked"], 1);
+
+    let Json(directory) = list_workers(axum::extract::State(state.clone()), headers)
+        .await
+        .unwrap();
+    assert_eq!(directory["workers"].as_array().unwrap().len(), 1);
+    assert_eq!(directory["workers"][0]["worker_id"], "office");
+    let db = state.inner.db.lock();
+    let binding_revoked: Option<i64> = db
+        .query_row(
+            "SELECT revoked_at FROM bindings WHERE id='zombie-binding'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(binding_revoked.is_some());
+    let worker_revoked: Option<i64> = db
+        .query_row(
+            "SELECT revoked_at FROM devices WHERE id='zombie'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(worker_revoked.is_some());
+    drop(db);
+
+    let register = register_device(
+        axum::extract::State(state),
+        Json(RegisterDeviceReq {
+            installation_id: "zombie".into(),
+            name: "zombie".into(),
+            hostname: Some("zombie".into()),
+            device_token: Some("zombie-token".into()),
+        }),
+    )
+    .await;
+    assert!(matches!(register, Err(ApiError::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn online_worker_cannot_be_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "active"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(&format!("{worker}-token"))],
+            )
+            .unwrap();
+        }
+    }
+    let (tx, _rx) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "active".into(),
+        AgentConnection {
+            connection_id: "active".into(),
+            tx,
+            kode_version: Some("0.2.2-test".into()),
+            os: Some("macos".into()),
+            arch: Some("aarch64".into()),
+            capabilities: vec!["inventory.v1".into()],
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        "Bearer office-token".parse().unwrap(),
+    );
+    let result = remove_worker(
+        axum::extract::State(state),
+        Path("active".into()),
+        headers,
+    )
+    .await;
+    assert!(matches!(result, Err(ApiError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn legacy_mobile_binding_cannot_remove_another_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["bound", "zombie"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(&format!("{worker}-token"))],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('legacy','bound','phone',?1,?2,1)",
+            params![
+                token_hash("legacy-mobile-token"),
+                serde_json::to_string(&["sessions.read"]).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        "Bearer legacy-mobile-token".parse().unwrap(),
+    );
+    let result = remove_worker(
+        axum::extract::State(state),
+        Path("zombie".into()),
+        headers,
+    )
+    .await;
+    assert!(matches!(result, Err(ApiError::Forbidden(_))));
+}
