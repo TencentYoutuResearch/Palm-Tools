@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use super::codex_title;
 use super::cursor_tail;
 use super::jsonl_tail::{self, Backend};
+use super::kimi_tail;
 use super::opencode_tail;
 use super::SessionId;
 use crate::event::CoreEvent;
@@ -167,6 +168,7 @@ pub fn profile(kind: Backend) -> &'static dyn BackendProfile {
         Backend::Tcodex => &TCODEX_PROFILE,
         Backend::Cursor => &CursorProfile,
         Backend::Opencode => &OpencodeProfile,
+        Backend::Kimi => &KimiProfile,
     }
 }
 
@@ -183,6 +185,7 @@ pub fn all_profiles() -> &'static [&'static dyn BackendProfile] {
         &TCODEX_PROFILE,
         &CursorProfile,
         &OpencodeProfile,
+        &KimiProfile,
     ];
     PROFILES
 }
@@ -220,6 +223,7 @@ static CODEX_PROFILE: CodexProfile = CodexProfile(Backend::Codex);
 static TCODEX_PROFILE: CodexProfile = CodexProfile(Backend::Tcodex);
 struct CursorProfile;
 struct OpencodeProfile;
+struct KimiProfile;
 
 impl BackendProfile for CodebuddyProfile {
     fn kind(&self) -> Backend {
@@ -614,6 +618,101 @@ impl BackendProfile for OpencodeProfile {
     }
     fn parse_usage_file(&self, _path: &Path, _fallback_ms: Option<i64>) -> Vec<UsageEvent> {
         Vec::new()
+    }
+}
+
+impl BackendProfile for KimiProfile {
+    fn kind(&self) -> Backend {
+        Backend::Kimi
+    }
+    fn usage_key(&self) -> &'static str {
+        "kimi"
+    }
+    fn persist_title_to_transcript(&self) -> bool {
+        false
+    }
+    fn resume_style(&self) -> ResumeStyle {
+        ResumeStyle::SessionFlag
+    }
+    fn find_session_path(&self, _cwd: &Path, _session_id: &str) -> Option<PathBuf> {
+        None
+    }
+    fn usage_file_matches(&self, path: &Path) -> bool {
+        path.file_name().and_then(|s| s.to_str()) == Some("wire.jsonl")
+    }
+    fn spawn_tail(&self, req: MetaTailRequest) {
+        kimi_tail::spawn(
+            req.id,
+            req.cwd,
+            req.resume_session_id,
+            req.spawn_started_at,
+            req.evt_tx,
+        );
+    }
+    fn list_sessions(&self, cwd: &Path) -> Vec<ListedSession> {
+        let (all, _) = self.list_sessions_page(cwd, 0, usize::MAX);
+        all
+    }
+    /// state.json 已按更新时间排好序,只对本页会话读 wire.jsonl 拿 model / tokens。
+    fn list_sessions_page(
+        &self,
+        cwd: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<ListedSession>, bool) {
+        let Some(home) = kimi_tail::kimi_home() else {
+            return (Vec::new(), false);
+        };
+        let all = kimi_tail::list_sessions(&home, cwd);
+        let has_more = all.len() > offset.saturating_add(limit);
+        let page = all
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|s| {
+                let stats = kimi_tail::read_wire_stats(&s.wire);
+                ListedSession {
+                    total_tokens: Some(stats.total_tokens()).filter(|t| *t > 0),
+                    model: stats.model,
+                    session_id: s.session_id,
+                    title: s.title,
+                    last_modified_secs: (s.updated_ms.max(0) / 1000) as u64,
+                }
+            })
+            .collect();
+        (page, has_more)
+    }
+    fn usage_roots(&self, home: &Path) -> Vec<PathBuf> {
+        vec![kimi_tail::kimi_home_in(home).join("sessions")]
+    }
+    fn parse_usage_file(&self, path: &Path, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
+        let Ok(file) = File::open(path) else {
+            return Vec::new();
+        };
+        BufReader::new(file)
+            .lines()
+            .map_while(Result::ok)
+            .filter(|line| line.contains("\"usage.record\""))
+            .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+            .filter(|rec| rec.get("type").and_then(Value::as_str) == Some("usage.record"))
+            .filter_map(|rec| {
+                let mut stats = kimi_tail::WireStats::default();
+                stats.apply_record(&rec);
+                let model = rec.get("model").and_then(Value::as_str)?.trim().to_string();
+                Some(UsageEvent {
+                    backend: self.usage_key().to_string(),
+                    model,
+                    timestamp_ms: rec.get("time").and_then(Value::as_i64).or(fallback_ms),
+                    usage: UsageBucket {
+                        input: stats.input_tokens,
+                        output: stats.output_tokens,
+                        cached: stats.cached_tokens,
+                        total: stats.total_tokens(),
+                        requests: 1,
+                    },
+                })
+            })
+            .collect()
     }
 }
 
@@ -1299,8 +1398,38 @@ mod tests {
             profile_for_key("opencode").unwrap().resume_style(),
             ResumeStyle::SessionFlag
         );
+        let kimi = profile_for_key("kimi").unwrap();
+        assert_eq!(kimi.resume_style(), ResumeStyle::SessionFlag);
+        assert!(!kimi.supports_session_id_flag());
+        assert!(!kimi.persist_title_to_transcript());
         assert!(profile_for_key("foo").is_none());
-        assert_eq!(all_profiles().len(), 7);
+        assert_eq!(all_profiles().len(), 8);
+    }
+
+    #[test]
+    fn kimi_usage_reads_usage_records_from_wire_files() {
+        let profile = profile_for_key("kimi").unwrap();
+        let root = std::env::temp_dir().join(format!("kode-kimi-usage-{}", uuid::Uuid::new_v4()));
+        let main = root.join("sessions/wd_w_1/session_a/agents/main");
+        fs::create_dir_all(&main).unwrap();
+        let wire = main.join("wire.jsonl");
+        fs::write(&wire, concat!(
+            r#"{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/k","systemPrompt":"usage.record"}"#, "\n",
+            r#"{"type":"usage.record","agentId":"main","model":"kimi-code/k","usage":{"inputOther":10,"output":4,"inputCacheRead":90,"inputCacheCreation":0},"time":1794550015076}"#, "\n",
+            r#"{"type":"token_counting.turn_recorded","agentId":"main","tokens":104}"#, "\n",
+        )).unwrap();
+        assert!(profile.usage_file_matches(&wire));
+        assert!(!profile.usage_file_matches(&root.join("user-history/x.jsonl")));
+        let events = profile.parse_usage_file(&wire, None);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!((e.backend.as_str(), e.model.as_str()), ("kimi", "kimi-code/k"));
+        assert_eq!(e.timestamp_ms, Some(1794550015076));
+        assert_eq!(
+            (e.usage.input, e.usage.output, e.usage.cached, e.usage.total),
+            (100, 4, 90, 104)
+        );
     }
 
     #[test]

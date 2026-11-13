@@ -82,6 +82,7 @@ Cargo workspace 只包含 Rust crate 和 `apps/gui/src-tauri`。`apps/mobile`、
 - claude / claude-internal:`~/.claude/projects/<slug>/<session-id>.jsonl`
 - tclaude:`~/.tclaude/projects/<slug>/<session-id>.jsonl`（与 Claude 独立）
 - codex:`~/.codex/sessions/**/rollout-*.jsonl`
+- kimi:`$KIMI_CODE_HOME`(默认 `~/.kimi-code`)`/sessions/<ws>/<session-id>/state.json`(title)+ `agents/main/wire.jsonl`(model / `usage.record` 用量 / `token_counting.*` 上下文),见 `session/kimi_tail.rs`
 
 Codex 的会话展示名优先读取 `~/.codex/state_5.sqlite` 中对应 `threads.name`，并在运行时同步改名；rollout 首条有效 user prompt 只作为兜底。Cursor 优先 `~/.cursor/chats/**/meta.json` 的 title，未生成时从 agent transcript 取首条有效 prompt。
 

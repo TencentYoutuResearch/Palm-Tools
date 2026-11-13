@@ -196,7 +196,8 @@ pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvel
         Backend::Codex | Backend::Tcodex => parse_codex(id, line),
         Backend::Cursor => parse_cursor(id, line),
         // opencode 没有 transcript 行可解析;结构化事件走 ACP。
-        Backend::Opencode => vec![],
+        // kimi 的 wire.jsonl 只接了 metadata(kimi_tail),语义事件尚未解析。
+        Backend::Opencode | Backend::Kimi => vec![],
     };
     events.iter_mut().for_each(crate::session_relay::annotate);
     events

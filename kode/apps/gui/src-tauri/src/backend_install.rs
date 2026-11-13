@@ -64,7 +64,7 @@ fn unix_recipes(key: &str) -> &'static [InstallRecipe] {
         "amp" => &[r!("npm", "npm install -g @sourcegraph/amp")],
         "cursor" => &[r!("curl", "curl https://cursor.com/install -fsS | bash")],
         "copilot" => &[r!("npm", "npm install -g @github/copilot")],
-        "kimi" => &[r!("uv", "uv tool install --python 3.13 kimi-cli")],
+        "kimi" => &[r!("curl", "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash")],
         "pi" => &[r!("npm", "npm install -g @mariozechner/pi-coding-agent")],
         "kiro" => &[r!("curl", "curl -fsSL https://cli.kiro.dev/install | bash")],
         "droid" => &[r!("curl", "curl -fsSL https://app.factory.ai/cli | sh")],
@@ -90,7 +90,7 @@ fn windows_recipes(key: &str) -> &'static [InstallRecipe] {
             "irm 'https://cursor.com/install?win32=true' | iex",
         )],
         "copilot" => &[r!("npm", "npm install -g @github/copilot")],
-        "kimi" => &[r!("uv", "uv tool install --python 3.13 kimi-cli")],
+        "kimi" => &[r!("powershell", "irm https://code.kimi.com/kimi-code/install.ps1 | iex")],
         "pi" => &[r!("npm", "npm install -g @mariozechner/pi-coding-agent")],
         "droid" => &[r!(
             "powershell",
@@ -533,5 +533,81 @@ mod tests {
             vec!["npm"]
         );
         assert!(pick_recipe("tclaude", |_| true).unwrap_err().is_empty());
+    }
+
+    #[test]
+    fn kimi_uses_official_installer_scripts() {
+        let unix = unix_recipes("kimi");
+        assert_eq!(unix.len(), 1, "kimi should have one unix recipe");
+        assert_eq!(unix[0].requires, "curl");
+        assert_eq!(
+            unix[0].script,
+            "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"
+        );
+
+        let windows = windows_recipes("kimi");
+        assert_eq!(windows.len(), 1, "kimi should have one windows recipe");
+        assert_eq!(windows[0].requires, "powershell");
+        assert_eq!(
+            windows[0].script,
+            "irm https://code.kimi.com/kimi-code/install.ps1 | iex"
+        );
+    }
+
+    /// gui 层矩阵：PATH 探测白名单必须恰好覆盖 `Config::default()` 的 17 个
+    /// 内置 backend(数据源一致,新增 backend 忘记登记立刻失败)。
+    #[test]
+    fn probe_candidates_match_every_builtin_backend() {
+        use std::collections::BTreeSet;
+        let candidates: BTreeSet<&str> = KNOWN_CANDIDATES.iter().map(|c| c.key).collect();
+        let builtin: BTreeSet<String> = kode_core::config::Config::default()
+            .backends
+            .keys()
+            .cloned()
+            .collect();
+        let builtin: BTreeSet<&str> = builtin.iter().map(String::as_str).collect();
+        assert_eq!(
+            candidates, builtin,
+            "KNOWN_CANDIDATES must cover exactly the built-in backends"
+        );
+        assert_eq!(candidates.len(), 17);
+    }
+
+    /// gui 层矩阵：安装配方只给有官方安装器的 12 个 key;其余 5 个
+    /// (claude-internal / tcodex / tclaude / grok / antigravity)两个平台都
+    /// 留空 → UI 提示手动安装。与 kode-core 的能力分组呼应。
+    #[test]
+    fn install_recipes_cover_exactly_the_official_installers() {
+        use std::collections::BTreeSet;
+        let manual: BTreeSet<&str> = [
+            "claude-internal",
+            "tcodex",
+            "tclaude",
+            "grok",
+            "antigravity",
+        ]
+        .into_iter()
+        .collect();
+        for key in &manual {
+            assert!(unix_recipes(key).is_empty(), "{key} should be manual on unix");
+            assert!(
+                windows_recipes(key).is_empty(),
+                "{key} should be manual on windows"
+            );
+        }
+        let candidates: BTreeSet<&str> = KNOWN_CANDIDATES.iter().map(|c| c.key).collect();
+        let with_recipe: BTreeSet<&str> = KNOWN_CANDIDATES
+            .iter()
+            .filter(|c| !unix_recipes(c.key).is_empty() || !windows_recipes(c.key).is_empty())
+            .map(|c| c.key)
+            .collect();
+        let expected: BTreeSet<&str> = candidates.difference(&manual).copied().collect();
+        assert_eq!(with_recipe, expected);
+        assert_eq!(with_recipe.len(), 12);
+        // ACP-capable backends have an official installer on every platform.
+        for key in ["codebuddy", "opencode"] {
+            assert!(!unix_recipes(key).is_empty(), "{key} unix installer");
+            assert!(!windows_recipes(key).is_empty(), "{key} windows installer");
+        }
     }
 }
