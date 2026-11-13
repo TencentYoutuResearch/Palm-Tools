@@ -2388,17 +2388,31 @@ mod tests {
     /// The relay republishes every uploaded event to phones as live, so an
     /// account relay must get the snapshot alone; self-hosted servers dedupe
     /// the replay against their mirror and still receive it.
+    #[cfg(unix)]
     #[tokio::test]
     async fn only_self_hosted_servers_receive_a_history_replay() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "replay".into());
-        let session = kode_core::session::Session::structured(
+        let mut session = kode_core::session::Session::structured(
             5,
             "codex",
             "fixture",
-            std::path::Path::new("/tmp/example-workspace"),
+            std::path::Path::new("/tmp"),
             "thread".into(),
             "gpt-test".into(),
+        );
+        // Snapshots only list sessions whose PTY is alive.
+        session.pty = Some(
+            kode_core::pty::PtyHost::spawn(
+                5,
+                "/bin/sh",
+                &["-c".into(), "sleep 30".into()],
+                portable_pty::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                std::path::Path::new("/tmp"),
+                ctx.core_tx.clone(),
+                &[],
+            )
+            .unwrap(),
         );
         ctx.sessions.lock().insert(5, session);
         ctx.bus.emit(crate::EventEnvelope::new(
