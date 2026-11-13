@@ -840,6 +840,27 @@
   "workers.renameRequired": {
     "message": "Worker 名称不能为空。"
   },
+  "workers.removeZone": {
+    "message": "移除离线 Worker"
+  },
+  "workers.removeZoneHint": {
+    "message": "仅用于清理已停止运行的调试记录。这里只移除服务器注册，不会删除本机 Kode 或工作区。"
+  },
+  "workers.remove": {
+    "message": "移除 Worker…"
+  },
+  "workers.removeTitle": {
+    "message": "移除 Worker“{name}”？"
+  },
+  "workers.removeMessage": {
+    "message": "将从当前同步服务器移除“{name}”的注册。它关联的设备绑定和可操作会话也会被撤销，其他设备将无法继续监控它。\n\n如需恢复，必须重新绑定此 Worker。此操作不会删除本机的工作区或会话记录。"
+  },
+  "workers.removeConfirm": {
+    "message": "确认移除"
+  },
+  "workers.removeCancel": {
+    "message": "取消"
+  },
   "workers.hostname": {
     "message": "PC 名称：{name}"
   },

@@ -341,7 +341,10 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/devices/:id/pairings", post(create_pairing))
         .route("/api/v1/pairings/:id/claim", post(claim_pairing))
         .route("/api/v1/workers", get(list_workers))
-        .route("/api/v1/workers/:worker_id", patch(update_worker_profile))
+        .route(
+            "/api/v1/workers/:worker_id",
+            patch(update_worker_profile).delete(remove_worker),
+        )
         .route(
             "/api/v1/workers/:worker_id/inventory",
             get(get_worker_inventory),
@@ -438,6 +441,25 @@ async fn register_device(
             device_token: provided,
         }));
     }
+    let revoked = db
+        .query_row(
+            "SELECT token_hash FROM devices
+             WHERE installation_id=?1 AND revoked_at IS NOT NULL
+             ORDER BY revoked_at DESC LIMIT 1",
+            [req.installation_id.trim()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if revoked.is_some_and(|expected| {
+        req.device_token
+            .as_deref()
+            .is_some_and(|provided| constant_eq(&expected, &token_hash(provided)))
+    }) {
+        return Err(ApiError::Forbidden(
+            "Worker registration was removed; reset its cloud-sync configuration to pair again"
+                .into(),
+        ));
+    }
     let device_id = format!("dev_{}", Uuid::new_v4().simple());
     let device_token = random_token("kdev");
     db.execute(
@@ -531,6 +553,145 @@ async fn update_worker_profile(
         "worker_id": worker_id,
         "name": display_name,
         "display_name": display_name,
+    })))
+}
+
+fn worker_removal_allowed(
+    state: &ServerState,
+    headers: &HeaderMap,
+    target_worker_id: &str,
+) -> Result<(), ApiError> {
+    let token = bearer(headers).ok_or(ApiError::Unauthorized)?;
+    if let Ok(auth) = state.mobile_auth(&token, "sessions.read") {
+        if target_worker_id == auth.device_id
+            || auth.scopes.iter().any(|item| item == "workers.monitor")
+        {
+            return Ok(());
+        }
+        return Err(ApiError::Forbidden(
+            "binding does not grant workers.monitor".into(),
+        ));
+    }
+    let exists = state
+        .inner
+        .db
+        .lock()
+        .query_row(
+            "SELECT 1 FROM devices WHERE token_hash=?1 AND revoked_at IS NULL",
+            [token_hash(&token)],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized)
+    }
+}
+
+async fn remove_worker(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(worker_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    if worker_id.is_empty() || worker_id.len() > 200 {
+        return Err(ApiError::BadRequest("invalid Worker id".into()));
+    }
+    worker_removal_allowed(&state, &headers, &worker_id)?;
+
+    let agents = state.inner.agents.lock();
+    if agents.contains_key(&worker_id) {
+        return Err(ApiError::Conflict(
+            "Worker is online; stop it before removing the registration".into(),
+        ));
+    }
+
+    let (session_ids, binding_ids) = {
+        let mut db = state.inner.db.lock();
+        let tx = db.transaction()?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM devices WHERE id=?1 AND revoked_at IS NULL",
+                [&worker_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(ApiError::NotFound(format!("Worker {worker_id}")));
+        }
+        let session_ids = tx
+            .prepare(
+                "SELECT id FROM sessions
+                 WHERE device_id=?1
+                   AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            )?
+            .query_map([&worker_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let binding_ids = tx
+            .prepare(
+                "SELECT id FROM bindings
+                 WHERE device_id=?1 AND revoked_at IS NULL",
+            )?
+            .query_map([&worker_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let removed_at = now_ms() as i64;
+        tx.execute(
+            "UPDATE sessions
+             SET dto_json=json_set(dto_json, '$.status', 'exited'), updated_at=?1
+             WHERE device_id=?2
+               AND COALESCE(json_extract(dto_json, '$.status'), 'starting')<>'exited'",
+            params![removed_at, worker_id],
+        )?;
+        tx.execute(
+            "UPDATE bindings SET revoked_at=?1
+             WHERE device_id=?2 AND revoked_at IS NULL",
+            params![removed_at, worker_id],
+        )?;
+        tx.execute(
+            "UPDATE devices SET revoked_at=?1
+             WHERE id=?2 AND revoked_at IS NULL",
+            params![removed_at, worker_id],
+        )?;
+        tx.commit()?;
+        (session_ids, binding_ids)
+    };
+    drop(agents);
+
+    for session_id in &session_ids {
+        state.publish(
+            &worker_id,
+            CloudEnvelope::new(
+                *session_id,
+                "session.exited",
+                json!({"reason":"worker_removed"}),
+            ),
+        );
+    }
+    for binding_id in &binding_ids {
+        state.publish(
+            &worker_id,
+            CloudEnvelope::new(
+                0,
+                "binding.revoked",
+                json!({"binding_id":binding_id}),
+            ),
+        );
+    }
+    state.publish(
+        &worker_id,
+        CloudEnvelope::new(
+            0,
+            "worker.removed",
+            json!({"worker_id":worker_id,"reason":"removed"}),
+        ),
+    );
+    Ok(Json(json!({
+        "worker_id": worker_id,
+        "removed": true,
+        "sessions_exited": session_ids.len(),
+        "bindings_revoked": binding_ids.len(),
     })))
 }
 

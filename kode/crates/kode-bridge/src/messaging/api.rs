@@ -73,6 +73,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/cloud/status", get(cloud_status))
         .route("/api/v1/messaging/cloud/pair", post(cloud_pair))
         .route("/api/v1/messaging/cloud/activate", post(cloud_activate))
+        .route("/api/v1/messaging/cloud/remove_worker", post(cloud_remove_worker))
         .route("/api/v1/messaging/cloud/backend", post(cloud_backend))
         .route("/api/v1/messaging/cloud/account/code", post(cloud_account_code))
         .route("/api/v1/messaging/cloud/account/sign_in", post(cloud_account_sign_in))
@@ -597,6 +598,13 @@ struct CloudActivation { backend_id:String }
 async fn cloud_activate(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudActivation>) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
     admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).activate_backend(&input.backend_id).map_err(|e|Error(StatusCode::BAD_REQUEST,e))?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudRemoveWorker { worker_id:String }
+async fn cloud_remove_worker(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<CloudRemoveWorker>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).remove_worker(&input.worker_id).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

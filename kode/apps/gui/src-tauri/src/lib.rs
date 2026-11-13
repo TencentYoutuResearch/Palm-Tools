@@ -203,6 +203,7 @@ pub fn run() {
             cloud_sync::cloud_sync_activate_backend,
             cloud_sync::cloud_sync_workers,
             cloud_sync::cloud_sync_rename_worker,
+            cloud_sync::cloud_sync_remove_worker,
             cloud_sync::cloud_sync_worker_inventory,
             cloud_sync::cloud_sync_worker_sessions,
             cloud_sync::cloud_sync_worker_history,

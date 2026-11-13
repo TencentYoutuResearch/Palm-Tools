@@ -376,6 +376,20 @@
       monitorWorkerId = null
     }
   }
+  function workerRemoved(workerId: string) {
+    workers = workers.filter((worker) => worker.worker_id !== workerId)
+    if (monitorWorkerId === workerId) {
+      monitorWorkerId = null
+      monitorSessions = []
+      monitorSessionsLoading = false
+      try {
+        localStorage.removeItem('kode.monitorWorkerId')
+      } catch {
+        // Navigation state is best effort; server state is authoritative.
+      }
+    }
+    void refreshWorkerDirectory()
+  }
   $effect(() => {
     // Signing in or out of the account adds or removes its desktops.
     void sidebarAccount?.active
@@ -2728,6 +2742,7 @@
             <WorkerDetailsPanel
               initialWorkerId={workMode === 'monitor' ? monitorWorkerId : null}
               onClose={() => (workersOpen = false)}
+              onWorkerRemoved={workerRemoved}
               {onTitlebarMouseDown}
             />
           </div>

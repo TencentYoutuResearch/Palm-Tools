@@ -375,6 +375,36 @@ impl CloudSyncManager {
             .map_err(|error| format!("invalid Worker profile response: {error}"))
     }
 
+    /// Retire an offline Worker registration from the active sync server.
+    /// The server rejects online Workers so removing a directory record can
+    /// never disconnect an Agent that may still be executing work.
+    pub async fn remove_worker(&self, worker_id: &str) -> Result<Value, String> {
+        if worker_id.is_empty()
+            || !worker_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid worker id".into());
+        }
+        let (server_url, token) = self.device_http_context()?;
+        let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .delete(format!("{server_url}/api/v1/workers/{worker}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker removal response: {error}"))
+    }
+
     pub async fn worker_inventory(&self, worker_id: &str) -> Result<Value, String> {
         if !worker_id
             .bytes()

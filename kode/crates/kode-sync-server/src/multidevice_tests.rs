@@ -723,3 +723,188 @@ async fn disconnect_expires_every_live_session_for_that_worker() {
         .unwrap();
     assert!(list["sessions"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn offline_worker_removal_revokes_bindings_sessions_and_directory_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "zombie"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(&format!("{worker}-token"))],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('zombie-binding','zombie','phone',?1,?2,1)",
+            params![
+                token_hash("zombie-token"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    sync_session_snapshot(
+        &state,
+        "zombie",
+        "boot",
+        vec![AgentSession {
+            local_id: 7,
+            dto: json!({
+                "id": 7,
+                "backend_key": "codex",
+                "title": "stale debug session",
+                "status": "idle",
+                "tokens": {}
+            }),
+        }],
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        "Bearer office-token".parse().unwrap(),
+    );
+
+    let Json(removed) = remove_worker(
+        axum::extract::State(state.clone()),
+        Path("zombie".into()),
+        headers.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed["removed"], true);
+    assert_eq!(removed["sessions_exited"], 1);
+    assert_eq!(removed["bindings_revoked"], 1);
+
+    let Json(directory) = list_workers(axum::extract::State(state.clone()), headers)
+        .await
+        .unwrap();
+    assert_eq!(directory["workers"].as_array().unwrap().len(), 1);
+    assert_eq!(directory["workers"][0]["worker_id"], "office");
+    let db = state.inner.db.lock();
+    let binding_revoked: Option<i64> = db
+        .query_row(
+            "SELECT revoked_at FROM bindings WHERE id='zombie-binding'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(binding_revoked.is_some());
+    let worker_revoked: Option<i64> = db
+        .query_row(
+            "SELECT revoked_at FROM devices WHERE id='zombie'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(worker_revoked.is_some());
+    drop(db);
+
+    let register = register_device(
+        axum::extract::State(state),
+        Json(RegisterDeviceReq {
+            installation_id: "zombie".into(),
+            name: "zombie".into(),
+            hostname: Some("zombie".into()),
+            device_token: Some("zombie-token".into()),
+        }),
+    )
+    .await;
+    assert!(matches!(register, Err(ApiError::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn online_worker_cannot_be_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "active"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(&format!("{worker}-token"))],
+            )
+            .unwrap();
+        }
+    }
+    let (tx, _rx) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "active".into(),
+        AgentConnection {
+            connection_id: "active".into(),
+            tx,
+            kode_version: Some("0.2.2-test".into()),
+            os: Some("macos".into()),
+            arch: Some("aarch64".into()),
+            capabilities: vec!["inventory.v1".into()],
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        "Bearer office-token".parse().unwrap(),
+    );
+    let result = remove_worker(
+        axum::extract::State(state),
+        Path("active".into()),
+        headers,
+    )
+    .await;
+    assert!(matches!(result, Err(ApiError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn legacy_mobile_binding_cannot_remove_another_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["bound", "zombie"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(&format!("{worker}-token"))],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('legacy','bound','phone',?1,?2,1)",
+            params![
+                token_hash("legacy-mobile-token"),
+                serde_json::to_string(&["sessions.read"]).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        "Bearer legacy-mobile-token".parse().unwrap(),
+    );
+    let result = remove_worker(
+        axum::extract::State(state),
+        Path("zombie".into()),
+        headers,
+    )
+    .await;
+    assert!(matches!(result, Err(ApiError::Forbidden(_))));
+}

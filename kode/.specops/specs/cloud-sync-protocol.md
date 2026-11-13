@@ -260,3 +260,19 @@ Cross-Worker inventory is disabled by default. A controlled single-tenant
 deployment can set `KODE_SYNC_ALLOW_SHARED_INVENTORY=1` to allow one registered
 Worker to inspect another's read-only inventory. Session data, events and
 commands remain scoped to each Worker independently of this flag.
+
+### Offline Worker removal
+
+`DELETE /api/v1/workers/:worker_id` retires a stale registration without
+deleting local Kode data. The Worker must be Offline; an active Agent WebSocket
+returns `409` so removal cannot terminate running work.
+
+The server soft-revokes the device, its monitor bindings and non-exited session
+DTOs in one transaction, then publishes `session.exited`, `binding.revoked` and
+`worker.removed`. Revoked rows remain in SQLite for audit, while
+`GET /api/v1/workers` omits them. A revoked installation/token cannot silently
+register a replacement and must pair again.
+
+Desktop exposes this only as a secondary danger zone in Worker Details for
+Offline Workers. A destructive confirmation names the Worker and explains that
+monitor access and actionable sessions will be revoked.

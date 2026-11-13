@@ -425,6 +425,13 @@ export const ipc = {
       workerId,
       displayName,
     }),
+  cloudSyncRemoveWorker: (workerId: string) =>
+    invoke<{
+      worker_id: string
+      removed: boolean
+      sessions_exited: number
+      bindings_revoked: number
+    }>('cloud_sync_remove_worker', { workerId }),
   cloudSyncWorkerInventory: (workerId: string) =>
     invoke<WorkerInventory>('cloud_sync_worker_inventory', { workerId }),
   cloudSyncWorkerSessions: (workerId: string) =>
