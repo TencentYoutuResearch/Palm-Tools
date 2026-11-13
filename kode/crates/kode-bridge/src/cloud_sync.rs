@@ -1392,7 +1392,7 @@ impl CloudSyncManager {
                                     self.set_binding_status(kind, enabled, binding_count);
                                     if enabled {
                                         snapshotted_session_ids =
-                                            self.send_snapshot_and_history(&mut socket).await?;
+                                            self.send_snapshot_and_history(&mut socket, kind).await?;
                                     } else {
                                         snapshotted_session_ids.clear();
                                     }
@@ -1401,14 +1401,14 @@ impl CloudSyncManager {
                                     sync_enabled = true;
                                     self.set_binding_status(kind, true, binding_count);
                                     snapshotted_session_ids =
-                                        self.send_snapshot_and_history(&mut socket).await?;
+                                        self.send_snapshot_and_history(&mut socket, kind).await?;
                                 }
                                 ServerFrame::BindingChanged { sync_enabled: enabled, binding_count } => {
                                     sync_enabled = enabled;
                                     self.set_binding_status(kind, enabled, binding_count);
                                     if enabled {
                                         snapshotted_session_ids =
-                                            self.send_snapshot_and_history(&mut socket).await?;
+                                            self.send_snapshot_and_history(&mut socket, kind).await?;
                                     } else {
                                         snapshotted_session_ids.clear();
                                     }
@@ -1485,7 +1485,7 @@ impl CloudSyncManager {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             snapshotted_session_ids =
-                                self.send_snapshot_and_history(&mut socket).await?;
+                                self.send_snapshot_and_history(&mut socket, kind).await?;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             return Err("local event bus closed".into());
@@ -1554,7 +1554,11 @@ impl CloudSyncManager {
         .await
     }
 
-    async fn send_snapshot_and_history<S>(&self, socket: &mut S) -> Result<HashSet<u64>, String>
+    async fn send_snapshot_and_history<S>(
+        &self,
+        socket: &mut S,
+        kind: BackendKind,
+    ) -> Result<HashSet<u64>, String>
     where
         S: SinkExt<Message> + Unpin,
         S::Error: std::fmt::Display,
@@ -1563,6 +1567,13 @@ impl CloudSyncManager {
         // session map a second time races with session creation and can replay an
         // event for an id the center has never seen.
         let session_ids = self.send_snapshot(socket).await?;
+        // The account relay keeps no timeline to dedupe against: it forwards
+        // every uploaded event to open phones as live, so a replay would mark
+        // old replies unread each time a phone opens. Phones read history
+        // from the desktop on demand instead.
+        if kind == BackendKind::AccountRelay {
+            return Ok(session_ids);
+        }
         for id in &session_ids {
             for event in if self.inner.ctx.runtimes.contains(*id) {
                 self.inner
@@ -2372,6 +2383,69 @@ mod tests {
         assert_eq!(sessions.status(), 200);
         wait_for("syncing").await;
         wait_for("standby").await;
+    }
+
+    /// The relay republishes every uploaded event to phones as live, so an
+    /// account relay must get the snapshot alone; self-hosted servers dedupe
+    /// the replay against their mirror and still receive it.
+    #[tokio::test]
+    async fn only_self_hosted_servers_receive_a_history_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "replay".into());
+        let session = kode_core::session::Session::structured(
+            5,
+            "codex",
+            "fixture",
+            std::path::Path::new("/tmp/example-workspace"),
+            "thread".into(),
+            "gpt-test".into(),
+        );
+        ctx.sessions.lock().insert(5, session);
+        ctx.bus.emit(crate::EventEnvelope::new(
+            5,
+            "message",
+            json!({"role": "assistant", "text": "old reply"}),
+        ));
+        let manager = CloudSyncManager::with_config_path(ctx, dir.path().join("cloud-sync.json"));
+        struct Frames(Vec<Message>);
+        impl futures_util::Sink<Message> for Frames {
+            type Error = std::convert::Infallible;
+            fn poll_ready(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn start_send(mut self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+                self.0.push(item);
+                Ok(())
+            }
+            fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_close(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let replayed = |frames: &Frames| {
+            frames
+                .0
+                .iter()
+                .filter(|frame| matches!(frame, Message::Text(raw) if raw.contains("\"type\":\"event\"")))
+                .count()
+        };
+
+        let mut relay = Frames(Vec::new());
+        let ids = manager
+            .send_snapshot_and_history(&mut relay, BackendKind::AccountRelay)
+            .await
+            .unwrap();
+        assert!(ids.contains(&5));
+        assert_eq!(replayed(&relay), 0, "the relay must not see old events as new");
+
+        let mut self_hosted = Frames(Vec::new());
+        manager
+            .send_snapshot_and_history(&mut self_hosted, BackendKind::SelfHosted)
+            .await
+            .unwrap();
+        assert_eq!(replayed(&self_hosted), 1);
     }
 
     #[test]
