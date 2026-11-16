@@ -35,6 +35,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
 pub mod acp;
+pub mod attachments;
 pub mod messaging;
 pub mod backend_probe;
 pub mod hook_relay;

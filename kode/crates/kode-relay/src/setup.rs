@@ -9,7 +9,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use kode_relay_protocol::{ServerFrame, SETUP_KIND_HISTORY};
+use kode_relay_protocol::{
+    ServerFrame, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_REQUEST_BYTES, SETUP_KIND_ATTACHMENT,
+    SETUP_KIND_HISTORY,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -109,6 +112,44 @@ pub(crate) async fn history(
     );
     events.sort_by_key(|event| event.ts);
     Ok(Json(json!({ "events": events })).into_response())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttachmentChunk {
+    upload_id: String,
+    name: String,
+    size: u64,
+    offset: u64,
+    data: String,
+}
+
+/// One ordered chunk of a phone attachment, written by the desktop into its
+/// temp directory. The relay keeps no copy; it only bounds the request.
+pub(crate) async fn attachment(
+    State(state): State<RelayState>,
+    headers: HeaderMap,
+    Json(chunk): Json<AttachmentChunk>,
+) -> Result<Response, ApiError> {
+    if chunk.upload_id.is_empty()
+        || chunk.upload_id.len() > 64
+        || chunk.name.len() > 1024
+        || chunk.size == 0
+        || chunk.size > MAX_ATTACHMENT_BYTES
+        || chunk.offset >= chunk.size
+        || chunk.data.is_empty()
+        || chunk.data.len() > MAX_ATTACHMENT_REQUEST_BYTES
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Attachments are limited to {} MB, sent in ordered chunks",
+            MAX_ATTACHMENT_BYTES / 1024 / 1024
+        )));
+    }
+    let (caller, device_id) = open(&state, &headers).await?;
+    let payload = serde_json::to_value(&chunk).unwrap_or(Value::Null);
+    Ok(response(
+        request(&state, &caller, &device_id, SETUP_KIND_ATTACHMENT, payload).await?,
+    ))
 }
 
 #[derive(Deserialize, Serialize)]

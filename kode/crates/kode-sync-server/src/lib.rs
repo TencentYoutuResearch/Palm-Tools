@@ -363,6 +363,12 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/backends/:key/models", get(mobile_setup::models))
         .route("/api/v1/fs/list", get(mobile_setup::directories))
         .route(
+            "/api/v1/attachments",
+            post(mobile_setup::attachment).layer(axum::extract::DefaultBodyLimit::max(
+                mobile_setup::MAX_ATTACHMENT_REQUEST_BYTES,
+            )),
+        )
+        .route(
             "/api/v1/sessions/:id",
             get(get_session).delete(delete_session).patch(rename_session),
         )

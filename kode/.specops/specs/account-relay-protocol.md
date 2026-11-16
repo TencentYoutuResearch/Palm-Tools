@@ -106,6 +106,9 @@ Same paths and bodies as the sync server; the desktop is named by the
 - `GET|POST /api/v1/sessions`, `GET|DELETE /api/v1/sessions/:id`,
   `GET /sessions/:id/history`, `POST /sessions/:id/{input,interrupt,answer,plan_response,mode,model}`
 - `GET /api/v1/backends`, `/api/v1/backends/:key/models`, `/api/v1/fs/list`
+- `POST /api/v1/attachments` uploads one file chunk, see
+  [cloud sync](./cloud-sync-protocol.md#phone-attachments). The relay keeps
+  no copy; each chunk is a `setup.request` of kind `attachment`.
 - `GET /ws?device_id=` sends `connection.hello{server_kind:"kode-relay",...}`
 - `DELETE /api/v1/bindings/current` is accepted as a no-op.
 
