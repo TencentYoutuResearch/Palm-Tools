@@ -16,6 +16,7 @@ import 'package:dio/dio.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 
+import '../protocol/attachments.dart';
 import '../protocol/protocol.dart';
 import '../protocol/session_setup.dart';
 import 'gateway_session.dart';
@@ -265,6 +266,93 @@ class ApiClient {
     // A direct kode-bridge returns 204 after writing into the local PTY. It
     // has no cloud command lifecycle, so the HTTP acknowledgement is final.
     return const InputDispatchReceipt(commandId: null, status: 'executed');
+  }
+
+  /// Uploads [file] to the desktop's temp directory in ordered chunks and
+  /// returns the absolute path a message can reference.
+  Future<String> uploadAttachment(
+    File file, {
+    required String name,
+    void Function(double progress)? onProgress,
+    CancelToken? cancelToken,
+  }) async {
+    final size = await file.length();
+    if (size <= 0) throw ApiException(400, 'empty_file', 'The file is empty.');
+    if (size > maxAttachmentBytes) {
+      throw ApiException(
+        413,
+        'too_large',
+        'Attachments are limited to ${formatAttachmentSize(maxAttachmentBytes)}.',
+      );
+    }
+    final uploadId = _idempotencyKey();
+    final reader = await file.open();
+    try {
+      var offset = 0;
+      while (offset < size) {
+        final bytes = await reader.read(attachmentChunkBytes);
+        if (bytes.isEmpty) {
+          throw ApiException(
+            409,
+            'file_changed',
+            'The file changed while uploading.',
+          );
+        }
+        final resp = await _dio.post(
+          '/api/v1/attachments',
+          data: {
+            'upload_id': uploadId,
+            'name': name,
+            'size': size,
+            'offset': offset,
+            'data': base64Encode(bytes),
+          },
+          cancelToken: cancelToken,
+          options: Options(
+            sendTimeout: const Duration(seconds: 60),
+            receiveTimeout: const Duration(seconds: 60),
+          ),
+        );
+        if (resp.statusCode == 404 || resp.statusCode == 405) {
+          throw ApiException(
+            resp.statusCode!,
+            'unsupported',
+            'This server does not accept attachments yet. Update it, then retry.',
+          );
+        }
+        if (resp.statusCode == 400 &&
+            resp.data is Map &&
+            '${resp.data['detail']}'.contains('Unsupported mobile setup')) {
+          throw ApiException(
+            400,
+            'unsupported',
+            'Update Kode on the desktop to send attachments.',
+          );
+        }
+        _check(resp);
+        offset += bytes.length;
+        onProgress?.call(offset / size);
+        final body = resp.data;
+        if (offset >= size) {
+          final path = body is Map ? body['path'] as String? : null;
+          if (path == null || path.isEmpty) {
+            throw ApiException(
+              502,
+              'unsupported',
+              'The desktop did not accept the attachment. Update Kode on the desktop, then retry.',
+            );
+          }
+          return path;
+        }
+      }
+      throw ApiException(
+        409,
+        'file_changed',
+        'The file changed while uploading.',
+      );
+    } finally {
+      await reader.close();
+    }
   }
 
   Future<List<Envelope>> getHistory(int id, {int? fromMs, int? limit}) async {

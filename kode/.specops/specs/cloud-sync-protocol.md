@@ -194,6 +194,26 @@ The response opens that session in mobile. Create results persist even when the
 original HTTP waiter has timed out. Read results are ephemeral, scoped to the
 requesting device, and mobile authorization is checked again before returning.
 
+## Phone attachments
+
+Phones attach photos, videos and files by uploading them to the desktop
+first and then naming the desktop path in an ordinary `input` message.
+
+`POST /api/v1/attachments` requires `sessions.send` and takes
+`{ upload_id, name, size, offset, data }`: `data` is base64 of at most 2 MiB,
+chunks are sent in order from `offset = 0`, and `size` is at most 50 MiB
+(`kode-relay-protocol::MAX_ATTACHMENT_*`). The center bounds the body and
+forwards each chunk as `setup.request` kind `attachment`; it stores nothing.
+The desktop (`kode-bridge::attachments`) writes
+`<temp>/kode-attachments/<upload_id>/<sanitized name>`, rejects out-of-order
+chunks with `409 offset_mismatch`, and answers the chunk that completes the
+file with `{ complete: true, path, name, size }`. Upload folders older than
+24 hours are deleted when a new upload starts.
+
+The message then carries one line per file, `Attached file: <path>`, after
+the typed text. Phones parse those lines back out of the transcript and show
+their own preview copies, which they keep for 24 hours.
+
 ## Deployment
 
 `deploy/docker-compose.sync.yml` runs the Rust service behind Caddy. Caddy owns

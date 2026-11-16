@@ -23,11 +23,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
+import '../../protocol/attachments.dart';
 import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
 import '../theme.dart';
 import '../glass.dart';
+import 'attachment_views.dart';
 import 'backend_identity.dart';
+import 'composer_attachments.dart';
 import 'message_markdown.dart';
 import 'speech_locale.dart';
 import 'session_send_button.dart';
@@ -101,6 +104,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
   /// 输入框
   final _inputCtrl = TextEditingController();
   final _inputFocus = FocusNode();
+  late final _attachments = ComposerAttachments(
+    () => ref.read(apiClientProvider),
+  );
   final _speech = SpeechToText();
   bool _speechInitialized = false;
   bool _speechAvailable = false;
@@ -194,6 +200,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     _inputCtrl.dispose();
     _inputFocus.removeListener(_handleComposerFocus);
     _inputFocus.dispose();
+    _attachments.dispose();
     _scrollCtrl
       ..removeListener(_handleScroll)
       ..dispose();
@@ -571,7 +578,19 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
       return;
     }
     if (_listening) await _stopListening();
-    final text = _inputCtrl.text.trim();
+    if (!mounted || _attachments.uploading) return;
+    if (_attachments.failed) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Retry or remove the attachments that failed.'),
+        ),
+      );
+      return;
+    }
+    final typed = _inputCtrl.text.trim();
+    if (typed.isEmpty && _attachments.isEmpty) return;
+    final paths = _attachments.commit(widget.sessionId);
+    final text = composeAttachmentMessage(typed, paths);
     if (text.isEmpty) return;
 
     final outbound = ref
@@ -835,7 +854,9 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     final normalized = title?.trim() ?? '';
     if (normalized.isEmpty || normalized == currentTitle || !mounted) return;
     try {
-      await ref.read(sessionsProvider.notifier).rename(widget.sessionId, normalized);
+      await ref
+          .read(sessionsProvider.notifier)
+          .rename(widget.sessionId, normalized);
       if (!mounted) return;
       setState(() {
         _meta = {..._meta, 'title': normalized};
@@ -1245,9 +1266,10 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     String? permissionMode,
     VoidCallback? onModelTap,
   }) {
-    return ValueListenableBuilder<TextEditingValue>(
-      valueListenable: _inputCtrl,
-      builder: (context, value, _) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([_inputCtrl, _attachments]),
+      builder: (context, _) {
+        final value = _inputCtrl.value;
         final expanded = _inputFocus.hasFocus;
         return TextFieldTapRegion(
           child: AnimatedSize(
@@ -1265,27 +1287,12 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                       languageLabel: _speechLanguage.localeLabel,
                       onDismissError: () => setState(() => _speechError = null),
                     ),
+                  ComposerAttachmentStrip(attachments: _attachments),
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
                       if (!expanded) ...[
-                        _ComposerIconButton(
-                          icon: _listening
-                              ? Icons.stop_rounded
-                              : Icons.mic_none_rounded,
-                          label: _listening
-                              ? 'Stop ${_speechLanguage.localeLabel} voice input'
-                              : 'Start ${_speechLanguage.localeLabel} voice input',
-                          hint: _listening
-                              ? null
-                              : 'Long press to switch language',
-                          badge: _speechLanguage.compactLabel,
-                          active: _listening,
-                          onPressed: _toggleSpeech,
-                          onLongPress: _listening
-                              ? null
-                              : _toggleSpeechLanguage,
-                        ),
+                        if (_listening) _voiceButton() else _attachButton(),
                         const SizedBox(width: 7),
                       ],
                       Expanded(
@@ -1338,6 +1345,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                             padding: const EdgeInsets.only(top: 6),
                             child: Row(
                               children: [
+                                _attachButton(),
                                 _ModeChip(
                                   // Live mode events are newer than the
                                   // published snapshot.
@@ -1396,23 +1404,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                                     ),
                                   ),
                                 ),
-                                _ComposerIconButton(
-                                  icon: _listening
-                                      ? Icons.stop_rounded
-                                      : Icons.mic_none_rounded,
-                                  label: _listening
-                                      ? 'Stop ${_speechLanguage.localeLabel} voice input'
-                                      : 'Start ${_speechLanguage.localeLabel} voice input',
-                                  hint: _listening
-                                      ? null
-                                      : 'Long press to switch language',
-                                  badge: _speechLanguage.compactLabel,
-                                  active: _listening,
-                                  onPressed: _toggleSpeech,
-                                  onLongPress: _listening
-                                      ? null
-                                      : _toggleSpeechLanguage,
-                                ),
+                                _voiceButton(),
                                 const SizedBox(width: 7),
                                 _composerCommitButton(working, value.text),
                               ],
@@ -1436,9 +1428,63 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
     working: working,
     stopping: _interrupting,
     text: text,
+    hasAttachments: !_attachments.isEmpty,
+    attachmentsPending: _attachments.uploading,
     onSend: _send,
     onStop: _interrupt,
   );
+
+  Widget _voiceButton() => _ComposerIconButton(
+    icon: _listening ? Icons.stop_rounded : Icons.mic_none_rounded,
+    label: _listening
+        ? 'Stop ${_speechLanguage.localeLabel} voice input'
+        : 'Start ${_speechLanguage.localeLabel} voice input',
+    hint: _listening ? null : 'Long press to switch language',
+    badge: _speechLanguage.compactLabel,
+    active: _listening,
+    onPressed: _toggleSpeech,
+    onLongPress: _listening ? null : _toggleSpeechLanguage,
+  );
+
+  Widget _attachButton() => _ComposerIconButton(
+    key: const ValueKey('session-composer-attach'),
+    icon: Icons.add_rounded,
+    label: 'Add photos, videos or files',
+    onPressed: _pickAttachments,
+  );
+
+  Future<void> _pickAttachments() async {
+    final remaining = _attachments.remaining;
+    if (remaining <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Up to $maxAttachmentsPerMessage files per message.'),
+        ),
+      );
+      return;
+    }
+    _permissionMenuOpen = true;
+    List<({String path, String name})> picked;
+    try {
+      picked = await pickComposerAttachments(context, limit: remaining);
+    } catch (error) {
+      picked = const [];
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open the picker: $error')),
+        );
+      }
+    } finally {
+      _permissionMenuOpen = false;
+    }
+    if (picked.isEmpty) return;
+    final skipped = await _attachments.addAll(picked);
+    if (skipped != null && mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(skipped)));
+    }
+  }
 
   void _openPermissionMenu() {
     _permissionMenuOpen = true;
@@ -1462,13 +1508,14 @@ class _ComposerIconButton extends StatelessWidget {
   final VoidCallback? onLongPress;
 
   const _ComposerIconButton({
+    super.key,
     required this.icon,
     required this.label,
-    required this.hint,
-    required this.badge,
-    required this.active,
+    this.hint,
+    this.badge = '',
+    this.active = false,
     required this.onPressed,
-    required this.onLongPress,
+    this.onLongPress,
   });
 
   @override
@@ -1501,19 +1548,22 @@ class _ComposerIconButton extends StatelessWidget {
                       ? colors.onErrorContainer
                       : colors.onSurfaceVariant,
                 ),
-                Positioned(
-                  right: 4,
-                  bottom: 3,
-                  child: Text(
-                    badge,
-                    style: TextStyle(
-                      color: active ? colors.onErrorContainer : colors.primary,
-                      fontSize: 8,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: -0.2,
+                if (badge.isNotEmpty)
+                  Positioned(
+                    right: 4,
+                    bottom: 3,
+                    child: Text(
+                      badge,
+                      style: TextStyle(
+                        color: active
+                            ? colors.onErrorContainer
+                            : colors.primary,
+                        fontSize: 8,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: -0.2,
+                      ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
@@ -1818,6 +1868,7 @@ class _MessageBubble extends StatelessWidget {
   }
 
   Widget _user(BuildContext context, ColorScheme colors) {
+    final message = splitAttachmentMessage(text);
     final failed = deliveryStatus == SessionMessageQueueStatus.failed;
     final maxWidth = MediaQuery.sizeOf(context).width * 0.82;
     final muted = TextStyle(color: colors.onSurfaceVariant, fontSize: 11);
@@ -1841,24 +1892,36 @@ class _MessageBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: maxWidth),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: failed
-                    ? colors.error.withValues(alpha: 0.08)
-                    : colors.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(18),
-                border: failed ? Border.all(color: colors.error) : null,
-              ),
-              child: MarkdownBody(
-                data: normalizeMessageMarkdown(text),
-                selectable: true,
-                styleSheet: _markdown(colors, colors.primary),
+          if (message.text.isNotEmpty)
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: failed
+                      ? colors.error.withValues(alpha: 0.08)
+                      : colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(18),
+                  border: failed ? Border.all(color: colors.error) : null,
+                ),
+                child: MarkdownBody(
+                  data: normalizeMessageMarkdown(message.text),
+                  selectable: true,
+                  styleSheet: _markdown(colors, colors.primary),
+                ),
               ),
             ),
-          ),
+          if (message.attachments.isNotEmpty)
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: Padding(
+                padding: EdgeInsets.only(top: message.text.isEmpty ? 0 : 6),
+                child: MessageAttachments(attachments: message.attachments),
+              ),
+            ),
           if (delivery != null || time.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4, right: 4),
