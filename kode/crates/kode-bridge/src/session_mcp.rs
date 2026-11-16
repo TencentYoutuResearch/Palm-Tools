@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod pages;
+
 struct Client {
     http: reqwest::Client,
     origin: String,
@@ -130,10 +132,16 @@ impl Client {
                 }Ok(result)
             },
             "kode_sessions_send"=>self.call("messages",Some(json!({"target":{"node_id":args["node_id"],"session_id":args["session_id"]},"content":args["content"],"idempotency_key":args["idempotency_key"],"in_reply_to":args["in_reply_to"]}))).await,
+            "kode_sessions_message_read"=>{
+                let id=args["message_id"].as_str().ok_or_else(||anyhow::anyhow!("Message ID required"))?;
+                if !crate::messaging::model::valid_id(id) { bail!("Invalid message ID") }
+                let offset=if args["offset"].is_null(){0}else{args["offset"].as_u64().ok_or_else(||anyhow::anyhow!("Offset must be a nonnegative code-point index"))?};
+                pages::message(self.call(&format!("messages/{id}"),None).await?,offset)
+            },
             "kode_sessions_read"|"kode_sessions_wait"=>{
                 let after=args["after"].as_u64().unwrap_or(0);let duration=if name.ends_with("wait"){args["timeout_seconds"].as_u64().unwrap_or(15).clamp(1,30)}else{0};
                 let until=tokio::time::Instant::now()+Duration::from_secs(duration);
-                loop{let result=self.call(&format!("events?after={after}"),None).await?;if result["events"].as_array().is_some_and(|rows|!rows.is_empty()) || tokio::time::Instant::now()>=until{return Ok(result)};tokio::time::sleep(Duration::from_millis(250)).await;}
+                loop{let result=self.call(&format!("events?after={after}"),None).await?;if result["events"].as_array().is_some_and(|rows|!rows.is_empty()) || tokio::time::Instant::now()>=until{return pages::events(result,after)};tokio::time::sleep(Duration::from_millis(250)).await;}
             },
             _=>bail!("Unknown session tool"),
         }
@@ -147,7 +155,8 @@ fn tool_definitions() -> Vec<Value> {
     vec![
     definition("kode_sessions_list","Find local and SSH conversations by name. Inspect matches before sending; never guess addresses.",json!({"query":{"type":"string"}}),&[]),
     definition("kode_sessions_send","Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to.",json!({"node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},"idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"}}),&["node_id","session_id","content","idempotency_key"]),
-    definition("kode_sessions_read","Read this conversation's message and receipt events after a durable cursor.",json!({"after":{"type":"integer","minimum":0}}),&[]),
+    definition("kode_sessions_message_read","Read authenticated full-message pages. Offset counts Unicode code points; follow next until null. A preview is not proof of consumption.",json!({"message_id":{"type":"string"},"offset":{"type":"integer","minimum":0}}),&["message_id"]),
+    definition("kode_sessions_read","Read bounded message and receipt previews. Follow cursor until empty. Use the continuation tool for truncated content.",json!({"after":{"type":"integer","minimum":0}}),&[]),
     definition("kode_sessions_wait","Wait up to 30 seconds for this conversation's messages or receipts.",json!({"after":{"type":"integer","minimum":0},"timeout_seconds":{"type":"integer","minimum":1,"maximum":30}}),&["after"]),
     definition("memory_search","Search reviewed memory on this Host's Kode backend.",json!({"query":{"type":"string"},"scope":{"type":"string"},"top_k":{"type":"integer"}}),&["query"]),
     definition("memory_read","Read one reviewed Kode memory fact and its backlinks.",json!({"id":{"type":"string"}}),&["id"]),

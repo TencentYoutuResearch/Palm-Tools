@@ -623,3 +623,22 @@ archive and unarchive operations retain the original runtime identity.
 `timeline` 为按查看者时区聚合的 `{date, rows}` 数组，rows 保留 backend/model 及输入、输出、缓存、总量。today 按小时（YYYY-MM-DDTHH:00）、month 按日、all 按月，从相应范围起点截至现在；缺失桶由客户端补零。daily 同样仅包含所选范围，不固定截断为 84 天。Agent/model 多选在客户端按 rows 的对应维度聚合，同时过滤图、活跃度及明细；不把未知时间的记录猜配到某一天。
 
 `GET/POST /api/v1/messaging/integrations` 新增持久化布尔项 `auto_resume_interrupted`，默认 true，旧配置缺失字段时采用默认值。修改仍要求 owner/admin 身份。DSH Host 独立保存上次运行中的会话 ID（非打开的 tab），启动时以冷查询核对最后一轮是否未闭合或因 disposed 中断，忽略已完成、用户停止、错误、归档及已有活动的会话，使用 SessionController 恢复原 Agent/模型/权限并排入一个续接输入。已有待处理输入直接恢复而不重复插入。主动停止用 ignorable plugin record 标识，关闭开关会清除此前候选；不自动接受权限请求。
+
+
+### Session 通信的有界模型读取
+
+现有消息持久化格式和参与者鉴权沿用 `/api/v1/messaging/messages/:id`。
+DSH Host、独立 JavaScript MCP 和桌面 Rust MCP 的 `kode_sessions_read` / `kode_sessions_wait`
+将事件投影为最多 16 条、序列化 JSON 不超过 8192 UTF-8 字节的页面。
+`token_budget.accounting=serialized_utf8_bytes` 是保守估算，不是模型实测 token 用量。
+页面 `cursor` 仅推进到实际返回的最后一个事件，持续读取直到空页，空页保持传入 cursor。
+
+长消息预览包含 `content_truncated`、Unicode 码点数 `content_length` 和 `continuation`。
+通过 `kode_sessions_message_read({message_id, offset})` 续读全文，`offset` 和 `next`
+均以 Unicode 码点计数，`next=null` 表示结束。全文工具只允许消息的发送方和接收方访问。
+自动注入接收会话的 relay 输入也遵循 8192 字节预算，并提供相同续读指令。
+预览不会被当作完整回复已读而移除尚未注入的自动回复。
+
+原始 HTTP 事件接口继续返回完整消息，每批最多 200 条并限制累计消息数据为 256 KiB。
+首条合法大消息仍会返回，以保证游标可前进。收件箱和定时轮询使用状态索引，
+跨节点重连仍查询收到的终态消息以重发收据，事件查询同时覆盖发送方和接收方并去重自发自收事件。

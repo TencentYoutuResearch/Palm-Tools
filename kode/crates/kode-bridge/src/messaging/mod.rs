@@ -323,7 +323,7 @@ impl Hub {
         let _guard = self.gate.lock();
         self.store.heartbeat(session)?;
         let mut pending = Vec::new();
-        for mut m in self.store.messages()? {
+        for mut m in self.store.inbox(session)? {
             if m.target.node_id == self.node_id()
                 && m.target.session_id == session
                 && m.status == Status::Received
@@ -496,7 +496,7 @@ impl Hub {
             .filter(|s| s.online)
             .map(|s| s.address.session_id)
             .collect();
-        for mut m in self.store.messages()? {
+        for mut m in self.store.open_messages()? {
             if m.target.node_id == self.node_id()
                 && m.status == Status::Delivering
                 && !online.contains(&m.target.session_id)

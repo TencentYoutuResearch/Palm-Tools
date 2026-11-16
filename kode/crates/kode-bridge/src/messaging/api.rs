@@ -340,7 +340,7 @@ async fn register(
     let id = req.session_id.clone();
     let registration = hub.store.register(req)?;
     // A new activation fences the previous token. Claimed external work is never replayed.
-    for mut m in hub.store.messages()? {
+    for mut m in hub.store.open_messages()? {
         if m.target.node_id == hub.node_id()
             && m.target.session_id == id
             && m.status == Status::Delivering

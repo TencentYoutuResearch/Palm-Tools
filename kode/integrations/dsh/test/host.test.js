@@ -71,6 +71,30 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
     await new Promise(resolve => setTimeout(resolve, 100))
     assert.ok(!received.some(input => input.content[0].text.includes('Final peer result')), 'a reply read in this turn must not queue a duplicate automatic turn')
     await assert.rejects(tools.get('kode_sessions_send').execute({}, { agent: {} }), /foreign agent/)
+    const longText = '🦊中a'.repeat(5000)
+    const large = await peer.call('/api/v1/messaging/messages', { target: own.address, content: longText, in_reply_to: reply.message.id, idempotency_key: randomUUID() })
+    let pageCursor = 0, preview
+    for (let attempt = 0; attempt < 30 && !preview; attempt++) {
+      const page = await tools.get('kode_sessions_read').execute({ after: pageCursor }, { agent })
+      preview = page.events.find(e => e.message.id === large.id)?.message
+      pageCursor = page.cursor
+    }
+    assert.equal(preview.content_truncated, true)
+    let restored = preview.content, next = preview.continuation.offset
+    while (next !== null) {
+      const page = await tools.get('kode_sessions_message_read').execute({ message_id: large.id, offset: next }, { agent })
+      restored += page.content; next = page.next
+    }
+    assert.equal(restored, longText)
+    const inboxUntil = Date.now() + 3000
+    while (!received.some(row => row.content[0].text.includes(large.id))) {
+      assert.ok(Date.now() < inboxUntil); await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    const relayed = received.find(row => row.content[0].text.includes(large.id)).content[0].text
+    assert.ok(relayed.includes('Message preview'))
+    assert.ok(Buffer.byteLength(JSON.stringify(received.find(row => row.content[0].text.includes(large.id)))) <= 8192)
+    assert.ok(Number(/offset=(\d+);/.exec(relayed)[1]) < 4096)
+    assert.ok(!relayed.includes(longText))
     const tokenState = JSON.parse(await readFile(join(root, 'state.json'), 'utf8'))
     assert.ok(tokenState[id])
   } finally {

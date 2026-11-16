@@ -42,7 +42,7 @@ fn frames(hub: &Hub, peer: &str, sent: &mut HashMap<String, Status>) -> Result<V
     for (id, (node, command, _)) in hub.workspace_pending.lock().iter() {
         if node == peer { out.push(Frame::WorkspaceRequest { id: id.clone(), command: command.clone() }); }
     }
-    for m in hub.store.messages()? {
+    for m in hub.store.peer_messages(peer)? {
         if sent.get(&m.id) == Some(&m.status) {
             continue;
         }
