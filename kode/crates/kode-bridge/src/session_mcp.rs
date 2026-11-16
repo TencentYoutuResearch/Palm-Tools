@@ -100,9 +100,12 @@ impl Client {
     }
     async fn tools(&self) -> Result<Vec<Value>> {
         let settings = self.call("integrations", None).await?;
+        let capabilities = self.call("node", None).await?;
         Ok(tool_definitions()
             .into_iter()
             .filter(|tool| {
+                if matches!(tool["name"].as_str(), Some("kode_sessions_cancel_input" | "kode_sessions_cancellation_status")) && capabilities["input_cancellation"] != true { return false; }
+
                 if tool["name"]
                     .as_str()
                     .unwrap_or_default()
@@ -132,6 +135,13 @@ impl Client {
                 }Ok(result)
             },
             "kode_sessions_send"=>self.call("messages",Some(json!({"target":{"node_id":args["node_id"],"session_id":args["session_id"]},"content":args["content"],"idempotency_key":args["idempotency_key"],"in_reply_to":args["in_reply_to"]}))).await,
+            "kode_sessions_delivery_status"|"kode_sessions_cancel_input"|"kode_sessions_cancellation_status"=>{
+                let id=args["message_id"].as_str().ok_or_else(||anyhow::anyhow!("Message ID required"))?;
+                if !crate::messaging::model::valid_id(id) { bail!("Invalid message ID") }
+                let suffix=if name=="kode_sessions_delivery_status"{"delivery"}else{"cancellation"};
+                let body=if name=="kode_sessions_cancel_input"{Some(json!({}))}else{None};
+                self.call(&format!("messages/{id}/{suffix}"),body).await
+            },
             "kode_sessions_message_read"=>{
                 let id=args["message_id"].as_str().ok_or_else(||anyhow::anyhow!("Message ID required"))?;
                 if !crate::messaging::model::valid_id(id) { bail!("Invalid message ID") }
@@ -156,6 +166,9 @@ fn tool_definitions() -> Vec<Value> {
     definition("kode_sessions_list","Find local and SSH conversations by name. Inspect matches before sending; never guess addresses.",json!({"query":{"type":"string"}}),&[]),
     definition("kode_sessions_send","Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to.",json!({"node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},"idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"}}),&["node_id","session_id","content","idempotency_key"]),
     definition("kode_sessions_message_read","Read authenticated full-message pages. Offset counts Unicode code points; follow next until null. A preview is not proof of consumption.",json!({"message_id":{"type":"string"},"offset":{"type":"integer","minimum":0}}),&["message_id"]),
+    definition("kode_sessions_delivery_status","Read persisted input delivery evidence. Queued is not consumed; consumed is not task completion.",json!({"message_id":{"type":"string"}}),&["message_id"]),
+    definition("kode_sessions_cancel_input","Request cancellation of your own message. Queue removal is not proof of stopping execution; the result may remain cancel_unconfirmed.",json!({"message_id":{"type":"string"}}),&["message_id"]),
+    definition("kode_sessions_cancellation_status","Read the persisted cancellation result. A stop request does not prove termination.",json!({"message_id":{"type":"string"}}),&["message_id"]),
     definition("kode_sessions_read","Read bounded message and receipt previews. Follow cursor until empty. Use the continuation tool for truncated content.",json!({"after":{"type":"integer","minimum":0}}),&[]),
     definition("kode_sessions_wait","Wait up to 30 seconds for this conversation's messages or receipts.",json!({"after":{"type":"integer","minimum":0},"timeout_seconds":{"type":"integer","minimum":1,"maximum":30}}),&["after"]),
     definition("memory_search","Search reviewed memory on this Host's Kode backend.",json!({"query":{"type":"string"},"scope":{"type":"string"},"top_k":{"type":"integer"}}),&["query"]),

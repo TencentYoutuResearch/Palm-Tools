@@ -88,4 +88,68 @@ export async function checkMcpPages(call, admin, source, peerRegistration) {
   assert.equal(denied.result.isError, true)
   assert.match(denied.result.content[0].text, /403|foreign message/)
   assert.ok(!denied.result.content[0].text.includes('Private fixture message'))
+  const controlRegistration = await admin.call('/api/v1/messaging/sessions', {
+    session_id: `control-${randomUUID()}`,
+    title: 'Control fixture',
+    runtime: 'external',
+  })
+  const controlPeer = admin.forSession(controlRegistration.owner_token)
+  const outgoingResponse = await call('tools/call', {
+    name: 'kode_sessions_send',
+    arguments: {
+      ...controlRegistration.session.address,
+      content: 'Cancelable fixture',
+      idempotency_key: randomUUID(),
+    },
+  })
+  assert.equal(outgoingResponse.result.isError, undefined)
+  const outgoing = JSON.parse(outgoingResponse.result.content[0].text)
+  const claimed = await controlPeer.call(
+    `/api/v1/messaging/sessions/${controlRegistration.session.address.session_id}/claim`,
+    {},
+  )
+  assert.ok(claimed.messages.some((row) => row.id === outgoing.id))
+  await controlPeer.call(`/api/v1/messaging/messages/${outgoing.id}/delivery`, {
+    session_id: controlRegistration.session.address.session_id,
+    input_id: 'fixture-input',
+    phase: 'prepared',
+    event_seq: null,
+  })
+  const invoke = (name, message_id) =>
+    call('tools/call', { name, arguments: { message_id } })
+  const delivery = await invoke('kode_sessions_delivery_status', outgoing.id)
+  assert.equal(
+    JSON.parse(delivery.result.content[0].text).delivery.phase,
+    'prepared',
+  )
+  const cancellation = await invoke('kode_sessions_cancel_input', outgoing.id)
+  assert.equal(cancellation.result.isError, undefined)
+  const requested = JSON.parse(cancellation.result.content[0].text)
+  assert.equal(requested.state, 'requested')
+  const repeated = await invoke('kode_sessions_cancel_input', outgoing.id)
+  assert.deepEqual(JSON.parse(repeated.result.content[0].text), requested)
+  const status = await invoke('kode_sessions_cancellation_status', outgoing.id)
+  assert.deepEqual(
+    JSON.parse(status.result.content[0].text).cancellation,
+    requested,
+  )
+  await controlPeer.call(
+    `/api/v1/messaging/messages/${outgoing.id}/cancellation/result`,
+    {
+      session_id: controlRegistration.session.address.session_id,
+      input_id: 'fixture-input',
+      state: 'queued_removed',
+      reason: 'fixture removed',
+    },
+  )
+  const finished = await invoke(
+    'kode_sessions_cancellation_status',
+    outgoing.id,
+  )
+  assert.equal(
+    JSON.parse(finished.result.content[0].text).cancellation.state,
+    'queued_removed',
+  )
+  const foreignCancel = await invoke('kode_sessions_cancel_input', preview.id)
+  assert.equal(foreignCancel.result.isError, true)
 }

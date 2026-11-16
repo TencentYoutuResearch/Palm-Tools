@@ -1,3 +1,4 @@
+import { createDeliveryTracker, deliveryInputId, DeliveryEvidenceUnavailable } from './delivery-tracker.js'
 /** Kode Host integration: durable backend messaging and independently owned native Agent execution. */
 import { eventPage, messagePage, relayInput } from './message-pages.js'
 import { retainClientBatches } from './client-asset-retention.js'
@@ -116,6 +117,8 @@ export async function apply(ctx, config = {}) {
       return
     }
     const entry = { agent, client, registration, stop: new AbortController(), task: undefined, tools: [], receipts: [], readReplies: new Set(), queuedReplies: new Map(), title: registration.session.title, titleRetryAt: 0 }
+    if (node.delivery_tracking) entry.delivery = createDeliveryTracker(agent, client)
+    entry.inputCancellation = node.input_cancellation === true
     active.set(agent.id, entry)
     const add = (name, description, parameters, execute) => entry.tools.push(agent.ctx.tools.register({ name, description,
       parameters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(Object.entries(parameters).map(([key, value]) => { const { required, ...property } = value; return [key, property] })), required: Object.entries(parameters).filter(([, value]) => value.required).map(([key]) => key) }, output,
@@ -152,6 +155,15 @@ export async function apply(ctx, config = {}) {
       const assignment = await client.call(`${PREFIX}messages`, { target: created.address, content: args.task, idempotency_key: `create:${createHash('sha256').update(args.idempotency_key).digest('hex')}`, in_reply_to: null }, signal)
       return { ...created, status: 'assigned', assignment }
     })
+    if (entry.inputCancellation) add('kode_sessions_cancel_input', 'Request cancellation of your own message with a runtime input binding. Queue removal is distinct from stopping execution. Active/shared/unsupported execution may remain cancel_unconfirmed. Remote cancellation requires negotiated peer support; queued offline requests remain pending.', {
+      message_id: { type: 'string', required: true },
+    }, (args, signal) => client.call(`${PREFIX}messages/${encodeURIComponent(args.message_id)}/cancellation`, {}, signal))
+    if (entry.inputCancellation) add('kode_sessions_cancellation_status', 'Read the persisted input cancellation result. A stop request never proves process termination.', {
+      message_id: { type: 'string', required: true },
+    }, (args, signal) => client.call(`${PREFIX}messages/${encodeURIComponent(args.message_id)}/cancellation`, undefined, signal))
+    add('kode_sessions_delivery_status', 'Inspect persisted runtime input evidence for a message visible to this session. Queued is not consumed; consumed is not task completion. Remote evidence is mirrored only when both nodes negotiate delivery observations; a missing observation never proves non-execution.', {
+      message_id: { type: 'string', required: true },
+    }, (args, signal) => client.call(`${PREFIX}messages/${encodeURIComponent(args.message_id)}/delivery`, undefined, signal))
     const params = {
       node_id: { type: 'string', required: true }, session_id: { type: 'string', required: true },
       content: { type: 'string', required: true }, idempotency_key: { type: 'string', required: true, description: 'Stable key for one logical send; reuse only when retrying the same content.' },
@@ -189,6 +201,34 @@ export async function apply(ctx, config = {}) {
     })
     for (const tool of memoryTools) add(tool.name, tool.description, tool.parameters, (args, signal) => client.call(`${PREFIX}memory/tool`, { name: tool.name, arguments: args }, signal))
     entry.task = pump(entry)
+    entry.controlTask = entry.inputCancellation ? pumpCancellation(entry) : Promise.resolve()
+  }
+  // Control must not queue behind delivery recovery, inbox flushing or receipts.
+  // Both loops share the session lifetime, but neither awaits the other to run.
+  async function pumpCancellation(entry) {
+    const { agent, client } = entry
+    const signal = AbortSignal.any([stop.signal, entry.stop.signal])
+    while (!signal.aborted) {
+      if (!runtimeReady) { await sleep(runtimeConfig.pollMs ?? 1000, signal); continue }
+      try {
+        let after = ''
+        do {
+          const page = await client.call(`${PREFIX}sessions/${encodeURIComponent(agent.id)}/cancellations?after=${encodeURIComponent(after)}`, undefined, signal)
+          for (const control of page.cancellations) {
+            const result = typeof agent.cancelInput === 'function'
+              ? await agent.cancelInput(control.input_id)
+              : { state: 'cancel_unconfirmed', reason: 'runtime_unsupported' }
+            await client.call(`${PREFIX}messages/${encodeURIComponent(control.message_id)}/cancellation/result`, {
+              session_id: String(agent.id), input_id: control.input_id, ...result,
+            }, signal)
+          }
+          after = page.next
+        } while (after)
+      } catch (error) {
+        if (!signal.aborted) ctx.logger.warn('Kode input cancellation connection failed: %s', error.message)
+      }
+      await sleep(runtimeConfig.pollMs ?? 1000, signal)
+    }
   }
   async function pump(entry) {
     const { agent, client } = entry
@@ -203,6 +243,7 @@ export async function apply(ctx, config = {}) {
             entry.title = title
           } catch { entry.titleRetryAt = Date.now() + 30000 }
         }
+        await entry.delivery?.recover(signal)
         while (entry.receipts.length) {
           const receipt = entry.receipts[0]
           await client.call(`${PREFIX}messages/${receipt.id}`, receipt.body, signal)
@@ -216,14 +257,33 @@ export async function apply(ctx, config = {}) {
               await client.call(`${PREFIX}messages/${message.id}`, { session_id: String(agent.id), status: 'accepted' }, signal)
               continue
             }
+            if (entry.delivery) await entry.delivery.prepare(message, signal)
+            if (message.in_reply_to && entry.readReplies.has(message.id)) {
+              await client.call(`${PREFIX}messages/${message.id}`, { session_id: String(agent.id), status: 'accepted' }, signal)
+              continue
+            }
+            signal.throwIfAborted()
             // followup queues a distinct turn; it never answers an outstanding approval.
-            const inputId = randomUUID()
+            const inputId = entry.delivery ? deliveryInputId(message.id) : randomUUID()
             if (message.in_reply_to) entry.queuedReplies.set(message.id, inputId)
             agent.followup(relayInput(message, inputId))
             // Acceptance is reported only after the inbox has reached persistence listeners.
-            await agent.ctx.parallel('session/flush', agent.session)
+            if (!entry.delivery) await agent.ctx.parallel('session/flush', agent.session)
           } catch {
             status = 'uncertain'; detail = 'dsh inbox submission outcome is uncertain; no automatic retry'
+          }
+          if (entry.delivery && status === 'accepted') {
+            // On transport failure, recovery inspects the durable input instead of replaying it.
+            try {
+              await entry.delivery.confirm(message, signal)
+              continue
+            } catch (error) {
+              // Only a known lack of runtime evidence settles as uncertain.
+              // Network/flush errors retain recovery ownership, never overwrite
+              // a receipt that may already have committed remotely.
+              if (!(error instanceof DeliveryEvidenceUnavailable)) throw error
+              status = 'uncertain'; detail = error.message
+            }
           }
           const body = { session_id: String(agent.id), status, detail }
           entry.receipts.push({ id: message.id, body })
@@ -242,7 +302,7 @@ export async function apply(ctx, config = {}) {
     await wakeTask
     const entries = [...active.values()]; active.clear()
     for (const entry of entries) { entry.stop.abort(); for (const dispose of entry.tools) dispose() }
-    await Promise.allSettled(entries.map(async entry => { await entry.task; await entry.client.call(`${PREFIX}sessions/${encodeURIComponent(entry.agent.id)}/offline`, {}) }))
+    await Promise.allSettled(entries.map(async entry => { await Promise.allSettled([entry.task, entry.controlTask]); await entry.client.call(`${PREFIX}sessions/${encodeURIComponent(entry.agent.id)}/offline`, {}) }))
     await saving
   }, 'kode.lifetime')
   ctx.on('agent/created', async ({ agent }) => { await install(agent) })

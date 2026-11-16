@@ -68,7 +68,7 @@ export class NativeAgentDriver {
     this.isKodeNativeAgent = true
     this.id = id; this.options = options; this.session = session; this.runtime = runtime
     this.scope = createScope(ctx, this); this.ctx = this.scope.ctx; this.events = agentEvents(ctx, this)
-    this.inbox = new Inbox(this); this.status = 'idle'; this.activity = Promise.resolve(); this.ready = false; this.disposed = false; this.revision = 0
+    this.activeInputs = new Set(); this.inbox = new Inbox(this); this.status = 'idle'; this.activity = Promise.resolve(); this.ready = false; this.disposed = false; this.revision = 0
     // DSH 0.2.2 validates image admission and model changes through this API.
     // Read the live projection so a pending selection wins over the last turn.
     this.model = {
@@ -112,6 +112,7 @@ export class NativeAgentDriver {
           admit: async () => {
             if (this.inbox.nextStep[0] !== message) return false
             this.inbox.splice('next-step', 0, 1, []); admitted = true
+            this.activeInputs.add(message.id)
             this.events.emit('agent/inbox/claimed', { message, turn: this.turn })
             await this.ctx.sessions.flush(this.session); return true
           },
@@ -122,13 +123,53 @@ export class NativeAgentDriver {
           if (!result.error && this.inbox.nextStep[0] !== message) continue
           break
         }
-        if (result.status === 'rejected') { this.inbox.prepend('next-turn', message); break }
+        if (result.status === 'rejected') { this.activeInputs.delete(message.id); this.inbox.prepend('next-turn', message); break }
         if (result.status === 'uncertain') this.events.emit('agent/error', { turn: this.turn, step: 1, error: new Error('中途插入的投递结果不确定；为避免重复执行，未自动重发。') })
       }
     })().catch(error => { this.events.emit('agent/error', { turn: this.turn, step: 1, error }) }).finally(() => { this.steeringTask = undefined; if (this.steeringRequested) this.scheduleSteering() })
   }
   inject(message) { this.send(message, 'next-step', false) }
   cancel(cause, options = {}) { if (cause?.kind !== 'disposed' && this.status === 'running') appendPluginRecord(this.session, 'plugin:kode/manual-stop', {}); if (!options.keepInbox) this.inbox.clear(); this.abort?.abort(cause) }
+  // Internal control primitive: callers must authenticate and bind message→input.
+  // Aborting the runtime is only a request, never proof of process termination.
+  async cancelInput(inputId) {
+    if (typeof inputId !== 'string' || !inputId) throw new Error('Input ID is required')
+    const prior = this.session.snapshotEvents().find(event => event.type === 'plugin:kode/input-cancellation' && event.data.inputId === inputId)
+    if (prior) {
+      // Reassert an interrupted stop request only against that exact sole input.
+      // Replaying a result must never stop a later or shared turn.
+      if (prior.data.result.reason === 'stop_requested' && this.activeInputs.size === 1 && this.activeInputs.has(inputId)) this.cancel({ kind: 'input_cancel', inputId }, { keepInbox: true })
+      await this.ctx.sessions.flush(this.session)
+      return { ...prior.data.result }
+    }
+    if (this.activeInputs.has(inputId)) {
+      const result = { state: 'cancel_unconfirmed', reason: this.activeInputs.size !== 1 ? 'shared_turn' : 'stop_requested' }
+      appendPluginRecord(this.session, 'plugin:kode/input-cancellation', { inputId, result })
+      if (result.reason === 'stop_requested') this.cancel({ kind: 'input_cancel', inputId }, { keepInbox: true })
+      await this.ctx.sessions.flush(this.session)
+      return result
+    }
+    if (this.inbox.remove(inputId)) {
+      await this.ctx.sessions.flush(this.session)
+      return { state: 'queued_removed' }
+    }
+    // Recover an already persisted queue removal after a lost response. A
+    // consumed input cannot be reclassified as withdrawn by a later splice.
+    const queues = { 'next-turn': [], 'next-step': [] }
+    let removed = false, consumed = false
+    for (const event of this.session.snapshotEvents()) {
+      if (event.type === 'user/message' && event.data.id === inputId) consumed = true
+      if (event.type !== 'agent/inbox/spliced' || !queues[event.data.target]) continue
+      const data = event.data
+      const prior = queues[data.target].splice(data.start, data.removedCount, ...data.inserted.map(m => m.id))
+      if (data.outcome === 'canceled' && prior.includes(inputId)) removed = true
+    }
+    if (removed && !consumed) {
+      await this.ctx.sessions.flush(this.session)
+      return { state: 'queued_removed' }
+    }
+    return { state: 'cancel_unconfirmed', reason: 'input_not_active_or_queued' }
+  }
   async whenIdle() { let pending; do { await (pending = this.activity) } while (pending !== this.activity) }
   async runMaintenance(job) {
     if (this.status !== 'idle' || this.maintenance) throw new Error('Agent already has active work')
@@ -165,6 +206,7 @@ export class NativeAgentDriver {
       try {
         const nativeContinuation = this.runtime.adapter.hasContinuation?.(this.id) ?? false
         const messages = nativeContinuation ? [] : this.inbox.claim(turn)
+        this.activeInputs = new Set(messages.map(message => message.id))
         if (!messages.length && !nativeContinuation) continue
         const state = this.ctx.sessionProjections.stateOf(this.session, 'modelSelection')
         const selection = state?.pending ?? state?.next ?? state?.lastUsed ?? this.options
@@ -219,6 +261,7 @@ export class NativeAgentDriver {
         if (reason.kind === 'error') this.events.emit('agent/error', { turn, step, error })
       } finally {
         await this.steeringTask
+        this.activeInputs.clear()
         stop()
         for (const event of recovery.results()) this.session.append('tool/result', event.data, { surfaceOp: 'append' })
         if (opened) this.session.append('step/end', { turn, step })

@@ -642,3 +642,15 @@ DSH Host、独立 JavaScript MCP 和桌面 Rust MCP 的 `kode_sessions_read` / `
 原始 HTTP 事件接口继续返回完整消息，每批最多 200 条并限制累计消息数据为 256 KiB。
 首条合法大消息仍会返回，以保证游标可前进。收件箱和定时轮询使用状态索引，
 跨节点重连仍查询收到的终态消息以重发收据，事件查询同时覆盖发送方和接收方并去重自发自收事件。
+
+### 会话输入控制与跨主机协议协商
+
+Hub 的 node 响应通过 `delivery_tracking` 和 `input_cancellation` 声明输入控制能力。DSH、独立 JavaScript MCP 和桌面 Rust MCP 暴露 `kode_sessions_delivery_status`、`kode_sessions_cancel_input`、`kode_sessions_cancellation_status`。取消工具根据连接 Hub 的能力声明动态展示。
+
+输入状态通过 `messages/:id/delivery` 记录 prepared、queued、consumed，绑定固定 message/session/input ID。Host 先持久化绑定，再提交输入，落盘后才报告排队或消费证据。重启恢复核对已有日志。取消由原消息发送者请求，执行端按已绑定输入处理，并通过 `messages/:id/cancellation/result` 持久化结果。消息参与者可查询状态。
+
+原生执行器支持撤回指定排队输入，返回 queued_removed。指定输入独占当前轮次时请求中止，并持久化 cancel_unconfirmed/stop_requested。共享轮次返回 cancel_unconfirmed/shared_turn。重复请求重放原处置，旧请求不会中止之后的轮次。持久化失败时不确认处置结果。Host 的取消轮询独立于普通投递循环。
+
+跨主机连接使用 `x-kode-messaging-version: 2` 协商，连接方等待服务端 Hello 后采用版本。v2 双方在业务帧前交换 Capabilities，分别协商 delivery_observations_v1 与 input_cancellation_v1。v1 保留既有帧格式。新输入控制帧仅在对应能力协商成功后发送和接收。
+
+v2 使用 DeliveryBatch/DeliveryAck 持久化同步输入证据，通过 InputCancellation 同步取消请求与处置。离线请求及未确认观察保留到重连，回执游标持久化后推进。取消请求、queued 或 consumed 状态均不作为任务完成或外部进程已终止的凭据。

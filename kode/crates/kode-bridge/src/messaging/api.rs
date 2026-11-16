@@ -65,6 +65,12 @@ fn owner(hub: &Hub, h: &HeaderMap, id: &str) -> Result<()> {
 }
 pub(super) fn router(hub: Arc<Hub>) -> Router {
     Router::new()
+        .route("/api/v1/messaging/messages/:id/delivery", get(delivery).post(observe_delivery))
+        .route("/api/v1/messaging/sessions/:id/deliveries", get(pending_deliveries))
+        .route("/api/v1/messaging/messages/:id/cancellation", get(cancellation).post(request_cancellation))
+        .route("/api/v1/messaging/messages/:id/cancellation/result", post(report_cancellation))
+        .route("/api/v1/messaging/sessions/:id/cancellations", get(pending_cancellations))
+
         .route("/api/v1/messaging/workbench/agent-hub", get(agent_hub).post(change_agent_hub))
         .route("/api/v1/messaging/workbench/handoff", post(handoff))
         .route("/api/v1/messaging/model-usage", get(model_usage))
@@ -130,7 +136,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
 async fn node(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     auth(&hub, &h)?;
     let (executable, built_at) = server_binary();
-    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"managed_peers":true,
+    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"delivery_tracking":true,"input_cancellation":true,"managed_peers":true,
         "pid":std::process::id(),"executable":executable,"built_at":built_at})))
 }
 /// Executable path and its modification time (Unix seconds), so a host app
@@ -767,4 +773,96 @@ async fn change_agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):J
 async fn handoff(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):Json<super::handoff::Request>)->Result<Json<serde_json::Value>>{
     admin(&hub,&h)?;
     Ok(Json(super::handoff::execute(hub,input).await?))
+}
+
+async fn delivery(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    // Reuse the participant visibility check, without changing the strict Message DTO.
+    let Json(message) = message(State(hub.clone()), h, Path(id.clone())).await?;
+    let local = message.target.node_id == hub.node_id();
+    let record = if local {
+        hub.store.delivery(&id)?
+    } else {
+        hub.store.delivery_mirror(&id)?
+    };
+    Ok(Json(
+        json!({"delivery":record,"scope":if local {"execution_host"} else {"remote_mirror"},"execution_node":message.target.node_id}),
+    ))
+}
+async fn observe_delivery(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<super::delivery::Observation>,
+) -> Result<Json<super::delivery::Record>> {
+    owner(&hub, &h, &input.session_id)?;
+    Ok(Json(hub.observe_delivery(&id, input)?))
+}
+#[derive(Deserialize, Default)]
+struct DeliveryCursor {
+    #[serde(default)]
+    after: String,
+}
+async fn pending_deliveries(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(cursor): Query<DeliveryCursor>,
+) -> Result<Json<serde_json::Value>> {
+    owner(&hub, &h, &id)?;
+    let records = hub.store.pending_deliveries(&id, &cursor.after)?;
+    let next = if records.len() == 200 {
+        records.last().map(|r| r.message_id.clone())
+    } else {
+        None
+    };
+    Ok(Json(json!({"deliveries":records,"next":next})))
+}
+
+async fn cancellation(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let _ = message(State(hub.clone()), h, Path(id.clone())).await?;
+    Ok(Json(json!({"cancellation":hub.cancellation(&id)?})))
+}
+async fn request_cancellation(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<super::cancellation::Record>> {
+    let m = hub
+        .store
+        .get(&id)?
+        .ok_or_else(|| Error(StatusCode::NOT_FOUND, "unknown message".into()))?;
+    owner(&hub, &h, &m.source.session_id)?;
+    Ok(Json(hub.request_cancellation(&id)?))
+}
+async fn report_cancellation(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(report): Json<super::cancellation::Report>,
+) -> Result<Json<super::cancellation::Record>> {
+    owner(&hub, &h, &report.session_id)?;
+    Ok(Json(hub.report_cancellation(&id, report)?))
+}
+async fn pending_cancellations(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(cursor): Query<DeliveryCursor>,
+) -> Result<Json<serde_json::Value>> {
+    owner(&hub, &h, &id)?;
+    let records = hub.pending_cancellations(&id, &cursor.after)?;
+    let next = if records.len() == 200 {
+        records.last().map(|r| r.message_id.clone())
+    } else {
+        None
+    };
+    Ok(Json(json!({"cancellations":records,"next":next})))
 }

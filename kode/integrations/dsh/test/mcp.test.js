@@ -31,7 +31,7 @@ test('MCP exposes session-bound model tools over real stdio and HTTP', { skip: !
   try {
     const initialized = await call('initialize', { protocolVersion: '2024-11-05' })
     assert.equal(initialized.result.serverInfo.name, 'kode-sessions')
-    const list = await call('tools/list', {}); assert.equal(list.result.tools.length, 5)
+    const list = await call('tools/list', {}); assert.equal(list.result.tools.length, 8)
     const sent = await call('tools/call', { name: 'kode_sessions_send', arguments: { ...target.session.address, content: 'MCP peer message', idempotency_key: randomUUID() } })
     assert.equal(sent.result.isError, undefined)
     const message = JSON.parse(sent.result.content[0].text)

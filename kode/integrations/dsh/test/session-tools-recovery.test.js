@@ -161,3 +161,125 @@ test(
     }
   },
 )
+
+test(
+  'input cancellation and delivery observations survive offline peers and both Hub restarts',
+  { skip: !process.env.KODE_TEST_BACKEND_URL, timeout: 45000 },
+  async () => {
+    let home, remote, sourceMcp
+    try {
+      home = await isolatedHub('control-home')
+      remote = await isolatedHub('control-remote')
+      await pairHubs(home, remote)
+      const source = await home.client.call('/api/v1/messaging/sessions', {
+        session_id: 'source',
+        title: 'Control requester',
+        runtime: 'external',
+      })
+      const target = await remote.client.call('/api/v1/messaging/sessions', {
+        session_id: 'target',
+        title: 'Control worker',
+        runtime: 'external',
+      })
+      const targetClient = remote.client.forSession(target.owner_token)
+      sourceMcp = await sessionMcp(home, source)
+      await eventually(
+        () => sourceMcp.tool('kode_sessions_list', { query: 'Control worker' }),
+        (result) =>
+          result.sessions.some((row) => row.address.node_id === remote.node),
+        'control directory',
+      )
+      const message = await sourceMcp.tool('kode_sessions_send', {
+        ...target.session.address,
+        content: 'Cancelable input',
+        idempotency_key: 'control-request',
+      })
+      await eventually(
+        () => targetClient.call('/api/v1/messaging/sessions/target/claim', {}),
+        (result) => result.messages.some((row) => row.id === message.id),
+        'input claim',
+      )
+      const input = {
+        session_id: 'target',
+        input_id: 'controlled-input',
+        event_seq: null,
+      }
+      await targetClient.call(
+        `/api/v1/messaging/messages/${message.id}/delivery`,
+        { ...input, phase: 'prepared' },
+      )
+      await targetClient.call(
+        `/api/v1/messaging/messages/${message.id}/delivery`,
+        { ...input, phase: 'queued' },
+      )
+      await eventually(
+        () =>
+          sourceMcp.tool('kode_sessions_delivery_status', {
+            message_id: message.id,
+          }),
+        (result) => result.delivery?.phase === 'queued',
+        'remote delivery mirror',
+      )
+      await remote.stop('SIGKILL')
+      const requested = await sourceMcp.tool('kode_sessions_cancel_input', {
+        message_id: message.id,
+      })
+      assert.equal(requested.state, 'requested')
+      await sourceMcp.close()
+      await home.stop('SIGKILL')
+      await home.start()
+      sourceMcp = await sessionMcp(home, source)
+      assert.deepEqual(
+        (
+          await sourceMcp.tool('kode_sessions_cancellation_status', {
+            message_id: message.id,
+          })
+        ).cancellation,
+        requested,
+      )
+      await remote.start()
+      const controls = await eventually(
+        () =>
+          targetClient.call('/api/v1/messaging/sessions/target/cancellations'),
+        (result) =>
+          result.cancellations.some((row) => row.message_id === message.id),
+        'offline cancellation delivery',
+      )
+      assert.equal(controls.cancellations[0].input_id, input.input_id)
+      await targetClient.call(
+        `/api/v1/messaging/messages/${message.id}/cancellation/result`,
+        {
+          ...input,
+          event_seq: undefined,
+          state: 'queued_removed',
+          reason: null,
+        },
+      )
+      await eventually(
+        () =>
+          sourceMcp.tool('kode_sessions_cancellation_status', {
+            message_id: message.id,
+          }),
+        (result) => result.cancellation?.state === 'queued_removed',
+        'cancellation result mirror',
+      )
+      assert.equal(
+        (
+          await sourceMcp.tool('kode_sessions_cancel_input', {
+            message_id: message.id,
+          })
+        ).state,
+        'queued_removed',
+      )
+      assert.deepEqual(
+        (await targetClient.call('/api/v1/messaging/sessions/target/claim', {}))
+          .messages,
+        [],
+      )
+    } finally {
+      await sourceMcp?.close()
+      await remote?.close()
+      await home?.close()
+    }
+  },
+)

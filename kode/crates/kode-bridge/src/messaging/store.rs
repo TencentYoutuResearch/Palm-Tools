@@ -15,7 +15,7 @@ const SESSION_EVENTS: &str = "SELECT seq,message FROM events WHERE json_extract(
     UNION SELECT seq,message FROM events WHERE json_extract(message,'$.target.node_id')=?3 AND json_extract(message,'$.target.session_id')=?2 AND seq>?1 ORDER BY seq LIMIT 200";
 
 pub struct Store {
-    db: Mutex<Connection>,
+    pub(super) db: Mutex<Connection>,
     pub node_id: String,
     _lock: Option<File>,
 }
@@ -76,6 +76,17 @@ impl Store {
           CREATE INDEX IF NOT EXISTS message_route ON messages(source_node,target_node,json_extract(body,'$.status'));
           CREATE INDEX IF NOT EXISTS event_source_cursor ON events(json_extract(message,'$.source.node_id'),json_extract(message,'$.source.session_id'),seq);
           CREATE INDEX IF NOT EXISTS event_target_cursor ON events(json_extract(message,'$.target.node_id'),json_extract(message,'$.target.session_id'),seq);
+          CREATE TABLE IF NOT EXISTS cancellation_peers (peer TEXT PRIMARY KEY, supported INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS input_cancellations (message_id TEXT PRIMARY KEY, session TEXT NOT NULL, pending INTEGER NOT NULL CHECK(pending IN (0,1)), body TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS input_cancellation_pending ON input_cancellations(session,pending,message_id);
+          CREATE TABLE IF NOT EXISTS input_cancellation_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS runtime_deliveries (message_id TEXT PRIMARY KEY, session TEXT NOT NULL, phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 2), body TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS runtime_delivery_pending ON runtime_deliveries(session,phase,message_id);
+          CREATE UNIQUE INDEX IF NOT EXISTS runtime_delivery_input ON runtime_deliveries(session,json_extract(body,'$.input_id'));
+          CREATE TABLE IF NOT EXISTS delivery_peer_cursors (peer TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS delivery_mirrors (message_id TEXT PRIMARY KEY, body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS delivery_mirror_events (peer TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(peer,seq));
+          CREATE TABLE IF NOT EXISTS runtime_delivery_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS workbench_documents (key TEXT PRIMARY KEY, revision INTEGER NOT NULL, value TEXT NOT NULL);")?;
         db.execute(
             "INSERT OR IGNORE INTO identity VALUES ('node_id',?1)",
@@ -300,7 +311,12 @@ impl Store {
     /// Read-only wakeup probe; unlike claim this never renews ownership or consumes work.
     pub fn pending_count(&self, session: &str) -> Result<u64> {
         Ok(self.db.lock().query_row(
-            "SELECT COUNT(*) FROM messages WHERE target_node=?1 AND target_session=?2 AND json_extract(body,'$.status')='received' AND json_extract(body,'$.expires_at')>?3",
+            "SELECT COUNT(*) FROM messages m WHERE target_node=?1 AND target_session=?2 AND (
+                (json_extract(m.body,'$.status')='received' AND json_extract(m.body,'$.expires_at')>?3)
+                OR EXISTS (SELECT 1 FROM runtime_deliveries d WHERE d.message_id=m.id AND d.session=?2 AND d.phase<2
+                    AND NOT EXISTS (SELECT 1 FROM input_cancellations c WHERE c.message_id=m.id))
+                OR EXISTS (SELECT 1 FROM input_cancellations c WHERE c.message_id=m.id AND c.session=?2 AND c.pending=1)
+            )",
             params![self.node_id, session, now()],
             |r| r.get(0),
         )?)

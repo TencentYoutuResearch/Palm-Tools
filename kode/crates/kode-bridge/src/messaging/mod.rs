@@ -1,6 +1,9 @@
 //! Opt-in durable session messaging. No Tauri dependencies and no PTY byte-path changes.
 //! `KODE_MESSAGING_CONFIG` selects a JSON config; disabled bridges behave as before.
 mod api;
+mod delivery;
+mod cancellation;
+mod wire;
 mod extensions;
 mod extension_files;
 mod handoff;
