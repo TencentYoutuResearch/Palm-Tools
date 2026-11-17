@@ -29,6 +29,7 @@ pub const EVENT_KINDS: &[&str] = &[
 #[derive(Default)]
 pub struct Registry {
     db: Mutex<Option<Connection>>,
+    pub(crate) workbench_store: Mutex<std::sync::Weak<crate::messaging::Store>>,
 }
 
 #[derive(Deserialize)]

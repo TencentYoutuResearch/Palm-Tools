@@ -27,6 +27,29 @@ async fn archive_document_changes_retire_projections_without_host_publication() 
     assert!(events.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn mobile_cloud_grouping_follows_workspace_moves_from_the_backend() {
+    let server = server("workspace-mobile", vec![]).await;
+    let ctx = &server._ctx;
+    let publication = serde_json::from_value(json!({
+        "runtime":"dsh","boot_id":"test",
+        "sessions":[{"session_id":"restored","dto":{"status":"idle","cwd":"/deleted/kode"}}]
+    })).unwrap();
+    ctx.runtimes.publish(ctx, publication).unwrap();
+    let workspaces = |path: &str| json!({"tables":{"workspaces":{
+        "project":{"path":path,"sessionIds":["restored"]}
+    }}});
+    server.hub.store.save_document("workspaces", 0, workspaces("/projects/kode")).unwrap();
+    let mobile = crate::cloud_sync::session_snapshots(ctx);
+    assert_eq!(mobile[0]["dto"]["cwd"], "/projects/kode");
+    assert_eq!(mobile[0]["dto"]["execution_cwd"], "/deleted/kode");
+    assert_eq!(ctx.runtimes.snapshots()[0]["dto"]["cwd"], "/deleted/kode");
+    server.hub.store.save_document("workspaces", 1, workspaces("/projects/moved")).unwrap();
+    let moved = crate::cloud_sync::session_snapshots(ctx);
+    assert_eq!(moved[0]["dto"]["cwd"], "/projects/moved");
+    assert_eq!(moved[0]["local_id"], mobile[0]["local_id"]);
+}
+
 struct Server {
     hub: Arc<Hub>,
     url: String,

@@ -310,3 +310,11 @@ register a replacement and must pair again.
 Desktop exposes this only as a secondary danger zone in Worker Details for
 Offline Workers. A destructive confirmation names the Worker and explains that
 monitor access and actionable sessions will be revoked.
+
+For DSH sessions owned by a registered workspace, the cloud DTO `cwd` is the
+current workspace's project path, following `session-index.worktreeParents`.
+`workspace_id` identifies that project, and `execution_cwd` retains the original
+session directory. This keeps existing mobile cwd-based grouping aligned with
+the desktop after workspace moves. Execution and history still route through
+the session identity and its original runtime directory. Unregistered sessions
+and non-DSH sessions retain their original DTO paths.

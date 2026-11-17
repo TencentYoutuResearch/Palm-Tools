@@ -22,6 +22,7 @@ mod store;
 mod session_catalog;
 mod session_visibility;
 pub use session_visibility::filter_visible_runtime_sessions;
+pub(crate) use session_visibility::project_mobile_workspaces;
 mod transcript;
 mod native_title;
 pub mod workspaces;
@@ -40,7 +41,7 @@ use std::{
         Arc, Weak,
     },
 };
-use store::Store;
+pub(crate) use store::Store;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -65,7 +66,7 @@ pub struct Hub {
     extensions: extensions::Extensions,
     handoff_gate: tokio::sync::Mutex<()>,
     memory: Mutex<Option<Arc<crate::MemoryHandle>>>,
-    store: Store,
+    store: Arc<Store>,
     config: Config,
     peers: Mutex<Vec<Peer>>,
     ctx: Weak<crate::Ctx>,
@@ -101,7 +102,8 @@ impl Hub {
                 }
             }
         }
-        let store = Store::open(&config.database, &config.node_id)?;
+        let store = Arc::new(Store::open(&config.database, &config.node_id)?);
+        *ctx.runtimes.workbench_store.lock() = Arc::downgrade(&store);
         ctx.runtimes.open(&config.database.with_extension("runtime.sqlite"))?;
         let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
