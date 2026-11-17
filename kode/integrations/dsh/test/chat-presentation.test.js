@@ -83,3 +83,13 @@ test('reasoning and unknown surfaces between commands remain in the same process
   assert.equal(g.snapshots()[0].data.summary.runningDetail,'latest')
  }
 })
+
+test('historical relay contexts remain visible while internal contexts keep their existing visibility', () => {
+  const definition = source.slice(source.indexOf('function isVisibleChatNode(node)'), source.indexOf('//#endregion', source.indexOf('function isVisibleChatNode(node)')))
+  const visible = vm.runInNewContext('(' + definition.trim() + ')')
+  const node = { visibility: 'visible', kind: 'context', data: { content: [{ type: 'text', text: 'peer result' }], source: { kind: 'agent-message', form: 'relay' } } }
+  assert.equal(visible(node), true)
+  assert.equal(visible({ ...node, data: { ...node.data, source: { kind: 'agent-instructions' } } }), false)
+  assert.equal(visible({ ...node, visibility: 'hidden' }), false)
+  assert.equal(visible({ ...node, data: { ...node.data, source: { kind: 'agent-message', form: 'notice' } } }), false)
+})

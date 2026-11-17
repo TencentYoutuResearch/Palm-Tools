@@ -8668,7 +8668,7 @@ const icon = (0, react_jsx_runtime.jsxs)("svg", { width: 18, height: 18, viewBox
 		* @returns whether the node contributes a visible Chat row.
 		*/
 		function isVisibleChatNode(node) {
-			return node.visibility === "visible" && node.kind !== "system-prompt" && (node.kind !== "context" || node.data.content.some((block) => block.type === "tool-addition" || block.type === "tool-removal")) && !(node.kind === "command" && node.data.name === "permission");
+			return node.visibility === "visible" && node.kind !== "system-prompt" && (node.kind !== "context" || (node.data.source?.kind === "agent-message" && node.data.source?.form === "relay") || node.data.content.some((block) => block.type === "tool-addition" || block.type === "tool-removal")) && !(node.kind === "command" && node.data.name === "permission");
 		}
 		//#endregion
 		//#region lib/types/client/conversation-nodes/group-tree-segments.js
