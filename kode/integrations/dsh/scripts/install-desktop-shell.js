@@ -1,4 +1,5 @@
 /** Patch only an unpacked development shell, preserving backups and checking upstream anchors. */
+import { marker, patchDesktopSources } from '../src/desktop-patch.js'
 import { execFileSync } from 'node:child_process'
 import { readFile, writeFile, copyFile } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
@@ -10,41 +11,8 @@ const manifest = JSON.parse(await readFile(join(directory, 'package.json'), 'utf
 if (manifest.name !== '@deepseek-ai/dsh-desktop') throw new Error('Expected the DSH Desktop development shell')
 const mainPath = join(directory, 'lib/main.js'), preloadPath = join(directory, 'lib/preload-app.cjs')
 let main = await readFile(mainPath, 'utf8'), preload = await readFile(preloadPath, 'utf8')
-const marker = '// Kode owned Desktop integration'
-if (!main.includes(marker)) {
-  const anchor = 'window.webContents.setWindowOpenHandler(({ url }) => {'
-  if (!main.includes(anchor)) throw new Error('Desktop window-open contract changed')
-  main = main.replace(anchor, `window.webContents.on("did-create-window", (child, details) => kodeDesktopShell.childCreated(window, child, details));
-  window.webContents.setWindowOpenHandler((details) => {
-    const native = kodeDesktopShell.windowOpen(window, details);
-    if (native) return native;
-    const { url } = details;`)
-  main = main.replaceAll('app.relaunch();', 'app.relaunch(process.env.KODE_DESKTOP_EXECUTABLE ? { execPath: process.env.KODE_DESKTOP_EXECUTABLE } : undefined);')
-  main = `${marker}
-import * as kodeElectron from 'electron';
-import { installDesktopShell } from ${JSON.stringify(pathToFileURL(join(root, 'src/desktop-shell.js')).href)};
-const kodeDesktopShell = installDesktopShell(kodeElectron);
-` + main
-}
-if (!preload.includes(marker)) {
-  preload += `
-${marker}
-{
-  const { contextBridge, ipcRenderer } = require('electron');
-  contextBridge.exposeInMainWorld('kodeDesktop', {
-    island: process.platform === 'darwin',
-    resizeIsland: size => ipcRenderer.send('kode-desktop:island-size', size),
-    notify: data => ipcRenderer.invoke('kode-desktop:notification', data),
-    openNotificationSettings: () => ipcRenderer.invoke('kode-desktop:notification-settings'),
-    onNotificationClick: callback => {
-      const handler = (_event, key) => callback(key);
-      ipcRenderer.on('kode-desktop:notification-click', handler);
-      return () => ipcRenderer.removeListener('kode-desktop:notification-click', handler);
-    },
-  });
-}
-`
-}
+const { main: patchedMain, preload: patchedPreload } = patchDesktopSources(main, preload, pathToFileURL(join(root, 'src/desktop-shell.js')).href)
+main = patchedMain; preload = patchedPreload
 for (const [path, content] of [[mainPath, main], [preloadPath, preload]]) {
   if (!(await readFile(path, 'utf8')).includes(marker)) await copyFile(path, path + '.before-kode-shell')
   await writeFile(path, content)

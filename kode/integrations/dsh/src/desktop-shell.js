@@ -1,4 +1,4 @@
-/** Owned Desktop integration, loaded by the unpacked shell installer. */
+/** Owned Desktop integration, loaded by the packaged or unpacked shell installer. */
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { findDevelopmentRuntime } from './desktop-runtime.js'

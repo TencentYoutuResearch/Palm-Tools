@@ -975,6 +975,35 @@ The token island scopes today to 00:00–now (hourly buckets), month to the firs
 
 macOS 使用 `electron app-directory` 开发启动时，npm 分发的 Electron 可能只有未封装的链接器签名，系统通知会返回 `UNErrorDomain 1`。开发启动器应先运行 `scripts/prepare-desktop-notifications.sh /path/to/Electron.app /path/to/cache`，使用其 stdout 返回的应用包内 `Contents/MacOS/Electron` 启动原有 app-directory。脚本保留原运行时，在独立缓存中复制，设置独立的 `com.deepseek.dsh.development` 标识和“DeepSeek Harness 开发版”名称，完整 ad-hoc 签名并注册到 Launch Services，按运行时内容复用，准备失败时阻止启动。正式签名的 Desktop 包使用原有发布流程。
 
+### Packaged macOS Desktop application
+
+The official Desktop app can use the same system menu-bar token panel and native
+notification bridge. Install the Kode bundle first, quit the official app, then run:
+
+```sh
+node /path/to/installed/@kode/dsh/scripts/install-desktop-app.js "/Applications/DeepSeek Harness.app"
+```
+
+The installer validates the app identity, signature and upstream window contract,
+patches a staged copy, updates Electron's ASAR integrity hash, and seals the local
+app with an ad-hoc signature while retaining hardened runtime, its entitlements
+and nested binaries.
+Only a verified staged copy replaces the app; no old application bundle is retained
+after success. It retains the official app identifier, runtime, profile and update
+feed. Launch the usual `.app`; no development launcher is needed. This is a local
+integration, not a publisher-signed release. An official update replaces the
+bridge; rerun the installer against the updated app. Native helpers are embedded
+in the app resources and do not import files from a development checkout.
+
+Compatibility is tested against DSH Desktop 0.2.2-rc.3 / Cordis 4.1.0. Run
+`npm run test:desktop-runtime -- /path/to/extracted-desktop/dsh` to repeat the
+full integration suite against an extracted release. The resolver fails when a
+release package is missing rather than using a local dependency. UI generators
+retain their pinned upstream source; the runtime matrix does not change it. Earlier
+Cordis 4.0.5 remains within the plugin's peer range. Repacking preserves upstream
+native unpacked paths and executable modes. Unknown window contracts fail before
+the installed application is replaced.
+
 ### Unpacked macOS Desktop development shell
 
 The owned native bridge supplies menu-bar token usage and native completion/wait
@@ -999,8 +1028,8 @@ The token panel stays on the DSH main window's display, including when another
 app is in front. Moving/resizing the owner updates its display; hiding or minimizing
 the owner hides the panel. Plain menu bars use their own
 height; internal camera clearance comes from AppKit's actual screen safe areas.
-The launcher and shell installer set `AppleMenuBarVisibleInFullscreen` only for
-`com.deepseek.dsh.development`, keeping the application menu and system status
+The installers set `AppleMenuBarVisibleInFullscreen` for the corresponding
+`com.deepseek.dsh` or `com.deepseek.dsh.development` app, keeping the application menu and system status
 items visible alongside Kode in native full screen. The panel avoids process
 activation-policy transformations. App focus changes leave the panel in place
 without repeated hide/show calls or moving it to another display.

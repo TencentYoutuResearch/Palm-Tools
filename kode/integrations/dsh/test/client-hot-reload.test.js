@@ -16,17 +16,20 @@ test('input adapters unload and reactivate through real Cordis service proxies',
   ctx.provide('remote', { commands: { list: async () => ({ ok: true, value: [] }) } })
   ctx.provide('slots', { inject() {} })
   class Controller extends Service {
+    static inject = ['sessions']
     constructor(ctx) { super(ctx, 'testController') }
     track(...args) { this.ctx.sessions.sessionOf(); tracks.push(args) }
     dismiss() {}
     toggleSource() {}
   }
   class Input extends Service {
+    static inject = ['testController']
     constructor(ctx) { super(ctx, 'inputTriggers') }
     sessionOf() { return this.ctx.testController }
     registerSource() { return () => {} }
   }
   class Commands extends Service {
+    static inject = ['sessions']
     constructor(ctx) { super(ctx, 'commandUi') }
     async candidates() { this.ctx.sessions.sessionOf(); return [{ name: 'file' }] }
   }

@@ -3,19 +3,20 @@ import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence'
+import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { installRuntimeInteractions, questionAnswer } from '../src/runtime-interactions.js'
 
 async function fixture(policy = 'ask') {
-  const ctx = new Context(); const sessions = await ctx.plugin(SessionStore), approval = await ctx.plugin(ApprovalService, { policy })
-  const session = ctx.sessions.prepare('interaction-test'); const detach = ctx.sessions.enter(session)
+  const ctx = new Context(); const projections = await ctx.plugin(ProjectionRegistry); const sessions = await ctx.plugin(SessionStore), approval = await ctx.plugin(ApprovalService, { policy })
+  const session = ctx.sessions.prepare('interaction-test'); const detach = ctx.sessions.enter(session); ctx.sessions.announce(session)
   session.append('turn/start', { turn: 1 }); session.append('step/start', { turn: 1, step: 1 })
   const agent = { id: session.id, session, ctx }
   const questions = { ctx, assertLiveRoot() {}, ask: UserQuestionService.prototype.ask }
   ctx.provide('userQuestions', questions)
   const bridge = { mobileEnabled: true, pending: new Map() }, dispose = installRuntimeInteractions(ctx, bridge)
-  return { ctx, session, agent, bridge, async close() { dispose(); detach(); await approval.dispose(); await sessions.dispose() } }
+  return { ctx, session, agent, bridge, async close() { dispose(); detach(); await approval.dispose(); await sessions.dispose(); await projections.dispose() } }
 }
 async function pending(bridge) {
   for (let count = 0; count < 100; count++) { if (bridge.pending.size) return [...bridge.pending.entries()][0]; await new Promise(resolve => setImmediate(resolve)) }
