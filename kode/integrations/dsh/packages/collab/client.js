@@ -2903,7 +2903,7 @@ var nativeRowStyles = () => `
 var h13 = import_react17.default.createElement;
 var CONVERSATION_CSS = "@deepseek-ai/dsh-client-ui-conversation/ConversationRoot.module.css";
 var label2 = (value) => typeof value === "function" ? value() : typeof value === "string" ? value : void 0;
-function conversationViewSource(slots, devTools) {
+function conversationViewSource(slots, devTools, sessionId) {
   let key2 = "", value = [];
   const read = () => {
     const tabs = [];
@@ -2911,6 +2911,7 @@ function conversationViewSource(slots, devTools) {
       const id5 = entry.options?.id;
       if (typeof id5 !== "string") continue;
       if (id5 === "trajectory" && !devTools?.getSnapshot?.()) continue;
+      if (typeof entry.options?.kodeVisibleForSession === "function" && !entry.options.kodeVisibleForSession(sessionId)) continue;
       tabs.push({ id: id5, label: label2(entry.options.label) ?? id5 });
     }
     const next = JSON.stringify(tabs);
@@ -2923,10 +2924,26 @@ function conversationViewSource(slots, devTools) {
   return {
     getSnapshot: read,
     subscribe(fn) {
-      const offs = [slots.subscribe("conversation.view", fn), devTools?.subscribe?.(fn)].filter((off) => typeof off === "function");
-      return () => {
-        for (const off of offs) off();
+      let visibilityOffs = [];
+      const watch = () => {
+        for (const off of visibilityOffs) off();
+        const sources = new Set(slots.entries("conversation.view").map((entry) => entry.options?.kodeVisibilitySubscribe).filter((source) => typeof source === "function"));
+        visibilityOffs = [...sources].map((source) => source(sessionId, fn)).filter((off) => typeof off === "function");
       };
+      watch();
+      const offSlots = slots.subscribe("conversation.view", () => {
+        watch();
+        fn();
+      });
+      const offDevTools = devTools?.subscribe?.(fn);
+      return () => {
+        offSlots();
+        if (typeof offDevTools === "function") offDevTools();
+        for (const off of visibilityOffs) off();
+      };
+    },
+    forSession(id5) {
+      return conversationViewSource(slots, devTools, id5);
     }
   };
 }
@@ -2936,7 +2953,8 @@ var classes = () => {
 };
 function createTabbedConversationView(source) {
   return function TabbedConversationView(props) {
-    const tabs = import_react17.default.useSyncExternalStore(source.subscribe, source.getSnapshot);
+    const sessionSource = import_react17.default.useMemo(() => source.forSession?.(props.sessionId) ?? source, [source, props.sessionId]);
+    const tabs = import_react17.default.useSyncExternalStore(sessionSource.subscribe, sessionSource.getSnapshot);
     const [chosen, choose] = import_react17.default.useState("chat");
     const ordered = import_react17.default.useMemo(() => [...tabs.filter((tab) => tab.id === "chat"), ...tabs.filter((tab) => tab.id !== "chat")], [tabs]);
     const view = ordered.some((tab) => tab.id === chosen) ? chosen : "chat";
@@ -4012,7 +4030,7 @@ function installDiscussions(ctx, { storage, teams = () => [], renderTeamAvatar, 
       setFull(false);
       setLatestSessionId(null);
       setContextMenuOpen(false);
-      const wanted = requestedTab?.surfaceId === selected?.surface.id ? requestedTab.tab : "discussion";
+      const wanted = requestedTab && selected && requestedTab.surfaceId === selected.surface.id ? requestedTab.tab : "discussion";
       requestedTab = null;
       setViewTab(wanted);
       if (selected?.thread) heading.current?.focus();
@@ -10376,7 +10394,8 @@ function OrbitSessionView({ host, views, viewSource = emptyViewSource, sessionId
   const list = host.sessions?.list;
   const row2 = import_react62.default.useSyncExternalStore(list?.subscribe ?? (() => () => {
   }), () => list?.getSnapshot()?.byId?.[sessionId] ?? null);
-  const viewTabs = import_react62.default.useSyncExternalStore(viewSource.subscribe, viewSource.getSnapshot);
+  const sessionViewSource = import_react62.default.useMemo(() => viewSource.forSession?.(sessionId) ?? viewSource, [viewSource, sessionId]);
+  const viewTabs = import_react62.default.useSyncExternalStore(sessionViewSource.subscribe, sessionViewSource.getSnapshot);
   const hasTabs = viewTabs.length > 1;
   const [shown, setShown] = import_react62.default.useState(true), [notice, setNotice] = import_react62.default.useState("");
   import_react62.default.useEffect(() => {

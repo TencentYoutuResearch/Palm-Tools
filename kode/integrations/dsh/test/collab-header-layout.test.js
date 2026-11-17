@@ -76,8 +76,11 @@ test('Orbit main Session passes native tabbed views into the embedded conversati
       sessions: { list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { session: { title: '会话' } } }) } },
       renderSession: (reference, props) => { calls.push({ reference, props }); return null },
     }
-    const viewSource = { subscribe: () => () => {}, getSnapshot: () => [{ id: 'chat' }, { id: 'trajectory' }] }
+    const scopedViewSource = { subscribe: () => () => {}, getSnapshot: () => [{ id: 'chat' }, { id: 'trajectory' }] }
+    let boundSession
+    const viewSource = { subscribe: () => () => {}, getSnapshot: () => [], forSession(id) { boundSession = id; return scopedViewSource } }
     const tree = OrbitSessionView({ host, views, viewSource, sessionId: 'session' })
+    assert.equal(boundSession, 'session')
     const walk = node => {
       if (!node || typeof node !== 'object') return null
       if (node.type?.name === 'PlanningSessionEmbed') return node

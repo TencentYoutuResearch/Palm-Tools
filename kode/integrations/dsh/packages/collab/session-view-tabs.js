@@ -19,7 +19,7 @@ export const CONVERSATION_CSS = '@deepseek-ai/dsh-client-ui-conversation/Convers
 const label = value => typeof value === 'function' ? value() : typeof value === 'string' ? value : undefined
 
 /** `{ subscribe, getSnapshot }` over the registered views; `devTools` is the native switch source or null. */
-export function conversationViewSource(slots, devTools) {
+export function conversationViewSource(slots, devTools, sessionId) {
   let key = '', value = []
   const read = () => {
     const tabs = []
@@ -27,6 +27,7 @@ export function conversationViewSource(slots, devTools) {
       const id = entry.options?.id
       if (typeof id !== 'string') continue
       if (id === 'trajectory' && !devTools?.getSnapshot?.()) continue
+      if (typeof entry.options?.kodeVisibleForSession === 'function' && !entry.options.kodeVisibleForSession(sessionId)) continue
       tabs.push({ id, label: label(entry.options.label) ?? id })
     }
     const next = JSON.stringify(tabs)
@@ -36,9 +37,22 @@ export function conversationViewSource(slots, devTools) {
   return {
     getSnapshot: read,
     subscribe(fn) {
-      const offs = [slots.subscribe('conversation.view', fn), devTools?.subscribe?.(fn)].filter(off => typeof off === 'function')
-      return () => { for (const off of offs) off() }
+      let visibilityOffs = []
+      const watch = () => {
+        for (const off of visibilityOffs) off()
+        const sources = new Set(slots.entries('conversation.view').map(entry => entry.options?.kodeVisibilitySubscribe).filter(source => typeof source === 'function'))
+        visibilityOffs = [...sources].map(source => source(sessionId, fn)).filter(off => typeof off === 'function')
+      }
+      watch()
+      const offSlots = slots.subscribe('conversation.view', () => { watch(); fn() })
+      const offDevTools = devTools?.subscribe?.(fn)
+      return () => {
+        offSlots()
+        if (typeof offDevTools === 'function') offDevTools()
+        for (const off of visibilityOffs) off()
+      }
     },
+    forSession(id) { return conversationViewSource(slots, devTools, id) },
   }
 }
 
@@ -50,7 +64,8 @@ const classes = () => {
 /** The `views` local slot of `conversation.content`: native tab row + the native session view. */
 export function createTabbedConversationView(source) {
   return function TabbedConversationView(props) {
-    const tabs = React.useSyncExternalStore(source.subscribe, source.getSnapshot)
+    const sessionSource = React.useMemo(() => source.forSession?.(props.sessionId) ?? source, [source, props.sessionId])
+    const tabs = React.useSyncExternalStore(sessionSource.subscribe, sessionSource.getSnapshot)
     const [chosen, choose] = React.useState('chat')
     const ordered = React.useMemo(() => [...tabs.filter(tab => tab.id === 'chat'), ...tabs.filter(tab => tab.id !== 'chat')], [tabs])
     const view = ordered.some(tab => tab.id === chosen) ? chosen : 'chat'

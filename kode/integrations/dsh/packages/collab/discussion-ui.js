@@ -165,7 +165,7 @@ export function installDiscussions(ctx,{storage,teams=()=>[],renderTeamAvatar,re
  function Main(){
   useVersion();const [full,setFull]=useState(false),[viewTab,setViewTab]=useState('discussion'),[latestSessionId,setLatestSessionId]=useState(null),[contextMenuOpen,setContextMenuOpen]=useState(false),heading=useRef(null)
   const selectionKey=selected?discussionKey(selected.scope)+':'+selected.surface.id+':'+selected.thread:''
-  useEffect(()=>{setFull(false);setLatestSessionId(null);setContextMenuOpen(false);const wanted=requestedTab?.surfaceId===selected?.surface.id?requestedTab.tab:'discussion';requestedTab=null;setViewTab(wanted);if(selected?.thread)heading.current?.focus()},[selectionKey])
+  useEffect(()=>{setFull(false);setLatestSessionId(null);setContextMenuOpen(false);const wanted=requestedTab&&selected&&requestedTab.surfaceId===selected.surface.id?requestedTab.tab:'discussion';requestedTab=null;setViewTab(wanted);if(selected?.thread)heading.current?.focus()},[selectionKey])
   if(!selected||!sameDiscussionScope(selected.scope,activeScope))return h(React.Fragment,null,h('style',null,STYLES),h(ChannelHome,{key:activeScope?discussionKey(activeScope):'unscoped'}))
   const {scope,surface,thread}=selected,key=discussionKey(scope)+':'+surface.id,TabList=ctx.get('uiConversation')?.kodeChannelViewTabs
   const dmTeam=surface.kind==='dm'&&surface.team_ids?.length===1?teams().find(t=>t.home_hub===scope.home_hub&&t.id===surface.team_ids[0]):null

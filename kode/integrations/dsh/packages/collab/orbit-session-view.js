@@ -18,7 +18,8 @@ const emptyViewSource = { subscribe: () => () => {}, getSnapshot: () => [] }
 export function OrbitSessionView({ host, views, viewSource = emptyViewSource, sessionId, actions = null, onClose }) {
   const list = host.sessions?.list
   const row = React.useSyncExternalStore(list?.subscribe ?? (() => () => {}), () => list?.getSnapshot()?.byId?.[sessionId] ?? null)
-  const viewTabs = React.useSyncExternalStore(viewSource.subscribe, viewSource.getSnapshot)
+  const sessionViewSource = React.useMemo(() => viewSource.forSession?.(sessionId) ?? viewSource, [viewSource, sessionId])
+  const viewTabs = React.useSyncExternalStore(sessionViewSource.subscribe, sessionViewSource.getSnapshot)
   const hasTabs = viewTabs.length > 1
   const [shown, setShown] = React.useState(true), [notice, setNotice] = React.useState('')
   React.useEffect(() => { setShown(true); setNotice('') }, [sessionId])
