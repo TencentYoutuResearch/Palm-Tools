@@ -6,8 +6,12 @@ use crate::persistence::PersistedState;
 #[derive(Deserialize,Serialize)]
 struct Connection { url: String, token_file: std::path::PathBuf, server_command: Option<std::path::PathBuf>, server_config: Option<std::path::PathBuf>, #[serde(default)] server_args: Vec<String> }
 static START: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Connection document shared by every frontend of the workbench service.
+pub(crate) fn connection_path() -> anyhow::Result<std::path::PathBuf> {
+    std::env::var_os("KODE_WORKBENCH_CONNECTION").map(std::path::PathBuf::from).or_else(||dirs::config_dir().map(|root|root.join("kode/workbench-connection.json"))).ok_or_else(||anyhow::anyhow!("config directory unavailable"))
+}
 pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, String)> {
-    let path = std::env::var_os("KODE_WORKBENCH_CONNECTION").map(std::path::PathBuf::from).or_else(||dirs::config_dir().map(|root|root.join("kode/workbench-connection.json"))).ok_or_else(||anyhow::anyhow!("config directory unavailable"))?;
+    let path = connection_path()?;
     let _start=START.lock().await;
     if !tokio::fs::try_exists(&path).await? {
         let root=path.parent().unwrap();tokio::fs::create_dir_all(root).await?;

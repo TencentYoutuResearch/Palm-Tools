@@ -100,6 +100,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/runtime/release", post(runtime_release))
         .route("/api/v1/messaging/runtime/settle", post(runtime_settle))
         .route("/api/v1/messaging/runtime/command", post(runtime_command))
+        .route("/api/v1/messaging/runtime/request", post(runtime_request))
         .route("/api/v1/messaging/runtime/sessions", get(runtime_sessions))
         .route("/api/v1/messaging/runtime/history", get(runtime_history))
         .route("/api/v1/messaging/node", get(node))
@@ -569,6 +570,19 @@ struct RuntimeCommand { session_id:u64, kind:String, payload:serde_json::Value, 
 async fn runtime_command(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<RuntimeCommand>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     Ok(Json(ctx.runtimes.command(input.session_id,&input.kind,input.payload,&input.request_id).await?))
+}
+/// Runtime-level operations not addressed to an existing session.
+const RUNTIME_REQUESTS: &[&str] = &["import_session"];
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeRequest { runtime:String, kind:String, payload:serde_json::Value, request_id:String }
+/// Ask a runtime host to take over a native session (for example dsh
+/// resuming a conversation the GUI just stopped running in its PTY).
+async fn runtime_request(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<RuntimeRequest>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    if !RUNTIME_REQUESTS.contains(&input.kind.as_str()) { return Err(Error(StatusCode::BAD_REQUEST,"unsupported runtime request".into())) }
+    if !ctx.runtimes.available(&input.runtime) { return Err(Error(StatusCode::SERVICE_UNAVAILABLE,format!("runtime {} is not running",input.runtime))) }
+    Ok(Json(ctx.runtimes.request(&input.runtime,None,&input.kind,input.payload,&input.request_id).await?))
 }
 async fn runtime_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;

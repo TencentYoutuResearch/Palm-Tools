@@ -1,0 +1,44 @@
+{
+  "schema": "kode.extension/v1",
+  "id": "kode.new-ui",
+  "name": "dsh 界面",
+  "version": "0.1.1",
+  "publisher": "kode",
+  "description": "用 DeepSeek Harness (dsh) 的结构化对话界面展示 Kode 会话，可与 TUI 随时切换。",
+  "engines": {
+    "kode": ">=0.2.2"
+  },
+  "capabilities": [
+    "workbench",
+    "session.views",
+    "session.runtime"
+  ],
+  "backend": {
+    "command": "node",
+    "args": [
+      "./bin/start.mjs"
+    ],
+    "ready_timeout_secs": 600
+  },
+  "contributes": {
+    "sessionViews": [
+      {
+        "id": "dsh",
+        "title": "dsh",
+        "runtime": "dsh",
+        "backends": [
+          "codex",
+          "tcodex",
+          "claude",
+          "claude-internal",
+          "tclaude",
+          "codebuddy",
+          "cursor"
+        ],
+        "dragRegion": {
+          "selector": "[data-kode-titlebar]"
+        }
+      }
+    ]
+  }
+}

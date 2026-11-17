@@ -7,6 +7,7 @@ import { homedir } from 'node:os'
 import { isAbsolute } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { profileRoute } from './agent-profiles.js'
+import { importSavedSession } from './workbench-import.js'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { installRuntimeInteractions, questionSchema, questionAnswer } from './runtime-interactions.js'
 
@@ -191,13 +192,28 @@ export class RuntimeBridge {
       }
       return { id: publicId, runtime_session_id: created.sessionId }
     }
+    if (kind === 'import_session') {
+      // Kode GUI hands over a native session it has just stopped running in a
+      // PTY; it waits until its own projection is gone before asking.
+      const tab = { backend_key: payload.backend_key, session_id: payload.session_id, cwd: payload.cwd, title: payload.title, model: payload.model }
+      const result = await importSavedSession(this.ctx, this.backend, tab, { fresh: true })
+      if (result.sharedSession) throw new Error('This session is still running in another Kode runtime')
+      await this.publish()
+      return { id: this.ids.get(result.sessionId) ?? null, runtime_session_id: result.sessionId }
+    }
     if (!sessionId) throw new Error('Session identity required')
     if (kind === 'input') {
       if (typeof payload.text !== 'string' || !payload.text.trim()) throw new Error('Message must contain text')
       return controller.prompt({ sessionId, requestId: id, mode: 'queue', content: [{ type: 'text', text: payload.text }] }, this.stop.signal)
     }
     if (kind === 'interrupt') return controller.cancel({ sessionId })
-    if (kind === 'delete') { await this.service('workspaceRegistry').archiveSession(sessionId, { stopActivity: true }); await this.publish(); return { accepted: true } }
+    if (kind === 'delete') {
+      await this.service('workspaceRegistry').archiveSession(sessionId, { stopActivity: true })
+      // An archived session must not keep its CLI writing the native thread:
+      // Kode may resume that thread in a PTY right after.
+      await this.service('kodeNativeFactory')?.release?.(sessionId)
+      await this.publish(); return { accepted: true }
+    }
     if (kind === 'answer' || kind === 'plan_response') return this.answer(sessionId, payload, kind)
     const { agent, error } = await controller.resolveAgent(sessionId)
     if (error) throw new Error(error.message)

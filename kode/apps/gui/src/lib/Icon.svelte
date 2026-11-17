@@ -58,6 +58,7 @@
     | 'minimize-2'
     | 'grip-vertical'
     | 'terminal'
+    | 'message-square'
     | 'monitor'
     | 'info'
 
@@ -245,6 +246,8 @@
     terminal:
       '<polyline points="4 17 10 11 4 5"/>' +
       '<line x1="12" y1="19" x2="20" y2="19"/>',
+    // lucide:message-square —— 对话气泡
+    'message-square': '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     // lucide:info
     info:
       '<circle cx="12" cy="12" r="10"/>' +
