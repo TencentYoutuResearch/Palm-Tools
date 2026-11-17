@@ -637,10 +637,27 @@ impl Session {
     /// footer. Other backends keep the hardware cursor in the composer.
     pub fn model_command_prompt_position(&self) -> Option<(u16, u16)> {
         let screen = self.parser.screen();
-        if self.backend_key != "cursor" {
+        if self.backend_key != "cursor" && self.backend_key != "tclaude" {
             return Some(screen.cursor_position());
         }
         let rows: Vec<_> = screen.rows(0, screen.size().1).collect();
+        if self.backend_key == "tclaude" {
+            let row = rows
+                .iter()
+                .rposition(|line| line.trim_start().starts_with("❯"))?;
+            let footer = rows
+                .iter()
+                .skip(row + 1)
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| line.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !footer.contains("shift+tab") {
+                return None;
+            }
+            let prefix = rows[row].chars().take_while(|c| c.is_whitespace()).count() + 1;
+            return Some((row as u16, prefix as u16));
+        }
         let row = rows
             .iter()
             .rposition(|line| line.trim_start().starts_with("→ "))?;
@@ -1851,6 +1868,8 @@ mod tests {
             );
             let tail = if backend == "cursor" {
                 "\r\n\r\nGrok 4.7 High\r\n/tmp · main\r\n"
+            } else if backend == "tclaude" {
+                "\r\n────────\r\n⏵⏵ auto mode on (shift+tab to cycle) · /effort"
             } else {
                 "\r\x1b[2C"
             };

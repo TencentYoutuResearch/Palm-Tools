@@ -493,13 +493,14 @@ impl CloudSyncManager {
         {
             return Err("invalid worker id".into());
         }
-        let (server_url, token) = self.device_http_context()?;
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
         let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
         let response = self
             .inner
             .client
             .get(format!("{server_url}/api/v1/workers/{worker}/sessions"))
             .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
             .send()
             .await
             .map_err(friendly_network_error)?;
@@ -548,7 +549,7 @@ impl CloudSyncManager {
     ) -> Result<Value, String> {
         if !matches!(
             op,
-            "input" | "interrupt" | "answer" | "plan_response" | "delete" | "rename"
+            "input" | "interrupt" | "answer" | "plan_response" | "delete" | "rename" | "model"
         ) {
             return Err(format!("unsupported Worker command: {op}"));
         }
@@ -597,6 +598,40 @@ impl CloudSyncManager {
             .json::<Value>()
             .await
             .map_err(|error| format!("invalid Worker backend response: {error}"))
+    }
+
+    pub async fn worker_models(
+        &self,
+        worker_id: &str,
+        backend_key: &str,
+    ) -> Result<Value, String> {
+        if backend_key.is_empty()
+            || backend_key.len() > 200
+            || !backend_key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid backend key".into());
+        }
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let backend =
+            url::form_urlencoded::byte_serialize(backend_key.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/backends/{backend}/models"))
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker model catalogue: {error}"))
     }
 
     pub async fn worker_create_session(
@@ -655,6 +690,9 @@ impl CloudSyncManager {
             .clone()
             .ok_or_else(|| "Worker is not registered with the sync server".to_string())?;
         let device = url::form_urlencoded::byte_serialize(device_id.as_bytes()).collect::<String>();
+        // A device bearer can only mint a monitor binding for itself. The
+        // resulting binding token has workers.monitor and may then target any
+        // registered Worker through X-Kode-Worker-Id.
         let response = self
             .inner
             .client
@@ -1798,7 +1836,9 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
         .lock()
         .values()
         .filter(|session| {
-            session.pty.as_ref().is_some_and(|pty| pty.is_alive())
+            (session.pty.as_ref().is_some_and(|pty| pty.is_alive())
+                || ctx.acp.get(session.id).is_some()
+                || session.args.iter().any(|arg| arg == "--acp"))
                 && !matches!(
                     session.state.status,
                     kode_core::session::state::Status::Exited(_)
@@ -2187,6 +2227,71 @@ mod tests {
         assert_eq!(disk.backends[0].account.as_ref().unwrap().refresh_token, "refresh-1");
     }
 
+    #[tokio::test]
+    async fn worker_session_list_uses_monitor_binding_for_selected_worker() {
+        use axum::{routing::get, Json, Router};
+
+        let app = Router::new().route(
+            "/api/v1/workers/:worker_id/sessions",
+            get(
+                |axum::extract::Path(worker_id): axum::extract::Path<String>,
+                 headers: axum::http::HeaderMap| async move {
+                    let authorized = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .is_some_and(|value| value == "Bearer monitor-token")
+                        && headers
+                            .get("x-kode-worker-id")
+                            .is_some_and(|value| value == worker_id.as_str());
+                    let status = if authorized {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::UNAUTHORIZED
+                    };
+                    (
+                        status,
+                        Json(json!({
+                            "sessions": [{
+                                "id": 42,
+                                "title": "sibling session",
+                                "backend_key": "tcodex"
+                            }]
+                        })),
+                    )
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cloud-sync.json");
+        std::fs::write(
+            &config_path,
+            json!({
+                "installation_id": "monitor-client",
+                "active_backend_id": "local",
+                "backends": [{
+                    "id": "local",
+                    "name": "Local",
+                    "server_url": base,
+                    "device_id": "self",
+                    "device_token": "device-token",
+                    "monitor_token": "monitor-token"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manager = CloudSyncManager::with_config_path(
+            crate::build_test_ctx(kode_core::config::Config::default(), "monitor".into()),
+            config_path,
+        );
+
+        let sessions = manager.worker_sessions("sibling").await.unwrap();
+        assert_eq!(sessions["sessions"][0]["title"], "sibling session");
+    }
+
     /// A provider session saved before relay sessions is exchanged on its
     /// next use, and from then on refreshes at the relay, not the issuer.
     #[tokio::test]
@@ -2321,6 +2426,27 @@ mod tests {
         for session in saved {
             assert_eq!(ctx.runtimes.history(session["local_id"].as_u64().unwrap(), 0, 10).unwrap().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn snapshots_include_structured_acp_sessions_without_a_pty() {
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "test".into());
+        ctx.sessions.lock().insert(
+            7,
+            kode_core::session::Session::structured(
+                7,
+                "codebuddy",
+                "codebuddy",
+                std::path::Path::new("/tmp"),
+                "acp-session".into(),
+                "claude-sonnet-5".into(),
+            ),
+        );
+        let snapshots = session_snapshots(&ctx);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0]["local_id"], 7);
+        assert_eq!(snapshots[0]["dto"]["backend_key"], "codebuddy");
+        assert_eq!(snapshots[0]["dto"]["transport_kind"], "acp");
     }
 
     #[test]

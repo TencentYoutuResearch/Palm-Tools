@@ -55,3 +55,12 @@ export class TerminalImeOutputGate {
     return joined
   }
 }
+
+/** Windows defers PTY redraws around IME composition; WKWebView must not. */
+export function pushTerminalOutputForPlatform(
+  gate: TerminalImeOutputGate,
+  bytes: Uint8Array,
+  windowsPlatform: boolean,
+): Uint8Array | null {
+  return windowsPlatform ? gate.push(bytes) : bytes
+}

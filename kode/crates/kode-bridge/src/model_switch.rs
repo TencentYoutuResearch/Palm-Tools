@@ -281,6 +281,7 @@ fn native_confirmation(screen: &str, before: &str, model: &str) -> bool {
         let Some(value) = line
             .strip_prefix("Set model to ")
             .or_else(|| line.strip_prefix("Model set to "))
+            .or_else(|| line.strip_prefix("Model changed to "))
         else {
             return false;
         };
@@ -541,6 +542,11 @@ mod tests {
         assert!(native_confirmation(line, "", "sonnet"));
         assert!(!native_confirmation(line, line, "sonnet"));
         assert!(!native_confirmation(line, "", "opus"));
+        assert!(native_confirmation(
+            "• Model changed to gpt-6-astra high",
+            "",
+            "gpt-6-astra"
+        ));
     }
 
     #[cfg(unix)]

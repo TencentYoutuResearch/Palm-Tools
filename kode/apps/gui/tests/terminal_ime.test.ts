@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { TerminalImeOutputGate } from '../src/lib/terminal_ime.ts'
+import {
+  pushTerminalOutputForPlatform,
+  TerminalImeOutputGate,
+} from '../src/lib/terminal_ime.ts'
 
 const bytes = (...values: number[]) => new Uint8Array(values)
 
@@ -35,4 +38,15 @@ test('exceptional output flushes at the bound without losing ordered bytes', () 
   assert.deepEqual(gate.push(bytes(3, 4)), bytes(1, 2, 3, 4))
   assert.equal(gate.push(bytes(5)), null)
   assert.deepEqual(gate.end(), bytes(5))
+})
+
+test('only Windows defers terminal output during IME composition', () => {
+  const gate = new TerminalImeOutputGate()
+  gate.begin()
+  assert.deepEqual(pushTerminalOutputForPlatform(gate, bytes(1), false), bytes(1))
+  assert.equal(gate.end(), null)
+
+  gate.begin()
+  assert.equal(pushTerminalOutputForPlatform(gate, bytes(2), true), null)
+  assert.deepEqual(gate.end(), bytes(2))
 })
