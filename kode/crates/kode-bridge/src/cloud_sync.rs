@@ -213,6 +213,9 @@ pub struct Inner {
     config_path: PathBuf,
     config: Mutex<CloudSyncConfig>,
     status: Mutex<CloudSyncStatus>,
+    /// Ticks on every status or config change; status surfaces subscribe
+    /// instead of polling.
+    status_changes: tokio::sync::watch::Sender<()>,
     generation: AtomicU64,
     boot_id: String,
     client: reqwest::Client,
@@ -229,6 +232,30 @@ pub struct Inner {
     relay_sessions_unsupported: std::sync::atomic::AtomicBool,
     /// After a failed exchange, epoch ms before which none is retried.
     upgrade_retry_at: AtomicU64,
+}
+
+struct StatusGuard<'a> {
+    status: parking_lot::MutexGuard<'a, CloudSyncStatus>,
+    changes: &'a tokio::sync::watch::Sender<()>,
+}
+
+impl std::ops::Deref for StatusGuard<'_> {
+    type Target = CloudSyncStatus;
+    fn deref(&self) -> &CloudSyncStatus {
+        &self.status
+    }
+}
+
+impl std::ops::DerefMut for StatusGuard<'_> {
+    fn deref_mut(&mut self) -> &mut CloudSyncStatus {
+        &mut self.status
+    }
+}
+
+impl Drop for StatusGuard<'_> {
+    fn drop(&mut self) {
+        self.changes.send_modify(|_| {});
+    }
 }
 
 impl CloudSyncManager {
@@ -283,6 +310,7 @@ impl CloudSyncManager {
                 config_path,
                 config: Mutex::new(config),
                 status: Mutex::new(status),
+                status_changes: tokio::sync::watch::Sender::new(()),
                 generation: AtomicU64::new(0),
                 boot_id: Uuid::new_v4().to_string(),
                 client: reqwest::Client::builder()
@@ -316,6 +344,27 @@ impl CloudSyncManager {
         status.active_backend_id = config.active_backend_id.clone();
         apply_account(&mut status, config.active_backend().and_then(|backend| backend.account.as_ref()));
         status
+    }
+
+    /// Wakes on every status or config change. Changes come in bursts and
+    /// some leave the visible status as it was, so compare `status()`
+    /// before forwarding.
+    pub fn subscribe_status(&self) -> tokio::sync::watch::Receiver<()> {
+        self.inner.status_changes.subscribe()
+    }
+
+    /// Status for writing; subscribers are woken when the guard drops.
+    fn status_mut(&self) -> StatusGuard<'_> {
+        StatusGuard {
+            status: self.inner.status.lock(),
+            changes: &self.inner.status_changes,
+        }
+    }
+
+    fn save_config(&self, config: &CloudSyncConfig) -> Result<(), String> {
+        let saved = save_config(&self.inner.config_path, config);
+        self.inner.status_changes.send_modify(|_| {});
+        saved
     }
 
     pub async fn list_workers(&self) -> Result<Value, String> {
@@ -636,7 +685,7 @@ impl CloudSyncManager {
                 .find(|candidate| candidate.id == backend.id)
                 .ok_or_else(|| "cloud sync backend changed during monitor binding".to_string())?;
             current.monitor_token = Some(token.clone());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         Ok((backend.server_url, token, worker_id.to_string()))
     }
@@ -714,7 +763,7 @@ impl CloudSyncManager {
                 });
             }
             config.active_backend_id = Some(id);
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         self.reset_status_for_active_backend();
         self.restart_agent();
@@ -804,7 +853,7 @@ impl CloudSyncManager {
         if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
             current.account = Some(session.clone());
         }
-        save_config(&self.inner.config_path, &config)?;
+        self.save_config(&config)?;
         Ok(session)
     }
 
@@ -987,7 +1036,7 @@ impl CloudSyncManager {
                     backend.name = format!("Kode account · {}", current.label());
                 }
             }
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         Ok(self.status())
     }
@@ -1023,7 +1072,7 @@ impl CloudSyncManager {
             if config.active_backend_id.as_deref() == Some(backend_id) {
                 config.active_backend_id = config.backends.first().map(|backend| backend.id.clone());
             }
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
             config.active_backend_id.is_some()
         };
         self.reset_status_for_active_backend();
@@ -1047,7 +1096,7 @@ impl CloudSyncManager {
                 return Err("cloud sync backend was not found".into());
             }
             config.active_backend_id = Some(backend_id.to_string());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         self.reset_status_for_active_backend();
         self.restart_agent();
@@ -1105,7 +1154,7 @@ impl CloudSyncManager {
                 });
             }
             config.active_backend_id = Some(id.clone());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
             id
         };
         self.reset_status_for_active_backend();
@@ -1119,7 +1168,7 @@ impl CloudSyncManager {
     fn reset_status_for_active_backend(&self) {
         let config = self.inner.config.lock();
         let active = config.active_backend();
-        let mut status = self.inner.status.lock();
+        let mut status = self.status_mut();
         status.server_url = active
             .map(|backend| backend.server_url.clone())
             .unwrap_or_default();
@@ -1180,7 +1229,7 @@ impl CloudSyncManager {
             };
             let switched = config.active_backend_id.as_deref() != Some(backend_id.as_str());
             config.active_backend_id = Some(backend_id);
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
             switched
         };
         self.reset_status_for_active_backend();
@@ -1258,9 +1307,9 @@ impl CloudSyncManager {
                 .ok_or_else(|| "cloud sync backend changed during registration".to_string())?;
             current.device_id = Some(registration.device_id.clone());
             current.device_token = Some(registration.device_token.clone());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
-        self.inner.status.lock().device_id = Some(registration.device_id.clone());
+        self.status_mut().device_id = Some(registration.device_id.clone());
         Ok(registration)
     }
 
@@ -1278,7 +1327,7 @@ impl CloudSyncManager {
             match result {
                 Ok(()) => {}
                 Err(error) => {
-                    let mut status = self.inner.status.lock();
+                    let mut status = self.status_mut();
                     status.state = "offline".into();
                     status.connected = false;
                     status.sync_enabled = false;
@@ -1311,7 +1360,7 @@ impl CloudSyncManager {
             return Err("sign in to the account relay first".into());
         }
         let session = self.fresh_session(&backend.id).await?;
-        self.inner.status.lock().device_id = Some(installation_id.clone());
+        self.status_mut().device_id = Some(installation_id.clone());
         Ok((installation_id, session.access_token, backend.kind))
     }
 
@@ -1342,7 +1391,7 @@ impl CloudSyncManager {
                 .map_err(|_| "invalid device token".to_string())?,
         );
         {
-            let mut status = self.inner.status.lock();
+            let mut status = self.status_mut();
             status.state = "connecting".into();
             status.last_error = None;
         }
@@ -1350,7 +1399,7 @@ impl CloudSyncManager {
             .await
             .map_err(|error| format!("WebSocket connect failed: {error}"))?;
         {
-            let mut status = self.inner.status.lock();
+            let mut status = self.status_mut();
             status.connected = true;
             status.state = idle_state(kind).into();
             status.last_error = None;
@@ -1503,7 +1552,7 @@ impl CloudSyncManager {
     }
 
     fn set_binding_status(&self, kind: BackendKind, enabled: bool, binding_count: u64) {
-        let mut status = self.inner.status.lock();
+        let mut status = self.status_mut();
         status.connected = true;
         status.sync_enabled = enabled;
         status.binding_count = binding_count;
@@ -1733,7 +1782,7 @@ impl CloudSyncManager {
         while receipts.len() > MAX_COMMAND_RECEIPTS {
             receipts.pop_front();
         }
-        save_config(&self.inner.config_path, &config)
+        self.save_config(&config)
     }
 }
 
@@ -2522,6 +2571,29 @@ mod tests {
         assert!(!summaries[0].active);
         assert!(summaries[1].active);
         assert!(summaries[0].managed);
+    }
+
+
+    /// Status surfaces are pushed changes instead of polling: writes to the
+    /// status and saved config both wake subscribers; reads do not.
+    #[tokio::test]
+    async fn status_writes_and_config_saves_wake_subscribers() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "status-push".into());
+        let manager = CloudSyncManager::with_config_path(ctx, dir.path().join("cloud-sync.json"));
+        let mut changes = manager.subscribe_status();
+        changes.mark_unchanged();
+
+        let _ = manager.status();
+        assert!(!changes.has_changed().unwrap());
+
+        manager.status_mut().connected = true;
+        tokio::time::timeout(Duration::from_secs(1), changes.changed()).await.unwrap().unwrap();
+        assert!(manager.status().connected);
+
+        let config = manager.inner.config.lock().clone();
+        manager.save_config(&config).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), changes.changed()).await.unwrap().unwrap();
     }
 }
 

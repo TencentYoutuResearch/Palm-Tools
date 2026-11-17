@@ -19,7 +19,8 @@ kode-bridge = { path = "../../../crates/kode-bridge" }
 kode-memory = { path = "../../../crates/kode-memory" }
 # devtools 改为可选 feature:release 打包不带,避免右键 Inspect Element / F12 / Cmd+Opt+I
 # 在最终用户机器上打开 WKWebView 调试器。`./run.sh dev` 会传 --features devtools。
-tauri = { version = "2", features = ["macos-private-api"] }
+# `unstable` enables child webviews (`Window::add_child`) for extension views.
+tauri = { version = "2", features = ["macos-private-api", "unstable"] }
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"

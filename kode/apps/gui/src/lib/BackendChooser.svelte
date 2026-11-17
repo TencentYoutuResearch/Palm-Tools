@@ -1,14 +1,10 @@
 <script lang="ts">
   /**
-   * BackendChooser.svelte —— 启动 / 新建 tab 时的后端选择面板。
+   * BackendChooser.svelte —— 启动 / 新建 tab 时的单视图会话配置面板。
    *
-   * 两阶段:
-   *   1. **List 阶段**:
-   *      - **本地 backends** 单层列表,数字键 1..9 quick-pick(直接 Start)
-   *      - **远端 endpoints** 折叠分组,展开后 lazy 拉远端 backend 列表(11.5)
-   *      点 backend 行 → 进入 Configure 阶段
-   *   2. **Configure 阶段**:展开 cwd 输入(Browse 仅 Local 可用)+ bypass toggle
-   *      + Start/Back/Cancel
+   * 单视图表单:backend 下拉 + 工作目录 + model + bypass + 常驻的 Session history,
+   * 全部一次呈现;「New session」只在 backend 与 cwd 都就绪后启用。
+   * 没有阶段切换,卡片高度固定,历史区固定 208px → 整个流程不发生页面跳变。
    *
    * 默认值:
    *   - 恢复上次成功创建时的 backend / endpoint / model;
@@ -19,7 +15,7 @@
    * 行为约束:
    *   - cwd 不验证目录存在(后端 spawn 失败再报错;给用户写到尚未存在路径的自由)
    *   - Local Browse 走 @tauri-apps/plugin-dialog 的 open({ directory: true })
-   *   - Remote 不能调本地 dialog;Phase 11.5.4 加 RemoteCwdPicker 走 fs.list 协议
+   *   - Remote 不能调本地 dialog;RemoteCwdPicker 走 fs.list 协议
    */
   import {
     ipc,
@@ -74,23 +70,85 @@
       ? workspaceCwd : undefined
   }
 
-  type Phase = 'list' | 'configure'
-  let phase: Phase = $state('list')
+  /// 单视图下拉的一个选项。value 是复合值:local 与 remote 会有同名 key
+  /// (claude / codex 等),只用 b.key 会串台,所以带上 endpoint 维度。
+  type BackendOption = {
+    value: string
+    backend: BackendInfo
+    endpoint: EndpointId
+    label: string
+    group: string
+    /// 远端 backend 自带的默认工作目录,选中时用于回填 cwd。
+    defaultCwd?: string | null
+  }
 
-  /// 选中的 backend + 它属于的 endpoint(Local 或 Remote)。
-  /// configure / start 都看这两个。
-  let selected: BackendInfo | null = $state(null)
-  let selectedEndpoint: EndpointId = $state(ENDPOINT_LOCAL)
+  function localOption(b: BackendInfo): BackendOption {
+    return {
+      value: `local:${b.key}`,
+      backend: b,
+      endpoint: ENDPOINT_LOCAL,
+      label: b.name ?? b.key,
+      group: 'Local',
+    }
+  }
+
+  function remoteOption(ep: EndpointSummary, b: RemoteBackendInfo): BackendOption {
+    // RemoteBackendInfo → BackendInfo(model_catalog 用 b.key 查表;远端不知道
+    // default_model,留空让 chooser 给一个安全默认)。
+    return {
+      value: `remote:${ep.id}:${b.key}`,
+      backend: {
+        key: b.key,
+        command: '(remote)',
+        default_model: null,
+        model_flag: b.model_flag ?? '--model',
+      },
+      endpoint: endpointRemote(ep.id),
+      label: b.display_name ?? b.key,
+      group: `Remote · ${ep.display_name}`,
+      defaultCwd: b.default_cwd,
+    }
+  }
+
+  /// 复刻旧 list 阶段的三态可见性:无 workspace 全显示;本地 workspace 只本地;
+  /// 远端 workspace 只该 endpoint(连 Local 都隐藏)。
+  function includesLocal(): boolean {
+    return workspaceCwd === undefined || workspaceEndpoint?.kind !== 'remote'
+  }
+  function includesEndpoint(ep: EndpointSummary): boolean {
+    if (workspaceCwd === undefined) return true
+    return workspaceEndpoint?.kind === 'remote' && ep.id === workspaceEndpoint.id
+  }
+
+  let remoteOptions = $state<BackendOption[]>([])
+  let localOptions = $derived(includesLocal() ? backends.map(localOption) : [])
+  let options = $derived([...localOptions, ...remoteOptions])
+  let groupedOptions = $derived.by(() => {
+    const groups = new Map<string, BackendOption[]>()
+    for (const option of options) {
+      const list = groups.get(option.group) ?? []
+      list.push(option)
+      groups.set(option.group, list)
+    }
+    return [...groups].map(([label, items]) => ({ label, items }))
+  })
+
+  let selectedValue = $state('')
+  let selectedOption = $derived(options.find((o) => o.value === selectedValue) ?? null)
+  /// 只读 derived —— 所有写入都必须走 selectedValue,不要在别处赋值。
+  let selected = $derived(selectedOption?.backend ?? null)
+  let selectedEndpoint = $derived(selectedOption?.endpoint ?? ENDPOINT_LOCAL)
 
   let cwd = $state('')
+  /// 用户手动改过路径后,切换 backend 不再用记忆/默认覆盖它。
+  let cwdTouched = $state(false)
   let bypass = $state(false)
-  /// 用户本轮 configure 手动改过 toggle 后,cwd 变化不再用项目记忆覆盖它。
+  /// 用户手动改过 toggle 后,cwd 变化不再用项目记忆覆盖它。
   let bypassTouched = $state(false)
   let submitting = $state(false)
-  let defaultCwd = $state('') // 从 PathsConfig 拉的全局默认,用于 reset 按钮(仅 Local)
+  let defaultCwd = $state('') // 从 PathsConfig 拉的全局默认
 
-  // cwd 历史(top 5):进入 configure 阶段时按 bucket 拉。
-  // 本地 bucket = 'local';远端 bucket = endpoint_id。
+  // cwd 历史(top 5):按 bucket 拉。本地 'local';远端 endpoint_id。
   // 点历史项 → 填进 cwd 输入框(不自动 start,用户可能还要改 model/mode)。
   let cwdHistory: string[] = $state([])
   let workspaceError = $state('')
@@ -167,24 +225,16 @@
     modelNotice = result.warning ?? ''
   }
 
-  // Phase 11.5:远端 endpoints + 每个 endpoint 的展开/loading/backends 状态。
-  // 第一次展开才拉(lazy);折叠后缓存保留,再展开直接显示(同一打开周期内)。
+  // 远端 endpoints + 已拉到的 backend 列表。原生 <select> 无法 lazy 展开分组,
+  // 所以挂载时一次性预拉,逐步填充 remoteOptions。
   let endpoints = $state<EndpointSummary[]>([])
-  let endpointError = $state('') // 拉 endpoint 列表失败
+  let endpointError = $state('') // 拉 endpoint / 远端 backend 失败
   let endpointRefreshHandler: (() => void) | null = null
-  type RemoteState = {
-    expanded: boolean
-    loading: boolean
-    error: string
-    backends: RemoteBackendInfo[]
-  }
-  let remoteStates = $state<Record<string, RemoteState>>({})
 
-  // Phase 11.5.4:RemoteCwdPicker 的 open 标志 + 起始路径。
-  // 仅 selectedEndpoint.kind === 'remote' 时可弹。
+  // RemoteCwdPicker 的 open 标志 + 起始路径;仅 remote endpoint 时可弹。
   let cwdPickerOpen = $state(false)
 
-  // session 历史列表:进入 configure 阶段后,输入 cwd 自动查询
+  // session 历史列表:输入 cwd 后自动查询
   let sessions = $state<SessionSummary[]>([])
   let sessionsLoading = $state(false)
   let sessionsError = $state('')
@@ -222,9 +272,9 @@
     }
   }
 
-  /// cwd 变化时(含切换 backend 重新进入 configure)按路径记忆回填 bypass 默认值(用户手动改过则不覆盖)。
+  /// cwd 变化时按路径记忆回填 bypass 默认值(用户手动改过则不覆盖)。
   $effect(() => {
-    if (phase !== 'configure' || bypassTouched) return
+    if (bypassTouched) return
     bypass = rememberedBypass(cwd)
   })
 
@@ -234,9 +284,9 @@
     const dir = cwd.trim()
     const key = selected?.key
     const ep = selectedEndpoint
-    // 只有 configure 阶段 + 有 backend 和绝对 cwd 才查
+    // 有 backend 和绝对 cwd 才查;依赖读取必须同步发生在 setTimeout 之前。
     void ep // 依赖:切换 endpoint 时重新拉首页
-    if (phase !== 'configure' || !key || !isAbsoluteSessionCwd(dir)) {
+    if (!key || !isAbsoluteSessionCwd(dir)) {
       sessionsFetchId++
       sessions = []
       sessionsHasMore = false
@@ -266,13 +316,9 @@
     return () => clearTimeout(timer)
   })
 
-  /// 进入 configure 阶段时拉对应 bucket 的 cwd 历史(top 5)。
-  /// 远端 bucket = endpoint_id;本地 bucket = 'local'。
+  /// 按当前 bucket 拉 cwd 历史(top 5)。远端 bucket = endpoint_id;本地 = 'local'。
+  /// 单视图下始终可拉,让路径候选在选 backend 之前就可用。
   $effect(() => {
-    if (phase !== 'configure') {
-      cwdHistory = []
-      return
-    }
     const bucket = currentBucket()
     workspaceError = ''
     let cancelled = false
@@ -290,12 +336,40 @@
     }
   })
 
-  async function refreshEndpoints() {
+  /// 拉 endpoint 列表 + 并发预拉各 endpoint 的远端 backends,构建下拉选项。
+  /// 原生 <select>/<optgroup> 没法 lazy 展开,所以一次性拉齐后整体填充。
+  async function loadBackends() {
     try {
       endpoints = await endpointIpc.list()
       endpointError = ''
     } catch (e) {
       endpointError = String(e)
+      endpoints = []
+      return
+    }
+    const results = await Promise.allSettled(
+      endpoints
+        .filter(includesEndpoint)
+        .map((ep) => endpointIpc.getRemoteBackends(ep.id).then((list) => ({ ep, list }))),
+    )
+    const collected: BackendOption[] = []
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        endpointError = String(result.reason)
+        continue
+      }
+      const { ep, list } = result.value
+      for (const b of list.filter((item) => item.enabled !== false)) {
+        collected.push(remoteOption(ep, b))
+      }
+    }
+    remoteOptions = collected
+    // endpoint 刷新后已选中的 option 可能已下线 → 取消选择,避免按钮指向无效项。
+    // 用刚构建的列表判断,不依赖 $derived 的刷新时机。
+    const available = [...localOptions, ...collected]
+    if (selectedValue && !available.find((o) => o.value === selectedValue)) {
+      selectedValue = ''
+      cwdPickerOpen = false
     }
   }
 
@@ -304,42 +378,35 @@
     try {
       const cfg = await ipc.getPathsConfig()
       defaultCwd = cfg.session_cwd ?? ''
-      if (phase === 'list') cwd = workspaceCwd ?? defaultCwd
+      cwd = workspaceCwd ?? defaultCwd
     } catch (e) {
       console.warn('getPathsConfig failed:', e)
     }
-    // 拉远端 endpoints — 没有 endpoint 也没事,UI 这块不渲染。
-    await refreshEndpoints()
-    if (workspaceEndpoint?.kind === 'remote') {
-      const targetId = workspaceEndpoint.id
-      const target = endpoints.find((ep) => ep.id === targetId)
-      if (target) await toggleEndpoint(target)
-    }
+    // 先把远端 options 拉齐,再恢复上次选择 —— 否则远端 option 还没到会静默失败。
+    await loadBackends()
     // Do not overwrite a selection made while the initial IPC requests were pending.
-    if (phase === 'list' && lastSelection
+    if (selectedValue === '' && lastSelection
       && (!workspaceEndpoint || sameEndpoint(workspaceEndpoint, lastSelection.endpointId))) {
       const ep = lastSelection.endpointId
-      if (ep.kind === 'local') {
-        const backend = backends.find((b) => b.key === lastSelection.backendKey)
-        if (backend) await pickBackend(backend, ep)
-      } else {
-        const endpoint = endpoints.find((e) => e.id === ep.id)
-        if (endpoint && !remoteStates[ep.id]?.expanded) await toggleEndpoint(endpoint)
-        const backend = remoteStates[ep.id]?.backends.find((b) => b.key === lastSelection.backendKey)
-        if (phase === 'list' && backend) pickRemoteBackend(ep.id, backend)
-      }
+      const value = ep.kind === 'local'
+        ? `local:${lastSelection.backendKey}`
+        : `remote:${ep.id}:${lastSelection.backendKey}`
+      const available = [...localOptions, ...remoteOptions]
+      if (available.find((o) => o.value === value)) selectOption(value)
     }
     endpointRefreshHandler = () => {
-      void refreshEndpoints()
+      void loadBackends()
     }
     window.addEventListener('kode:endpoints-changed', endpointRefreshHandler)
   })
 
-  async function pickBackend(b: BackendInfo, ep: EndpointId, initialCwd?: string | null) {
-    selected = b
-    selectedEndpoint = ep
-    bypass = false
-    bypassTouched = false
+  /// 选中下拉项。selected / selectedEndpoint 是只读 derived,由 selectedValue 推出。
+  function selectOption(value: string) {
+    const option = options.find((o) => o.value === value)
+    selectedValue = option ? value : ''
+    cwdPickerOpen = false
+    if (!option) return
+    const { backend: b, endpoint: ep } = option
     modelOptions = modelsFor(b.key)
     modelLoading = false
     modelNotice = ''
@@ -352,11 +419,13 @@
       customModel = previous.model
       selectedModelValue = modelOptions.some((m) => m.value === previous.model) ? previous.model : '__custom__'
     }
-    phase = 'configure'
     void probeModels(b, ep)
 
-    // An explicit workspace wins over the remembered directory on this node.
-    cwd = workspacePathFor(ep) ?? previous?.cwd ?? initialCwd ?? (ep.kind === 'local' ? defaultCwd : '')
+    // An explicit workspace wins over everything; otherwise keep a path the user
+    // already typed, then fall back to the remembered / remote default.
+    cwd = workspacePathFor(ep) ?? (cwdTouched
+      ? cwd
+      : (previous?.cwd ?? option.defaultCwd ?? (ep.kind === 'local' ? defaultCwd : '')))
   }
 
   async function submitOnce(opts: {
@@ -380,66 +449,7 @@
     }
   }
 
-  function quickStart(b: BackendInfo) {
-    if (submitting) return
-    void pickBackend(b, ENDPOINT_LOCAL)
-  }
-
-  async function toggleEndpoint(ep: EndpointSummary) {
-    const cur = remoteStates[ep.id]
-    if (cur?.expanded) {
-      remoteStates[ep.id] = { ...cur, expanded: false }
-      return
-    }
-    // 展开:若已有缓存的 backends 直接复用;否则 lazy fetch
-    if (cur?.backends && cur.backends.length > 0) {
-      remoteStates[ep.id] = { ...cur, expanded: true }
-      return
-    }
-    remoteStates[ep.id] = {
-      expanded: true,
-      loading: true,
-      error: '',
-      backends: [],
-    }
-    try {
-      const list = await endpointIpc.getRemoteBackends(ep.id)
-      // 过滤掉远端 server 报告 disabled 的 backend。
-      // `b.enabled !== false`:旧 server 不返回 enabled 字段 → 视为开启(向后兼容)。
-      const visible = list.filter((b) => b.enabled !== false)
-      remoteStates[ep.id] = {
-        expanded: true,
-        loading: false,
-        error: '',
-        backends: visible,
-      }
-    } catch (e) {
-      remoteStates[ep.id] = {
-        expanded: true,
-        loading: false,
-        error: String(e),
-        backends: [],
-      }
-    }
-  }
-
-  function pickRemoteBackend(epId: string, b: RemoteBackendInfo) {
-    // RemoteBackendInfo → BackendInfo 适配(model_catalog 用 b.key 做 lookup;
-    // 远端不知道 default_model,留空让 BackendChooser 自动给一个安全默认)
-    const adapted: BackendInfo = {
-      key: b.key,
-      command: '(remote)',
-      default_model: null,
-      model_flag: b.model_flag ?? '--model',
-    }
-    pickBackend(adapted, endpointRemote(epId), b.default_cwd)
-  }
-
-  function back() {
-    phase = 'list'
-    selected = null
-    selectedEndpoint = ENDPOINT_LOCAL
-  }
+  /// 单视图没有阶段切换 / Back / 数字键 quick-pick,选择只改 selectedValue。
 
   /// 把 selectedModelValue + customModel 解析成最终要传给后端的 model 字符串。
   /// 返回 undefined 表示不传 model(走 backend.default_model 老语义)。
@@ -511,29 +521,13 @@
   }
 
   function handleKey(e: KeyboardEvent) {
-    if (phase === 'list') {
-      if (submitting || (workspaceCwd !== undefined && workspaceEndpoint?.kind === 'remote')) return
-      // 数字键 1..9 quick pick — 仅对**本地 backends** 启用
-      if (/^[1-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const i = Number(e.key) - 1
-        const b = backends[i]
-        if (b) {
-          e.preventDefault()
-          quickStart(b)
-        }
-      }
-    } else if (phase === 'configure') {
-      if (submitting) return
-      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        // 焦点不在按钮上时,Enter 也提交
-        if ((e.target as HTMLElement)?.tagName !== 'BUTTON') {
-          e.preventDefault()
-          start()
-        }
-      } else if (e.key === 'Escape') {
-        e.preventDefault()
-        back()
-      }
+    if (submitting) return
+    // 焦点不在按钮上、且 backend + cwd 都选好时,Enter 才提交。
+    if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey
+      && selected && cwd.trim()
+      && (e.target as HTMLElement)?.tagName !== 'BUTTON') {
+      e.preventDefault()
+      start()
     }
   }
 
@@ -569,259 +563,209 @@
   <div class="card">
     <div class="header">
       <div class="title-row">
-        <h1>{phase === 'list' ? 'New session' : `Configure ${selected?.name ?? selected?.key}`}</h1>
+        <h1>New session</h1>
         <span class="version">v0.2-dev</span>
       </div>
       <p class="hint">
-        {#if phase === 'list'}
-          {#if workspaceCwd !== undefined}
-            Choose a backend and model for <code>{workspaceCwd}</code>
-          {:else}
-          Choose a backend, or press <kbd>1..9</kbd> to start with defaults
-          {/if}
-        {:else if selectedEndpoint.kind === 'remote'}
-          Set <strong>remote</strong> working directory (absolute path on the server) and start
-        {:else}
-          Set working directory and permission mode, then press <kbd>Enter</kbd> to start
-        {/if}
+        Choose a backend and a working directory below, then start the session.
       </p>
     </div>
 
-    {#if errorMessage}
-      <div class="start-error" role="alert">
-        <strong>无法启动会话</strong>
-        <span>{errorMessage}</span>
-        <small>检查命令路径或工作目录后重试；这不会影响左侧已有会话。</small>
-      </div>
-    {/if}
-
-    {#if phase === 'list'}
-      <!-- ======================== Local backends ======================== -->
-      {#if workspaceCwd === undefined || workspaceEndpoint?.kind !== 'remote'}
-      <h2 class="section">Local</h2>
-      {#if backends.length === 0}
-        <div class="empty">
-          <strong>No backend configured</strong>
-          <span>Open Settings → Backends to enable or add one.</span>
+    <!-- 所有可变高度的条件块都放在这个滚动区里,卡片总高保持恒定。 -->
+    <div class="setup-scroll">
+      {#if errorMessage}
+        <div class="start-error" role="alert">
+          <strong>无法启动会话</strong>
+          <span>{errorMessage}</span>
+          <small>检查命令路径或工作目录后重试；这不会影响左侧已有会话。</small>
         </div>
-      {:else}
-        <ul>
-          {#each backends as b, i (b.key)}
-            <li>
-              <button onclick={() => pickBackend(b, ENDPOINT_LOCAL)}>
-                <BackendIcon backendKey={b.key} command={b.command} size={20} />
-                <div class="entry-main">
-                  <span class="key">{b.name ?? b.key}</span>
-                  {#if b.command && b.command !== b.key}
-                    <code class="cmd">{b.command}</code>
-                  {/if}
-                </div>
-                <div class="entry-side">
-                  {#if b.default_model}
-                    <span class="model">{b.default_model}</span>
-                  {/if}
-                  <kbd class="hotkey">{i + 1}</kbd>
-                </div>
-              </button>
-            </li>
-          {/each}
-        </ul>
       {/if}
 
-      <!-- ======================== Remote endpoints ======================== -->
+      {#if selectedEndpoint.kind === 'remote'}
+        <p class="badge">via <code>{selectedEndpoint.id}</code> (remote)</p>
       {/if}
-      {#if endpoints.length > 0 && (workspaceCwd === undefined || workspaceEndpoint?.kind === 'remote')}
-        <h2 class="section">Remote</h2>
-        <ul class="endpoints">
-          {#each endpoints.filter((ep) => workspaceCwd === undefined || (workspaceEndpoint?.kind === 'remote' && ep.id === workspaceEndpoint.id)) as ep (ep.id)}
-            {@const st = remoteStates[ep.id]}
-            <li class="endpoint">
-              <button class="endpoint-row" onclick={() => toggleEndpoint(ep)}>
-                <span class="status-dot" class:on={ep.connected}></span>
-                <span class="ep-name">{ep.display_name}</span>
-                <code class="ep-url">{ep.base_url}</code>
-                <span class="ep-toggle">{st?.expanded ? '▾' : '▸'}</span>
-              </button>
-              {#if st?.expanded}
-                <div class="ep-body">
-                  {#if st.loading}
-                    <p class="ep-msg">loading…</p>
-                  {:else if st.error}
-                    <p class="ep-msg ep-err">{st.error}</p>
-                  {:else if st.backends.length === 0}
-                    <p class="ep-msg ep-muted">no backends configured on this endpoint</p>
-                  {:else}
-                    <ul class="ep-backends">
-                      {#each st.backends as b (b.key)}
-                        <li>
-                          <button onclick={() => pickRemoteBackend(ep.id, b)}>
-                            <BackendIcon backendKey={b.key || b.display_name} size={18} />
-                            <div class="entry-main">
-                              <span class="key">{b.display_name ?? b.key}</span>
-                              {#if b.default_cwd}
-                                <code class="cmd">{b.default_cwd}</code>
-                              {/if}
-                            </div>
-                          </button>
-                        </li>
-                      {/each}
-                    </ul>
-                  {/if}
-                </div>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      {#if endpointError}
-        <p class="ep-msg ep-err">{endpointError}</p>
-      {/if}
-    {:else if phase === 'configure' && selected}
-      <div class="configure">
-        {#if selectedEndpoint.kind === 'remote'}
-          <p class="badge">via <code>{selectedEndpoint.id}</code> (remote)</p>
-        {/if}
 
-        <div class="field">
-          <label for="cwd-input">Working directory</label>
-          <div class="cwd-row">
-            <Combobox
-              id="cwd-input"
-              bind:value={cwd}
-              options={cwdHistory}
-              placeholder={selectedEndpoint.kind === 'remote'
-                ? '/home/dev/code (server-side absolute path)'
-                : (defaultCwd || '/absolute/path')}
-            />
-            <button class="btn ghost" onclick={browseCwd}>Browse…</button>
-          </div>
-          <p class="hint-line">
-            {#if selectedEndpoint.kind === 'remote'}
-              Select a Kode workspace on this server, or browse to register one.
-            {:else}
-              New session's cwd. <code>{selected.command}</code> will run here.
+      <div class="field">
+        <label for="backend-select">Backend</label>
+        <!-- 图标 / 文字 / caret 收进同一个控件框,不再各画各的边框。 -->
+        <div class="backend-control" class:empty={!selected}>
+          <span class="backend-icon">
+            {#if selected}
+              <BackendIcon backendKey={selected.key} command={selected.command} size={18} />
             {/if}
-          </p>
-          {#if workspaceError}<p class="ep-msg ep-err" role="alert">{workspaceError}</p>{/if}
-        </div>
-
-        <div class="field">
-          <div class="field-label-row">
-            <label for="model-select">Model</label>
-            <button class="model-refresh" type="button" disabled={modelLoading} aria-label="Refresh available models" title="Refresh available models" onclick={() => void probeModels(selected!, selectedEndpoint, true)}>
-              <span class:spinning={modelLoading}>↻</span>
-            </button>
-          </div>
+          </span>
           <select
-            id="model-select"
-            value={selectedModelValue}
-            onchange={(e) => (selectedModelValue = (e.target as HTMLSelectElement).value)}
+            id="backend-select"
+            value={selectedValue}
+            onchange={(e) => selectOption((e.target as HTMLSelectElement).value)}
           >
-            <option value="">Use backend default</option>
-            {#each modelOptions as m (m.value)}
-              <option value={m.value}>{m.label}</option>
-            {/each}
-            {#if customModelAllowed}<option value="__custom__">Custom…</option>{/if}
-          </select>
-          {#if selectedModelValue === '__custom__'}
-            <input
-              type="text"
-              value={customModel}
-              oninput={(e) => (customModel = (e.target as HTMLInputElement).value)}
-              placeholder={modelPlaceholder()}
-              spellcheck="false"
-              autocomplete="off"
-              class="model-custom"
-            />
-          {/if}
-          <p class="hint-line">
-            {modelHint(selected)}
-          </p>
-          <p class="catalog-status" class:error={Boolean(modelNotice)}>
-            {modelLoading ? 'Detecting available models…' : `${modelOptions.length} models · ${modelSource}`}
-          </p>
-          {#if modelNotice}<p class="hint-line model-notice">{modelNotice}</p>{/if}
-        </div>
-
-        <div class="field">
-          <label class="toggle">
-            <input
-              type="checkbox"
-              checked={bypass}
-              onchange={(e) => {
-                bypass = (e.target as HTMLInputElement).checked
-                bypassTouched = true
-              }}
-            />
-            <span class="toggle-label">Bypass permissions</span>
-          </label>
-          <p class="hint-line">
-            Skip permission prompts when the selected backend supports a bypass launch mode.
-          </p>
-        </div>
-
-        {#if selectedEndpoint.kind === 'local' || selectedEndpoint.kind === 'remote'}
-          <div class="session-history">
-            {#if sessionsLoading}
-              <p class="sh-msg">Looking for existing sessions…</p>
-            {:else if sessionsError}
-              <p class="sh-msg sh-err">{sessionsError}</p>
-            {:else if sessions.length > 0}
-              <div class="sh-label">Session history in this directory</div>
-              <ul class="sh-list">
-                {#each sessions as s (s.session_id)}
-                  <li class="sh-item">
-                    <div class="sh-main" onclick={() => resumeSession(s)} role="button" tabindex="0"
-                      onkeydown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          resumeSession(s)
-                        }
-                      }}>
-                      <span class="sh-title">{s.title || s.session_id.slice(0, 8)}</span>
-                      <span class="sh-meta">
-                        {#if s.model}
-                          <code class="sh-model">{s.model}</code>
-                        {/if}
-                        {#if s.total_tokens != null}
-                          <span class="sh-tokens">{formatTokens(s.total_tokens)}</span>
-                        {/if}
-                        <span class="sh-time">{formatTime(s.last_modified_secs)}</span>
-                      </span>
-                    </div>
-                    <button class="btn sh-resume" onclick={() => resumeSession(s)} disabled={submitting}>Resume</button>
-                  </li>
+            <option value="">Select a backend…</option>
+            {#each groupedOptions as group}
+              <optgroup label={group.label}>
+                {#each group.items as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
                 {/each}
-              </ul>
-              {#if sessionsHasMore}
-                <button class="btn sh-more" onclick={loadMoreSessions} disabled={sessionsLoadingMore}>
-                  {sessionsLoadingMore ? 'Loading…' : 'More'}
-                </button>
-              {/if}
-            {:else if cwd.trim().startsWith('/')}
-              <p class="sh-msg sh-muted">No existing sessions found. Start a new one below.</p>
-            {/if}
-          </div>
-        {/if}
-
-        <div class="actions">
-          <button class="btn primary" onclick={() => start()} disabled={submitting || !cwd.trim()}>
-            {submitting ? 'Starting...' : 'New session'}
-          </button>
-          <button class="btn ghost" onclick={back} disabled={submitting}>Back</button>
+              </optgroup>
+            {/each}
+          </select>
+          <span class="backend-caret" aria-hidden="true">▾</span>
         </div>
+        <p class="hint-line">
+          {#if selected}
+            Runs <code>{selected.command}</code>{#if selected.default_model} · default model <code>{selected.default_model}</code>{/if}.
+          {:else}
+            Pick a local or remote backend to continue.
+          {/if}
+        </p>
+        {#if options.length === 0}
+          <p class="ep-msg ep-err" role="alert">
+            No backend configured. Open Settings → Backends to enable or add one.
+          </p>
+        {/if}
+        {#if endpointError}
+          <p class="ep-msg ep-err">{endpointError}</p>
+        {/if}
       </div>
-    {/if}
+
+      <div class="field">
+        <label for="cwd-input">Working directory</label>
+        <div class="cwd-row">
+          <Combobox
+            id="cwd-input"
+            bind:value={cwd}
+            options={cwdHistory}
+            onchange={() => (cwdTouched = true)}
+            placeholder={selectedEndpoint.kind === 'remote'
+              ? '/home/dev/code (server-side absolute path)'
+              : (defaultCwd || '/absolute/path')}
+          />
+          <button class="btn ghost" onclick={browseCwd}>Browse…</button>
+        </div>
+        <p class="hint-line">
+          {#if selectedEndpoint.kind === 'remote'}
+            Select a Kode workspace on this server, or browse to register one.
+          {:else}
+            New session's cwd.
+          {/if}
+        </p>
+        {#if workspaceError}<p class="ep-msg ep-err" role="alert">{workspaceError}</p>{/if}
+      </div>
+
+      <div class="field">
+        <div class="field-label-row">
+          <label for="model-select">Model</label>
+          <button class="model-refresh" type="button" disabled={!selected || modelLoading} aria-label="Refresh available models" title="Refresh available models" onclick={() => { if (selected) void probeModels(selected, selectedEndpoint, true) }}>
+            <span class:spinning={modelLoading}>↻</span>
+          </button>
+        </div>
+        <select
+          id="model-select"
+          value={selectedModelValue}
+          disabled={!selected}
+          onchange={(e) => (selectedModelValue = (e.target as HTMLSelectElement).value)}
+        >
+          <option value="">Use backend default</option>
+          {#each modelOptions as m (m.value)}
+            <option value={m.value}>{m.label}</option>
+          {/each}
+          {#if customModelAllowed}<option value="__custom__">Custom…</option>{/if}
+        </select>
+        {#if selectedModelValue === '__custom__' && selected}
+          <input
+            type="text"
+            value={customModel}
+            oninput={(e) => (customModel = (e.target as HTMLInputElement).value)}
+            placeholder={modelPlaceholder()}
+            spellcheck="false"
+            autocomplete="off"
+            class="model-custom"
+          />
+        {/if}
+        <p class="hint-line">
+          {selected ? modelHint(selected) : 'Select a backend to choose a model.'}
+        </p>
+        <p class="catalog-status" class:error={Boolean(modelNotice)}>
+          {modelLoading ? 'Detecting available models…' : `${modelOptions.length} models · ${modelSource}`}
+        </p>
+        {#if modelNotice}<p class="hint-line model-notice">{modelNotice}</p>{/if}
+      </div>
+
+      <div class="field">
+        <label class="toggle">
+          <input
+            type="checkbox"
+            checked={bypass}
+            disabled={!selected}
+            onchange={(e) => {
+              bypass = (e.target as HTMLInputElement).checked
+              bypassTouched = true
+            }}
+          />
+          <span class="toggle-label">Bypass permissions</span>
+        </label>
+        <p class="hint-line">
+          Skip permission prompts when the selected backend supports a bypass launch mode.
+        </p>
+      </div>
+    </div>
+
+    <!-- 常驻固定 208px:任何选择/加载状态下都不卸载、不改变尺寸 → 页面不跳变。 -->
+    <div class="session-history">
+      {#if sessionsLoading}
+        <p class="sh-msg">Looking for existing sessions…</p>
+      {:else if sessionsError}
+        <p class="sh-msg sh-err">{sessionsError}</p>
+      {:else if sessions.length > 0}
+        <div class="sh-label">Session history in this directory</div>
+        <ul class="sh-list">
+          {#each sessions as s (s.session_id)}
+            <li class="sh-item">
+              <div class="sh-main" onclick={() => resumeSession(s)} role="button" tabindex="0"
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    resumeSession(s)
+                  }
+                }}>
+                <span class="sh-title">{s.title || s.session_id.slice(0, 8)}</span>
+                <span class="sh-meta">
+                  {#if s.model}
+                    <code class="sh-model">{s.model}</code>
+                  {/if}
+                  {#if s.total_tokens != null}
+                    <span class="sh-tokens">{formatTokens(s.total_tokens)}</span>
+                  {/if}
+                  <span class="sh-time">{formatTime(s.last_modified_secs)}</span>
+                </span>
+              </div>
+              <button class="btn sh-resume" onclick={() => resumeSession(s)} disabled={submitting}>Resume</button>
+            </li>
+          {/each}
+        </ul>
+        {#if sessionsHasMore}
+          <button class="btn sh-more" onclick={loadMoreSessions} disabled={sessionsLoadingMore}>
+            {sessionsLoadingMore ? 'Loading…' : 'More'}
+          </button>
+        {/if}
+      {:else if cwd.trim().startsWith('/')}
+        <p class="sh-msg sh-muted">No existing sessions found. Start a new one below.</p>
+      {/if}
+    </div>
+
+    <div class="actions">
+      <button class="btn primary" onclick={() => start()} disabled={submitting || !selected || !cwd.trim()}>
+        {submitting ? 'Starting...' : 'New session'}
+      </button>
+      {#if !submitting && (!selected || !cwd.trim())}
+        <span class="disabled-hint">
+          {#if !selected}Select a backend first.{:else}Enter a working directory.{/if}
+        </span>
+      {/if}
+    </div>
 
     <div class="footer">
       <span class="footer-text">
-        {#if phase === 'list'}
-          Configure backends in Settings → Backends · Manage remotes from the command palette
-        {:else if selectedEndpoint.kind === 'remote'}
-          Remote endpoint: <code>{selectedEndpoint.id}</code>
-        {:else}
-          Default cwd: <code>{defaultCwd || '(none)'}</code>
-        {/if}
+        Configure backends in Settings → Backends · Default cwd: <code>{defaultCwd || '(none)'}</code>
       </span>
     </div>
   </div>
@@ -855,8 +799,12 @@
   .card {
     width: 620px;
     max-width: 100%;
-    max-height: 90vh;
-    overflow-y: auto;
+    /* 固定高度 + 内部滚动:任何选择/加载状态都不改变卡片几何 → 不跳变。 */
+    height: min(90vh, 760px);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     background: color-mix(in srgb, var(--bg-elevated) 94%, var(--bg-base));
     border: 1px solid var(--bd-strong);
     border-radius: var(--rad-xl);
@@ -866,7 +814,18 @@
     font-family: var(--font-ui);
   }
   .header {
+    flex-shrink: 0;
     margin-bottom: var(--sp-4);
+  }
+  .setup-scroll {
+    /* 内容自适应高度;剩余空间交给 .session-history 伸展,不留空白。 */
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-3);
   }
   .title-row {
     display: flex;
@@ -889,28 +848,6 @@
     margin: 6px 0 0 0;
     font-size: var(--fs-sm);
     color: var(--fg-secondary);
-  }
-  .hint kbd {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    border-radius: var(--rad-sm);
-    background: var(--bg-tab-hover);
-    border: 1px solid var(--bd-default);
-    color: var(--fg-secondary);
-  }
-
-  /* 分组标题(Local / Remote) */
-  .section {
-    margin: 18px 0 8px;
-    font-size: var(--fs-xs);
-    font-weight: var(--fw-semi);
-    color: var(--fg-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0;
-  }
-  .section:first-of-type {
-    margin-top: 0;
   }
 
   ul {
@@ -946,125 +883,7 @@
   }
   button:active { transform: scale(0.99); }
 
-  .entry-main {
-    display: flex;
-    align-items: baseline;
-    gap: var(--sp-3);
-    min-width: 0;
-    flex: 1 1 auto;
-  }
-  .entry-side {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    flex-shrink: 0;
-  }
-  .key {
-    font-weight: var(--fw-semi);
-    color: var(--fg-primary);
-    font-size: var(--fs-md);
-  }
-  .cmd {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--fg-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .model {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--st-info);
-  }
-  .hotkey {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    border-radius: var(--rad-md);
-    background: var(--bg-tab-hover);
-    color: var(--fg-secondary);
-    font-size: var(--fs-xs);
-    font-family: var(--font-mono);
-    border: 1px solid var(--bd-default);
-  }
-  .empty {
-    color: var(--fg-secondary);
-    font-size: var(--fs-sm);
-    padding: var(--sp-3);
-    border: 1px dashed var(--bd-default);
-    border-radius: var(--rad-lg);
-    display: flex;
-    flex-direction: column;
-    gap: var(--sp-1);
-    margin-bottom: var(--sp-3);
-  }
-  .empty strong { color: var(--st-warn); }
-
-  /* === remote endpoint 折叠分组 === */
-  .endpoints {
-    margin: 0;
-  }
-  .endpoint {
-    border: 1px solid var(--bd-default);
-    border-radius: var(--rad-lg);
-    margin-bottom: var(--sp-2);
-    overflow: hidden;
-  }
-  .endpoint > .endpoint-row {
-    border: none;
-    border-radius: 0;
-  }
-  .endpoint-row {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-  }
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--fg-tertiary);
-    flex-shrink: 0;
-  }
-  .status-dot.on {
-    background: var(--st-ok, #4ade80);
-  }
-  .ep-name {
-    font-weight: var(--fw-semi);
-    flex-shrink: 0;
-  }
-  .ep-url {
-    flex: 1;
-    color: var(--fg-tertiary);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ep-toggle {
-    color: var(--fg-tertiary);
-    font-size: var(--fs-xs);
-    width: 16px;
-    text-align: center;
-  }
-  .ep-body {
-    padding: var(--sp-2) var(--sp-3) var(--sp-2);
-    background: color-mix(in srgb, var(--bg-base) 88%, var(--bg-elevated));
-    border-top: 1px solid var(--bd-default);
-  }
-  .ep-backends {
-    margin: 0;
-  }
-  .ep-backends li {
-    margin-bottom: 4px;
-  }
-  .ep-backends button {
-    padding: var(--sp-2);
-  }
+  /* backend 下拉 / 路径 / 模型 / 权限字段 */
   .ep-msg {
     margin: 0;
     font-size: var(--fs-xs);
@@ -1073,11 +892,8 @@
   .ep-msg.ep-err {
     color: var(--st-err, #ef4444);
   }
-  .ep-msg.ep-muted {
-    color: var(--fg-tertiary);
-  }
 
-  /* === configure 阶段 === */
+  /* === 单视图表单 === */
   .badge {
     margin: 0 0 var(--sp-2);
     font-size: var(--fs-xs);
@@ -1106,11 +922,60 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
   }
-  .configure {
+  .backend-control {
     display: flex;
-    flex-direction: column;
-    gap: var(--sp-3);
-    margin-bottom: var(--sp-3);
+    align-items: center;
+    gap: 10px;
+    min-height: 40px;
+    padding: 0 12px;
+    border: 1px solid var(--bd-default);
+    border-radius: var(--rad-md);
+    background: var(--bg-input);
+    transition: border-color var(--t-fast), box-shadow var(--t-fast);
+  }
+  .backend-control:hover {
+    border-color: color-mix(in srgb, var(--acc) 40%, var(--bd-default));
+  }
+  .backend-control:focus-within {
+    border-color: var(--acc);
+    box-shadow: 0 0 0 3px var(--acc-soft);
+  }
+  .backend-icon {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    border-radius: var(--rad-sm);
+    background: var(--bg-tab-hover);
+  }
+  .backend-control.empty .backend-icon {
+    background: transparent;
+    border: 1px dashed var(--bd-default);
+  }
+  /* 去掉原生 select 的边框与箭头,让整个控件像一个输入框。 */
+  .backend-control select {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    padding: 9px 0;
+    appearance: none;
+    -webkit-appearance: none;
+    color: var(--fg-primary);
+    font-family: var(--font-ui);
+    font-size: var(--fs-sm);
+    cursor: pointer;
+  }
+  .backend-control select:focus {
+    outline: none;
+    border-color: transparent;
+  }
+  .backend-caret {
+    flex-shrink: 0;
+    color: var(--fg-tertiary);
+    font-size: 10px;
+    pointer-events: none;
   }
   .field {
     display: flex;
@@ -1247,9 +1112,15 @@
   }
 
   .actions {
+    flex-shrink: 0;
     display: flex;
+    align-items: center;
     gap: var(--sp-2);
     margin-top: var(--sp-2);
+  }
+  .disabled-hint {
+    font-size: var(--fs-xs);
+    color: var(--fg-tertiary);
   }
   .btn {
     border: 1px solid var(--bd-default);
@@ -1273,6 +1144,21 @@
     font-weight: var(--fw-med);
   }
   .btn.primary:hover { filter: brightness(1.1); }
+  .btn:disabled {
+    opacity: .5;
+    cursor: default;
+  }
+  .btn:disabled:hover {
+    background: transparent;
+    color: var(--fg-secondary);
+    filter: none;
+  }
+  .btn.primary:disabled,
+  .btn.primary:disabled:hover {
+    background: var(--acc);
+    color: var(--fg-on-accent);
+    filter: none;
+  }
 
   /* === session history === */
   .session-history {
@@ -1285,6 +1171,9 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    /* 吃掉表单之外的剩余高度:空白变成可多看几条历史的空间,卡片仍固定不跳。 */
+    flex-grow: 1;
+    flex-shrink: 0;
   }
   .sh-label {
     display: block;
@@ -1375,6 +1264,7 @@
   }
 
   .footer {
+    flex-shrink: 0;
     border-top: 1px solid var(--bd-default);
     padding-top: var(--sp-3);
   }

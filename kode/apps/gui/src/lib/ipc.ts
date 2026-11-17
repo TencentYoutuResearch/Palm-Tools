@@ -1624,6 +1624,61 @@ export const pluginIpc = {
   create: (name: string, description: string) => invoke<string>('plugin_create', { name, description }),
   nativeOverview: () => invoke<NativePluginOverview>('native_plugin_overview'),
 }
+/** Kode extensions (`kode-extension.json`), unrelated to the skill plugins above. */
+export interface ExtensionSessionView {
+  id: string
+  title: string
+  runtime: string | null
+  backends: string[]
+  path: string
+}
+export interface ExtensionManifest {
+  schema: string
+  id: string
+  name: string
+  version: string
+  description: string
+  publisher: string
+  engines: { kode?: string | null }
+  capabilities: string[]
+  backend: { command: string; args: string[] } | null
+  contributes: { sessionViews: ExtensionSessionView[] }
+}
+export interface ExtensionInfo {
+  id: string
+  enabled: boolean
+  linked: boolean
+  dir: string
+  compatible: boolean
+  manifest: ExtensionManifest | null
+  error: string | null
+  running: { url: string; pid: number } | null
+}
+export type ExtensionRect = { x: number; y: number; width: number; height: number }
+export type ExtensionProgress = { id: string; message: string; step: number | null; total: number | null }
+export type ExtensionViewAction = { extension: string; view: string; action: string; params: Record<string, unknown> }
+export const extensionIpc = {
+  list: () => invoke<ExtensionInfo[]>('extension_list'),
+  install: (path: string, link: boolean) => invoke<ExtensionInfo>('extension_install', { path, link }),
+  uninstall: (id: string) => invoke<void>('extension_uninstall', { id }),
+  setEnabled: (id: string, enabled: boolean) => invoke<void>('extension_set_enabled', { id, enabled }),
+  start: (id: string) => invoke<{ url: string; pid: number }>('extension_start', { id }),
+  restart: (id: string) => invoke<{ url: string; pid: number }>('extension_restart', { id }),
+  logs: (id: string) => invoke<string[]>('extension_logs', { id }),
+  showView: (extension: string, view: string, rect: ExtensionRect, fragment: string | null) =>
+    invoke<void>('extension_view_show', { extension, view, rect, fragment }),
+  hideViews: (extension: string | null = null) => invoke<void>('extension_view_hide', { extension }),
+  postToView: (extension: string, view: string, message: Record<string, unknown>) =>
+    invoke<boolean>('extension_view_post', { extension, view, message }),
+  onChanged: (cb: () => void) => listen('extensions-changed', () => cb()),
+  onProgress: (cb: (progress: ExtensionProgress) => void) => listen<ExtensionProgress>('extension-progress', (e) => cb(e.payload)),
+  onViewAction: (cb: (action: ExtensionViewAction) => void) => listen<ExtensionViewAction>('extension-view-action', (e) => cb(e.payload)),
+  /** Ask a workbench runtime (dsh) to take over a native session. */
+  runtimeImport: (runtime: string, payload: { backend_key: string; session_id: string; cwd: string; title?: string; model?: string }) =>
+    invoke<{ id: number | null; runtime_session_id: string }>('shared_runtime_request', { runtime, kind: 'import_session', payload }),
+  /** Archive a runtime-hosted session so its host releases the native thread. */
+  runtimeArchive: (id: SessionId) => invoke<unknown>('shared_runtime_archive', { id }),
+}
 export type ScreenshotDraft = { pngBase64: string; width: number; height: number }
 export type ScreenshotCrop = { x: number; y: number; width: number; height: number }
 

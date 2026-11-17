@@ -1398,7 +1398,7 @@ pub fn memory_browse_state_set(
 pub(crate) fn restore_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let win = app
-        .get_webview_window("main")
+        .get_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
     let _ = win.unminimize();
     let _ = win.show();

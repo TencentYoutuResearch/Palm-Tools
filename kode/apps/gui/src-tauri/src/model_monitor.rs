@@ -64,6 +64,13 @@ impl ModelMonitorLayout {
 }
 
 pub fn create_model_monitor(app: &tauri::AppHandle) -> Result<(), String> {
+    // The monitor sits at a fixed spot on every display. A debug instance
+    // running next to the installed app would stack a second one exactly on
+    // top of it, so coexisting instances opt in explicitly.
+    let coexisting = std::env::var("KODE_DISABLE_SINGLE_INSTANCE").as_deref() == Ok("1");
+    if coexisting && std::env::var("KODE_MODEL_MONITOR").as_deref() != Ok("1") {
+        return Ok(());
+    }
     sync_model_monitor_windows(app)?;
     install_model_monitor_main_window_listener(app);
     start_model_monitor_display_sync(app);
@@ -111,7 +118,7 @@ fn create_model_monitor_for_display(
 
 fn install_model_monitor_main_window_listener(app: &tauri::AppHandle) {
     // model monitor 是主窗口的系统级伴随窗口，不应改变原有“关闭主窗口即退出”语义。
-    if let Some(main) = app.get_webview_window("main") {
+    if let Some(main) = app.get_window("main") {
         let app = app.clone();
         let refresh_generation = Arc::new(AtomicU64::new(0));
         main.on_window_event(move |event| match event {
@@ -146,7 +153,7 @@ fn start_model_monitor_display_sync(app: &tauri::AppHandle) {
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             timer.tick().await;
-            if app.get_webview_window("main").is_none() {
+            if app.get_window("main").is_none() {
                 break;
             }
             let app_for_sync = app.clone();
@@ -728,7 +735,7 @@ fn attach_model_monitor_to_main_display(
 ) -> Result<(), String> {
     use objc2_app_kit::{NSWindow, NSWindowOrderingMode};
 
-    let Some(main) = app.get_webview_window("main") else {
+    let Some(main) = app.get_window("main") else {
         return Ok(());
     };
     let should_attach = main.is_fullscreen().unwrap_or(false)

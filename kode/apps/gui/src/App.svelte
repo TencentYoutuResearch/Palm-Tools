@@ -92,6 +92,7 @@
   import { outsidePressClose } from './lib/outside_close'
   import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry, type WorkerSessionDto } from './lib/ipc'
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
+  import { watchCloudStatus } from './lib/cloud_status_watch'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
   import {
@@ -102,6 +103,13 @@
     type ScreenshotSettings,
   } from './lib/screenshot_settings'
   import { pushToast } from './lib/toast'
+  import { extensionIpc, type ExtensionViewAction } from './lib/ipc'
+  import ExtensionViewPort from './lib/ExtensionViewPort.svelte'
+  import { autostartRuntimeHosts, sessionViews, startExtensionWatch, viewForBackend, viewForRuntime, type SessionViewTarget } from './lib/extensions'
+  import { switchProgress, switchToRuntime, switchToTui, toRuntimeBlocker, toTuiBlocker, type SwitchBlocker } from './lib/runtime_switch'
+  import SwitchProgressOverlay from './lib/SwitchProgressOverlay.svelte'
+  import { toasts } from './lib/toast'
+  import { floatingOverlays } from './lib/overlay_guard'
 
   /**
    * 模板专用的响应式翻译函数。t() 本身不读任何 reactive 源,直接在常驻模板里用
@@ -162,8 +170,10 @@
   let accountTriggerEl: HTMLButtonElement | undefined = $state()
   let accountStatus = $state<CloudSyncStatus | null>(null)
   let sidebarAccount = $derived(accountStatus?.backends.find((b) => b.kind === 'account_relay') ?? null)
-  /** Sidebar identity. Read on start, when the menu opens and when an
-   *  account surface closes; never polled, so an idle window stays idle. */
+  /** Sidebar identity. Follows the pushed `cloud-status`, so a socket that
+   *  connects or drops later shows without reopening anything; also read on
+   *  start, when the menu opens and when an account surface closes. */
+  $effect(() => watchCloudStatus((status) => { accountStatus = status }))
   async function refreshAccountStatus() {
     try {
       accountStatus = await ipc.cloudSyncStatus()
@@ -1297,6 +1307,77 @@
       deployOpen ||
       pickerState != null,
   )
+  /// Session view switch for the active terminal tab. Inside an extension
+  /// view Kode's chrome is hidden and the view renders its own switch.
+  type ViewSwitch = { target: SessionViewTarget; blocker: SwitchBlocker }
+  let viewSwitch = $derived.by((): ViewSwitch | null => {
+    const tab = $activeTab
+    if (!tab || tab.sharedRuntime || tab.transportKind === 'acp') return null
+    const target = viewForBackend($sessionViews, tab.backendKey)
+    return target ? { target, blocker: toRuntimeBlocker(tab) } : null
+  })
+  let dshView = $derived(viewForRuntime($sessionViews, 'dsh'))
+  /// An extension view owns the whole window: Kode's sidebar, titlebar,
+  /// inspector and status bar give way to the view's own chrome.
+  let extImmersive = $derived(!!$activeTab?.sharedRuntime && !!dshView && !chooserOpen && !deviceView && !$switchProgress)
+  function switchBlockerText(blocker: SwitchBlocker) {
+    return blocker === 'busy' ? tr('extensions.switch.busy') : blocker === 'remote' ? tr('extensions.switch.remote') : blocker === 'no_session' ? tr('extensions.switch.noSession') : ''
+  }
+  function switchFailed(e: unknown) {
+    pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail: e instanceof Error ? e.message : String(e), durationMs: 8000 })
+  }
+  async function switchToView() {
+    const tab = $activeTab
+    const sw = viewSwitch
+    if (!tab || !sw || sw.blocker || $switchProgress) return
+    await switchToRuntime(tab, sw.target).catch(switchFailed)
+  }
+  async function switchTabToTui(tab: TabInfo) {
+    if ($switchProgress) return
+    const blocker = toTuiBlocker(tab)
+    if (blocker) {
+      pushToast({ severity: 'warning', title: tr('extensions.switch.failed'), detail: switchBlockerText(blocker), durationMs: 5000 })
+      return
+    }
+    await switchToTui(tab).catch(switchFailed)
+  }
+  /// Back to Kode's own UI without moving the conversation.
+  function leaveExtensionView() {
+    const tab = [...$tabs].reverse().find((t) => !t.sharedRuntime)
+    if (tab) selectTab(tab.id)
+    else startNewSession()
+  }
+  function onExtensionViewAction(event: ExtensionViewAction) {
+    if (!$sessionViews.some((v) => v.extension === event.extension && v.view.id === event.view)) return
+    if (event.action === 'leave') return leaveExtensionView()
+    if (event.action === 'switch-view' && event.params.to === 'tui') {
+      const ref = String(event.params.session ?? '')
+      const tab = $tabs.find((t) => t.sharedRuntime && t.dshSessionId === ref)
+      if (!tab) {
+        pushToast({ severity: 'warning', title: tr('extensions.switch.failed'), detail: tr('extensions.switch.notSwitchable'), durationMs: 6000 })
+        return
+      }
+      void switchTabToTui(tab)
+    }
+  }
+  /// Kode toasts are DOM and would sit under the native view; the view's
+  /// embed bridge draws them on top instead.
+  const forwardedToasts = new Set<number>()
+  $effect(() => {
+    const list = $toasts
+    const target = dshView
+    if (!extImmersive || !target) return
+    const dark = theme === 'dark' || (theme === 'system' && systemPrefersDark)
+    for (const toast of list) {
+      if (forwardedToasts.has(toast.id)) continue
+      forwardedToasts.add(toast.id)
+      void extensionIpc.postToView(target.extension, target.view.id, {
+        type: 'toast', severity: toast.severity, title: toast.title, detail: toast.detail ?? '',
+        durationMs: Math.max(1500, toast.expiresAt - Date.now()), theme: dark ? 'dark' : 'light',
+      }).catch(() => {})
+    }
+  })
+
   /** SpecOps console session. The token remains in-memory and is injected via URL fragment. */
   let specopsSession: SpecOpsSession | null = $state(null)
   let specopsOpening = $state(false)
@@ -1340,6 +1421,21 @@
   let memoryPromptBytes = $state(0)
   /** 当前展开的预览(null = 关闭) */
   let memoryPromptPreviewText: string | null = $state(null)
+  /// Extension views are native webviews above the DOM: hide them while any
+  /// modal, dialog or dropdown could sit over the session area.
+  let overlayBlocked = $derived(
+    anyModalOpen ||
+      bootLoading ||
+      closeConfirm != null ||
+      $sessionExitRecovery != null ||
+      specopsInitConfirm != null ||
+      screenshotDraft != null ||
+      monitorNewOpen ||
+      memoryPromptPreviewText !== null ||
+      accountMenuOpen ||
+      $floatingOverlays > 0,
+  )
+
   /** 全局 UI 主题。null/初始 = 'system' 走系统偏好。state.json 持久化。 */
   let theme: ThemeMode = $state('system')
   /** 全局 UI 语言。system 走 navigator.language。 */
@@ -1536,7 +1632,9 @@
         // 无持久化或失败 — 静默,Browse 自带空默认
       }
       advanceBoot(6)
+      await startExtensionWatch(onExtensionViewAction)
       const persisted = await ipc.getPersistedTabs()
+      if (persisted) autostartRuntimeHosts(persisted)
       if (persisted && persisted.length > 0) {
         const localRestoredIds: SessionId[] = []
         await restoreTabs(persisted, (tab) => {
@@ -2308,6 +2406,7 @@
   class:sb-hidden={sidebarMode === 'hidden'}
   class:inspector-open={inspectorOpen}
   class:inspector-resizing={inspectorResizing}
+  class:ext-immersive={extImmersive}
   style={inspectorOpen ? `--inspector-w:${inspectorWidth}px` : ''}
 >
   {#if isWindows}<WindowsWindowControls />{/if}
@@ -2554,6 +2653,23 @@
         <strong>{topbarTitle}</strong>
       </div>
       <div class="titlebar-actions">
+        {#if viewSwitch}
+          <div class="view-switch" role="group" aria-label={tr('extensions.switch.label')}>
+            <button class="active" aria-pressed="true" tabindex="-1">
+              <Icon name="terminal" size={13} />
+              <span>{tr('extensions.switch.tui')}</span>
+            </button>
+            <button
+              aria-pressed="false"
+              disabled={!!viewSwitch.blocker || !!$switchProgress}
+              title={switchBlockerText(viewSwitch.blocker) || tr('extensions.switch.toView', { name: viewSwitch.target.view.title })}
+              onclick={switchToView}
+            >
+              <Icon name="message-square" size={13} />
+              <span>{viewSwitch.target.view.title}</span>
+            </button>
+          </div>
+        {/if}
         <UpdateButton />
         <EventCenter />
         {#if terminalPosition === 'bottom' && $tabs.length > 0}
@@ -2669,8 +2785,13 @@
       {@const tab = $tabs.find((t) => t.id === id)}
       <!-- inert 兜底:visibility:hidden 仍可能被 Tab 键焦点穿透,inert 完全屏蔽
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
+      {@const extTarget = tab?.sharedRuntime ? viewForRuntime($sessionViews, 'dsh') : null}
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
-        {#if tab?.transportKind === 'acp'}
+        {#if extTarget}
+          {#if isActive}
+            <ExtensionViewPort target={extTarget} sessionRef={tab?.dshSessionId} visible={isActive} blocked={overlayBlocked || !!$switchProgress} />
+          {/if}
+        {:else if tab?.transportKind === 'acp'}
           <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} agentName={tab?.backendKey === 'codebuddy' ? 'CodeBuddy' : tab?.backendKey ?? 'Agent'} />
         {:else}
         <Terminal
@@ -2683,6 +2804,9 @@
         {/if}
       </div>
     {/each}
+    {#if $switchProgress}
+      <SwitchProgressOverlay progress={$switchProgress} />
+    {/if}
     {#if deviceView}
       {#key `${deviceView.device.device_id}:${deviceView.session.id}`}
         <DeviceSession
@@ -3207,6 +3331,19 @@
      否则红绿灯会溢出 sidebar 压到终端区。 */
   .root.sb-compact { --sidebar-w: 78px; }
   .root.sb-hidden  { --sidebar-w: 0px; }
+  /* Extension view (dsh) fills the window and draws its own chrome: room
+     for the traffic lights, drag regions and the TUI/dsh switch. */
+  .root.ext-immersive {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
+    grid-template-rows: minmax(0, 1fr) 0;
+  }
+  .root.ext-immersive .sidebar,
+  .root.ext-immersive .inspector-shell,
+  .root.ext-immersive .status,
+  .root.ext-immersive .top-banners,
+  .root.ext-immersive .bottom-terminal { display: none; }
+  .root.ext-immersive .main-titlebar { display: none; }
+  .root.ext-immersive .term-wrapper { padding: 0; bottom: 0; }
   /* hidden:用列宽→0 收起(不再 display:none),配合 .sidebar overflow:hidden 平滑动画。
      收起后不可交互,且内容不换行抖动。 */
   .root.sb-hidden .sidebar {
@@ -4556,6 +4693,52 @@
     /* 隐藏的 wrapper 也要 fade out,避免叠层时一闪 */
     opacity: 0;
     transition: opacity var(--t-fast) ease;
+  }
+  /* Segmented control in the style of the title pill: chip track, the
+     current view raised as an elevated segment. */
+  .view-switch {
+    -webkit-app-region: no-drag;
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 28px;
+    padding: 2px;
+    box-sizing: border-box;
+    border: 1px solid var(--bd-muted);
+    border-radius: var(--rad-md);
+    background: var(--bg-chip);
+    margin-right: 4px;
+  }
+  .view-switch button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: calc(var(--rad-md) - 2px);
+    background: transparent;
+    color: var(--fg-tertiary);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  .view-switch button:hover:not(:disabled):not(.active) {
+    color: var(--fg-primary);
+    background: var(--bg-hover);
+  }
+  .view-switch button.active {
+    background: var(--bg-elevated);
+    color: var(--fg-primary);
+    box-shadow: var(--sh-sm), 0 0 0 0.5px var(--bd-default);
+    cursor: default;
+  }
+  .view-switch button:disabled:not(.active) {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .term-wrapper.visible {
     visibility: visible;

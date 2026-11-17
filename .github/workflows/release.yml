@@ -207,6 +207,16 @@ jobs:
             codesign -dv --verbose=4 kode/target/release/bundle/macos/kode.app 2>&1 | grep 'Authority=Developer ID Application:'
           fi
 
+      - name: Verify bundled extensions
+        # run.sh app builds integrations/dsh into the app; Kode installs it on
+        # first start. A release without it would silently lose the dsh view.
+        run: |
+          set -euo pipefail
+          ext=kode/target/release/bundle/macos/kode.app/Contents/Resources/resources/extensions/kode-new-ui
+          for file in kode-extension.json bin/start.mjs package.json vendor/kode-dsh.tgz; do
+            test -s "$ext/$file" || { echo "error: bundled extension is missing $file" >&2; exit 1; }
+          done
+
       - name: Install updater signature verifier
         run: brew install minisign
 
@@ -310,6 +320,8 @@ jobs:
             $json | ConvertTo-Json -Depth 20 | Set-Content -Path $file
           }
       - name: Build Windows bundle
+        # No bundled extensions on Windows yet: the dsh view's launcher
+        # (integrations/dsh/kode-extension) is macOS/Linux only.
         working-directory: kode/apps/gui
         run: pnpm tauri build --bundles nsis
       - name: Collect Windows assets

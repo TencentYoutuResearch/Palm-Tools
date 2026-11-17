@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capabilities",
+  "identifier": "extension-views",
+  "description": "Extension views (child webviews labelled ext-*) load loopback pages served by extension backends and cover Kode's titlebar. The only IPC they get is moving and maximizing the window from their declared drag regions; everything else between a view and Kode goes through the host-authored embed bridge.",
+  "webviews": ["ext-*"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}

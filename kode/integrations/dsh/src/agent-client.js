@@ -712,6 +712,21 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
             h('button', { className: 'kode-goal-icon', type: 'button', title: '在侧边栏编辑 Goal', 'aria-label': '在侧边栏编辑 Goal', disabled: busy, onClick: () => { try { openSidebar() } catch (error) { setError(error.message) } } }, h(IconPanelLeftOutlineRegular, { size: 14, className: 'kode-goal-expand-icon' })))),
         h(Failure, { text: error })))
   }
+  // Embedded in Kode desktop (kode.extension/v1 view): Kode hides its own
+  // chrome, so the TUI ⇄ dsh switch and the way back live in dsh's UI.
+  const kodeEmbedded = () => !!globalThis.document?.documentElement?.hasAttribute?.('data-kode-embed') && typeof globalThis.window?.kodeHost?.request === 'function'
+  const glyph = d => h('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
+  const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
+  const CHAT_GLYPH = 'M3 4.2c0-.66.54-1.2 1.2-1.2h7.6c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H7l-2.6 2v-2h-.2c-.66 0-1.2-.54-1.2-1.2z'
+  function KodeViewSwitch({ sessionId }) {
+    return h('div', { className: 'kode-view-switch', role: 'group', 'aria-label': '会话视图' },
+      h('button', { type: 'button', title: '在 Kode 终端中继续这段对话', onClick: () => window.kodeHost.request('switch-view', { to: 'tui', session: sessionId }) }, glyph(TERMINAL_GLYPH), h('span', null, 'TUI')),
+      h('button', { type: 'button', className: 'active', 'aria-pressed': true, tabIndex: -1 }, glyph(CHAT_GLYPH), h('span', null, 'dsh')))
+  }
+  function KodeLeavePage() {
+    useEffect(() => { window.kodeHost.request('leave') }, [])
+    return h('div', { className: 'kode-leave-page' }, '正在返回 Kode…')
+  }
   function HandoffMenu({ sessionId, sessions }) {
     const { data } = useDirectory(sessionId, sessions), [open, setOpen] = useState(false)
     const [target, setTarget] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
@@ -1407,6 +1422,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const workspacePhase = useSyncExternalStore(React.useCallback(fn => workspaces.list.subscribe(fn), [workspaces]), () => workspaces.list.getSnapshot().phase)
     const sessionPhase = useSyncExternalStore(React.useCallback(fn => sessions.list.subscribe(fn), [sessions]), () => sessions.list.getSnapshot().phase)
     const [error, setError] = useState('')
+    // Embedding hosts (Kode desktop) switch sessions by changing the hash.
+    const [arrivals, setArrivals] = useState(0)
+    useEffect(() => {
+      const arrive = () => setArrivals(count => count + 1)
+      window.addEventListener('hashchange', arrive)
+      return () => window.removeEventListener('hashchange', arrive)
+    }, [])
     useEffect(() => {
       if (workspacePhase !== 'ready' || sessionPhase !== 'ready') return
       const match = /^#kode-open-(session|workspace)=(.+)$/.exec(window.location.hash)
@@ -1416,8 +1438,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search)
       // Cancel rc.2's asynchronous saved-draft restoration before opening a link.
       layout.beginNavigation()
+      setError('')
       Promise.resolve(match[1] === 'session' ? uiWorkspace.openSession(target) : uiWorkspace.openWorkspace(target)).catch(error => setError(error.message))
-    }, [uiWorkspace, workspacePhase, sessionPhase])
+    }, [uiWorkspace, workspacePhase, sessionPhase, arrivals])
     return error ? h('div', { className: 'kode-navigation-error', role: 'alert' }, error) : null
   }
   function ProjectFlow({ open, busy: ownerBusy, slots, workspaces, onPicked, onCancel, initialName = '' }) {
@@ -2077,6 +2100,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: 'kode-goal', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, GoalSidebar))
     ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'kode-goal' }, () => h(React.Fragment, null, h(IconGoalOutlineRegular, { size: 16 }), 'Goal')))
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-handoff', order: 100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, HandoffMenu))
+    if (kodeEmbedded()) {
+      ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-view-switch', order: 200, inject: sessionId => ({ sessionId }) }, KodeViewSwitch))
+      // Kode's window buttons sit over the page; keep a titlebar strip for
+      // them that also drags the window. dsh's own desktop layout
+      // (data-platform) needs its Electron bridge, so it is not used here.
+      const titlebar = document.createElement('div')
+      titlebar.setAttribute('data-kode-titlebar', '')
+      document.body.append(titlebar)
+      ctx.effect(() => () => titlebar.remove(), 'kode.embed-titlebar')
+    }
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, AgentIdentity))
     ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({ name: 'sidebar.session.row.hover', id: 'kode-saved-time' }, SavedSessionHover))
     ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'kode-agent-avatar' }, SidebarAgentAvatar))
@@ -2206,6 +2239,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-settings-general .kode-notification-permission{padding:4px 0 10px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}
 .kode-settings-general .kode-notification-permission>button{flex:none;margin-left:auto}
 .kode-settings-general .kode-settings-group>.kode-config-note:last-of-type{margin-top:8px}
+.kode-view-switch{display:inline-flex;align-items:center;gap:2px;height:30px;padding:2px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base)}
+.kode-view-switch>button{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border:0;border-radius:calc(var(--dsw-radius-md) - 2px);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;line-height:1;cursor:pointer}
+.kode-view-switch>button:hover:not(.active){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.kode-view-switch>button.active{background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-label-primary);cursor:default;box-shadow:0 0 0 .5px var(--dsw-alias-border-l2)}
+.kode-view-switch>button:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:1px}
+.kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
+html[data-kode-embed][data-kode-platform=macos] #root{box-sizing:border-box;height:100%;padding-top:28px}
+[data-kode-titlebar]{display:none}
+html[data-kode-embed] .kode-token-notch{display:none}
+html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:block;position:fixed;inset:0 0 auto;height:28px;z-index:2147483000;background:var(--dsw-specific-sidebar-fill);border-bottom:.5px solid var(--dsw-alias-border-l3);user-select:none;-webkit-user-select:none}
 .kode-handoff-trigger{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px!important;padding:0 10px!important;white-space:nowrap}.kode-handoff-dialog{width:min(480px,calc(100vw - 32px))}.kode-handoff-body .kode-field{margin-bottom:12px}.kode-handoff-body>.kode-config-note{margin:0}.kode-model-control{min-width:0;max-width:min(360px,45cqw)}.kode-model-control>.kode-trigger{max-width:100%}[data-slot="conversation.input.right"] [data-composer-stat="activity"]{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;min-width:0;width:24px;max-width:24px;margin-right:-8px;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] button{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;width:24px;min-width:24px;height:24px;min-height:24px;margin:0;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] [class*="label"]{display:none}
 .kode-settings-main{width:100%;min-width:0}.kode-settings-page .kode-settings-section{width:100%}.kode-settings-page .kode-settings-section .kode-agent-settings{width:100%;max-width:none;min-width:0;box-sizing:border-box}.kode-settings-page .kode-agent-rows,.kode-settings-page .kode-agent-row,.kode-settings-page .kode-agent-editor{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-source-summary,.kode-settings-page .kode-source-copy{min-width:0}.kode-settings-page .kode-personalization .kode-avatar-content,.kode-settings-page .kode-personalization .kode-avatar-grid,.kode-settings-page .kode-personalization .kode-avatar-preview{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-personalization .kode-avatar-preview>img{max-width:100%}
 .kode-source-editor{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;align-items:start}.kode-source-editor>.kode-field{min-width:0;margin:0}.kode-source-editor>.kode-field input{box-sizing:border-box;width:100%;min-width:0}.kode-source-field-location,.kode-source-field-subdir,.kode-source-editor>.kode-hub-targets,.kode-source-editor-actions{grid-column:1/-1}.kode-source-editor>.kode-hub-targets{display:flex;flex-wrap:wrap;gap:8px 16px;min-width:0;margin:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md)}.kode-source-editor>.kode-hub-targets>legend{padding:0 4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-source-editor>.kode-hub-targets>label{display:inline-flex;align-items:center;gap:6px;min-height:28px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}.kode-source-editor>.kode-hub-targets input{flex:none;margin:0;accent-color:var(--dsw-alias-state-business-primary)}.kode-source-editor-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}.kode-source-editor-actions>button{width:auto;min-width:88px}
@@ -2222,6 +2265,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const KodeMainPage = () => h('div', { className: 'kode-settings-main' }, h(KodeSettings, { sessions: scope.sessions, slots: scope.slots, close: () => {} }))
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-settings' }, KodeMainPage))
       scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode' }, IconAgentPresetOutlineRegular))
+      if (kodeEmbedded()) {
+        scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, KodeLeavePage))
+        scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-leave', order: 7, label: 'Kode 终端' }, () => glyph(TERMINAL_GLYPH)))
+      }
       openKodeSettings = section => {
         requestedSettingsSection = section
         scope.layout.selectPanel('kode-settings')

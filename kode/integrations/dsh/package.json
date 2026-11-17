@@ -55,7 +55,8 @@
     "test:ssh": "python3 scripts/test-ssh.py",
     "build:bundle": "node scripts/build-bundle.js",
     "build:directory-browse": "node scripts/build-directory-browse.js",
-    "build:chat": "node scripts/build-chat.js"
+    "build:chat": "node scripts/build-chat.js",
+    "build:kode-extension": "node scripts/build-kode-extension.js"
   },
   "bin": {
     "kode-sessions-mcp": "./src/mcp.js"

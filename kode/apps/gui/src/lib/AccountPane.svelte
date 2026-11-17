@@ -5,9 +5,10 @@
    * shows exactly those, in the relay's order, so new methods (WeChat,
    * Google) appear without reshaping the UI.
    *
-   * Polls only while a QR is on screen (PalmX, or a palm handoff a phone
-   * approves with Kode's own palm scan); otherwise status is read when the
-   * pane opens and after each action.
+   * Polls the QR flow only while a QR is on screen (PalmX, or a palm
+   * handoff a phone approves with Kode's own palm scan). Connection status
+   * follows the pushed `cloud-status`, so a sign-in that connects a moment
+   * later shows here without reopening the pane.
    */
   import { onDestroy, onMount } from 'svelte'
   import {
@@ -19,6 +20,7 @@
   } from './ipc'
   import Icon, { type IconName } from './Icon.svelte'
   import ConfirmDialog from './ConfirmDialog.svelte'
+  import { watchCloudStatus } from './cloud_status_watch'
   import { currentLocale, t } from './i18n'
 
   type Props = { onSignedIn?: () => void }
@@ -69,6 +71,7 @@
   onMount(() => {
     void initialize()
   })
+  $effect(() => watchCloudStatus((next) => { status = next }))
   onDestroy(() => {
     stopPolling()
     if (palmx) void cancelCall().catch(() => {})

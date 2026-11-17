@@ -34,8 +34,8 @@ const BACKEND_KEYS: &[&str] = &[
 ];
 
 /// 每个内置 key 是否进入 semantic 层、映射到哪个 transcript 解析器。
-/// `None` = 没有 jsonl tail(9 个 preset);`Opencode` = 有变体但解析为空,
-/// 结构化事件走 ACP;`Kimi` = 只接 metadata tail,语义解析为空。
+/// `None` = 没有 jsonl tail(8 个 preset);`Opencode` = 有变体但解析为空,
+/// 结构化事件走 ACP;`Kimi` = 解析 wire.jsonl。
 const EXPECTED_KIND: &[(&str, Option<Backend>)] = &[
     ("amp", None),
     ("antigravity", None),
@@ -80,7 +80,7 @@ fn semantic_kind_mapping_all() {
 }
 
 /// 每个有解析器的 Backend 变体各喂一行该格式的 transcript,断事件类型;
-/// opencode / kimi 对任意行返回空(opencode 走 ACP,kimi 尚未解析语义)。
+/// opencode 对任意行返回空(结构化事件走 ACP)。
 #[test]
 fn transcript_line_matrix_all() {
     let fixtures: &[(Backend, &str, &str)] = &[
@@ -117,8 +117,8 @@ fn transcript_line_matrix_all() {
         (Backend::Opencode, r#"{"anything":1}"#, ""),
         (
             Backend::Kimi,
-            r#"{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"hi"}]}"#,
-            "",
+            r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","uuid":"u1","stepUuid":"s1","part":{"type":"text","text":"hello"}}}"#,
+            "message",
         ),
     ];
     for (backend, line, expected_type) in fixtures {
