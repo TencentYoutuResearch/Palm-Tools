@@ -1,7 +1,10 @@
 //! Administration uses the existing bridge bearer. Agent credentials are session-scoped.
 use super::{model::*, Hub};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -71,6 +74,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/integrations", get(integration_status).post(integration_configure))
         .route("/api/v1/messaging/memory/tool", post(memory_tool))
         .route("/api/v1/messaging/cloud/status", get(cloud_status))
+        .route("/api/v1/messaging/cloud/status/ws", get(cloud_status_ws))
         .route("/api/v1/messaging/cloud/pair", post(cloud_pair))
         .route("/api/v1/messaging/cloud/activate", post(cloud_activate))
         .route("/api/v1/messaging/cloud/remove_worker", post(cloud_remove_worker))
@@ -576,6 +580,27 @@ async fn runtime_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<J
 async fn cloud_status(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<crate::cloud_sync::CloudSyncStatus>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     Ok(Json(crate::cloud_sync::CloudSyncManager::new(ctx).status()))
+}
+/// Pushes the status on connect and again on each change it makes.
+async fn cloud_status_ws(State(hub): State<Arc<Hub>>, h: HeaderMap, ws: WebSocketUpgrade) -> Result<Response> {
+    admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
+    let manager=crate::cloud_sync::CloudSyncManager::new(ctx);
+    Ok(ws.on_upgrade(move |socket| stream_cloud_status(manager, socket)))
+}
+async fn stream_cloud_status(manager: crate::cloud_sync::CloudSyncManager, mut socket: WebSocket) {
+    let mut changes=manager.subscribe_status();
+    let mut sent=String::new();
+    loop {
+        let status=serde_json::to_string(&manager.status()).unwrap_or_default();
+        if status!=sent {
+            if socket.send(WsMessage::Text(status.clone())).await.is_err() { return }
+            sent=status;
+        }
+        tokio::select! {
+            changed=changes.changed() => if changed.is_err() { return },
+            message=socket.recv() => match message { Some(Ok(WsMessage::Close(_)))|Some(Err(_))|None => return, _ => {} },
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

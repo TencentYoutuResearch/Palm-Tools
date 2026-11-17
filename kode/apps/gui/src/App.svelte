@@ -92,6 +92,7 @@
   import { outsidePressClose } from './lib/outside_close'
   import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry, type WorkerSessionDto } from './lib/ipc'
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
+  import { watchCloudStatus } from './lib/cloud_status_watch'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
   import {
@@ -162,8 +163,10 @@
   let accountTriggerEl: HTMLButtonElement | undefined = $state()
   let accountStatus = $state<CloudSyncStatus | null>(null)
   let sidebarAccount = $derived(accountStatus?.backends.find((b) => b.kind === 'account_relay') ?? null)
-  /** Sidebar identity. Read on start, when the menu opens and when an
-   *  account surface closes; never polled, so an idle window stays idle. */
+  /** Sidebar identity. Follows the pushed `cloud-status`, so a socket that
+   *  connects or drops later shows without reopening anything; also read on
+   *  start, when the menu opens and when an account surface closes. */
+  $effect(() => watchCloudStatus((status) => { accountStatus = status }))
   async function refreshAccountStatus() {
     try {
       accountStatus = await ipc.cloudSyncStatus()

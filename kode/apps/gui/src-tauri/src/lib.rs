@@ -134,6 +134,7 @@ pub fn run() {
                 &app_state.protocol_ctx,
             ));
             cloud_sync.start_saved();
+            crate::cloud_sync::start_status_feed(handle.clone());
             if std::env::var("KODE_DISABLE_AUTO_SETUP").as_deref()!=Ok("1"){shared_services::start_saved(app_state.ctx.backend_configs.read().clone());}
             app.manage(app_state);
             app.manage(cloud_sync);
