@@ -84,3 +84,30 @@ for (const type of ['claude', 'cursor','codebuddy']) test(`installed ${type} sup
     assert.ok(session.proxy)
   } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('native ACP child streams and team members remain separate from the parent answer', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-acp-children-')), children = []
+  const session = new AcpSession({ type: 'custom', executable: process.execPath, args: [fixture] }, root, { subagent: update => children.push(update) })
+  try {
+    await session.open({}, [])
+    const result = await collect(session.turn([{ type: 'text', text: 'NATIVE_SUBAGENTS' }]))
+    const parentText = result.filter(event => event.method === 'item/agentMessage/delta').map(event => event.params.delta).join('')
+    assert.doesNotMatch(parentText, /Child-only output|Buddy-only output/)
+    assert.ok(children.some(child => child.id === 'claude-child' && child.delta === 'Child-only output'))
+    assert.ok(children.some(child => child.id === 'buddy-child' && child.delta === 'Buddy-only output'))
+    assert.ok(children.some(child => child.id === 'cursor-child' && child.status === 'completed'))
+    assert.ok(children.some(child => child.id === 'claude-child' && child.status === 'completed'))
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('known ACP child permissions inherit the active parent approval flow', async () => {
+  let approvals = 0
+  const session = new AcpSession({}, tmpdir(), { approve: async () => { approvals++; return true } })
+  session.threadId = 'parent'
+  session.active = { turnId: 'turn', signal: new AbortController().signal }
+  session.observeSubagent({ id: 'known-child', status: 'running' })
+  const request = { sessionId: 'known-child', toolCall: { toolCallId: 'child-call', kind: 'execute' }, options: [{ optionId: 'allow', kind: 'allow_once' }] }
+  assert.equal((await session.permission(request)).outcome.optionId, 'allow')
+  assert.equal((await session.permission({ ...request, sessionId: 'foreign-child' })).outcome.outcome, 'cancelled')
+  assert.equal(approvals, 1)
+})

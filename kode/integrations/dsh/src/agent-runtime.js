@@ -1,4 +1,5 @@
 /** Native CLI protocols and model discovery; the Kode driver owns inbox scheduling and the shell renders canonical events. */
+import { nativeSubagentRecord } from './native-subagents.js'
 import { randomUUID } from 'node:crypto'
 import { AgentProfiles, profileRevision, profileRoute } from './agent-profiles.js'
 import { createNativeSession } from './native-session.js'
@@ -158,7 +159,30 @@ export class AgentRuntimeAdapter {
     const callIdentity = (turnId, itemId) => `kode:${epoch}:${turnId}:${itemId}`
     const autoCompact = binding.profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact') : undefined
     const resolved = await this.resolveProfile(binding.profile, agent)
+    const knownChildren = new Set((agent.session.snapshotEvents?.() ?? []).filter(event => event.type === 'subagent/catalog').map(event => event.data.childId))
+    let childFlush
+    const sessionStore = agent.ctx.sessions
     const runtime = await createNativeSession({ ...resolved, ...(autoCompact ? { autoCompactEnabled: autoCompact.data.enabled } : {}) }, agent.session.header.cwd ?? process.cwd(), {
+      subagent: update => {
+        const data = nativeSubagentRecord(update)
+        if (!data) return
+        const childId = `kode-native:${agent.id}:${update.id}`
+        const known = knownChildren.has(childId)
+        if (!(known && update.replay)) appendPluginRecord(agent.session, 'plugin:kode/subagent-update', data)
+        if (!known) {
+          knownChildren.add(childId)
+          agent.session.append('subagent/catalog', { version: 2, childId, childCreatedAt: Date.now(), mode: 'external', label: data.name || data.task?.slice(0, 120) || data.id })
+          if (this.busy.has(agent.id) && !update.replay) {
+            const callId = `kode:${epoch}:subagent:${update.id}`
+            this.logCall(agent, callId, 'subagent_native', { id: data.id, title: data.name || data.task?.slice(0, 120) || data.id, task: data.task, model: data.model })
+            this.logResult(agent, callId, [{ type: 'text', text: '原生子 Agent 已登记。' }])
+          }
+        }
+        if (!childFlush) childFlush = setTimeout(() => {
+          childFlush = undefined
+          void Promise.resolve().then(() => sessionStore.flush(agent.session)).catch(error => this.ctx.logger?.warn('Native child persistence failed: %s', error.message))
+        }, 100).unref()
+      },
       policy: () => agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session }) ?? { mode: 'read-only' },
       approvalPolicy: () => agent.ctx.get('approval')?.effectivePolicy?.(agent.session) ?? 'ask',
       mode: () => {
@@ -205,6 +229,11 @@ export class AgentRuntimeAdapter {
         return { answers: Object.fromEntries(response.answers.map(a => [a.id, { answers: [...a.selected, ...(a.custom ? [a.custom] : [])], ...(request.structured ? { selected: a.selected, ...(a.custom ? { custom: a.custom } : {}) } : {}) }])) }
       },
     })
+    const closeNative = runtime.close.bind(runtime)
+    runtime.close = async () => {
+      try { await closeNative() }
+      finally { clearTimeout(childFlush); childFlush = undefined }
+    }
     runtime.nativeCalls = nativeCalls
     runtime.autoCompactRevision = autoCompact?.seq ?? -1
     runtime.callIdentity = callIdentity

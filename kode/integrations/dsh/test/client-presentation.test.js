@@ -866,3 +866,17 @@ test('goal pencil edits inline and saves the existing session goal', async () =>
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{ args: { action: 'goal', sessionId: 'goal-edit-fixture', command: 'edit Updated objective' }, host: 'local' }])
   assert.ok(!walk(render()).some(node => node.type === 'form'))
 })
+
+test('native child cards use persisted execution status and expandable child output', () => {
+  const render = client().entry('tool.call.toolview', 'subagent_native')
+  const args = { id: 'native-child', title: 'Verifier', task: 'Check source' }
+  const view = expanded => render({ block: { args: { text: key => args[key] } }, useDisclosure: () => ({ expanded, setExpanded() {} }), useProjection: (key, select) => {
+    assert.equal(key, 'kodeNativeSubagents')
+    return select({ 'native-child': { name: 'Verifier', task: 'Check source', status: 'running', output: 'Child findings' } })
+  } })
+  assert.match(visibleText(view(false)), /Verifier.*运行中/)
+  assert.doesNotMatch(visibleText(view(false)), /Child findings/)
+  assert.match(visibleText(view(true)), /Check source/)
+  const output = findNode(view(true), node => node.props?.text === 'Child findings')
+  assert.equal(output.props.text, 'Child findings')
+})

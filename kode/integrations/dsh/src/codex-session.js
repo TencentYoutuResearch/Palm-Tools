@@ -1,4 +1,5 @@
 /** One persistent Codex app-server connection per dsh Session and profile snapshot. */
+import { codexSubagents } from './native-subagents.js'
 import { deduplicateSkillCopies } from './codex-skills.js'
 import { RpcProcess } from './rpc-process.js'
 import { createToolProxy } from './tool-proxy.js'
@@ -13,7 +14,7 @@ export class CodexSession {
   constructor(profile, cwd, handlers = {}) {
     this.profile = profile; this.cwd = cwd; this.handlers = handlers
     this.lifetime = new AbortController(); this.requests = new Set()
-    this.pendingEvents = []; this.readerWaiters = []
+    this.pendingEvents = []; this.readerWaiters = []; this.children = new Map()
     this.commands = [
       { name: 'goal', description: '管理 Codex 原生持久目标', input: { hint: '目标描述 | status | edit 新目标 | pause | resume | clear' } },
       { name: 'compact', description: '使用 Codex 原生上下文压缩' },
@@ -25,7 +26,14 @@ export class CodexSession {
   connectRpc() {
     this.rpc = new RpcProcess(this.profile, this.cwd)
     this.rpc.on('notification', message => {
-      if (message.params?.threadId && this.threadId && message.params.threadId !== this.threadId) return
+      if (message.params?.threadId && this.threadId && message.params.threadId !== this.threadId) {
+        const id = message.params.threadId
+        if (!this.children.has(id)) return
+        if (message.method === 'item/agentMessage/delta') this.observeSubagent({ id, delta: message.params.delta })
+        if (message.method === 'turn/completed') this.observeSubagent({ id, status: message.params.turn?.status === 'completed' ? 'completed' : message.params.turn?.status === 'interrupted' ? 'cancelled' : 'failed' })
+        return
+      }
+      for (const child of codexSubagents(message.params?.item)) this.observeSubagent(child)
       if (message.method === 'thread/goal/updated' || message.method === 'thread/goal/cleared') this.handlers.goal?.(message.method.endsWith('/cleared') ? null : message.params.goal)
       if (message.method === 'thread/goal/cleared' || message.method === 'thread/goal/updated' && message.params.goal.status !== 'active') this.goalStopped = true
       if (message.method === 'thread/goal/updated' && message.params.goal.status === 'active') this.goalStopped = false
@@ -36,11 +44,21 @@ export class CodexSession {
         if (message.method === 'turn/started') this.handlers.continuation?.()
       }
     })
-    this.rpc.on('closed', error => { this.active?.end(error); for (const resolve of this.readerWaiters.splice(0)) resolve() })
+    this.rpc.on('closed', error => {
+      for (const child of this.children.values()) {
+        if (child.status === 'running') this.observeSubagent({ id: child.id, status: 'disconnected' })
+      }
+      this.active?.end(error)
+      for (const resolve of this.readerWaiters.splice(0)) resolve()
+    })
     this.rpc.on('request', message => {
       const task = this.answer(message).catch(() => {})
       this.requests.add(task); void task.finally(() => this.requests.delete(task))
     })
+  }
+  observeSubagent(update) {
+    this.children.set(update.id, { ...this.children.get(update.id), ...update })
+    this.handlers.subagent?.(update)
   }
   initialize(signal) {
     if (!this.ready) {

@@ -75,6 +75,13 @@ async function receive(message) {
       notify('item/completed', { threadId, turnId, item: { type: 'agentMessage', id: 'answer', text: `${process.env.KODE_FIXTURE_AGENT_LABEL ?? 'fixture'}: ${text}` } })
       notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } })
     }
+    if (text.includes('NATIVE_SUBAGENTS')) {
+      const item = { type: 'collabAgentToolCall', id: 'spawn-child', tool: 'spawnAgent', senderThreadId: threadId, receiverThreadIds: ['codex-child'], prompt: 'Verify native children', status: 'completed', agentsStates: { 'codex-child': { status: 'running' } } }
+      notify('item/started', { threadId, turnId, item })
+      notify('item/agentMessage/delta', { threadId: 'codex-child', turnId: 'child-turn', delta: 'Child live output' })
+      notify('item/agentMessage/delta', { threadId: 'foreign-child', turnId: 'foreign-turn', delta: 'Foreign output' })
+      notify('item/completed', { threadId, turnId, item: { ...item, agentsStates: { 'codex-child': { status: 'completed', message: 'Child verification complete' } } } })
+    }
     if (text.includes('WAIT')) return
     if (text.includes('OVERLAPPING_NATIVE')) {
       const start=(id)=>notify('item/started',{threadId,turnId,item:{type:'commandExecution',id,command:id,status:'inProgress'}})

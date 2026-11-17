@@ -1959,6 +1959,23 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       (relay.content.length > 180 || relay.content.split('\n').length > 3) && h('details', null, h('summary', null, '展开完整消息'), h('p', { className: 'kode-relay-body' }, relay.content)),
     )
   }
+  function NativeSubagentTool({ block, useDisclosure, useProjection }) {
+    const { expanded: open, setExpanded: setOpen } = useDisclosure()
+    const child = useProjection('kodeNativeSubagents', state => state?.[block.args.text('id')])
+    const status = child?.status ?? 'unknown'
+    const label = ({ running: '运行中', completed: '已完成', failed: '失败', cancelled: '已停止', idle: '空闲', disconnected: '连接中断', unknown: '状态未知' })[status] ?? '状态未知'
+    const name = child?.name || block.args.text('title') || '子 Agent'
+    return h('section', { className: 'kode-message-tool', 'aria-label': `子 Agent ${name}` },
+      h('button', { type: 'button', className: 'kode-tool-heading', 'aria-expanded': open, onClick: () => setOpen(!open) },
+        h(IconAgentPresetOutlineRegular, { size: 14 }), h('span', { className: 'kode-tool-action' }, name),
+        h('span', { className: 'kode-tool-summary' }, label),
+        h(StateDot, { state: ({ running: 'ongoing', completed: 'done', failed: 'error', cancelled: 'idle', unknown: 'idle' })[status] ?? 'idle', size: 14 }),
+        h(IconChevronDownOutlineRegular, { size: 12, className: open ? 'kode-chevron-open' : '' })),
+      open && h(React.Fragment, null,
+        (child?.task || block.args.text('task')) && h('p', { className: 'kode-native-input' }, child?.task || block.args.text('task')),
+        child?.model && h('span', { className: 'kode-secondary' }, child.model),
+        child?.output && h(ConsoleOutput, { text: child.output })))
+  }
   function NativeOperationTool({toolName,phase,block,useDisclosure}) {
     const {expanded:open,setExpanded:setOpen}=useDisclosure()
     let input=block.args.value?.('input') ?? block.args.value?.('rawInput') ?? {}
@@ -2140,6 +2157,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       for (const key of ['kode_sessions_list', 'kode_sessions_create', 'kode_sessions_send', 'kode_sessions_read', 'kode_sessions_wait']) yield ctx.slots.register({ name: 'tool.call.toolview', key, inject: sessionId => ({ sessions: ctx.sessions, sessionId }) }, MessagingTool)
       // Official renderers may already own these keys. Shadow them at a
       // separate priority so either activation order and hot reload are valid.
+      yield ctx.slots.register({ name: 'tool.call.toolview', key: 'subagent_native', priority: -10 }, NativeSubagentTool)
       for (const key of ['exec_command','apply_patch','kode_native_commandExecution','kode_native_fileChange','kode_native_operation']) yield ctx.slots.register({name:'tool.call.toolview',key,priority:-10},NativeOperationTool)
     })
     ctx.effect(() => { const timer = setInterval(() => { if (nameListeners.size && !document.hidden) void refreshNames() }, 10000); return () => clearInterval(timer) }, 'kode.session-names')

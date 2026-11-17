@@ -76,7 +76,7 @@ for (const officialFirst of [true, false]) {
       let disposers
       vm.runInNewContext(source.slice(start, end), {
         ctx: { slots: { register, inject: (_seat, callback) => { disposers = [...callback()] } } },
-        MessagingTool: () => {}, NativeOperationTool: kode,
+        MessagingTool: () => {}, NativeOperationTool: kode, NativeSubagentTool: kode,
       })
       return () => { for (const dispose of disposers.reverse()) dispose() }
     }

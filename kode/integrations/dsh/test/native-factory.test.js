@@ -879,3 +879,25 @@ test('queue cancellation cannot acknowledge failed persistence and retries from 
     assert.equal(agent.inbox.nextStep.length, 0)
   } finally { await h.fiber.dispose() }
 })
+
+test('native child observations use the shipped external catalog and balanced read-only tool cards', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-native-children-'))
+  const h = await host({ closeSession: async () => {} })
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))] }])
+  const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
+  Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
+    agent.followup(message('children', 'NATIVE_SUBAGENTS')); await agent.whenIdle()
+    const events = h.stored.get(agent.id).events
+    assert.equal(events.filter(event => event.type === 'subagent/catalog').length, 1)
+    assert.equal(events.find(event => event.type === 'subagent/catalog').data.mode, 'external')
+    assert.equal(h.ctx.sessionProjections.stateOf(agent.session, 'kodeNativeSubagents')['codex-child'].status, 'completed')
+    assert.ok(events.some(event => event.type === 'tool/call' && event.data.name === 'subagent_native'))
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    if (process.env.KODE_TEST_DSH_NODE_MODULES) {
+      const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+      assertReleasedV4Relationships({ header: h.stored.get(agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES)
+    }
+  } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
