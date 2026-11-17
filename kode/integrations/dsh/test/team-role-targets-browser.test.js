@@ -8,6 +8,7 @@ import {tmpdir} from 'node:os'
 import {join,resolve} from 'node:path'
 import {headlessBrowser} from './support/headless-browser.js'
 import {collabRenderPage} from './support/collab-render-page.js'
+import {teamRoleFallbackProfile} from '../packages/collab/team-role-targets.js'
 
 const profiles=[{id:'tclaude',name:'tclaude',type:'claude',origin:'builtin'},{id:'codex',name:'Codex',type:'codex',origin:'builtin'}]
 const catalogs={
@@ -16,6 +17,15 @@ const catalogs={
 }
 const opus={profileId:'tclaude',model:'opus-5.5'},sonnet={profileId:'tclaude',model:'sonnet-5.5'},sol={profileId:'codex',model:'gpt-6.1-sol',reasoningEffort:'medium'}
 const team={id:'team',home_hub:'fixture-home',revision:4,superagent_id:'superagent-team',conversation_id:'conversation-team',spec:{name:'评审团队',workers:[{id:'tester',role:'Tester',responsibilities:['Verify changes'],allowed_target_ids:[]}],coordinator_targets:['control'],execution_targets:[{id:'control',host_id:'fixture-home',executor_profile_id:'codex',model_id:'gpt-6.1-sol'}]}}
+
+test('execution defaults prefer the authorized native Agent and exclude empty builtin DSH fallbacks',()=>{
+ const rows=[{id:'builtin-dsh',type:'dsh'},{id:'tcodex',type:'codex'},{id:'codex',type:'codex'}]
+ const config={selectedProfileId:'builtin-dsh',configuredDefaultProfileId:'tcodex'}
+ assert.equal(teamRoleFallbackProfile(team,config,rows)?.id,'codex')
+ assert.equal(teamRoleFallbackProfile({spec:{execution_targets:[{executor_profile_id:'builtin-dsh'}]}},config,rows)?.id,'tcodex')
+ assert.equal(teamRoleFallbackProfile(null,{selectedProfileId:'builtin-dsh'},rows)?.id,'tcodex')
+ assert.equal(teamRoleFallbackProfile(null,{selectedProfileId:'builtin-dsh'},[rows[0]]),undefined)
+})
 
 // Fixture models only: nothing here reaches a real model, Session or microphone.
 test('DM settings: role-target storage holds Reasonable/Lite while preserving unrelated saved roles',{skip:!process.env.KODE_TEST_BROWSER_BIN,timeout:60000},async()=>{

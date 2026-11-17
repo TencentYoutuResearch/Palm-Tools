@@ -5258,13 +5258,18 @@ var defaultCandidate = (profileId, configuration) => {
   const effort = model.id === defaults?.model && model.reasoningEfforts?.some((row2) => row2.id === defaults.reasoningEffort) ? defaults.reasoningEffort : void 0;
   return { profileId, model: model.id, ...effort ? { reasoningEffort: effort } : {} };
 };
+var teamRoleFallbackProfile = (team, config, profiles) => [
+  team?.spec?.execution_targets?.[0]?.executor_profile_id,
+  config.configuredDefaultProfileId,
+  config.selectedProfileId
+].map((id5) => profiles.find((row2) => row2.id === id5 && row2.type !== "dsh")).find(Boolean) ?? profiles.find((row2) => row2.type !== "dsh");
 function TeamRoleTargets({ controls, team, host, config, profiles, catalogs, catalog, onSaved, onConflict }) {
   const targets = config.teamRoleTargets, legacy = config.teamRolePreferences;
   const assignments = targets?.assignments ?? legacy?.assignments ?? {};
   const saved = targets ? assignments[EXECUTION_ROLE] ?? [] : null;
   const reasonable = targets ? saved[0] : assignments[EXECUTION_ROLE];
   const lite = targets ? saved[1] : assignments[LITE_ROLE];
-  const profileId = reasonable?.profileId ?? lite?.profileId ?? config.selectedProfileId ?? profiles[0]?.id;
+  const profileId = reasonable?.profileId ?? lite?.profileId ?? teamRoleFallbackProfile(team, config, profiles)?.id;
   const profile = profiles.find((row2) => row2.id === profileId);
   const catalogRow = profile ? catalogs[profile.id] : null;
   const [busy, setBusy] = import_react27.default.useState(false), [message, setMessage] = import_react27.default.useState("");

@@ -17,6 +17,12 @@ const defaultCandidate = (profileId, configuration) => {
   const effort = model.id === defaults?.model && model.reasoningEfforts?.some(row => row.id === defaults.reasoningEffort) ? defaults.reasoningEffort : undefined
   return { profileId, model: model.id, ...(effort ? { reasoningEffort: effort } : {}) }
 }
+export const teamRoleFallbackProfile = (team, config, profiles) => [
+  team?.spec?.execution_targets?.[0]?.executor_profile_id,
+  config.configuredDefaultProfileId,
+  config.selectedProfileId,
+].map(id => profiles.find(row => row.id === id && row.type !== 'dsh')).find(Boolean)
+  ?? profiles.find(row => row.type !== 'dsh')
 
 /** One execution Agent with two local model preferences. Other saved roles and authorized
  * team execution_targets are preserved verbatim; this editor never grants or rebinds them. */
@@ -26,7 +32,7 @@ export function TeamRoleTargets({ controls, team, host, config, profiles, catalo
   const saved = targets ? assignments[EXECUTION_ROLE] ?? [] : null
   const reasonable = targets ? saved[0] : assignments[EXECUTION_ROLE]
   const lite = targets ? saved[1] : assignments[LITE_ROLE]
-  const profileId = reasonable?.profileId ?? lite?.profileId ?? config.selectedProfileId ?? profiles[0]?.id
+  const profileId = reasonable?.profileId ?? lite?.profileId ?? teamRoleFallbackProfile(team, config, profiles)?.id
   const profile = profiles.find(row => row.id === profileId)
   const catalogRow = profile ? catalogs[profile.id] : null
   const [busy, setBusy] = React.useState(false), [message, setMessage] = React.useState('')
