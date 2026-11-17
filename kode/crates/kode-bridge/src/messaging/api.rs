@@ -105,7 +105,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/runtime/sessions", get(runtime_sessions))
         .route("/api/v1/messaging/runtime/history", get(runtime_history))
         .route("/api/v1/messaging/node", get(node))
-        .route("/api/v1/messaging/workbench/peers", post(add_peer))
+        .route("/api/v1/messaging/workbench/peers", get(workbench_peers).post(add_peer))
         .route("/api/v1/messaging/workbench/peers/remove", post(remove_peer))
         .route("/api/v1/messaging/workbench/catalog", get(workbench_catalog))
         .route("/api/v1/messaging/workbench/agents", get(agent_catalog).post(change_agent))
@@ -159,6 +159,10 @@ pub fn server_binary() -> (Option<String>, Option<u64>) {
 async fn model_usage(State(hub): State<Arc<Hub>>, h: HeaderMap, Query(query): Query<crate::model_usage::ModelUsageQuery>) -> Response {
     if let Err(error) = admin(&hub, &h) { return error.into_response(); }
     crate::get_model_usage(Query(query)).await.into_response()
+}
+async fn workbench_peers(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    Ok(Json(json!({"peers":hub.peers()})))
 }
 async fn add_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(peer): Json<super::Peer>) -> Result<Json<serde_json::Value>> {
     admin(&hub, &h)?;
@@ -219,7 +223,7 @@ async fn change_workspace(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input)
 }
 async fn workspace_hosts(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;
-    Ok(Json(json!({"local_node_id":hub.node_id(),"hosts":hub.peers().iter().map(|peer| json!({"node_id":peer.node_id,"ssh_host":peer.ssh.as_ref().map(|ssh| &ssh.host)})).collect::<Vec<_>>()})))
+    Ok(Json(json!({"local_node_id":hub.node_id(),"hosts":hub.peers().iter().map(|peer| json!({"node_id":peer.node_id,"ssh_host":peer.ssh.as_ref().map(|ssh| &ssh.host),"ssh_port":peer.ssh.as_ref().map(|ssh| ssh.port)})).collect::<Vec<_>>()})))
 }
 async fn workbench_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;

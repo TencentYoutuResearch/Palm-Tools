@@ -58,6 +58,19 @@ paths:
 - Rust 桥**不实现** `/login`(token 由 GUI 生成,直接 bearer)。
 - Go server 实现:配置文件 `username + password_hash` → 校验通过返回 JWT。`expires_at` 为 RFC3339 字符串或 `null`(永不过期)。
 
+### 3.2 SSH 工作区的共享后端配对
+
+GUI 与 DSH 的 SSH 部署统一调用 Kode 服务的 `--bootstrap-workbench` 入口，
+使用远端 `kode/workbench-connection.json` 发现服务并完成双向 peer 注册。
+既有 GUI endpoint 首次访问工作区时也执行该配对。
+`--upgrade` 在核验进程启动参数后升级共享服务，保留数据库路径和 node identity。
+
+`GET /api/v1/messaging/workbench/peers` 返回管理员可见的 `{"peers":[...]}`，
+包括重连所需的 peer 配置和 link token。仅管理员 bearer 可读取，普通会话凭据返回 403。
+写入仍通过 `POST /api/v1/messaging/workbench/peers`，重复的相同配置保持幂等。
+`GET /api/v1/messaging/workbench/workspaces/hosts` 的 host 行新增 `ssh_port`，
+与 `ssh_host` 一起区分 SSH 账号及端口。旧客户端可忽略该字段。
+
 ## 4. REST 端点
 
 所有端点都需要 `Authorization: Bearer`(`/auth/login` 除外)。

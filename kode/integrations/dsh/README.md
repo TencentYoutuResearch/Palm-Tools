@@ -407,6 +407,20 @@ loopback, checks authentication and pairs the two messaging nodes. A live progre
 dialog exposes each step, errors, cancellation and retry. The existing-access-URL
 path remains available for manually administered Hosts.
 
+GUI and DSH deployment invoke `kode-session-server --bootstrap-workbench` to
+reuse the host's canonical `kode/workbench-connection.json` service. The Kode
+service owns workspace, Agent and session catalog state. DSH Host supplies the
+execution adapter and its official runtime. An existing managed DSH database is
+adopted with the same node ID, administrator credential and database path. The
+service executable is retained outside frontend release directories. Deployment
+updates request `--upgrade`, which verifies the running service process against
+its configuration and preserves the same database and node identity. Frontend
+replacement and rollback leave the shared service available.
+
+GUI-only SSH endpoints complete this pairing on first workspace access. Both
+frontends register the authenticated messaging peer before querying the remote
+workspace catalog. Accounts and SSH ports remain distinct mappings.
+
 The SSH transport uses the user's keys/config and strict known-host checks.
 Unknown host keys or password-only authentication must be resolved through the
 user's normal SSH setup. Nothing is installed with sudo. The managed installation

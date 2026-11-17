@@ -11,6 +11,7 @@ async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--bootstrap-workbench" => return kode_bridge::messaging::bootstrap::run(args).await,
             "--config" => config = args.next(),
             "--token-file" => token_file = args.next(),
             "--bind" => bind = args.next().context("--bind needs an address")?,
@@ -42,9 +43,11 @@ async fn main() -> Result<()> {
         hub.node_id(),
         listener.local_addr()?
     );
+    let shutdown_hub = hub.clone();
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            shutdown_hub.shutdown();
         })
         .await?;
     hub.shutdown();

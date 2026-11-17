@@ -54,7 +54,7 @@ try {
       if (path.startsWith('assets/remote')) {
         return path === 'assets/remote'
           || path === 'assets/remote/.npmignore'
-          || path.startsWith(`assets/remote/${platform}`)
+          || Object.keys(targets).some(target => path === `assets/remote/${target}` || path.startsWith(`assets/remote/${target}/`))
       }
       const first = path.split('/')[0]
       if (includedRoots.has(first)) return true

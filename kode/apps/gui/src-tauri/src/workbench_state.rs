@@ -132,9 +132,18 @@ async fn workspace_node(client: &reqwest::Client, document_url: &str, token: &st
     if bucket=="local" { return Ok((base,hosts["local_node_id"].as_str().ok_or_else(||anyhow::anyhow!("Kode backend identity missing"))?.into())) }
     let catalog: Value=client.get(format!("{base}/catalog")).bearer_auth(token).send().await?.error_for_status()?.json().await?;
     let endpoint=catalog["endpoints"].as_array().and_then(|rows|rows.iter().find(|row|row["id"].as_str()==Some(bucket))).ok_or_else(||anyhow::anyhow!("SSH endpoint has no Kode backend mapping"))?;
-    let host=endpoint["ssh_host"].as_str().ok_or_else(||anyhow::anyhow!("SSH endpoint has no execution host"))?.rsplit('@').next().unwrap_or("");
-    let node=hosts["hosts"].as_array().and_then(|rows|rows.iter().find(|row|row["ssh_host"].as_str().and_then(|value|value.rsplit('@').next())==Some(host))).and_then(|row|row["node_id"].as_str()).ok_or_else(||anyhow::anyhow!("SSH Host must connect its Kode backend before workspace access"))?;
-    Ok((base,node.into()))
+    let host=endpoint["ssh_host"].as_str().ok_or_else(||anyhow::anyhow!("SSH endpoint has no execution host"))?;
+    let port=endpoint["ssh_port"].as_u64().filter(|port|*port>0 && *port<=65535).unwrap_or(22) as u16;
+    if let Some(node)=mapped_workspace_node(&hosts,host,port) {
+        return Ok((base,node.to_owned()))
+    }
+    let node=crate::remote_workbench::pair(client,&base,token,host,port,false).await?;
+    Ok((base,node))
+}
+fn mapped_workspace_node<'a>(hosts: &'a Value, host: &str, port: u16) -> Option<&'a str> {
+    hosts["hosts"].as_array()?.iter().find(|row|
+        row["ssh_host"].as_str()==Some(host) && row["ssh_port"].as_u64().unwrap_or(22)==u64::from(port)
+    )?["node_id"].as_str()
 }
 pub async fn workspace_paths(bucket: &str) -> anyhow::Result<Vec<String>> {
     let (client,url,token)=connection().await?;
@@ -159,6 +168,18 @@ async fn ensure_workspace_from(client:&reqwest::Client,url:&str,token:&str,bucke
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspace_mapping_keeps_accounts_and_ssh_ports_separate() {
+        let hosts=json!({"hosts":[
+            {"node_id":"alice-default","ssh_host":"alice@server.example","ssh_port":22},
+            {"node_id":"alice-other","ssh_host":"alice@server.example","ssh_port":2200},
+            {"node_id":"bob","ssh_host":"bob@server.example","ssh_port":22}
+        ]});
+        assert_eq!(mapped_workspace_node(&hosts,"alice@server.example",2200),Some("alice-other"));
+        assert_eq!(mapped_workspace_node(&hosts,"bob@server.example",22),Some("bob"));
+        assert_eq!(mapped_workspace_node(&hosts,"server.example",22),None);
+        assert_eq!(mapped_workspace_node(&hosts,"alice@server.example",2222),None);
+    }
     #[tokio::test]
     async fn gui_workspace_choices_and_registration_use_the_same_kode_catalog() {
         let root=tempfile::tempdir().unwrap();let token="gui-workspace-test-secret-at-least-32-bytes";

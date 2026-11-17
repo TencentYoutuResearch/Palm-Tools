@@ -102,6 +102,9 @@ async fn owner_can_pair_live_hosts_without_restart_or_exposing_link_secrets() {
     let response = client.post(&path).bearer_auth("admin-test").json(&remote).send().await.unwrap();
     assert!(response.status().is_success());
     assert!(!response.text().await.unwrap().contains(SECRET));
+    assert_eq!(client.get(&path).bearer_auth(&sender.owner_token).send().await.unwrap().status(), 403);
+    let paired:Value=client.get(&path).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();
+    assert_eq!(paired["peers"][0]["link_token"],SECRET);
     let stored = left.hub.store.document("managed-peers").unwrap();
     assert_eq!(stored["revision"], 1);
     assert_eq!(super::peers::load(&left.hub.store, &left.hub.config).unwrap().len(), 1);

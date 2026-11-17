@@ -48,7 +48,7 @@ build_native() {
     TARGET_TRIPLE="$(rustc --print host-tuple)"
   fi
   cargo build --release \
-    -p kode-bridge --bin kode-bridge \
+    -p kode-bridge --bin kode-bridge --bin kode-session-server \
     -p kode-memory --bin kode-memory \
     -p kode-memory --bin kode-memory-mcp \
     --manifest-path "$ROOT/Cargo.toml"
@@ -100,7 +100,7 @@ build_docker() {
       set -euo pipefail
       export PATH="/usr/local/cargo/bin:$PATH"
       cargo build --release \
-        -p kode-bridge --bin kode-bridge \
+        -p kode-bridge --bin kode-bridge --bin kode-session-server \
         -p kode-memory --bin kode-memory \
         -p kode-memory --bin kode-memory-mcp \
         --manifest-path /work/Cargo.toml
@@ -136,7 +136,7 @@ build_docker_musl() {
       set -e
       export PATH="/usr/local/cargo/bin:$PATH"
       cargo build --release --target '"$TARGET_TRIPLE"' \
-        -p kode-bridge --bin kode-bridge \
+        -p kode-bridge --bin kode-bridge --bin kode-session-server \
         -p kode-memory --bin kode-memory \
         -p kode-memory --bin kode-memory-mcp \
         --manifest-path /work/Cargo.toml
@@ -154,6 +154,7 @@ make_bundle() {
   mkdir -p "$STAGE/bin"
 
   cp "$target_dir/kode-bridge" "$STAGE/bin/kode-bridge"
+  cp "$target_dir/kode-session-server" "$STAGE/bin/kode-session-server"
   cp "$target_dir/kode-memory" "$STAGE/bin/kode-memory"
   cp "$target_dir/kode-memory-mcp" "$STAGE/bin/kode-memory-mcp"
 

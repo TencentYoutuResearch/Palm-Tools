@@ -32,7 +32,7 @@ async function web(state, path, body) {
   if (!response.ok) throw new Error('远端 dsh 尚未就绪。')
   return response.json()
 }
-async function healthy(state) { if (!state?.token || !alive(state.webPid) || !alive(state.backendPid)) return false; try { const node = await backend(state, 'node'); await web(state, '/api/kode/agents'); return node.node_id === state.nodeId && node.managed_peers } catch { return false } }
+async function healthy(state) { if (!state?.token || !alive(state.webPid)) return false; try { const node = await backend(state, 'node'); await web(state, '/api/kode/agents'); return node.node_id === state.nodeId && node.managed_peers } catch { return false } }
 async function waitFor(check, message, recovering = false) {
   for (let i = 0; i < 120; i++) { if (!recovering) stop.signal.throwIfAborted(); try { return await check() } catch {} await sleep(500) }
   throw new Error(message)
@@ -65,7 +65,35 @@ async function startService(argv, logPath, env) {
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) }); child.unref(); return child.pid
   } finally { await log.close() }
 }
+async function sharedBackend(state, upgrade = false) {
+  const binary = join(state.release, 'bin/kode-session-server')
+  const output = await new Promise((resolve, reject) => {
+    const child = spawn(binary, ['--bootstrap-workbench', '--local-node', request.localNode, '--link-token', request.linkToken, ...(upgrade ? ['--upgrade'] : [])], { stdio: ['ignore', 'pipe', 'pipe'], signal: stop.signal })
+    let stdout = '', stderr = ''
+    children.add(child)
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', code => {
+      children.delete(child)
+      code === 0 ? resolve(stdout) : reject(new Error(`共享 Kode 后端连接失败。${stderr.slice(0, 1000)}`))
+    })
+  })
+  const ready = JSON.parse(output.trim())
+  const connection = await readJson(ready.connection_file)
+  if (!connection) throw new Error('共享 Kode 后端连接配置缺失。')
+  state.nodeId = ready.node_id
+  state.backendPort = ready.remote_port
+  state.adminToken = (await readFile(connection.token_file, 'utf8')).trim()
+  state.backendConnection = ready.connection_file
+  state.links ??= {}
+  state.links[request.localNode] = ready.link_token
+  delete state.backendPid
+  return connection
+}
 async function start(state, recovering = false) {
+  const connection = await sharedBackend(state, true)
+  if (state.webPort === state.backendPort) state.webPort = await port()
   const dshHome = join(data, 'dsh'), profile = join(dshHome, 'profiles/web')
   const runtime = join(state.release, 'node_modules'), bin = join(state.release, 'bin')
   await mkdir(profile, { recursive: true, mode: 0o700 })
@@ -73,15 +101,10 @@ async function start(state, recovering = false) {
   const modules = join(profile, 'node_modules')
   // This link belongs exclusively to the managed profile, never to a user's existing dsh home.
   await rm(modules, { force: true }); await symlink(runtime, modules, 'dir')
-  await save(join(data, 'backend.json'), { node_id: state.nodeId, database: join(data, 'messages.sqlite'), peers: [] })
-  await writeFile(join(data, 'admin.token'), state.adminToken + '\n', { mode: 0o600 })
-  const patch = [{ id: 'kode', config: { url: `http://127.0.0.1:${state.backendPort}`, tokenFile: join(data, 'admin.token'), serverConfig: join(data, 'backend.json'), serverCommand: join(bin, 'kode-session-server'), sshTunnelCommand: join(bin, 'kode-ssh-tunnel'), sharedBackendState: true, publishWorkbenchConnection: false, stateFile: join(data, 'owners.json'), agentProfilesFile: join(data, 'agents.json'), projectHostsFile: join(data, 'ssh-hosts.json') } }, { id: 'directory-picker', disabled: true }, { insert: [{ id: 'kode-directory-browse-host', name: '@deepseek-ai/dsh-host-directory-picker-browse' }] }]
+  const patch = [{ id: 'kode', config: { url: `http://127.0.0.1:${state.backendPort}`, tokenFile: connection.token_file, serverConfig: connection.server_config, serverCommand: connection.server_command, serverArgs: connection.server_args ?? [], sshTunnelCommand: join(bin, 'kode-ssh-tunnel'), sharedBackendState: true, publishWorkbenchConnection: false, stateFile: join(data, 'owners.json'), agentProfilesFile: join(data, 'agents.json'), projectHostsFile: join(data, 'ssh-hosts.json') } }, { id: 'directory-picker', disabled: true }, { insert: [{ id: 'kode-directory-browse-host', name: '@deepseek-ai/dsh-host-directory-picker-browse' }] }]
   await save(join(data, 'kode.patch.yml'), patch)
   const env = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: '1', PATH: `${dirname(process.execPath)}:${bin}:${process.env.PATH}` }
   for (const key of Object.keys(env)) if (key.startsWith('KODE_')) delete env[key]
-  state.backendPid = await startService([join(bin, 'kode-session-server'), '--config', join(data, 'backend.json'), '--token-file', join(data, 'admin.token'), '--bind', `127.0.0.1:${state.backendPort}`], join(data, 'backend.log'), env)
-  await save(stateFile, state)
-  await waitFor(() => backend(state, 'node'), '远端 Kode 服务启动超时。', recovering)
   const webLog = join(data, 'web.log'); const before = (await readFile(webLog, 'utf8').catch(() => '')).length
   state.webPid = await startService([process.execPath, join(runtime, '@deepseek-ai/dsh/lib/bin.js'), 'web', '--patch', join(data, 'kode.patch.yml'), '--host', '127.0.0.1', '--port', String(state.webPort), '--no-open'], webLog, env)
   await save(stateFile, state)
@@ -94,11 +117,11 @@ async function start(state, recovering = false) {
   }, '远端 dsh 启动超时；请查看 ~/.local/share/kode/dsh-host/state/web.log。', recovering)
 }
 async function pair(state) {
+  await sharedBackend(state)
   state.links ??= {}
   const token = state.links[request.localNode] ?? request.linkToken
   state.links[request.localNode] = token
   await save(stateFile, state)
-  await backend(state, 'workbench/peers', { node_id: request.localNode, link_token: token, url: null, ssh: null })
   process.stdout.write(JSON.stringify({ kind: 'ready', nodeId: state.nodeId, webPort: state.webPort, backendPort: state.backendPort, token: state.token, linkToken: token }) + '\n')
 }
 
@@ -117,7 +140,7 @@ try {
   if (previous?.revision === request.revision && await healthy(previous)) {
     progress('dependencies', 'done', '复用已安装的服务'); progress('start', 'done', '远端服务正在运行'); progress('health', 'done', '健康检查通过'); await pair(previous)
   } else {
-    if (previous && (alive(previous.webPid) || alive(previous.backendPid))) {
+    if (previous && alive(previous.webPid)) {
       if (!await healthy(previous)) throw new Error('已有远端服务状态异常，未覆盖；请检查其运行状态后重试。')
       const listing = await web(previous, '/api/session/list', { type: 'client-request', rpcId: randomUUID(), method: 'session/list', payload: { args: { _request: {} } } })
       if (!listing.result?.ok || listing.result.value.items.some(row => row.running || Object.values(row.projections?.values?.inbox ?? {}).some(queue => Array.isArray(queue) && queue.length))) throw new Error('远端有运行中或排队的会话，请在其结束后重试。')
@@ -133,13 +156,12 @@ try {
       // old service so a conversation started during dependency setup survives.
       const listing = await web(previous, '/api/session/list', { type: 'client-request', rpcId: randomUUID(), method: 'session/list', payload: { args: { _request: {} } } })
       if (!listing.result?.ok || listing.result.value.items.some(row => row.running || Object.values(row.projections?.values?.inbox ?? {}).some(queue => Array.isArray(queue) && queue.length))) throw new Error('远端会话已开始运行，安装包已准备，服务未重启；请在其结束后重试。')
-      await stopOwned(previous.webPid); await stopOwned(previous.backendPid); replacing = true
+      await stopOwned(previous.webPid); replacing = true
     }
     next = { ...previous, nodeId: previous?.nodeId ?? 'ssh-' + randomBytes(8).toString('hex'), adminToken: previous?.adminToken ?? randomBytes(32).toString('hex'), webPort: previous?.webPort ?? await port(), backendPort: previous?.backendPort ?? await port(), release, revision: request.revision, links: previous?.links ?? {} }
     if (next.webPort === next.backendPort) next.webPort = await port()
     delete next.webPid; delete next.backendPid
-    await save(stateFile, next)
-    progress('start', 'running', '启动 Kode 会话服务和 dsh'); await start(next); progress('start', 'done', '服务已启动')
+    progress('start', 'running', '连接共享 Kode 后端并启动 dsh'); await start(next); progress('start', 'done', '服务已启动')
     progress('health', 'running', '检查远端认证、插件和会话接口')
     if (!await healthy(next)) throw new Error('远端服务健康检查失败。')
     progress('health', 'done', '远端服务已就绪'); await pair(next)
@@ -149,7 +171,7 @@ try {
     }
   }
 } catch (error) {
-  if (next) { await stopOwned(next.webPid).catch(() => {}); await stopOwned(next.backendPid).catch(() => {}) }
-  if (replacing && previous) { await start(previous, true).then(() => save(stateFile, previous)).catch(() => {}) }
+  if (next) { await stopOwned(next.webPid).catch(() => {}) }
+  if (replacing && previous) { await start(previous, true).catch(() => {}); await save(stateFile, previous) }
   process.stderr.write(String(error.message).slice(0,1000) + '\n'); process.exitCode = 1
 } finally { await rm(lock, { recursive: true, force: true }); await rm(staging, { recursive: true, force: true }) }
