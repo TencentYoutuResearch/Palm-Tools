@@ -1363,6 +1363,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         const allowed = name.endsWith('menu.item') ? ['pin', 'rename', 'kode-avatar', 'archive'] : ['pin', 'archive']
         return h(React.Fragment, null, ...slots.entries(name).filter(entry => allowed.includes(entry.options.id)).map(entry => h(entry.component, {
           ...owner, key: entry.options.id, t: props.t, useShortcuts: props.useShortcuts,
+          useSessionAccess: props.useSessionAccess,
           useMenuOpenState: () => options.hookContext,
           usePinned: select => select(new Set(merged.workspaces.pinnedSessionIds)),
           useArchived: select => select(new Set(merged.workspaces.archivedSessionIds)),

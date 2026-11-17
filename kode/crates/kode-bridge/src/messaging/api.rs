@@ -113,7 +113,9 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/workbench/workspaces", get(workspaces).post(change_workspace))
         .route("/api/v1/messaging/workbench/workspaces/hosts", get(workspace_hosts))
         .route("/api/v1/messaging/workbench/transcript", post(workbench_transcript))
-        .route("/api/v1/messaging/workbench/documents/:key", get(workbench_document).post(save_workbench_document))
+        .route("/api/v1/messaging/workbench/native-title", post(workbench_native_title))
+        // Session indexes and Agent bindings grow with persisted conversations.
+        .route("/api/v1/messaging/workbench/documents/:key", get(workbench_document).post(save_workbench_document).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/v1/messaging/self", get(own_session))
         .route("/api/v1/messaging/native/resolve", post(resolve_native))
         .route(
@@ -282,6 +284,45 @@ async fn workbench_transcript(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(in
         super::transcript::recent_before(&path,input.limit.unwrap_or(80).clamp(1,1000),input.tail_bytes.unwrap_or(8*1024*1024).clamp(4096,64*1024*1024),input.before)
     }).await.map_err(anyhow::Error::from)??;
     Ok(Json(messages))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeTitle {
+    backend_key: String,
+    session_id: String,
+    cwd: String,
+    title: String,
+}
+async fn workbench_native_title(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Json(input): Json<NativeTitle>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    if !valid_id(&input.session_id) || !std::path::Path::new(&input.cwd).is_absolute() {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid saved session".into()));
+    }
+    let title = input.title.trim().to_owned();
+    if title.is_empty() || title.chars().count() > 512 {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid session title".into()));
+    }
+    let catalog = super::agents::catalog(&hub)?;
+    let protocol = catalog.backends.get(&input.backend_key)
+        .map(|config| config.protocol_key(&input.backend_key)).unwrap_or(&input.backend_key);
+    use kode_core::session::jsonl_tail::{Backend, resolve_session_path};
+    let backend = Backend::from_backend_key(protocol);
+    if !matches!(backend, Some(Backend::Claude | Backend::Tclaude)) {
+        return Ok(Json(json!({"supported":false})));
+    }
+    let updated = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+        let Some(path) = resolve_session_path(backend.unwrap(), std::path::Path::new(&input.cwd), &input.session_id) else {
+            return Ok(false);
+        };
+        let _guard = hub.gate.lock();
+        super::native_title::write_claude_title(&path, &input.session_id, &title)?;
+        Ok(true)
+    }).await.map_err(anyhow::Error::from)??;
+    Ok(Json(json!({"supported":true,"updated":updated})))
 }
 async fn own_session(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     let Principal::Session(id) = auth(&hub, &h)? else {

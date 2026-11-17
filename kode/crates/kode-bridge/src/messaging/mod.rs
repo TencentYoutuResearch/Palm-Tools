@@ -23,6 +23,7 @@ mod session_catalog;
 mod session_visibility;
 pub use session_visibility::filter_visible_runtime_sessions;
 mod transcript;
+mod native_title;
 pub mod workspaces;
 pub mod server;
 #[cfg(test)]

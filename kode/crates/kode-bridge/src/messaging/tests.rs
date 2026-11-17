@@ -148,6 +148,21 @@ async fn workbench_configuration_is_durable_versioned_and_not_agent_accessible()
     assert_eq!(client.get(format!("{}/api/v1/messaging/workbench/documents/arbitrary-file", s.url)).bearer_auth("admin-test").send().await.unwrap().status(), 400);
 }
 
+#[tokio::test]
+async fn workbench_session_index_accepts_documents_larger_than_message_limit() {
+    let s = server("large-index-test", vec![]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/workbench/documents/session-index", s.url);
+    let value = json!({"version": 1, "native_sessions": [], "metadata": "x".repeat(256 * 1024)});
+    let saved: Value = client.post(&url).bearer_auth("admin-test")
+        .json(&json!({"expected_revision": 0, "value": value}))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(saved["value"], value);
+    let loaded: Value = client.get(&url).bearer_auth("admin-test")
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(loaded, saved);
+}
+
 #[cfg(not(windows))]
 #[tokio::test]
 async fn archived_legacy_gui_tabs_need_no_adapter_and_are_restorable_without_losing_metadata() {
@@ -1168,4 +1183,20 @@ async fn usage_history_requires_admin_and_valid_period_and_timezone() {
         assert_eq!(client.get(format!("{url}?{query}")).bearer_auth("admin-test").send().await.unwrap().status(), 400);
     }
     assert_eq!(client.post(format!("{url}?period=today")).bearer_auth("admin-test").send().await.unwrap().status(), 405);
+}
+
+#[tokio::test]
+async fn native_title_requires_admin_and_valid_native_identity() {
+    let s = server("native-title", vec![]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/workbench/native-title", s.url);
+    let input = json!({"backend_key":"codex","session_id":"thread","cwd":"/srv/project","title":"Renamed"});
+    assert_eq!(client.post(&url).json(&input).send().await.unwrap().status(), 401);
+    let result: Value = client.post(&url).bearer_auth("admin-test").json(&input).send().await.unwrap().json().await.unwrap();
+    assert_eq!(result["supported"], false);
+    for invalid in [json!({"session_id":"../thread"}), json!({"cwd":"relative"}), json!({"title":"  "})] {
+        let mut body = input.clone();
+        for (key, value) in invalid.as_object().unwrap() { body[key] = value.clone(); }
+        assert_eq!(client.post(&url).bearer_auth("admin-test").json(&body).send().await.unwrap().status(), 400);
+    }
 }

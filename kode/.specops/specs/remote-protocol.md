@@ -589,6 +589,19 @@ REST 一律 JSON:
 The shared Kode backend owns these additive administration endpoints. They use
 its existing administrator bearer; session-scoped agent credentials receive 403.
 
+- `POST /api/v1/messaging/workbench/native-title` accepts
+  `{backend_key, session_id, cwd, title}` and synchronizes Claude-compatible
+  transcript title records and the atomic `custom-title.json` sidecar. Backend
+  protocol selection includes TClaude. A running DSH Claude session first uses
+  ACP `_session/rename` so its in-memory title agrees with the persisted title.
+  The response contains `{supported, updated}`. Unsupported protocols return
+  `supported: false`, and a missing transcript returns `updated: false`.
+  Title updates require an administrator bearer, an absolute cwd, a valid
+  native session ID and a nonempty title of at most 512 characters.
+- `GET/POST /api/v1/messaging/workbench/documents/:key` accepts bodies up to
+  8 MiB for durable session indexes and bindings. Other bridge routes retain
+  their existing limits.
+
 - `GET /api/v1/messaging/workbench/agent-hub`: extension sources, native target
   status, managed plugin paths, portable skill targets and backend power state.
 - `POST /api/v1/messaging/workbench/agent-hub`: JSON action `save-source`

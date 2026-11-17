@@ -421,10 +421,11 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
   for (const current of ['local', 'build']) {
     const foreign = current === 'local' ? 'build' : 'local'
     const c = client({ current, hosts: ['local', 'build'].map(id => ({ id, name: id, sessions: [{ id: 'same', title: id }], workspaces: [], pinnedSessionIds: ['same'], archivedSessionIds: [] })) })
+    const useSessionAccess = () => true
     const pin = () => null, archive = () => null
     c.addSlot('sidebar.workspaces.session.menu.item', 'pin', pin)
     c.addSlot('sidebar.workspaces.session.menu.item', 'archive', archive)
-    const wrapper = c.workspaceShell.component({ useSessions: select => select({ ids: ['same'], byId: { same: { id: 'same' } } }), useWorkspaces: select => select({ items: [], pinnedSessionIds: [], archivedSessionIds: [] }) })
+    const wrapper = c.workspaceShell.component({ useSessionAccess, useSessions: select => select({ ids: ['same'], byId: { same: { id: 'same' } } }), useWorkspaces: select => select({ items: [], pinnedSessionIds: [], archivedSessionIds: [] }) })
     wrapper.type(wrapper.props); await new Promise(resolve => setImmediate(resolve))
     const tree = wrapper.type(wrapper.props), native = tree.children.find(child => child?.type === c.native)
     const id = `kode-host:${foreign}/same`, menuState = [true, () => {}]
@@ -434,6 +435,7 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
     assert.ok(controls.some(control => control.type === archive))
     assert.equal(pinControl.props.usePinned(set => set.has(id)), true)
     assert.equal(pinControl.props.useMenuOpenState(), menuState)
+    for (const control of controls) assert.equal(control.props.useSessionAccess, useSessionAccess)
     for (const [callback, operation] of [['pinSession', 'pin-session'], ['unpinSession', 'unpin-session'], ['archiveSession', 'archive-session'], ['unarchiveSession', 'unarchive-session']]) {
       pinControl.props[callback](id); await new Promise(resolve => setImmediate(resolve))
       assert.deepEqual(c.requests.at(-1), { action: 'host-operation', id: foreign, operation, args: { sessionId: 'same' } })

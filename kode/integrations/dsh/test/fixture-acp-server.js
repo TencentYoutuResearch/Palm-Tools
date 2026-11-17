@@ -39,6 +39,7 @@ app.onRequest('session/load', async ({ params, client }) => {
   await announceCommands(client)
   return { modes, configOptions }
 })
+app.onRequest('_session/rename', { parse: value => value }, async ({ params }) => { await record('_session/rename', params); return {} })
 app.onRequest('session/set_mode', async ({ params }) => { await record('session/set_mode', params); modes.currentModeId = params.modeId; return {} })
 app.onRequest('session/set_config_option', async ({ params }) => { await record('session/set_config_option', params); configOptions.find(option => option.id === params.configId).currentValue = params.value; return { configOptions } })
 app.onNotification('session/cancel', async ({ params }) => { await record('session/cancel', params); pending.get(params.sessionId)?.() })

@@ -32,11 +32,19 @@ function codexFastCapability(model) {
 }
 export class AgentRuntimeAdapter {
   constructor(ctx, profiles, { recordNative = (session, data) => appendPluginRecord(session, 'plugin:kode/native-event', data), resolveProfile = async profile => profile, onThread = async () => {} } = {}) {
-    this.ctx = ctx; this.profiles = profiles; this.live = new Map(); this.busy = new Set(); this.catalogs = new Map(); this.positions = new WeakMap(); this.stop = new AbortController(); this.probes = new Set()
+    this.ctx = ctx; this.profiles = profiles; this.live = new Map(); this.busy = new Set(); this.catalogs = new Map(); this.positions = new WeakMap(); this.stop = new AbortController(); this.probes = new Set(); this.titleUpdates = new Map()
     this.recordNative = recordNative
     this.resolveProfile = resolveProfile
     this.onThread = onThread
     ctx.on?.('session/event', (session, event) => {
+      if (event.type === 'session/title' && this.profiles.binding(session.id)?.profile.type === 'claude') {
+        const agent = this.ctx.agents?.get(session.id) ?? { id: session.id, session }
+        const update = (this.titleUpdates.get(session.id) ?? Promise.resolve())
+          .then(() => this.onThread(agent))
+          .catch(error => this.ctx.logger.warn('Native title synchronization failed: %s', error.message))
+        this.titleUpdates.set(session.id, update)
+        void update.then(() => { if (this.titleUpdates.get(session.id) === update) this.titleUpdates.delete(session.id) })
+      }
       if (event.type === 'step/start') this.positions.set(session, { turn: event.data.turn, step: event.data.step })
       if (event.type === 'step/end' || event.type === 'turn/end') this.positions.delete(session)
     })
@@ -375,9 +383,10 @@ export class AgentRuntimeAdapter {
   }
   async renameSession(agent, title, signal) {
     const binding = this.profiles.binding(agent.id)
-    if (!binding?.threadId || binding.profile.type !== 'codex') return
+    if (!binding?.threadId || !['codex', 'claude'].includes(binding.profile.type)) return
     const live = this.live.get(agent.id)
     if (live?.rename) return live.rename(title, signal)
+    if (binding.profile.type === 'claude') return // Persisted titles are synchronized by the Kode backend.
     const runtime = await createNativeSession(await this.resolveProfile(binding.profile, agent), agent.session.header.cwd ?? process.cwd())
     this.probes.add(runtime)
     try { await runtime.initialize(signal); runtime.threadId = binding.threadId; await runtime.rename(title, signal) }
@@ -411,7 +420,7 @@ export async function installAgentRuntime(ctx, config) {
   await profiles.ensureBuiltins(builtinProfiles(types))
   const runtimes = new Map(Object.entries(types).filter(([key]) => key !== 'dsh'))
   const adapter = new AgentRuntimeAdapter(ctx, profiles, { onThread: async agent => {
-    if (config.sharedBackendState && config.backendClient) { const { saveNativeTab } = await import('./workbench-import.js'); await saveNativeTab(config.backendClient, profiles, agent, ctx.get('sessionTitle')?.get(agent.session)?.title ?? '未命名会话') }
+    if (config.sharedBackendState && config.backendClient) { const { saveNativeTab } = await import('./workbench-import.js'); await saveNativeTab(config.backendClient, profiles, agent, ctx.get('sessionTitle')?.get(agent.session)?.title ?? '未命名会话', { renameNative: title => adapter.renameSession(agent, title) }) }
   }, resolveProfile: async (profile, agent) => {
     const runtime = runtimes.get(profile.type)
     if (!runtime) throw new Error('此 Agent 的执行插件已拔出。')

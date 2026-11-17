@@ -1,6 +1,12 @@
 /** Validate upstream window ownership before installing the shared native bridge. */
 export const marker = '// Kode owned Desktop integration'
+// Older Desktop shells authenticate the native welcome client a second time
+// through Chromium's stale cookie jar. Reuse the owned Host cookie, as rc.3 does.
+export function patchWelcomeAuthentication(main) {
+  return main.replace("welcomeBackend = await connectDesktopWelcome(ready.url, (input, init) => net.fetch(input, init), async () => (await session.defaultSession.cookies.get({ url: ready.url })).map((cookie) => `${cookie.name}=${cookie.value}`).join(\"; \"));", "welcomeBackend = await connectDesktopWelcome(new URL(\"/\", ready.url).href, (input, init) => fetch(input, { ...init, headers: { ...init?.headers, cookie: hostCookie } }), async () => hostCookie);")
+}
 export function patchDesktopSources(main, preload, bridgeSpecifier) {
+  main = patchWelcomeAuthentication(main)
   if (!main.includes(marker)) {
     const anchor = 'window.webContents.setWindowOpenHandler(({ url }) => {'
     if (main.split(anchor).length !== 2) throw new Error('Desktop window-open contract changed')

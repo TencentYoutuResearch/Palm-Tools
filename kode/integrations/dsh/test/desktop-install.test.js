@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as asar from '@electron/asar'
 import { patchDesktopArchive } from '../src/desktop-archive.js'
-import { marker, patchDesktopSources } from '../src/desktop-patch.js'
+import { marker, patchDesktopSources, patchWelcomeAuthentication } from '../src/desktop-patch.js'
 
 const main = 'import { app } from "electron";\nwindow.webContents.setWindowOpenHandler(({ url }) => { return {action:"deny"}; });\napp.relaunch();'
 const preload = 'const electron = require("electron"); const { ipcRenderer } = electron; electron.contextBridge.exposeInMainWorld("desktop", {});'
@@ -44,4 +44,25 @@ test('unknown upstream window contracts fail before touching an archive', () => 
 
 test('unknown preload contracts fail rather than exposing a partial bridge', () => {
   assert.throws(() => patchDesktopSources(main, 'module.exports = {}', './bridge.js'), /preload contract changed/)
+})
+
+
+import vm from 'node:vm'
+test('legacy welcome reuses the owned Host cookie without Chromium cookie state or another launch exchange', async () => {
+  const legacy = "welcomeBackend = await connectDesktopWelcome(ready.url, (input, init) => net.fetch(input, init), async () => (await session.defaultSession.cookies.get({ url: ready.url })).map((cookie) => `${cookie.name}=${cookie.value}`).join(\"; \"));"
+  const patched = patchWelcomeAuthentication(legacy)
+  assert.equal(patchWelcomeAuthentication(patched), patched)
+  const requests = []
+  const context = { URL, ready: { url: 'http://127.0.0.1:47870/?token=fixture-launch' }, hostCookie: 'fixture=signed-owner-cookie',
+    async fetch(url, init) { requests.push({ url, init }); return { ok: true } },
+    async connectDesktopWelcome(url, send, cookies) {
+      assert.equal(url, 'http://127.0.0.1:47870/')
+      await send(url, { credentials: 'include' })
+      await send('http://127.0.0.1:47870/api/settings/describe', { method: 'POST', headers: { 'content-type': 'application/json' } })
+      assert.equal(await cookies(), 'fixture=signed-owner-cookie')
+    } }
+  await vm.runInNewContext('(async () => { let welcomeBackend; ' + patched + ' })()', context)
+  assert.ok(requests.every(request => request.init.headers.cookie === context.hostCookie))
+  assert.equal(requests[1].init.headers['content-type'], 'application/json')
+  assert.equal(patchWelcomeAuthentication('welcomeBackend = connectDesktopWelcome(ready.url, cookie);'), 'welcomeBackend = connectDesktopWelcome(ready.url, cookie);')
 })

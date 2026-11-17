@@ -65,7 +65,9 @@ export async function savedSessionOperation(client, input) {
     if (operation === 'rename-session') {
       const title = String(input.args?.title ?? '').trim()
       if (!title || title.length > 512) throw new Error('会话名称不能为空，且不能超过 512 个字符。')
+      const result = await client.call('/api/v1/messaging/workbench/native-title', { backend_key, session_id, cwd: tab.cwd, title })
       row.title = title; row.title_pinned = true
+      if (result.updated) row.native_title = title
     }
     if (operation === 'session-avatar') {
       const avatarId = input.args?.avatarId ?? null

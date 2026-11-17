@@ -1321,6 +1321,12 @@ fn json_content_to_text(v: &Value) -> Option<String> {
         let text = arr
             .iter()
             .filter_map(|item| {
+                // Claude tool results are user-role envelopes, but their content
+                // belongs to the tool card. Only text blocks are dialogue.
+                if item.get("type").and_then(Value::as_str)
+                    .is_some_and(|kind| !matches!(kind, "text" | "input_text" | "output_text")) {
+                    return None;
+                }
                 item.get("text")
                     .or_else(|| item.get("input_text"))
                     .or_else(|| item.get("output_text"))

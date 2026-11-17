@@ -24,6 +24,7 @@ portable-pty = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 fs2 = "0.4"
+tempfile = "3"
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
 
@@ -34,7 +35,6 @@ sysinfo = "0.33"
 
 [dev-dependencies]
 kode-relay = { path = "../kode-relay" }
-tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [[bin]]

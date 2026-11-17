@@ -76,7 +76,7 @@ export class AcpSession {
     return this.initialized ??= (async () => {
       this.lifetime.signal.throwIfAborted(); signal?.throwIfAborted()
       await this.launch()
-      this.info = await this.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'kode-dsh', version: '0.1.0' }, clientCapabilities: { elicitation: { form: {} } } }, signal, this.profile.startupTimeoutMs ?? 15000)
+      this.info = await this.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'kode-dsh', version: '0.1.0' }, clientCapabilities: { elicitation: { form: {} }, ...(this.profile.type === 'claude' ? { _meta: { jetbrains: { air: { version: 1, capabilities: ['sessionIndex'] } } } } : {}) } }, signal, this.profile.startupTimeoutMs ?? 15000)
       if (this.info.protocolVersion !== 1) throw new Error('Agent did not negotiate ACP v1')
     })()
   }
@@ -106,6 +106,10 @@ export class AcpSession {
     if (!this.threadId) throw new Error('ACP Agent returned no session ID')
     for (const update of this.setupUpdates.splice(0)) this.update(update)
     return this.threadId
+  }
+  async rename(title, signal) {
+    if (!this.threadId) throw new Error('Native session is not ready for renaming')
+    await this.request('_session/rename', { sessionId: this.threadId, title }, signal)
   }
   async listModels(signal, { model } = {}) {
     await this.open({}, [], signal)

@@ -5656,9 +5656,6 @@ function KodeTokenIsland({ activity, appearance } = {}) {
     if (!popup) return
     try {
       popup.document.title = 'Kode 用量'
-      const style = popup.document.createElement('style')
-      style.textContent = (document.querySelector('[data-kode-workbench]')?.textContent ?? '') + nativeIslandStyle
-      popup.document.head.append(style)
       setNativeWindow(popup)
     } catch { popup.close(); return }
     return () => popup.close()
@@ -5777,7 +5774,7 @@ function KodeTokenIsland({ activity, appearance } = {}) {
           h('tbody', null, ...rows.map((row, index) => h('tr', { key: row.key }, h('th', { scope: 'row' }, h('span', null, row.key)), ...['input_tokens', 'output_tokens', 'total_tokens'].map(key => h('td', { key, title: exact(row[key]) }, usageNumber(row[key])))))))),
         h('p', { className: 'kode-token-model-note' }, '图表、活跃度与明细使用同一筛选 · 悬停查看完整 token 数')),
       h('footer', null, '每 30 秒更新 · CLI 历史统计，不等同于当前对话上下文占用')))
-  return !enabled ? null : nativeWindow ? react_dom.createPortal(content, nativeWindow.document.body) : content
+  return !enabled ? null : nativeWindow ? react_dom.createPortal(h(react.Fragment, null, h('style', { 'data-kode-native-island': '' }, (document.querySelector('[data-kode-workbench]')?.textContent ?? '') + nativeIslandStyle), content), nativeWindow.document.body) : content
 }
 function installWorkbenchUi(ctx) {
   kodeWorkbenchContext = ctx

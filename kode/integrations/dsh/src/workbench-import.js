@@ -35,7 +35,7 @@ export async function importBackendProfiles(client, profiles) {
   }
   return catalog
 }
-export async function saveNativeTab(client, profiles, agent, title) {
+export async function saveNativeTab(client, profiles, agent, title, { renameNative } = {}) {
   const binding = profiles.binding(agent.id)
   if (!binding?.threadId || binding.profile.type === 'dsh') return
   const document = new BackendDocument(client, 'session-index')
@@ -50,9 +50,14 @@ export async function saveNativeTab(client, profiles, agent, title) {
     if (!backend) return
     const index = state.native_sessions.findIndex(tab => tab.session_id === binding.threadId && tab.backend_key === backend)
     const saved=(catalog.tabs??[]).find(tab=>tab.session_id===binding.threadId && tab.backend_key===backend)
-    const model=agent.session.requestHeader()?.config.model
+    const model=agent.session.requestHeader()?.config?.model
     const updatedAt = agent.updatedAt ?? agent.session.snapshotEvents?.().at(-1)?.time ?? saved?.updated_at ?? state.native_sessions[index]?.updated_at
     const row = { ...(Number.isFinite(updatedAt) && updatedAt > 0 ? { updated_at: updatedAt } : {}), backend_key: backend, agent_id: profile.id, title: title?.trim() || saved?.title || state.native_sessions[index]?.title || '未命名会话', title_pinned: true, cwd: agent.session.header.cwd, session_id: binding.threadId, dsh_session_id: agent.id, ...(model?{model}:{}), transport_kind: 'pty', endpoint_id: null }
+    if (profile.type === 'claude' && row.title !== '未命名会话' && state.native_sessions[index]?.native_title !== row.title) {
+      await renameNative?.(row.title)
+      const result = await client.call('/api/v1/messaging/workbench/native-title', { backend_key: backend, session_id: binding.threadId, cwd: row.cwd, title: row.title })
+      if (result.updated) row.native_title = row.title
+    }
     const pendingAvatars = state.presentation?.sessionAvatars
     if (pendingAvatars && Object.hasOwn(pendingAvatars, agent.id)) {
       row.avatar_id = pendingAvatars[agent.id]
@@ -98,7 +103,7 @@ export async function importSavedSession(ctx, client, tab) {
   if (live) return { sharedSession: live, imported: false }
   const runtime = ctx.get('kodeAgents'), controller = ctx.get('sessionController')
   const registry = ctx.get('workspaceRegistry')
-  let workspace = await registry.resolveByPath(tab.cwd)
+  let workspace = registry.list().find(workspace => workspace.path === tab.cwd) ?? await registry.resolveByPath(tab.cwd)
   const profile = savedSessionProfile(runtime.profiles, tab)
   if (!profile) throw new Error(`This saved ${tab.backend_key} session has no installed inline protocol adapter`)
   const id = savedImportIdentity(tab, profile.id, runtime.profiles.bindings, registry.archivedSessionIds)

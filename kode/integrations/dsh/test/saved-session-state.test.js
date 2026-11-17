@@ -5,7 +5,7 @@ import { importedSessionId, savedSessionOperation } from '../src/saved-session-s
 const tab={backend_key:'removed-tclaude',session_id:'old-thread',cwd:'/srv/project',title:'Old conversation',env:{API_KEY:'must-not-leak'}}
 function backend(){
  const documents={'session-index':{version:1,native_sessions:[tab]},workspaces:{version:2,tables:{workspaces:{project:{title:'Project',path:'/srv/project',sessionIds:[]}}},global:{initialized:true,workspaceIds:['project'],archivedSessionIds:[],pinnedSessionIds:[]}}},revisions={}
- return{documents,async call(path,body){if(path.endsWith('/node'))return{node_id:'example-node'};const key=path.split('/').at(-1);if(!body)return{revision:revisions[key]??0,value:structuredClone(documents[key])};assert.equal(body.expected_revision,revisions[key]??0);documents[key]=structuredClone(body.value);return{revision:revisions[key]=(revisions[key]??0)+1,value:structuredClone(documents[key])}}}
+ return{documents,async call(path,body){if(path.endsWith('/native-title'))return{supported:false};if(path.endsWith('/node'))return{node_id:'example-node'};const key=path.split('/').at(-1);if(!body)return{revision:revisions[key]??0,value:structuredClone(documents[key])};assert.equal(body.expected_revision,revisions[key]??0);documents[key]=structuredClone(body.value);return{revision:revisions[key]=(revisions[key]??0)+1,value:structuredClone(documents[key])}}}
 }
 test('removed Agent tabs can pin, archive and unarchive without an adapter, transcript import or runtime',async()=>{
  const client=backend(),calls=[]

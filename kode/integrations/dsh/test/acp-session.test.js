@@ -18,6 +18,7 @@ test('ACP supports independent profiles, scoped MCP tools, permissions, models, 
   try {
     const [id, same] = await Promise.all([a.open({}, tools), b.open({}, tools)])
     assert.equal(id, same)
+    await a.rename('Renamed original', AbortSignal.timeout(5000))
     const [first, second] = await Promise.all([collect(a.turn([{ type: 'text', text: 'APPROVAL TOOL first' }], { model: 'fixture-large' })), collect(b.turn([{ type: 'text', text: 'second' }]))])
     assert.equal(toolCalls, 1); assert.equal(permissions, 1)
     assert.equal(first.find(e => e.method === 'item/agentMessage/delta').params.delta, 'one: APPROVAL TOOL first')
@@ -31,6 +32,7 @@ test('ACP supports independent profiles, scoped MCP tools, permissions, models, 
     const again = await collect(resumed.turn([{ type: 'text', text: 'restored followup' }]))
     assert.equal(again.filter(e => e.method === 'item/agentMessage/delta').map(e => e.params.delta).join(''), 'one: restored followup')
     const records = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(records.some(r => r.method === '_session/rename' && r.params.sessionId === id && r.params.title === 'Renamed original'))
     assert.ok(records.some(r => r.method === 'session/set_mode' && r.params.modeId === 'plan'))
     assert.ok(records.some(r => r.method === 'session/set_mode' && r.params.modeId === 'agent'))
     assert.ok(records.filter(r => ['session/new', 'session/load'].includes(r.method)).every(r => r.params.cwd === root), 'ACP workspace is the owning session directory')
