@@ -480,7 +480,7 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
             .await?;
     }
     let port = reqwest::Url::parse(&connection.url)?
-        .port()
+        .port_or_known_default()
         .context("shared backend port missing")?;
     println!(
         "{}",

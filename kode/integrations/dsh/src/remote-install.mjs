@@ -65,10 +65,10 @@ async function startService(argv, logPath, env) {
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) }); child.unref(); return child.pid
   } finally { await log.close() }
 }
-async function sharedBackend(state, upgrade = false) {
-  const binary = join(state.release, 'bin/kode-session-server')
+async function sharedBackend(state, upgrade = false, recovering = false) {
+  const binary = join(staging, 'bin/kode-session-server')
   const output = await new Promise((resolve, reject) => {
-    const child = spawn(binary, ['--bootstrap-workbench', '--local-node', request.localNode, '--link-token', request.linkToken, ...(upgrade ? ['--upgrade'] : [])], { stdio: ['ignore', 'pipe', 'pipe'], signal: stop.signal })
+    const child = spawn(binary, ['--bootstrap-workbench', '--local-node', request.localNode, '--link-token', request.linkToken, ...(upgrade ? ['--upgrade'] : [])], { stdio: ['ignore', 'pipe', 'pipe'], signal: recovering ? undefined : stop.signal })
     let stdout = '', stderr = ''
     children.add(child)
     child.stdout.on('data', chunk => { stdout += chunk })
@@ -92,7 +92,7 @@ async function sharedBackend(state, upgrade = false) {
   return connection
 }
 async function start(state, recovering = false) {
-  const connection = await sharedBackend(state, true)
+  const connection = await sharedBackend(state, true, recovering)
   if (state.webPort === state.backendPort) state.webPort = await port()
   const dshHome = join(data, 'dsh'), profile = join(dshHome, 'profiles/web')
   const runtime = join(state.release, 'node_modules'), bin = join(state.release, 'bin')
