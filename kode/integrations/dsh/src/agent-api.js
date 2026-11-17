@@ -69,10 +69,11 @@ export function registerAgentApi(ctx, service) {
         const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
         const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         const fastState = agent ? ctx.sessionProjections.stateOf(agent.session, 'kodeFast') : storedRow?.projections?.values?.kodeFast
-        const selectedModel = models.find(row => row.id === selection?.model)
+        const selectedModel = models.find(row => row.id === selection?.model || row.aliases?.includes(selection?.model))
+        const displaySelection = selectedModel ? { ...selection, model: selectedModel.id } : selection
         const fast = effectiveFast(fastState, selection, selectedModel)
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
-          selectedProfileId, selection, defaultModelSelection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
+          selectedProfileId, selection: displaySelection, defaultModelSelection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
           canChangeAgent: agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true,
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return

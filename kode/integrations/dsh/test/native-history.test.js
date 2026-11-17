@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { relayInput } from '../src/message-pages.js'
 import { buildHistorySeed,renumberNativeTurns,encodeHistoryArtifact } from '../src/native-history.js'
 import { Session,KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import { pathToFileURL } from 'node:url'
@@ -51,4 +52,15 @@ test('repaired artifacts are discoverable and readable by the actual released pe
   const handle=await ctx.sessionPersistence.open(id,'read')
   try{const stored=await handle.read();assert.equal(stored.events.length,events.length);assert.equal(stored.events[0].time,time)}finally{await handle.close()}
  }finally{await fiber.dispose();await rm(root,{recursive:true,force:true})}
+})
+
+test('imported peer envelopes retain relay attribution and ordinary user text stays editable', () => {
+  const incoming = relayInput({ id: 'message-1', source: { node_id: 'worker.example', session_id: 'session-child' }, in_reply_to: 'request-1', content: 'Verification complete' }, 'input-1')
+  const text = incoming.content[0].text
+  const events = buildHistorySeed({ messages: [{ kind: 'text', role: 'user', text, time }, { kind: 'text', role: 'user', text: 'Please explain this prefix: Kode session message', time }] }, selection)
+  const users = events.filter(event => event.type === 'user/message')
+  assert.deepEqual(users[0].data.source, incoming.source)
+  assert.equal(users[0].data.content[0].text, text)
+  assert.equal(users[1].data.source.kind, 'user')
+  assert.doesNotThrow(() => Session.create('relay-history', events))
 })

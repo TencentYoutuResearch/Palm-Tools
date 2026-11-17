@@ -111,3 +111,21 @@ test('known ACP child permissions inherit the active parent approval flow', asyn
   assert.equal((await session.permission({ ...request, sessionId: 'foreign-child' })).outcome.outcome, 'cancelled')
   assert.equal(approvals, 1)
 })
+
+test('Claude model aliases use authoritative native resolution and retain the canonical picker identity', async () => {
+  const session = new AcpSession({ type: 'claude' }, tmpdir())
+  session.state = { configOptions: [{ id: 'model', category: 'model', type: 'select', currentValue: 'claude-default', options: [{ value: 'claude-kimi-k3.1-pro[1m]', name: 'Kimi' }] }] }
+  session.open = async () => {}
+  session.waitForCommands = async () => {}
+  session.info = { agentCapabilities: {} }
+  session.request = async (method, params) => {
+    assert.equal(method, 'session/set_config_option')
+    assert.equal(params.configId, 'model')
+    if (params.value !== 'kimi-k3.1-pro') throw new Error('Native model rejected')
+    return { configOptions: [{ ...session.state.configOptions[0], currentValue: 'claude-kimi-k3.1-pro[1m]' }] }
+  }
+  const models = await session.listModels(undefined, { model: 'kimi-k3.1-pro' })
+  assert.equal(models[0].id, 'claude-kimi-k3.1-pro[1m]')
+  assert.deepEqual(models[0].aliases, ['kimi-k3.1-pro'])
+  await assert.rejects(session.selectModel('unknown-model'), /Native model rejected/)
+})

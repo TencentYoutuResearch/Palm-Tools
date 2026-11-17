@@ -137,7 +137,7 @@ export class AcpSession {
     const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
     const effort = effortOption(this.state), fast = fastOption(this.state), current = option?.currentValue ?? this.state.models?.currentModelId
     const models = option ? flattenOptions(option.options).map(m => ({ id: m.value, model: m.value, displayName: m.name, isDefault: m.value === current })) : (this.state.models?.availableModels ?? []).map(m => ({ id: m.modelId, model: m.modelId, displayName: m.name, isDefault: m.modelId === current }))
-    return models.map(row => ({ ...row, inputModalities: this.info.agentCapabilities?.promptCapabilities?.image || this.profile.type === 'claude' ? ['text', 'image'] : ['text'], ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}), ...(fast && row.id === current ? { fastCapability: { transport: 'config-option', defaultEnabled: fastValue(fast.currentValue) ?? false } } : {}) }))
+    return models.map(row => ({ ...row, ...(model && row.id === current && model !== current ? { aliases: [model] } : {}), inputModalities: this.info.agentCapabilities?.promptCapabilities?.image || this.profile.type === 'claude' ? ['text', 'image'] : ['text'], ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}), ...(fast && row.id === current ? { fastCapability: { transport: 'config-option', defaultEnabled: fastValue(fast.currentValue) ?? false } } : {}) }))
   }
   async waitForCommands(signal = this.lifetime.signal) {
     // Claude sends its authoritative commands after the setup response.
@@ -179,7 +179,8 @@ export class AcpSession {
     if (model && model !== 'default') {
       const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
       if (option) {
-        model = resolveAdvertisedModel(flattenOptions(option.options), model)
+        // Claude's bridge resolves native aliases, including provider models and context suffixes.
+        if (this.profile.type !== 'claude' && model !== option.currentValue) model = resolveAdvertisedModel(flattenOptions(option.options), model)
         const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value: model }, signal)
         if (result.configOptions) this.state.configOptions = result.configOptions
         else option.currentValue = model

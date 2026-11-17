@@ -1,5 +1,6 @@
 /** Compile a read-only native history window into released dsh Session events.
  * Source timestamps and tool lifecycles are retained; nothing is executed. */
+import { restoredRelaySource } from './message-pages.js'
 import { createHash } from 'node:crypto'
 import { constants,zstdCompressSync } from 'node:zlib'
 
@@ -36,7 +37,7 @@ export function buildHistorySeed(transcript, selection) {
     for(const call of pending.values())result(call,'历史片段未记录该调用的最终结果。')
     pending.clear();closeStep();push('turn/end',{turn,reason:{kind:reason,...(reason==='aborted'?{reason:{kind:'user'}}:{})}});open=false
   }
-  const user=row=>{start();startStep();push('user/message',{id:id('user'),role:'user',source:{kind:'user'},content:[{type:'text',text:row.text}]},stamp(row)??time,true)}
+  const user=row=>{start();startStep();push('user/message',{id:id('user'),role:'user',source:restoredRelaySource(row.text)??{kind:'user'},content:[{type:'text',text:row.text}]},stamp(row)??time,true)}
   for(const row of rows){
     const previousTime=time
     const at=stamp(row);if(at!==undefined)time=at
