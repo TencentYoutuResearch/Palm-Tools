@@ -50,10 +50,27 @@ test('human acceptance form recovers original decision from IndexedDB after lost
     const wait = expr => page.evaluate(`(async()=>{const end=Date.now()+10000;while(Date.now()<end){if(${expr})return true;await new Promise(r=>setTimeout(r,30))}throw Error('Decision UI timed out: '+document.body.innerText)})()`)
     const click = text => page.evaluate(`(async()=>{const end=Date.now()+10000;while(Date.now()<end){const button=Array.from(document.querySelectorAll('button')).find(b=>b.textContent===${JSON.stringify(text)});if(button&&!button.disabled){button.click();return}await new Promise(r=>setTimeout(r,30))}throw Error('Decision action not ready: '+${JSON.stringify(text)}+'; '+document.body.innerText)})()`)
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
-    await wait('globalThis.fixture'); await click('IM'); await wait(`document.querySelector('.kode-collab-contact-name')`)
-    await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
-    const open = async () => { await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='工作过程')`); await click('工作过程'); await wait(`document.querySelector('.kode-collab-run')`); await click('查看详情'); await wait(`document.querySelector('.kode-collab-delivery-decision')`) }
+    await wait('globalThis.fixture'); await wait(`document.querySelector('.kode-collab-mode-switch button')`)
+    if (await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').getAttribute('aria-label').includes('会话')`)) { await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').click()`); await wait(`Array.from(document.querySelectorAll('[role=menuitem]')).some(b=>b.textContent.includes('协作'))`); await page.evaluate(`Array.from(document.querySelectorAll('[role=menuitem]')).find(b=>b.textContent.includes('协作')).click()`) }
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`); await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`)
+    await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`)
+    const open = async () => { await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='工作过程')`); await click('工作过程'); await wait(`document.querySelector('.kode-collab-run')`); if (await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-run button')).some(b=>b.textContent==='查看详情')`)) await click('查看详情'); await wait(`document.querySelector('.kode-collab-delivery-decision')`) }
     await open()
+    assert.equal(await page.evaluate(`!!document.querySelector('.kode-collab-attention button')`), true, 'approval entry remains outside folded inspector')
+    assert.equal(await page.evaluate(`document.querySelector('.kode-collab-run button[aria-expanded]')?.getAttribute('aria-expanded')`), 'true', 'pending decisions open without another disclosure')
+    const wide = await page.evaluate(`(()=>{const thread=document.querySelector('.kode-collab-thread').getBoundingClientRect(),process=document.querySelector('.kode-collab-process').getBoundingClientRect();return {side:process.left>=thread.right-1,thread:thread.width,inspector:process.width}})()`)
+    // Process details now open in the right inspector aside (client-source.js .kode-collab-inspector, flex-basis clamp(380px,42%,520px)), beside the conversation.
+    assert.equal(wide.side, true, JSON.stringify(wide)); assert.equal(await page.evaluate(`!!document.querySelector('.kode-collab-process').closest('aside.kode-collab-inspector')`), true)
+    assert.ok(wide.inspector >= 380 && wide.inspector <= 520 && wide.thread > wide.inspector, 'main conversation keeps the larger column: '+JSON.stringify(wide))
+    const controls = await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-header-actions button')).map(b=>({name:b.getAttribute('aria-label'),tooltip:b.title,icon:!!b.querySelector('svg'),width:b.getBoundingClientRect().width,height:b.getBoundingClientRect().height}))`)
+    assert.ok(controls.every(b=>b.name&&b.name===b.tooltip&&b.icon&&b.width>=36&&b.height>=36),JSON.stringify(controls))
+    // The composer is the native PortableTextComposer (client-source.js:352); its send action is an icon button[aria-label=发送], not a form submit.
+    await wait(`document.querySelector('.kode-collab-composer button[aria-label="发送"]')`)
+    const ax = await page.call('Accessibility.getFullAXTree')
+    const names = ax.nodes.filter(node=>!node.ignored&&node.role?.value==='button').map(node=>node.name?.value)
+    for (const name of ['SuperAgent 设置','收起工作过程','发送']) assert.ok(names.includes(name),'accessible action missing: '+name)
+    assert.ok(!names.some(name => /预算/.test(name)), 'no budget entry (owner decision)')
+
     await page.evaluate(`document.querySelector('.kode-collab-delivery-decision textarea').focus()`)
     await page.call('Input.insertText', { text: '已核对产物与验证记录' })
     await click('核对验收决定'); assert.equal(writes, 0)

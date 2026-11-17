@@ -1,10 +1,14 @@
 /** At-most-once history restoration under a newly bound Coordinator operation. */
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { assertLegacyCoordinatorContext } from './context-scope.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { mountCoordinatorContext } from './coordinator-context.js'
 import { mountOfficialCoordinatorTools } from './official-coordinator-tools.js'
 export async function resumeCoordinator(host,command){
+ assertLegacyCoordinatorContext(command, command?.coordinator)
+ const binding=host.execution.profiles.binding(command.session_id)
+ assertLegacyCoordinatorContext(binding, binding?.managedCoordinator, binding?.coordinatorPredecessor?.coordinator)
  command=structuredClone(command)
  const key=JSON.stringify([command.session_id,command.command_id]),fingerprint=createHash('sha256').update(JSON.stringify(command)).digest('hex')
  const pending=host.coordinatorResumes.get(key)
@@ -18,6 +22,7 @@ async function perform(host,command,fingerprint){
  host.stop.signal.throwIfAborted()
  const prior=await profiles.update(state=>{
   const binding=state.bindings[command.session_id]
+  assertLegacyCoordinatorContext(binding, binding?.managedCoordinator, binding?.coordinatorPredecessor?.coordinator)
   const rows=binding?.coordinatorResumeReceipts??{}
   if(Object.hasOwn(rows,command.command_id)){
    if(rows[command.command_id].fingerprint!==fingerprint)throw Error('Coordinator resume identity conflict')
@@ -37,6 +42,7 @@ async function perform(host,command,fingerprint){
  })
  const validateAdmission=agent=>{
   const binding=profiles.binding(command.session_id)
+  assertLegacyCoordinatorContext(binding, binding?.managedCoordinator, agent.session?.header)
   if(binding?.operationClosed||binding?.revision!==command.profile_revision||!isDeepStrictEqual(binding?.managedOperation,command.operation)
    ||!isDeepStrictEqual(binding?.managedCoordinator,command.coordinator)||agent.options.provider!==command.provider
    ||agent.options.model!==command.model||(agent.options.reasoningEffort??null)!==(command.effort??null))throw Error('Coordinator resume admission changed')
@@ -45,7 +51,7 @@ async function perform(host,command,fingerprint){
   const persistence=host.ctx.get('sessionPersistence')
   if(!persistence)throw Error('Coordinator history persistence unavailable')
   const history=await persistence.open(command.session_id,'read',{signal:host.stop.signal})
-  try{if(history.header.id!==command.session_id||history.header.cwd!==command.cwd||history.header.isSeeded)throw Error('Coordinator restored history identity mismatch')}
+  try{assertLegacyCoordinatorContext(history.header);if(history.header.id!==command.session_id||history.header.cwd!==command.cwd||history.header.isSeeded)throw Error('Coordinator restored history identity mismatch')}
   finally{await history.close()}
   const owned=await host.resume({resumeSessionId:command.session_id,
    agentOptions:{provider:command.provider,model:command.model,...(command.effort==null?{}:{reasoningEffort:command.effort})},

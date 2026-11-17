@@ -16,10 +16,21 @@ test('Builder model discovery is owner scoped, exact route and public metadata o
   await read('?provider=missing'); assert.equal(status, 404)
   await read('?provider=fixture', 'POST'); assert.equal(status, 405); assert.equal(calls, 0)
   await read('?provider=fixture'); assert.equal(status, 200); assert.equal(body.eligible_for_dispatch, false); assert.equal(body.items[0].private, undefined)
+  assert.equal(body.evidence.source, 'adapter_catalog'); assert.equal(body.evidence.inference, 'not_tested');
   await read('?provider=fixture&model=model'); assert.equal(status, 200)
   assert.deepEqual(body.item.reasoning, { efforts: [{ id: 'custom', name: 'Custom' }], default_effort: 'custom' })
   assert.ok(!JSON.stringify(body).includes('do-not-export'))
   failure = true; await read('?provider=fixture'); assert.equal(status, 503); assert.deepEqual(body, { error: 'Model metadata unavailable' })
   failure = false; llm.listModels = async provider => { providers = []; return [{ provider, id: 'model', name: 'Model' }] }
   await read('?provider=fixture'); assert.equal(status, 404, 'removed provider cannot return a stale catalog')
+})
+
+test('managed CLI routes without validated Builder profile context remain unavailable', async () => {
+ let route, status
+ registerBuilderModels({webServer:{register:r=>{route=r}},connection:{admit:()=>({peer:{principal:{kind:'owner'}}})}}, {
+ listProviders:()=>[{id:'kode-workflow-worker',name:'Worker'}],
+ listModels:async ()=>{throw Error('must not probe')},
+ }, 'home')
+ await route.handler({method:'GET',url:'/api/kode/builder/models?provider=kode-workflow-worker'}, {writeHead:code=>{status=code},end(){}})
+ assert.equal(status,404)
 })

@@ -118,7 +118,10 @@ fn map_keys<T>(map: &BTreeMap<String, T>) -> bool {
     map.len() <= 64 && map.keys().all(|k| valid_id(k))
 }
 pub(super) fn canonical(input: &Config) -> Result<String> {
-    Ok(format!("kode.project.config.v1\n{}", serde_json::to_string(input)?))
+    Ok(format!(
+        "kode.project.config.v1\n{}",
+        serde_json::to_string(input)?
+    ))
 }
 
 impl Store {
@@ -139,9 +142,16 @@ impl Store {
             .transpose()
     }
     pub fn save_project_config(&self, mut input: Config) -> Result<Value> {
+        // Instruction bytes and their serialized envelope have separate bounds.
+        // Leave ordinary project/delivery configuration limits unchanged.
+        let maximum = if matches!(&input.spec, Spec::WorkflowDependency { .. }) {
+            super::workflow_dependencies::STAGE_DEPENDENCIES_MAX_BYTES
+        } else {
+            65536
+        };
         if !valid_id(&input.id)
             || !valid_id(&input.version)
-            || serde_json::to_vec(&input)?.len() > 65536
+            || serde_json::to_vec(&input)?.len() > maximum
         {
             bail!("invalid project configuration bounds");
         }

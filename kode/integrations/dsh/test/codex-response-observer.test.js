@@ -92,3 +92,19 @@ test('invalid UTF8 and partial byte sequences cannot establish response usage', 
     assert.equal(observer.usageEvidence(), null)
   }
 })
+
+
+test('progress excludes keepalives, empty deltas, foreign responses and status polling', () => {
+  let count = 0
+  const observer = new CodexResponseObserver({ onProgress: () => count++ })
+  const send = value => observer.push(Buffer.from('data: ' + JSON.stringify(value) + '\n\n'))
+  send({ type: 'response.created', response: { id: 'owned' } })
+  observer.push(Buffer.from(': heartbeat\n\n'))
+  send({ type: 'response.in_progress', response: { id: 'owned' } })
+  send({ type: 'response.reasoning_text.delta', response_id: 'owned', delta: '' })
+  assert.equal(count, 0)
+  send({ type: 'response.reasoning_text.delta', response_id: 'owned', delta: 'thinking' })
+  assert.equal(count, 1)
+  send({ type: 'response.reasoning_text.delta', response_id: 'foreign', delta: 'unrelated' })
+  assert.equal(count, 1)
+})

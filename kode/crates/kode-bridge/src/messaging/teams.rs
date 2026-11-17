@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -27,7 +28,9 @@ pub struct Target {
     pub provider_id: String,
     pub model_id: String,
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub account_binding_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub capability_profile_revision: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -36,11 +39,18 @@ pub struct Worker {
     pub id: String,
     pub role: String,
     pub responsibilities: Vec<String>,
+    /// Owner-reviewed role instructions; never CLI configuration or authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_prompt: Option<String>,
     pub allowed_target_ids: Vec<String>,
     pub required_capabilities: Vec<String>,
     pub workspace_refs: Vec<WorkspaceRef>,
     pub max_parallel: u16,
 }
+
+#[cfg(test)]
+#[path = "teams_role_prompt_tests.rs"]
+mod role_prompt_tests;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRef {
@@ -68,6 +78,11 @@ pub enum Kind {
     Builder,
     Coordinator,
 }
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    InteractiveNative,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Proactive {
@@ -87,10 +102,14 @@ pub struct Spec {
     pub name: String,
     pub purpose: String,
     pub kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<ExecutionMode>,
     pub workspace_refs: Vec<WorkspaceRef>,
     pub execution_targets: Vec<Target>,
     pub workers: Vec<Worker>,
     pub coordinator_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator_startup: Option<CoordinatorStartup>,
     pub workflow_pack_refs: Vec<WorkflowRef>,
@@ -135,7 +154,41 @@ fn workspace_key(w: &WorkspaceRef) -> (&str, &str, &str) {
     (&w.host_id, &w.workspace_id, &w.root_ref)
 }
 impl Spec {
+    /// Candidate drafts may be incomplete, but prompt bounds still apply before
+    /// owner review. Full execution configuration is checked by validate().
+    pub(super) fn validate_role_prompts(&self) -> Result<()> {
+        if self.coordinator_prompt.as_ref().is_some_and(|p| !text(p, 16000))
+            || self.workers.iter().any(|w| w.role_prompt.as_ref().is_some_and(|p| !text(p, 16000)))
+            || serde_json::to_vec(self)?.len() > 65536
+        {
+            bail!("invalid role prompt: expected 1-16000 UTF-8 bytes without NUL within a 65536-byte TeamSpec")
+        }
+        Ok(())
+    }
+    /// The caller must supply the immutable Team row's home/id/revision, not a
+    /// browser or model assertion. The outer mandate/scope binds the full object.
+    pub(super) fn role_prompt_snapshot(&self, home: &str, team: &str, revision: u64, worker_id: Option<&str>) -> Result<Option<Value>> {
+        self.validate_role_prompts()?;
+        if !valid_id(home) || !valid_id(team) || revision == 0 || revision > 9007199254740991 {
+            bail!("invalid role prompt Team identity")
+        }
+        let (prompt, role) = match worker_id {
+            None => (&self.coordinator_prompt, json!({"kind":"coordinator"})),
+            Some(id) => {
+                let matches: Vec<_> = self.workers.iter().filter(|worker| worker.id == id).collect();
+                if !valid_id(id) || matches.len() != 1 { bail!("role prompt Worker identity mismatch") }
+                (&matches[0].role_prompt, json!({"kind":"worker","worker_id":id}))
+            }
+        };
+        Ok(prompt.as_ref().map(|text| json!({"version":1,"home_hub":home,"team_id":team,"team_revision":revision,
+            "role":role,"text":text,"sha256":format!("{:x}",Sha256::digest(text.as_bytes()))})))
+    }
     pub(super) fn validate(&self) -> Result<()> {
+        self.validate_role_prompts()?;
+        let interactive = self.execution_mode == Some(ExecutionMode::InteractiveNative);
+        if interactive && self.budget_policy_id.is_some() {
+            bail!("interactive native teams cannot use a controlled budget policy")
+        }
         if !text(&self.name, 160)
             || !text(&self.purpose, 8192)
             || self.workspace_refs.len() > 64
@@ -182,8 +235,9 @@ impl Spec {
                 || !text(&t.provider_id, 256)
                 || !text(&t.model_id, 256)
                 || t.effort.as_ref().is_some_and(|v| !text(v, 64))
-                || !text(&t.account_binding_id, 256)
-                || !text(&t.capability_profile_revision, 256)
+                || (interactive && t.executor_profile_revision.is_none())
+                || (!(interactive && t.account_binding_id.is_empty()) && !text(&t.account_binding_id, 256))
+                || (!(interactive && t.capability_profile_revision.is_empty()) && !text(&t.capability_profile_revision, 256))
             {
                 bail!("invalid or duplicate execution target")
             }
@@ -396,3 +450,7 @@ impl Store {
         Ok(json!({"items":items,"next_cursor":next,"home_hub":self.node_id}))
     }
 }
+
+#[cfg(test)]
+#[path = "teams_execution_mode_tests.rs"]
+mod execution_mode_tests;

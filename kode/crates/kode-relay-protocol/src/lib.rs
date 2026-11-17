@@ -15,21 +15,6 @@ pub const SHARED_RUNTIME_ID_FLOOR: u64 = 1 << 40;
 /// Setup request kind that asks the desktop for one session's history window.
 pub const SETUP_KIND_HISTORY: &str = "history";
 
-/// Setup request kind that appends one chunk of a phone attachment to a file
-/// in the desktop's temp directory. The final chunk's reply carries the path.
-pub const SETUP_KIND_ATTACHMENT: &str = "attachment";
-
-/// Largest attachment a phone may upload.
-pub const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
-
-/// Largest decoded chunk per request. Keeps each phone request and each
-/// relay frame far below HTTP gateway and WebSocket frame limits.
-pub const MAX_ATTACHMENT_CHUNK_BYTES: usize = 2 * 1024 * 1024;
-
-/// Bound for a JSON attachment request body: base64 of a full chunk plus
-/// the small envelope fields.
-pub const MAX_ATTACHMENT_REQUEST_BYTES: usize = MAX_ATTACHMENT_CHUNK_BYTES / 3 * 4 + 64 * 1024;
-
 /// Event delivered to mobile clients over `/ws` and in `/history` responses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CloudEnvelope {

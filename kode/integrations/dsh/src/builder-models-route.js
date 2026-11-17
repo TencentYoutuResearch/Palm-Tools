@@ -1,11 +1,12 @@
 /** Public adapter metadata only. Discovery neither generates text nor authorizes execution. */
+import { managedBuilderSnapshot } from './builder-profile-metadata.js'
 import { officialResourceDirectory } from './official-resource-directory.js'
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0')
 function modelInfo(value, provider) {
   if (!value || value.provider !== provider || !text(value.id) || !text(value.name)) throw Error('Invalid model metadata')
   return { provider, id: value.id, name: value.name }
 }
-export function registerBuilderModels(ctx, llm, home) {
+export function registerBuilderModels(ctx, llm, home, service) {
   return ctx.webServer.register({ kind: 'exact', path: '/api/kode/builder/models', handler: async (req, res) => {
     const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
     const admitted = ctx.connection.admit(req)
@@ -13,8 +14,12 @@ export function registerBuilderModels(ctx, llm, home) {
     if (req.method !== 'GET') return send(405, { error: 'GET required' })
     const query = new URL(req.url, 'http://localhost').searchParams
     const provider = query.get('provider'), model = query.get('model')
-    if (!text(provider) || (query.has('model') && !text(model)) || [...query.keys()].some(key => !['provider', 'model'].includes(key) || query.getAll(key).length !== 1)) return send(400, { error: 'Invalid model query' })
-    if (!officialResourceDirectory(llm).items.some(row => row.provider_id === provider && row.registered)) return send(404, { error: 'Provider unavailable' })
+    if (!text(provider) || (query.has('model') && !text(model)) || [...query.keys()].some(key => !['provider', 'model', 'profile_id', 'profile_revision'].includes(key) || query.getAll(key).length !== 1)) return send(400, { error: 'Invalid model query' })
+    const native = provider.startsWith('kode-workflow-')
+    const identity = () => native ? managedBuilderSnapshot(service, llm, provider, query.get('profile_id'), query.get('profile_revision'))
+      : !query.has('profile_id') && !query.has('profile_revision') && officialResourceDirectory(llm).items.some(row => row.provider_id === provider && row.registered) ? {} : null
+    const before = identity()
+    if (!before) return send(404, { error: 'Provider unavailable' })
     const controller = new AbortController()
     let timer
     try {
@@ -40,8 +45,9 @@ export function registerBuilderModels(ctx, llm, home) {
         return { item: { ...item, reasoning } }
       }
       const value = await Promise.race([lookup(), deadline])
-      if (!officialResourceDirectory(llm).items.some(row => row.provider_id === provider && row.registered)) return send(404, { error: 'Provider unavailable' })
-      return send(200, { home_hub: home, provider, ...value, eligible_for_dispatch: false })
+      const after = identity()
+      if (!after || JSON.stringify(after) !== JSON.stringify(before)) return send(404, { error: 'Provider unavailable' })
+      return send(200, { home_hub: home, provider, ...before, ...value, evidence: { source: 'adapter_catalog', live_model_availability: 'not_verified', authentication: 'not_verified', inference: 'not_tested' }, eligible_for_dispatch: false })
     } catch { return send(503, { error: 'Model metadata unavailable' }) }
     finally { clearTimeout(timer); controller.abort() }
   } })

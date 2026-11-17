@@ -37,7 +37,7 @@ for(const recheck of [false,true,'obsolete'])test(`owner execution observation a
         const path = new URL(req.url, 'http://localhost').pathname, route = routes.get(path)
         if (path.startsWith('/api/kode/work-run') && req.method !== 'GET') executionPosts++
         if (route) return await route.handler(req, res)
-        if (await collabRenderPage(req, res)) return
+        if (await collabRenderPage(req, res, {hub})) return
         res.writeHead(404); res.end()
       } catch { if (!res.headersSent) res.writeHead(500); res.end() }
     })
@@ -46,7 +46,7 @@ for(const recheck of [false,true,'obsolete'])test(`owner execution observation a
     const page = await browser.page(`http://127.0.0.1:${server.address().port}`)
     const wait = expression => page.evaluate(`(async()=>{const end=Date.now()+10000;while(Date.now()<end){if(${expression})return;await new Promise(r=>setTimeout(r,25))}throw Error('Execution status UI timeout: '+document.body.innerText.slice(0,2000))})()`)
     const click = async text => { await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()===${JSON.stringify(text)}&&!b.disabled)`); await page.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(text)}&&!b.disabled).click()`) }
-    const open = async (expected='自动推进已暂停') => { await wait('globalThis.fixture'); await wait(`Array.from(document.querySelectorAll('button')).some(b=>['IM','Session'].includes(b.textContent.trim()))`); await page.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='IM')?.click()`); await wait(`document.querySelector('.kode-collab-contact-name')`); await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`); await click('工作过程'); await click('查看详情'); await wait(`document.querySelector('.kode-collab-run-detail')?.innerText.includes(${JSON.stringify(expected)})`) }
+    const open = async (expected='自动推进已暂停') => { await wait('globalThis.fixture'); await wait(`Array.from(document.querySelectorAll('button')).some(b=>['IM','Session'].includes(b.textContent.trim()))`); await page.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='IM')?.click()`); await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`); await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`); await click('工作过程'); await click('查看详情'); await wait(`document.querySelector('.kode-collab-run-detail')?.innerText.includes(${JSON.stringify(expected)})`) }
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
     await open()
     if(recheck){

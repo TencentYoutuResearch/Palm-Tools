@@ -1,3 +1,6 @@
+import { registerTeamConfigurationAcceptance } from './team-configuration-acceptance-route.js'
+import {nativeCoordinatorBinding} from './native-coordinator-scope.js'
+import { SessionInterop, registerSessionInteropApi } from './session-interop.js'
 import { assignmentInput } from './assignment-input.js'
 import { coordinatorInput } from './coordinator-input.js'
 import { builderInput } from './builder-input.js'
@@ -24,6 +27,7 @@ import { registerSessionNotifications, registerNotificationSettings } from './se
 import { registerModelUsageApi } from './model-usage-api.js'
 import { createDeliveryTracker, deliveryInputId, DeliveryEvidenceUnavailable } from './delivery-tracker.js'
 import { controlledBinding } from './managed-codex-profile.js'
+import { ordinaryHostInstall, requiresDedicatedHostAdmission } from './host-install-admission.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -44,13 +48,23 @@ export async function apply(ctx, config = {}) {
   installNativeStartupBarrier(ctx)
   if (ctx.inject) ctx.inject(['sessionPersistence'], scope => scope.effect(() => installSessionRecovery(scope), 'kode.session-recovery'))
   const runtimeConfig = await prepareRuntimeConfig(config)
+  const interop = new SessionInterop(ctx, { ...(config.sessionInteropFile ? { path: config.sessionInteropFile } : {}) })
+  ctx.provide?.('kodeSessionInterop', interop)
   const token = runtimeConfig.tokenFile ? (await readFile(runtimeConfig.tokenFile, 'utf8')).trim() : process.env.KODE_BRIDGE_TOKEN
   if (!token) throw new Error('kode requires tokenFile or KODE_BRIDGE_TOKEN on the dsh Host')
   const admin = new BackendClient(runtimeConfig.url, token)
+  interop.backend = admin
   ctx.provide?.('kodeBackend', admin)
   const backend = await connectBackend(admin, runtimeConfig)
   ctx.effect(() => backend.close, 'kode.backend-lifetime')
   const node = backend.node
+  if (runtimeConfig.teamDemo?.enabled === true) {
+    try {
+      const { runTeamDemoStartup } = await import('./team-demo-startup.js')
+      const demo = await runTeamDemoStartup(admin, runtimeConfig.teamDemo)
+      if (demo.status === 'blocked') console.warn('Kode demo setup blocked; ordinary Host startup continues.')
+    } catch { console.warn('Kode demo setup unavailable; ordinary Host startup continues.') }
+  }
   if (runtimeConfig.publishWorkbenchConnection && runtimeConfig.sharedBackendState) {
     const path = runtimeConfig.workbenchConnectionFile ?? join(homedir(), process.platform === 'darwin' ? 'Library/Application Support/kode/workbench-connection.json' : '.config/kode/workbench-connection.json')
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
@@ -59,6 +73,9 @@ export async function apply(ctx, config = {}) {
   const stateFile = runtimeConfig.stateFile ?? join(homedir(), '.config', 'kode', `dsh-${node.node_id}.json`)
   let tokens = Object.create(null)
   try { tokens = Object.assign(Object.create(null), JSON.parse(await readFile(stateFile, 'utf8'))) } catch (e) { if (e.code !== 'ENOENT') throw e }
+  // Provider plugins inject this registry; never discover tokens or infer accounts.
+  const externalConnections = new Map()
+  ctx.provide?.('kodeExternalConnections', externalConnections)
   const active = new Map()
   const installing = new Map()
   const stop = new AbortController()
@@ -83,12 +100,19 @@ export async function apply(ctx, config = {}) {
     webCtx.effect(() => registerSessionNotifications(webCtx), 'kode.session-notifications')
     webCtx.effect(() => registerNotificationSettings(webCtx), 'kode.notification-settings')
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
+    webCtx.effect(() => registerSessionInteropApi(webCtx, interop), 'kode.session-interop-api')
+    const { mountExternalResources } = await import('./external-integrations/host.js')
+    // Provider plugins remain the connection authority; an empty registry stays disabled.
+    webCtx.effect(() => mountExternalResources(webCtx, { backendClient: admin, homeId: node.node_id, stateFile, connections: externalConnections }), 'kode.external-resources-api')
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerProjectHosts } = await import('./project-hosts.js')
-    await registerProjectHosts(webCtx, { ...runtimeConfig, backendClient: admin })
+    await registerProjectHosts(webCtx, { ...runtimeConfig, backendClient: admin, get interactiveRuntime() { try { return webCtx.get('kodeInteractiveTeamRuntime') } catch { return undefined } } })
+    webCtx.effect(() => registerTeamConfigurationAcceptance(webCtx, { backendClient: admin }), 'kode.team-configuration-acceptance')
     const { registerMessagingApi, syncSessionTitles } = await import('./messaging-api.js')
     webCtx.effect(() => registerMessagingApi(webCtx, admin, node.node_id), 'kode.messaging-directory-api')
+    const { registerNativeScopedStatus } = await import('./native-scoped-status-route.js')
+    webCtx.effect(() => registerNativeScopedStatus(webCtx, { backendClient: admin }), 'kode.scoped-native-status')
     webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
       const lifetime = new AbortController()
       const task = syncSessionTitles(sessionCtx.sessionController, admin, new Set(Object.keys(tokens)), lifetime.signal).catch(error => { if (!lifetime.signal.aborted) ctx.logger.warn('Kode session name sync failed: %s', error.message) })
@@ -101,14 +125,25 @@ export async function apply(ctx, config = {}) {
     installRuntimeBridge(scope, admin)
   })
   function install(agent) {
-    // Third-party model sessions retain their own tools and execution context.
-    if (agent.options && !agent.isKodeNativeAgent && !agent.options.provider?.startsWith('kode-agent-')) return Promise.resolve()
-    if (installing.has(agent.id)) return installing.get(agent.id)
-    const task = performInstall(agent).finally(() => installing.delete(agent.id))
-    installing.set(agent.id, task)
-    return task
+    // Planning and isolated scopes never inherit ordinary Hub registration,
+    // memory, interop tools or delivery pumps. This deny-only check grants no
+    // scope authority; persisted markers also fence startup before admission.
+    return ordinaryHostInstall(agent, () => {
+      // Third-party model sessions retain their own tools and execution context.
+      if (agent.options && !agent.isKodeNativeAgent && !agent.options.provider?.startsWith('kode-agent-')) return Promise.resolve()
+      if (installing.has(agent.id)) return installing.get(agent.id)
+      const task = performInstall(agent).finally(() => installing.delete(agent.id))
+      installing.set(agent.id, task)
+      return task
+    })
   }
   ctx.provide?.('kodeOperationLeases', { acquire: async (agent, binding, signal, admission = {}) => {
+    const scoped=nativeCoordinatorBinding(agent)
+    if(scoped){
+      const runtime=ctx.get('kodeCoordinatorScopeRuntime')
+      if(runtime!==scoped.service)throw new Error('Native scope Host owner changed')
+      return runtime.acquireOperationLease(agent,binding,signal,admission)
+    }
     const managed = ctx.get('kodeAgents')?.profiles.binding(agent.id)
     if (!active.has(agent.id) && controlledBinding(managed) && managed.managedOperation?.id === binding.id && ctx.agents.get(agent.id) === agent) {
       // Explicit controlled official execution opts into Host registration.
@@ -119,6 +154,8 @@ export async function apply(ctx, config = {}) {
     return acquireOperationLease(entry.client, binding, { node_id: node.node_id, session_id: String(agent.id), profile_id: managed?.profile.id, grant_enforcement: controlledBinding(managed) && ctx.get('kodeAgents')?.officialExecution?.authorizesLease(agent, binding) === true }, { signal, beforeClaim: admission.beforeClaim })
   } })
   async function performInstall(agent) {
+    // Also fence direct lease-registration callers; no implicit token or tools.
+    if (requiresDedicatedHostAdmission(agent)) throw new Error('Dedicated scope Host admission required')
     if (active.has(agent.id) || stop.signal.aborted) return
     const registration = await admin.call(`${PREFIX}sessions`, {
       session_id: String(agent.id), title: sessionTitle(agent),
@@ -153,6 +190,12 @@ export async function apply(ctx, config = {}) {
       hosts: await (ctx.get?.('kodeProjectHosts')?.workspaceCatalog?.() ?? [{ name: '此计算机', kind: 'local', workspaces: [] }]),
       agentConfigurations: ctx.get?.('kodeAgents')?.profiles.list().filter(profile => ctx.get('kodeAgents').hasRuntime(profile.type)).map(profile => ({ name: profile.name, type: profile.type })) ?? [],
     }))
+    add('kode_sessions_summary', 'Summarize a session using the locally configured isolated summary Agent. Does not prompt or change the target. Omit session_id for this session. Cross-session access requires an explicit owner grant; a list entry is not access permission. The result identifies a snapshot and may be truncated.', {
+      session_id: { type: 'string' }, system_prompt: { type: 'string', required: true, description: 'Instructions for the summary only, maximum 16000 bytes.' },
+    }, (args, signal) => interop.summary(args, agent, signal))
+    add('kode_sessions_set_model', 'Select an advertised model for this or an explicitly owner-authorized session. The target must be idle with no queued input. Applies to its next turn, not an in-flight request. Managed workflow sessions are excluded.', {
+      session_id: { type: 'string' }, model: { type: 'string', required: true }, reasoningEffort: { type: 'string' },
+    }, (args, signal) => interop.model(args, agent, signal))
     add('kode_sessions_create', 'Create a new local or SSH Agent conversation and give it a task. Use this when the user asks to open another conversation or delegate work to a new helper. Select an existing Host and Agent configuration by human name; omitted Host means this computer. Returns the new named session address for follow-up communication. Reuse the same creation key only when retrying this exact task.', {
       title: { type: 'string', required: true, description: 'Human-readable name for the new conversation.' }, task: { type: 'string', required: true, description: 'Task to give the new helper, written as a normal request.' },
       host: { type: 'string', description: 'Saved SSH Host name; omit to create on this Host.' }, agent: { type: 'string', description: 'An existing Agent configuration name, such as tcodex.' },
@@ -208,17 +251,18 @@ export async function apply(ctx, config = {}) {
       node_id: { type: 'string', required: true }, session_id: { type: 'string', required: true },
       content: { type: 'string', required: true }, idempotency_key: { type: 'string', required: true, description: 'Stable key for one logical send; reuse only when retrying the same content.' },
       in_reply_to: { type: 'string' },
+      direct_insert: { type: 'boolean', description: '是否直接插入。true stops the current turn and inserts this input first; requires explicit owner grant and supported local runtime. false/default queues behind existing input.' },
     }
     add('kode_sessions_send', 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => ({ message: await client.call(`${PREFIX}messages`, {
       target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
-      idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null,
+      idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null, ...(args.direct_insert === undefined || args.direct_insert === false ? {} : { direct_insert: args.direct_insert }),
     }, signal) }))
     const readEvents = async (after, signal) => {
       const cursor = Math.max(0, after ?? 0)
       const result = eventPage(await client.call(`${PREFIX}events?after=${cursor}`, undefined, signal), cursor)
       for (const event of result.events) {
         const message = event.message
-        if (message?.content_truncated || !message?.in_reply_to || message.target?.node_id !== node.node_id || message.target.session_id !== agent.id) continue
+        if (message?.direct_insert || message?.content_truncated || !message?.in_reply_to || message.target?.node_id !== node.node_id || message.target.session_id !== agent.id) continue
         entry.readReplies.add(message.id)
         const queued = entry.queuedReplies.get(message.id)
         if (queued) { agent.inbox?.remove(queued); entry.queuedReplies.delete(message.id) }
@@ -297,30 +341,38 @@ export async function apply(ctx, config = {}) {
         for (const message of pending.messages) {
           let status = 'accepted', detail
           try {
-            if (message.in_reply_to && entry.readReplies.has(message.id)) {
+            if (!message.direct_insert && message.in_reply_to && entry.readReplies.has(message.id)) {
               await client.call(`${PREFIX}messages/${message.id}`, { session_id: String(agent.id), status: 'accepted' }, signal)
               continue
+            }
+            if (message.direct_insert) {
+              if (message.source.node_id !== node.node_id || !agent.assertDirectInsertAvailable || !entry.delivery) throw Object.assign(new Error('Direct insertion unsupported on this runtime'), { code: 'DIRECT_INSERT_UNSUPPORTED' })
+              await interop.authorizePeerInsertion(message.source.session_id, String(agent.id))
+              agent.assertDirectInsertAvailable()
             }
             // Prepare before any runtime side effect; failures follow the uncertain settlement path.
             if (entry.delivery) await entry.delivery.prepare(message, signal)
             // Reading a reply can race the durable prepare request above.
             // Recheck immediately before the synchronous inbox submission.
-            if (message.in_reply_to && entry.readReplies.has(message.id)) {
+            if (!message.direct_insert && message.in_reply_to && entry.readReplies.has(message.id)) {
               await client.call(`${PREFIX}messages/${message.id}`, { session_id: String(agent.id), status: 'accepted' }, signal)
               continue
             }
             // followup queues a distinct turn; it never answers an outstanding approval.
             const inputId = entry.delivery ? deliveryInputId(message.id) : randomUUID()
-            if (message.in_reply_to) entry.queuedReplies.set(message.id, inputId)
+            if (message.in_reply_to && !message.direct_insert) entry.queuedReplies.set(message.id, inputId)
             const binding = ctx.get?.('kodeAgents')?.profiles?.binding(agent.id)
             const mandate = await coordinatorInput(admin, binding, message, inputId, signal) ?? await builderInput(admin, binding, message, inputId, signal) ?? await assignmentInput(admin, binding, message, inputId, signal)
             signal.throwIfAborted()
-            agent.followup(mandate ?? relayInput(message, inputId))
+            if (message.direct_insert) await agent.interruptAndInsert(mandate ?? relayInput(message, inputId), { signal,
+              beforeInsert: () => interop.authorizePeerInsertion(message.source.session_id, String(agent.id)),
+            })
+            else await agent.followup(mandate ?? relayInput(message, inputId))
             // Acceptance is reported only after the inbox has reached persistence listeners.
             // Tracked delivery owns its evidence flush in confirm().
             if (!entry.delivery) await agent.ctx.parallel('session/flush', agent.session)
-          } catch {
-            status = 'uncertain'; detail = 'dsh inbox submission outcome is uncertain; no automatic retry'
+          } catch (error) {
+            status = error.code === 'DIRECT_INSERT_UNSUPPORTED' ? 'rejected' : 'uncertain'; detail = error.code?.startsWith('DIRECT_INSERT_') ? error.message : 'dsh inbox submission outcome is uncertain; no automatic retry'
           }
           if (entry.delivery && status === 'accepted') {
             // On transport failure, recovery inspects the durable input instead of replaying it.
@@ -372,6 +424,24 @@ export async function apply(ctx, config = {}) {
     service.adapter.extensionRevision = async () => (await hub.read()).revision
     const resolveProfile = service.adapter.resolveProfile
     service.adapter.resolveProfile = async (profile, agent) => hub.nativeProfile(await resolveProfile(profile, agent))
+    const { createNativePlanningBridge } = await import('./native-planning-bridge.js')
+    const { createBuilderPlanningSessions } = await import('./builder-planning-session.js')
+    const { createHostBuilderPlanningResources } = await import('./builder-planning-resource-host.js')
+    const planning = createBuilderPlanningSessions({ ctx: runtimeCtx, backendClient: admin, home: node.node_id, service,
+      readResources: createHostBuilderPlanningResources({ ctx: runtimeCtx, service, home: node.node_id }),
+      bridge: createNativePlanningBridge({ ctx: runtimeCtx, service }) })
+    ctx.provide('kodePlanningRuntime', planning)
+    const { createInteractiveTeamHostRuntime } = await import('./interactive-team-host-runtime.js')
+    const { nativeInteractiveTeamBinding } = await import('./native-interactive-team.js')
+    const interactiveRuntime = createInteractiveTeamHostRuntime({ ctx: runtimeCtx, backend: admin, service, home: node.node_id, nativeBinding: nativeInteractiveTeamBinding })
+    runtimeCtx.provide('kodeInteractiveTeamRuntime', interactiveRuntime)
+    const { createNativeCoordinatorHostRuntime } = await import('./native-coordinator-host-runtime.js')
+    const scopedRuntime=createNativeCoordinatorHostRuntime({host:node.node_id,
+      clientForSession:id=>tokens[id]?admin.forSession(tokens[id]):undefined,
+      profiles:service.profiles,workspaceRegistry:runtimeCtx.get('workspaceRegistry'),
+      usageOutbox:service.adapter.usageOutbox,selectionOutbox:service.adapter.selectionOutbox,
+      context:runtimeCtx,nativeFactory:()=>runtimeCtx.get('kodeNativeFactory')})
+    ctx.provide('kodeCoordinatorScopeRuntime',scopedRuntime)
     runtimeReady = true
     runtimeCtx.inject(['sessionController', 'typertGateway'], async guardCtx => {
       const { installManagedSessionCommandGuard, installManagedSessionGatewayGuard } = await import('./managed-session-access.js')
@@ -382,25 +452,38 @@ export async function apply(ctx, config = {}) {
       const { registerAgentApi } = await import('./agent-api.js')
       webCtx.effect(() => registerAgentHubApi(webCtx, { hub, backend: admin, service }), 'kode.agent-hub-api')
       webCtx.effect(() => registerAgentApi(webCtx, service), 'kode.agent-api')
+      const { registerInteractiveTeamRoutes } = await import('./interactive-team-host-route.js')
+      webCtx.effect(() => registerInteractiveTeamRoutes(webCtx, interactiveRuntime), 'kode.interactive-team-routes')
+      const { createInteractiveTeamCatalog, registerInteractiveTeamCatalog } = await import('./interactive-team-catalog.js')
+      webCtx.effect(() => registerInteractiveTeamCatalog(webCtx, createInteractiveTeamCatalog({ service, home: node.node_id })), 'kode.interactive-team-catalog')
+      const {registerNativeScopedDelivery}=await import('./native-scoped-delivery-route.js')
+      webCtx.effect(()=>registerNativeScopedDelivery(webCtx,scopedRuntime),'kode.scoped-native-delivery')
+      const { registerBuilderPlanning } = await import('./builder-planning-route.js')
+      webCtx.effect(() => registerBuilderPlanning(webCtx, planning), 'kode.builder-planning-api')
+      const { createBuilderSettings, registerBuilderSettings } = await import('./builder-settings.js')
+      webCtx.effect(() => registerBuilderSettings(webCtx, createBuilderSettings(service.profiles.localPreferences)), 'kode.builder-settings-api')
+      const { registerBuilderProposal } = await import('./builder-proposal-route.js')
+      webCtx.effect(() => registerBuilderProposal(webCtx, { backendClient: admin }), 'kode.builder-proposal-api')
       const { registerManagedSessionAccess } = await import('./managed-session-access.js')
       webCtx.effect(() => registerManagedSessionAccess(webCtx, service, node.node_id), 'kode.managed-session-access')
       const { registerResourceCoverage } = await import('./resource-coverage.js')
       const { officialResourceDirectory } = await import('./official-resource-directory.js')
       const { registerBuilderModels } = await import('./builder-models-route.js')
-      webCtx.effect(() => registerBuilderModels(webCtx, runtimeCtx.llm, node.node_id), 'kode.builder-models-api')
+      webCtx.effect(() => registerBuilderModels(webCtx, runtimeCtx.llm, node.node_id, service), 'kode.builder-models-api')
       const { registerBuilderDefaults } = await import('./builder-defaults-route.js')
       webCtx.effect(() => registerBuilderDefaults(webCtx, { backendClient: admin, service: { ...service, officialResourceDirectory: () => officialResourceDirectory(runtimeCtx.llm) }, llm: runtimeCtx.llm, home: node.node_id, defaults: () => {
         const current = webCtx.agentDefaultModel.currentSelection()
         const official = current?.provider && !current.provider.startsWith('kode-agent-') ? { provider: current.provider, model: current.model, effort: current.reasoningEffort ?? null } : {}
         return { ...official, ...runtimeConfig.builderDefaults }
       } }), 'kode.builder-default-selection-api')
-      webCtx.effect(() => registerResourceCoverage(webCtx, { ...service, officialResourceDirectory: () => officialResourceDirectory(runtimeCtx.llm) }, admin, node.node_id), 'kode.resource-coverage-api')
+      webCtx.effect(() => registerResourceCoverage(webCtx, { ...service, registeredBuilderProviders: () => runtimeCtx.llm.listProviders(), officialResourceDirectory: () => officialResourceDirectory(runtimeCtx.llm) }, admin, node.node_id), 'kode.resource-coverage-api')
       if (service.appearance) { const { registerAvatarApi } = await import('./session-appearance.js'); webCtx.effect(() => registerAvatarApi(webCtx, service.appearance), 'kode.avatar-api') }
       webCtx.inject(['sessionController', 'kodeNativeFactory'], async scope => {
         await scope.kodeNativeFactory.ready
         const { installRestartResume } = await import('./restart-resume.js')
         await installRestartResume(scope, admin, `${stateFile}.restart.json`)
       })
+      if (service.appearance) { const { registerCollabAppearance } = await import('./collab-appearance-route.js'); webCtx.effect(() => registerCollabAppearance(webCtx, { backendClient: admin, appearance: service.appearance }), 'kode.collab-appearance-api') }
       if (runtimeConfig.sharedBackendState) webCtx.inject(['sessionController'], sessionCtx => sessionCtx.effect(() => {
         const lifetime = new AbortController()
         const task = import('./workbench-import.js').then(({ syncNativeTabs }) => syncNativeTabs(sessionCtx.sessionController, admin, service.profiles, lifetime.signal))

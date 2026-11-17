@@ -143,6 +143,9 @@ impl Store {
                 .team(id, Some(*team_revision))?
                 .ok_or_else(|| anyhow::anyhow!("unknown team revision"))?;
             let spec: Spec = serde_json::from_value(team["spec"].clone())?;
+            if spec.execution_mode == Some(super::teams::ExecutionMode::InteractiveNative) {
+                bail!("interactive native teams do not use controlled activation")
+            }
             if spec.kind != super::teams::Kind::Coordinator {
                 bail!("activation requires coordinator team")
             }

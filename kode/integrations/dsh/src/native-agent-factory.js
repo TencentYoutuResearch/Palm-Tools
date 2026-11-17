@@ -1,3 +1,4 @@
+import {prepareNativeInteractiveSession,assertInteractiveJournalAdmission,assertNoInteractiveHistoryCopy,assertInteractiveParentHistory,INTERACTIVE_TEAM_RECORD} from './native-interactive-team.js'
 import { symbols } from '@deepseek-ai/cordis'
 import { contextUsageProjection } from './context-usage.js'
 import { fastProjection } from './model-fast.js'
@@ -5,6 +6,10 @@ import { fastProjection } from './model-fast.js'
 import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import { NativeAgentDriver, boundaryProjection, inboxProjection } from './native-agent-driver.js'
 import { installQueueSteering } from './queue-steering.js'
+import { prepareNativeBuilderSession, isBuilderSessionId } from './native-builder-lifecycle.js'
+import {prepareNativeCoordinatorSession,isNativeCoordinatorId} from './native-coordinator-scope.js'
+import { planningCompletionOptions, completionAuthority, assertCompletionRuntime, assertCompletionJournal } from './native-planning-completion.js'
+import { prepareNativePlanningSession, assertPlanningJournalAdmission } from './native-planning-session.js'
 export const name = 'kode-native-agent-factory'
 export const inject = ['agents', 'sessions', 'sessionProjections', 'sessionPersistence', 'kodeAgents', 'tools', 'agentPresets', 'agentLoop']
 export class NativeAgentFactory {
@@ -13,12 +18,19 @@ export class NativeAgentFactory {
   resume(owner, options) { return this.track(() => this.attach(owner, options, true)) }
   track(start) { if (this.stopping) return Promise.reject(new Error('Agent runtime is unplugged')); const task = start(); this.pending.add(task); return task.finally(() => this.pending.delete(task)) }
   async importHistory(id,seed,cwd,selection) {
+    assertNoInteractiveHistoryCopy(seed)
+    if(await this.ctx.get('kodeInteractiveTeamRuntime')?.sessionAdmission(id,{mode:'restore'}))throw new Error('Interactive Team cannot import history')
+    if(isNativeCoordinatorId(id))throw new Error('Native scope cannot import another conversation history')
+    if(isBuilderSessionId(id))throw new Error('Native Builder cannot import another conversation history')
+    if(await this.ctx.get('kodePlanningRuntime')?.sessionAdmission(id,{mode:'restore'}))throw new Error('Planning cannot import another conversation history')
     const live=this.ctx.agents.get(id)
     if(live && (live.status!=='idle' || live.inbox.nextTurn.length || live.inbox.nextStep.length))throw new Error('会话正在运行，历史导入将在空闲后重试。')
     let handle,stored
     try {handle=await this.ctx.sessionPersistence.open(id,'read');stored=await handle.read()}
     catch(error){if(error.code!=='ENOENT' && !/not found/i.test(error.message))throw error}
     finally{await handle?.close()}
+    if(stored?.events.some(e=>e.type==='plugin:kode/interactive-team'))throw new Error('Interactive Team journal cannot import history')
+    if(stored)assertPlanningJournalAdmission({snapshotEvents:()=>stored.events},undefined)
     if(stored?.events.some(event=>event.type==='turn/start'))return
     if(!stored){await this.ctx.agents.create({sessionId:id,agentOptions:selection,meta:{cwd,agentPreset:'kode-native'},seed});return}
     // Complete a previous empty import without changing any existing event.
@@ -32,7 +44,9 @@ export class NativeAgentFactory {
     }finally{await handle.close()}
   }
   async attach(owner, options, resume) {
-    const ctx = this.ctx, id = options.resumeSessionId ?? options.sessionId
+    let ctx = this.ctx
+    const id = options.resumeSessionId ?? options.sessionId
+    let builder, planning, coordinator, interactive
     let handle, driver, detachSession, detachAgent, releaseOwner, published = false, closing
     let closed = false
     const setupDone = Promise.withResolvers(), ownerAbort = new AbortController()
@@ -42,7 +56,13 @@ export class NativeAgentFactory {
       ownerAbort.abort(new Error('Agent owner disposed'))
       await setupDone.promise
       try { await driver?.close() } finally {
-        try { await handle?.close() } finally { detachAgent?.(); detachSession?.(); this.live.delete(dispose); if (this.byId.get(id) === dispose) this.byId.delete(id) }
+        try { await handle?.close() } finally {
+          detachAgent?.(); detachSession?.(); this.live.delete(dispose); if (this.byId.get(id) === dispose) this.byId.delete(id)
+          await builder?.close(driver)
+          await coordinator?.close(driver)
+          planning?.close(driver)
+          await interactive?.close(driver)
+        }
       }
     })()
     // Establish owner cancellation before any storage await.
@@ -50,10 +70,31 @@ export class NativeAgentFactory {
     const check = () => { signal.throwIfAborted(); owner.fiber.assertActive(); if (closed || this.stopping) throw new Error('Agent owner was disposed during setup') }
     try {
       check()
+      builder = await prepareNativeBuilderSession(ctx, options, resume); check()
+      if (builder) ctx = builder.ctx
+      planning = await prepareNativePlanningSession(ctx, options, resume); check()
+      if (builder && planning) throw new Error('Planning and controlled Builder identities cannot overlap')
+      coordinator=await prepareNativeCoordinatorSession(ctx,options,resume);check()
+      if(coordinator&&(builder||planning))throw new Error('Native role identities cannot overlap')
+      if(coordinator)ctx=coordinator.ctx
+      if(!resume)await assertInteractiveParentHistory(ctx,options)
+      check()
+      // A durable model/selection below still wins on resume. Only its missing
+      // fallback is the original draft selection, never another UI default.
+      if (planning) options = { ...options, agentOptions: planning.selection, ...(!resume ? { meta: { ...options.meta, cwd: planning.binding.cwd } } : {}) }
+      if(!resume)interactive=await prepareNativeInteractiveSession(ctx,options,false)
+      if(interactive&&(builder||planning||coordinator))throw new Error('Interactive native role overlap')
+      if(interactive)ctx=interactive.ctx
+      if(interactive)options={...options,agentOptions:interactive.selection,meta:{...options.meta,cwd:interactive.cwd}}
       let session
       if (resume) {
         handle = await ctx.sessionPersistence.open(id, 'write', { signal }); check()
         const stored = await handle.read(0, undefined, { signal }); check()
+        interactive=await prepareNativeInteractiveSession(ctx,options,true,stored.events);check()
+        if(interactive)ctx=interactive.ctx
+        if(interactive&&(builder||planning||coordinator))throw new Error('Interactive native role overlap')
+        if (planning?.completion) await planning.verifyStored(handle.header, stored.events, handle.inheritedEventCount)
+        else assertPlanningJournalAdmission({ snapshotEvents: () => stored.events }, planning)
         const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
           ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
         if (selected?.provider?.startsWith('kode-agent-')) {
@@ -66,12 +107,24 @@ export class NativeAgentFactory {
           if (start) closers.push({ seq: stored.events.length + closers.length, time: Date.now(), type: 'plugin:kode/restart-interrupted', ignorable: true, data: { startSeq: start.seq, interruptedAt: stored.events.at(-1)?.time } })
           await handle.append(closers)
         }
-        session = ctx.sessions.prepare(id, { seed: [...stored.events, ...closers], meta: handle.header, inheritedEventCount: handle.inheritedEventCount })
+        session = ctx.sessions.prepare(id, { seed: [...stored.events, ...closers], meta: handle.header, inheritedEventCount: handle.inheritedEventCount,
+          ...(builder || coordinator || interactive ? { eventState: stored.eventState } : {}) })
+        builder?.bind(session)
+        coordinator?.bind(session)
+        interactive?.bind(session)
+        if (!planning?.completion) assertPlanningJournalAdmission(session, planning)
+        planning?.bind(session)
       } else {
-        session = ctx.sessions.prepare(id, { ...(options.meta ? { meta: options.meta } : {}), ...(options.seed ? { seed: options.seed } : {}), ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}) })
+        session = ctx.sessions.prepare(id, { ...(options.meta || builder || coordinator ? { meta: { ...options.meta, ...(builder ? { cwd: builder.cwd } : {}),...(coordinator?{cwd:coordinator.cwd}:{}) } } : {}), ...(options.seed ? { seed: options.seed } : {}), ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}) })
+        builder?.bind(session)
+        coordinator?.bind(session)
+        interactive?.bind(session)
+        planning?.bind(session)
         handle = await ctx.sessionPersistence.create(session.header, { signal, ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}) }); check()
       }
       driver = new NativeAgentDriver(ctx, id, options.agentOptions ?? {}, session, ctx.kodeAgents)
+      planning?.attach(driver)
+      if (builder || coordinator || interactive) driver.ctx = driver.ctx.extend({ sessions: driver.ctx.reflect.trace(ctx.get('sessions')) })
       const storedCount = resume ? (await handle.read()).events.length : 0
       // DSH 0.2.2 requires store membership and completed session/created
       // publication before setup may append model/preset/binding events.
@@ -84,9 +137,17 @@ export class NativeAgentFactory {
       check()
       detachSession = driver.ctx.sessions.enter(session)
       driver.ctx.sessions.announce(session); check()
+      await builder?.setup(driver); check()
+      await coordinator?.setup(driver);check()
+      await interactive?.setup(driver);check()
       const commit = await options.setup?.(driver.ctx, driver); check(); commit?.commit()
+      await builder?.check(driver); check()
+      await coordinator?.check(driver);check()
+      await interactive?.check(driver);check()
+      if (planning?.completion) { await planning.check(driver); await driver.ctx.sessions.flush(session); await planning.check(driver); check() }
       detachAgent = ctx.agents.enter(driver, options.parentAgent)
       await ctx.agents.announce(driver, resume ? 'resume' : 'startup', signal); check()
+      if (planning?.completion) { await planning.check(driver); check() }
       published = true; this.live.add(dispose); this.byId.set(id, dispose); ctx.kodeAgents.mountCommands?.(driver); driver.start()
       setupDone.resolve()
       return { agent: driver, dispose: async () => { try { await dispose() } finally { await releaseOwner() } } }
@@ -121,9 +182,37 @@ export function installNativeFactoryRouting(ctx, native) {
     const opened = await native.resume(record.owner, { resumeSessionId: agent.id, agentOptions: selection, setup: async (_scope, driver) => { driver.session.append('agent-preset/selected', {agentPreset:'kode-native'}) } })
     return opened.agent
   }
+  native.completePlanningCreation = async (command, id) => {
+    const options = await planningCompletionOptions(ctx, command, id)
+    const admitted = await completionAuthority(ctx, command, id)
+    const live = ctx.agents.get(id)
+    if (live) {
+      const owned = officialHandles.get(id)
+      if (!owned || owned.handle.agent !== live) throw new Error('Original setup-only Session has an unknown live owner')
+      const profile = assertCompletionRuntime(ctx, admitted)
+      assertCompletionJournal(live.session.header, live.session.snapshotEvents(), live.session.inheritedEventCount ?? 0, admitted, profile)
+      await owned.handle.dispose()
+    }
+    const result = await native.resume(ctx, options)
+    return result.agent
+  }
   const remember = (owner, handle) => { officialHandles.set(handle.agent.id, {owner,handle}); return handle }
   const owns = async (options, restoring, storage = persistence, checkBinding = true) => {
     const id = options.resumeSessionId ?? options.sessionId
+    // The installed SessionController carries global model defaults even for
+    // an explicit preset. Only an exact owner planning/interactive admission overrides them.
+    if (!restoring && options.meta?.agentPreset === "kode-native") {
+      const planning = await ctx.get("kodePlanningRuntime")?.sessionAdmission(id, { mode: "fresh" })
+      if (planning) {
+        if (planning.binding?.session_id !== id || planning.binding?.mode !== "interactive_planning") throw new Error("Foreign planning admission")
+        return true
+      }
+      const interactive = await ctx.get('kodeInteractiveTeamRuntime')?.sessionAdmission(id, { mode: 'fresh' })
+      if (interactive) {
+        if (interactive.binding?.native_session_id !== id || interactive.binding?.execution_mode !== 'interactive_native') throw new Error('Foreign interactive admission')
+        return true
+      }
+    }
     if (checkBinding && ctx.kodeAgents.profiles?.binding?.(id)) return true
     const provider = options.agentOptions?.provider
     if (!restoring) {
@@ -134,6 +223,7 @@ export function installNativeFactoryRouting(ctx, native) {
     try {
       handle = await storage.open(id, 'read', { signal: options.signal })
       const stored = await handle.read()
+      if(stored.events.some(e=>e.type===INTERACTIVE_TEAM_RECORD))return true
       const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
         ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
       // Cold resume callers may carry global defaults. Durable ownership wins
@@ -145,6 +235,7 @@ export function installNativeFactoryRouting(ctx, native) {
   }
   const createRouter = async function(owner, options) {
     if (await owns(options, false)) { nativeIds.add(options.sessionId); return native.createAgent(owner, options) }
+    await assertInteractiveParentHistory(ctx,options)
     return remember(owner, await create.call(this, owner, options))
   }
   const resumeRouter = async function(owner, options) {
@@ -180,7 +271,8 @@ export function installNativeFactoryRouting(ctx, native) {
   }
   if (resumeWith) upstream.resumeWith = routing.wrappedResumeWith = resumeWithRouter
   return () => {
-    if (upstream.createAgent === createRouter) upstream.createAgent = routing.wrappedCreate = function(owner, options) {
+    if (upstream.createAgent === createRouter) upstream.createAgent = routing.wrappedCreate = async function(owner, options) {
+      if (options.meta?.agentPreset === 'kode-native' && (await ctx.get('kodePlanningRuntime')?.sessionAdmission(options.sessionId, { mode: 'fresh' }) || await ctx.get('kodeInteractiveTeamRuntime')?.sessionAdmission(options.sessionId, { mode: 'fresh' }))) throw nativeUnavailable()
       if (nativeIds.has(options.sessionId) || options.agentOptions?.provider?.startsWith('kode-agent-') || !options.agentOptions?.provider && options.meta?.agentPreset === 'kode-native') throw nativeUnavailable()
       return create.call(this, owner, options)
     }
@@ -246,6 +338,7 @@ export async function apply(ctx) {
     await Promise.all(ids.map(id => factory.byId.get(id)?.()))
   })
   factory.promote = (...args) => delegate.promote(...args)
+  factory.completePlanningCreation = (...args) => delegate.completePlanningCreation(...args)
   ctx.provide('kodeNativeFactory', factory)
   ctx.effect(function* () {
     yield ctx.sessionProjections.register(boundaryProjection)

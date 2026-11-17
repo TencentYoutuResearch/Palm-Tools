@@ -1,3 +1,4 @@
+import { guardDiscussionTool } from './coordinator-discussion-guard.js'
 /** Scoped publication uses fixed Host authority and the existing durable delivery tracker. */
 import { isDeepStrictEqual } from 'node:util'
 import { createDeliveryTracker } from './delivery-tracker.js'
@@ -22,6 +23,7 @@ export function mountOfficialCoordinatorTools(agentCtx,agent,runtime,scope,allow
   execute:async args=>{
    runtime.entry.assertToolBody(agent,name,args)
    if(!valid(args))throw Error('Invalid Coordinator publication arguments')
+   guardDiscussionTool(agent,name,args)
    const binding=runtime.profiles.binding(agent.id)
    if(binding?.operationClosed||binding?.managedBuilder||binding?.managedAssignment||!isDeepStrictEqual(binding?.managedOperation,operation)||!isDeepStrictEqual(binding?.managedCoordinator,scope))throw Error('Coordinator publication binding changed')
    const base=`/api/v1/messaging/conversations/${encodeURIComponent(scope.conversation_id)}`

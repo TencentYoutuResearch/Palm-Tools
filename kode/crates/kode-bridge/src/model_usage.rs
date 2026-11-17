@@ -20,7 +20,8 @@ pub struct ModelUsageTotals {
     pub output_tokens: u64,
     pub cached_tokens: u64,
     pub total_tokens: u64,
-    pub cost_usd: f64,
+    /// Static-price estimate, not a provider bill; None when any cost is unknown.
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +34,8 @@ pub struct ModelUsageRow {
     pub output_tokens: u64,
     pub cached_tokens: u64,
     pub total_tokens: u64,
-    pub cost_usd: f64,
+    /// Static-price estimate, not a provider bill; None when any cost is unknown.
+    pub cost_usd: Option<f64>,
     pub requests: u64,
 }
 
@@ -411,15 +413,24 @@ fn add_daily(daily: &mut DailyMap, timestamp_ms: i64, tokens: u64, offset_minute
 
 fn usage_rows(usage: UsageMap) -> (Vec<ModelUsageRow>, ModelUsageTotals) {
     let mut rows = Vec::with_capacity(usage.len());
-    let mut totals = ModelUsageTotals::default();
+    let mut totals = ModelUsageTotals {
+        cost_usd: Some(0.0),
+        ..ModelUsageTotals::default()
+    };
     for ((backend, model), bucket) in usage {
-        let cost = kode_core::cost::cost_usd(&model, bucket.input, bucket.output, bucket.cached)
-            .unwrap_or(0.0);
+        let cost = if bucket.input.saturating_add(bucket.output) < bucket.total {
+            None // No complete token split; never report this as free usage.
+        } else {
+            kode_core::cost::cost_usd(&model, bucket.input, bucket.output, bucket.cached)
+        };
         totals.input_tokens = totals.input_tokens.saturating_add(bucket.input);
         totals.output_tokens = totals.output_tokens.saturating_add(bucket.output);
         totals.cached_tokens = totals.cached_tokens.saturating_add(bucket.cached);
         totals.total_tokens = totals.total_tokens.saturating_add(bucket.total);
-        totals.cost_usd += cost;
+        totals.cost_usd = totals
+            .cost_usd
+            .zip(cost)
+            .map(|(total, value)| total + value);
         rows.push(ModelUsageRow {
             source: "local".into(),
             backend,
@@ -439,9 +450,13 @@ fn usage_rows(usage: UsageMap) -> (Vec<ModelUsageRow>, ModelUsageTotals) {
             .then_with(|| left.backend.cmp(&right.backend))
             .then_with(|| left.model.cmp(&right.model))
     });
-    totals.cost_usd = (totals.cost_usd * 1_000_000.0).round() / 1_000_000.0;
+    totals.cost_usd = totals
+        .cost_usd
+        .map(|cost| (cost * 1_000_000.0).round() / 1_000_000.0);
     for row in &mut rows {
-        row.cost_usd = (row.cost_usd * 1_000_000.0).round() / 1_000_000.0;
+        row.cost_usd = row
+            .cost_usd
+            .map(|cost| (cost * 1_000_000.0).round() / 1_000_000.0);
     }
     (rows, totals)
 }
@@ -475,6 +490,11 @@ fn finish_snapshot(
             }
         })
         .collect();
+    let warnings = if totals.cost_usd.is_none() {
+        vec!["Some usage has no model price or complete token split; cost is unknown, not zero or free.".into()]
+    } else {
+        Vec::new()
+    };
     ModelUsageSnapshot {
         period: period.to_string(),
         until_ms: None,
@@ -483,13 +503,72 @@ fn finish_snapshot(
         totals,
         daily,
         timeline: Vec::new(),
-        warnings: Vec::new(),
+        warnings,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_or_incomplete_cost_is_null_and_contaminates_the_total() {
+        let mut usage = UsageMap::new();
+        usage.insert(
+            ("codebuddy".into(), "claude-sonnet-4".into()),
+            UsageBucket {
+                total: 100,
+                requests: 1,
+                ..UsageBucket::default()
+            },
+        );
+        usage.insert(
+            ("codex".into(), "unknown-new-model".into()),
+            UsageBucket {
+                input: 20,
+                output: 5,
+                total: 25,
+                requests: 1,
+                ..UsageBucket::default()
+            },
+        );
+        usage.insert(
+            ("claude".into(), "claude-sonnet-4".into()),
+            UsageBucket {
+                input: 100,
+                output: 10,
+                total: 110,
+                requests: 1,
+                ..UsageBucket::default()
+            },
+        );
+        let snapshot = finish_snapshot("today", 3, usage, DailyMap::new(), None);
+        assert_eq!(snapshot.totals.total_tokens, 235);
+        assert_eq!(snapshot.totals.cost_usd, None);
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .find(|r| r.backend == "claude")
+                .unwrap()
+                .cost_usd
+                .unwrap()
+                > 0.0
+        );
+        assert!(snapshot
+            .rows
+            .iter()
+            .filter(|r| r.backend != "claude")
+            .all(|r| r.cost_usd.is_none()));
+        assert!(serde_json::to_value(&snapshot).unwrap()["totals"]["cost_usd"].is_null());
+        assert!(!snapshot.warnings.is_empty());
+        assert_eq!(
+            finish_snapshot("today", 0, UsageMap::new(), DailyMap::new(), None)
+                .totals
+                .cost_usd,
+            Some(0.0)
+        );
+    }
 
     #[test]
     fn bounded_ranges_include_endpoints_and_exclude_later_or_undated_records() {

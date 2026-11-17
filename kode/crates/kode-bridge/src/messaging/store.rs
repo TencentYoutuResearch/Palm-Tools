@@ -265,6 +265,13 @@ impl Store {
         tx.commit()?;
         Ok(result)
     }
+    pub(super) fn message_for_key(&self, source: &Address, key: &str) -> Result<Option<Message>> {
+        let body: Option<String> = self.db.lock().query_row(
+            "SELECT body FROM messages WHERE source_node=?1 AND source_session=?2 AND idem=?3",
+            params![source.node_id, source.session_id, key], |row| row.get(0),
+        ).optional()?;
+        body.map(|body| serde_json::from_str(&body).map_err(Into::into)).transpose()
+    }
     pub(super) fn insert_in(db: &Connection, m: Message) -> Result<Message> {
         let previous: Option<String> = db.query_row("SELECT body FROM messages WHERE id=?1 OR (source_node=?2 AND source_session=?3 AND idem=?4)", params![m.id,m.source.node_id,m.source.session_id,m.idempotency_key], |r| r.get(0)).optional()?;
         if let Some(body) = previous {
@@ -274,6 +281,7 @@ impl Store {
                 || p.content != m.content
                 || p.idempotency_key != m.idempotency_key
                 || p.in_reply_to != m.in_reply_to
+                || p.direct_insert != m.direct_insert
                 || p.hop_count != m.hop_count
                 || p.expires_at.saturating_sub(p.created_at)
                     != m.expires_at.saturating_sub(m.created_at)
@@ -378,6 +386,7 @@ mod query_tests {
             },
             content: "fixture".into(),
             idempotency_key: id.into(),
+            direct_insert: false,
             in_reply_to: None,
             hop_count: 0,
             created_at: now(),

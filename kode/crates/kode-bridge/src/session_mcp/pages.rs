@@ -67,7 +67,9 @@ pub(super) fn message(message: Value, offset: u64) -> Result<Value> {
     }
     let build = |end: usize| {
         let text: String = points[offset..end].iter().collect();
-        json!({"id":message["id"],"source":message["source"],"target":message["target"],"in_reply_to":message["in_reply_to"],"status":message["status"],"content":text,"offset":offset,"next":if end<points.len(){Some(end)}else{None},"content_length":points.len(),"token_budget":budget()})
+        let mut page = json!({"id":message["id"],"source":message["source"],"target":message["target"],"in_reply_to":message["in_reply_to"],"status":message["status"],"content":text,"offset":offset,"next":if end<points.len(){Some(end)}else{None},"content_length":points.len(),"token_budget":budget()});
+        if message["direct_insert"] == true { page["direct_insert"] = json!(true); }
+        page
     };
     let mut low = offset;
     let mut high = offset.saturating_add(4096).min(points.len());

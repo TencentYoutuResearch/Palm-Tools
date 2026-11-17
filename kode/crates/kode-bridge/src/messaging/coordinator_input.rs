@@ -17,6 +17,7 @@ fn key(message: &str) -> String {
     format!("coordinator-input:{}", json!(message))
 }
 fn source(db: &Connection, conversation: &str, message: &str) -> Result<Value> {
+    if let Some(input) = super::collaboration::discussion_dispatch::source(db, conversation, message)? { return Ok(input); }
     let body:String=db.query_row("SELECT body FROM conversation_messages WHERE conversation_id=?1 AND id=?2 AND actor='human:local_owner'",params![conversation,message],|r|r.get(0))?;
     Ok(serde_json::from_str(&body)?)
 }
@@ -68,6 +69,7 @@ impl Store {
         }
         super::coordinator_close::ensure_open(&tx, &input.operation_id, input.attempt)?;
         let human = source(&tx, conversation, message)?;
+        super::collaboration::discussion_dispatch::admit_delivery(&tx, &human)?;
         let team = human["team_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("invalid conversation team"))?;
@@ -120,6 +122,7 @@ impl Store {
                     &json!({"format":"kode.coordinator.input.v1","conversation_id":conversation,"source_message_id":message,"operation_id":op.id}),
                 )?,
                 idempotency_key: format!("coordinator-input-{}", uuid::Uuid::new_v4()),
+                direct_insert: false,
                 in_reply_to: None,
                 hop_count: 0,
                 created_at: at,

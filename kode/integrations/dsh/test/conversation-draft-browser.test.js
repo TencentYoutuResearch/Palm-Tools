@@ -37,7 +37,7 @@ test('Chrome restart recovers accepted-send draft cleanup without another messag
       try {
         const route = routes.get(new URL(req.url, 'http://localhost').pathname)
         if (route) return await route.handler(req, res)
-        if (await collabRenderPage(req, res)) return
+        if (await collabRenderPage(req, res, {hub})) return
         res.writeHead(404); res.end()
       } catch { if (!res.headersSent) res.writeHead(500); res.end() }
     })
@@ -45,16 +45,18 @@ test('Chrome restart recovers accepted-send draft cleanup without another messag
     const url = `http://127.0.0.1:${server.address().port}`
     browser = await headlessBrowser(process.env.KODE_TEST_BROWSER_BIN, profile)
     let page = await browser.page(url)
-    const wait = expression => page.evaluate(`(async()=>{const until=Date.now()+10000;while(Date.now()<until){if(${expression})return;await new Promise(r=>setTimeout(r,25))}throw Error('Draft recovery UI timed out')})()`)
+    const wait = expression => page.evaluate(`(async()=>{const until=Date.now()+10000;while(Date.now()<until){if(${expression})return;await new Promise(r=>setTimeout(r,25))}throw Error('Draft recovery UI timed out: '+JSON.stringify({waitingFor:${JSON.stringify(expression)},clearFailures:globalThis.fixtureDraftClearFailures,body:document.body.innerText,errors:globalThis.fixtureErrors}))})()`)
+  const enterCollaboration=async()=>{await wait(`document.querySelector('.kode-collab-mode-switch button')`);if(await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').getAttribute('aria-label').includes('会话')`)){await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').click()`);await wait(`Array.from(document.querySelectorAll('[role=menuitem]')).some(b=>b.textContent.includes('协作'))`);await page.evaluate(`Array.from(document.querySelectorAll('[role=menuitem]')).find(b=>b.textContent.includes('协作')).click()`)}}
     const select = async () => {
       await wait('globalThis.fixture')
-      await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]')?.click()`)
-      await wait(`document.querySelector('.kode-collab-contact-name')`)
-      await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
-      await wait(`document.querySelector('.kode-collab-composer textarea')`)
+      await enterCollaboration()
+      await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
+      await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`)
+      await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`)
+      await wait(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]')`)
     }
     await select()
-    await page.evaluate(`document.querySelector('.kode-collab-composer textarea').focus()`)
+    await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').focus()`)
     await page.call('Input.insertText', { text: '浏览器重启后不能重发此需求' })
     await wait(`document.querySelector('.kode-collab-draft-status')?.textContent==='草稿已保存。'`)
     await page.evaluate(`(()=>{
@@ -68,7 +70,7 @@ test('Chrome restart recovers accepted-send draft cleanup without another messag
         return original.call(this,row,...args)
       }
     })()`)
-    await page.evaluate(`document.querySelector('.kode-collab-composer button[type="submit"]').click()`)
+    await page.evaluate(`document.querySelector('.kode-collab-composer button[aria-label="发送"]').click()`)
     await wait(`globalThis.fixtureDraftClearFailures===1 && document.querySelector('.kode-collab-draft-status')?.textContent.includes('未能保存')`)
     assert.equal(sends, 1)
     assert.equal((await call(`conversations/${team.conversation_id}/messages`)).items.length, 1)
@@ -76,7 +78,7 @@ test('Chrome restart recovers accepted-send draft cleanup without another messag
     browser = await headlessBrowser(process.env.KODE_TEST_BROWSER_BIN, profile)
     page = await browser.page(url)
     await select()
-    await wait(`document.querySelector('.kode-collab-composer textarea').value==='' && document.querySelector('.kode-collab-draft-status')?.textContent==='草稿已保存。'`)
+    await wait(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').textContent==='' && document.querySelector('.kode-collab-draft-status')?.textContent==='草稿已保存。'`)
     assert.equal(sends, 1)
     assert.equal((await call(`conversations/${team.conversation_id}/messages`)).items.length, 1)
     assert.deepEqual(await call('budgets/budget'), beforeBudget)

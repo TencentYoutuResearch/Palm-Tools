@@ -41,7 +41,7 @@ test('activation review displays the exact frozen dependency source, permissions
       try {
         const route = routes.get(new URL(req.url, 'http://localhost').pathname)
         if (route) return await route.handler(req, res)
-        if (await collabRenderPage(req, res)) return
+        if (await collabRenderPage(req, res, {hub})) return
         res.writeHead(404); res.end()
       } catch { if (!res.headersSent) res.writeHead(500); res.end() }
     })
@@ -52,9 +52,9 @@ test('activation review displays the exact frozen dependency source, permissions
     const wait = expression => page.evaluate(`(async()=>{const end=Date.now()+10000;while(Date.now()<end){if(${expression})return;await new Promise(r=>setTimeout(r,25))}throw Error('Dependency UI timeout')})()`)
     const button = text => `Array.from(document.querySelectorAll('button')).find(button=>button.textContent.trim()===${JSON.stringify(text)}&&!button.disabled)`
     const click = async text => { await wait(button(text)); await page.evaluate(`${button(text)}.click()`) }
-    await wait('globalThis.fixture'); await click('IM'); await wait(`document.querySelector('.kode-collab-contact-name')`)
-    await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
-    await click('团队管理'); await click('核对激活条件')
+    await wait('globalThis.fixture'); await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`); await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`)
+    await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`)
+    await click('SuperAgent 设置'); await click('展开高级设置'); await click('核对激活条件')
     await wait(`document.querySelector('.kode-collab-dependencies')`)
     const text = await page.evaluate(`document.querySelector('.kode-collab-dependencies').innerText`)
     for (const value of [artifact.hash, artifact.config.spec.artifact.content_hash, 'fixture://reviewed-project/method', 'kode_artifact_capture', hub.node]) assert.ok(text.includes(value), value)

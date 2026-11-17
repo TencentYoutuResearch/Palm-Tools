@@ -1,6 +1,7 @@
 import React from 'react'
+import { IconButton } from './icons.js'
 const h = React.createElement
-export function SessionDiagnostics({ run, request, onOpenSession }) {
+export function SessionDiagnostics({ run, request, onOpenSession, compact = false }) {
   const [opened, setOpened] = React.useState(false), [page, setPage] = React.useState(null)
   const [busy, setBusy] = React.useState(false), [error, setError] = React.useState('')
   const active = React.useRef(null)
@@ -34,17 +35,18 @@ export function SessionDiagnostics({ run, request, onOpenSession }) {
     } catch { if (!controller.signal.aborted) setError('无法更新会话诊断，请刷新后重试。') }
     finally { if (!controller.signal.aborted) setBusy(false) }
   }
+  React.useEffect(() => { if (compact) void load(false) }, [compact, run.id, run.revision, run.team_id, run.home_hub])
   return h('section', { className: 'kode-collab-session-diagnostics', 'aria-label': '内部会话只读诊断' },
-    h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void load(false) }, opened ? '刷新会话诊断' : '查看内部会话诊断'),
-    opened && h('p', { className: 'kode-collab-note' }, '只读显示 Home 已记录的执行身份与状态，运行端存活状态尚未探测。'),
+    opened ? h(IconButton, { icon: 'refresh', label: '刷新会话诊断', disabled: busy, onClick: () => void load(false) }) : h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void load(false) }, '查看内部会话诊断'),
+    !compact && opened && h('p', { className: 'kode-collab-note' }, '只读显示 Home 已记录的执行身份与状态，运行端存活状态尚未探测。'),
     page && page.run_revision !== run.revision && h('p', { role: 'status' }, '任务版本已改变，请刷新会话诊断。'),
     error && h('p', { role: 'status' }, error),
-    page && h('ul', null, ...page.items.map(item => h('li', { key: item.assignment_id },
+    page && h('ul', null, ...page.items.map(item => h('li', { key: item.assignment_id, 'data-assignment-id': item.assignment_id },
       h('p', null, `${item.stage_id} · 第 ${item.stage_attempt} 次 · ${item.current_stage_attempt ? '当前分配' : '历史分配'}`),
-      h('p', null, `Host ${item.worker.node_id} · Session ${item.worker.session_id}`),
-      h('p', null, `Operation ${item.operation.id} · ${item.operation.state} · epoch ${item.operation.epoch}`),
-      h('p', null, `停止记录 ${item.stop_state || '尚无确认'} · 用量结算${item.accounting_confirmed ? '已确认' : '待确认'} · 持有资源 ${item.held_resources}`),
-      onOpenSession && item.worker.node_id === run.home_hub && h('button', { type: 'button', className: 'kode-collab-button', onClick: () => void open(item) }, '打开原生会话（只读）'),
+      !compact && h('p', null, `Host ${item.worker.node_id} · Session ${item.worker.session_id}`),
+      !compact && h('p', null, `Operation ${item.operation.id} · ${item.operation.state} · epoch ${item.operation.epoch}`),
+      !compact && h('p', null, `停止记录 ${item.stop_state || '尚无确认'} · 用量结算${item.accounting_confirmed ? '已确认' : '待确认'} · 持有资源 ${item.held_resources}`),
+      onOpenSession && item.worker.node_id === run.home_hub && h('button', { type: 'button', className: 'kode-collab-button', disabled: busy || page.run_revision !== run.revision, onClick: () => void open(item) }, compact ? `打开执行会话（只读）：${item.worker.session_id}` : '打开原生会话（只读）'),
       item.worker.node_id !== run.home_hub && h('p', { className: 'kode-collab-note' }, '原始会话保存在执行 Host，可在该 Host 的 Session 模式只读查看。')))),
     opened && page?.items.length === 0 && h('p', null, '尚无 Worker 会话分配记录。'),
     page?.next_cursor && h('button', { type: 'button', className: 'kode-collab-button', disabled: busy || page.run_revision !== run.revision, onClick: () => void load(true) }, '更多会话记录'))

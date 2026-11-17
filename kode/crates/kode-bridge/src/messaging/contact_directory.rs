@@ -46,11 +46,52 @@ pub struct Page {
     pub q: String,
     #[serde(default)]
     pub archived: bool,
+    pub workspace_host: Option<String>,
+    pub workspace_id: Option<String>,
+    pub workspace_root: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceScope {
+    host_id: String,
+    workspace_id: String,
+    root_ref: String,
+}
+
+impl Page {
+    fn workspace_scope(&self) -> Result<Option<WorkspaceScope>> {
+        match (
+            &self.workspace_host,
+            &self.workspace_id,
+            &self.workspace_root,
+        ) {
+            (None, None, None) => Ok(None),
+            (Some(host), Some(id), Some(root))
+                if valid_id(host)
+                    && valid_id(id)
+                    && !root.trim().is_empty()
+                    && root.len() <= 1024
+                    && !root.contains('\0') =>
+            {
+                Ok(Some(WorkspaceScope {
+                    host_id: host.clone(),
+                    workspace_id: id.clone(),
+                    root_ref: root.clone(),
+                }))
+            }
+            _ => bail!("invalid contact workspace scope"),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Cursor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<WorkspaceScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    home_hub: Option<String>,
     q: String,
     archived: bool,
     pinned: i64,
@@ -190,10 +231,11 @@ impl Store {
     pub fn contact_directory(&self, page: Page) -> Result<Value> {
         let limit = page.limit.unwrap_or(25);
         let search = page.q.trim();
+        let workspace = page.workspace_scope()?;
         if !(1..=50).contains(&limit)
             || page.q.len() > 160
             || page.q.contains('\0')
-            || page.after.len() > 2048
+            || page.after.len() > if workspace.is_some() { 16384 } else { 2048 }
         {
             bail!("invalid contact directory query")
         }
@@ -201,7 +243,9 @@ impl Store {
             None
         } else {
             let value: Cursor = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&page.after)?)?;
-            if value.q != search
+            if value.workspace != workspace
+                || value.home_hub.as_deref() != workspace.as_ref().map(|_| self.node_id.as_str())
+                || value.q != search
                 || value.archived != page.archived
                 || !valid_id(&value.id)
                 || !(0..=1).contains(&value.pinned)
@@ -216,6 +260,7 @@ impl Store {
         let db = self.db.lock();
         let sql = "WITH facts AS (
             SELECT t.id,r.body,
+              (SELECT json_object('sequence',m.sequence,'content',substr(json_extract(m.body,'$.content'),1,160),'actor',COALESCE(json_extract(m.body,'$.actor.kind'),'system'),'created_at',json_extract(m.body,'$.created_at')) FROM conversation_messages m WHERE m.conversation_id=t.conversation_id ORDER BY m.sequence DESC LIMIT 1) AS preview,
               COALESCE(p.value,'{}') AS preference,
               COALESCE(json_extract(p.value,'$.pinned'),0) AS pinned,
               COALESCE((SELECT MAX(m.sequence) FROM conversation_messages m WHERE m.conversation_id=t.conversation_id),0) AS latest,
@@ -228,12 +273,14 @@ impl Store {
             FROM teams t JOIN team_revisions r ON r.team_id=t.id AND r.revision=t.revision
             LEFT JOIN workbench_documents p ON p.key='contact-preference:'||t.id
             WHERE (?1='' OR instr(lower(json_extract(r.body,'$.spec.name')),lower(?1))>0 OR instr(lower(json_extract(r.body,'$.spec.purpose')),lower(?1))>0)
+              AND (?10 IS NULL OR EXISTS (SELECT 1 FROM json_each(json_extract(r.body,'$.spec.workspace_refs')) w
+                WHERE json_extract(w.value,'$.host_id')=?10 AND json_extract(w.value,'$.workspace_id')=?11 AND json_extract(w.value,'$.root_ref')=?12))
           ), ranked AS (
             SELECT *,CASE WHEN decisions>0 THEN 2 WHEN resources>0 OR stopping>0 THEN 1 ELSE 0 END AS attention,
               CASE WHEN unread_count>0 THEN 1 ELSE 0 END AS unread,
               CASE WHEN COALESCE(json_extract(preference,'$.archived'),0)=1 AND latest<=COALESCE(json_extract(preference,'$.archived_through_sequence'),0) AND active_runs=0 THEN 1 ELSE 0 END AS archived
             FROM facts
-          ) SELECT body,preference,pinned,attention,unread,activity,id,latest,unread_count,decisions,resources,stopping,active_runs,archived
+          ) SELECT body,preference,pinned,attention,unread,activity,id,latest,unread_count,decisions,resources,stopping,active_runs,archived,preview
           FROM ranked WHERE archived=?2 AND (?3=0 OR (-pinned,-attention,-unread,-activity,id)>(?4,?5,?6,?7,?8))
           ORDER BY pinned DESC,attention DESC,unread DESC,activity DESC,id ASC LIMIT ?9";
         let mut query = db.prepare(sql)?;
@@ -246,7 +293,10 @@ impl Store {
             cursor.as_ref().map(|v| -v.unread).unwrap_or(0),
             cursor.as_ref().map(|v| -v.activity).unwrap_or(0),
             cursor.as_ref().map(|v| v.id.as_str()).unwrap_or(""),
-            limit + 1
+            limit + 1,
+            workspace.as_ref().map(|w| w.host_id.as_str()),
+            workspace.as_ref().map(|w| w.workspace_id.as_str()),
+            workspace.as_ref().map(|w| w.root_ref.as_str())
         ])?;
         let mut items = Vec::new();
         let mut last = None;
@@ -264,8 +314,15 @@ impl Store {
                 serde_json::from_str(&stored)?
             };
             let attention: i64 = row.get(3)?;
-            team["contact"] = json!({"preference":pref,"archived":row.get::<_,bool>(13)?,"latest_sequence":row.get::<_,u64>(7)?,"unread_count":row.get::<_,u64>(8)?,"last_activity_at":row.get::<_,u64>(5)?,"attention":{"decisions":row.get::<_,u64>(9)?,"resources":row.get::<_,u64>(10)?,"stopping":row.get::<_,u64>(11)?,"active_runs":row.get::<_,u64>(12)?},"needs_attention":attention>0});
+            let preview = row
+                .get::<_, Option<String>>(14)?
+                .map(|value| serde_json::from_str::<Value>(&value))
+                .transpose()?
+                .unwrap_or(Value::Null);
+            team["contact"] = json!({"preview":preview,"preference":pref,"archived":row.get::<_,bool>(13)?,"latest_sequence":row.get::<_,u64>(7)?,"unread_count":row.get::<_,u64>(8)?,"last_activity_at":row.get::<_,u64>(5)?,"attention":{"decisions":row.get::<_,u64>(9)?,"resources":row.get::<_,u64>(10)?,"stopping":row.get::<_,u64>(11)?,"active_runs":row.get::<_,u64>(12)?},"needs_attention":attention>0});
             last = Some(Cursor {
+                workspace: workspace.clone(),
+                home_hub: workspace.as_ref().map(|_| self.node_id.clone()),
                 q: search.to_owned(),
                 archived: page.archived,
                 pinned: row.get(2)?,
@@ -324,6 +381,37 @@ mod tests {
 
     fn message(store: &Store, team: &str, id: &str, at: u64) {
         store.db.lock().execute("INSERT INTO conversation_messages(id,conversation_id,team_id,actor,request_id,request,body) VALUES(?1,?2,?3,'superagent',?1,'{}',?4)",params![id,format!("conversation-{team}"),team,serde_json::to_string(&json!({"created_at":at})).unwrap()]).unwrap();
+    }
+
+    #[test]
+    fn contact_preview_is_latest_bounded_unicode_and_scoped_to_its_conversation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("preview.sqlite"), "home").unwrap();
+        seed(&store, "one", 1);
+        seed(&store, "two", 1);
+        for (team, id, content) in [
+            ("one", "older", "old".to_string()),
+            ("one", "latest", "掌".repeat(500)),
+            ("two", "foreign", "other conversation".to_string()),
+        ] {
+            store.db.lock().execute("INSERT INTO conversation_messages(id,conversation_id,team_id,actor,request_id,request,body) VALUES(?1,?2,?3,'superagent',?1,'{}',?4)",params![id,format!("conversation-{team}"),team,json!({"content":content,"actor":{"kind":"superagent"},"created_at":2}).to_string()]).unwrap();
+        }
+        let page = store.contact_directory(Page::default()).unwrap();
+        let one = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "one")
+            .unwrap();
+        assert_eq!(one["contact"]["preview"]["content"], "掌".repeat(160));
+        assert_eq!(one["contact"]["preview"]["actor"], "superagent");
+        let two = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "two")
+            .unwrap();
+        assert_eq!(two["contact"]["preview"]["content"], "other conversation");
     }
 
     #[test]
@@ -479,6 +567,175 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    fn scoped_page(host: &str, id: &str, root: &str) -> Page {
+        Page {
+            workspace_host: Some(host.into()),
+            workspace_id: Some(id.into()),
+            workspace_root: Some(root.into()),
+            ..Page::default()
+        }
+    }
+
+    fn seed_workspace(store: &Store, id: &str, at: u64, refs: Value) {
+        let mut body = seed(store, id, at);
+        // Identical labels must never substitute for the authoritative triple.
+        body["spec"]["name"] = json!("same project");
+        body["spec"]["workspace_refs"] = refs;
+        store
+            .db
+            .lock()
+            .execute(
+                "UPDATE team_revisions SET body=?1 WHERE team_id=?2",
+                params![body.to_string(), id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_contacts_filter_exact_triples_before_pagination_and_bind_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("scoped.sqlite"), "authority-home").unwrap();
+        let workspace =
+            json!({"host_id":"execution-host","workspace_id":"project","root_ref":"/work/掌"});
+        seed_workspace(&store, "matching-a", 2, json!([workspace]));
+        seed_workspace(
+            &store,
+            "matching-b",
+            1,
+            json!([
+                {"host_id":"other-host","workspace_id":"project","root_ref":"/work/掌"},workspace
+            ]),
+        );
+        seed_workspace(
+            &store,
+            "foreign-host",
+            100,
+            json!([{"host_id":"other-host","workspace_id":"project","root_ref":"/work/掌"}]),
+        );
+        seed_workspace(
+            &store,
+            "foreign-root",
+            100,
+            json!([{"host_id":"execution-host","workspace_id":"project","root_ref":"/work/掌/child"}]),
+        );
+        seed_workspace(
+            &store,
+            "foreign-id",
+            100,
+            json!([{"host_id":"execution-host","workspace_id":"other","root_ref":"/work/掌"}]),
+        );
+        seed(&store, "legacy", 200);
+        change(&store, "foreign-host", 0, Action::Pin).unwrap();
+        let mut query = scoped_page("execution-host", "project", "/work/掌");
+        query.limit = Some(1);
+        let first = store.contact_directory(query).unwrap();
+        assert_eq!(first["home_hub"], "authority-home");
+        assert_eq!(first["items"][0]["id"], "matching-a");
+        let cursor = first["next_cursor"].as_str().unwrap();
+        let decoded: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(cursor).unwrap()).unwrap();
+        assert_eq!(decoded["home_hub"], "authority-home");
+        assert_eq!(decoded["workspace"], workspace);
+        let mut query = scoped_page("execution-host", "project", "/work/掌");
+        query.after = cursor.into();
+        let second = store.contact_directory(query).unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+        assert_eq!(second["items"][0]["id"], "matching-b");
+        assert!(second["next_cursor"].is_null());
+        for mut foreign in [
+            Page::default(),
+            scoped_page("other-host", "project", "/work/掌"),
+            scoped_page("execution-host", "other", "/work/掌"),
+            scoped_page("execution-host", "project", "/work/掌/child"),
+        ] {
+            foreign.after = cursor.into();
+            assert!(store.contact_directory(foreign).is_err());
+        }
+        let mut altered = decoded;
+        altered["home_hub"] = json!("execution-host");
+        let mut query = scoped_page("execution-host", "project", "/work/掌");
+        query.after = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&altered).unwrap());
+        assert!(store.contact_directory(query).is_err());
+        let global = store
+            .contact_directory(Page {
+                limit: Some(1),
+                ..Page::default()
+            })
+            .unwrap();
+        let global_cursor = global["next_cursor"].as_str().unwrap();
+        let decoded: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(global_cursor).unwrap()).unwrap();
+        assert!(decoded.get("workspace").is_none());
+        assert!(decoded.get("home_hub").is_none());
+        let mut query = scoped_page("execution-host", "project", "/work/掌");
+        query.after = global_cursor.into();
+        assert!(store.contact_directory(query).is_err());
+        assert_eq!(
+            store.contact_directory(Page::default()).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn workspace_contact_scope_requires_complete_bounded_exact_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("validation.sqlite"), "home").unwrap();
+        for page in [
+            Page {
+                workspace_host: Some("host".into()),
+                ..Page::default()
+            },
+            Page {
+                workspace_id: Some("id".into()),
+                workspace_root: Some("/root".into()),
+                ..Page::default()
+            },
+            scoped_page("", "id", "/root"),
+            scoped_page("h\0", "id", "/root"),
+            scoped_page(&"h".repeat(161), "id", "/root"),
+            scoped_page("host", "bad/id", "/root"),
+            scoped_page("host", "id", ""),
+            scoped_page("host", "id", "  "),
+            scoped_page("host", "id", "/root\0"),
+            scoped_page("host", "id", &"掌".repeat(342)),
+        ] {
+            assert!(store.contact_directory(page).is_err());
+        }
+        assert!(store
+            .contact_directory(scoped_page("host", "id", &"x".repeat(1024)))
+            .is_ok());
+    }
+
+    #[test]
+    fn scoped_cursor_round_trips_maximum_escaped_root_without_widening_global_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("escaped.sqlite"), "home").unwrap();
+        let root = "\u{1}".repeat(1024);
+        let refs = json!([{"host_id":"host","workspace_id":"id","root_ref":root}]);
+        seed_workspace(&store, "a", 2, refs.clone());
+        seed_workspace(&store, "b", 1, refs);
+        let mut page = scoped_page("host", "id", &root);
+        page.limit = Some(1);
+        let result = store.contact_directory(page).unwrap();
+        let after = result["next_cursor"].as_str().unwrap();
+        assert!(after.len() > 2048 && after.len() <= 16384);
+        let mut page = scoped_page("host", "id", &root);
+        page.after = after.into();
+        assert_eq!(
+            store.contact_directory(page).unwrap()["items"][0]["id"],
+            "b"
+        );
+        assert!(store
+            .contact_directory(Page {
+                after: after.into(),
+                ..Page::default()
+            })
+            .is_err());
     }
 
     #[test]

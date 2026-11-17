@@ -21,6 +21,46 @@ pub struct Complete {
     pub expected_revision: u64,
     pub assignment_id: String,
 }
+/// Shapes with an implemented evidence close-out. Runtime independence/workspace checks remain separate.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum StaticProof {
+    Artifact,
+    ReadOnlyReview,
+}
+pub(super) fn static_proof(pack: &Pack, stage: &super::workflows::Stage) -> Option<StaticProof> {
+    let scope = stage.execution.as_ref()?;
+    if scope.network
+        || stage.produces.is_empty()
+        || scope
+            .capabilities
+            .iter()
+            .any(|c| !matches!(c, Capability::Read | Capability::WorkspaceWrite))
+    {
+        return None;
+    }
+    if stage.independent_from.is_empty()
+        && stage.produces.iter().all(|o| {
+            matches!(
+                pack.evidence_rules.get(o),
+                Some(EvidenceRule::Artifact { .. })
+            )
+        })
+    {
+        return Some(StaticProof::Artifact);
+    }
+    if scope.capabilities.iter().all(|c| *c == Capability::Read)
+        && stage.produces.iter().all(|o| {
+            matches!(
+                pack.evidence_rules.get(o),
+                Some(EvidenceRule::Review { .. } | EvidenceRule::Verification { .. })
+            )
+        })
+    {
+        return Some(StaticProof::ReadOnlyReview);
+    }
+    None
+}
+
 impl Store {
     pub fn complete_work_stage(&self, id: &str, stage_id: &str, input: Complete) -> Result<Value> {
         if !valid_id(id)
@@ -75,36 +115,14 @@ impl Store {
             .iter()
             .find(|s| s.id == stage_id)
             .ok_or_else(|| anyhow::anyhow!("unknown stage"))?;
-        // Unsupported proofs remain explicit gates, never substituted by an Agent's verdict.
-        let scope = stage
-            .execution
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("stage execution scope missing"))?;
-        let artifact_stage = stage.independent_from.is_empty()
-            && stage.produces.iter().all(|o| {
-                matches!(
-                    pack.evidence_rules.get(o),
-                    Some(EvidenceRule::Artifact { .. })
-                )
-            });
-        let review_stage = !assignment["execution_workspace"].is_null()
-            && scope.capabilities.iter().all(|c| *c == Capability::Read)
-            && stage.produces.iter().all(|o| {
-                matches!(
-                    pack.evidence_rules.get(o),
-                    Some(EvidenceRule::Review { .. } | EvidenceRule::Verification { .. })
-                )
-            });
-        if scope.network
-            || stage.produces.is_empty()
-            || (!artifact_stage && !review_stage)
-            || scope
-                .capabilities
-                .iter()
-                .any(|c| !matches!(c, Capability::Read | Capability::WorkspaceWrite))
-        {
-            bail!("stage requires additional independent or external execution proof")
-        }
+        // Use the same static proof gate at intake and completion; runtime workspace proof remains mandatory.
+        let artifact_stage = match static_proof(&pack, stage) {
+            Some(StaticProof::Artifact) => true,
+            Some(StaticProof::ReadOnlyReview) if !assignment["execution_workspace"].is_null() => {
+                false
+            }
+            _ => bail!("stage requires additional independent or external execution proof"),
+        };
         let state = run["stages"]
             .as_array()
             .unwrap()

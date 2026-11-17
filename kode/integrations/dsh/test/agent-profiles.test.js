@@ -74,7 +74,8 @@ test('model restrictions and default effort survive editing and reopening, with 
     const reopened = await new AgentProfiles(file).open()
     const edited = reopened.list().find(row => row.id === original.id)
     assert.deepEqual(edited.allowedModels, ['small'])
-    assert.equal(edited.defaultReasoningEffort, 'low')
+    assert.equal(edited.defaultReasoningEffort, undefined)
+    assert.deepEqual(reopened.defaultModelFor(original.id), { reasoningEffort: 'low' })
     await reopened.save({ ...edited, allowedModels: null, defaultReasoningEffort: null })
     const cleared = (await new AgentProfiles(file).open()).list().find(row => row.id === original.id)
     assert.equal(cleared.allowedModels, undefined)
@@ -98,5 +99,25 @@ test('unused binding cleanup cannot discard pending or acknowledged quota fences
     await profiles.bind('empty', 'p')
     await profiles.clearUnusedBinding('empty')
     assert.equal(profiles.binding('empty'), undefined)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('new native profile saves put model and effort only in local defaults without changing bound revisions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-native-profile-selection-'))
+  try {
+    const profiles = await new AgentProfiles(join(root, 'profiles.json')).open()
+    const profile = await profiles.save({ id: 'native', name: 'Codex', type: 'codex', defaultModel: 'preferred', defaultReasoningEffort: 'high' })
+    assert.equal(profile.defaultModel, undefined)
+    assert.equal(profile.defaultReasoningEffort, undefined)
+    assert.deepEqual(profiles.defaultModelFor('native'), { model: 'preferred', reasoningEffort: 'high' })
+    await profiles.bind('conversation', 'native')
+    const binding = profiles.binding('conversation')
+    await profiles.setDefaultModel('native', { model: 'another', reasoningEffort: 'low' })
+    assert.deepEqual(profiles.get('native'), profile)
+    assert.deepEqual(profiles.binding('conversation'), binding)
+    const reopened = await new AgentProfiles(profiles.path).open()
+    assert.deepEqual(reopened.get('native'), profile)
+    assert.deepEqual(reopened.defaultModelFor('native'), { model: 'another', reasoningEffort: 'low' })
+    assert.deepEqual(reopened.modelDefaults, {}, 'new personal defaults do not enter the synchronizable profile document')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

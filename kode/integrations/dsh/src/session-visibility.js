@@ -1,10 +1,10 @@
 /** Setup events alone do not make a conversation, even if dsh's cold cache says otherwise. */
 export function isSetupOnlySession(row, observed, binding, agent) {
-  if (observed?.unavailable || !observed?.events?.length || row.savedTab || binding?.threadId
+  if (observed?.unavailable || observed?.inheritedEventCount !== 0 || !observed?.events?.length || row.savedTab || binding?.threadId
     || row.running || agent?.status === 'running'
     || row.projections?.values?.userQuestions?.questions?.active?.length
     || ['inbox', 'kodeInbox'].some(key => Object.values(row.projections?.values?.[key] ?? {}).some(queue => Array.isArray(queue) && queue.length))) return false
-  return !observed.events.some(event => ['user/message', 'assistant/message', 'tool/call', 'plugin:kode/shared-interaction'].includes(event.type))
+  return observed.events.every(event => ['permission/preset', 'sandbox/mode', 'approval/policy', 'turn/start', 'turn/end', 'model/selection'].includes(event.type))
 }
 
 export async function setupOnlySessionIds(ctx, controller, items) {

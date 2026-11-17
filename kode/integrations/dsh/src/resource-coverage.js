@@ -1,5 +1,7 @@
 /** Owner inventory of registered Host profiles, including idle/retired bindings. No provider calls. */
+import { builderProfileMetadata } from './builder-profile-metadata.js'
 import { profileRevision } from './agent-profiles.js'
+import { managedNativeEnabled } from './managed-codex-profile.js'
 import { nativeUsageCapability } from './native-session.js'
 const grantCapability = official => ({ status: official ? 'conditional' : 'unsupported', reason: official ? 'requires_controlled_entry_and_trusted_tool_policies' : 'native_internal_tools_not_fully_enforced', automatic_team_admission: false })
 
@@ -31,18 +33,19 @@ export async function resourceCoverage(service, client, host, { after = '', limi
       items.push({ cursor: target.key, host, resource_kind: 'official_loop_provider', provider_id: provider.provider_id,
         grant_capability: grantCapability(true), name: provider.name, route_registered: provider.registered, runtime_available: provider.registered,
         quota_source: null, quota_status: 'source_not_connected', account: null, limits: [],
-        model_catalog_status: 'not_collected', models: [], usage_capability: { supported: false, reason: 'official_loop_metering_not_integrated' },
+        model_catalog_status: 'not_collected', models: [], usage_capability: { supported: true, source: 'official_controlled_call', status: 'conditional', reason: 'requires_trusted_adapter_usage_and_controlled_entry' },
         eligible_for_dispatch: false, eligibility_reason: 'inventory_is_not_admission', budget_status: 'requires_assignment_context' })
       continue
     }
     const { profile, bindings } = target
-    const usage = nativeUsageCapability(profile)
+    const usage = profile.type === 'dsh' ? { supported: true, source: 'official_controlled_call', status: 'conditional', reason: 'requires_trusted_adapter_usage_and_controlled_entry' } : nativeUsageCapability(profile)
     const row = { cursor: target.key, host, resource_kind: 'execution_profile', profile_id: profile.id, profile_revision: target.revision, name: profile.name, executor_type: profile.type,
-      grant_capability: grantCapability(profile.type === 'dsh'), configured: target.configured, bound_sessions: bindings.length, runtime_available: service.hasRuntime(profile.type),
-      quota_source: usage.supported ? 'codex_app_server' : null, usage_capability: usage,
-      quota_status: usage.supported ? 'not_connected' : 'source_unsupported', account: null, limits: [],
+      grant_capability: grantCapability(profile.type === 'dsh' || managedNativeEnabled(profile)), configured: target.configured, bound_sessions: bindings.length, runtime_available: service.hasRuntime(profile.type),
+      quota_source: usage.source === 'codex_thread_token_usage' ? 'codex_app_server' : null, usage_capability: usage,
+      quota_status: usage.source === 'codex_thread_token_usage' ? 'not_connected' : 'source_unsupported', account: null, limits: [],
       remote_authorities: [...new Set(bindings.map(binding => binding.managedOperation?.home_node).filter(Boolean))].sort(),
       eligible_for_dispatch: false, eligibility_reason: 'inventory_is_not_admission', budget_status: 'requires_assignment_context' }
+    Object.assign(row, builderProfileMetadata(profile, row.runtime_available && target.configured, service.registeredBuilderProviders?.() ?? []))
     if (client && host) {
       try {
         const query = `host=${encodeURIComponent(host)}&profile=${encodeURIComponent(profile.id)}`
@@ -50,7 +53,7 @@ export async function resourceCoverage(service, client, host, { after = '', limi
           client.call(`/api/v1/messaging/resource-binding?${query}`),
           client.call(`/api/v1/messaging/quota-snapshots?${query}`),
         ])
-        projectQuota(row, binding, quota, usage.supported)
+        projectQuota(row, binding, quota, usage.source === 'codex_thread_token_usage')
       } catch { row.quota_status = 'authority_unavailable' }
       // Monetary facts have different scopes/units; never merge them into Codex windows.
       row.provider_monetary = { status: 'unavailable', sources: [] }
@@ -76,7 +79,7 @@ export async function resourceCoverage(service, client, host, { after = '', limi
         if (context.policy?.host !== host || context.policy?.profile !== profile.id || context.binding?.host !== host || context.binding?.profile !== profile.id) throw new Error('Resource scope mismatch')
         if (!context.quota) remote.quota_status = 'snapshot_unsupported'
         else {
-          projectQuota(remote, context.binding, context.quota, usage.supported)
+          projectQuota(remote, context.binding, context.quota, usage.source === 'codex_thread_token_usage')
           remote.assignment_binding_current = context.binding.binding_current === true && context.binding.revision === context.policy.binding_revision && context.binding.account_id === context.policy.account_id && context.binding.account_epoch === context.policy.account_epoch
         }
       } catch { remote.quota_status = 'authority_unavailable' }

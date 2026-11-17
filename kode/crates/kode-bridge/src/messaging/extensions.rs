@@ -152,7 +152,8 @@ impl Extensions {
                     .context("source not found")?;
                 let before = value["sources"][index].clone();
                 let operation = (|| -> Result<()> {
-                    let (skills, plugins, revision, release, packages) = files::snapshot(&self.root, &before)?;
+                    let (skills, plugins, revision, release, packages) =
+                        files::snapshot(&self.root, &before)?;
                     let next = files::desired(&self.home, &before, &skills)?;
                     let previous = before["links"].as_array().cloned().unwrap_or_default();
                     value["sources"][index]["links"] = json!(next);
@@ -171,7 +172,8 @@ impl Extensions {
                         value["sources"][index] = before.clone();
                         return Err(error);
                     }
-                    if let Err(error) = files::native_sync(&self.root, &mut value["sources"][index])
+                    if let Err(error) =
+                        files::native_sync(&self.root, &self.home, &mut value["sources"][index])
                     {
                         value["sources"][index]["nativeStatus"]["codex"] =
                             json!(format!("failed: {error}"));
@@ -193,7 +195,9 @@ impl Extensions {
                     .iter()
                     .position(|row| row["id"].as_str() == Some(id))
                     .context("source not found")?;
-                if let Err(error) = files::native_remove(&self.root, &mut value["sources"][index]) {
+                if let Err(error) =
+                    files::native_remove(&self.root, &self.home, &mut value["sources"][index])
+                {
                     save(hub, &value)?;
                     return Err(error);
                 }

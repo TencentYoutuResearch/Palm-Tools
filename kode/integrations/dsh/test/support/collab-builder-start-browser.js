@@ -1,3 +1,4 @@
+import { revealBuilderControl } from './reveal-builder-control.js'
 import { CoordinatorUpdates } from '../../src/coordinator-updates.js'
 import { AssignmentDispatchHost } from '../../src/assignment-dispatch-host.js'
 import { WorkRunController } from '../../src/work-run-controller.js'
@@ -109,13 +110,31 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     browser = await headlessBrowser(process.env.KODE_TEST_BROWSER_BIN, browserProfile)
     const page = await browser.page(`http://127.0.0.1:${server.address().port}`)
     const wait = expression => page.evaluate(`(async()=>{const until=Date.now()+10000;while(Date.now()<until){if(${expression})return;await new Promise(r=>setTimeout(r,25))}throw Error('Builder startup render timeout: '+document.body.innerText.slice(-1800))})()`)
-    const click = text => page.evaluate(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent===${JSON.stringify(text)}).click()`)
-    await wait('globalThis.fixture'); await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]').click()`)
-    await wait(`Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='团队搭建助手')`); await click('团队搭建助手')
-    await wait(`document.querySelector('.kode-collab-builder-create textarea')`)
-    await page.evaluate(`document.querySelector('.kode-collab-builder-create textarea').focus()`)
+    const click = async text => {
+      const target = `Array.from(document.querySelectorAll('button')).find(button=>(button.textContent===${JSON.stringify(text)}||button.getAttribute('aria-label')===${JSON.stringify(text)}))`
+      await revealBuilderControl(page, target)
+      await page.evaluate(`(${target}).click()`)
+    }
+    const reveal = selector => revealBuilderControl(page, `document.querySelector(${JSON.stringify(selector)})`)
+    const chooseDraft = async value => {
+      const target=value?`Array.from(document.querySelectorAll('[data-builder-draft-id]')).find(button=>button.dataset.builderDraftId===${JSON.stringify(value)})`:`document.querySelector('[aria-label="新建团队设计消息列"]')`
+      await wait(target)
+      await revealBuilderControl(page,target)
+      await page.evaluate(`(${target}).click()`)
+    }
+    await wait('globalThis.fixture');
+    await wait(`document.querySelector('.kode-collab-mode-switch button')`)
+    if(await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').getAttribute('aria-label').includes('会话')`)){
+      await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').click()`)
+      await wait(`Array.from(document.querySelectorAll('[role=menuitem]')).some(b=>b.textContent.includes('协作'))`)
+      await page.evaluate(`Array.from(document.querySelectorAll('[role=menuitem]')).find(b=>b.textContent.includes('协作')).click()`)
+    }
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
+    await wait(`Array.from(document.querySelectorAll('button')).some(button=>button.getAttribute('aria-label')==='私信 Team Builder')`); await page.evaluate(`document.querySelector('button[aria-label="私信 Team Builder"]').click()`)
+    await wait(`document.querySelector('.kode-collab-builder-create [role=textbox][contenteditable=true]')`)
+    await page.evaluate(`document.querySelector('.kode-collab-builder-create [role=textbox][contenteditable=true]').focus()`)
     await page.call('Input.insertText', { text: 'Browser startup test' })
-    await wait(`document.querySelector('.kode-collab-builder-create button[type="submit"]')?.disabled === false`)
+    await wait(`document.querySelector('.kode-collab-builder-create button[aria-label="保存目标并继续"]')?.disabled === false`)
     await click('保存目标并继续')
     await wait(`document.querySelector('.kode-collab-builder h2')?.textContent === 'Browser startup test'`)
     const drafts = (await call('superagents/drafts')).items
@@ -150,6 +169,7 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     assert.deepEqual(interview.interview.answers, browserInterviewAnswers)
     assert.equal(interview.eligible_for_execution, false)
 
+    await reveal('.kode-collab-workspace-form select')
     await wait(`document.querySelector('.kode-collab-workspace-form select option[value="${hub.node}"]')`)
     await page.evaluate(`(() => { const select = document.querySelector('.kode-collab-workspace-form select'); select.value = ${JSON.stringify(hub.node)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`)
     await wait(`document.querySelector('.kode-collab-workspace-option input')`)
@@ -169,6 +189,7 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     assert.deepEqual(selected.selection, { profile_id: 'builder', provider: 'fixture', model: 'model', effort: null, workspace })
     assert.equal(selected.eligible_for_execution, false)
     await wait(`document.querySelector('[aria-label="本次预留预算"]') && !document.querySelector('[aria-label="本次预留预算"]').disabled`)
+    await reveal('[aria-label="账户归属标识"]')
     await page.evaluate(`document.querySelector('[aria-label="账户归属标识"]').focus()`)
     await page.call('Input.insertText', { text: 'browser-account' })
     await click('核对账户绑定')
@@ -181,6 +202,7 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     assert.equal(binding.account_id, 'browser-account'); assert.equal(binding.revision, 2)
     await wait(`document.querySelector('[aria-label="预算单位"]') && !document.querySelector('[aria-label="预算单位"]').disabled`)
     for (const [label, value] of [['预算单位', 'credits'], ['创建预算总额', '100'], ['每百万输入 token 内部计价', '1'], ['每百万缓存输入 token 内部计价', '1'], ['每百万输出 token 内部计价', '1']]) {
+      await reveal(`[aria-label="${label}"]`)
       await page.evaluate(`document.querySelector('[aria-label="${label}"]').focus()`)
       await page.call('Input.insertText', { text: value })
     }
@@ -192,41 +214,40 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     await wait(`document.querySelector('.kode-collab-funding-form')?.innerText.includes('创建预算与草案权限已配置')`)
     funding = (await call(`${draftPath}/funding`)).record
     assert.equal(funding.budget.limit, 100); assert.equal(funding.budget.reserved, 0)
+    await reveal('[aria-label="本次预留预算"]')
     await page.evaluate(`document.querySelector('[aria-label="本次预留预算"]').focus()`); await page.call('Input.insertText', { text: '20' })
     await page.evaluate(`document.querySelector('.kode-collab-start-form input[type="checkbox"]').click()`)
-    await click('核对启动配置'); await wait(`document.querySelector('.kode-collab-start-form')?.innerText.includes('确认启动创建助手')`)
+    await click('核对启动配置'); await wait(`document.querySelector('.kode-collab-start-form')?.innerText.includes('确认启动 Team Builder')`)
     assert.equal(planned.command.start.operation.resource.account_id, 'browser-account')
     assert.equal(planned.command.start.operation.resource.binding_revision, 2)
     assert.equal(starts, 0); assert.equal((await call(`budgets/${funding.budget.id}`)).budget.reserved, 0)
-    await click('确认启动创建助手'); await wait(`document.querySelector('.kode-collab-start-form')?.innerText.includes('恢复原启动请求')`)
+    await click('确认启动 Team Builder'); await wait(`document.querySelector('.kode-collab-start-form')?.innerText.includes('恢复原启动请求')`)
     assert.equal(created.state, 'created', 'response was lost after genuine native creation')
     assert.ok(host.handles.has(created.request.session_id))
     assert.equal((await call(`budgets/${funding.budget.id}`)).budget.reserved, 20)
     await click('恢复原启动请求'); await wait(`document.querySelector('.kode-collab-start-form')?.innerText.includes('助手创建已确认')`)
     assert.equal(starts, 2)
-    await click('返回草案列表')
-    await wait(`Array.from(document.querySelectorAll('button')).some(button=>!button.disabled && button.textContent==='Browser startup test · 草案')`)
-    await click('Browser startup test · 草案')
+    await chooseDraft('')
+    await chooseDraft(interview.id)
     await wait(`document.querySelector('.kode-collab-start-form')?.innerText.includes('助手创建已确认')`)
     assert.equal(starts, 2, 'IndexedDB restoration does not issue another startup')
     await page.call('Page.reload')
     await wait('globalThis.fixture')
-    await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]')?.click()`)
-    await wait(`Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='团队搭建助手')`)
-    await click('团队搭建助手')
-    await wait(`Array.from(document.querySelectorAll('button')).some(button=>!button.disabled && button.textContent==='Browser startup test · 草案')`)
-    await click('Browser startup test · 草案')
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
+    await wait(`Array.from(document.querySelectorAll('button')).some(button=>button.getAttribute('aria-label')==='私信 Team Builder')`)
+    await page.evaluate(`document.querySelector('button[aria-label="私信 Team Builder"]').click()`)
+    await chooseDraft(interview.id)
     await wait(`document.querySelector('.kode-collab-start-form')?.innerText.includes('助手创建已确认')`)
     assert.equal(starts, 2, 'full page reload recovers IndexedDB without another POST')
-    await wait(`document.querySelector('[aria-label="给创建助手的消息"]') && !document.querySelector('[aria-label="给创建助手的消息"]').disabled`)
-    await page.evaluate(`document.querySelector('[aria-label="给创建助手的消息"]').focus()`)
+    await wait(`document.querySelector('[aria-label="给 Team Builder 的消息"]') && document.querySelector('[aria-label="给 Team Builder 的消息"]').getAttribute('contenteditable')==='true'`)
+    await page.evaluate(`document.querySelector('[aria-label="给 Team Builder 的消息"]').focus()`)
     await onConfigured(await call(draftPath))
     await page.call('Input.insertText', { text: 'Browser conversation check' })
-    await click('发送给创建助手')
-    await wait(`document.querySelector('.kode-collab-builder-conversation')?.innerText.includes('重试原助手消息')`)
+    await click('发送给 Team Builder')
+    await wait(`document.querySelector('.kode-collab-builder-conversation button[aria-label="重试原助手消息"]')`)
     await click('重试原助手消息')
-    await wait(`!document.querySelector('[aria-label="给创建助手的消息"]').disabled`)
-    await page.evaluate(`document.querySelector('[aria-label="给创建助手的消息"]').focus()`)
+    await wait(`document.querySelector('[aria-label="给 Team Builder 的消息"]').getAttribute('contenteditable')==='true'`)
+    await page.evaluate(`document.querySelector('[aria-label="给 Team Builder 的消息"]').focus()`)
     await page.call('Input.insertText', { text: 'Unsent follow-up' })
     await wait(`document.querySelector('.kode-collab-builder-conversation')?.innerText.includes('Browser reply received')`)
     const events = host.ctx.get('agents').get(created.request.session_id).session.snapshotEvents(0)
@@ -238,7 +259,7 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     assert.deepEqual(proposed.interview.proposed_workflow.workflow.stages.map(stage => stage.id), ['implement', 'review', 'verify'])
     assert.equal((await call('workflows/native-browser-flow/events')).events.length, 0, 'assistant proposal is not owner registration')
     await wait(`Array.from(document.querySelectorAll('button')).some(button => button.textContent === '核对工作流方案' && !button.disabled)`)
-    assert.equal(await page.evaluate(`document.querySelector('[aria-label="给创建助手的消息"]').value`), 'Unsent follow-up')
+    assert.equal(await page.evaluate(`document.querySelector('[aria-label="给 Team Builder 的消息"]').textContent`), 'Unsent follow-up')
     await click('核对工作流方案')
     assert.equal((await call('workflows/native-browser-flow/events')).events.length, 0)
     await click('确认登记流程配置')
@@ -258,9 +279,9 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     await onWorkflowRegistered(await call(draftPath), teamProposal)
     const teamCount = (await call('teams')).items.length
     const sessionsBefore = (await call('sessions')).sessions.length
-    await page.evaluate(`(() => { const input = document.querySelector('[aria-label="给创建助手的消息"]'); input.focus(); input.select(); })()`)
+    await page.evaluate(`(() => { const input = document.querySelector('[aria-label="给 Team Builder 的消息"]'); input.focus(); const range=document.createRange();range.selectNodeContents(input);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range); })()`)
     await page.call('Input.insertText', { text: 'Use the registered workflow to propose my team' })
-    await click('发送给创建助手')
+    await click('发送给 Team Builder')
     await wait(`document.querySelector('.kode-collab-proposal')?.innerText.includes('Browser authored team')`)
     assert.equal((await call('teams')).items.length, teamCount)
     assert.deepEqual((await call(draftPath)).interview.proposed_team, teamProposal)
@@ -279,6 +300,7 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     await wait(`document.querySelector('[aria-label="团队预算单位"]')`)
     assert.ok(await page.evaluate(`document.querySelector('.kode-collab-account-capacity')?.innerText.includes('尚未配置账号工作并发上限')`))
     for (const [label, value] of [['团队预算单位', 'credits'], ['初始团队总额度', '100'], ['单次工作预留上限', '10']]) {
+      await reveal(`[aria-label="${label}"]`)
       await page.evaluate(`document.querySelector('[aria-label="${label}"]').focus()`)
       await page.call('Input.insertText', { text: value })
     }
@@ -299,6 +321,7 @@ export async function inspectBuilderStartup({ hub, host, profiles, root, onConfi
     assert.ok(await page.evaluate(`document.querySelector('.kode-collab-scheduling-form').innerText.includes('尚无能力评价条目')`))
     await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '新增用户能力评价').click()`)
     for (const [label, value] of [['local-model 任务类型', 'development'], ['local-model 能力评分', '80'], ['local-model 评价可信度', '0.7'], ['local-model 评价依据', 'Owner observation in fixture']]) {
+      await reveal(`[aria-label="${label}"]`)
       await page.evaluate(`document.querySelector('[aria-label="${label}"]').focus()`)
       await page.call('Input.insertText', { text: value })
     }

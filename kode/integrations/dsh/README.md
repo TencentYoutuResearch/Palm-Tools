@@ -15,6 +15,18 @@ The integration declares `engines.dsh: "*"` and wildcard DSH peer dependencies, 
 
 Native CLI adapters drive Codex app-server and Claude/CodeBuddy ACP through the Kode Agent factory, while dsh supplies the conversation shell. Workspace selection and session-message presentation extend dsh UI slots. The bundle enables dsh's existing sandboxed sidebar-browser plugin on Web; files, Git and terminal continue using the shipped dsh implementations. SpecOps rules are outside this integration's scope.
 
+## Channel-first collaboration (current redesign)
+
+Channels hold requirements, discussion and task archives; private messages prioritize core updates. Long Superagent private replies show an exact original-text excerpt (with an explicit truncation marker when needed), expandable to the unchanged original, not a generated summary. Human text stays intact. Discussion opens on the right with the root message and actual replies. Task/WorkRun/exact native Session links live in a separate collapsed “任务与执行” disclosure or on-demand execution inspector, not in place of the discussion. Narrow screens retain explicit close/back navigation.
+
+“No mode switch hides navigation” means navigation continuity: native mode controls can remain without hiding the project tree or stranding channels, private messages or Sessions. Empty-state/channel guidance creates no channels, moves or publishes no history, and grants no permissions. Explicit scoped creation, publication and execution remain separate actions.
+
+Reuse the native DSH shell and visual tokens. [Slack threads](https://slack.com/help/articles/115000769927-Use-threads-to-organize-discussions) informs the beside-channel discussion, and [Linear collapsed history](https://linear.app/changelog/2025-04-03-collapsed-issue-history) informs progressive disclosure, not copied branding. See [Product](../../PRODUCT.md) for the design contract.
+
+The independent [`@kode/dsh-composer`](packages/composer/README.md) reuses DSH conversation UI 0.2.1-rc.5's editor, keymap and InputBar CSS. `npm run build:composer` checks upstream version/client SHA-256 and reviewed extension SHA-256 against `packages/composer/upstream-lock.json`; `build:collab` runs it first. Upstream MIT licensing is preserved. No fake Session, duplicate Conversation/runtime registration or textarea fallback is introduced. Scoped draft persistence, request IDs and receipts remain caller-owned; attachments and voice are unsupported.
+
+`test/channel-first-browser.test.js` exercises the real isolated DSH renderer and Hub using controlled content and execution records, without starting a model. It is not new live Hy4 business/model acceptance. The completed 2026-11-10 no-provider suite recorded 1,628 tests: 1,292 passed, 336 environment-gated skips and zero failures. Controlled browser checks covered 1440/1000/390-pixel widths, exact persisted restoration and bounded height of 36-line root/thread/DM drafts, Chromium DevTools composition, and synthetic clipboard over-limit whole-edit rejection with scope restoration. This is not OS Chinese-IME or system-clipboard acceptance. After the final selected-panel/scope highlight correction, the current-source no-provider rerun confirmed the same 1,628-test result (24.44 seconds); the core real-browser tests passed 13/13 and the three legacy tests against explicitly shipped artifacts passed 3/3. The complete channel-first matrix passed (5.69 seconds), including current-selection markers for channels, discussion DMs, Teams and native Sessions. Environment-gated skips remain untested in this run; this is not all-environment acceptance. Existing P1 resource/approval revocation and stale-409 work remains pending; this UI change does not close those gates or supersede the acceptance audit.
+
 ## Shared session and workspace storage
 
 Kode's backend SQLite documents own workspace registrations and native session identities on each execution node. Both frontends use these documents; the GUI's opened-tab snapshot is separate from the durable session catalog. Closing a tab or an unsuccessful CLI resume does not erase its native registration. The GUI aggregates SSH peer catalogs through the authenticated backend link, maps remote sessions to their configured SSH endpoint, and reads canonical workspace titles. A remote session is never resumed as a local process.
@@ -1987,6 +1999,19 @@ Reference the returned `{id,version,hash}` through the stage's optional `executi
 Home freezes the resolved artifacts into the WorkRun context. Dispatch and admission validate the exact artifact bytes and Host. A Worker receives only its stage's resources, and the model-call provenance records their source and hashes. Later versions apply when explicitly selected for a new team revision. Empty dependency arrays preserve existing workflow hashes and mandate content.
 
 These resources transport reviewed workflow instructions. Their required tools pass the existing Host tool and grant checks. Executable plugin installation uses the owner's separate installation procedure.
+
+### Managed CLI progress and output
+
+`managedInference.timeoutMs` is an **idle-progress deadline**, defaulting to 300000 ms,
+not a maximum decision duration. Bound native item progress and nonempty admitted
+provider text, reasoning or tool-argument deltas renew it. Heartbeats, empty deltas,
+status polling and unrelated responses do not. Explicit cancellation and authority,
+usage and process-stop checks still apply independently.
+
+Completed text has no cumulative 1 MiB rejection. Large output spills to a private
+`managed-codex/codex-output-*` archive and the adapter consumes the complete text.
+Queue backpressure, per-frame validation and free-storage protection remain active;
+those failures are explicit, never silent truncation. Archives survive decision cleanup.
 
 ### Controlled Codex wrapper bootstrap
 

@@ -1,9 +1,15 @@
+import { validPatchRequest } from './assignment-patch-tool.js'
 import { validWriteRequest } from './assignment-write-tool.js'
 import { validSourceRequest } from './assignment-source-tools.js'
 import { validReviewRequest, validReviewShape } from './assignment-evidence-tools.js'
 /** Trusted, per-Agent workflow tools. The frozen allow mask/grant still decides visibility and use. */
 const id = { type: 'string', pattern: '^[A-Za-z0-9_.:-]{1,120}$', minLength: 1, maxLength: 120 }
 const definitions = [
+  { name: 'kode_patch_source', validate: validPatchRequest, capabilities: ['read', 'workspace_write'],
+    description: 'Atomically apply 1 to 16 ordered literal text replacements to an existing UTF-8 source file. Supply its exact non-null SHA-256 from the last read. Each old_text must occur exactly once at its step; duplicate old_text, missing or ambiguous matches fail the whole batch without writing. Each text fragment is at most 16 KiB, the JSON request at most 64 KiB, and resulting file at most 256 KiB. No regex, fuzzy matching, shell or commit. Conflicts do not overwrite concurrent edits.',
+    properties: { path: { type: 'string', minLength: 1, maxLength: 1024 }, expected_sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      replacements: { type: 'array', minItems: 1, maxItems: 16, items: { type: 'object', additionalProperties: false,
+        properties: { old_text: { type: 'string', minLength: 1, maxLength: 16384 }, new_text: { type: 'string', maxLength: 16384 } }, required: ['old_text', 'new_text'] } } } },
   { name: 'kode_write_source', validate: validWriteRequest, capabilities: ['read', 'workspace_write'],
     description: 'Create or atomically replace a UTF-8 file within the assigned writable repository. Supply the SHA-256 from your last read, or null for a new file. Conflicts fail without overwriting. An already_present result observes desired bytes; it does not resolve an earlier uncertain tool call. No commit is performed.',
     properties: { path: { type: 'string', minLength: 1, maxLength: 1024 }, expected_sha256: { type: ['string', 'null'], pattern: '^[a-f0-9]{64}$' }, content: { type: 'string', maxLength: 262144 } } },

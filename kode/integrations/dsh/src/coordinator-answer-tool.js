@@ -1,3 +1,4 @@
+import { guardDiscussionTool } from './coordinator-discussion-guard.js'
 /** Forward a consumed human response within the fixed Coordinator authority. */
 import { isDeepStrictEqual } from 'node:util'
 import { createDeliveryTracker } from './delivery-tracker.js'
@@ -14,13 +15,14 @@ export function mountCoordinatorAnswerTool(agentCtx, agent, runtime, scope) {
     && Object.keys(args).every(key => fields.includes(key)) && fields.every(key => validId(args[key]))
   const dispose = tools.register({
     name,
-    description: 'Forward a new consumed human conversation response to its exact pending Worker clarification. Supply the Assignment, question request and human Hub message references. The Hub forwards original human text unchanged. This does not change the workflow, grant or budget and cannot answer secret/login questions. Reuse identical request_id and arguments after uncertainty.',
+    description: 'Forward only a consumed human conversation response with an explicit owner-selected clarification_target to that exact pending Worker clarification. Never infer a target from ordinary discussion or from there being only one question. Supply the Assignment, question request and human Hub message references. The Hub forwards original human text unchanged. This does not change the workflow, grant or budget and cannot answer secret/login questions. Reuse identical request_id and arguments after uncertainty.',
     parameters: { type: 'object', additionalProperties: false,
       properties: Object.fromEntries(fields.map(key => [key, { type: 'string' }])), required: fields },
     output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     execute: async args => {
       runtime.entry.assertToolBody(agent, name, args)
       if (!valid(args)) throw Error('Invalid Coordinator clarification answer arguments')
+      guardDiscussionTool(agent,name,args)
       const binding = runtime.profiles.binding(agent.id)
       if (binding?.operationClosed || binding?.managedBuilder || binding?.managedAssignment
           || !isDeepStrictEqual(binding?.managedOperation, operation)
@@ -43,6 +45,10 @@ export function mountCoordinatorAnswerTool(agentCtx, agent, runtime, scope) {
       if (input?.request?.operation_id !== operation.id || input.request.control_revision !== scope.control_revision
           || input.request.attempt !== operation.attempt || input.request.epoch !== operation.epoch
           || input.receipt?.worker?.session_id !== agent.id) throw Error('Coordinator answer input mismatch')
+      const target = input.message?.clarification_target
+      if (input.message?.actor?.kind !== 'human' || input.message.actor.id !== 'local_owner'
+          || target?.assignment_id !== assignment_id || target.question_request_id !== args.question_request_id
+          || !validId(target.run_id)) throw Error('Coordinator answer requires the explicit owner-selected question target')
       await createDeliveryTracker(agent, runtime.client).confirm({ id: input.receipt.message_id })
       try { return await runtime.client.call(path, body) }
       catch (error) {

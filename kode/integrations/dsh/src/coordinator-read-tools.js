@@ -1,3 +1,5 @@
+import { guardDiscussionTool } from './coordinator-discussion-guard.js'
+import { mountCoordinatorEventWait } from './coordinator-event-wait.js'
 /** Read activated configuration and authoritative status only within fixed Coordinator authority. */
 import { readCoordinatorResources } from './coordinator-resources.js'
 import { readWorkRunAccounting } from './work-run-accounting-status.js'
@@ -17,6 +19,34 @@ export function clarificationPage(run,after=''){
  return {worker_clarification:q?{assignment_id:q.assignment_id,stage_id:q.stage_id,stage_attempt:q.stage_attempt,
   request_id:q.request.request_id,call_id:q.request.call_id,questions:q.request.questions,context_hash:q.context_hash}:null,
   worker_clarifications:{count:questions.length,revision:run.revision,next_cursor:offset+1<questions.length?`${run.revision}:${offset+1}`:null}}
+}
+/** Receipts and leases are observations, never new dispatch or model authority. */
+export async function readAssignedExecution(call, run, at = Date.now()) {
+ const assigned=(run.stages??[]).filter(stage=>stage.assignment_id),items=[]
+ const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(value)
+ for(const stage of assigned.slice(0,16)){
+  const base={stage_id:stage.stage_id,assignment_id:stage.assignment_id,stage_attempt:stage.attempt}
+  try{
+   if(!id(stage.assignment_id))throw Error('Invalid assigned identity')
+   const a=await call(`work-assignments/${encodeURIComponent(stage.assignment_id)}`)
+   if(a.id!==stage.assignment_id||a.run_id!==run.id||a.team_id!==run.team_id||a.stage_id!==stage.stage_id||a.stage_attempt!==stage.attempt)throw Error('Assignment scope changed')
+   const command=a.dispatch?.command?.operation
+   if(!id(command?.id))throw Error('Missing operation identity')
+   const op=await call(`operations/${encodeURIComponent(command.id)}`)
+   if(op.id!==command.id||op.attempt!==command.attempt||op.epoch!==command.epoch||op.worker?.session_id!==a.worker?.session_id||op.worker?.node_id!==a.worker?.node_id)throw Error('Worker operation scope changed')
+   const created=a.creation?.state==='created'&&a.creation.session_id===a.worker.session_id
+   const admitted=['official_local_host','official_remote_host'].includes(a.admission?.kind)
+   const held=a.resources?.state==='held',mandate=typeof a.mandate?.receipt?.message_id==='string'
+   const lease=op.state==='active'&&Number.isSafeInteger(op.lease_until)&&op.lease_until>at
+   items.push({...base,observation:'assignment_receipts_and_operation_lease',worker_created:created,resources_held:held,mandate_recorded:mandate,
+    admission_recorded:admitted,operation_state:op.state,lease_valid:lease,
+    active_worker_lease:created&&held&&mandate&&lease&&admitted,execution_drained:a.stop?.receipt?.state==='execution_drained',
+    completion_authorized:false})
+  }catch{items.push({...base,observation:'unavailable_or_scope_changed',active_worker_lease:null})}
+ }
+ return {authority:'read_only_execution_observation',observed_at:at,items,truncated:assigned.length>16,
+  stage_ready_means:'assigned_not_yet_stage_completed_not_proof_worker_unstarted',
+  run_waiting_reason_basis:'coarse_dispatch_state_not_live_worker_admission',grants_execution:false}
 }
 export async function readCoordinatorState(runtime,agent,scope,operation,kind,args){
  const call=p=>runtime.client.call(`/api/v1/messaging/${p}`)
@@ -53,7 +83,7 @@ export async function readCoordinatorState(runtime,agent,scope,operation,kind,ar
     evidence_hash:run.human_acceptance.evidence_hash,requested_at:run.human_acceptance.requested_at,
     decision:run.human_acceptance.decision??null,evidence_included:false}:null,
    completion_authorized:run.completion_authorized,stages:run.stages,delivery:run.delivery??null,task_workspaces:run.task_workspaces??null,cancellation:run.cancellation??null,intervention:run.intervention??null,
-   coordinator:run.coordinator??null,execution_accounting:await readWorkRunAccounting(runtime,run),observed_at:Date.now(),details_included:true}
+   coordinator:run.coordinator??null,assigned_execution:await readAssignedExecution(call,run),execution_accounting:await readWorkRunAccounting(runtime,run),observed_at:Date.now(),details_included:true}
  }else throw Error('Invalid Coordinator read kind')
  await authority()
  if(Buffer.byteLength(JSON.stringify(result))>65536)throw Error('Coordinator result exceeds bounded detail limit; result is incomplete and was not returned')
@@ -62,9 +92,11 @@ export async function readCoordinatorState(runtime,agent,scope,operation,kind,ar
 export function mountCoordinatorReadTools(agentCtx,agent,runtime,scope){
  const op=structuredClone(runtime.profiles.binding(agent.id)?.managedOperation),tools=agentCtx.get('tools').forScope(agentCtx),policies=agentCtx.get('kodeOfficialToolPolicies'),disposers=[]
  const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(v)
+ const wait = mountCoordinatorEventWait(agentCtx,agent)
+ disposers.push(wait.dispose)
  const definitions=[
-  {name:'kode_coordinator_configuration',kind:'configuration',key:'binding_id',empty:true,description:'Read only the activated configuration of your fixed team. Empty binding_id lists workflow choices, input names and paged current budget/provider facts; pass resource_after from resources.next_cursor until all targets are covered; a returned binding ID reads full frozen workflow/project/delivery details. This does not activate, reserve or dispatch anything.'},
-  {name:'kode_coordinator_workflow_status',kind:'status',key:'run_id',description:'Read current Hub state, original inputs, prior-task reference, stages, human acceptance decision and delivery receipt for a WorkRun of your fixed team. Acceptance evidence bodies are omitted; decision reason and exact evidence hash are retained. A pending stage or accepted run is not completion. Worker questions are paged one request at a time. Pass worker_clarifications.next_cursor as clarification_after until null; if revision changes, restart from the first page. Set omit_inputs=true to avoid repeating large original inputs. This does not advance or retry work.'},
+  {name:'kode_coordinator_configuration',kind:'configuration',key:'binding_id',empty:true,description:'Read only the activated configuration of your fixed team. Empty binding_id lists workflow choices, input names and paged current budget/provider facts; pass resource_after from resources.next_cursor until all targets are covered; a returned binding ID reads full frozen workflow/project/delivery details. This does not activate, reserve or dispatch anything. eligible_for_execution=false means this configuration read grants no authority; it is not a live refusal or evidence that activation is missing.'},
+  {name:'kode_coordinator_workflow_status',kind:'status',key:'run_id',description:'Read current Hub state, original inputs, prior-task reference, stages, human acceptance decision and delivery receipt for a WorkRun of your fixed team. Acceptance evidence bodies are omitted; decision reason and exact evidence hash are retained. A pending stage or accepted run is not completion. ready and waiting_resource are coarse dispatch states: inspect assigned_execution receipts and active_worker_lease before claiming no Worker started. Static configuration eligibility is not live admission. Worker questions are paged one request at a time. Pass worker_clarifications.next_cursor as clarification_after until null; if revision changes, restart from the first page. Set omit_inputs=true to avoid repeating large original inputs. This does not advance or retry work.'},
  ]
  try{
   for(const d of definitions){
@@ -72,9 +104,11 @@ export function mountCoordinatorReadTools(agentCtx,agent,runtime,scope){
     &&(!('resource_after' in a)||d.kind==='configuration'&&a.binding_id===''&&(a.resource_after===''||id(a.resource_after)))
     &&(!('omit_inputs' in a)||typeof a.omit_inputs==='boolean')
     &&(!('clarification_after' in a)||a.clarification_after===''||/^[0-9]{1,20}:[0-9]{1,3}$/.test(a.clarification_after))
-   disposers.push(tools.register({name:d.name,description:d.description,parameters:{type:'object',additionalProperties:false,properties:{[d.key]:{type:'string'},...(d.kind==='configuration'?{resource_after:{type:'string'}}:{clarification_after:{type:'string'},omit_inputs:{type:'boolean'}})},required:[d.key]},output:{schema:{type:'object'},render:(_args,v)=>[{type:'text',text:JSON.stringify(v)}]},execute:args=>{
+   disposers.push(tools.register({name:d.name,description:d.description,parameters:{type:'object',additionalProperties:false,properties:{[d.key]:{type:'string'},...(d.kind==='configuration'?{resource_after:{type:'string'}}:{clarification_after:{type:'string'},omit_inputs:{type:'boolean'}})},required:[d.key]},output:{schema:{type:'object'},render:(_args,v)=>[{type:'text',text:JSON.stringify(v)}]},execute:async (args,execution)=>{
     runtime.entry.assertToolBody(agent,d.name,args);if(!valid(args))throw Error('Invalid Coordinator read arguments')
-    return readCoordinatorState(runtime,agent,scope,op,d.kind,args)
+    guardDiscussionTool(agent,d.name,args)
+    const result = await readCoordinatorState(runtime,agent,scope,op,d.kind,args)
+    return d.kind==='status' ? wait.observe(result,execution) : result
    }}))
    disposers.push(policies.register(d.name,{capabilities:['read'],network:false,workspaceLock:false,implementation:tools.get(d.name,agent),validateArguments:valid,authorize:request=>request.agent===agent&&valid(request.arguments)},agent))
   }

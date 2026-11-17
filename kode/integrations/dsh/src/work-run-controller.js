@@ -2,7 +2,7 @@ import { advanceWorkRunCancellation } from './work-run-cancellation.js'
 import { readAssignmentOutputs } from './assignment-outputs.js'
 /** Bounded Host progression. Hub receipts, never local Agent text, decide workflow state. */
 const prefix = '/api/v1/messaging/'
-const resourceWait = error => error?.status === 409 && (['assignment_account_capacity_exhausted','assignment_workspace_busy','assignment_exclusive_resource_busy'].includes(error.code) && /^\/api\/v1\/messaging\/work-assignments\/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\/resources$/.test(error.path ?? '') || error.code === 'team_budget_exhausted' && /^\/api\/v1\/messaging\/work-runs\/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\/schedule$/.test(error.path ?? ''))
+const resourceWait = error => error?.status === 409 && (['assignment_account_capacity_exhausted','assignment_workspace_busy','assignment_exclusive_resource_busy'].includes(error.code) && /^\/api\/v1\/messaging\/work-assignments\/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\/resources$/.test(error.path ?? '') || ['team_budget_exhausted','team_assignment_capacity_exhausted'].includes(error.code) && /^\/api\/v1\/messaging\/work-runs\/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\/schedule$/.test(error.path ?? ''))
 const validId = id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(id)
 export class WorkRunController {
   constructor(dispatcher, { prepare, outputs } = {}) {

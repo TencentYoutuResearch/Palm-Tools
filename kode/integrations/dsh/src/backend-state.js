@@ -1,6 +1,7 @@
 /** Shared Kode backend documents. Browser storage and frontend lifetimes own no configuration. */
 import { AgentProfiles, normalizeModelDefaults } from './agent-profiles.js'
 import { isDeepStrictEqual } from 'node:util'
+import { readFile } from 'node:fs/promises'
 function startPlans(state){
   const plans=state?.coordinatorStartPlans
   if(plans!==undefined&&(!plans||typeof plans!=='object'||Array.isArray(plans)))throw Error('Invalid Kode Coordinator start plans')
@@ -23,6 +24,10 @@ export class BackendAgentProfiles extends AgentProfiles {
     this.profiles = state.profiles; this.bindings = Object.assign(Object.create(null), state.bindings)
   }
   async open(initial = []) {
+    await this.localPreferences.open()
+    // Old personal defaults remain readable without importing them into Hub state.
+    try { this.legacyLocalModelDefaults = normalizeModelDefaults(JSON.parse(await readFile(this.path, 'utf8')).modelDefaults) }
+    catch (error) { if (error.code !== 'ENOENT') throw error; this.legacyLocalModelDefaults = {} }
     let state = await this.document.read()
     const sharedPlans=startPlans(state)
     if (!state?.dsh_migrated) {
@@ -31,19 +36,24 @@ export class BackendAgentProfiles extends AgentProfiles {
       for(const [key,plan] of Object.entries(this.coordinatorStartPlans)){
         if(Object.hasOwn(sharedPlans,key)&&!isDeepStrictEqual(sharedPlans[key],plan))throw Error('Conflicting migrated Coordinator start plan')
       }
-      const migrated = this.list(), names = new Set(migrated.map(profile => `${profile.type}:${profile.name.toLocaleLowerCase()}`))
+      const migrated = structuredClone(this.profiles), names = new Set(migrated.map(profile => `${profile.type}:${profile.name.toLocaleLowerCase()}`))
       const existing = state?.profiles ?? []
       state = await this.document.write({ ...state, version: 1,
         profiles: [...existing.filter(profile => !migrated.some(row => row.id === profile.id) && !names.has(`${profile.type}:${profile.name.toLocaleLowerCase()}`)), ...migrated],
-        bindings: { ...structuredClone(this.bindings), ...state?.bindings }, modelDefaults: { ...this.modelDefaults, ...normalizeModelDefaults(state?.modelDefaults) }, coordinatorStartPlans:{...structuredClone(this.coordinatorStartPlans),...sharedPlans}, dsh_migrated: true })
+        bindings: { ...structuredClone(this.bindings), ...state?.bindings }, modelDefaults: normalizeModelDefaults(state?.modelDefaults), coordinatorStartPlans:{...structuredClone(this.coordinatorStartPlans),...sharedPlans}, dsh_migrated: true })
     }
     this.adopt(state); return this
   }
-  async reload() { const state = await this.document.read(); if (state) this.adopt(state) }
+  async candidateRegistry() {
+    // A diagnostic read must not advance the CAS cursor of an in-flight registry write.
+    const snapshot = new BackendDocument(this.document.client, this.document.key)
+    return this.candidateRegistryView(await snapshot.read())
+  }
+  async reload() { await this.localPreferences.open(); const state = await this.document.read(); if (state) this.adopt(state) }
   update(operation) {
     const task = this.chain.then(async () => {
       await this.reload()
-      const state = { ...structuredClone(this.sharedState), version: 1, modelDefaults: structuredClone(this.modelDefaults), profiles: this.list(), bindings: structuredClone(this.bindings) }
+      const state = { ...structuredClone(this.sharedState), version: 1, modelDefaults: structuredClone(this.modelDefaults), profiles: structuredClone(this.profiles), bindings: structuredClone(this.bindings) }
       const result = await operation(state)
       this.adopt(await this.document.write(state))
       return structuredClone(result)

@@ -190,3 +190,24 @@ test('human acceptance remains fenced after Host reconstruction and accepted rev
   await restored.scan()
   assert.deepEqual(f.starts, ['a', 'a'], 'exact accepted Hub revision reopens progression automatically')
 })
+
+test('unchanged capacity waits retain automatic retries without rewriting the durable ledger', async t => {
+  const f = await fixture(t, { maxWatches: 1, intervalMs: 250 })
+  f.runs.delete('b'); f.runs.delete('c')
+  f.runs.get('a').state = 'waiting_resource'
+  const writes = [], record = f.service.record.bind(f.service)
+  f.service.record = async (id, row) => { writes.push({ id, ...row }); return record(id, row) }
+  for (let i = 0; i < 6; i++) {
+    await f.service.scan()
+    await f.callbacks.get('a')({ state: 'waiting_resource', reason: 'team_assignment_capacity_exhausted' })
+  }
+  assert.equal(f.starts.length, 6, 'capacity waits remain eligible, not permanently fenced')
+  assert.equal(writes.length, 2, 'only initial watching and first wait are persisted')
+  assert.equal(f.service.rows.a.blocked, false)
+  assert.equal(f.service.intervalMs, 250)
+  assert.equal(new WorkRunService(f.controller).intervalMs, 2000, 'production default is bounded periodic polling')
+  f.runs.get('a').revision++
+  await f.service.scan()
+  await f.callbacks.get('a')({ state: 'scheduled' })
+  assert.equal(writes.length, 4, 'a changed Hub revision and actual scheduling are persisted')
+})

@@ -37,6 +37,9 @@ function run(command, args, { capture = false, cwd = root } = {}) {
 }
 
 if (platform.startsWith('darwin')) await run(process.execPath, [join(root, 'scripts/build-desktop-screen.js')])
+await run(process.execPath, [join(root, 'scripts/build-sidebar.js')])
+await run(process.execPath, [join(root, 'scripts/build-conversation.js')])
+await run(process.execPath, [join(root, 'scripts/build-sidebar-right.js')])
 await run(process.execPath, [join(root, 'scripts/build-collab.js')])
 await run(process.execPath, [join(root, 'scripts/build-transport.js')])
 await run(process.execPath, [join(root, 'scripts/build-remote.js'), '--target', rustTarget])
@@ -45,7 +48,7 @@ await rm(destination, { recursive: true, force: true })
 await mkdir(destination, { recursive: true })
 const staging = await mkdtemp(join(tmpdir(), 'kode-dsh-bundle-'))
 const packageRoot = join(staging, 'package')
-const includedRoots = new Set(['assets', 'packages', 'scripts', 'src'])
+const includedRoots = new Set(['assets', 'packages', 'scripts', 'src', 'patches'])
 try {
   await cp(root, packageRoot, {
     recursive: true,

@@ -1,7 +1,7 @@
 //! Owner-selected Builder runtime intent, separate from executable grants and funding.
 use super::{model::valid_id, store::Store, teams::WorkspaceRef};
 use anyhow::{bail, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -25,6 +25,63 @@ pub struct Save {
 fn text(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 4096 && !value.contains('\0')
 }
+
+/// A scope is a durable draft reservation, not proof that inference happened.
+/// Only the existing never-claimed bundle abandonment receipt releases it.
+/// Historical scopes without that positive evidence remain conservatively bound.
+pub(super) fn runtime_binding(db: &Connection, id: &str) -> Result<Option<Value>> {
+    let mut query = db.prepare(
+        "SELECT value FROM workbench_documents WHERE key LIKE 'builder-scope:%' AND json_extract(value,'$.request.draft_id')=?1 ORDER BY key",
+    )?;
+    let mut bindings = Vec::new();
+    for body in query.query_map([id], |r| r.get::<_, String>(0))? {
+        let scope: Value = serde_json::from_str(&body?)?;
+        let operation_id = scope["operation_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Builder scope operation missing"))?;
+        let op = super::builder_authority::operation(db, operation_id)?;
+        let claimed: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_events WHERE operation_id=?1 AND json_extract(body,'$.operation.state')='active')",
+            [operation_id], |r| r.get(0),
+        )?;
+        let abandoned: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_events WHERE operation_id=?1 AND json_extract(body,'$.kind')='bundle_abandoned' AND json_extract(body,'$.stop_basis')='never_claimed' AND json_extract(body,'$.operation.revision')=?2 AND json_extract(body,'$.operation.attempt')=?3 AND json_extract(body,'$.operation.epoch')=?4)",
+            params![operation_id, op.revision, op.attempt, op.epoch], |r| r.get(0),
+        )?;
+        if !claimed && abandoned && op.state == super::operations::State::Stopped {
+            continue;
+        }
+        let pending = !claimed && op.state == super::operations::State::Prepared;
+        bindings.push(json!({
+            "operation_id":operation_id,"attempt":scope["request"]["attempt"],
+            "state":if pending {"pending_start"} else {"started_or_occupied"},
+            "reason":if pending {"builder_start_pending"} else {"builder_runtime_bound"},
+            "binding_count":1,"worker":scope["worker"],
+            "profile_id":op.resource.as_ref().map(|resource| &resource.profile),
+            "profile_revision":op.selection_policy.as_ref().map(|policy| &policy.profile_revision),
+            "selection_snapshot":scope["selection_snapshot"]
+        }));
+    }
+    // Pre-upgrade data may contain more than one occupied scope. Never present
+    // an arbitrary first row as the draft's unique running Agent.
+    Ok(match bindings.len() {
+        0 => None,
+        1 => bindings.pop(),
+        count => Some(
+            json!({"state":"legacy_conflict","reason":"multiple_builder_bindings","binding_count":count}),
+        ),
+    })
+}
+
+pub(super) fn ensure_unbound(db: &Connection, id: &str) -> Result<()> {
+    if let Some(binding) = runtime_binding(db, id)? {
+        bail!(
+            "Builder draft runtime is already bound: {}",
+            binding["reason"]
+        );
+    }
+    Ok(())
+}
 impl Store {
     pub fn builder_selection(&self, id: &str) -> Result<Value> {
         if !valid_id(id) {
@@ -45,8 +102,9 @@ impl Store {
             )
             .optional()?;
         let record: Option<Value> = body.map(|s| serde_json::from_str(&s)).transpose()?;
+        let binding = runtime_binding(&db, id)?;
         Ok(
-            json!({"home_hub":self.node_id,"draft_id":id,"draft_revision":draft["revision"],"draft_status":draft["status"],"record":record,"eligible_for_execution":false}),
+            json!({"home_hub":self.node_id,"draft_id":id,"draft_revision":draft["revision"],"draft_status":draft["status"],"record":record,"runtime_binding":binding,"model_change_supported":false,"eligible_for_execution":false}),
         )
     }
     pub fn save_builder_selection(&self, id: &str, input: Save) -> Result<Value> {
@@ -113,6 +171,24 @@ impl Store {
         if revision.unwrap_or(0) != input.expected_revision {
             bail!("Builder selection revision conflict")
         }
+        if let Some(binding) = runtime_binding(&tx, id)? {
+            let prior: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM workbench_documents WHERE key=?1",
+                    [&key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let prior: Option<Value> = prior.map(|body| serde_json::from_str(&body)).transpose()?;
+            // No-op saves and exact request replay remain safe. A selection write
+            // never changes an existing runtime's model, effort, Agent or workspace.
+            if prior.as_ref().map(|v| &v["selection"]) != Some(&request["selection"]) {
+                bail!(
+                    "Builder runtime selection locked ({}); running model changes are unsupported",
+                    binding["reason"]
+                )
+            }
+        }
         let revision = input.expected_revision + 1;
         let receipt = json!({"home_hub":self.node_id,"draft_id":id,"draft_revision":input.draft_revision,"revision":revision,"request_id":input.request_id,"selection":input.selection,"eligible_for_execution":false});
         tx.execute("INSERT INTO workbench_documents(key,revision,value) VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,value=excluded.value", params![key,revision,serde_json::to_string(&receipt)?])?;
@@ -127,6 +203,10 @@ impl Store {
         Ok(receipt)
     }
 }
+
+#[cfg(test)]
+#[path = "builder_selection_tests.rs"]
+mod tests;
 
 /// Validate the confirmed runtime intent in the same transaction that reserves funding.
 /// Exact historical start receipts are recovered before this current-state check.

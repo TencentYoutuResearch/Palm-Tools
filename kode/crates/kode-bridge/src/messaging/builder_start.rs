@@ -68,6 +68,9 @@ impl Store {
         if input.operation.worker.node_id != self.node_id {
             bail!("Builder must start on its home Hub")
         }
+        // Scope reservation and all preparation effects share this transaction.
+        // Exact historical command replay above must remain available after start.
+        super::builder_selection::ensure_unbound(&tx, &input.draft_id)?;
         if let Some(selected) = &input.selection_ref {
             super::builder_selection::validate_start_selection(&tx, &input, selected)?;
         }

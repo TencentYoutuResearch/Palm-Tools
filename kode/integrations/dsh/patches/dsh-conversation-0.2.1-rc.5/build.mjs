@@ -1,0 +1,16 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+const root=fileURLToPath(new URL('../..',import.meta.url));
+const pkg=root+'/node_modules/@deepseek-ai/dsh-client-ui-conversation/';
+const meta=JSON.parse(await readFile(pkg+'package.json','utf8'));
+if(meta.version!=='0.2.1-rc.5')throw Error('Unsupported upstream version');
+const source=await readFile(pkg+'lib/client.js','utf8'), marker='\t\texports.Config = Config;';
+if(source.split(marker).length!==2)throw Error('Upstream seam changed');
+const hash=createHash('sha256').update(source).digest('hex');
+const expected=await readFile(new URL('./upstream.sha256',import.meta.url),'utf8');
+if(expected.trim()!==hash)throw Error('Upstream bundle hash changed');
+await writeFile(new URL('./upstream.sha256',import.meta.url),hash+'\n');
+const extension=await readFile(new URL('./extension.js',import.meta.url),'utf8');
+await writeFile(new URL('./conversation-portable.js',import.meta.url),source.replace(marker,extension+'\n'+marker));
+console.log('Built isolated proposal against '+meta.version+' sha256 '+hash);

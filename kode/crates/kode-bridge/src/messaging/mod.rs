@@ -1,6 +1,8 @@
 //! Opt-in durable session messaging. No Tauri dependencies and no PTY byte-path changes.
 //! `KODE_MESSAGING_CONFIG` selects a JSON config; disabled bridges behave as before.
 mod api;
+mod interactive_team;
+mod team_configuration_acceptance;
 mod extensions;
 mod extension_files;
 mod handoff;
@@ -57,7 +59,21 @@ mod cancellation;
 mod capability_profiles;
 mod codebuddy_registry;
 mod conversations;
+mod collaboration;
 mod coordinator_control;
+pub mod coordinator_context_scope;
+mod coordinator_context_registry;
+mod coordinator_context_control;
+mod coordinator_context_input;
+mod coordinator_context_inbox;
+mod coordinator_context_pending;
+mod coordinator_context_active;
+mod coordinator_context_host_binding;
+mod coordinator_context_call;
+mod coordinator_context_native_input;
+mod runtime_host_enrollment;
+mod coordinator_context_tools;
+mod coordinator_context_retrieval;
 mod coordinator_close;
 mod coordinator_accounting;
 mod coordinator_input;
@@ -344,6 +360,22 @@ impl Hub {
         }
         Ok(all)
     }
+    fn direct_insert_supported(&self, target: &Address) -> bool {
+        if target.node_id != self.node_id() { return false; }
+        let Some(ctx) = self.ctx.upgrade() else { return false; };
+        let registered = self.store.sessions().unwrap_or_default().into_iter().any(|row|
+            row.address == *target && row.runtime == "dsh" && row.online);
+        if !registered { return false; }
+        let snapshots = ctx.runtimes.snapshots();
+        let matching: Vec<_> = snapshots.iter().filter(|row| {
+            let dto = &row["dto"];
+            dto["runtime"] == "dsh" && dto["runtime_session_id"] == target.session_id
+                && dto["runtime_online"] == true && dto["owner_alive"] == true
+                && dto["status"] != "exited" && dto["direct_insert_supported"] == true
+                && dto["execution_state_observed_at"].as_u64().is_some_and(|at| at <= now() && now().saturating_sub(at) < 15000)
+        }).collect();
+        matching.len() == 1
+    }
     fn send(&self, source: &str, req: SendRequest) -> Result<Message> {
         if !integrations::settings(self)?.messaging_enabled {
             bail!("Session communication is disabled in Kode settings")
@@ -410,6 +442,7 @@ impl Hub {
             target: req.target,
             content: req.content,
             idempotency_key: req.idempotency_key,
+            direct_insert: req.direct_insert,
             in_reply_to: req.in_reply_to,
             hop_count,
             created_at: now(),
@@ -421,10 +454,17 @@ impl Hub {
             },
             detail: None,
         };
+        // A durable replay must remain readable even if the target has since stopped.
+        // insert() still rejects any changed field, including direct_insert.
+        if m.direct_insert && self.store.message_for_key(&m.source, &m.idempotency_key)?.is_none()
+            && !self.direct_insert_supported(&m.target) {
+            bail!("direct_insert requires a fresh local dsh session with interrupt-and-insert support; remote and legacy targets are unsupported")
+        }
         self.store.insert(m)
     }
     fn receive(&self, peer: &str, mut m: Message) -> Result<Message> {
         let _guard = self.gate.lock();
+        if m.direct_insert { bail!("direct_insert is unsupported for peer messages"); }
         if m.source.node_id != peer
             || m.target.node_id != self.node_id()
             || !valid_id(&m.id)

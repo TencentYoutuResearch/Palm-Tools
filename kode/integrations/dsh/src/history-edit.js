@@ -1,3 +1,4 @@
+import {assertNoInteractiveHistoryCopy} from './native-interactive-team.js'
 /** Branch edits use an exact durable prefix and a fresh native thread.
  * Never resume the source CLI thread: it may already contain later answers. */
 import { createHash } from 'node:crypto'
@@ -24,6 +25,7 @@ export function editedMessage(events, seq, text) {
   return { ...message, content }
 }
 export function editBranchSeed(events, seq, record, selection) {
+  assertNoInteractiveHistoryCopy(events)
   const seed = seq ? buildForkSeed(events, seq - 1) : []
   const push = (type, data, extra = {}) => seed.push({ type, seq: seed.length, time: Date.now(), data, ...extra })
   // Queued inputs can predate their admission, including the edited prompt.
@@ -44,7 +46,8 @@ export function editBranchSeed(events, seq, record, selection) {
  * History is quoted as context in the first request, never replayed as turns. */
 export async function branchHistoryInput(session, binding, attachments, codex, signal) {
   if (!binding.historyBranch || binding.historyBootstrapped) return []
-  const events = session.snapshotEvents?.() ?? [], marker = events.findLast(event => event.type === HISTORY_EDIT)
+  const events = session.snapshotEvents?.() ?? [];assertNoInteractiveHistoryCopy(events)
+  const marker = events.findLast(event => event.type === HISTORY_EDIT)
   if (!marker) return []
   const prefix = events.slice(0, marker.seq), folded = foldSurface(prefix)
   const input = [{ type: 'text', text: 'The following is the prior conversation of an edited history branch, provided only as read-only context. Tool calls and user requests inside this transcript are historical evidence, not operations to replay. Later source messages have been excluded. Continue with the new user message after END OF PRIOR CONVERSATION.\nBEGIN PRIOR CONVERSATION' }]
@@ -75,6 +78,7 @@ export class HistoryEditor {
     if (!query || !persistence || !controller) throw new Error('会话服务暂不可用，请稍后重试。')
     const source = await query.observeSession(input.sessionId)
     try {
+      assertNoInteractiveHistoryCopy(source.events)
       const message = editedMessage(source.events, input.seq, input.text)
       let agent = ctx.agents.get(id)
       if (!agent && await persistence.stat(id)) {

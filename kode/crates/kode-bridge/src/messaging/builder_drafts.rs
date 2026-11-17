@@ -9,6 +9,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+#[path = "builder_optimization.rs"]
+pub(super) mod optimization;
+#[path = "builder_team_links.rs"]
+mod team_links;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Page {
+    #[serde(default)]
+    pub after: String,
+    pub limit: Option<usize>,
+    pub team_id: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Interview {
@@ -80,6 +94,9 @@ impl Save {
         if let Some(package) = &i.proposed_workflow {
             super::builder_workflow_proposal::validate(package, &i.workspace_refs)?;
         }
+        if let Some(spec) = &i.proposed_team {
+            spec.validate_role_prompts()?;
+        }
         let mut inspected = std::collections::HashSet::new();
         if let Some(questionnaire) = &i.questionnaire {
             questionnaire.validate()?;
@@ -110,17 +127,26 @@ impl Store {
             .optional()?;
         body.map(|v| Ok(serde_json::from_str(&v)?)).transpose()
     }
-    pub fn builder_drafts(&self, page: super::teams::Page) -> Result<Value> {
+    pub fn builder_drafts(&self, page: Page) -> Result<Value> {
         let limit = page.limit.unwrap_or(25);
-        if limit == 0 || limit > 50 || page.after.len() > 256 {
+        if limit == 0
+            || limit > 50
+            || page.after.len() > 256
+            || page.team_id.as_ref().is_some_and(|id| !valid_id(id))
+        {
             bail!("invalid Builder draft page")
         }
         let db = self.db.lock();
-        let mut query = db.prepare("SELECT body FROM builder_draft_revisions r WHERE id>?1 AND revision=(SELECT MAX(revision) FROM builder_draft_revisions WHERE id=r.id) ORDER BY id LIMIT ?2")?;
-        let mut items = query.query_map(params![page.after, limit+1], |r|r.get::<_,String>(0))?
+        let mut query = db.prepare(&format!("SELECT body FROM builder_draft_revisions r WHERE id>?1 AND revision=(SELECT MAX(revision) FROM builder_draft_revisions WHERE id=r.id)
+            AND (?3 IS NULL OR EXISTS (SELECT 1 FROM workbench_documents o WHERE o.key='builder-optimization:' || r.id AND json_extract(o.value,'$.optimization_target.team_id')=?3) OR EXISTS (SELECT 1 FROM team_events e WHERE e.team_id=?3
+            AND ({}) AND json_extract(CASE WHEN json_valid(e.body) THEN e.body ELSE '{{}}' END,'$.draft_id')=r.id)) ORDER BY id LIMIT ?2", team_links::ACCEPTED))?;
+        let mut items = query.query_map(params![page.after, limit+1, page.team_id], |r|r.get::<_,String>(0))?
             .map(|row| {
                 let v: Value = serde_json::from_str(&row?)?;
-                Ok(json!({"id":v["id"],"revision":v["revision"],"status":v["status"],"purpose":v["interview"]["purpose"],"updated_at":v["updated_at"]}))
+                let mut item = json!({"id":v["id"],"revision":v["revision"],"status":v["status"],"purpose":v["interview"]["purpose"],"updated_at":v["updated_at"]});
+                team_links::enrich(&db, &mut item)?;
+                optimization::enrich(&db, &mut item, false)?;
+                Ok(item)
             }).collect::<Result<Vec<Value>>>()?;
         let more = items.len() > limit;
         items.truncate(limit);
@@ -208,9 +234,16 @@ impl Store {
         if !valid_id(id) {
             bail!("invalid Builder draft identity")
         }
-        let body: Option<String> = self.db.lock().query_row(
+        let db = self.db.lock();
+        let body: Option<String> = db.query_row(
             "SELECT body FROM builder_draft_revisions WHERE id=?1 ORDER BY revision DESC LIMIT 1",
             [id], |r| r.get(0)).optional()?;
-        body.map(|v| Ok(serde_json::from_str(&v)?)).transpose()
+        body.map(|v| {
+            let mut draft = serde_json::from_str(&v)?;
+            team_links::enrich(&db, &mut draft)?;
+            optimization::enrich(&db, &mut draft, true)?;
+            Ok(draft)
+        })
+        .transpose()
     }
 }

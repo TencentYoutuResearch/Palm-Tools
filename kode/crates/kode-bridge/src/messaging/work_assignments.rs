@@ -9,6 +9,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// Retryable concurrency pressure, distinct from invalid grants or configuration.
+#[derive(Debug)]
+pub(super) struct TeamAssignmentCapacityExhausted;
+impl std::fmt::Display for TeamAssignmentCapacityExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("team assignment capacity exhausted")
+    }
+}
+impl std::error::Error for TeamAssignmentCapacityExhausted {}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prepare {
@@ -270,7 +280,7 @@ pub(super) fn prepare_in(
             .as_u64()
             .unwrap()
     {
-        bail!("team assignment capacity exhausted")
+        return Err(TeamAssignmentCapacityExhausted.into());
     }
     let inputs = super::assignment_inputs::freeze(db, &run, stage, at)?;
     let assignment_id = uuid::Uuid::new_v4().to_string();

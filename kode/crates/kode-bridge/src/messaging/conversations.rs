@@ -10,11 +10,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ClarificationTarget {
+    pub run_id: String,
+    pub assignment_id: String,
+    pub question_request_id: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Send {
     pub request_id: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clarification_target: Option<ClarificationTarget>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +46,25 @@ fn request(db: &Connection, conversation: &str, id: &str) -> Result<Option<(Stri
     Ok(db.query_row("SELECT request,body FROM conversation_messages WHERE conversation_id=?1 AND actor='human:local_owner' AND request_id=?2",params![conversation,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)
 }
 impl Store {
+    pub fn conversation_clarifications(&self, conversation: &str) -> Result<Value> {
+        let db = self.db.lock();
+        let team_id = team(&db,conversation)?;
+        let mut q = db.prepare("SELECT body FROM work_runs WHERE team_id=?1 AND state IN ('running','queued','waiting_resource') ORDER BY id")?;
+        let rows = q.query_map([&team_id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut items = Vec::new();
+        for body in rows {
+            let run: Value = serde_json::from_str(&body)?;
+            if run["coordinator"]["conversation_id"] != conversation { continue }
+            for question in super::assignment_clarification::pending(&run) {
+                items.push(json!({"run_id":run["id"],"assignment_id":question["assignment_id"],
+                    "question_request_id":question["request"]["request_id"],"questions":question["request"]["questions"],
+                    "stage_id":question["stage_id"],"stage_attempt":question["stage_attempt"],"recorded_at":question["recorded_at"],
+                    "run_title":run["inputs"]["request"]}));
+            }
+        }
+        Ok(json!({"conversation_id":conversation,"team_id":team_id,"home_hub":self.node_id,"items":items}))
+    }
+
     pub fn pending_conversation_inputs(&self, conversation: &str, input: Page) -> Result<Value> {
         let limit = input.limit.unwrap_or(20);
         if limit == 0 || limit > 32 || input.after > i64::MAX as u64 {
@@ -44,7 +72,7 @@ impl Store {
         }
         let db = self.db.lock();
         let team = team(&db, conversation)?;
-        let mut q=db.prepare("SELECT id,sequence FROM conversation_messages m WHERE conversation_id=?1 AND actor='human:local_owner' AND sequence>?2 AND NOT EXISTS(SELECT 1 FROM workbench_documents d WHERE d.key='coordinator-input:'||json_quote(m.id)) ORDER BY sequence LIMIT ?3")?;
+        let mut q=db.prepare("SELECT id,sequence FROM (SELECT id,sequence FROM conversation_messages WHERE conversation_id=?1 AND actor='human:local_owner' UNION ALL SELECT id,seq AS sequence FROM collaboration_coordinator_inputs WHERE conversation_id=?1) m WHERE sequence>?2 AND NOT EXISTS(SELECT 1 FROM workbench_documents d WHERE d.key='coordinator-input:'||json_quote(m.id)) ORDER BY sequence LIMIT ?3")?;
         let mut items = q
             .query_map(params![conversation, input.after, limit + 1], |r| {
                 Ok(json!({"message_id":r.get::<_,String>(0)?,"sequence":r.get::<_,u64>(1)?}))
@@ -91,12 +119,31 @@ impl Store {
             .ok_or_else(|| anyhow::anyhow!("invalid team activation"))?;
         let authority = team_activation::authorized(&tx, &team_id, revision, now())?
             .ok_or_else(|| anyhow::anyhow!("conversation team authority unavailable"))?;
+        if let Some(target) = &input.clarification_target {
+            if input.prior_run_id.is_some() || ![&target.run_id,&target.assignment_id,&target.question_request_id].iter().all(|id|valid_id(id)) {
+                bail!("invalid clarification target")
+            }
+            let body: String = tx.query_row("SELECT body FROM work_assignments WHERE id=?1",[&target.assignment_id],|r|r.get(0))?;
+            let assignment: Value = serde_json::from_str(&body)?;
+            let (mut run, op) = super::assignment_resources::authorized_context(&tx,&target.assignment_id,&assignment,now())?;
+            if run["id"] != target.run_id || run["team_id"] != team_id
+                || run["coordinator"]["conversation_id"] != conversation
+                || assignment["state"] != "prepared" || assignment["creation"]["state"] != "created"
+                || op.state != super::operations::State::Active
+                || op.lease_until.is_none_or(|t|t<=now()) {
+                bail!("clarification target must be active work from this conversation")
+            }
+            super::assignment_resources::assert_held(&tx,&assignment)?;
+            if !super::assignment_mandate::consumed(&tx,&assignment,&self.node_id)? { bail!("clarification target mandate not consumed") }
+            super::assignment_clarification::take_pending(&mut run,&target.assignment_id,&target.question_request_id)?;
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let at = now();
         let mut row = json!({"id":id,"conversation_id":conversation,"team_id":team_id,"superagent_id":authority["snapshot"]["team"]["superagent_id"],"home_hub":self.node_id,
             "team_revision":revision,"activation_revision":authority["revision"],"request_id":input.request_id,"actor":{"kind":"human","id":"local_owner"},"content":input.content,"created_at":at,"state":"accepted","coordinator_delivery":"pending"});
         if let Some(prior_id) = &input.prior_run_id { row["prior_run_id"] = json!(prior_id); }
-        tx.execute("INSERT INTO conversation_messages(id,conversation_id,team_id,actor,request_id,request,body) VALUES (?1,?2,?3,'human:local_owner',?4,?5,?6)",params![id,conversation,team_id,input.request_id,encoded,serde_json::to_string(&row)?])?;
+        if let Some(target) = &input.clarification_target { row["clarification_target"] = serde_json::to_value(target)?; }
+        tx.execute("INSERT INTO conversation_messages(sequence,id,conversation_id,team_id,actor,request_id,request,body) VALUES ((SELECT MAX(COALESCE((SELECT MAX(sequence) FROM conversation_messages),0),COALESCE((SELECT MAX(seq) FROM collaboration_coordinator_inputs),0))+1),?1,?2,?3,'human:local_owner',?4,?5,?6)",params![id,conversation,team_id,input.request_id,encoded,serde_json::to_string(&row)?])?;
         let sequence = tx.last_insert_rowid();
         row["sequence"] = json!(sequence);
         tx.execute(

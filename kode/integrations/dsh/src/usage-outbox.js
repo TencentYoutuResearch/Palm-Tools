@@ -108,10 +108,28 @@ export class UsageOutbox {
       r.revision = result.reservation.revision
       r.acknowledged = r.commandObservation
       r.receipt = result
+      r.acknowledged_usage = structuredClone(command)
       delete r.command; delete r.commandObservation
       r.done = r.latest.event_id === r.acknowledged && r.latest.turn_ended === true
       r.status = r.done ? 'estimated_pending_reconciliation' : 'pending'
     })
+  }
+  /** Confirm the exact original billing receipt; a local observation is not a Hub receipt. */
+  async confirmedReceipt(session, operation) {
+    const key = this.key(operation), binding = this.profiles.binding(session), row = binding?.usageOutbox?.[key]
+    if (!isDeepStrictEqual(binding?.managedOperation, operation) || !row?.done || row.command
+      || row.latest?.turn_ended !== true || row.acknowledged !== row.latest?.event_id
+      || !row.acknowledged_usage?.event_id || !row.receipt) throw Object.assign(new Error('Native usage receipt is not confirmed'), { code: 'usage_receipt_unconfirmed' })
+    const command = structuredClone(row.acknowledged_usage)
+    if (command.reservation_id !== row.context.reservation.request.id || command.model !== row.selected_model
+      || command.expected_revision + 1 !== row.revision) throw new Error('Native usage receipt binding changed')
+    const receipt = row.home_node
+      ? (await this.relay(session, operation, { kind: 'receipt', event_id: command.event_id })).receipt
+      : await this.client.call(`/api/v1/messaging/metered-usage/${encodeURIComponent(command.event_id)}`, undefined, this.stop.signal)
+    if (!isDeepStrictEqual(receipt?.usage, command) || !isDeepStrictEqual(receipt?.result, row.receipt)) throw new Error('Native usage server receipt changed')
+    const current = this.profiles.binding(session)
+    if (!isDeepStrictEqual(current.managedOperation, operation) || !isDeepStrictEqual(current.usageOutbox?.[key], row)) throw new Error('Native usage changed while confirming receipt')
+    return { usage_event_id: command.event_id, receipt: structuredClone(receipt) }
   }
   start(intervalMs = 5000) {
     if (this.timer || !this.client || this.stop.signal.aborted) return

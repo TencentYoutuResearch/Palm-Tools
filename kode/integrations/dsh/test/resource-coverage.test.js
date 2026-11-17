@@ -96,3 +96,9 @@ test('coverage keeps monetary facts separate and old Hub absence does not erase 
   const legacy = (await resourceCoverage(one, client, 'host')).items[0]
   assert.equal(legacy.provider_monetary.status, 'unavailable'); assert.equal(legacy.quota_status, 'exhausted')
 })
+
+
+test('controlled official token usage is distinct from connected provider quotas and admission', async () => {
+  const result=await resourceCoverage({profiles:{list:()=>[profile('official','dsh')],bindings:{}},hasRuntime:()=>true,officialResourceDirectory:()=>({status:'registered_only',items:[{provider_id:'fixture',name:'Fixture',registered:true}]})},null,'host')
+  for(const row of result.items){assert.equal(row.usage_capability.supported,true);assert.equal(row.usage_capability.status,'conditional');assert.equal(row.eligible_for_dispatch,false);assert.equal(row.quota_source,null)}
+})

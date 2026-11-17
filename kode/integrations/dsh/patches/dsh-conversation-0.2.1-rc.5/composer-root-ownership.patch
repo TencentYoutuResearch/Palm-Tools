@@ -1,0 +1,238 @@
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -15450,9 +15450,15 @@
+ 			* @returns the unbind disposer.
+ 			*/
+ 			bindFilePicker(picker) {
++				// Kode patch: views bind in mount order; unbinding the current picker
++				// returns the action to the newest still-bound view, never to none.
++				const pickers = this.filePickers ??= [];
++				pickers.push(picker);
+ 				this.filePicker = picker;
+ 				return () => {
+-					if (this.filePicker === picker) this.filePicker = void 0;
++					const index = pickers.lastIndexOf(picker);
++					if (index >= 0) pickers.splice(index, 1);
++					if (this.filePicker === picker) this.filePicker = pickers.at(-1);
+ 				};
+ 			}
+ 			/**
+@@ -18133,8 +18139,33 @@
+ 		* @param props - Strict Session store, view ledger, navigation, render, and locale shares.
+ 		* @returns Session navigation controls, with title and tabs after conversation starts.
+ 		*/
+-		function ConversationSessionHeader({ sessionId, hideChrome, useSessions, useConversationViews, useStore, renderSlot, open, selectView, setPinned, t, useEntryPins, useEntryActions }) {
+-			const tabs = useConversationViews((value) => value);
++		function ConversationViewTabList({ visibleTabs, active, selectView }) {
++			return (0, react_jsx_runtime.jsx)("div", {
++					className: ConversationRoot_module_css_default.viewTabs,
++					role: "tablist",
++					"data-conversation-tabs": "",
++					children: visibleTabs.map((viewTab) => (0, react_jsx_runtime.jsx)("button", {
++						type: "button",
++						role: "tab",
++						"aria-selected": viewTab.id === active?.id,
++						className: clsx(ConversationRoot_module_css_default.tab, viewTab.id === active?.id && ConversationRoot_module_css_default.tabActive),
++						onClick: () => {
++							selectView(viewTab.id);
++						},
++						children: (0, react_jsx_runtime.jsx)(ViewTabLabel, { label: viewTab.label })
++					}, viewTab.id))
++				});
++		}
++		function KodeChannelViewTabs({ tabs, value, onSelect }) {
++			return (0, react_jsx_runtime.jsx)("div", {
++				className: ConversationRoot_module_css_default.tabs,
++				children: (0, react_jsx_runtime.jsx)(ConversationViewTabList, { visibleTabs: tabs, active: { id: value }, selectView: onSelect })
++			});
++		}
++		function ConversationSessionHeader({ sessionId, hideChrome, useSessions, useConversationViews, useStore, renderSlot, open, selectView, setPinned, t, useEntryPins, useEntryActions, kodeViewVisibility }) {
++			const allTabs = useConversationViews((value) => value);
++			const hidden = (0, react.useSyncExternalStore)(kodeViewVisibility.subscribe, kodeViewVisibility.getSnapshot);
++			const tabs = (0, react.useMemo)(() => allTabs.filter((tab) => !hidden.split("\n").includes(tab.id)), [allTabs, hidden]);
+ 			const active = resolveActiveView(tabs, useStore((s) => s.view));
+ 			const ancestry = useSessions((s) => deriveAncestry(s, sessionId), equalBreadcrumbs);
+ 			const unpinned = useEntryPins((ids) => ids);
+@@ -18225,21 +18256,7 @@
+ 			}), showTabs && (0, react_jsx_runtime.jsxs)("div", {
+ 				ref: tabRow,
+ 				className: ConversationRoot_module_css_default.tabs,
+-				children: [(0, react_jsx_runtime.jsx)("div", {
+-					className: ConversationRoot_module_css_default.viewTabs,
+-					role: "tablist",
+-					"data-conversation-tabs": "",
+-					children: visibleTabs.map((viewTab) => (0, react_jsx_runtime.jsx)("button", {
+-						type: "button",
+-						role: "tab",
+-						"aria-selected": viewTab.id === active?.id,
+-						className: clsx(ConversationRoot_module_css_default.tab, viewTab.id === active?.id && ConversationRoot_module_css_default.tabActive),
+-						onClick: () => {
+-							selectView(viewTab.id);
+-						},
+-						children: (0, react_jsx_runtime.jsx)(ViewTabLabel, { label: viewTab.label })
+-					}, viewTab.id))
+-				}), hasEntryActions && (0, react_jsx_runtime.jsx)(ViewsMoreMenu, {
++				children: [(0, react_jsx_runtime.jsx)(ConversationViewTabList, { visibleTabs, active, selectView }), hasEntryActions && (0, react_jsx_runtime.jsx)(ViewsMoreMenu, {
+ 					label: t("session.moreViews"),
+ 					current: currentInMore,
+ 					entries: moreTabs.map((viewTab) => ({
+@@ -18265,6 +18282,12 @@
+ 		}
+ 		//#endregion
+ 		//#region lib/types/client/input/editor/ComposerContentEditable.js
++		/**
++		* Kode patch: occurrences mounted on one shared Session editor, oldest first.
++		* Only the current root's owner may move the root; it returns it to the newest
++		* still-mounted occurrence with that occurrence's own editability.
++		*/
++		const composerRootOccurrences = /* @__PURE__ */ new WeakMap();
+ 		/**
+ 		* The composer's contenteditable host: binds one shell-owned Lexical editor
+ 		* to a resident div. Session-maybe by design — a null editor renders the
+@@ -18280,16 +18303,27 @@
+ 		*/
+ 		function ComposerContentEditable({ editor, editable, ...rest }) {
+ 			const ref = (0, react.useRef)(null);
++			const occurrence = (0, react.useRef)({ el: null, editable });
+ 			(0, react.useLayoutEffect)(() => {
+ 				const el = ref.current;
+ 				if (editor === null || el === null) return;
++				const entry = occurrence.current;
++				entry.el = el;
++				let entries = composerRootOccurrences.get(editor);
++				if (entries === void 0) composerRootOccurrences.set(editor, entries = []);
++				entries.push(entry);
+ 				editor.setRootElement(el);
+ 				return () => {
+-					editor.setRootElement(null);
++					entries.splice(entries.indexOf(entry), 1);
++					if (editor.getRootElement() !== el) return;
++					const previous = entries.at(-1);
++					editor.setRootElement(previous?.el ?? null);
++					if (previous !== void 0) editor.setEditable(previous.editable);
+ 				};
+ 			}, [editor]);
+ 			(0, react.useLayoutEffect)(() => {
+-				if (editor !== null) editor.setEditable(editable);
++				occurrence.current.editable = editable;
++				if (editor !== null && editor.getRootElement() === ref.current) editor.setEditable(editable);
+ 			}, [editor, editable]);
+ 			return (0, react_jsx_runtime.jsx)("div", {
+ 				ref,
+@@ -18398,6 +18432,9 @@
+ 				editor.update(() => {}, { onUpdate: syncComposition });
+ 			};
+ 			const recentlyComposing = () => composing || Date.now() < composingUntil;
++			// Kode patch: every view of a Session registers on the shared editor and Lexical stops at the first
++			// handler that answers, so only the view whose composer holds the root may answer.
++			const owned = (listener) => (event) => handlers.owns?.() === false ? false : listener(event);
+ 			const arrow = (key) => (event) => {
+ 				const inComposition = event !== null && isComposingEvent(event, recentlyComposing);
+ 				if (handlers.arbitrate(key, inComposition) !== "pass") {
+@@ -18416,21 +18453,21 @@
+ 				root?.addEventListener("compositionstart", onCompositionStart);
+ 				root?.addEventListener("compositionend", onCompositionEnd);
+ 				syncComposition();
+-			}), editor.registerUpdateListener(syncComposition), editor.registerCommand(sn$2, arrow("up"), 4), editor.registerCommand(ln$2, arrow("down"), 4), editor.registerCommand(hn$2, (event) => arrow(event.shiftKey ? "tabBack" : "tab")(event), 4), editor.registerCommand(fn$1, (event) => {
++			}), editor.registerUpdateListener(syncComposition), editor.registerCommand(sn$2, owned(arrow("up")), 4), editor.registerCommand(ln$2, owned(arrow("down")), 4), editor.registerCommand(hn$2, owned((event) => arrow(event.shiftKey ? "tabBack" : "tab")(event)), 4), editor.registerCommand(fn$1, owned((event) => {
+ 				handlers.dismissPopup();
+ 				if (handlers.arbitrate("escape", isComposingEvent(event, recentlyComposing)) === "consumed") {
+ 					event.preventDefault();
+ 					return true;
+ 				}
+ 				return false;
+-			}, 4), editor.registerCommand(an$1, (event) => {
++			}), 4), editor.registerCommand(an$1, owned((event) => {
+ 				if (isComposingEvent(event, recentlyComposing)) return false;
+ 				if (handlers.space()) {
+ 					event.preventDefault();
+ 					return true;
+ 				}
+ 				return false;
+-			}, 4), editor.registerCommand(cn$1, (event) => {
++			}), 4), editor.registerCommand(cn$1, owned((event) => {
+ 				if (event !== null && (event.altKey || event.getModifierState("AltGraph") || event.ctrlKey && event.metaKey || event.shiftKey && (event.ctrlKey || event.metaKey))) return true;
+ 				if (event?.shiftKey === true) return false;
+ 				if (event !== null && isComposingEvent(event, recentlyComposing)) return true;
+@@ -18443,7 +18480,7 @@
+ 				if (!handlers.canSubmit()) return true;
+ 				handlers.submit(event?.ctrlKey === true || event?.metaKey === true);
+ 				return true;
+-			}, 4), editor.registerCommand(Je$2, (event) => {
++			}), 4), editor.registerCommand(Je$2, owned((event) => {
+ 				const clipboardData = event.clipboardData ?? null;
+ 				if (clipboardData === null) return false;
+ 				const files = [];
+@@ -18465,7 +18502,7 @@
+ 				event.preventDefault();
+ 				handlers.pasteText(text);
+ 				return true;
+-			}, 4));
++			}), 4));
+ 		}
+ 		//#endregion
+ 		//#region lib/types/client/input/editor/view-binding.js
+@@ -18542,10 +18579,15 @@
+ 		* @param editor - the borrowed Session-owned editor.
+ 		* @param keyboard - the existing composer keyboard operations.
+ 		* @param gate - live view values read by the installed handlers.
++		* @param scrollRef - this view's scrollport; the view answers only while it holds the editor root.
+ 		* @returns the keymap disposer.
+ 		*/
+-		function installDraftKeymap(editor, keyboard, gate) {
++		function installDraftKeymap(editor, keyboard, gate, scrollRef) {
+ 			return registerComposerKeymap(editor, {
++				owns: () => {
++					const root = editor.getRootElement();
++					return root !== null && scrollRef.current?.contains(root) === true;
++				},
+ 				arbitrate: (key, composing) => keyboard.arbitrate(key, composing),
+ 				space: () => {
+ 					if (gate.current.machineBusy || gate.current.locked) return false;
+@@ -19115,7 +19157,7 @@
+ 			}, [keyboard]);
+ 			(0, react.useEffect)(() => {
+ 				if (editor === null || keyboard === void 0) return;
+-				return installDraftKeymap(editor, keyboard, gate);
++				return installDraftKeymap(editor, keyboard, gate, scrollRef);
+ 			}, [editor, keyboard]);
+ 			const keepFocus = (e) => {
+ 				keepDraftFocus(e, editor);
+@@ -19694,6 +19736,7 @@
+ 			const maxConcurrentFileUploads = config.maxConcurrentFileUploads;
+ 			const workspaceNavigation = ctx.get("uiWorkspace");
+ 			const uiConversation = new UiConversation(ctx, sessions);
++			uiConversation.kodeChannelViewTabs = KodeChannelViewTabs;
+ 			uiConversation.userText.register(sessionReferenceRule);
+ 			uiConversation.userText.register(collapseWhitespaceRule);
+ 			uiConversation.userText.register(trimWhitespaceRule);
+@@ -20047,6 +20090,21 @@
+ 					}
+ 				}
+ 			}, ConversationHeader);
++			// Kode overlay: optional contributor visibility, without replacing native tab chrome.
++			const kodeViewVisibility = (sessionId) => ({
++				getSnapshot: () => slots.entries("conversation.view").filter(({options}) => typeof options.kodeVisibleForSession === "function" && !options.kodeVisibleForSession(sessionId)).map(({options}) => options.id).join("\n"),
++				subscribe: (listener) => {
++					let stops = [];
++					const watch = () => {
++						for (const stop of stops) stop();
++						const sources = new Set(slots.entries("conversation.view").map(({options}) => options.kodeVisibilitySubscribe).filter((source) => typeof source === "function"));
++						stops = [...sources].map((source) => source(sessionId, listener)).filter((stop) => typeof stop === "function");
++					};
++					watch();
++					const unsub = slots.subscribe("conversation.view", () => { watch(); listener(); });
++					return () => { unsub(); for (const stop of stops) stop(); };
++				}
++			});
+ 			const registerSessionHeader = () => slots.register({
+ 				name: "conversation.session.header",
+ 				locale: NS,
+@@ -20079,6 +20137,7 @@
+ 						entryPins: viewPins.unpinned,
+ 						entryActions: viewActions
+ 					},
++					kodeViewVisibility: kodeViewVisibility(sessionId),
+ 					setPinned: viewPins.setPinned,
+ 					open: (id) => {
+ 						workspaceNavigation.openSession(id);

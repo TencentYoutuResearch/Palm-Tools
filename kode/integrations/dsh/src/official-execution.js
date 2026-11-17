@@ -1,3 +1,6 @@
+import { guardDiscussionTool } from './coordinator-discussion-guard.js'
+import { assertLegacyCoordinatorContext } from './context-scope.js'
+import { executeAssignmentPatchTool } from './assignment-patch-tool.js'
 import { executeAssignmentWriteTool } from './assignment-write-tool.js'
 import { executeAssignmentSourceTool } from './assignment-source-tools.js'
 import { executeAssignmentEvidenceTool } from './assignment-evidence-tools.js'
@@ -25,7 +28,7 @@ import { OfficialToolJournal } from './official-tool-journal.js'
 /** Host-owned controlled execution; callers never receive collector credentials. */
 import { OfficialCallOutbox } from './official-call-outbox.js'
 import { streamLeasedOfficialCall } from './official-call-lease.js'
-import { controlledBinding, managedCodexEnabled, managedCodexRoute } from './managed-codex-profile.js'
+import { controlledBinding, managedNativeEnabled, managedCodexRoute } from './managed-codex-profile.js'
 import { ManagedCodexAdapter } from './managed-codex-adapter.js'
 import { AssignmentClarificationOutbox } from './assignment-clarification-outbox.js'
 import { TaskWorktrees } from './task-worktrees.js'
@@ -158,6 +161,7 @@ export class OfficialExecution {
         runtime.entry.assertToolBody(agent, name, request)
         await assertOwner()
         if (name === 'kode_write_source') return executeAssignmentWriteTool(runtime, agent, binding, slot.workspaceLease, request, combined, assertOwner)
+        if (name === 'kode_patch_source') return executeAssignmentPatchTool(runtime, agent, binding, slot.workspaceLease, request, combined, assertOwner)
         if (['kode_list_source', 'kode_read_source'].includes(name)) return executeAssignmentSourceTool(runtime, agent, binding, slot.workspaceLease, name, request, combined, assertOwner)
         if (['kode_capture_output', 'kode_review_output'].includes(name)) return executeAssignmentEvidenceTool(runtime, agent, binding, slot.workspaceLease, name, request, combined, assertOwner)
         if (name === 'kode_publish_output') return publishAssignmentOutput(runtime, agent, binding, request, combined, assertOwner)
@@ -173,6 +177,10 @@ export class OfficialExecution {
       const enter = () => { if (busy) throw new Error('Official execution action already in progress'); busy = true; slot.actions++ }
       const leave = () => { busy = false; slot.actions--; releaseWorkspace() }
       const streamWith = async function* (options, dispatch, preparedConfig) {
+        if (binding.managedCoordinator) {
+          const current = runtime.profiles.binding(agent.id)
+          assertLegacyCoordinatorContext(binding, binding.managedCoordinator, current, current?.managedCoordinator, options, agent.session?.header)
+        }
         if (options.sessionId !== agent.id || options.provider?.startsWith('kode-agent-')) throw new Error('Official stream identity mismatch')
         if ((options.tools ?? []).some(tool => !allowed.has(tool.name))) throw Object.assign(new Error('Official stream advertises unauthorized tool'), {
           toolDiagnostic: { advertised: (options.tools ?? []).map(tool => tool.name).slice(0, 64), allowed: [...allowed].slice(0, 64) },
@@ -261,14 +269,18 @@ export class OfficialExecution {
             const toolSignal = request.signal ? AbortSignal.any([request.signal, lease.signal]) : lease.signal
             toolSignal.throwIfAborted()
             const policy = runtime.ctx.get('kodeOfficialToolPolicies')?.get?.(request.name, agent)
-            if (policy?.validateArguments && !policy.validateArguments(request.arguments)) {
+            let discussionError, restrictedTurnCode
+            if (binding.managedCoordinator) {
+              try { guardDiscussionTool(agent,request.name,request.arguments) } catch (error) { if(!['DISCUSSION_AUTHORITY_REQUIRED','CLARIFICATION_AUTHORITY_REQUIRED'].includes(error.code))throw error; discussionError=error.message;restrictedTurnCode=error.code }
+            }
+            if (discussionError || policy?.validateArguments && !policy.validateArguments(request.arguments)) {
               // No implementation has run. Persist a definite rejection so the model
               // can correct its input without treating this as an uncertain effect.
-              const message = 'Arguments do not match the tool JSON schema. Correct them using the declared output IDs and parameter constraints.'
+              const message = discussionError || 'Arguments do not match the tool JSON schema. Correct them using the declared output IDs and parameter constraints.'
               const result = { content: [{ type: 'text', text: message }], isError: true,
-                error: { code: 'INVALID_TOOL_ARGUMENTS', message } }
+                error: { code: discussionError ? restrictedTurnCode : 'INVALID_TOOL_ARGUMENTS', message } }
               await runtime.tools.begin(agent.id, operation, request)
-              await runtime.tools.end(agent.id, request.callId, 'returned', 'arguments_rejected_before_dispatch', result)
+              await runtime.tools.end(agent.id, request.callId, 'returned', discussionError ? (restrictedTurnCode==='CLARIFICATION_AUTHORITY_REQUIRED'?'clarification_rejected_before_dispatch':'discussion_rejected_before_dispatch') : 'arguments_rejected_before_dispatch', result)
               await assertOwner()
               return result
             }
@@ -347,7 +359,7 @@ export class OfficialExecution {
   refreshProviders() {
     if (this.closed) return
     const routes = [...new Set([...this.profiles.list(), ...Object.values(this.profiles.bindings).map(binding => binding.profile)]
-      .filter(managedCodexEnabled).map(profile => managedCodexRoute(profile.id)))]
+      .filter(managedNativeEnabled).map(profile => managedCodexRoute(profile.id)))]
     if (this.managedRegistration) this.managedRegistration.replace(routes)
     else if (routes.length) this.managedRegistration = this.ctx.llm.registerAdapter(routes, this.managedCodex)
   }

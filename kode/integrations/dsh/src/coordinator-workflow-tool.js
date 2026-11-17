@@ -1,3 +1,4 @@
+import { guardDiscussionTool } from './coordinator-discussion-guard.js'
 import { isDeepStrictEqual } from 'node:util'
 import { createDeliveryTracker } from './delivery-tracker.js'
 /** Create only from the fixed consumed conversation request and activated binding. */
@@ -14,6 +15,7 @@ export function mountCoordinatorWorkflowTool(agentCtx,agent,runtime,scope){
   output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
   execute:async args=>{
    runtime.entry.assertToolBody(agent,name,args);if(!valid(args))throw Error('Invalid Coordinator workflow arguments')
+   guardDiscussionTool(agent,name,args)
    const b=runtime.profiles.binding(agent.id)
    if(b?.operationClosed||b?.managedBuilder||b?.managedAssignment||!isDeepStrictEqual(b?.managedOperation,op)||!isDeepStrictEqual(b?.managedCoordinator,scope))throw Error('Coordinator workflow binding changed')
    const base=`/api/v1/messaging/conversations/${encodeURIComponent(scope.conversation_id)}`

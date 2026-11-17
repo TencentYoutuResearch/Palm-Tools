@@ -11,21 +11,27 @@ export class RpcProcess extends EventEmitter {
     this.process = spawnAgent(profile.executable, [...(profile.args ?? []), 'app-server', '--listen', 'stdio://', ...appServerArgs], cwd, profile.env, { inheritEnvironment })
     this.child = this.process.child
     this.child.stdout.setEncoding('utf8')
-    this.child.stdout.on('data', chunk => {
-      this.buffer += chunk
-      if (this.buffer.length > 8 * 1024 * 1024) return this.fail(new Error('Agent protocol frame exceeds 8 MiB'))
-      let end
-      while ((end = this.buffer.indexOf('\n')) >= 0) {
-        const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1)
-        if (!line.trim()) continue
-        try { this.receive(JSON.parse(line)) } catch { this.fail(new Error('Agent emitted invalid JSON-RPC')); return }
-      }
-    })
+    this.child.stdout.on('data', chunk => this.receiveChunk(chunk))
     this.child.stderr.setEncoding('utf8')
     this.child.stderr.on('data', chunk => { this.stderr = (this.stderr + chunk).slice(-8192) })
     this.child.stdin.on('error', error => this.fail(error))
     this.child.on('error', error => this.fail(error))
     this.child.on('exit', (code, signal) => this.fail(new Error(`Agent process exited (${signal ?? code})`)))
+  }
+  receiveChunk(chunk) {
+    this.buffer += chunk
+    let end
+    // Apply the resource bound to each frame, not several valid frames that
+    // happen to share one stdout chunk. The remainder is an unfinished frame.
+    while ((end = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, end)
+      this.buffer = this.buffer.slice(end + 1)
+      if (Buffer.byteLength(line) > 8 * 1024 * 1024) return this.fail(new Error('Agent protocol frame exceeds 8 MiB'))
+      if (!line.trim()) continue
+      try { this.receive(JSON.parse(line)) } catch { this.fail(new Error('Agent emitted invalid JSON-RPC')); return }
+      if (this.closed) return
+    }
+    if (Buffer.byteLength(this.buffer) > 8 * 1024 * 1024) this.fail(new Error('Agent protocol frame exceeds 8 MiB'))
   }
   receive(message) {
     if (!message || typeof message !== 'object') throw new Error('invalid RPC envelope')

@@ -1,4 +1,5 @@
 /** Hash the actual prepared input; never persist prompt bodies or infer old versions. */
+import {coordinatorRoleSection} from './coordinator-role-context.js'
 import { createHash } from 'node:crypto'
 import { BUILDER_PROMPT_VERSION,BUILDER_PROMPT } from './builder-prompt.js'
 import { COORDINATOR_PROMPT_VERSION,coordinatorPrompt } from './coordinator-context.js'
@@ -17,6 +18,10 @@ export function promptProvenance(binding,options,assignment){
   const role=binding.managedBuilder?'builder':binding.managedCoordinator?'coordinator':null
   const version=role==='builder'?BUILDER_PROMPT_VERSION:COORDINATOR_PROMPT_VERSION
   const expected=role==='builder'?BUILDER_PROMPT:role==='coordinator'?coordinatorPrompt(binding.managedCoordinator):null
+  if(role==='coordinator'){
+   const configured=coordinatorRoleSection(binding)
+   if(configured&&!systems.flatMap(texts).some(text=>text.includes(configured)))throw Error('Prepared Coordinator role prompt missing or changed')
+  }
   // Require the full trusted section; a marker in project/user text cannot opt in.
   if(expected&&systems.flatMap(texts).some(text=>text.includes(expected)))instruction={role,version,sha256:system_sha256}
  }

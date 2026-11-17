@@ -71,6 +71,49 @@ pub struct ActiveQuery {
     pub after: Option<String>,
 }
 
+// Display projection only. Never expose the serialized worker context or look up other tasks/DMs.
+fn request_preview(run: &Value) -> Option<String> {
+    let raw = run["inputs"]["request"].as_str()?;
+    let source = &run["collaboration"];
+    if source.is_null() {
+        return Some(raw.chars().take(240).collect());
+    }
+    let (format, revision) = match source["format"].as_str()? {
+        "kode.collaboration.work-source.v1" => ("kode.collaboration.task-context.v1", "task_revision"),
+        "kode.collaboration.work-source.v2" => ("kode.collaboration.task-context.v2", "execution_revision"),
+        _ => return None,
+    };
+    if raw.len() > 48000 {
+        return None;
+    }
+    let frozen: Value = serde_json::from_str(raw).ok()?;
+    let task_id = source["task_id"].as_str().filter(|id| valid_id(id))?;
+    let expected_run = format!("task-run-{:x}", Sha256::digest(task_id.as_bytes()));
+    let expected_context = format!("collaboration-task:{task_id}");
+    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&frozen).ok()?));
+    if frozen["format"] != format
+        || run["id"] != expected_run
+        || frozen["task_id"] != task_id
+        || source["context_id"] != expected_context
+        || frozen["context_id"] != source["context_id"]
+        || frozen["team_id"] != run["team_id"]
+        || !source["scope"].is_object()
+        || frozen["scope"] != source["scope"]
+        || source["scope"]["home_hub"] != run["home_hub"]
+        || source[revision].as_u64().unwrap_or(0) == 0
+        || frozen[revision] != source[revision]
+        || source["context_sha256"] != hash
+    {
+        return None;
+    }
+    let summary = frozen["summary"].as_str().filter(|text| !text.trim().is_empty())?;
+    Some(summary.chars().take(240).collect())
+}
+
+#[cfg(test)]
+#[path = "work_run_preview_tests.rs"]
+mod preview_tests;
+
 impl Store {
     /// Owner process history includes terminal runs; scheduler discovery deliberately does not.
     pub fn team_work_runs(&self, team: &str, page: super::teams::Page) -> Result<Option<Value>> {
@@ -97,7 +140,7 @@ impl Store {
         let mut items = query.query_map(params![team, page.after, limit + 1], |row| row.get::<_, String>(0))?
             .map(|row| {
                 let row: Value = serde_json::from_str(&row?)?;
-                let preview = row["inputs"]["request"].as_str().map(|text| text.chars().take(240).collect::<String>());
+                let preview = request_preview(&row);
                 Ok(json!({"id":row["id"],"team_id":row["team_id"],"home_hub":self.node_id,
                     "revision":row["revision"],"state":row["state"],"waiting_reason":row["waiting_reason"],
                     "completion_authorized":row["completion_authorized"],"created_at":row["created_at"],"updated_at":row["updated_at"],
@@ -141,6 +184,15 @@ impl Store {
         input: Create,
         coordinator: Option<(&str, &super::coordinator_run::Start)>,
     ) -> Result<Value> {
+        self.create_work_run_bound(input, coordinator, None)
+    }
+    pub(in crate::messaging) fn create_work_run_bound(
+        &self,
+        input: Create,
+        coordinator: Option<(&str, &super::coordinator_run::Start)>,
+        collaboration: Option<(&str, &super::collaboration::execution::Dispatch)>,
+    ) -> Result<Value> {
+        if coordinator.is_some() && collaboration.is_some() { bail!("ambiguous work source") }
         if [
             &input.id,
             &input.request_id,
@@ -165,11 +217,13 @@ impl Store {
             serde_json::to_string(
                 &json!({"run":input,"conversation_id":conversation,"coordinator":scope}),
             )?
+        } else if let Some((task_id, dispatch)) = collaboration {
+            serde_json::to_string(&json!({"run":input,"task_id":task_id,"dispatch":dispatch}))?
         } else {
             serde_json::to_string(&input)?
         };
         // Return the original receipt even if the run was cancelled since creation.
-        if let Some((prior, body)) = self
+        if collaboration.is_none() { if let Some((prior, body)) = self
             .db
             .lock()
             .query_row(
@@ -183,7 +237,7 @@ impl Store {
                 bail!("work run request identity conflict");
             }
             return Ok(serde_json::from_str(&body)?);
-        }
+        } }
         let team = self
             .team(&input.team_id, Some(input.team_revision))?
             .ok_or_else(|| anyhow::anyhow!("unknown team revision"))?;
@@ -241,6 +295,9 @@ impl Store {
             )
             .optional()?;
         if let Some((prior, body)) = retry {
+            if let Some((task_id, dispatch)) = collaboration {
+                super::collaboration::execution::validate_retry(&tx, &self.node_id, task_id, dispatch, &serde_json::from_str::<Value>(&body)?)?;
+            }
             if prior != request {
                 bail!("work run request identity conflict");
             }
@@ -267,6 +324,9 @@ impl Store {
             row["owner"] = json!({"kind":"superagent","id":origin["superagent_id"]});
             row["coordinator"] = origin;
         }
+        if let Some((task_id, dispatch)) = collaboration {
+            row["collaboration"] = super::collaboration::execution::authorize(&tx, &self.node_id, task_id, dispatch, &row)?;
+        }
         let count: u64 = tx.query_row("SELECT COUNT(*) FROM work_runs WHERE team_id=?1 AND state NOT IN ('completed','failed','cancelled')",[&input.team_id],|r|r.get(0))?;
         if count >= u64::from(spec.limits.max_active_runs) {
             bail!("team work run capacity exhausted");
@@ -279,6 +339,9 @@ impl Store {
         let body = serde_json::to_string(&row)?;
         tx.execute("INSERT INTO work_runs(id,team_id,request_id,request,revision,state,body,initial_body) VALUES (?1,?2,?3,?4,1,?6,?5,?5)",params![input.id,input.team_id,input.request_id,request,body,row["state"].as_str()])?;
         tx.execute("INSERT INTO work_run_events(run_id,body) VALUES (?1,?2)",params![input.id,serde_json::to_string(&json!({"kind":"work_run_received","revision":1,"at":at,"actor":row["owner"],"run":row}))?])?;
+        if let Some((task_id, dispatch)) = collaboration {
+            super::collaboration::execution::record(&tx, &self.node_id, task_id, dispatch, &row)?;
+        }
         tx.commit()?;
         Ok(row)
     }

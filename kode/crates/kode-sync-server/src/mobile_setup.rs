@@ -53,51 +53,6 @@ pub(super) async fn directories(
     .await
 }
 
-/// Mirrors `kode-relay-protocol`'s attachment limits; the desktop enforces
-/// the same bounds when it writes the file.
-const ATTACHMENT_KIND: &str = "attachment";
-const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
-pub(super) const MAX_ATTACHMENT_REQUEST_BYTES: usize = 2 * 1024 * 1024 / 3 * 4 + 64 * 1024;
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AttachmentChunk {
-    upload_id: String,
-    name: String,
-    size: u64,
-    offset: u64,
-    data: String,
-}
-
-/// One ordered chunk of a phone attachment for the desktop's temp directory.
-pub(super) async fn attachment(
-    axum::extract::State(state): axum::extract::State<ServerState>,
-    headers: HeaderMap,
-    Json(chunk): Json<AttachmentChunk>,
-) -> Result<Response, ApiError> {
-    if chunk.upload_id.is_empty()
-        || chunk.upload_id.len() > 64
-        || chunk.name.len() > 1024
-        || chunk.size == 0
-        || chunk.size > MAX_ATTACHMENT_BYTES
-        || chunk.offset >= chunk.size
-        || chunk.data.is_empty()
-        || chunk.data.len() > MAX_ATTACHMENT_REQUEST_BYTES
-    {
-        return Err(ApiError::BadRequest(format!(
-            "Attachments are limited to {} MB, sent in ordered chunks",
-            MAX_ATTACHMENT_BYTES / 1024 / 1024
-        )));
-    }
-    dispatch(
-        &state,
-        &headers,
-        ATTACHMENT_KIND,
-        serde_json::to_value(chunk).unwrap(),
-    )
-    .await
-}
-
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateRequest {
@@ -150,12 +105,15 @@ async fn dispatch(
     payload: Value,
 ) -> Result<Response, ApiError> {
     let creating = kind == "create_session";
-    let scope = if creating || kind == ATTACHMENT_KIND {
-        "sessions.send"
-    } else {
-        "sessions.content.read"
-    };
-    let auth = worker_auth_from_headers(state, headers, scope)?;
+    let auth = worker_auth_from_headers(
+        state,
+        headers,
+        if creating {
+            "sessions.send"
+        } else {
+            "sessions.content.read"
+        },
+    )?;
     let id = format!("setup_{}", Uuid::new_v4().simple());
     // Keep the desktop connection stable through insertion and dispatch.
     let agent = state.inner.agents.lock().get(&auth.worker_id).cloned();
@@ -226,7 +184,15 @@ async fn dispatch(
     let result = tokio::time::timeout(Duration::from_secs(50), rx).await;
     drop(guard);
     // Recheck revocation after the desktop read has completed.
-    worker_auth_from_headers(state, headers, scope)?;
+    worker_auth_from_headers(
+        state,
+        headers,
+        if creating {
+            "sessions.send"
+        } else {
+            "sessions.content.read"
+        },
+    )?;
     Ok(response(match result {
         Ok(Ok(reply)) => reply,
         _ => (

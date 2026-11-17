@@ -1,0 +1,429 @@
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -1305,6 +1305,18 @@ window.__ModuleLoader__.load({
+ 		* signal, actions — is read through the slot-owned useTabInfo hook. The Tab
+ 		* domain follows each session's store commits, including sessions off screen.
+ 		*/
++		/** Seats a session surface dispatches tabs through (upstream names). */
++		const SESSION_SEATS = {
++			tab: "sidebar.right.pane.tab",
++			title: "sidebar.right.pane.tab.title",
++			menu: "sidebar.right.tab.menu.item"
++		};
++		/** Root-scoped seats a panel host surface dispatches tabs through; no session binding is implied. */
++		const HOST_SEATS = {
++			tab: "sidebar.right.host.tab",
++			title: "sidebar.right.host.tab.title",
++			menu: "sidebar.right.host.tab.menu.item"
++		};
+ 		/** The guide tab one pane holds, if any: a pane holds at most one. */
+ 		function guideIn(layout, paneId) {
+ 			return (0, _deepseek_ai_dsh_client_ui_dockkit.findPaneContentTab)(layout, paneId, pageAddress(GUIDE_KIND), GUIDE_KIND);
+@@ -1365,10 +1377,10 @@ window.__ModuleLoader__.load({
+ 		/**
+ 		* Dispatch one tab's body or title with stable framework hooks and record lifetime.
+ 		*/
+-		function TabSlot({ renderSlot, occurrence, useTabTypes, useTabNavigation, useStore, fullscreen, shortcuts, active, retainTab, tab, seat, fallback }) {
++		function TabSlot({ renderSlot, occurrence, useTabTypes, useTabNavigation, useStore, fullscreen, shortcuts, active, retainTab, tab, seat, fallback, sessionId, host, seats = SESSION_SEATS }) {
+ 			const { id, signal, tabActions } = occurrence(tab);
+ 			const definition = useTabTypes((types) => types.find((definition) => definition.kind === tab.kind));
+-			const retained = seat === "sidebar.right.pane.tab" && definition?.keepMounted === true;
++			const retained = seat === seats.tab && definition?.keepMounted === true;
+ 			(0, react.useLayoutEffect)(() => retained ? retainTab(tab.id, signal) : void 0, [
+ 				retained,
+ 				retainTab,
+@@ -1378,7 +1390,9 @@ window.__ModuleLoader__.load({
+ 			const hookContext = (0, react.useMemo)(() => ({
+ 				tabId: tab.id,
+ 				shortcuts,
+-				title: seat === "sidebar.right.pane.tab.title",
++				title: seat === seats.title,
++				surface: sessionId,
++				host,
+ 				fullscreen,
+ 				active,
+ 				signal,
+@@ -1394,14 +1408,16 @@ window.__ModuleLoader__.load({
+ 				tabActions,
+ 				useStore,
+ 				useTabNavigation,
+-				shortcuts
++				shortcuts,
++				sessionId,
++				host
+ 			]);
+ 			const content = renderSlot(seat, {}, {
+ 				entryKey: definition?.id ?? tab.kind,
+ 				fallback,
+ 				hookContext
+ 			});
+-			return seat === "sidebar.right.pane.tab.title" ? (0, react_jsx_runtime.jsx)("span", {
++			return seat === seats.title ? (0, react_jsx_runtime.jsx)("span", {
+ 				className: SidebarRight_module_css_default.tabTitle,
+ 				"data-sidebar-right-tab": tab.id,
+ 				"data-sidebar-right-occurrence": id,
+@@ -1425,7 +1441,7 @@ window.__ModuleLoader__.load({
+ 			return (tab) => (0, react_jsx_runtime.jsx)(TabSlot, {
+ 				...rest,
+ 				tab,
+-				seat: "sidebar.right.pane.tab",
++				seat: (rest.seats ?? SESSION_SEATS).tab,
+ 				fallback: (0, react_jsx_runtime.jsx)("p", {
+ 					className: SidebarRight_module_css_default.unavailable,
+ 					"data-sidebar-right-unavailable": true,
+@@ -1438,7 +1454,7 @@ window.__ModuleLoader__.load({
+ 			return (tab) => (0, react_jsx_runtime.jsx)(TabSlot, {
+ 				...panel,
+ 				tab,
+-				seat: "sidebar.right.pane.tab.title",
++				seat: (panel.seats ?? SESSION_SEATS).title,
+ 				fallback: tab.title
+ 			}, tab.id);
+ 		}
+@@ -1537,7 +1553,7 @@ window.__ModuleLoader__.load({
+ 						canSplit: (0, _deepseek_ai_dsh_client_ui_dockkit.canSplit)(surface.layout) && (0, _deepseek_ai_dsh_client_ui_dockkit.dockPaneIds)(surface.layout).length < 2,
+ 						dropZones: "horizontal",
+ 						minPaneFraction: .2,
+-						canAddTab: (paneId) => guideIn(surface.layout, paneId) === void 0,
++						canAddTab: (paneId) => panel.seats === void 0 && guideIn(surface.layout, paneId) === void 0,
+ 						canCloseTab: (tabId) => canCloseTab(surface, tabId),
+ 						intents: intentsFor(sessionId, actions, openTab, panel.closeTab, panel.splitPane),
+ 						labels: dockLabels(t, panel.shortcuts.find((entry) => entry.id === "pane.split"), panel.shortcuts.find((entry) => entry.id === "page.close")),
+@@ -1545,7 +1561,7 @@ window.__ModuleLoader__.load({
+ 						renderTabTitle: titlesFor(panel),
+ 						active: panel.active,
+ 						keepMounted: (tab) => types.find((type) => type.kind === tab.kind)?.keepMounted === true,
+-						renderTabMenuItems: (tab, dismiss) => renderSlot("sidebar.right.tab.menu.item", {
++						renderTabMenuItems: (tab, dismiss) => renderSlot((panel.seats ?? SESSION_SEATS).menu, {
+ 							tab,
+ 							dismiss
+ 						}),
+@@ -1569,7 +1585,7 @@ window.__ModuleLoader__.load({
+ 		* itself; this seat reports only what it renders with: the room its kit
+ 		* measured and the automatic fullscreen rule of its frame width.
+ 		*/
+-		function RightbarSeat({ sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, measureRoom, reportAutoFullscreen, openTab, closeTab, useTabTypes, useTabNavigation, occurrence, retainTab, active, useShortcuts, splitPane, toggleFullscreen }) {
++		function RightbarSeat({ sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, measureRoom, reportAutoFullscreen, openTab, closeTab, useTabTypes, useTabNavigation, occurrence, retainTab, active, useShortcuts, splitPane, toggleFullscreen, seats, host }) {
+ 			const shortcuts = useShortcuts((entries) => entries);
+ 			const surface = useStore((state) => state.bySession[sessionId]);
+ 			const shown = active && surface !== void 0 && surface.layout.expanded;
+@@ -1657,7 +1673,9 @@ window.__ModuleLoader__.load({
+ 				splitPane,
+ 				toggleFullscreen,
+ 				width,
+-				panelRef
++				panelRef,
++				seats,
++				host
+ 			});
+ 		}
+ 		//#endregion
+@@ -1719,14 +1737,188 @@ window.__ModuleLoader__.load({
+ 		* @param props - frame geometry, view targets and the authorized Session renderer.
+ 		* @returns the foreground and retained background Sidebars.
+ 		*/
+-		function RightbarRoot({ usePanelInfo, useViews, ...props }) {
+-			const visible = usePanelInfo((info) => info.activePanelId === null);
+-			return (0, react_jsx_runtime.jsx)(react_jsx_runtime.Fragment, { children: useViews((value) => value).map((view) => (0, react_jsx_runtime.jsx)(SessionView, {
++		function RightbarRoot({ usePanelInfo, useViews, useHosts, hostSurface, ...props }) {
++			const panelId = usePanelInfo((info) => info.activePanelId);
++			const visible = panelId === null;
++			const host = useHosts((hosts) => panelId === null ? void 0 : hosts.get(panelId));
++			return (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [useViews((value) => value).map((view) => (0, react_jsx_runtime.jsx)(SessionView, {
+ 				...props,
+ 				view,
+ 				visible
+-			}, view.sessionId)) });
++			}, view.sessionId)), host === void 0 ? null : (0, react_jsx_runtime.jsx)(HostView, {
++				...props,
++				host,
++				surface: hostSurface(host)
++			}, host.key)] });
++		}
++		/**
++		* A main panel's own surface, keyed by the real resource scope the panel names
++		* (never a Session). Same seat, panel, docking kit and tab domain as a Session;
++		* its layout persists locally under its scope key and its tabs dispatch through
++		* the root-scoped host seats.
++		*/
++		function HostView({ host, surface, width, viewportWidth, canShow, renderSlot, t, useTabTypes, useShortcuts }) {
++			return (0, react_jsx_runtime.jsx)("div", {
++				className: SidebarRight_module_css_default.session,
++				"data-sidebar-right-host": host.panelId,
++				children: (0, react_jsx_runtime.jsx)(RightbarSeat, {
++					...surface,
++					sessionId: host.key,
++					width,
++					viewportWidth,
++					canShow,
++					renderSlot,
++					t,
++					useTabTypes,
++					useShortcuts,
++					active: true,
++					seats: HOST_SEATS,
++					host: {
++						panelId: host.panelId,
++						scope: host.scope
++					}
++				})
++			});
++		}
++		//#endregion
++		//#region kode: panel hosts
++		/**
++		* Main panels that own a right Sidebar surface while they fill the main column.
++		* A host names a real resource scope (for example a team or a draft), read from
++		* its own source; the surface key is `host:<panelId>/<scope>`, so two scopes never
++		* share tabs and a host key can never equal a Session id.
++		*/
++		var SidebarRightHosts = class {
++			byPanel = /* @__PURE__ */ new Map();
++			snapshot = (0, _deepseek_ai_dsh_client_store.createSnapshotStore)(/* @__PURE__ */ new Map());
++			/** Active host per panel; an entry object is stable while its scope is unchanged. */
++			source = this.snapshot;
++			register(panelId, options) {
++				if (typeof panelId !== "string" || panelId === "") throw new Error("sidebarRight: a host needs a panel id");
++				if (this.byPanel.has(panelId)) throw new Error(`sidebarRight: panel "${panelId}" already has a host`);
++				const { scope, seed } = options;
++				if (typeof seed !== "string") throw new Error(`sidebarRight: host "${panelId}" needs a seed page kind`);
++				const record = {
++					panelId,
++					scope,
++					seed,
++					entry: void 0
++				};
++				this.byPanel.set(panelId, record);
++				const unsubscribe = scope.subscribe(() => {
++					this.publish();
++				});
++				this.publish();
++				return () => {
++					unsubscribe();
++					if (this.byPanel.get(panelId) === record) this.byPanel.delete(panelId);
++					this.publish();
++				};
++			}
++			/** The surface key of a panel's current scope, or undefined without one. */
++			keyFor(panelId) {
++				return this.snapshot.getSnapshot().get(panelId)?.key;
++			}
++			publish() {
++				const next = /* @__PURE__ */ new Map();
++				let changed = false;
++				for (const record of this.byPanel.values()) {
++					const scope = record.scope.getSnapshot();
++					if (typeof scope !== "string" || scope === "") {
++						record.entry = void 0;
++						continue;
++					}
++					if (record.entry?.scope !== scope) record.entry = Object.freeze({
++						panelId: record.panelId,
++						scope,
++						seed: record.seed,
++						key: `host:${record.panelId}/${scope}`
++					});
++					next.set(record.panelId, record.entry);
++				}
++				const previous = this.snapshot.getSnapshot();
++				if (previous.size !== next.size) changed = true;
++				else for (const [panelId, entry] of next) if (previous.get(panelId) !== entry) changed = true;
++				if (changed) this.snapshot.set(next);
++			}
++		};
++		/**
++		* Per-scope surfaces for hosts: the same store and adoption as a Session's, minted
++		* here because no Session scope binding exists for them. Released on unload.
++		*/
++		function createHostSurfaces({ tabs, adopt, controller, measure, injected }) {
++			const surfaces = /* @__PURE__ */ new Map();
++			const noRetain = () => () => {};
++			const surfaceFor = (host) => {
++				const existing = surfaces.get(host.key);
++				if (existing !== void 0) return existing.props;
++				const handle = createSidebarRightStore(() => {
++					const definition = tabs.get(host.seed);
++					if (definition === void 0) throw new Error(`sidebarRight: host seed kind "${host.seed}" is not registered`);
++					return {
++						kind: host.seed,
++						title: definition.title(pageAddress(host.seed))
++					};
++				});
++				const instance = handle.create(host.key);
++				const release = adopt(host.key, instance);
++				const key = host.key;
++				const props = {
++					useStore: (selector) => (0, react.useSyncExternalStore)(instance.subscribe, () => selector(instance.getSnapshot())),
++					actions: instance.actions,
++					syncPresentation: injected.syncPresentation,
++					reportAutoFullscreen: injected.reportAutoFullscreen,
++					splitPane: injected.splitPane,
++					toggleFullscreen: injected.toggleFullscreen,
++					openTab: (kind, options) => {
++						controller.openTabIn(key, kind, options);
++					},
++					measureRoom: (canSplitPane) => {
++						measure(key, canSplitPane);
++					},
++					closeTab: (tabId) => {
++						try {
++							controller.closeIn(key, tabId);
++						} catch (error) {
++							console.error("Sidebar tab close failed:", error);
++						}
++					},
++					useTabNavigation: (tabId) => {
++						const navigation = controller.tabDomain.occurrence(key, { id: tabId }).navigation;
++						return (0, react.useSyncExternalStore)(navigation.subscribe, navigation.getSnapshot);
++					},
++					occurrence: (tab) => controller.tabDomain.occurrence(key, tab),
++					retainTab: noRetain
++				};
++				surfaces.set(key, {
++					props,
++					release
++				});
++				return props;
++			};
++			return {
++				surfaceFor,
++				dispose: () => {
++					for (const { release } of surfaces.values()) release();
++					surfaces.clear();
++				}
++			};
+ 		}
++		/**
++		* Host tab information: the Session tab reader aimed at the host surface, plus the
++		* host's panel and scope so a body acts only within the scope its tab lives in.
++		*/
++		const hostTabInfoFactory = (_standard, context) => {
++			const useTabInfo = tabInfoFactory({ sessionId: context.surface }, context);
++			const { host } = context;
++			return function useHostTabInfo() {
++				const info = useTabInfo();
++				return (0, react.useMemo)(() => ({
++					...info,
++					host
++				}), [info, host]);
++			};
++		};
+ 		//#endregion
+ 		//#region lib/types/client/session-view.js
+ 		/** Owns its reference until retirement finishes or the Sidebar plugin shuts down. */
+@@ -4923,6 +5115,7 @@ window.__ModuleLoader__.load({
+ 			const t = ctx.locale.bind(NS);
+ 			const tabs = new SidebarRightTabRegistry(ctx);
+ 			const views = new SidebarSessionViews(ctx.sessions);
++			const hosts = new SidebarRightHosts();
+ 			ctx.effect(() => {
+ 				const current = ctx.uiSession.adapter.current;
+ 				const sync = () => {
+@@ -4951,17 +5144,43 @@ window.__ModuleLoader__.load({
+ 			ctx.effect(() => {
+ 				const sync = () => {
+ 					const selected = views.source.getSnapshot().find((view) => view.selected);
+-					show(layout.panelInfo.getSnapshot().activePanelId === null ? selected?.sessionId : void 0);
++					const panelId = layout.panelInfo.getSnapshot().activePanelId;
++					show(panelId === null ? selected?.sessionId : hosts.keyFor(panelId));
+ 				};
+ 				const unsubscribeViews = views.source.subscribe(sync);
+ 				const unsubscribePanel = layout.panelInfo.subscribe(sync);
++				const unsubscribeHosts = hosts.source.subscribe(sync);
+ 				sync();
+ 				return () => {
+ 					unsubscribeViews();
+ 					unsubscribePanel();
++					unsubscribeHosts();
+ 					show(void 0);
+ 				};
+ 			}, "ui-sidebar-right: on-screen Session");
++			/**
++			* Let a main panel own a surface for its current real scope. Commands on the
++			* returned handle act on that scope's surface whether or not it is on screen.
++			*/
++			controller.registerHost = (panelId, options) => {
++				const dispose = hosts.register(panelId, options);
++				const current = () => {
++					const key = hosts.keyFor(panelId);
++					if (key === void 0) throw new Error(`sidebarRight: panel "${panelId}" has no current scope`);
++					hostSurfaces?.surfaceFor(hosts.source.getSnapshot().get(panelId));
++					return key;
++				};
++				return {
++					openTab: (kind, placement = {}) => {
++						controller.openTabIn(current(), kind, placement);
++					},
++					openResource: (address, placement = {}) => {
++						controller.openResourceIn(current(), address, placement);
++					},
++					dispose
++				};
++			};
++			let hostSurfaces;
+ 			const disposeRegistry = ctx.reflect.provide("sidebarRightTabs", tabs);
+ 			const disposeService = ctx.reflect.provide("sidebarRight", controller);
+ 			ctx.effect(() => () => {
+@@ -5026,17 +5245,47 @@ window.__ModuleLoader__.load({
+ 						}
+ 					}
+ 				};
++				hostSurfaces = createHostSurfaces({
++					tabs,
++					adopt,
++					controller,
++					measure,
++					injected
++				});
+ 				const disposeTypes = [tabs.register(guideDefinition(t))];
+ 				const disposeSeat = ctx.slots.inject("rightbar", function* () {
+ 					yield ctx.slots.register({
+ 						name: "rightbar",
+-						children: { "rightbar.session": {
+-							kind: "single",
+-							scope: "session"
+-						} },
++						locale: NS,
++						children: {
++							"rightbar.session": {
++								kind: "single",
++								scope: "session"
++							},
++							"sidebar.right.host.tab": {
++								kind: "keyed",
++								scope: "root",
++								inject: { hooks: { tabInfo: hostTabInfoFactory } }
++							},
++							"sidebar.right.host.tab.title": {
++								kind: "keyed",
++								scope: "root",
++								inject: { hooks: { tabInfo: hostTabInfoFactory } }
++							},
++							"sidebar.right.host.tab.menu.item": {
++								kind: "list",
++								scope: "root"
++							}
++						},
+ 						inject: () => ({
+-							hooks: { views: views.source },
+-							mountView: (reference) => views.mount(reference)
++							hooks: {
++								views: views.source,
++								hosts: hosts.source,
++								shortcuts: injected.hooks.shortcuts,
++								tabTypes: injected.hooks.tabTypes
++							},
++							mountView: (reference) => views.mount(reference),
++							hostSurface: (host) => hostSurfaces.surfaceFor(host)
+ 						})
+ 					}, RightbarRoot);
+ 					yield ctx.slots.register({
+@@ -5132,6 +5381,8 @@ window.__ModuleLoader__.load({
+ 					for (const dispose of disposeTypes.reverse()) dispose();
+ 					for (const release of adoptions.values()) release();
+ 					adoptions.clear();
++					hostSurfaces.dispose();
++					hostSurfaces = void 0;
+ 				};
+ 			}, "ui-sidebar-right: seats and shipped tab type");
+ 		}

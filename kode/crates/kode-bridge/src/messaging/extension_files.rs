@@ -84,6 +84,15 @@ pub fn validate(source: &Value) -> Result<Value> {
     Ok(json!({"id":name,"kind":kind,"location":location,"subdir":subdir,"targets":rows}))
 }
 pub fn run(root: &Path, executable: &str, args: &[String], seconds: u64) -> Result<String> {
+    run_scoped(root, executable, args, seconds, None)
+}
+fn run_scoped(
+    root: &Path,
+    executable: &str,
+    args: &[String],
+    seconds: u64,
+    home: Option<&Path>,
+) -> Result<String> {
     fs::create_dir_all(root)?;
     let log = root.join(format!("command-{}.log", uuid::Uuid::new_v4()));
     let mut options = fs::OpenOptions::new();
@@ -101,6 +110,9 @@ pub fn run(root: &Path, executable: &str, args: &[String], seconds: u64) -> Resu
         .stdout(output.try_clone()?)
         .stderr(output)
         .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(home) = home {
+        scope_native_command(&mut command, home)?;
+    }
     for key in [
         "KODE_BRIDGE_TOKEN",
         "KODE_MESSAGING_ADMIN_TOKEN_FILE",
@@ -142,6 +154,33 @@ pub fn run(root: &Path, executable: &str, args: &[String], seconds: u64) -> Resu
         bail!("{executable} failed: {text}")
     }
     Ok(text)
+}
+// Native installers must use the same explicit home as the Hub's skill links.
+// Never inherit an unrelated CODEX_HOME or user config when the Hub is isolated.
+fn scope_native_command(command: &mut Command, home: &Path) -> Result<()> {
+    if !home.is_absolute() {
+        bail!("native installer home must be absolute")
+    }
+    fs::create_dir_all(home)?;
+    let home = fs::canonicalize(home)?;
+    command
+        .env("HOME", &home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY");
+    Ok(())
+}
+fn run_native(
+    root: &Path,
+    home: &Path,
+    executable: &str,
+    args: &[String],
+    seconds: u64,
+) -> Result<String> {
+    run_scoped(root, executable, args, seconds, Some(home))
 }
 fn copy_tree(source: &Path, target: &Path, count: &mut usize, depth: usize) -> Result<()> {
     if depth > 32 {
@@ -224,7 +263,8 @@ fn display_text(value: &Value, limit: usize) -> Option<String> {
     Some(text.chars().take(limit).collect())
 }
 fn at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    path.iter().try_fold(value, |current, key| current.get(*key))
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
 }
 fn display_at(value: &Value, path: &[&str], limit: usize) -> Option<String> {
     display_text(at(value, path)?, limit)
@@ -239,7 +279,9 @@ fn optional_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 fn frontmatter(path: &Path) -> (Option<String>, Option<String>) {
-    let Some(bytes) = fs::read(path).ok() else { return (None, None) };
+    let Some(bytes) = fs::read(path).ok() else {
+        return (None, None);
+    };
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]);
     let mut lines = text.lines();
     if lines.next().map(str::trim) != Some("---") {
@@ -269,8 +311,12 @@ fn frontmatter(path: &Path) -> (Option<String>, Option<String>) {
         if line.starts_with(char::is_whitespace) {
             continue;
         }
-        let Some((key, value)) = line.split_once(':') else { continue };
-        if key.trim() == "description" && matches!(value.trim(), ">" | ">-" | ">+" | "|" | "|-" | "|+") {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() == "description"
+            && matches!(value.trim(), ">" | ">-" | ">+" | "|" | "|-" | "|+")
+        {
             folded = true;
             description = None;
             continue;
@@ -296,7 +342,11 @@ fn safe_relative(path: &Path) -> Option<String> {
             _ => return None,
         }
     }
-    Some(if parts.is_empty() { ".".into() } else { parts.join("/") })
+    Some(if parts.is_empty() {
+        ".".into()
+    } else {
+        parts.join("/")
+    })
 }
 fn package_logo(path: &Path, mut candidates: Vec<Option<String>>) -> Option<String> {
     candidates.push(Some("./assets/logo.png".into()));
@@ -305,20 +355,30 @@ fn package_logo(path: &Path, mut candidates: Vec<Option<String>>) -> Option<Stri
         if candidate.contains('\\') || candidate.contains('\0') {
             continue;
         }
-        let Some(relative) = safe_relative(Path::new(&candidate)) else { continue };
+        let Some(relative) = safe_relative(Path::new(&candidate)) else {
+            continue;
+        };
         if relative == "." {
             continue;
         }
         let file = root.join(&relative);
-        let Ok(real) = fs::canonicalize(&file) else { continue };
+        let Ok(real) = fs::canonicalize(&file) else {
+            continue;
+        };
         if !real.starts_with(&root) {
             continue;
         }
-        let extension = real.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
+        let extension = real
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if !["png", "jpg", "jpeg", "webp"].contains(&extension.as_str()) {
             continue;
         }
-        let Ok(meta) = fs::metadata(&real) else { continue };
+        let Ok(meta) = fs::metadata(&real) else {
+            continue;
+        };
         if meta.is_file() && meta.len() <= 4 * 1024 * 1024 {
             return Some(relative);
         }
@@ -327,7 +387,9 @@ fn package_logo(path: &Path, mut candidates: Vec<Option<String>>) -> Option<Stri
 }
 fn collect_mcp(value: &Value, rows: &mut BTreeMap<String, String>) {
     let servers = value.get("mcpServers").unwrap_or(value);
-    let Some(servers) = servers.as_object() else { return };
+    let Some(servers) = servers.as_object() else {
+        return;
+    };
     for (name, config) in servers {
         if rows.len() >= 64 || name.is_empty() || name.len() > 128 || !config.is_object() {
             continue;
@@ -363,7 +425,9 @@ fn mcp_preview(path: &Path, manifests: &[Value]) -> Value {
     let mut rows = BTreeMap::new();
     let mut referenced = false;
     for manifest in manifests {
-        let Some(servers) = manifest.get("mcpServers") else { continue };
+        let Some(servers) = manifest.get("mcpServers") else {
+            continue;
+        };
         if let Some(reference) = servers.as_str() {
             referenced = true;
             if let Some(value) = referenced_json(path, reference) {
@@ -380,23 +444,30 @@ fn mcp_preview(path: &Path, manifests: &[Value]) -> Value {
             }
         }
     }
-    rows.into_iter().map(|(name, kind)| json!({"name":name,"type":kind})).collect()
+    rows.into_iter()
+        .map(|(name, kind)| json!({"name":name,"type":kind}))
+        .collect()
 }
 fn collect_hooks(value: &Value, rows: &mut BTreeMap<String, Option<String>>) {
-    let Some(hooks) = value.get("hooks").and_then(Value::as_object) else { return };
+    let Some(hooks) = value.get("hooks").and_then(Value::as_object) else {
+        return;
+    };
     let description = display_text(&value["description"], 2000);
     for (event, entries) in hooks {
         if rows.len() >= 128 || event.is_empty() || event.len() > 128 || !entries.is_array() {
             continue;
         }
-        rows.entry(event.clone()).or_insert_with(|| description.clone());
+        rows.entry(event.clone())
+            .or_insert_with(|| description.clone());
     }
 }
 fn hooks_preview(path: &Path, manifests: &[Value]) -> Value {
     let mut rows = BTreeMap::new();
     let mut referenced = false;
     for manifest in manifests {
-        let Some(hooks) = manifest.get("hooks") else { continue };
+        let Some(hooks) = manifest.get("hooks") else {
+            continue;
+        };
         if let Some(reference) = hooks.as_str() {
             referenced = true;
             if let Some(value) = referenced_json(path, reference) {
@@ -411,33 +482,53 @@ fn hooks_preview(path: &Path, manifests: &[Value]) -> Value {
             collect_hooks(&value, &mut rows);
         }
     }
-    rows.into_iter().map(|(name, description)| json!({"name":name,"description":description})).collect()
+    rows.into_iter()
+        .map(|(name, description)| json!({"name":name,"description":description}))
+        .collect()
 }
 fn rules_preview(path: &Path) -> Value {
-    let Ok(entries) = fs::read_dir(path.join("rules")) else { return json!([]) };
+    let Ok(entries) = fs::read_dir(path.join("rules")) else {
+        return json!([]);
+    };
     let mut rows = BTreeMap::new();
     for path in entries.filter_map(|entry| entry.ok().map(|entry| entry.path())) {
-        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
         if !["md", "mdc"].contains(&extension)
-            || path.file_name().and_then(|value| value.to_str()).unwrap_or("").starts_with('.')
+            || path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .starts_with('.')
         {
             continue;
         }
-        let fallback = path.file_stem().and_then(|value| value.to_str()).unwrap_or("rule").to_string();
+        let fallback = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("rule")
+            .to_string();
         let (name, description) = frontmatter(&path);
-        rows.entry(fallback.clone()).or_insert_with(|| {
-            json!({"name":name.unwrap_or(fallback),"description":description})
-        });
+        rows.entry(fallback.clone())
+            .or_insert_with(|| json!({"name":name.unwrap_or(fallback),"description":description}));
     }
     rows.into_values().take(500).collect()
 }
 fn agents_preview(path: &Path) -> Value {
-    let Ok(entries) = fs::read_dir(path.join("agents")) else { return json!([]) };
+    let Ok(entries) = fs::read_dir(path.join("agents")) else {
+        return json!([]);
+    };
     let mut files = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| {
             path.extension().and_then(|value| value.to_str()) == Some("md")
-                && !path.file_name().and_then(|value| value.to_str()).unwrap_or("").starts_with('.')
+                && !path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("")
+                    .starts_with('.')
         })
         .collect::<Vec<_>>();
     files.sort();
@@ -445,19 +536,28 @@ fn agents_preview(path: &Path) -> Value {
         .into_iter()
         .take(500)
         .map(|path| {
-            let fallback = path.file_stem().and_then(|value| value.to_str()).unwrap_or("agent");
+            let fallback = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("agent");
             let (name, description) = frontmatter(&path);
             json!({"name":name.unwrap_or_else(||fallback.into()),"description":description})
         })
         .collect()
 }
 fn commands_preview(path: &Path) -> Value {
-    let Ok(entries) = fs::read_dir(path.join("commands")) else { return json!([]) };
+    let Ok(entries) = fs::read_dir(path.join("commands")) else {
+        return json!([]);
+    };
     let mut files = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| {
             path.extension().and_then(|value| value.to_str()) == Some("md")
-                && !path.file_name().and_then(|value| value.to_str()).unwrap_or("").starts_with('.')
+                && !path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("")
+                    .starts_with('.')
         })
         .collect::<Vec<_>>();
     files.sort();
@@ -465,7 +565,10 @@ fn commands_preview(path: &Path) -> Value {
         .into_iter()
         .take(500)
         .map(|path| {
-            let fallback = path.file_stem().and_then(|value| value.to_str()).unwrap_or("command");
+            let fallback = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("command");
             let (name, description) = frontmatter(&path);
             json!({"name":name.unwrap_or_else(||fallback.into()),"description":description})
         })
@@ -480,12 +583,19 @@ fn package_preview(path: &Path, manifests: &[Value]) -> Value {
     let cursor = optional_json(&path.join(".cursor-plugin/plugin.json")).unwrap_or(Value::Null);
     let interface = &codex["interface"];
     let meta_interface = &meta["codex"]["interface"];
-    let fallback = |key: &str| manifests.iter().find_map(|row| display_text(&row[key], 2000));
+    let fallback = |key: &str| {
+        manifests
+            .iter()
+            .find_map(|row| display_text(&row[key], 2000))
+    };
     let name = first_display(&[
         display_at(&meta, &["id"], 128),
         fallback("name"),
-        path.file_name().and_then(|value| value.to_str()).map(|value| value.to_string()),
-    ]).unwrap_or_else(|| "plugin".into());
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_string()),
+    ])
+    .unwrap_or_else(|| "plugin".into());
     let display_name = first_display(&[
         display_at(&meta, &["displayName"], 128),
         display_at(interface, &["displayName"], 128),
@@ -516,13 +626,16 @@ fn package_preview(path: &Path, manifests: &[Value]) -> Value {
         display_at(interface, &["category"], 128),
         display_at(meta_interface, &["category"], 128),
     ]);
-    let logo = package_logo(path, vec![
-        display_at(interface, &["logo"], 4096),
-        display_at(interface, &["composerIcon"], 4096),
-        display_at(meta_interface, &["logo"], 4096),
-        display_at(meta_interface, &["composerIcon"], 4096),
-        display_at(&cursor, &["logo"], 4096),
-    ]);
+    let logo = package_logo(
+        path,
+        vec![
+            display_at(interface, &["logo"], 4096),
+            display_at(interface, &["composerIcon"], 4096),
+            display_at(meta_interface, &["logo"], 4096),
+            display_at(meta_interface, &["composerIcon"], 4096),
+            display_at(&cursor, &["logo"], 4096),
+        ],
+    );
     json!({
         "name":name,"path":path.to_string_lossy(),"displayName":display_name,
         "description":description,"longDescription":long_description,"version":version,
@@ -539,20 +652,35 @@ pub fn logo(root: &Path, source: &Value, package_index: usize) -> Result<(Vec<u8
     if safe_relative(Path::new(release)).as_deref() != Some(release) || release == "." {
         bail!("invalid release")
     }
-    let package = source["packages"].as_array().and_then(|rows| rows.get(package_index)).context("package missing")?;
-    let package_path = safe_relative(Path::new(package["path"].as_str().context("package path missing")?)).context("invalid package path")?;
-    let logo_path = safe_relative(Path::new(package["logo"].as_str().context("logo missing")?)).context("invalid logo path")?;
+    let package = source["packages"]
+        .as_array()
+        .and_then(|rows| rows.get(package_index))
+        .context("package missing")?;
+    let package_path = safe_relative(Path::new(
+        package["path"].as_str().context("package path missing")?,
+    ))
+    .context("invalid package path")?;
+    let logo_path = safe_relative(Path::new(package["logo"].as_str().context("logo missing")?))
+        .context("invalid logo path")?;
     if logo_path == "." {
         bail!("invalid logo path")
     }
-    let base = root.join("sources").join(source_id).join("releases").join(release).join("package");
+    let base = root
+        .join("sources")
+        .join(source_id)
+        .join("releases")
+        .join(release)
+        .join("package");
     let base = fs::canonicalize(base)?;
     let package_root = fs::canonicalize(base.join(package_path))?;
     if !package_root.starts_with(&base) {
         bail!("package escapes release")
     }
     let file = fs::canonicalize(package_root.join(logo_path))?;
-    if !file.starts_with(&package_root) || !fs::metadata(&file)?.is_file() || fs::metadata(&file)?.len() > 4 * 1024 * 1024 {
+    if !file.starts_with(&package_root)
+        || !fs::metadata(&file)?.is_file()
+        || fs::metadata(&file)?.len() > 4 * 1024 * 1024
+    {
         bail!("logo escapes package or is too large")
     }
     let bytes = fs::read(file)?;
@@ -628,10 +756,16 @@ fn scan(
         skills.push(json!({"name":name,"path":path}));
         if let Some(index) = current_package {
             let (display_name, description) = frontmatter(&skill);
-            let fallback = path.file_name().and_then(|value| value.to_str()).unwrap_or("skill");
-            packages[index]["skills"].as_array_mut().unwrap().push(json!({
-                "name":display_name.unwrap_or_else(||fallback.into()),"description":description,
-            }));
+            let fallback = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("skill");
+            packages[index]["skills"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "name":display_name.unwrap_or_else(||fallback.into()),"description":description,
+                }));
         }
         return Ok(());
     }
@@ -643,12 +777,24 @@ fn scan(
             && !name.starts_with('.')
             && !["node_modules", "target"].contains(&name.as_ref())
         {
-            scan(root, &entry.path(), depth + 1, count, skills, plugins, packages, current_package)?
+            scan(
+                root,
+                &entry.path(),
+                depth + 1,
+                count,
+                skills,
+                plugins,
+                packages,
+                current_package,
+            )?
         }
     }
     Ok(())
 }
-pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Option<String>, String, Vec<Value>)> {
+pub fn snapshot(
+    root: &Path,
+    source: &Value,
+) -> Result<(Vec<Value>, Value, Option<String>, String, Vec<Value>)> {
     let name = source["id"].as_str().context("source id missing")?;
     let release_id = uuid::Uuid::new_v4().to_string();
     let release = root
@@ -704,7 +850,16 @@ pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Optio
     let mut skills = vec![];
     let mut plugins = json!({"claude":[],"codebuddy":[],"cursor":[],"codex":[]});
     let mut packages = vec![];
-    scan(&selected, &selected, 0, &mut 0, &mut skills, &mut plugins, &mut packages, None)?;
+    scan(
+        &selected,
+        &selected,
+        0,
+        &mut 0,
+        &mut skills,
+        &mut plugins,
+        &mut packages,
+        None,
+    )?;
     if skills.is_empty()
         && plugins
             .as_object()
@@ -715,9 +870,18 @@ pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Optio
         bail!("未找到 SKILL.md 或原生插件清单")
     }
     for row in &mut packages {
-        let path = PathBuf::from(row["path"].as_str().context("package preview path missing")?);
-        row["path"] = json!(safe_relative(path.strip_prefix(&package)?).context("invalid package preview path")?);
-        row["skills"].as_array_mut().unwrap().sort_by_key(|skill| skill["name"].as_str().unwrap_or("").to_string());
+        let path = PathBuf::from(
+            row["path"]
+                .as_str()
+                .context("package preview path missing")?,
+        );
+        row["path"] =
+            json!(safe_relative(path.strip_prefix(&package)?)
+                .context("invalid package preview path")?);
+        row["skills"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_key(|skill| skill["name"].as_str().unwrap_or("").to_string());
     }
     packages.sort_by_key(|row| row["path"].as_str().unwrap_or("").to_string());
     Ok((skills, plugins, revision, release_id, packages))
@@ -826,7 +990,7 @@ pub fn replace(
     }
     operation
 }
-pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
+pub fn native_sync(root: &Path, home: &Path, source: &mut Value) -> Result<()> {
     let name = source["id"]
         .as_str()
         .context("source id missing")?
@@ -836,12 +1000,14 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
         .context("targets missing")?
         .clone();
     source["nativeStatus"] = json!({});
+    source["nativeEvidence"] = json!({});
     for target in &targets {
         let target = target.as_str().unwrap();
         let native = source["plugins"][target]
             .as_array()
             .is_some_and(|rows| !rows.is_empty());
         source["nativeStatus"][target] = json!(if native { "ready" } else { "skills-only" });
+        source["nativeEvidence"][target] = json!({"basis": if native && target == "codex" { "installer_pending" } else if native { "launch_argument_configured" } else { "skills_links_only" }, "runtime_verified": false});
     }
     let plugins = if targets.contains(&json!("codex")) {
         source["plugins"]["codex"]
@@ -852,7 +1018,7 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
         vec![]
     };
     if plugins.is_empty() {
-        native_remove(root, source)?;
+        native_remove(root, home, source)?;
         return Ok(());
     }
     let selectors = plugins
@@ -865,8 +1031,9 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
         .unwrap_or_default();
     for selector in installed {
         if !selectors.contains(&selector) {
-            run(
+            run_native(
                 root,
+                home,
                 "codex",
                 &[
                     "plugin".into(),
@@ -898,8 +1065,9 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
         canonical.join(".agents/plugins/marketplace.json"),
         serde_json::to_vec(&json!({"name":format!("kode-{name}"),"plugins":entries}))?,
     )?;
-    run(
+    run_native(
         root,
+        home,
         "codex",
         &[
             "plugin".into(),
@@ -912,8 +1080,9 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
     )?;
     source["codexMarketplace"] = json!(format!("kode-{name}"));
     for selector in &selectors {
-        run(
+        run_native(
             root,
+            home,
             "codex",
             &[
                 "plugin".into(),
@@ -932,16 +1101,19 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
         }
     }
     source["nativeStatus"]["codex"] = json!("installed");
+    source["nativeEvidence"]["codex"] =
+        json!({"basis":"installer_completed", "runtime_verified":false});
     Ok(())
 }
-pub fn native_remove(root: &Path, source: &mut Value) -> Result<()> {
+pub fn native_remove(root: &Path, home: &Path, source: &mut Value) -> Result<()> {
     let installed = source["codexInstalled"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     for selector in installed {
-        run(
+        run_native(
             root,
+            home,
             "codex",
             &[
                 "plugin".into(),
@@ -956,8 +1128,9 @@ pub fn native_remove(root: &Path, source: &mut Value) -> Result<()> {
             .retain(|row| row != &selector);
     }
     if let Some(name) = source["codexMarketplace"].as_str() {
-        run(
+        run_native(
             root,
+            home,
             "codex",
             &[
                 "plugin".into(),
@@ -970,4 +1143,33 @@ pub fn native_remove(root: &Path, source: &mut Value) -> Result<()> {
         source.as_object_mut().unwrap().remove("codexMarketplace");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod native_scope_tests {
+    use super::*;
+    #[test]
+    fn native_installer_overrides_inherited_home_and_auth_without_running_cli() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("isolated");
+        let mut command = Command::new("codex");
+        command
+            .env("HOME", "/daily")
+            .env("CODEX_HOME", "/daily/codex")
+            .env("OPENAI_API_KEY", "fixture-not-a-secret");
+        scope_native_command(&mut command, &home).unwrap();
+        let env: std::collections::HashMap<_, _> = command.get_envs().collect();
+        let actual = fs::canonicalize(home).unwrap();
+        assert_eq!(env[std::ffi::OsStr::new("HOME")], Some(actual.as_os_str()));
+        assert_eq!(
+            env[std::ffi::OsStr::new("CODEX_HOME")],
+            Some(actual.join(".codex").as_os_str())
+        );
+        assert_eq!(
+            env[std::ffi::OsStr::new("XDG_CONFIG_HOME")],
+            Some(actual.join(".config").as_os_str())
+        );
+        assert_eq!(env[std::ffi::OsStr::new("OPENAI_API_KEY")], None);
+        assert!(scope_native_command(&mut command, Path::new("relative")).is_err());
+    }
 }

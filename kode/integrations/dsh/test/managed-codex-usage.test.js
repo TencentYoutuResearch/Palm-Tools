@@ -11,7 +11,7 @@ import { AgentProfiles } from '../src/agent-profiles.js'
 import { ManagedCodexAdapter } from '../src/managed-codex-adapter.js'
 import { managedCodexRoute } from '../src/managed-codex-profile.js'
 
-for (const [mode, native, complete] of [['text', false, true], ['tool', false, true], ['late-usage', true, true], ['text', false, false]]) {
+for (const [mode, native, complete] of [['large-text', true, true], ['text', false, true], ['tool', false, true], ['late-usage', true, true], ['text', false, false]]) {
   test(`managed adapter publishes one usage and retains evidence (mode=${mode}, native=${native}, complete=${complete})`, async t => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'kode-provider-adapter-')))
     let requests = 0
@@ -41,6 +41,11 @@ for (const [mode, native, complete] of [['text', false, true], ['tool', false, t
       messages: [{ role: 'user', content: [{ type: 'text', text: 'Inspect fixture' }] }],
       tools: [{ name: 'kode_read_source', parameters: { type: 'object', properties: {} } }],
     })) chunks.push(chunk)
+    if (mode === 'large-text') {
+      const texts = chunks.filter(row => row.type === 'block-end' && row.block.type === 'text')
+      assert.equal(texts.length, 4)
+      assert.equal(texts.reduce((sum, row) => sum + row.block.text.length, 0), 2 * 1024 * 1024)
+    }
     assert.equal(requests, 1)
     const usages = chunks.filter(row => row.type === 'usage')
     assert.equal(usages.length, complete ? 1 : 0)
@@ -50,6 +55,7 @@ for (const [mode, native, complete] of [['text', false, true], ['tool', false, t
     assert.equal(decisions.length, 1)
     const decision = decisions[0].data
     assert.equal(decision.stop.process_group_empty, true)
+    if (mode === 'large-text') assert.equal(decision.output_artifact.bytes, 2 * 1024 * 1024)
     assert.equal(decision.usage_evidence?.source ?? null, complete ? native ? 'codex_thread_token_usage' : 'codex_admitted_provider_response' : null)
     if (complete && !native) {
       assert.equal(decision.usage_evidence.response_id, 'adapter-response')

@@ -88,7 +88,11 @@ impl Store {
             );
             let result = match result {
                 Ok(result) => result,
-                Err(error) if error.downcast_ref::<super::budgets::InsufficientBudget>().is_some() => {
+                Err(error) if error.downcast_ref::<super::budgets::InsufficientBudget>().is_some()
+                    || error.downcast_ref::<work_assignments::TeamAssignmentCapacityExhausted>().is_some() => {
+                    let capacity = error.downcast_ref::<work_assignments::TeamAssignmentCapacityExhausted>().is_some();
+                    let reason = if capacity { "team_assignment_capacity_exhausted" } else { "team_budget_exhausted" };
+                    let kind = if capacity { "work_run_capacity_wait" } else { "work_run_budget_wait" };
                     // Roll back all partial Assignment preparation before recording the wait.
                     // Keep the database mutex: no other command can change this run between
                     // the failed reservation and its durable, deduplicated explanation.
@@ -96,17 +100,17 @@ impl Store {
                     let tx = db.transaction()?;
                     let mut waiting = run.clone();
                     if waiting["state"] != "waiting_resource"
-                        || waiting["waiting_reason"] != "team_budget_exhausted"
+                        || waiting["waiting_reason"] != reason
                     {
                         waiting["state"] = json!("waiting_resource");
-                        waiting["waiting_reason"] = json!("team_budget_exhausted");
+                        waiting["waiting_reason"] = json!(reason);
                         waiting["revision"] = json!(input.expected_revision + 1);
                         waiting["updated_at"] = json!(at);
                         tx.execute("UPDATE work_runs SET state='waiting_resource',revision=?2,body=?3 WHERE id=?1",
                             params![id, input.expected_revision + 1, waiting.to_string()])?;
                         tx.execute("INSERT INTO work_run_events(run_id,body) VALUES (?1,?2)",
-                            params![id, json!({"kind":"work_run_budget_wait","revision":waiting["revision"],
-                                "stage_id":stage.id,"reason":"team_budget_exhausted","at":at,
+                            params![id, json!({"kind":kind,"revision":waiting["revision"],
+                                "stage_id":stage.id,"reason":reason,"at":at,
                                 "actor":{"kind":"system","id":"home_scheduler"}}).to_string()])?;
                     }
                     tx.commit()?;

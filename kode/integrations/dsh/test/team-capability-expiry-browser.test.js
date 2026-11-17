@@ -34,7 +34,7 @@ test('retained expired pinned measurement permits editing a different assessment
      if (path === '/api/kode/teams/capability-update' && req.method === 'POST' && drop) { drop = false; const end = res.end.bind(res), head = res.writeHead.bind(res); res.writeHead = () => res; res.end = () => { head(503, { 'content-type': 'application/json' }); end(JSON.stringify({ error: 'Committed response unavailable' })); return res } }
      return await route.handler(req, res)
     }
-    if (await collabRenderPage(req, res)) return
+    if (await collabRenderPage(req, res, {hub})) return
     res.writeHead(404); res.end()
    } catch { if (!res.headersSent) res.writeHead(500); res.end() }
   })
@@ -44,9 +44,9 @@ test('retained expired pinned measurement permits editing a different assessment
   await page.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
   const wait = expr => page.evaluate(`(async()=>{const end=Date.now()+10000;while(Date.now()<end){if(${expr})return;await new Promise(r=>setTimeout(r,25))}throw Error('Capability UI timeout: '+document.body.innerText)})()`)
   const click = text => page.evaluate(`(async()=>{const end=Date.now()+10000;while(Date.now()<end){const b=[...document.querySelectorAll('button')].find(b=>b.textContent===${JSON.stringify(text)}&&!b.disabled);if(b){b.click();return}await new Promise(r=>setTimeout(r,25))}throw Error('Action unavailable: '+${JSON.stringify(text)}+' '+document.body.innerText)})()`)
-  await wait('globalThis.fixture'); await click('IM'); await wait(`document.querySelector('.kode-collab-contact-name')`)
-  await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
-  const open = async () => { await click('团队管理'); await click('读取调度资源'); await wait(`document.querySelector('.kode-collab-capability-update')`) }
+  await wait('globalThis.fixture'); await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`); await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`)
+  await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`)
+  const open = async () => { await click('SuperAgent 设置'); await click('展开高级设置'); await click('读取调度资源'); await wait(`document.querySelector('.kode-collab-capability-update')`) }
   await open(); await click('修改已有能力评价'); await click('添加评价'); await click('取消修改'); assert.equal(writes, 0)
   await click('修改已有能力评价'); await click('添加评价')
   await page.evaluate(`document.querySelector('.kode-collab-capability-update input[aria-label$="任务类型"]').focus()`)

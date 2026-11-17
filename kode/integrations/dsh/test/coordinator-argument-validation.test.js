@@ -11,7 +11,7 @@ test('Coordinator argument validators reject malformed input without relaxing ag
     register(value) { entries.set(value.name, value); return () => entries.delete(value.name) },
     get(name) { return entries.get(name) },
   }
-  const ctx = { get: name => name === 'tools' ? { forScope: () => tools } : policies }
+  const ctx = { on: () => () => {}, get: name => name === 'tools' ? { forScope: () => tools } : policies }
   let bodyCalls = 0, backendCalls = 0
   const runtime = { profiles: { binding: () => binding }, entry: { assertToolBody() { bodyCalls++ } },
     client: { call() { backendCalls++; throw Error('Malformed arguments must not reach the backend') } } }

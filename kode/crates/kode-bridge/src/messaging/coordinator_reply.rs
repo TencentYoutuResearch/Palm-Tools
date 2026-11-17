@@ -152,6 +152,7 @@ mod update_tests {
     }
 }
 fn receipt(db: &Connection, conversation: &str, request: &str) -> Result<Option<(String, String)>> {
+    if let Some(receipt) = super::collaboration::discussion_dispatch::reply_receipt(db, conversation, request)? { return Ok(Some(receipt)); }
     Ok(db.query_row("SELECT request,body FROM conversation_messages WHERE conversation_id=?1 AND actor='superagent' AND request_id=?2",params![conversation,request],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)
 }
 impl Store {
@@ -254,6 +255,12 @@ impl Store {
         }
         if !authority["transfer"].is_null() {
             row["authority_transfer"] = authority["transfer"].clone();
+        }
+        if !source["message"]["discussion"].is_null() {
+            if input.source_update.is_some() { bail!("discussion reply cannot adopt another workflow update") }
+            let reply = super::collaboration::discussion_dispatch::publish(&tx, &source["message"], &encoded, row)?;
+            tx.commit()?;
+            return Ok(reply);
         }
         tx.execute("INSERT INTO conversation_messages(id,conversation_id,team_id,actor,request_id,request,body) VALUES (?1,?2,?3,'superagent',?4,?5,?6)",params![id,conversation,team,input.request_id,encoded,serde_json::to_string(&row)?])?;
         let sequence = tx.last_insert_rowid();

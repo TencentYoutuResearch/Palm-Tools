@@ -32,7 +32,7 @@ export async function pipelineBrowser(hub, onInput, { agents = () => undefined, 
     } }
     for (const register of [registerCollabTeams, registerCollabRuns, registerCollabEvidence, registerConversation, registerCollabBudgets, registerWorkRun, registerWorkRunExecution, registerWorkRunReceipt, registerWorkRunTrace]) register(ctx, { backendClient: client })
     server = createServer(async (req, res) => {
-      try { const route = routes.get(new URL(req.url, 'http://localhost').pathname); if (route) return await route.handler(req, res); if (await collabRenderPage(req, res)) return; res.writeHead(404); res.end() }
+      try { const route = routes.get(new URL(req.url, 'http://localhost').pathname); if (route) return await route.handler(req, res); if (await collabRenderPage(req, res, {hub})) return; res.writeHead(404); res.end() }
       catch { if (!res.headersSent) res.writeHead(500); res.end() }
     })
     server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -40,7 +40,7 @@ export async function pipelineBrowser(hub, onInput, { agents = () => undefined, 
     const page = await browser.page(`http://127.0.0.1:${server.address().port}`)
     const wait = expression => page.evaluate(`(async()=>{const until=Date.now()+15000;while(Date.now()<until){if(${expression})return;await new Promise(r=>setTimeout(r,25))}throw Error('Pipeline browser did not reach expected state')})()`)
     await wait('globalThis.fixture')
-    await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]').click()`)
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
     await wait(`document.querySelector('.kode-collab-contact-name')`)
     await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-contact-name')).find(e=>e.textContent==='Team').click()`)
     await wait(`document.querySelector('.kode-collab-composer textarea')`)
@@ -115,7 +115,7 @@ export async function pipelineBrowser(hub, onInput, { agents = () => undefined, 
         if (reload) {
           await page.call('Page.reload')
           await wait('globalThis.fixture')
-          await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]')?.click()`)
+          await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
           await wait(`document.querySelector('.kode-collab-contact-name')`)
           await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-contact-name')).find(e=>e.textContent==='Team').click()`)
         }

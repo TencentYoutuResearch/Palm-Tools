@@ -41,7 +41,7 @@ export function BuilderWorkflowView({ draft, storage }) {
     ...Object.entries(project.connections ?? {}).map(([id, connection]) => h('p', { key: id }, '连接 ', id, '：', connection.connection_id, '；能力 ', connection.capabilities.join('、'))),
     ...delivery.targets.map((target, index) => h('p', { key: index }, '交付终点：', JSON.stringify(target))), h('p', null, '必需产物：', delivery.required_outputs.join('、')),
     h('p', null, delivery.human_acceptance ? '人工验收：流程证据通过后，仍需你确认本次交付。' : '人工验收：未设额外人工门禁，由 Hub 按流程证据判定交付。'),
-    slot?.state === 'registered' && !review ? h('p', null, '流程配置已登记。创建助手可引用这些版本更新团队方案，团队仍需单独确认和激活。') :
+    slot?.state === 'registered' && !review ? h('p', null, '流程配置已登记。Team Builder 可引用这些版本更新团队方案，团队仍需单独确认和激活。') :
       slot?.state === 'prepared' ? h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void confirm() }, '恢复原流程登记') :
       review ? h('div', null, h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void confirm() }, '确认登记流程配置'), h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => setReview(null) }, '返回查看流程')) :
       h('button', { type: 'button', className: 'kode-collab-button', disabled: !ready || busy, onClick: () => setReview(structuredClone(draft)) }, '核对工作流方案'),

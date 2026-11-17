@@ -1,3 +1,5 @@
+import { validateProcessTargetRun } from './process-target.js'
+import { IconButton } from './icons.js'
 import { TraceView } from './trace-view.js'
 import { SessionDiagnostics } from './session-diagnostics.js'
 import { InterventionForm } from './intervention-form.js'
@@ -29,7 +31,7 @@ function Evidence({ run, stage, request }) {
       `${kinds[row.kind] || '证据'} · ${row.name} · 记录编号 ${row.seq}`,
       h(EvidenceDetail, { run, stage, output: row, request })))))
 }
-export function ProcessDetail({ team, runId, request, storage, onUpdated, onFollowup, onOpenSession }) {
+export function ProcessDetail({ team, runId, request, storage, onUpdated, onFollowup, onOpenSession, expectedTarget }) {
   const [detail, setDetail] = React.useState(null), [events, setEvents] = React.useState([])
   const [executionObservation, setExecutionObservation] = React.useState(null)
   const [cursor, setCursor] = React.useState(0), [more, setMore] = React.useState(false)
@@ -46,6 +48,7 @@ export function ProcessDetail({ team, runId, request, storage, onUpdated, onFoll
       const path = `/api/kode/work-run?run_id=${encodeURIComponent(runId)}`
       const run = await request(path, { signal: controller.signal })
       if (run.id !== runId || run.team_id !== team.id || run.home_hub !== team.home_hub || !Array.isArray(run.stages) || typeof run.completion_authorized !== 'boolean' || !Number.isSafeInteger(run.revision) || run.revision < 1) throw Error('Invalid run identity')
+      validateProcessTargetRun(run, expectedTarget)
       if (controller.signal.aborted) return
       const after = append ? cursor : 0
       const history = background && more ? { events: [], next_cursor: after } : await request(`${path}&view=events&after=${after}`, { signal: controller.signal })
@@ -70,8 +73,8 @@ export function ProcessDetail({ team, runId, request, storage, onUpdated, onFoll
     let first = true
     return visibleRefresh({ refresh: () => { if (first) { first = false; return 3000 } return latestLoad.current(true, true) } })
   }, [runId, team.id, team.home_hub, detail?.state])
-  return h('div', { className: 'kode-collab-run-detail' },
-    h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void load(false) }, busy ? '正在读取详情…' : '刷新详情'),
+  return h('div', { className: 'kode-collab-run-detail', 'data-run-id': runId },
+    h(IconButton, { icon: 'refresh', label: busy ? '正在读取详情…' : '刷新详情', disabled: busy, onClick: () => void load(false) }),
     error && h('p', { role: 'status' }, error),
     detail && h(React.Fragment, null,
       h('p', null, detail.completion_authorized ? 'Hub 已确认交付' : '尚未确认交付'),

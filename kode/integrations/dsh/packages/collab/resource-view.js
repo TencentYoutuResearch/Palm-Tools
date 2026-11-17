@@ -1,4 +1,5 @@
 import React from 'react'
+import { IconButton } from './icons.js'
 import { ModelDirectory } from './model-directory.js'
 const h = React.createElement
 const quotaLabels = { reported: '已有额度观测', exhausted: '额度耗尽', stale: '额度记录已过期', reset_passed: '重置时间已过，等待新观测', partial: '额度信息不完整', account_unbound: '尚未绑定账户', binding_unavailable: '账户绑定已变化', source_unsupported: '此资源尚不支持额度采集', source_not_connected: '尚未连接额度来源', not_connected: '尚未连接额度来源', authority_unavailable: '额度服务暂不可用' }
@@ -23,7 +24,7 @@ export function ResourceView({ home, request }) {
   React.useEffect(() => { void load(false); return () => active.current?.abort() }, [home])
   return h('section', { className: 'kode-collab-resources', 'aria-label': '执行资源与额度' },
     h('h3', null, '执行资源与额度'), h('p', { className: 'kode-collab-note' }, '这里显示此 Hub 上已登记的资源。登记不代表已具备团队执行权限，远端资源需另行核对。'),
-    h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void load(false) }, busy ? '正在读取…' : '刷新执行资源'),
+    h(IconButton, { icon: 'refresh', label: busy ? '正在读取…' : '刷新执行资源', disabled: busy, onClick: () => void load(false) }),
     error && h('p', { role: 'status' }, error),
     page.loaded && !page.items.length && h('p', null, '此 Hub 尚未登记执行资源。'),
     ...page.items.map(row => h('article', { key: row.cursor, className: 'kode-collab-run' },
@@ -31,6 +32,7 @@ export function ResourceView({ home, request }) {
       row.resource_kind === 'official_loop_provider' && row.route_registered && h(ModelDirectory, { home, provider: row.provider_id, request }),
       h('p', null, row.runtime_available ? '执行器已登记' : '执行器暂不可用', ' · ', row.grant_capability?.status === 'conditional' ? '需受控工具和授权检查' : '当前不支持团队权限约束'),
       h('p', null, '供应商额度：', quotaLabels[row.quota_status] || '状态未识别，不能推断可用额度'),
+      h('p', null, '可信用量：', row.usage_capability?.supported ? row.usage_capability.status === 'conditional' ? '受控调用可计量，仍需核对工具和返回用量' : '支持 CLI 用量观测' : '尚不支持此执行器的可信计量'),
       ...(row.limits ?? []).flatMap(bucket => bucket.windows.map(window => h('p', { key: `${bucket.limit_id}:${window.window_id}` }, bucket.limit_id, ' / ', window.window_id, '：已用 ', window.used_percent, '%', window.freshness === 'reported' ? '' : '（非最新观测）'))),
       h('p', null, '供应商金额余额：', row.provider_monetary?.status === 'observed' ? '已有独立金额记录，需按账户、单位和有效期核对' : '尚无可确认的金额记录'),
       h('p', null, '团队预算：需按具体团队读取，此资源目录不提供团队预算。'))),

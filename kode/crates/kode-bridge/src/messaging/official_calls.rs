@@ -125,6 +125,7 @@ impl Store {
         {
             bail!("call operation authority unavailable")
         }
+        super::coordinator_context_call::prepare_in(&tx,&op,&request,at)?;
         super::selection_evidence::admit(&tx, &op)?;
         let dependencies = super::workflow_dependencies::operation_manifest(&tx, &op.id)?;
         if !dependencies.is_empty() && request.prompt_provenance.as_ref().and_then(|proof| proof.instruction.as_ref())

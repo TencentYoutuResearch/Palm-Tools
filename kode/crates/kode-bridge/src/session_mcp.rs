@@ -144,7 +144,13 @@ impl Client {
                     if let Some(rows)=result["sessions"].as_array_mut(){rows.retain(|row|format!("{} {}",row["title"].as_str().unwrap_or_default(),row["address"]).to_lowercase().contains(&query));}
                 }Ok(result)
             },
-            "kode_sessions_send"=>self.call("messages",Some(json!({"target":{"node_id":args["node_id"],"session_id":args["session_id"]},"content":args["content"],"idempotency_key":args["idempotency_key"],"in_reply_to":args["in_reply_to"]}))).await,
+            "kode_sessions_send"=>{
+                let body = send_payload(&args)?;
+                if body["direct_insert"] == true && self.call("node", None).await?["direct_insert"] != true {
+                    bail!("This Hub does not support direct_insert; request was not sent")
+                }
+                self.call("messages",Some(body)).await
+            },
             "kode_sessions_delivery_status"|"kode_sessions_cancel_input"|"kode_sessions_cancellation_status"=>{
                 let id=args["message_id"].as_str().ok_or_else(||anyhow::anyhow!("Message ID required"))?;
                 if !crate::messaging::model::valid_id(id) { bail!("Invalid message ID") }
@@ -172,6 +178,18 @@ impl Client {
     }
 }
 
+fn send_payload(args: &Value) -> Result<Value> {
+    let direct_insert = match args.get("direct_insert") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => bail!("direct_insert must be a boolean"),
+    };
+    let mut body = json!({"target":{"node_id":args["node_id"],"session_id":args["session_id"]},"content":args["content"],"idempotency_key":args["idempotency_key"],"in_reply_to":args["in_reply_to"]});
+    // Omit false to preserve strict legacy Hub request schemas.
+    if direct_insert { body["direct_insert"] = json!(true); }
+    Ok(body)
+}
+
 fn definition(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required}})
 }
@@ -179,7 +197,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
     definition("kode_sessions_lifecycle_read","Read bounded delivery/consumption/cancellation audit records. This cursor is separate from message reads; continue until empty. Historical imports are not causal order. Consumed is not task completion.",json!({"after":{"type":"integer","minimum":0}}),&[]),
     definition("kode_sessions_list","Find local and SSH conversations by name. Inspect matches before sending; never guess addresses.",json!({"query":{"type":"string"}}),&[]),
-    definition("kode_sessions_send","Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to.",json!({"node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},"idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"}}),&["node_id","session_id","content","idempotency_key"]),
+    definition("kode_sessions_send","Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to. direct_insert=true interrupts and inserts ahead of queued input on supported local sessions; false or omitted queues normally.",json!({"node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},"idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"},"direct_insert":{"type":"boolean","default":false}}),&["node_id","session_id","content","idempotency_key"]),
     definition("kode_sessions_message_read","Read authenticated full-message pages. Offset counts Unicode code points; follow next until null. A preview is not proof of consumption.",json!({"message_id":{"type":"string"},"offset":{"type":"integer","minimum":0}}),&["message_id"]),
     definition("kode_sessions_delivery_status","Read persisted input delivery evidence. Queued is not consumed; consumed is not task completion.",json!({"message_id":{"type":"string"}}),&["message_id"]),
     definition("kode_sessions_cancel_input","Request cancellation of your own message. Queue removal is not proof of stopping execution; the result may remain cancel_unconfirmed.",json!({"message_id":{"type":"string"}}),&["message_id"]),
@@ -269,4 +287,28 @@ pub async fn reserve_gui_session(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod direct_insert_tests {
+    use super::*;
+    #[test]
+    fn send_preserves_explicit_insert_without_changing_legacy_queue_wire() {
+        let mut args = json!({"node_id":"local","session_id":"target","content":"Fixture","idempotency_key":"once"});
+        assert!(send_payload(&args).unwrap().get("direct_insert").is_none());
+        args["direct_insert"] = json!(false);
+        assert!(send_payload(&args).unwrap().get("direct_insert").is_none());
+        args["direct_insert"] = json!(true);
+        assert_eq!(send_payload(&args).unwrap()["direct_insert"], true);
+        for invalid in [json!("true"), json!(1), Value::Null] {
+            args["direct_insert"] = invalid;
+            assert!(send_payload(&args).is_err());
+        }
+        let definition = tool_definitions().into_iter().find(|tool| tool["name"] == "kode_sessions_send").unwrap();
+        assert_eq!(definition["inputSchema"]["properties"]["direct_insert"]["type"], "boolean");
+        for direct in [false, true] {
+            let page = pages::message(json!({"id":"fixture","content":"text","direct_insert":direct}), 0).unwrap();
+            if direct { assert_eq!(page["direct_insert"], true); } else { assert!(page.get("direct_insert").is_none()); }
+        }
+    }
 }

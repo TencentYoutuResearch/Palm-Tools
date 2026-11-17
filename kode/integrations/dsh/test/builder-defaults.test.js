@@ -69,3 +69,13 @@ test('ordinary Builder defaults cannot select a managed native profile route', a
  value.providers = [{ provider_id: 'kode-workflow-native', registered: true }]
  assert.deepEqual((await proposeBuilderDefaults(value)).fields, ['provider'])
 })
+
+test('separate local model defaults take priority without changing the execution profile', async () => {
+ const value = input()
+ value.profiles[0] = { ...value.profiles[0], defaultModel: 'legacy', defaultReasoningEffort: 'legacy-effort', defaultModelSelection: { model: 'preferred', reasoningEffort: 'deliberate' } }
+ value.listModels = async provider => [{ provider, id: 'legacy' }, { provider, id: 'preferred' }]
+ const before = structuredClone(value.profiles)
+ const result = await proposeBuilderDefaults(value)
+ assert.equal(result.selection.model, 'preferred'); assert.equal(result.selection.effort, 'deliberate')
+ assert.deepEqual(value.profiles, before)
+})

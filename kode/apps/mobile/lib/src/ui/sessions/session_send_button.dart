@@ -10,12 +10,6 @@ class SessionSendButton extends StatelessWidget {
   final bool stopping;
   final bool circular;
 
-  /// Ready attachments make an empty draft sendable.
-  final bool hasAttachments;
-
-  /// Attachments still uploading hold Send back.
-  final bool attachmentsPending;
-
   const SessionSendButton({
     super.key,
     required this.working,
@@ -24,19 +18,14 @@ class SessionSendButton extends StatelessWidget {
     required this.onStop,
     this.stopping = false,
     this.circular = false,
-    this.hasAttachments = false,
-    this.attachmentsPending = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final hasDraft = text.trim().isNotEmpty || hasAttachments;
-    final canSend = hasDraft && !attachmentsPending;
-    final showStop = working && !hasDraft;
+    final canSend = text.trim().isNotEmpty;
+    final showStop = working && !canSend;
     final label = stopping
         ? 'Stopping agent'
-        : attachmentsPending && hasDraft
-        ? 'Waiting for attachments to upload'
         : showStop
         ? 'Stop agent'
         : 'Send message';

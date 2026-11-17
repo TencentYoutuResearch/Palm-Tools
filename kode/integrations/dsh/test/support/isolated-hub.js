@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BackendClient } from '../../src/backend-client.js'
-const binary = fileURLToPath(new URL('../../../../target/debug/kode-session-server', import.meta.url))
+const binary = process.env.KODE_TEST_HUB_BIN || fileURLToPath(new URL('../../../../target/debug/kode-session-server', import.meta.url))
 export async function isolatedHub(node) {
   const root = await mkdtemp(join(tmpdir(), 'kode-hub-fixture-'))
   const token = randomBytes(32).toString('hex'), tokenFile = join(root, 'admin.token'), config = join(root, 'config.json')

@@ -345,7 +345,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, u64>(0))
                 .unwrap(),
-            29
+            super::super::migrations::VERSION as u64
         );
         let db = store.db.lock();
         for (view, index) in [

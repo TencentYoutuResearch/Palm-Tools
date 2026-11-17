@@ -1,3 +1,4 @@
+import { IconButton } from './icons.js'
 import React from 'react'
 import { visibleRefresh } from './visible-refresh.js'
 const h = React.createElement
@@ -46,5 +47,5 @@ export function ExecutionStatusView({ run, request, onObservation }) {
   return h('section', { className: 'kode-collab-execution-status', 'aria-label': '执行端检查' },
     error ? h('p', { role: 'status' }, '暂时无法读取执行端状态。任务状态仍以 Hub 记录为准。') :
       message ? h('p', { role: 'status' }, message) : !observation && h('p', { role: 'status' }, '正在核对执行端状态…'),
-    h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void load() }, busy ? '正在核对执行端…' : '刷新执行检查'))
+    h(IconButton, { icon: 'refresh', label: busy ? '正在核对执行端…' : '刷新执行检查', disabled: busy, onClick: () => void load() }))
 }

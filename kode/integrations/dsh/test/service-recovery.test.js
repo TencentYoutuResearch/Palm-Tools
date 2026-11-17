@@ -24,7 +24,7 @@ function recoveryPanel(host, capabilities, fetcher = async () => new Response('{
     useRef: initial => { const index = cursor++; return refs[index] ??= { current: initial } }, useEffect() {},
   }
   window.__ModuleLoader__ = { load: definition => definition.factory(name => name === 'react' ? react : new Proxy({}, { get: (_, key) => key })) }
-  vm.runInNewContext(source.replace("  return { inject: ['slots'", "  window.recoveryPanel = ServiceRecovery;\n  return { inject: ['slots'"), { window, fetch: fetcher, AbortController, Date, Error, setTimeout, clearTimeout })
+  vm.runInNewContext(source.replace("  return { createAgentControlsFacade, createWorkspaceFacade, createAppearanceFacade,", "  window.recoveryPanel = ServiceRecovery;\n  return { createAgentControlsFacade, createWorkspaceFacade, createAppearanceFacade,"), { window, fetch: fetcher, AbortController, Date, Error, setTimeout, clearTimeout })
   let retried = 0
   const settings = { request: () => new Promise(resolve => pending.push(resolve)), retry: () => retried++ }
   states[0] = { current: 'local', hosts: [], ...capabilities }

@@ -1,8 +1,9 @@
+const eligibility = { eligibility_basis: 'configuration_read_never_grants_execution', live_admission_status: 'not_checked_by_this_read' }
 /** Fixed activated scope; home owns local and remote facts. No provider calls or reservations. */
 export async function readCoordinatorResources(call, activation, team, after = '') {
   const spec = activation.snapshot?.team?.spec, policies = activation.snapshot?.policies
   if (!Array.isArray(spec?.execution_targets) || policies?.budget?.policy?.kind !== 'budget' || policies?.scheduling?.policy?.kind !== 'scheduling') {
-    return { status: 'configuration_unavailable', eligible_for_execution: false }
+    return { status: 'configuration_unavailable', eligible_for_execution: false, ...eligibility }
   }
   const configured = [...spec.execution_targets].sort((a,b)=>a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
   if (after && !configured.some(t=>t.id===after)) throw Error('Unknown Coordinator resource cursor')
@@ -20,7 +21,7 @@ export async function readCoordinatorResources(call, activation, team, after = '
   }))
   const targets=await Promise.all(selected.map(async target=>{
     const row={target_id:target.id,host:target.host_id,profile:target.executor_profile_id,model:target.model_id,
-      eligible_for_execution:false,provider_windows:{status:'unavailable'},provider_monetary:{status:'not_connected',sources:[]}}
+      eligible_for_execution:false,...eligibility,provider_windows:{status:'unavailable'},provider_monetary:{status:'not_connected',sources:[]}}
     const policy=policies.scheduling.policy.targets[target.id]?.resource
     if (!policy || policy.host!==target.host_id || policy.profile!==target.executor_profile_id || policy.account_id!==target.account_binding_id) {
       return {...row,status:'target_policy_identity_mismatch'}
@@ -44,5 +45,5 @@ export async function readCoordinatorResources(call, activation, team, after = '
   }))
   return {status:'observed',scope:'activated_team_resources',observed_at:Date.now(),configured_target_count:configured.length,
     targets,team_budgets,next_cursor:configured.some(t=>t.id>(selected.at(-1)?.id??after))?selected.at(-1)?.id:null,
-    eligible_for_execution:false,reserved_by_read:false,limitations:['home_observations_not_live_provider_queries','unknown_or_stale_facts_are_not_available_balance','atomic_admission_still_required']}
+    eligible_for_execution:false,...eligibility,reserved_by_read:false,limitations:['home_observations_not_live_provider_queries','unknown_or_stale_facts_are_not_available_balance','atomic_admission_still_required']}
 }

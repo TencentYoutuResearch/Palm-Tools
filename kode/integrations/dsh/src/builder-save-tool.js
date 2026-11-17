@@ -2,14 +2,7 @@
  * never turn an ambiguous outcome into a second write or a claim of human consent.
  */
 import { isDeepStrictEqual } from 'node:util'
-function canonicalProposal(value) {
-  if(value===null)return null
-  const result=structuredClone(value)
-  for(const key of ['grant_id','budget_policy_id','scheduling_policy_id'])result[key]??=null
-  if(Array.isArray(result.delivery_bindings)&&!result.delivery_bindings.length)delete result.delivery_bindings
-  if(Array.isArray(result.execution_targets))for(const target of result.execution_targets){target.effort??=null;if(target.executor_profile_revision===null)delete target.executor_profile_revision}
-  return result
-}
+import { canonicalTeamProposal as canonicalProposal } from './team-role-prompts.js'
 export async function saveOfficialBuilderDraft(runtime, agent, fixed, operation, args, read) {
   const path=`/api/v1/messaging/superagents/drafts/${encodeURIComponent(fixed.draft_id)}`
   const receiptPath=`${path}/commands/${encodeURIComponent(args.request_id)}`
@@ -26,7 +19,7 @@ export async function saveOfficialBuilderDraft(runtime, agent, fixed, operation,
   const draft=await read()
   if(draft.revision!==args.expected_revision)throw new Error('Builder draft revision conflict')
   const interview=structuredClone(draft.interview)
-  interview.questions=structuredClone(args.questions);interview.proposed_team=structuredClone(args.proposed_team)
+  interview.questions=structuredClone(args.questions);interview.proposed_team=canonicalProposal(args.proposed_team)
   if(args.proposed_workflow!=null)interview.proposed_workflow=structuredClone(args.proposed_workflow);else delete interview.proposed_workflow
   const command={id:fixed.draft_id,request_id:args.request_id,expected_revision:args.expected_revision,revoked:false,
     builder_operation:{id:operation.id,attempt:operation.attempt,epoch:operation.epoch},interview}

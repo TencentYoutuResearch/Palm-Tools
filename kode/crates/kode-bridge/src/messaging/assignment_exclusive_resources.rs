@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
                 .unwrap(),
-            29
+            super::super::migrations::VERSION as u64
         );
         assert_eq!(
             db.query_row(

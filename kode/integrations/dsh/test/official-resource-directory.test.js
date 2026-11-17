@@ -5,7 +5,7 @@ import { resourceCoverage } from '../src/resource-coverage.js'
 
 test('official directory includes dormant routes and uses only cached allowlisted metadata', async () => {
   const llm = {
-    listProviders: () => [{ id: 'live', name: 'Live', private: 'do-not-export' }, { id: 'kode-agent-p', name: 'Native' }],
+    listProviders: () => [{ id: 'live', name: 'Live', private: 'do-not-export' }, { id: 'kode-agent-p', name: 'Native' }, { id: 'kode-workflow-p', name: 'Managed native' }],
     listConfigurableProviders: () => [{ provider: 'live', displayName: 'Old' }, { provider: 'dormant', displayName: 'Dormant', settingsNs: 'private', settingsPath: ['secret'] }],
     listModels: () => { throw new Error('must not start discovery') },
     exportProviderConfig: () => { throw new Error('must not read settings') },

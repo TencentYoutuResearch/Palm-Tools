@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { deliveryInputId } from './delivery-tracker.js'
 import { assignmentDependencies } from './assignment-dependencies.js'
+import { assertAssignmentRolePrompt } from './assignment-role-prompt.js'
 export async function assignmentInput(client, binding, message, inputId, signal) {
   const id = binding?.managedAssignment?.id
   if (!id) return null
@@ -86,6 +87,7 @@ export async function assignmentModelInput(runtime, agent, binding, options, sig
   }
   const answerProofs = receipts.map(({ question_request_id, message_id, content_hash }) => ({ question_request_id, message_id, content_hash }))
   assertAssignmentModelMessages(options.messages,expected,agent.session.snapshotEvents(0),answers)
+  await assertAssignmentRolePrompt(runtime, agent, binding, assignment, JSON.parse(message.content), options, signal)
   // AgentLoop can start concurrently with inbox confirmation. Persist before paid admission.
   const sessions = runtime.ctx.get?.('sessions') ?? runtime.ctx.sessions
   if (typeof sessions?.flush !== 'function' || await sessions.flush(agent.session) !== true) {

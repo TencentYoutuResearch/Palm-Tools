@@ -31,7 +31,7 @@ export async function waiveStageInBrowser(hub, run, stageId) {
     server = createServer(async (req, res) => { try {
       const route = routes.get(new URL(req.url, 'http://localhost').pathname)
       if (route) return await route.handler(req, res)
-      if (await collabRenderPage(req, res)) return
+      if (await collabRenderPage(req, res, {hub})) return
       res.writeHead(404); res.end()
     } catch { if (!res.headersSent) res.writeHead(500); res.end() } })
     server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -42,10 +42,10 @@ export async function waiveStageInBrowser(hub, run, stageId) {
     const open = async () => {
       await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='工作过程')`)
       await click('工作过程'); await wait(`document.querySelector('.kode-collab-run')`)
-      await click('查看详情'); await wait(`document.querySelector('.kode-collab-stage-waiver')`)
+      if (await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-run button')).some(b=>b.textContent==='查看详情')`)) await click('查看详情'); await wait(`document.querySelector('.kode-collab-stage-waiver')`)
     }
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
-    await wait('globalThis.fixture'); await click('IM'); await wait(`document.querySelector('.kode-collab-contact-name')`)
+    await wait('globalThis.fixture'); await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`); await wait(`document.querySelector('.kode-collab-contact-name')`)
     await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`); await open()
     await click('核对阶段豁免')
     await wait(`document.querySelector('.kode-collab-stage-waiver textarea')`)

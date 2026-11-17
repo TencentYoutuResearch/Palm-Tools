@@ -1,4 +1,5 @@
 import React from 'react'
+import {IconButton} from './icons.js'
 import { TRACE_VIEWS,readTraceManifest,readTraceSlice,exportTracePart } from './trace-data.js'
 const h=React.createElement
 const labels={work_events:'任务事件',assignments:'角色与分配尝试',operations:'执行操作',operation_events:'工具、权限与证据事件',model_calls:'模型调用与计量',model_events:'调用用量事件',messages:'内部通信原文',communication_events:'投递、消费与取消收据',conversation:'关联的人类请求与回复',archives:'产物归档引用',verification_archives:'验证日志归档引用',team_history:'共享团队历史'}
@@ -49,7 +50,7 @@ function TraceReader({run,request}){
   finally{if(exportActive.current===stop){exportRunning.current=false;if(!stop.signal.aborted)setExporting(false)}}
  }
  return h('section',{className:'kode-collab-trace-reader','aria-label':'协作追溯'},
-  h('div',{className:'kode-collab-toolbar'},h('h4',null,'协作追溯'),h('button',{type:'button',className:'kode-collab-button',onClick:reload,disabled:busy||exporting},'刷新追溯')),
+  h('div',{className:'kode-collab-toolbar'},h('h4',null,'协作追溯'),h(IconButton,{icon:'refresh',label:'刷新追溯',onClick:reload,disabled:busy||exporting})),
   h('p',{className:'kode-collab-note'},'记录按类型与游标分组。共享会话记录按原操作范围展示用量。'),
   stale&&h('p',{role:'status'},`任务已有新进展，当前展示第 ${anchor.revision} 版追溯。刷新后可读取新版本。`),
   manifest?.prompt_attestation.missing>0&&h('p',{role:'status'},'有 ',manifest.prompt_attestation.missing,' 条调用缺少已记录的提示词生效凭据。'),

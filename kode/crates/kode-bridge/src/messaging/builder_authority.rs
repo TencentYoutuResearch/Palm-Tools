@@ -83,6 +83,8 @@ pub(super) fn bind_in(tx: &Connection, node_id: &str, id: &str, input: Attach) -
         }
         return Ok(old);
     }
+    // Also protect the direct scope API and legacy starts without selection_ref.
+    super::builder_selection::ensure_unbound(tx, &input.draft_id)?;
     let op = operation(&tx, id)?;
     if super::coordinator_control::bound(tx, id)? {
         bail!("Coordinator operation cannot become Builder")
@@ -106,7 +108,17 @@ pub(super) fn bind_in(tx: &Connection, node_id: &str, id: &str, input: Attach) -
     if draft["revision"].as_u64() != Some(input.draft_revision) || draft["status"] != "draft" {
         bail!("Builder draft revision conflict")
     }
-    let row = json!({"operation_id":id,"request":request,"worker":op.worker,"home_hub":node_id,"workspaces":draft["interview"]["workspace_refs"],"created_at":now(),"actor":{"kind":"human","id":"local_owner"}});
+    let selected: Option<String> = tx
+        .query_row(
+            "SELECT value FROM workbench_documents WHERE key=?1",
+            [format!("builder-selection:{}", input.draft_id)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let selected: Option<Value> = selected
+        .map(|body| serde_json::from_str(&body))
+        .transpose()?;
+    let row = json!({"operation_id":id,"request":request,"worker":op.worker,"home_hub":node_id,"workspaces":draft["interview"]["workspace_refs"],"selection_snapshot":selected,"created_at":now(),"actor":{"kind":"human","id":"local_owner"}});
     tx.execute(
         "INSERT INTO workbench_documents(key,revision,value) VALUES (?1,1,?2)",
         params![key(id, input.attempt), serde_json::to_string(&row)?],

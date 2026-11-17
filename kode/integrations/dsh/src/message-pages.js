@@ -38,7 +38,7 @@ export function messagePage(message, offset = 0) {
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Offset must be a nonnegative code-point index')
   const points = Array.from(message.content)
   if (offset > points.length) throw new Error('Offset exceeds message length')
-  const build = end => ({ id: message.id, source: message.source, target: message.target, in_reply_to: message.in_reply_to, status: message.status,
+  const build = end => ({ id: message.id, source: message.source, target: message.target, in_reply_to: message.in_reply_to, status: message.status, ...(message.direct_insert ? { direct_insert: true } : {}),
     content: points.slice(offset, end).join(''), offset, next: end < points.length ? end : null, content_length: points.length, token_budget: budget })
   let low = offset, high = Math.min(points.length, offset + 4096)
   if (!fits(build(low))) throw new Error('Message metadata exceeds page token estimate budget')

@@ -10,20 +10,28 @@ export async function handleContactDirectory(req, res, client) {
   }
   const keys = [...query.keys()]
   if (new Set(keys).size !== keys.length) return send(400, { error: 'Duplicate contact query' })
-  const identity = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value)
+  const identity = value => typeof value === 'string' && value.length >= 1 && value.length <= 160 && !/[^A-Za-z0-9_.:-]/.test(value)
   try {
     if (view === 'contacts') {
       if (req.method !== 'GET') return send(405, { error: 'GET required' })
-      if (keys.some(key => !['view', 'after', 'limit', 'q', 'archived'].includes(key))) return send(400, { error: 'Invalid contact directory query' })
+      if (keys.some(key => !['view', 'after', 'limit', 'q', 'archived', 'workspace_host', 'workspace_id', 'workspace_root'].includes(key))) return send(400, { error: 'Invalid contact directory query' })
+      const scopeKeys = ['workspace_host', 'workspace_id', 'workspace_root']
+      const scoped = scopeKeys.some(key => query.has(key))
+      if (scoped && (!scopeKeys.every(key => query.has(key)) || !identity(query.get('workspace_host'))
+        || !identity(query.get('workspace_id')) || !query.get('workspace_root').trim()
+        || Buffer.byteLength(query.get('workspace_root')) > 1024 || query.get('workspace_root').includes('\0'))) {
+        return send(400, { error: 'Invalid contact workspace scope' })
+      }
       const after = query.get('after') ?? ''
       const limit = query.get('limit') ?? '25'
       const search = query.get('q') ?? ''
       const archived = query.get('archived') ?? 'false'
-      if (!/^[A-Za-z0-9_-]{0,2048}$/.test(after) || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50
+      if (!new RegExp(`^[A-Za-z0-9_-]{0,${scoped ? 16384 : 2048}}$`).test(after) || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50
         || Buffer.byteLength(search) > 160 || search.includes('\0') || !['false', 'true'].includes(archived)) {
         return send(400, { error: 'Invalid contact directory page' })
       }
       const params = new URLSearchParams({ after, limit, q: search, archived })
+      if (scoped) for (const key of scopeKeys) params.set(key, query.get(key))
       return send(200, await client.call(`/api/v1/messaging/contact-directory?${params}`))
     }
     if (view !== 'contact-preference' || keys.some(key => !['view', 'team_id', 'request_id'].includes(key)) || !identity(query.get('team_id'))) {

@@ -21,7 +21,7 @@ export async function inspectNativeEvidence(hub, expected) {
       try {
         const route = routes.get(new URL(req.url, 'http://localhost').pathname)
         if (route) return await route.handler(req, res)
-        if (await collabRenderPage(req, res)) return
+        if (await collabRenderPage(req, res, {hub})) return
         res.writeHead(404); res.end()
       } catch { if (!res.headersSent) res.writeHead(500); res.end() }
     })
@@ -30,7 +30,7 @@ export async function inspectNativeEvidence(hub, expected) {
     const page = await browser.page(`http://127.0.0.1:${server.address().port}`)
     const wait = expression => page.evaluate(`(async()=>{const until=Date.now()+10000;while(Date.now()<until){if(${expression})return;await new Promise(r=>setTimeout(r,25))}throw Error('Evidence render timeout: '+document.body.innerText.slice(0,1500))})()`)
     await wait('globalThis.fixture')
-    await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]').click()`)
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
     await wait(`document.querySelector('.kode-collab-contact-name')`)
     await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
     const click = text => page.evaluate(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent===${JSON.stringify(text)}).click()`)

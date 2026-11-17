@@ -43,17 +43,17 @@ test('real Cordis references share reversible mode navigation without session ef
     layout: { selectPanel(id) { if (missing) throw Error('not registered'); panels.push(id) } }, openBuilder: () => ++builder })
   adapter.selectMode('im'); assert.equal(workspace.calls.length, 0)
   workspace.startSession(); traced.startSession()
-  assert.equal(builder, 2); assert.equal(workspace.calls.length, 0)
-  adapter.selectMode('session'); assert.equal(workspace.calls.length, 0)
+  assert.equal(builder, 0); assert.equal(workspace.calls.length, 2)
+  adapter.selectMode('session'); assert.equal(workspace.calls.length, 2)
   adapter.selectMode('im')
   const options = { prompt: 'explicit session request', clearPreviousDraft: false }
   assert.deepEqual(traced.startSession('workspace', options), ['workspace', options])
-  assert.equal(view.getSnapshot().mode, 'session'); assert.equal(workspace.calls.length, 1)
+  assert.equal(view.getSnapshot().mode, 'im'); assert.equal(workspace.calls.length, 3)
   missing = true; assert.throws(() => adapter.selectMode('im'), /not registered/)
-  assert.equal(view.getSnapshot().mode, 'session')
+  assert.equal(view.getSnapshot().mode, 'im')
   adapter.dispose(); adapter.dispose()
   assert.equal(Object.hasOwn(workspace, 'startSession'), false)
-  traced.startSession(); assert.equal(workspace.calls.length, 2)
+  traced.startSession(); assert.equal(workspace.calls.length, 4)
   assert.throws(() => adapter.selectMode('im'), /disposed/)
 })
 
@@ -62,4 +62,14 @@ test('navigation teardown preserves a later owner replacement', () => {
   const adapter = installCollabNavigation({ workspace, view, layout: { selectPanel() {} }, openBuilder() {} })
   const later = () => 42; workspace.startSession = later
   adapter.dispose(); assert.equal(workspace.startSession, later)
+})
+
+
+test('sidebar mode changes preserve the selected main panel and create no sessions',()=>{
+ let sessions=0;const panels=[],view=createCollabViewState()
+ const nav=installCollabNavigation({workspace:{startSession(){sessions++}},view,layout:{selectPanel:id=>panels.push(id)},openBuilder(){}})
+ nav.selectMode('im',{showPanel:false});nav.selectMode('session',{showPanel:false})
+ assert.deepEqual(panels,[]);assert.equal(sessions,0)
+ nav.selectMode('im');assert.deepEqual(panels,['kode-collab'],'explicit contact navigation still selects its conversation')
+ nav.dispose()
 })

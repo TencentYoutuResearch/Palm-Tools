@@ -4,11 +4,11 @@ export function officialResourceDirectory(llm) {
   const routes = new Map()
   try {
     for (const item of llm.listConfigurableProviders?.() ?? []) {
-      if (typeof item.provider !== 'string' || !item.provider || item.provider.startsWith('kode-agent-')) continue
+      if (typeof item.provider !== 'string' || !item.provider || (item.provider.startsWith('kode-agent-') || item.provider.startsWith('kode-workflow-'))) continue
       routes.set(item.provider, { provider_id: item.provider, name: item.displayName ?? item.provider, registered: false })
     }
     for (const item of llm.listProviders()) {
-      if (typeof item.id !== 'string' || !item.id || item.id.startsWith('kode-agent-')) continue
+      if (typeof item.id !== 'string' || !item.id || (item.id.startsWith('kode-agent-') || item.id.startsWith('kode-workflow-'))) continue
       routes.set(item.id, { provider_id: item.id, name: item.name ?? item.id, registered: true })
     }
     return { status: llm.listConfigurableProviders ? 'registered_and_declared' : 'registered_only', items: [...routes.values()] }

@@ -1,6 +1,6 @@
 /** Exact configuration validation only. No session creation, call preparation or inference. */
 import { profileRevision } from './agent-profiles.js'
-import { controlledBinding, managedCodexEnabled, managedCodexRoute } from './managed-codex-profile.js'
+import { controlledBinding, managedNativeEnabled, managedCodexRoute } from './managed-codex-profile.js'
 
 export function assertOfficialProfile(profiles, binding, policy) {
   if (!policy) return
@@ -32,7 +32,7 @@ export async function preflightOfficialSelection(ctx, profiles, binding, policy,
       || (policy.effort != null && resolved.reasoningEffort !== policy.effort)) {
     throw new Error('Official resolved configuration differs from selection policy')
   }
-  if (managedCodexEnabled(binding.profile)) {
+  if (managedNativeEnabled(binding.profile)) {
     if (!controlledBinding(binding) || config.provider !== managedCodexRoute(binding.profile.id) || !agent || !nativeAdapter) throw new Error('Managed CLI workflow configuration unavailable')
     const actual = await nativeAdapter.preflight(binding, resolved, agent, signal)
     signal?.throwIfAborted()

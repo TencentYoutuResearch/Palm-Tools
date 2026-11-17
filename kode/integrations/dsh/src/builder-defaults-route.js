@@ -1,15 +1,24 @@
+import { profileRevision } from './agent-profiles.js'
+import { builderProfileMetadata } from './builder-profile-metadata.js'
 import { proposeBuilderDefaults } from './builder-defaults.js'
-import { controlledBinding, managedCodexEnabled } from './managed-codex-profile.js'
+import { managedNativeEnabled } from './managed-codex-profile.js'
 const valid = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value)
 export function registerBuilderDefaults(ctx, { backendClient, service, llm, home, defaults = {}, timeoutMs = 10000 }) {
  const preferences = () => typeof defaults === 'function' ? defaults() : defaults
- const snapshot = () => ({ defaultProfileId: service.profiles.defaultProfileId, profiles: service.profiles.list()
-  .filter(profile => controlledBinding({ profile, managedBuilder: {} }))
-  .map(profile => ({ id: profile.id, type: profile.type, protocol: profile.protocol,
-   defaultModel: profile.defaultModel, defaultReasoningEffort: profile.defaultReasoningEffort, allowedModels: profile.allowedModels,
-   ...(managedCodexEnabled(profile) ? { managedInference: { roles: profile.managedInference.roles } } : {}),
-   runtime_available: service.hasRuntime(profile.type) })),
-  providers: service.officialResourceDirectory().items.map(({ provider_id, registered }) => ({ provider_id, registered })) })
+ const snapshot = () => {
+  const registered = llm.listProviders?.() ?? []
+  const profiles = service.profiles.list().map(profile => {
+   const metadata = builderProfileMetadata(profile, service.hasRuntime(profile.type), registered)
+   return { id: profile.id, type: profile.type, protocol: profile.protocol, profile_revision: profileRevision(profile),
+    defaultModelSelection: service.profiles.defaultModelFor?.(profile.id),
+    defaultModel: profile.defaultModel, defaultReasoningEffort: profile.defaultReasoningEffort, allowedModels: profile.allowedModels,
+    ...(managedNativeEnabled(profile) ? { managedInference: { roles: metadata.managed_roles } } : {}),
+    ...metadata, runtime_available: service.hasRuntime(profile.type) }
+  }).filter(profile => profile.builder_selection_eligible)
+  return { defaultProfileId: service.profiles.defaultProfileId, profiles,
+   providers: [...service.officialResourceDirectory().items.filter(row => !row.provider_id.startsWith('kode-workflow-')).map(({ provider_id, registered }) => ({ provider_id, registered })),
+    ...profiles.filter(profile => profile.managed_provider_id).map(profile => ({ provider_id: profile.managed_provider_id, registered: profile.managed_route_registered }))] }
+ }
  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/builder/default-selection', handler: async (req, res) => {
   const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
   const admitted = ctx.connection.admit(req)

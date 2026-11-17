@@ -53,3 +53,20 @@ test('owner reconciliation persists attestation, rejects stale fence and never m
     assert.equal(profiles.binding('worker').stopReconciliations.length, 2)
   } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
+test('late stop cannot overwrite direct insertion fence; owner resume clears scheduler guards', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-direct-fence-'))
+  const profiles = await new AgentProfiles(join(root, 'agents.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath }])
+  await profiles.bind('worker', 'fixture')
+  await profiles.patchBinding('worker', { stopBlocked: true, stopFenceId: 'direct-fence', directInsertFenceId: 'direct-fence' })
+  let wakes = 0
+  const agent = { id: 'worker', session: {}, parked: true, directInsertBlocked: true, wake() { assert.equal(this.parked, false); assert.equal(this.directInsertBlocked, false); wakes++ } }
+  const ctx = { agents: { get: () => agent }, sessionProjections: { stateOf: () => ({ lastTurn: 1, lastStepBoundary: { kind: 'start', step: 1 } }) } }
+  const adapter = new AgentRuntimeAdapter(ctx, profiles, { recordNative() {} })
+  try {
+    await adapter.recordStop(agent, { close: async () => ({ spawned: true, leader_exited: true, signal_scope: 'leader', signal_failures: [] }) })
+    assert.equal(profiles.binding('worker').stopBlocked, true)
+    assert.equal(profiles.binding('worker').stopFenceId, 'direct-fence')
+    await adapter.reconcileStop({ session_id: 'worker', expected_fence_id: 'direct-fence', reason: 'Checked owned process group', processes_checked: true, resume: true })
+    assert.equal(wakes, 1); assert.equal(profiles.binding('worker').directInsertFenceId, null)
+  } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})

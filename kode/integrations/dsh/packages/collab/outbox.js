@@ -1,3 +1,4 @@
+import { validConversationTarget, sameConversationTarget } from './conversation-target.js'
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value)
 const keyOf = team => JSON.stringify([team.home_hub, team.conversation_id])
 function validateTeam(team) {
@@ -6,12 +7,13 @@ function validateTeam(team) {
 function validateRecord(team, row) {
   if (!row) return
   if (row.home_hub !== team.home_hub || row.team_id !== team.id || row.superagent_id !== team.superagent_id || row.conversation_id !== team.conversation_id
-    || (row.prior_run_id !== undefined && !validId(row.prior_run_id)) || (row.draft_token !== undefined && !validId(row.draft_token)) || !validId(row.request_id) || typeof row.content !== 'string' || !['prepared', 'unconfirmed', 'accepted'].includes(row.state)) throw Error('发送记录与当前联系人不匹配。')
+    || (row.clarification_target !== undefined && !validConversationTarget(row.clarification_target))
+    || (row.prior_run_id !== undefined && !validId(row.prior_run_id)) || (row.draft_token !== undefined && !validId(row.draft_token)) || !validId(row.request_id) || typeof row.content !== 'string' || !['prepared', 'unconfirmed', 'rejected', 'accepted'].includes(row.state)) throw Error('发送记录与当前联系人不匹配。')
 }
 function validReceipt(row, receipt) {
   return receipt && receipt.home_hub === row.home_hub && receipt.team_id === row.team_id && receipt.superagent_id === row.superagent_id
     && receipt.conversation_id === row.conversation_id && receipt.request_id === row.request_id && receipt.content === row.content
-    && receipt.prior_run_id === row.prior_run_id
+    && receipt.prior_run_id === row.prior_run_id && sameConversationTarget(receipt.clarification_target, row.clarification_target)
     && receipt.actor?.kind === 'human' && receipt.state === 'accepted' && validId(receipt.id)
 }
 export function createCollabOutbox({ storage, request, uuid = () => crypto.randomUUID() }) {
@@ -38,16 +40,16 @@ export function createCollabOutbox({ storage, request, uuid = () => crypto.rando
         receipt = result.message
       }
       controller.signal.throwIfAborted()
-      if (!receipt) receipt = await request('/api/kode/conversation/messages', { signal: controller.signal, body: { conversation_id: row.conversation_id, request_id: row.request_id, content: row.content, ...(row.prior_run_id === undefined ? {} : { prior_run_id: row.prior_run_id }) } })
+      if (!receipt) receipt = await request('/api/kode/conversation/messages', { signal: controller.signal, body: { conversation_id: row.conversation_id, request_id: row.request_id, content: row.content, ...(row.clarification_target ? { clarification_target: row.clarification_target } : {}), ...(row.prior_run_id === undefined ? {} : { prior_run_id: row.prior_run_id }) } })
       if (!validReceipt(row, receipt)) throw Error('Receipt identity mismatch')
       const accepted = { ...row, state: 'accepted', receipt }
       await storage.save(key, accepted)
       publish(key, { ...accepted, busy: false, error: '' })
       return accepted
-    } catch {
-      const uncertain = { ...row, state: 'unconfirmed' }
+    } catch (error) {
+      const uncertain = { ...row, state: error?.confirmedRejection ? 'rejected' : 'unconfirmed', error: error?.confirmedRejection ? error.message : '发送结果尚未确认。重试会先查询原请求，不会新建请求。' }
       try { await storage.save(key, uncertain) } catch {}
-      publish(key, { ...uncertain, busy: false, error: '发送结果尚未确认。重试会先查询原请求，不会新建请求。' })
+      publish(key, { ...uncertain, busy: false })
       return uncertain
     } finally { controllers.delete(controller) }
   }
@@ -57,20 +59,21 @@ export function createCollabOutbox({ storage, request, uuid = () => crypto.rando
     keyOf,
     load(team) {
       validateTeam(team); const key = keyOf(team)
-      return serial(key, 'load', async () => { const row = await storage.read(key); validateRecord(team, row); publish(key, row ? { ...row, busy: false, error: '' } : null); return row })
+      return serial(key, 'load', async () => { const row = await storage.read(key); validateRecord(team, row); publish(key, row ? { ...row, busy: false, error: row.error || '' } : null); return row })
     },
-    send(team, content, { prior_run_id, draft_token } = {}) {
+    send(team, content, { prior_run_id, draft_token, clarification_target } = {}) {
       validateTeam(team)
+      if (clarification_target !== undefined && (!validConversationTarget(clarification_target) || prior_run_id !== undefined)) return Promise.reject(Error('请选择一个明确的问题，不能同时关联修改请求。'))
       if (typeof content !== 'string' || !content.trim() || content.includes('\0') || new TextEncoder().encode(content).length > 65536) return Promise.reject(Error('请输入不超过 64 KiB 的消息。'))
       if (prior_run_id !== undefined && !validId(prior_run_id)) return Promise.reject(Error('无法确认关联任务。'))
       if (draft_token !== undefined && !validId(draft_token)) return Promise.reject(Error('无法确认草稿版本。'))
       const key = keyOf(team)
       // A second click joins the same in-flight operation. A later differing message cannot replace an unresolved one.
       return serial(key, 'send', async () => {
-        const candidate = { home_hub: team.home_hub, team_id: team.id, superagent_id: team.superagent_id, conversation_id: team.conversation_id, request_id: uuid(), content, ...(prior_run_id === undefined ? {} : { prior_run_id }), ...(draft_token === undefined ? {} : { draft_token }), state: 'prepared' }
+        const candidate = { home_hub: team.home_hub, team_id: team.id, superagent_id: team.superagent_id, conversation_id: team.conversation_id, request_id: uuid(), content, ...(clarification_target ? { clarification_target: { ...clarification_target } } : {}), ...(prior_run_id === undefined ? {} : { prior_run_id }), ...(draft_token === undefined ? {} : { draft_token }), state: 'prepared' }
         if (!validId(candidate.request_id)) throw Error('无法创建消息请求标识。')
-        const row = await storage.reserve(key, candidate); validateRecord(team, row)
-        if (row.content !== content || row.prior_run_id !== prior_run_id) throw Error('上一条消息结果尚未确认，请先恢复该请求。')
+        const row = await storage.reserve(key, candidate, current => current.state === 'rejected' && (current.content !== content || current.prior_run_id !== prior_run_id || !sameConversationTarget(current.clarification_target, clarification_target))); validateRecord(team, row)
+        if (row.content !== content || row.prior_run_id !== prior_run_id || !sameConversationTarget(row.clarification_target, clarification_target)) throw Error('上一条消息结果尚未确认，请先恢复该请求。')
         return deliver(team, row, row.request_id !== candidate.request_id)
       })
     },
@@ -85,6 +88,10 @@ export async function requestCollabMessage(path, { body, signal, fetcher = globa
   if (body === undefined ? !path.startsWith('/api/kode/conversation/messages?') : path !== '/api/kode/conversation/messages') throw Error('Unsupported message request')
   const response = await fetcher(path, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
     ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) })
-  if (!response.ok) throw Error('Message result unavailable')
+  if (!response.ok) {
+    const result = await response.json().catch(() => null)
+    if (result?.code === 'clarification_rejected') throw Object.assign(Error(result.error), { confirmedRejection: true })
+    throw Error('Message result unavailable')
+  }
   return response.json()
 }

@@ -1,0 +1,330 @@
+{
+  "authority": {
+    "attempt": 1,
+    "audience_revision": 1,
+    "context_key": "e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8",
+    "context_scope": {
+      "context_epoch": 1,
+      "home_hub": "home",
+      "kind": "discussion_thread",
+      "scope_id": "915e9726cbd4760765e5a8567bb337717a9cb7f60333949b488cbac2794c457f",
+      "team_id": "team",
+      "version": 2
+    },
+    "control_revision": 1,
+    "epoch": 1,
+    "journal_id": "0a7b6086-c363-4592-a89c-9a09f04f8121",
+    "operation_id": "4b663ec0-d3ff-4e1e-9ba3-1900928fd230",
+    "operation_revision": 4,
+    "origin": {
+      "home_hub": "home",
+      "host_id": "home",
+      "root_ref": "/fixture/project",
+      "workspace_id": "workspace"
+    },
+    "session_id": "context-e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8",
+    "surface_id": "channel",
+    "team_revision": 2,
+    "thread_id": "a4c93380-456a-41e7-99ec-e272802f8854",
+    "worker": {
+      "node_id": "home",
+      "session_id": "context-e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8"
+    }
+  },
+  "dispatch_allowed": false,
+  "host_binding": {
+    "binding_id": "7a632623-ae72-4905-93d9-e38c69ecd0ec",
+    "claim_allowed": false,
+    "context_key": "e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8",
+    "execution_authorized": false,
+    "frozen": {
+      "activation_sha256": "b51f83fe3e018712173aae90b1ab12bfab6e97d3c89eda8af626ce6c844f53d6",
+      "context": {
+        "audience_revision": 1,
+        "context_scope": {
+          "context_epoch": 1,
+          "home_hub": "home",
+          "kind": "discussion_thread",
+          "scope_id": "915e9726cbd4760765e5a8567bb337717a9cb7f60333949b488cbac2794c457f",
+          "team_id": "team",
+          "version": 2
+        },
+        "key": "e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8",
+        "origin": {
+          "home_hub": "home",
+          "host_id": "home",
+          "root_ref": "/fixture/project",
+          "workspace_id": "workspace"
+        },
+        "request_id": "register",
+        "start_sequence": 1,
+        "surface_id": "channel",
+        "team_revision": 2,
+        "thread_id": "a4c93380-456a-41e7-99ec-e272802f8854"
+      },
+      "control": {
+        "context_key": "e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8",
+        "context_scope": {
+          "context_epoch": 1,
+          "home_hub": "home",
+          "kind": "discussion_thread",
+          "scope_id": "915e9726cbd4760765e5a8567bb337717a9cb7f60333949b488cbac2794c457f",
+          "team_id": "team",
+          "version": 2
+        },
+        "created_at": 1794324654269,
+        "dispatch_state": "not_ready",
+        "home_hub": "home",
+        "journal_id": "0a7b6086-c363-4592-a89c-9a09f04f8121",
+        "readiness_reason": "scoped_runtime_incomplete",
+        "request": {
+          "activation_revision": 1,
+          "attempt": 1,
+          "epoch": 1,
+          "expected_revision": 0,
+          "operation_id": "4b663ec0-d3ff-4e1e-9ba3-1900928fd230",
+          "operation_revision": 4,
+          "request_id": "4b663ec0-d3ff-4e1e-9ba3-1900928fd230",
+          "target_id": "engine",
+          "team_revision": 2
+        },
+        "revision": 1,
+        "runtime_ready": false,
+        "superagent_id": "b8a77760-4c97-4945-bd90-4825fe954538",
+        "team_id": "team",
+        "worker": {
+          "node_id": "home",
+          "session_id": "context-e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8"
+        }
+      },
+      "enrollment": {
+        "boot_id": "boot",
+        "home": "home",
+        "host_id": "home",
+        "id": "ad3066dd-fb43-4ae6-9eb3-e01565dfdee4",
+        "protocol_version": 1,
+        "revision": 1,
+        "revoked": false
+      },
+      "execution_target": {
+        "account_binding_id": "account",
+        "capability_profile_revision": "1",
+        "effort": null,
+        "executor_profile_id": "fixture-engine",
+        "executor_profile_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "host_id": "home",
+        "id": "engine",
+        "model_id": "fixture-model",
+        "provider_id": "fixture-provider"
+      },
+      "grant": {
+        "attempt": 1,
+        "epoch": 1,
+        "grant_id": "grant",
+        "scope": {
+          "budget_ids": [
+            "budget"
+          ],
+          "capabilities": [
+            "read",
+            "delegate"
+          ],
+          "network": false,
+          "revision": 1,
+          "target": {
+            "host": "home",
+            "root": "/fixture/project",
+            "workspace": "workspace"
+          },
+          "team_id": "team",
+          "tools": []
+        }
+      },
+      "manifest": {
+        "profile": "conversation_reply_v1",
+        "tools": [],
+        "version": 1
+      },
+      "manifest_sha256": "29235b3fdf5caaeb7fcc8bf334e556efd157c997dd3726d6a72f22d82192692b",
+      "operation": {
+        "attempt": 1,
+        "epoch": 1,
+        "id": "4b663ec0-d3ff-4e1e-9ba3-1900928fd230",
+        "initial_revision": 4,
+        "owner": "owner",
+        "resource": {
+          "account_epoch": 1,
+          "account_id": "account",
+          "binding_revision": 1,
+          "host": "home",
+          "limit_ids": [],
+          "profile": "fixture-engine",
+          "unknown_quota": "team_budget"
+        },
+        "selection": {
+          "effort": null,
+          "model": "fixture-model",
+          "profile_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": "executor_configuration"
+        },
+        "worker": {
+          "node_id": "home",
+          "session_id": "context-e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8"
+        }
+      }
+    },
+    "receipt_replay": false,
+    "revision": 1,
+    "runtime_ready": false,
+    "state": "bound_not_admitted"
+  },
+  "lease_observation": {
+    "expires_at": null,
+    "revision": 4
+  },
+  "operation": {
+    "attempt": 1,
+    "budget_available": null,
+    "budget_required": true,
+    "epoch": 1,
+    "grant_available": true,
+    "grant_required": true,
+    "id": "4b663ec0-d3ff-4e1e-9ba3-1900928fd230",
+    "lease_duration_ms": null,
+    "lease_until": null,
+    "owner": "owner",
+    "request_key": "inbox-operation",
+    "resource": {
+      "account_epoch": 1,
+      "account_id": "account",
+      "binding_revision": 1,
+      "host": "home",
+      "limit_ids": [],
+      "profile": "fixture-engine",
+      "unknown_quota": "team_budget"
+    },
+    "resource_available": null,
+    "resource_required": true,
+    "revision": 4,
+    "selection_policy": {
+      "effort": null,
+      "model": "fixture-model",
+      "profile_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": "executor_configuration"
+    },
+    "state": "prepared",
+    "worker": {
+      "node_id": "home",
+      "session_id": "context-e1ce1ba7f806d6679a192494dae153fc5dbd427924ce893d8cd7372f5be8c8a8"
+    }
+  },
+  "source_read_allowed": true,
+  "team_snapshot": {
+    "activation_requirements": [
+      "workflow_validation",
+      "resource_coverage",
+      "workspace_and_grant",
+      "budget_and_scheduling",
+      "human_activation"
+    ],
+    "active_revision": null,
+    "conversation_id": "cc1b7725-e21c-4add-9a2f-6d90b8c199d2",
+    "created_at": 1794324654266,
+    "eligible_for_execution": false,
+    "home_hub": "home",
+    "id": "team",
+    "owner": {
+      "id": "local_owner",
+      "kind": "human"
+    },
+    "revision": 2,
+    "schema_version": 1,
+    "spec": {
+      "budget_policy_id": "budget-policy",
+      "coordinator_targets": [
+        "engine"
+      ],
+      "delivery_bindings": [
+        {
+          "delivery_policy": {
+            "hash": "37a6a41f22a2ecd69e294c36d92b2a5b202894f5bd81771471767e7b3dcbd1f9",
+            "id": "delivery",
+            "version": "1"
+          },
+          "id": "local",
+          "project": {
+            "hash": "12a6e0ce5e54d0869e8051ad2bcac8257895989e36e07a0e3f9fa7282cbacd8f",
+            "id": "project",
+            "version": "1"
+          },
+          "workflow": {
+            "hash": "03db0dabd7618da67a9044bf08c55a4dda400875765dee9462f7b23ff64f89f8",
+            "id": "flow",
+            "version": "1"
+          }
+        }
+      ],
+      "execution_targets": [
+        {
+          "account_binding_id": "account",
+          "capability_profile_revision": "1",
+          "effort": null,
+          "executor_profile_id": "fixture-engine",
+          "executor_profile_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "host_id": "home",
+          "id": "engine",
+          "model_id": "fixture-model",
+          "provider_id": "fixture-provider"
+        }
+      ],
+      "grant_id": "grant",
+      "kind": "coordinator",
+      "limits": {
+        "max_active_assignments": 2,
+        "max_active_runs": 2
+      },
+      "name": "Fixture",
+      "proactive_mode": "off",
+      "purpose": "offline context tests",
+      "scheduling_policy_id": "schedule-policy",
+      "workers": [
+        {
+          "allowed_target_ids": [
+            "engine"
+          ],
+          "id": "worker",
+          "max_parallel": 1,
+          "required_capabilities": [],
+          "responsibilities": [
+            "Test"
+          ],
+          "role": "implementation",
+          "workspace_refs": [
+            {
+              "host_id": "home",
+              "root_ref": "/fixture/project",
+              "workspace_id": "workspace"
+            }
+          ]
+        }
+      ],
+      "workflow_pack_refs": [
+        {
+          "hash": "03db0dabd7618da67a9044bf08c55a4dda400875765dee9462f7b23ff64f89f8",
+          "id": "flow",
+          "version": "1"
+        }
+      ],
+      "workspace_refs": [
+        {
+          "host_id": "home",
+          "root_ref": "/fixture/project",
+          "workspace_id": "workspace"
+        }
+      ]
+    },
+    "status": "draft",
+    "superagent_id": "b8a77760-4c97-4945-bd90-4825fe954538",
+    "updated_at": 1794324654267
+  }
+}

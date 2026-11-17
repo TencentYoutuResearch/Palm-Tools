@@ -9,15 +9,15 @@ export function registerBuilderDrafts(ctx, config) {
     if (!config?.backendClient) return send(503, { error: 'Builder drafts unavailable' })
     const query = new URL(req.url, 'http://localhost').searchParams, keys = [...query.keys()]
     const valid = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value)
-    if (keys.length !== new Set(keys).size || keys.some(key => !['draft_id', 'after', 'limit'].includes(key))) return send(400, { error: 'Invalid draft query' })
+    if (keys.length !== new Set(keys).size || keys.some(key => !['draft_id', 'team_id', 'after', 'limit'].includes(key))) return send(400, { error: 'Invalid draft query' })
     let path = '/api/v1/messaging/superagents/drafts'
     if (query.has('draft_id')) {
       if (!valid(query.get('draft_id')) || keys.length !== 1) return send(400, { error: 'Invalid draft identity' })
       path += `/${encodeURIComponent(query.get('draft_id'))}`
     } else {
-      const after = query.get('after') ?? '', limit = query.get('limit') ?? '25'
-      if ((after && !valid(after)) || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50) return send(400, { error: 'Invalid draft cursor' })
-      path += `?after=${encodeURIComponent(after)}&limit=${limit}`
+      const after = query.get('after') ?? '', limit = query.get('limit') ?? '25', team = query.get('team_id')
+      if ((team !== null && !valid(team)) || (after && !valid(after)) || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50) return send(400, { error: 'Invalid draft cursor' })
+      path += `?after=${encodeURIComponent(after)}&limit=${limit}${team === null ? '' : `&team_id=${encodeURIComponent(team)}`}`
     }
     try { return send(200, await config.backendClient.call(path)) }
     catch (error) { return send(error?.status === 404 ? 404 : 503, { error: 'Builder drafts unavailable' }) }

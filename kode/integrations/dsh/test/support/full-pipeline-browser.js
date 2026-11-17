@@ -38,8 +38,8 @@ export async function fullPipelineBrowser(hub,onInput){
 
  }
     await wait(`!document.querySelector('dialog[open], [role=dialog][aria-modal=true]')`)
-    await wait(`document.querySelector('[aria-label="切换到 IM 模式"]')||document.querySelector('[aria-label="切换到 Session 模式"]')`)
-    await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]')?.click()`)
+    await wait(`document.querySelector('[data-sidebar-section=channels]')`)
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
     await page.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='展开')?.click()`)
     await wait(`document.querySelector('.kode-collab-contact-name')`)
     await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
@@ -50,9 +50,9 @@ export async function fullPipelineBrowser(hub,onInput){
         assert.notEqual(before.state,'completed');assert.ok(before.stages.some(s=>s.assignment_id),'real Worker assignment exists')
         const grant=await hub.client.call('/api/v1/messaging/team-grants/grant')
         for(let i=0;i<3;i++){
-          await page.evaluate(`document.querySelector('[aria-label="切换到 Session 模式"]').click()`)
+          await page.evaluate(`document.querySelector('[data-sidebar-section=sessions] summary').click()`)
           await wait(`document.querySelector('[data-composer-input]')`)
-          await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]').click()`)
+          await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
           await wait(`document.querySelector('.kode-collab-composer textarea')`)
         }
         assert.deepEqual(await hub.client.call('/api/v1/messaging/work-runs/'+runId),before)
@@ -74,8 +74,8 @@ export async function fullPipelineBrowser(hub,onInput){
       async verifyResult({ reload = false } = {}) {
         if (reload) {
           await page.call('Page.reload')
-          await wait(`document.querySelector('[aria-label="切换到 IM 模式"]')||document.querySelector('[aria-label="切换到 Session 模式"]')`)
-          await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]')?.click()`)
+          await wait(`document.querySelector('[data-sidebar-section=channels]')`)
+          await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
           await wait(`document.querySelector('.kode-collab-contact-name')`)
           await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
         }

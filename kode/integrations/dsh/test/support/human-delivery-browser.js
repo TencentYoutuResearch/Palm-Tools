@@ -36,7 +36,7 @@ export async function acceptDeliveryInBrowser(hub, run, choice = 'accept') {
     server = createServer(async (req, res) => { try {
       const route = routes.get(new URL(req.url, 'http://localhost').pathname)
       if (route) return await route.handler(req, res)
-      if (await collabRenderPage(req, res)) return
+      if (await collabRenderPage(req, res, {hub})) return
       res.writeHead(404); res.end()
     } catch { if (!res.headersSent) res.writeHead(500); res.end() } })
     server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -47,10 +47,10 @@ export async function acceptDeliveryInBrowser(hub, run, choice = 'accept') {
     const open = async () => {
       await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='工作过程')`)
       await click('工作过程'); await wait(`document.querySelector('.kode-collab-run')`)
-      await click('查看详情'); await wait(`document.querySelector('.kode-collab-delivery-decision')`)
+      if (await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-run button')).some(b=>b.textContent==='查看详情')`)) await click('查看详情'); await wait(`document.querySelector('.kode-collab-delivery-decision')`)
     }
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
-    await wait('globalThis.fixture'); await click('IM'); await wait(`document.querySelector('.kode-collab-contact-name')`)
+    await wait('globalThis.fixture'); await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`); await wait(`document.querySelector('.kode-collab-contact-name')`)
     await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`); await open()
     const hasWaivers = Object.keys(run.human_acceptance.evidence?.waivers ?? {}).length > 0
     const acceptanceReason = hasWaivers ? '已核对本次产物、验证证据和人工豁免' : '已核对本次产物、独立评审与验证证据'
@@ -101,12 +101,12 @@ export async function acceptDeliveryInBrowser(hub, run, choice = 'accept') {
       if (process.env.KODE_TEST_FOLLOWUP_SCREENSHOT_PATH) {
         const shot = await page.call('Page.captureScreenshot', { format: 'png' }); await writeFile(process.env.KODE_TEST_FOLLOWUP_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'))
       }
-      await click('发送'); await wait(`document.body.innerText.includes('发送结果尚未确认')`)
+      await click('发送'); await wait(`document.querySelector('.kode-message-delivery[data-state=unconfirmed]')`)
       assert.equal(followups.length, 1); assert.equal(followups[0].prior_run_id, run.id)
       await page.evaluate('globalThis.fixture = undefined'); await page.call('Page.reload'); await wait('globalThis.fixture')
-      await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='查询并重试原消息')`)
-      assert.equal(await page.evaluate(`document.querySelector('.kode-collab-composer').innerText.includes(${JSON.stringify(run.id)})`), true)
-      await click('查询并重试原消息'); await wait(`document.querySelector('.kode-collab-composer').innerText.includes('Hub 已接收')`)
+      await wait(`document.querySelector('.kode-message-delivery button[aria-label="重试发送"]:not(:disabled)')`)
+      assert.equal(await page.evaluate(`document.querySelector('.kode-message-delivery-kind').title.includes(${JSON.stringify(run.id)})`), true)
+      await page.evaluate(`document.querySelector('.kode-message-delivery button[aria-label="重试发送"]').click()`); await wait(`!document.querySelector('.kode-message-delivery')`)
       assert.equal(followups.length, 1, 'receipt recovery must not POST another request')
       const stored = await hub.client.call(`/api/v1/messaging/conversations/${followupReceipt.conversation_id}/requests/${followupReceipt.request_id}`)
       assert.deepEqual(stored.message, followupReceipt)

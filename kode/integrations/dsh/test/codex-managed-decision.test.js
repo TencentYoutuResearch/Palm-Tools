@@ -5,7 +5,9 @@ import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { decisionTexts } from '../src/decision-output.js'
 import { CodexManagedDecision } from '../src/codex-managed-decision.js'
+import { nativeWorkerClarificationInstructions, NATIVE_WORKER_CLARIFICATION_VERSION } from '../src/native-worker-clarification-prompt.js'
 
 const messages = [{ role: 'system', content: [{ type: 'text', text: 'Inspect the granted fixture source.' }] },
   { role: 'user', content: [{ type: 'text', text: 'Inspect fixture.txt' }] }]
@@ -18,6 +20,17 @@ async function fixture(t, mode, allowUserInput = true, options = {}) {
   const upstream = createServer((_request, response) => {
     forwarded++
     notifyForwarded()
+    if (mode === 'progress-text') {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write('data: '+JSON.stringify({type:'response.created',response:{id:'progress'}})+'\n\n')
+      let count = 0
+      const timer = setInterval(() => {
+        response.write('data: '+JSON.stringify({type:'response.reasoning_text.delta',response_id:'progress',delta:'working'})+'\n\n')
+        if (++count === 12) { clearInterval(timer); response.end() }
+      }, 40)
+      response.once('close', () => clearInterval(timer))
+      return
+    }
     if (options.providerFrames) {
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       response.write(options.providerFrames.map(value => `data: ${JSON.stringify(value)}\n\n`).join(''))
@@ -37,6 +50,7 @@ async function fixture(t, mode, allowUserInput = true, options = {}) {
   })
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const decision = new CodexManagedDecision({ cwd: directory, stateRoot: directory,
+    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
     endpoint: `http://127.0.0.1:${upstream.address().port}/responses`, model: 'fixture', effort: 'high', allowUserInput,
     profile: { type: 'codex', executable: process.execPath,
       args: [fileURLToPath(new URL('./fixture-managed-codex-decision.js', import.meta.url))],
@@ -435,4 +449,68 @@ for (const stalled of [false, true]) test(`native peer-close ${stalled ? 'stalle
   assert.deepEqual(outcome.texts, [])
   assert.equal(outcome.stop.process_group_empty, true)
   assert.deepEqual(f.counts(), { admitted: 1, forwarded: 1 })
+})
+
+
+test('semantic provider progress survives several idle windows with no CLI notifications', async t => {
+  const f = await fixture(t, 'progress-text', true, { timeoutMs: 200 })
+  await f.decision.prepare({ messages, tools })
+  const started = Date.now()
+  const result = await f.decision.execute()
+  assert.equal(result.failure, undefined)
+  assert.ok(Date.now() - started > 400)
+  assert.deepEqual(result.texts, ['Checked fixture'])
+  assert.equal(result.stop.process_group_empty, true)
+})
+
+test('a stalled provider is stopped and never releases Host calls', async t => {
+  const f = await fixture(t, 'hang', true, { timeoutMs: 200 })
+  await f.decision.prepare({ messages, tools })
+  const result = await f.decision.execute()
+  assert.equal(result.failure.code, 'managed_cli_idle_timeout')
+  assert.deepEqual(result.calls, [])
+  assert.equal(result.stop.process_group_empty, true)
+})
+
+test('large cumulative output survives process close and is consumed completely', async t => {
+  const f = await fixture(t, 'large-text')
+  await f.decision.prepare({ messages, tools })
+  const result = await f.decision.execute()
+  assert.equal(result.failure, undefined)
+  assert.deepEqual(result.texts, [])
+  assert.equal(result.output_artifact.bytes, 2 * 1024 * 1024)
+  let count = 0
+  for await (const text of decisionTexts(result)) { assert.equal(text, 'x'.repeat(512 * 1024)); count++ }
+  assert.equal(count, 4)
+  assert.equal(result.stop.process_group_empty, true)
+})
+
+for (const enabled of [true, false]) test(`native owner clarification capability is declared only when enabled (${enabled})`, async t => {
+  const f = await fixture(t, 'text', enabled)
+  await f.decision.prepare({ messages, tools })
+  const request = f.decision.rpc.request.bind(f.decision.rpc)
+  let turn
+  f.decision.rpc.request = (method, params, ...rest) => {
+    if (method === 'turn/start') turn = structuredClone(params)
+    return request(method, params, ...rest)
+  }
+  const result = await f.decision.execute()
+  assert.equal(result.failure, undefined)
+  const settings = turn.collaborationMode.settings
+  assert.equal(turn.collaborationMode.mode, enabled ? 'plan' : 'default')
+  assert.equal(settings.developer_instructions.includes(NATIVE_WORKER_CLARIFICATION_VERSION), enabled)
+  assert.equal(settings.developer_instructions.includes(nativeWorkerClarificationInstructions), enabled)
+  assert.match(settings.developer_instructions, /Do not replay completed calls/)
+  assert.deepEqual(f.counts(), { admitted: 1, forwarded: 1 })
+})
+
+test('native clarification guidance preserves contact and authority boundaries without invented answers', () => {
+  assert.equal(NATIVE_WORKER_CLARIFICATION_VERSION, 'kode.assignment.native-clarification.v2')
+  assert.match(nativeWorkerClarificationInstructions, /worker_user_contact:false still prohibits direct contact/)
+  assert.match(nativeWorkerClarificationInstructions, /durably records the question/)
+  assert.match(nativeWorkerClarificationInstructions, /prose-only blocked response is not a recorded clarification/)
+  assert.match(nativeWorkerClarificationInstructions, /If that schema requires options/)
+  assert.match(nativeWorkerClarificationInstructions, /rather than fabricating candidate business answers/)
+  assert.match(nativeWorkerClarificationInstructions, /not permission to add tools/)
+  assert.match(nativeWorkerClarificationInstructions, /Never request passwords, tokens or other secrets/)
 })

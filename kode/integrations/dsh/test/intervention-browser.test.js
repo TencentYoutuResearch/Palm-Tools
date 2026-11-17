@@ -44,7 +44,7 @@ test('Chrome and Home restart recover committed takeover and resume without anot
       try {
         const route = routes.get(new URL(req.url, 'http://localhost').pathname)
         if (route) return await route.handler(req, res)
-        if (await collabRenderPage(req, res)) return
+        if (await collabRenderPage(req, res, {hub})) return
         res.writeHead(404); res.end()
       } catch { if (!res.headersSent) res.writeHead(500); res.end() }
     })
@@ -59,9 +59,9 @@ test('Chrome and Home restart recover committed takeover and resume without anot
     const open = async () => {
       browser = await headlessBrowser(process.env.KODE_TEST_BROWSER_BIN, profile); page = await browser.page(url)
       await wait('globalThis.fixture')
-      await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]')?.click()`)
-      await wait(`document.querySelector('.kode-collab-contact-name')`)
-      await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
+      await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
+      await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`)
+      await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`)
       await click('工作过程'); await click('查看详情')
     }
     await open()

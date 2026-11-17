@@ -2,7 +2,8 @@
 import { codexProviderUsage, codexUsageBasis } from './codex-provider-usage.js'
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(value)
 export class CodexResponseObserver {
-  constructor() {
+  constructor({ onProgress = () => {} } = {}) {
+    this.onProgress = onProgress
     this.decoder = new TextDecoder('utf-8', { fatal: true })
     this.line = ''
     this.linePresent = false
@@ -57,6 +58,10 @@ export class CodexResponseObserver {
             else this.responseModel = model
           }
           if (['response.created', 'response.in_progress'].includes(value?.type)) this.identify(value.response?.id)
+          // Only semantic content extends the idle deadline; keepalives and status polls do not.
+          if (!this.invalidEvidence && this.responseId && !this.terminal
+              && /^response\.(output_text|reasoning_text|reasoning_summary_text|function_call_arguments)\.delta$/.test(value?.type)
+              && typeof value.delta === 'string' && value.delta.length) this.onProgress()
           if (['response.completed', 'response.failed', 'response.incomplete'].includes(value?.type)) {
             if (this.terminal) this.invalidEvidence = true
             this.identify(value.response?.id)

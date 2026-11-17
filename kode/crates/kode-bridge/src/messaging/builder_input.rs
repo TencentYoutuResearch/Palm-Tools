@@ -119,6 +119,7 @@ impl Store {
                 target: op.worker.clone(),
                 content,
                 idempotency_key: format!("builder-input-{}", uuid::Uuid::new_v4()),
+                direct_insert: false,
                 in_reply_to: None,
                 hop_count: 0,
                 created_at: at,

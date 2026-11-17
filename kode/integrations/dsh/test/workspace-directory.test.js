@@ -72,3 +72,16 @@ test('directory mutations route only allowlisted actions and never escalate arch
   assert.deepEqual(calls, [{ sessionId: 'remote' }, { workspaceId: 'project', title: 'Renamed' }])
   await assert.rejects(hostOperation(ctx, { operation: 'destroy', args: {} }), /未知目录操作/)
 })
+
+
+test('background managed execution remains addressable but never becomes a sidebar chat', async () => {
+  const ids=['ordinary','worker','coordinator','builder']
+  const bindings={worker:{managedAssignment:{id:'assignment'}},coordinator:{managedCoordinator:{team_id:'team'}},builder:{managedBuilder:{draft_id:'draft'}}}
+  const profile={id:'fixture',name:'Fixture',type:'dsh'}
+  const items=ids.map(sessionId=>({sessionId,blank:false,cwd:'/fixture',projections:{values:{title:sessionId}}}))
+  const services={workspaceRegistry:{list:()=>[{id:'workspace',sessionIds:ids}],archivedSessionIds:[]},sessionController:{list:async()=>({items})},kodeAgents:{profiles:{binding:id=>bindings[id]?{profile,...bindings[id]}:undefined}}}
+  const result=await hostDirectory({get:name=>services[name]})
+  assert.deepEqual(result.sessions.map(row=>row.id),['ordinary'])
+  assert.deepEqual(result.hiddenSessionIds,['worker','coordinator','builder'])
+  assert.deepEqual(result.workspaces[0].sessionIds,ids,'the projection does not delete or archive execution sessions')
+})

@@ -55,6 +55,7 @@ impl Store {
             }
             return Ok(prior);
         }
+        super::builder_drafts::optimization::check_accept(&tx, id, &input.team_id, input.team_revision)?;
         let body: String = tx.query_row(
             "SELECT body FROM builder_draft_revisions WHERE id=?1 ORDER BY revision DESC LIMIT 1",
             [id],

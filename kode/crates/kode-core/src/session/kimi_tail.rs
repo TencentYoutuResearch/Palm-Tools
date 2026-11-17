@@ -416,6 +416,7 @@ fn meta_event(
         model,
         title,
         session_uuid,
+        selection: None,
         tokens_reset: reset,
         tokens: tokens(current.stats.total_tokens()),
         input_tokens: tokens(current.stats.input_tokens),

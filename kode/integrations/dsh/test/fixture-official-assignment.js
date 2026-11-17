@@ -139,7 +139,7 @@ for (const pump of [false, 'lost-reply', 'uncertain', 'mandate', 'resource-off',
     const useInstalledEngine = Boolean(cliMode) && !providerFallbackMode && Boolean(process.env.KODE_TEST_MANAGED_CODEX_EXECUTABLE)
     const profile = cliMode ? { id: 'profile', name: 'CLI Worker', type: 'codex', executable: useInstalledEngine ? process.env.KODE_TEST_MANAGED_CODEX_EXECUTABLE : process.execPath,
       args: useInstalledEngine ? [] : [fileURLToPath(new URL('./fixture-managed-codex-decision.js', import.meta.url))],
-      env: { KODE_MANAGED_FIXTURE_MODE: questionMode ? 'question' : 'provider', ...(questionMode ? { KODE_MANAGED_FIXTURE_SMALL_USAGE: '1', ...((providerFallbackMode || process.env.KODE_TEST_QUESTION_NO_USAGE === '1') ? { KODE_MANAGED_FIXTURE_NO_USAGE: '1' } : {}), ...(providerFallbackDrainMode ? { KODE_MANAGED_FIXTURE_CLOSE_AFTER_TERMINAL: '1' } : {}) } : {}) }, defaultModel: 'model',
+      env: { ...(process.env.KODE_TEST_ROLE_PROMPT ? { KODE_MANAGED_FIXTURE_RPC_LOG: join(hub.root, 'managed-role-wire.jsonl') } : {}), KODE_MANAGED_FIXTURE_MODE: questionMode ? 'question' : 'provider', ...(questionMode ? { KODE_MANAGED_FIXTURE_SMALL_USAGE: '1', ...((providerFallbackMode || process.env.KODE_TEST_QUESTION_NO_USAGE === '1') ? { KODE_MANAGED_FIXTURE_NO_USAGE: '1' } : {}), ...(providerFallbackDrainMode ? { KODE_MANAGED_FIXTURE_CLOSE_AFTER_TERMINAL: '1' } : {}) } : {}) }, defaultModel: 'model',
       managedInference: { endpoint: `http://127.0.0.1:${nativeProvider.address().port}/responses` } }
       : { id: 'profile', name: 'Official', type: 'dsh' }
     const profiles = await new AgentProfiles(join(hub.root, 'profiles.json')).open([profile])
@@ -160,7 +160,7 @@ for (const pump of [false, 'lost-reply', 'uncertain', 'mandate', 'resource-off',
     }
     if (reworkMode) await hub.client.call(`${root}/price-versions`, { id: 'price', model: 'model', unit: 'credits', model_policy: 'requested_model', input_per_million: 1000000, cached_per_million: 1000000, output_per_million: 1000000 })
     const workflow = await hub.client.call(`${root}/workflows`, { id: 'flow', version: '1', inputs: ['request'],
-      stages: [{ id: 'inspect', role: 'coordinator', requires: ['request'], produces: ['artifact'], independent_from: [], execution: { task_tag: 'inspection', repository_binding: 'code', capabilities: modelToolMode || reworkMode ? ['read', 'workspace_write'] : ['read'], tools: reworkMode ? ['fixture_inspect', 'kode_capture_output', 'kode_write_source', 'kode_read_source', 'kode_publish_output'] : modelToolMode ? ['fixture_inspect', 'kode_capture_output', 'kode_write_source'] : ['fixture_inspect'], network: false } },
+      stages: [{ id: 'inspect', role: process.env.KODE_TEST_ROLE_PROMPT ? 'review' : 'coordinator', requires: ['request'], produces: ['artifact'], independent_from: [], execution: { task_tag: 'inspection', repository_binding: 'code', capabilities: modelToolMode || reworkMode ? ['read', 'workspace_write'] : ['read'], tools: reworkMode ? ['fixture_inspect', 'kode_capture_output', 'kode_write_source', 'kode_read_source', 'kode_publish_output'] : modelToolMode ? ['fixture_inspect', 'kode_capture_output', 'kode_write_source'] : ['fixture_inspect'], network: false } },
         { id: 'followup', ...(reworkMode ? { on_reject: { target: 'inspect', max_reworks: 1 } } : {}), role: 'coordinator', requires: ['inspect'], produces: ['later'], independent_from: independentMode ? ['inspect'] : [], execution: { task_tag: 'inspection', repository_binding: 'code', capabilities: ['read'], tools: reworkMode ? ['fixture_inspect', 'kode_review_output', 'kode_read_source', 'kode_publish_output'] : modelToolMode ? ['fixture_inspect', 'kode_review_output', 'kode_list_source', 'kode_read_source'] : ['fixture_inspect'], network: false } },
         ...(pipelineMode ? [{ id: 'verify', role: 'coordinator', requires: ['followup'], produces: ['checked'], independent_from: ['inspect', 'followup'], execution: { task_tag: 'inspection', repository_binding: 'code', capabilities: ['read'], tools: ['fixture_inspect', 'kode_verify_output', 'kode_publish_output'], network: false } }] : [])],
       completion_stages: [pipelineMode ? 'verify' : 'followup'], evidence_rules: { ...(pipelineMode ? { checked: { kind: 'verification', artifact_output: 'artifact', command_binding: 'check', environment_binding: 'local', required_scenarios: ['smoke'] } } : {}), artifact: { kind: 'artifact', repository_binding: 'code' }, later: pump === 'verification' ? { kind: 'verification', artifact_output: 'artifact', command_binding: 'check', environment_binding: 'local', required_scenarios: ['smoke'] } : independentMode ? { kind: 'review', artifact_output: 'artifact' } : { kind: 'artifact', repository_binding: 'code' } } })
@@ -190,6 +190,10 @@ for (const pump of [false, 'lost-reply', 'uncertain', 'mandate', 'resource-off',
       delivery_bindings: [{ id: 'local', workflow: versionRef(workflow), project: versionRef(project), delivery_policy: versionRef(delivery) }],
       grant_id: 'grant', budget_policy_id: 'budget-policy', scheduling_policy_id: 'schedule-policy',
       limits: { max_active_assignments: completeMode ? 1 : 2, max_active_runs: 8 }, proactive_mode: 'off' }
+    if (process.env.KODE_TEST_ROLE_PROMPT) {
+      spec.coordinator_prompt = 'FOREIGN_COORDINATOR_ROLE'
+      spec.workers = [{ id: 'review', role: 'review', responsibilities: ['Inspect'], allowed_target_ids: ['target'], required_capabilities: [], workspace_refs: [workspace], max_parallel: 1, role_prompt: 'OWNER_REVIEWED_FROZEN_WORKER_ROLE' }]
+    }
     if (pipelineMode) {
       spec.execution_targets.push({ ...spec.execution_targets[0], id: 'aaa-alternate' })
       spec.coordinator_targets.unshift('aaa-alternate')
@@ -197,6 +201,7 @@ for (const pump of [false, 'lost-reply', 'uncertain', 'mandate', 'resource-off',
     await hub.client.call(`${root}/teams`, { id: 'team', request_id: 'new', expected_revision: 0, spec })
     const grantCommand = { expected_revision: 0, policy: { id: 'grant', team_id: 'team', enabled: true, expires_at: Date.now() + 60000,
       targets: [{ host: hub.node, workspace: 'workspace', root: workspaceRoot }], capabilities: modelToolMode || reworkMode ? ['read', 'workspace_write'] : ['read'], tools: pipelineMode ? ['fixture_inspect', 'kode_verify_output', 'kode_publish_output', ...(modelToolMode || reworkMode ? ['kode_capture_output', 'kode_review_output', 'kode_list_source', 'kode_read_source', 'kode_write_source'] : [])] : ['fixture_inspect'], network: false, budget_ids: ['budget'] } }
+    if (process.env.KODE_TEST_ROLE_PROMPT) grantCommand.policy.capabilities.push('delegate')
     let grant = (await hub.client.call(`${root}/team-grants`, grantCommand)).grant
     const request = { id: 'before', request_id: 'before', team_id: 'team', team_revision: 1, binding_id: 'local', inputs: { request: mandateMode ? 'Inspect ' + 'context '.repeat(900) + 'FULL_INPUT_END' : 'Inspect' }, prior_run_id: null }
     const initial = await hub.client.call(runs, request)
@@ -208,7 +213,7 @@ for (const pump of [false, 'lost-reply', 'uncertain', 'mandate', 'resource-off',
     await hub.client.call(path, command)
     const preparePath = `${runs}/before/stages/inspect/assignments`
     const beforePrepare = await readRun()
-    const prepare = { request_id: 'prepare', expected_revision: beforePrepare.revision, target_id: 'target', worker_id: null }
+    const prepare = { request_id: 'prepare', expected_revision: beforePrepare.revision, target_id: 'target', worker_id: process.env.KODE_TEST_ROLE_PROMPT ? 'review' : null }
     await assert.rejects(hub.client.call(preparePath, prepare), /not recommended/)
     assert.equal((await readRun()).revision, beforePrepare.revision, 'rejected preparation does not mutate the run')
     assert.equal((await hub.client.call(`${root}/budgets/budget`)).budget.reserved, 0)
@@ -612,6 +617,17 @@ for (const pump of [false, 'lost-reply', 'uncertain', 'mandate', 'resource-off',
       assert.ok(JSON.stringify(inferenceMessages).includes('FULL_INPUT_END'), 'complete mandate bypasses ordinary peer preview truncation')
       const message = await hub.client.call(`${root}/messages/${messageId}`)
       const payload = JSON.parse(message.content)
+      if (process.env.KODE_TEST_ROLE_PROMPT) {
+        assert.equal(payload.role_prompt.team_revision, 1)
+        assert.deepEqual(payload.role_prompt.role, { kind: 'worker', worker_id: 'review' })
+        assert.equal(payload.role_prompt.text, 'OWNER_REVIEWED_FROZEN_WORKER_ROLE')
+        // Managed Codex separates system instructions from ordinary history. Read
+        // the actual thread/start wire rather than inventing a system message.
+        const system = cliMode ? (await readFile(join(hub.root, 'managed-role-wire.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse).map(row => [row.params.baseInstructions, row.params.developerInstructions].filter(Boolean).join('\n')).join('\n')
+          : JSON.stringify(inferenceMessages.filter(row => row.role === 'system'))
+        assert.match(system, /OWNER_REVIEWED_FROZEN_WORKER_ROLE/)
+        assert.doesNotMatch(system, /FOREIGN_COORDINATOR_ROLE/)
+      }
       const spoof = await hub.client.forSession(observer.owner_token).call(`${root}/messages`, { target: assignment.worker, content: message.content, idempotency_key: 'unbound-copy' })
       const spoofDeadline = Date.now() + 3000
       while ((await hub.client.call(`${root}/messages/${spoof.id}`)).status !== 'uncertain') {

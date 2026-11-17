@@ -14,6 +14,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+// Bound complete instruction resources without changing execution authority.
+const INSTRUCTION_MAX_BYTES: usize = 64 * 1024;
+pub(super) const STAGE_DEPENDENCIES_MAX_BYTES: usize = 96 * 1024;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -118,7 +122,7 @@ pub(super) fn normalize(artifact: &mut Artifact) -> Result<()> {
         || artifact.source.chars().any(char::is_control)
         || !valid_id(&artifact.source_version)
         || artifact.instructions.trim().is_empty()
-        || artifact.instructions.len() > 16384
+        || artifact.instructions.len() > INSTRUCTION_MAX_BYTES
         || artifact.instructions.contains('\0')
         || artifact.content_hash
             != format!("{:x}", Sha256::digest(artifact.instructions.as_bytes()))
@@ -236,7 +240,7 @@ pub(super) fn for_stage(binding: &Value, stage: &Stage, host: &str) -> Result<Ve
         scoped(&artifact, scope, Some(host))?;
         selected.push(row.clone());
     }
-    if serde_json::to_vec(&selected)?.len() > 32768 {
+    if serde_json::to_vec(&selected)?.len() > STAGE_DEPENDENCIES_MAX_BYTES {
         bail!("workflow dependency stage input exceeds bound")
     }
     Ok(selected)
@@ -343,5 +347,78 @@ mod tests {
                 .unwrap(),
             row
         );
+    }
+    fn sized_config(id: &str, instructions: String) -> Config {
+        let mut value = config();
+        value.id = id.into();
+        if let Spec::WorkflowDependency { artifact } = &mut value.spec {
+            artifact.content_hash = format!("{:x}", Sha256::digest(instructions.as_bytes()));
+            artifact.instructions = instructions;
+            normalize(artifact).unwrap();
+        }
+        value
+    }
+    fn sized_row(id: &str, bytes: usize) -> Value {
+        let value = sized_config(id, "x".repeat(bytes));
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(
+                super::super::project_configs::canonical(&value)
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
+        json!({"id":value.id,"version":value.version,"hash":hash,"config":value})
+    }
+    fn frozen_rows(rows: Vec<Value>) -> (Value, Stage) {
+        let mut value = pack();
+        value.stages[0].execution.as_mut().unwrap().dependencies = rows
+            .iter()
+            .map(|row| {
+                serde_json::from_value(
+                    json!({"id":row["id"],"version":row["version"],"hash":row["hash"]}),
+                )
+                .unwrap()
+            })
+            .collect();
+        (
+            json!({"workflow_dependencies":{"inspect":rows}}),
+            value.stages.remove(0),
+        )
+    }
+    #[test]
+    fn complete_instruction_limit_is_utf8_bytes_and_preserves_exact_content() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("ledger.sqlite"), "home").unwrap();
+        // Above the former 16 KiB limit, with a multibyte exact 64 KiB boundary.
+        let text = "界".repeat(INSTRUCTION_MAX_BYTES / 3) + "a";
+        assert_eq!(text.len(), INSTRUCTION_MAX_BYTES);
+        let mut value = sized_config("full-skill", text.clone());
+        let row = store.save_project_config(value.clone()).unwrap();
+        assert_eq!(row["config"]["spec"]["artifact"]["instructions"], text);
+        value.version = "2".into();
+        if let Spec::WorkflowDependency { artifact } = &mut value.spec {
+            artifact.instructions.push('x');
+            artifact.content_hash =
+                format!("{:x}", Sha256::digest(artifact.instructions.as_bytes()));
+        }
+        assert!(store.save_project_config(value).is_err());
+    }
+    #[test]
+    fn complete_dependency_rows_have_an_exact_96_kib_stage_bound() {
+        let base = vec![sized_row("one", 40000), sized_row("two", 40000)];
+        let extra = STAGE_DEPENDENCIES_MAX_BYTES - serde_json::to_vec(&base).unwrap().len();
+        let rows = vec![sized_row("one", 40000 + extra), sized_row("two", 40000)];
+        assert_eq!(
+            serde_json::to_vec(&rows).unwrap().len(),
+            STAGE_DEPENDENCIES_MAX_BYTES
+        );
+        let (binding, stage) = frozen_rows(rows);
+        assert_eq!(for_stage(&binding, &stage, "home").unwrap().len(), 2);
+        let (binding, stage) = frozen_rows(vec![
+            sized_row("one", 40001 + extra),
+            sized_row("two", 40000),
+        ]);
+        assert!(for_stage(&binding, &stage, "home").is_err());
     }
 }

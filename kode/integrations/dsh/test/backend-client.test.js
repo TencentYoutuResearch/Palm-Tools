@@ -26,3 +26,16 @@ test('binary backend assets retain authentication, content type and byte payload
   assert.equal(result.contentType, 'image/png'); assert.deepEqual([...result.body], [...bytes])
   await assert.rejects(client(new Response('<html></html>', { headers: { 'content-type': 'text/html' } })).asset(path), /image/)
 })
+
+test('request size rejection preserves HTTP status instead of masking it as invalid JSON', async () => {
+  const route = '/api/v1/messaging/workbench/documents/agents'
+  for (const response of [new Response('Failed to buffer the request body: length limit exceeded', {status:413}), Response.json({error:'too large'}, {status:413})]) {
+    await assert.rejects(client(response).call(route, {}), error => {
+      assert.equal(error.status, 413); assert.equal(error.path, route)
+      assert.equal(error.code, 'request_body_too_large')
+      assert.match(error.message, /size limit.*HTTP 413/)
+      assert.doesNotMatch(error.message, /invalid JSON/)
+      return true
+    })
+  }
+})

@@ -1,10 +1,14 @@
 import { symbols } from '@deepseek-ai/cordis'
+import { isDeepStrictEqual } from 'node:util'
+import { createScopedCoordinatorSessionAdapter } from './scoped-coordinator-session-adapter.js'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { CoordinatorCloseRecovery } from './coordinator-close-recovery.js'
 import { closeCoordinator } from './coordinator-close.js'
 import { planBuilderStart } from './builder-start-plan.js'
 import { installAssignmentTools, assignmentToolNames } from './assignment-tools.js'
 import { mountAssignmentPrompt } from './assignment-prompt.js'
+import { mountAssignmentRolePrompt, assertAssignmentRolePromptDurable } from './assignment-role-prompt.js'
+import { assertCoordinatorRolePromptDurable } from './coordinator-role-context.js'
 /** Own controlled official Agent handles without replacing the ordinary registry factory. */
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { OfficialDispatch } from './official-dispatch.js'
@@ -35,7 +39,7 @@ export class OfficialLoopHost {
     this.coordinatorInbox = new CoordinatorInbox(this)
     this.coordinatorBootstrap = new CoordinatorBootstrap(this)
   }
-  mount() {
+  mount(scopedSessionId) {
     return this.mounting ??= (async () => {
       this.stop.signal.throwIfAborted()
       const services = this.execution.loopServices(), registry = this.ctx.get('agents')
@@ -54,6 +58,10 @@ export class OfficialLoopHost {
         if (typeof target.createAgent === 'function' && constructor.inject?.includes('systemPrompt')) Loop = constructor
       }
       let scope = this.ctx.isolate('llm').isolate('tools').isolate('agents').isolate('agentLoop')
+      // Internal Host authority only. Current production has no ready v2
+      // resolver; existing factories and all unsupported gates remain unchanged.
+      const scopedReady = this.execution.scopedCoordinatorAdmission?.(scopedSessionId)?.runtime_ready === true
+      if (scopedReady) scope = scope.isolate('sessions')
       // Isolation labels alone still share the parent's fiber.store. Give the
       // controlled service aliases their own owner so ordinary ctx.llm/tools
       // cannot resolve back into this loop and recurse through admission.
@@ -61,6 +69,14 @@ export class OfficialLoopHost {
       await this.servicesFiber
       this.stop.signal.throwIfAborted()
       scope = this.servicesFiber.ctx
+      if (scopedReady) {
+        this.scopedCoordinatorSessions = createScopedCoordinatorSessionAdapter(this.ctx.get('sessions'), id => {
+          const row = this.execution.scopedCoordinatorAdmission?.(id)
+          if (row?.mode === 'legacy') return {mode:'legacy'}
+          return row?.runtime_ready === true ? {mode:row.mode,authority:row.authority} : undefined
+        })
+        scope.provide('sessions', this.scopedCoordinatorSessions.sessions)
+      }
       // Cordis traces service property descriptors, so an own method (rather
       // than a Proxy getter) is required. Keep the original prompt layers and
       // caller context so role sections remain Agent-scoped.
@@ -80,7 +96,10 @@ export class OfficialLoopHost {
           if (!admission || admission.run) throw new Error('Official publication has no pending admission')
           signal?.throwIfAborted()
           admission.validate?.(agent)
+          const coordinator = this.execution.profiles.binding(agent.id)?.managedCoordinator
+          if (coordinator && coordinator.context_scope === undefined) await assertCoordinatorRolePromptDurable(agent, this.execution)
           admission.run = await this.execution.open(agent, { tools: admission.tools, signal: this.stop.signal, freshContext: admission.freshContext })
+          if (this.execution.profiles.binding(agent.id)?.managedAssignment) await assertAssignmentRolePromptDurable(agent, this.execution)
           signal?.throwIfAborted()
           admission.validate?.(agent)
           return registry.announce(agent, source, signal)
@@ -99,9 +118,11 @@ export class OfficialLoopHost {
       this.fiber = await scope.plugin(Loop, { agents: [], maxParallelToolCalls: 1 })
       this.stop.signal.throwIfAborted()
       if (!this.factory) throw new Error('Controlled official factory unavailable')
-      this.coordinatorInbox.start()
-      this.coordinatorTransfers.start()
-      this.coordinatorCloseRecovery.start()
+      if (!this.scopedCoordinatorSessions) {
+        this.coordinatorInbox.start()
+        this.coordinatorTransfers.start()
+        this.coordinatorCloseRecovery.start()
+      }
     })()
   }
   create(options, { tools = [] } = {}) { return this.start('createAgent', options, tools) }
@@ -128,10 +149,16 @@ export class OfficialLoopHost {
   }
   async createOwned(method, id, options, tools) {
     let handle
+    const scopedAdmission = structuredClone(this.execution.scopedCoordinatorAdmission?.(id))
+    const scopedRequested = scopedAdmission?.runtime_ready === true || this.execution.profiles.binding(id)?.managedCoordinator?.context_scope !== undefined
+    if (scopedRequested && scopedAdmission?.runtime_ready !== true) throw new Error('Scoped Coordinator Host admission is not runtime ready')
+    if (scopedRequested && !isDeepStrictEqual(this.execution.profiles.binding(id)?.managedCoordinator?.context_scope,scopedAdmission.authority?.context_scope)) throw new Error('Scoped Coordinator Host binding differs from trusted authority')
     const admission = { tools, run: undefined, validate: options.validateAdmission, freshContext: method === 'createAgent' && options.seed === undefined && options.parentAgent === undefined && options.inheritedEventCount === undefined }
     const signal = options.signal ? AbortSignal.any([options.signal, this.stop.signal]) : this.stop.signal
     try {
-      await this.mount(); signal.throwIfAborted()
+      await this.mount(id); signal.throwIfAborted()
+      if (scopedRequested && !this.scopedCoordinatorSessions) throw new Error('Existing legacy Host cannot acquire scoped session ownership; a separate controlled Host is required')
+      if (!scopedRequested && this.scopedCoordinatorSessions) throw new Error('Scoped Coordinator Host cannot acquire legacy session ownership; use the original Host')
       this.admissions.set(id, admission)
       const setup = async (agentCtx, agent) => {
         const actualAgent = agent[symbols.original] ?? agent
@@ -142,11 +169,22 @@ export class OfficialLoopHost {
         // an explicit scoped view without changing root services or its scope key.
         const localTools = agentCtx.get('tools').forScope(agentCtx)
         agentCtx = agentCtx.extend({ tools: localTools })
+        if (scopedRequested) {
+          const latest = this.execution.scopedCoordinatorAdmission?.(id)
+          if (latest?.runtime_ready !== true || !isDeepStrictEqual(latest.authority,scopedAdmission.authority)) throw new Error('Scoped Coordinator Host authority changed before publication')
+          agentCtx = agentCtx.extend({sessions:agentCtx.reflect.trace(this.scopedCoordinatorSessions.sessions)})
+        }
         actualAgent.ctx = agentCtx
         const commit = await options.setup?.(agentCtx, agent)
         if (tools.some(name => assignmentToolNames.includes(name))) {
           agentCtx.effect(() => installAssignmentTools(agentCtx, agent, this.execution, tools))
-          if (this.execution.profiles.binding(agent.id)?.managedAssignment) agentCtx.effect(() => mountAssignmentPrompt(agentCtx))
+        }
+        // Role and mandate instructions belong to the Assignment, including
+        // read-only stages that advertise no built-in artifact tool.
+        if (this.execution.profiles.binding(agent.id)?.managedAssignment) {
+          agentCtx.effect(() => mountAssignmentPrompt(agentCtx))
+          const disposeRolePrompt = await mountAssignmentRolePrompt(agentCtx, agent, this.execution, { prepublication: true })
+          agentCtx.effect(() => disposeRolePrompt)
         }
         const view = agentCtx.get('tools'), scoped = view.forScope(agentCtx)
         // A fixed allow mask also hides global tools registered after this Agent starts.

@@ -19,6 +19,7 @@ export class BackendClient {
     })
     const text = await response.text()
     if (response.status === 404) throw Object.assign(new Error(`Kode backend is missing ${path} (HTTP 404); update the shared Kode backend and reconnect`), { status: 404 })
+    if (response.status === 413) throw Object.assign(new Error(`Kode backend rejected a request that exceeds its size limit (HTTP 413, ${path}); update the shared Kode backend and retry`), { status: 413, path, code: 'request_body_too_large' })
     let result
     try { result = text ? JSON.parse(text) : undefined } catch {
       throw new Error(`Kode backend returned invalid JSON (HTTP ${response.status}, ${path})`)

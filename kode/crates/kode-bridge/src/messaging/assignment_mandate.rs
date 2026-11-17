@@ -116,6 +116,20 @@ impl Store {
             "stage":stage,"inputs":inputs,"input_manifest":assignment["inputs"],"execution_workspace":assignment["execution_workspace"]["receipt"],"repository":repository,"source_repository":source_repository,
             "evidence_rules":pack["evidence_rules"],"grant_scope":grant_scope,"authority_scope":authority_scope,"funding":assignment["candidate"]["funding"],
             "completion_authority":"home_hub","worker_user_contact":false,"valid_until":at+86400000u64});
+        // Freeze the selected role from the WorkRun's already-frozen Team, not
+        // the latest editable Team and never from a model or executor profile.
+        let team = &run["context"]["team"];
+        let team_id = team["id"].as_str().ok_or_else(|| anyhow::anyhow!("role prompt Team missing"))?;
+        let team_revision = team["revision"].as_u64().ok_or_else(|| anyhow::anyhow!("role prompt Team revision missing"))?;
+        if team["home_hub"] != self.node_id || team["id"] != assignment["team_id"] || team["revision"] != run["team_revision"] {
+            bail!("role prompt Team scope mismatch")
+        }
+        let spec: super::teams::Spec = serde_json::from_value(team["spec"].clone())?;
+        let selected_role = &assignment["candidate"]["worker_id"];
+        if !selected_role.is_null() && !selected_role.is_string() { bail!("role prompt selected Worker invalid") }
+        if let Some(prompt) = spec.role_prompt_snapshot(&self.node_id, team_id, team_revision, selected_role.as_str())? {
+            mandate["role_prompt"] = prompt;
+        }
         let typed_stage = serde_json::from_value(stage.clone())?;
         let dependencies = super::workflow_dependencies::for_stage(&run["context"]["binding"], &typed_stage, &worker.node_id)?;
         if !dependencies.is_empty() { mandate["dependencies"] = json!(dependencies); }
@@ -138,6 +152,7 @@ impl Store {
                 target: worker,
                 content,
                 idempotency_key: format!("mandate-{id}"),
+                direct_insert: false,
                 in_reply_to: None,
                 hop_count: 0,
                 created_at: at,

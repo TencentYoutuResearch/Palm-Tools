@@ -109,3 +109,33 @@ test('failed draft writes stay local and block flush until storage succeeds', as
   await drafts.retry(team)
   assert.equal(storage.values.get(conversationViewKey(team)).value.draft, 'keep this')
 })
+
+test('scrolling after failed accepted-send cleanup stays local until explicit retry', async () => {
+  const storage = memory(), original = storage.update, { view, drafts } = editor(storage)
+  await drafts.open(team)
+  view.saveConversation(team, { draft: 'accepted once' })
+  const { draftToken } = await drafts.flush(team)
+  let attempts = 0
+  storage.update = async () => { attempts++; throw Error('cleanup storage full') }
+  await assert.rejects(drafts.acknowledge(team, {
+    home_hub: team.home_hub, team_id: team.id, conversation_id: team.conversation_id,
+    state: 'accepted', draft_token: draftToken,
+  }), /cleanup storage full/)
+  await new Promise(resolve => setImmediate(resolve))
+  const clearedToken = drafts.getSnapshot()[conversationViewKey(team)].draftToken
+  view.saveConversation(team, { scrollTop: 7 })
+  view.saveConversation(team, { scrollTop: 11 })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(attempts, 1)
+  assert.equal(view.conversation(team).draft, '')
+  assert.equal(view.conversation(team).scrollTop, 11)
+  assert.equal(drafts.getSnapshot()[conversationViewKey(team)].draftToken, clearedToken)
+  assert.equal(drafts.getSnapshot()[conversationViewKey(team)].error, 'cleanup storage full')
+  assert.equal(storage.values.get(conversationViewKey(team)).value.draft, 'accepted once')
+  storage.update = original
+  await drafts.retry(team)
+  assert.equal(storage.values.get(conversationViewKey(team)).value.draft, '')
+  assert.equal(storage.values.get(conversationViewKey(team)).value.scrollTop, 11)
+  assert.equal(drafts.getSnapshot()[conversationViewKey(team)].error, '')
+  drafts.close()
+})

@@ -16,7 +16,7 @@ function headersForForwarding(headers) {
 }
 
 export class CodexModelGate {
-  constructor({ endpoint, deferredEndpoint = false, model, effort, tools, admit, signal, allowUserInput = true }) {
+  constructor({ endpoint, deferredEndpoint = false, model, effort, tools, admit, signal, allowUserInput = true, onProgress = () => {} }) {
     let target
     try { target = endpoint == null && deferredEndpoint ? null : new URL(endpoint) } catch { throw new Error('Managed CLI inference endpoint rejected') }
     if (target && ((target.protocol !== 'https:' && !(target.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(target.hostname)))
@@ -24,6 +24,7 @@ export class CodexModelGate {
     if (typeof model !== 'string' || !model || !Array.isArray(tools)
         || tools.some(name => typeof name !== 'string' || !name) || typeof admit !== 'function'
         || (effort != null && (typeof effort !== 'string' || !effort))) throw new Error('Managed CLI inference contract required')
+    this.onProgress = onProgress
     this.endpoint = target
     this.model = model
     this.effort = effort
@@ -161,7 +162,7 @@ export class CodexModelGate {
       response.writeHead(upstream.status, outputHeaders)
       if (upstream.body) {
         if (upstream.headers.get('content-type')?.split(';')[0].trim() === 'text/event-stream') {
-          observer = new CodexResponseObserver()
+          observer = new CodexResponseObserver({ onProgress: this.onProgress })
         }
         const drained = await drainCodexResponse(upstream.body, response, { observer,
           signal: this.signal, successful: upstreamStatus === 200 })

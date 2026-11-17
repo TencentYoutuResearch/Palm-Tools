@@ -163,3 +163,37 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     assert.equal(readOnlyConfiguration.modelError,undefined)
   } finally { await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }) }
 })
+
+test('existing owner Agent API stores scoped Team role preferences locally with CAS and no execution', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-team-role-api-'))
+  const profiles = await new AgentProfiles(join(root, 'agents.json')).open([{ id: 'codex', name: 'Codex', type: 'codex' }])
+  const routes = new Map()
+  const ctx = { webServer: { register: route => { routes.set(route.path, route.handler); return () => {} } },
+    connection: { admit: req => ({ peer: { principal: { kind: req.headers.role ?? 'guest' } } }) }, agents: { get() {} },
+    agentDefaultModel: { currentSelection: () => ({ provider: 'kode-agent-codex', model: 'model' }) } }
+  const service = { profiles, hasRuntime: () => true, adapter: { listModels: async () => [{ id: 'model' }] }, refresh() { assert.fail('preferences do not reconfigure execution') } }
+  registerAgentApi(ctx, service)
+  const server = http.createServer((req, res) => { void routes.get('/api/kode/agents')(req, res) })
+  server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  const endpoint = `http://127.0.0.1:${server.address().port}/api/kode/agents`
+  const post = (body, role = 'owner') => fetch(endpoint, { method: 'POST', headers: { role, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const get = async team => (await fetch(`${endpoint}?configuration=1&team_id=${team}`, { headers: { role: 'owner' } })).json()
+  try {
+    const input = { action: 'set-team-roles', teamId: 'team-one', expectedRevision: 0, assignments: { frontend: { profileId: 'codex', model: 'model', reasoningEffort: 'high' } } }
+    assert.equal((await post(input, 'guest')).status, 403)
+    assert.deepEqual((await get('team-one')).teamRolePreferences, { teamId: 'team-one', assignments: {}, preferenceRevision: 0, scope: 'local_host', eligibleForExecution: false })
+    const saved = await (await post(input)).json()
+    assert.equal(saved.preferenceRevision, 1); assert.equal(saved.scope, 'local_host'); assert.equal(saved.eligibleForExecution, false)
+    assert.deepEqual(saved.assignments, input.assignments)
+    assert.equal((await post(input)).status, 409, 'stale writes cannot overwrite another settings page')
+    assert.equal((await post({ ...input, expectedRevision: 1 })).status, 200)
+    assert.equal(profiles.localPreferences.state.revision, 1, 'identical save is idempotent')
+    assert.deepEqual((await get('team-two')).teamRolePreferences.assignments, {}, 'one Team lookup does not expose another Team mapping')
+    assert.equal((await post({ ...input, expectedRevision: 1, grant: 'all' })).status, 400)
+    assert.equal((await post({ ...input, expectedRevision: 1, assignments: { frontend: { profileId: 'codex', model: 'model', permissions: ['write'] } } })).status, 400)
+    assert.equal((await post({ ...input, expectedRevision: 1, assignments: { frontend: { profileId: 'missing', model: 'model' } } })).status, 400)
+    assert.equal((await fetch(`${endpoint}?team_id=../other`, { headers: { role: 'owner' } })).status, 400)
+    assert.deepEqual(Object.keys(profiles.bindings), [])
+    assert.deepEqual((await new AgentProfiles(profiles.path).open()).teamRolesFor('team-one'), input.assignments)
+  } finally { await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }) }
+})

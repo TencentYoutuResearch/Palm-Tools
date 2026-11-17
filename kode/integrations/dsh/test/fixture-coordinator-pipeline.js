@@ -62,6 +62,7 @@ import { deliveryInputId } from '../src/delivery-tracker.js'
 import { COORDINATOR_PROMPT_VERSION } from '../src/coordinator-context.js'
 import { ASSIGNMENT_PROMPT_VERSION } from '../src/assignment-prompt.js'
 import { readAssignmentOutputs } from '../src/assignment-outputs.js'
+import { createLiveEvidenceRecorder, liveFailureDetails } from './support/live-evidence.js'
 import { liveTeamPipeline } from './support/live-team-pipeline.js'
 
 // Positive authority covers local cases and the longer cross-Hub case plus claim time.
@@ -88,13 +89,14 @@ test('Coordinator requests automatically execute implementation, independent rev
  let dependencyArtifact,dependencyNegativesChecked=false
  const dependencyProofs=[]
  const hub=await isolatedHub('official-coordinator'),ctx=new Context()
+ let liveEvidence,fixtureFailure
  let execution,host,runService,startServer,ownerHttp,imBrowser,nativeProvider,nativeDecide,remoteHub,remoteRuntime,remoteRoot,profiles
  const liveStagesByAssignment=new Map()
  try{
   await ctx.plugin(SessionStore);await ctx.plugin(AgentRegistry);await ctx.plugin(Projections)
   await ctx.plugin(SystemPrompt,{includeHarnessIdentity:false,includeRuntimeContext:false})
   await ctx.plugin(Tools);await ctx.plugin(LlmRuntime)
-  const runtimeRoot=await realpath(hub.root),root=join(runtimeRoot,'project'),call=(p,b)=>hub.client.call(`/api/v1/messaging/${p}`,b),at=Date.now()
+  const runtimeRoot=await realpath(hub.root),root=join(runtimeRoot,'project'),call=(p,b,signal)=>hub.client.call(`/api/v1/messaging/${p}`,b,signal),at=Date.now()
   await mkdir(root)
   const git=args=>promisify(execFile)('/usr/bin/git',['-C',root,'-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false',...args],{env:{...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_AUTHOR_NAME:'Fixture',GIT_AUTHOR_EMAIL:'fixture@example.com',GIT_COMMITTER_NAME:'Fixture',GIT_COMMITTER_EMAIL:'fixture@example.com'}})
   await git(['init','-q']);await writeFile(join(root,'README.md'),'Fixture project');await git(['add','.']);await git(['commit','-qm','fixture baseline'])
@@ -153,8 +155,8 @@ test('Coordinator requests automatically execute implementation, independent rev
   let builderCalls=0,builderProposal=null,builderWorkflow,builderHandle,builderAccounting
   let calls=0,currentReply,currentStart,currentRunId;const errors=[]
   ctx.on('agent/error',e=>{
-   errors.push(e.error.message)
-   if((liveWorker||liveCoordinatorScenario)&&e.error.managedInferenceFailure)t.diagnostic(JSON.stringify({managed_inference_failure:e.error.managedInferenceFailure}))
+   errors.push((liveWorker||liveCoordinatorScenario)?{name:e.error.name,code:typeof e.error.code==='number'?e.error.code:null}:e.error.message)
+   if((liveWorker||liveCoordinatorScenario)&&e.error.managedInferenceFailure)t.diagnostic(JSON.stringify({managed_inference_failure:liveFailureDetails(e.error.managedInferenceFailure)}))
   })
   if(humanScenario&&followupScenario)ctx.on('tools/result',(request,result)=>{
    if(!result.isError)return
@@ -732,7 +734,8 @@ test('Coordinator requests automatically execute implementation, independent rev
   runService=await new WorkRunService(controller,{intervalMs:100,onState:s=>states.push(s)}).open();if(blockedScenario){if(!interventionScenario)runService.coordinatorUpdates.start()}else if(!transferScenario)runService.start()
   if(process.env.KODE_TEST_COORDINATOR_UPDATE_RECOVERY==='1')await runService.coordinatorUpdates.close()
   if(liveCoordinatorScenario){
-   await liveTeamPipeline({t,hub,ctx,profiles,execution,host,runService,owned,team,root,model:fixtureModel,call,waitFor,errors})
+   liveEvidence=createLiveEvidenceRecorder({directory:process.env.KODE_TEST_LIVE_EVIDENCE_DIR,team,profiles,ctx,call,diagnostic:value=>t.diagnostic(value)})
+   await liveTeamPipeline({t,hub,ctx,profiles,execution,host,runService,owned,team,root,model:fixtureModel,call,waitFor,errors,evidence:liveEvidence})
    return
   }
 
@@ -827,7 +830,7 @@ test('Coordinator requests automatically execute implementation, independent rev
     const authority={request_id:'invalid-answer',question_request_id:question.request.request_id,source_message_id:currentReply.source_message_id,conversation_id:team.conversation_id,operation_id:op.id,control_revision:1,attempt:1,epoch:1}
     await assert.rejects(call(answerPath,authority),/new human response/)
     await assert.rejects(peerClient.call(`/api/v1/messaging/${answerPath}`,authority),/403/)
-    const human=await call(`conversations/${team.conversation_id}/messages`,{request_id:'human-answer',content:'Use implemented.'})
+    const human=await call(`conversations/${team.conversation_id}/messages`,{request_id:'human-answer',content:'Use implemented.',clarification_target:{run_id:run.id,assignment_id:question.assignment_id,question_request_id:question.request.request_id}})
     await waitFor(async()=>(await call(`conversations/${team.conversation_id}/coordinator-replies/after-answer-result`)).message!==null).catch(async error=>{throw Error(JSON.stringify({calls,errors,states:states.slice(-8),answerWrites,lostAnswer,...(remoteAnswer?{run:await call(`work-runs/${run.id}`),remote_states:remoteRuntime.states.slice(-12),requests:[...remoteRuntime.requests.values()],recent_requests:remoteRuntime.completed,workers:Object.entries(remoteRuntime.profiles.bindings).filter(([,binding])=>binding.managedAssignment).map(([id,binding])=>({id,assignment:binding.managedAssignment.id,lifecycle:binding.remoteLifecycle,status:remoteRuntime.ctx.agents.get(id)?.status,steps:workerSteps.get(id)}))}:{})}),{cause:error})})
     await owned.agent.whenIdle()
     const final=await call(`work-runs/${run.id}`)
@@ -836,6 +839,7 @@ test('Coordinator requests automatically execute implementation, independent rev
     assert.equal(final.pending_clarification,undefined)
     const answer=(await call(`${answerPath}/${question.request.request_id}`)).answer
     assert.equal(answer.source_message_id,human.id)
+    await assert.rejects(call(runs[0].startPath,{...runs[0].start,request_id:'answer-cannot-start-workflow',source_message_id:human.id}),/clarification answer input cannot start a workflow/)
     if(remoteAnswer){assert.equal(answer.worker.node_id,remoteHub.node);assert.equal(answer.home_hub,hub.node);assert.equal(question.home_hub,hub.node)}
     assert.equal(answerWrites,1);assert.equal(lostAnswer,true)
     if(nativeAnswer){
@@ -1258,17 +1262,18 @@ test('Coordinator requests automatically execute implementation, independent rev
    assert.deepEqual((await call(`${startPath}/requests/${start.request_id}`)).run,run)
    await assert.rejects(call(startPath,{...start,request_id:'after-stop'}),/active local lease|authority unavailable|control changed/)
   }
- }finally{
-  if(liveWorker&&profiles){
+ }catch(error){fixtureFailure=error;throw error}finally{
+  await liveEvidence?.capture('before_cleanup',{error:fixtureFailure})
+  if((liveWorker||liveCoordinatorScenario)&&profiles){
    for(const [session,binding]of Object.entries(profiles.bindings)){
-    if(!binding.managedAssignment||binding.profile.id!=='native-worker')continue
+    if(!binding.managedAssignment&&!binding.managedCoordinator)continue
     let reader
     try{
      reader=await ctx.sessionPersistence.open(session,'read')
      const events=(await reader.read(0,4096)).events
      const records=events.map(pluginRecordOf).filter(Boolean)
      const failures=records.filter(row=>row.type==='plugin:kode/managed-cli-decision'&&row.data.failure_code)
-       .map(row=>({code:row.data.failure_code,details:row.data.failure_details??null,stopped:row.data.stop?.process_group_empty===true}))
+       .map(row=>({code:row.data.failure_code,details:liveFailureDetails(row.data.failure_details),stopped:row.data.stop?.process_group_empty===true}))
      if(failures.length)t.diagnostic(JSON.stringify({managed_inference_failures:failures}))
      const toolFailures=Object.values(binding.officialTools??{}).filter(row=>row.status!=='returned')
        .map(row=>({tool:row.tool,status:row.status,reason:row.reason??null,home_reconciled:row.home_reconciled===true}))
@@ -1281,13 +1286,13 @@ test('Coordinator requests automatically execute implementation, independent rev
        declared_output:args?.output==='reviewed',findings_array:Array.isArray(args?.findings)}}))
      }
      const completions=records.filter(row=>row.type==='plugin:kode/managed-cli-decision')
-     t.diagnostic(JSON.stringify({managed_decision_summary:{stage:liveStagesByAssignment.get(binding.managedAssignment.id)??null,
+     t.diagnostic(JSON.stringify({managed_decision_summary:{stage:binding.managedCoordinator?'coordinator':liveStagesByAssignment.get(binding.managedAssignment?.id)??null,
        decisions:completions.length,terminal_peer_closes:completions.filter(row=>row.data.transport_completion==='response_completed_peer_closed').length}}))
     }catch{t.diagnostic('Live decision failure metadata unavailable')}
     finally{await reader?.close()}
    }
   }
-  try{await remoteRuntime?.close();await remoteHub?.close()}finally{await imBrowser?.close();await ownerHttp?.close();if(startServer){startServer.closeAllConnections();await new Promise(resolve=>startServer.close(resolve))}await runService?.close();await host?.close();await execution?.close();await nativeProvider?.close();await ctx.fiber.dispose();for(const name of await readdir(join(hub.root,'artifact-workspaces')).catch(e=>{if(e.code==='ENOENT')return [];throw e})){await chmod(join(hub.root,'artifact-workspaces',name,'source'),0o700).catch(e=>{if(e.code!=='ENOENT')throw e})}await hub.close()}}
+  try{await remoteRuntime?.close();await remoteHub?.close()}finally{await imBrowser?.close();await ownerHttp?.close();if(startServer){startServer.closeAllConnections();await new Promise(resolve=>startServer.close(resolve))}await runService?.close();await host?.close();await liveEvidence?.capture('after_host_stop',{error:fixtureFailure});await execution?.close();await nativeProvider?.close();await ctx.fiber.dispose();for(const name of await readdir(join(hub.root,'artifact-workspaces')).catch(e=>{if(e.code==='ENOENT')return [];throw e})){await chmod(join(hub.root,'artifact-workspaces',name,'source'),0o700).catch(e=>{if(e.code!=='ENOENT')throw e})}await hub.close()}}
 })
 
 // Diagnostic timer is unreferenced: it reports only if another resource prevents exit.

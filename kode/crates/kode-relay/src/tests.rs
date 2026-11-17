@@ -355,11 +355,6 @@ async fn every_device_route_hides_foreign_devices() {
         (Method::GET, "/api/v1/backends", None),
         (Method::GET, "/api/v1/backends/claude/models", None),
         (Method::GET, "/api/v1/fs/list", None),
-        (
-            Method::POST,
-            "/api/v1/attachments",
-            Some(json!({"upload_id":"upload-1","name":"a.png","size":1,"offset":0,"data":"YQ=="})),
-        ),
     ];
     for (method, path, body) in routes {
         let mut request = h
@@ -472,56 +467,6 @@ async fn commands_settle_through_history_and_deduplicate() {
         .find(|e| e["type"] == "command.status")
         .expect("receipt");
     assert_eq!(receipt["payload"]["status"], "executed");
-}
-
-#[tokio::test]
-async fn attachment_chunks_reach_the_desktop_and_oversize_is_rejected() {
-    let h = harness().await;
-    let mut agent = h.agent(ALICE, "desk").await;
-    let mut phone = h.phone(ALICE_PHONE, "desk").await;
-    agent.expect_gate(true, json!([session(4, "files")])).await;
-    let _ = next_json(&mut phone).await;
-
-    let (status, _) = h
-        .call(
-            reqwest::Method::POST,
-            "/api/v1/attachments",
-            ALICE_PHONE,
-            "desk",
-            Some(json!({"upload_id":"upload-1","name":"big.mov",
-                "size": kode_relay_protocol::MAX_ATTACHMENT_BYTES + 1,"offset":0,"data":"YQ=="})),
-        )
-        .await;
-    assert_eq!(status, 400, "the relay bounds the declared size");
-
-    let upload = tokio::spawn({
-        let base = h.base.clone();
-        async move {
-            let response = reqwest::Client::new()
-                .post(format!("{base}/api/v1/attachments"))
-                .bearer_auth(ALICE_PHONE)
-                .header(DEVICE_HEADER, "desk")
-                .json(&json!({"upload_id":"upload-1","name":"a.png","size":1,"offset":0,"data":"YQ=="}))
-                .send()
-                .await
-                .unwrap();
-            (
-                response.status().as_u16(),
-                response.json::<Value>().await.unwrap(),
-            )
-        }
-    });
-    let request = agent.frame().await;
-    assert_eq!(request["type"], "setup.request");
-    assert_eq!(request["kind"], kode_relay_protocol::SETUP_KIND_ATTACHMENT);
-    assert_eq!(request["payload"]["data"], "YQ==");
-    agent
-        .send(json!({"type": "setup.result", "request_id": request["request_id"], "boot_id": "boot-1",
-            "status": 200, "body": {"complete": true, "path": "/tmp/kode-attachments/upload-1/a.png"}}))
-        .await;
-    let (status, body) = upload.await.unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(body["path"], "/tmp/kode-attachments/upload-1/a.png");
 }
 
 #[tokio::test]

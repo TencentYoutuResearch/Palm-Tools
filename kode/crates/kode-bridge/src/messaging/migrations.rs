@@ -2,7 +2,7 @@
 use anyhow::{bail, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-pub(super) const VERSION: u32 = 29;
+pub(super) const VERSION: u32 = 31;
 const BASE_SCHEMA: &str = r#"          CREATE TABLE IF NOT EXISTS identity (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, info TEXT NOT NULL, token TEXT NOT NULL, seen INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, source_node TEXT NOT NULL, source_session TEXT NOT NULL, target_node TEXT NOT NULL, target_session TEXT NOT NULL, idem TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(source_node,source_session,idem));
@@ -229,6 +229,12 @@ pub(super) fn migrate(db: &Connection, node: &str) -> Result<()> {
         let held: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM assignment_exclusive_holds WHERE state='held')",[],|row|row.get(0))?;
         if held { bail!("active exclusive resources require confirmed release before global-scope upgrade") }
         tx.execute_batch(super::assignment_exclusive_resources::GLOBAL_INDEX)?;
+    }
+    if version < 30 {
+        tx.execute_batch(super::collaboration::SCHEMA)?;
+    }
+    if version < 31 {
+        tx.execute_batch(super::collaboration::discussion_dispatch::SCHEMA)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -684,6 +690,7 @@ mod tests {
                 },
                 content: "retained".into(),
                 idempotency_key: "one".into(),
+                direct_insert: false,
                 in_reply_to: None,
                 hop_count: 0,
                 created_at: 1,

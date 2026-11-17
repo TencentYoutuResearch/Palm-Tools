@@ -1,6 +1,8 @@
 /** Host-owned executable profiles. Type selects a protocol; ID selects a configuration. */
-import { readFile, open, rename, mkdir, rm } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { writePrivateJson } from './private-json-store.js'
+import { LocalAgentPreferences, normalizeTeamRoles, normalizeRoleTargets } from './local-agent-preferences.js'
+export { writePrivateJson } from './private-json-store.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { normalizeManagedInference } from './managed-codex-profile.js'
 
@@ -46,25 +48,17 @@ export function normalizeProfile(input) {
     profile.allowedModels = [...new Set(input.allowedModels.map(id => text(id, 'allowed model', 256)))]
   }
   if (input.managedInference != null) {
-    if (profile.type !== 'codex' && profile.protocol !== 'codex') throw new Error('Managed inference currently requires a Codex protocol profile')
+    if (!['codex', 'claude'].includes(profile.type) && profile.protocol !== 'codex') throw new Error('Managed inference requires a Codex or Claude protocol profile')
     profile.managedInference = normalizeManagedInference(input.managedInference)
+    if (profile.type === 'claude' && (profile.args.length || !profile.managedInference.bootstrap?.provider
+        || !profile.managedInference.bootstrap.home || profile.managedInference.bootstrap.pathVariable !== 'TCLAUDE_CLAUDE_PATH')) throw Error('Managed Claude requires a pinned wrapper bootstrap')
+    if (profile.managedInference.responseModels && (profile.type !== 'claude' || Object.keys(profile.managedInference.responseModels).some(model => !(profile.allowedModels ?? [profile.defaultModel]).includes(model)))) throw Error('Response model mapping requires a Claude allowed model')
     if (profile.defaultReasoningEffort && !profile.managedInference.reasoningEfforts.includes(profile.defaultReasoningEffort)) throw new Error('Managed inference must declare the default reasoning effort')
   }
   return structuredClone(profile)
 }
 export function profileRevision(profile) {
   return createHash('sha256').update(JSON.stringify({ ...profile, env: Object.entries(profile.env ?? {}).sort() })).digest('hex')
-}
-export async function writePrivateJson(path, value) {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  const temporary = `${path}.${randomUUID()}.tmp`
-  try {
-    const file = await open(temporary, 'wx', 0o600)
-    try { await file.writeFile(JSON.stringify(value, null, 2)); await file.sync() } finally { await file.close() }
-    await rename(temporary, path)
-    const directory = await open(dirname(path), 'r')
-    try { await directory.sync() } finally { await directory.close() }
-  } finally { await rm(temporary, { force: true }) }
 }
 
 export function normalizeModelDefaults(input) {
@@ -82,8 +76,9 @@ export function normalizeModelDefaults(input) {
   }))
 }
 export class AgentProfiles {
-  constructor(path) { this.path = path; this.defaultProfileId = null; this.modelDefaults = {}; this.coordinatorStartPlans = Object.create(null); this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
+  constructor(path) { this.path = path; this.localPreferences = new LocalAgentPreferences(`${path}.preferences.json`); this.defaultProfileId = null; this.modelDefaults = {}; this.coordinatorStartPlans = Object.create(null); this.profiles = []; this.bindings = Object.create(null); this.chain = Promise.resolve() }
   async open(initial = []) {
+    await this.localPreferences.open()
     let fresh = false
     try {
       const stored = JSON.parse(await readFile(this.path, 'utf8'))
@@ -104,12 +99,82 @@ export class AgentProfiles {
     if (fresh) await writePrivateJson(this.path, { version: 1, profiles: this.profiles, bindings: this.bindings, modelDefaults: this.modelDefaults, coordinatorStartPlans: this.coordinatorStartPlans })
     return this
   }
-  list() { return structuredClone(this.profiles) }
-  get(id) { const p = this.profiles.find(p => p.id === id); if (!p) throw new Error('unknown Agent profile'); return structuredClone(p) }
+  // Legacy runtime routes remain resolvable. Only listAgents() is the new
+  // executor picker; it never changes an existing session's profile snapshot.
+  nativeAgentCatalog() {
+    return this.localPreferences.state.agentCatalog.flatMap(entry => {
+      const source = this.profiles.find(profile => profile.id === entry.sourceProfileId)
+      if (!source || profileRevision(source) !== entry.sourceProfileRevision || this.profiles.some(profile => profile.id === entry.id)) return []
+      const { type, protocol, executable, args, env } = source
+      return [normalizeProfile({ id: entry.id, name: entry.name, type, ...(protocol ? { protocol } : {}), ...(type === 'dsh' ? {} : { executable, args, env }) })]
+    })
+  }
+  list() { return structuredClone([...this.profiles, ...this.nativeAgentCatalog()]) }
+  listAgents() {
+    const rows = this.list(), byId = new Map(rows.map(profile => [profile.id, profile]))
+    return rows.filter(profile => this.localPreferences.state.archivedProfiles?.[profile.id] !== profileRevision(profile) && !this.catalogAliasTarget(profile.id, byId)).map(profile => {
+      const { defaultModel, defaultReasoningEffort, ...identity } = profile
+      return identity
+    })
+  }
+  catalogAliasTarget(id, byId) {
+    const alias = Object.hasOwn(this.localPreferences.state.profileAliases, id) && this.localPreferences.state.profileAliases[id]
+    const source = alias && byId.get(id), target = alias && byId.get(alias.profileId)
+    if (!source || !target || profileRevision(source) !== alias.sourceProfileRevision || target.managedInference || target.allowedModels) return undefined
+    const cli = ({ type, protocol, executable, args, env }) => profileRevision({ type, protocol, executable, args, env })
+    return cli(source) === cli(target) ? target.id : undefined
+  }
+  canonicalProfileId(id) { return this.catalogAliasTarget(id, new Map(this.list().map(profile => [profile.id, profile]))) ?? id }
+  teamRolesFor(teamId) { return this.localPreferences.rolesFor(teamId) }
+  setTeamRoles(teamId, assignments, expectedRevision) {
+    const normalized = normalizeTeamRoles({ [teamId]: assignments })[teamId]
+    for (const assignment of Object.values(normalized)) {
+      const profile = this.get(assignment.profileId)
+      if (this.canonicalProfileId(profile.id) !== profile.id) throw Error('Select a native Agent identity for the Team role')
+      if (assignment.sourceProfileId && (profileRevision(this.get(assignment.sourceProfileId)) !== assignment.sourceProfileRevision || this.canonicalProfileId(assignment.sourceProfileId) !== assignment.profileId)) throw Error('Legacy role source changed')
+    }
+    return this.localPreferences.setTeamRoles(teamId, normalized, expectedRevision)
+  }
+  teamRoleTargetsFor(teamId) { return this.localPreferences.targetsFor(teamId) }
+  // Detached authority view: never overwrite session snapshots or create a missing registry.
+  async candidateRegistry() {
+    const stored = JSON.parse(await readFile(this.path, 'utf8'))
+    return this.candidateRegistryView(stored)
+  }
+  candidateRegistryView(stored) {
+    if (stored?.version !== 1 || !Array.isArray(stored.profiles)) throw Error('Agent registry unavailable')
+    const view = Object.create(this)
+    view.profiles = stored.profiles.map(p => ({ ...normalizeProfile(p), ...(p.origin === 'builtin' && p.id === `builtin-${p.type}` && p.type !== 'custom' ? { origin: 'builtin' } : {}) }))
+    return view
+  }
+  async teamRoleTargetDiagnostics(teamId) {
+    const assignments = this.teamRoleTargetsFor(teamId)
+    let registry
+    try { registry = await this.candidateRegistry() }
+    catch { return [{ code: 'registry_unavailable' }] }
+    const known = new Set(registry.list().map(profile => profile.id))
+    return Object.entries(assignments).flatMap(([role, candidates]) => candidates.flatMap((candidate, index) =>
+      known.has(candidate.profileId) ? [] : [{ role, index, profileId: candidate.profileId, code: 'agent_missing' }]))
+  }
+  async setTeamRoleTargets(teamId, assignments, expectedRevision) {
+    const normalized = normalizeRoleTargets({ [teamId]: assignments })[teamId]
+    // Refresh from the provider's authority, not the legacy path in shared mode.
+    // This check is diagnostic/configuration validation, not a cross-provider transaction.
+    await this.localPreferences.open()
+    const registry = await this.candidateRegistry()
+    for (const candidates of Object.values(normalized)) for (const assignment of candidates) {
+      const profile = registry.list().find(profile => profile.id === assignment.profileId)
+      if (!profile) throw Error('agent_missing: ' + assignment.profileId)
+      if (registry.canonicalProfileId(profile.id) !== profile.id) throw Error('Select a native Agent identity for the Team role')
+      if (assignment.sourceProfileId && (profileRevision(registry.get(assignment.sourceProfileId)) !== assignment.sourceProfileRevision || registry.canonicalProfileId(assignment.sourceProfileId) !== assignment.profileId)) throw Error('Legacy role source changed')
+    }
+    return this.localPreferences.setRoleTargets(teamId, normalized, expectedRevision)
+  }
+  get(id) { const p = this.list().find(p => p.id === id); if (!p) throw new Error('unknown Agent profile'); return structuredClone(p) }
   binding(sessionId) { return this.bindings[sessionId] ? structuredClone(this.bindings[sessionId]) : undefined }
   update(operation) {
     const task = this.chain.then(async () => {
-      const state = { version: 1, defaultProfileId: this.defaultProfileId, modelDefaults: structuredClone(this.modelDefaults), profiles: this.list(), bindings: structuredClone(this.bindings), coordinatorStartPlans: structuredClone(this.coordinatorStartPlans) }
+      const state = { version: 1, defaultProfileId: this.defaultProfileId, modelDefaults: structuredClone(this.modelDefaults), profiles: structuredClone(this.profiles), bindings: structuredClone(this.bindings), coordinatorStartPlans: structuredClone(this.coordinatorStartPlans) }
       const result = await operation(state)
       await writePrivateJson(this.path, state)
       this.defaultProfileId = state.defaultProfileId ?? null
@@ -127,29 +192,54 @@ export class AgentProfiles {
   }
   setDefaultModel(id, selection) {
     this.get(id)
-    const normalized = selection === null ? null : normalizeModelDefaults({ [id]: selection })[id]
-    return this.update(state => {
-      state.modelDefaults ??= {}
-      if (normalized) state.modelDefaults[id] = normalized
-      else delete state.modelDefaults[id]
-      return { profileId: id, defaultModelSelection: normalized }
-    })
+    return this.localPreferences.setModel(id, selection)
   }
-  defaultModelFor(id) { const selection = this.modelDefaults[id]; return selection ? structuredClone(selection) : undefined }
-  save(input) {
-    const p = normalizeProfile(input)
-    return this.update(state => {
-      if (p.id.startsWith('builtin-') || state.profiles.find(v => v.id === p.id)?.origin === 'builtin') throw new Error('内置 Agent 不能修改，请添加自定义配置。')
-      const index = state.profiles.findIndex(v => v.id === p.id)
-      if (index < 0) state.profiles.push(p); else {
-        for (const field of ['allowedModels', 'defaultReasoningEffort', 'managedInference']) if (!Object.hasOwn(input, field) && Object.hasOwn(state.profiles[index], field)) p[field] = state.profiles[index][field]
-        normalizeProfile(p)
-        state.profiles[index] = p
-      }
-      return p
-    })
+  defaultModelFor(id) {
+    // Read legacy shared defaults only as fallback. All new writes are local.
+    const profile = this.list().find(row => row.id === id)
+    if (!profile) return undefined
+    const fallback = this.legacyLocalModelDefaults?.[id] ?? this.modelDefaults[id] ?? (profile?.defaultModel || profile?.defaultReasoningEffort ? { ...(profile.defaultModel ? { model: profile.defaultModel } : {}), ...(profile.defaultReasoningEffort ? { reasoningEffort: profile.defaultReasoningEffort } : {}) } : undefined)
+    return this.localPreferences.selectionFor(id, fallback)
   }
-  remove(id) { return this.update(state => {
+  async save(input) {
+    const p = normalizeProfile(input), prior = this.list().find(row => row.id === p.id)
+    const hasSelection = Object.hasOwn(input, 'defaultModel') || Object.hasOwn(input, 'defaultReasoningEffort')
+    let selection = this.defaultModelFor(p.id) ?? {}
+    if (Object.hasOwn(input, 'defaultModel')) {
+      if (input.defaultModel == null) delete selection.model
+      else selection.model = p.defaultModel
+    }
+    if (Object.hasOwn(input, 'defaultReasoningEffort')) {
+      if (input.defaultReasoningEffort == null) delete selection.reasoningEffort
+      else selection.reasoningEffort = p.defaultReasoningEffort
+    }
+    // Model/effort preferences no longer mutate a native executable identity.
+    // Preserve the exact former response allow-list if it relied on defaultModel.
+    if (p.managedInference?.responseModels && !p.allowedModels && p.defaultModel) p.allowedModels = [p.defaultModel]
+    delete p.defaultModel; delete p.defaultReasoningEffort
+    if (this.localPreferences.state.agentCatalog.some(row => row.id === p.id)) {
+      throw Error('Edit the original CLI configuration and explicitly review its Agent catalog mapping')
+    } else {
+      await this.update(state => {
+        if (p.id.startsWith('builtin-') || state.profiles.find(v => v.id === p.id)?.origin === 'builtin') throw new Error('内置 Agent 不能修改，请添加自定义配置。')
+        const index = state.profiles.findIndex(v => v.id === p.id)
+        if (index < 0) state.profiles.push(p); else {
+          for (const field of ['allowedModels', 'managedInference']) if (!Object.hasOwn(input, field) && Object.hasOwn(state.profiles[index], field)) p[field] = state.profiles[index][field]
+          if (p.managedInference?.responseModels && !p.allowedModels && prior?.defaultModel) p.allowedModels = [prior.defaultModel]
+          normalizeProfile({ ...p, ...(selection.reasoningEffort ? { defaultReasoningEffort: selection.reasoningEffort } : {}) })
+          state.profiles[index] = p
+        }
+      })
+    }
+    if (hasSelection || prior?.defaultModel || prior?.defaultReasoningEffort) await this.localPreferences.setModel(p.id, Object.keys(selection).length ? selection : null)
+    return structuredClone(p)
+  }
+  remove(id) { return this.update(async state => {
+    await this.localPreferences.open()
+    const local = this.localPreferences.state
+    const referenced = [...Object.values(local.teamRoles).flatMap(Object.values), ...Object.values(local.roleTargets).flatMap(roles => Object.values(roles).flat())]
+    const derivedIds = new Set(local.agentCatalog.filter(row => row.sourceProfileId === id).map(row => row.id))
+    if (referenced.some(row => row.profileId === id || row.sourceProfileId === id || derivedIds.has(row.profileId) || derivedIds.has(row.sourceProfileId))) throw Error('Agent is referenced by local Team preferences; remove references first')
     const profile = state.profiles.find(p => p.id === id)
     if (!profile) throw new Error('此自定义 Agent 配置不存在或已删除。')
     if (profile.origin === 'builtin') throw new Error('内置 Agent 不能删除。')
@@ -169,7 +259,7 @@ export class AgentProfiles {
         if (existing.profile.id !== profileId) throw new Error('start a new conversation to change its Agent configuration')
         return existing
       }
-      const profile = state.profiles.find(p => p.id === profileId)
+      const profile = state.profiles.find(p => p.id === profileId) ?? this.nativeAgentCatalog().find(p => p.id === profileId)
       if (!profile) throw new Error('unknown Agent profile')
       const binding = { profile, revision: profileRevision(profile), seenInputs: [] }
       Object.defineProperty(state.bindings, sessionId, { value: binding, enumerable: true, configurable: true, writable: true })
@@ -191,7 +281,7 @@ export class AgentProfiles {
         if (existing.seenInputs?.length) throw new Error('native conversation already received input')
       }
       const prior = Object.values(state.bindings).find(row => row.threadId === threadId && row.profile.id === profileId)
-      const profile = prior?.profile ?? existing?.profile ?? state.profiles.find(row => row.id === profileId)
+      const profile = prior?.profile ?? existing?.profile ?? state.profiles.find(row => row.id === profileId) ?? this.nativeAgentCatalog().find(row => row.id === profileId)
       if (!profile) throw new Error('unknown Agent profile')
       const binding = { ...existing, profile: structuredClone(profile), revision: profileRevision(profile), threadId, seenInputs: [] }
       Object.defineProperty(state.bindings, sessionId, { value: binding, enumerable: true, configurable: true, writable: true })

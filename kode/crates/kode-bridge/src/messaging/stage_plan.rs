@@ -41,6 +41,9 @@ pub(super) fn plan_in(db: &Connection, id: &str, stage_id: &str, at: u64) -> Res
     let team_id = run["team_id"].as_str().unwrap();
     let spec: Spec = serde_json::from_value(run["context"]["team"]["spec"].clone())?;
     let mut issues = Vec::new();
+    if super::collaboration::execution::admit_run(db, &run).is_err() {
+        issues.push(json!({"code":"collaboration_task_scope_changed"}));
+    }
     let mut candidates = Vec::new();
     let live =
         team_activation::authorized(db, team_id, run["team_revision"].as_u64().unwrap(), at)?;

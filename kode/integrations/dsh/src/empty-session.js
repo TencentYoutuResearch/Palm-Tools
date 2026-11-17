@@ -1,7 +1,9 @@
 /** Cold list cache misses are unknown, not proof of an existing conversation. */
 const setupEvents = new Set(['permission/preset', 'sandbox/mode', 'approval/policy'])
 export function needsEmptySessionCheck(row) {
-  return row.blank === false && !row.running && !row.projections?.values?.sessionListMetadata
+  return row.blank === false && !row.running && !row.savedTab
+    && !row.projections?.values?.userQuestions?.questions?.active?.length
+    && !['inbox', 'kodeInbox'].some(key => Object.values(row.projections?.values?.[key] ?? {}).some(queue => Array.isArray(queue) && queue.length)) && !row.projections?.values?.sessionListMetadata
     && !row.title && !row.projections?.values?.title
 }
 export function setupOnlySession(inspection) {
@@ -23,13 +25,13 @@ export function sessionInspector(controller, query) {
     } finally { observation[Symbol.dispose]() }
   }
 }
-export async function classifyEmptySessions(controller, items, query) {
+export async function classifyEmptySessions(controller, items, query, { preserve = () => false } = {}) {
   const inspect = sessionInspector(controller, query)
   if (!inspect) return items
   const result = []
   // Bound cold reads; never activate an Agent and never hide a failed read.
   for (let offset = 0; offset < items.length; offset += 4) result.push(...await Promise.all(items.slice(offset, offset + 4).map(async row => {
-    if (!needsEmptySessionCheck(row)) return row
+    if (!needsEmptySessionCheck(row) || preserve(row)) return row
     try { return setupOnlySession(await inspect(row.sessionId)) ? { ...row, blank: true } : row }
     catch { return row }
   })))

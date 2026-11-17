@@ -248,3 +248,10 @@ test('0.2.2 query-only cold placeholders retire existing shared publications wit
  assert.equal(disposed,2);assert.equal(publications.length,1)
  assert.equal(publications[0].sessions[0].dto.status,'exited');assert.deepEqual(publications[0].sessions[0].events,[])
 })
+
+test('runtime summary does not fabricate zero token consumption when usage is unavailable', () => {
+  const bridge = new RuntimeBridge({ get: name => name === 'kodeAgents' ? { profiles: { binding: () => undefined } } : undefined }, {})
+  const dto = bridge.projection({ sessionId: 'saved', title: 'Saved conversation' })
+  assert.equal(dto.title, 'Saved conversation')
+  assert.equal(Object.hasOwn(dto, 'tokens'), false)
+})

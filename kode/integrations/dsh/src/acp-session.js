@@ -1,5 +1,9 @@
+import { acpApprovalDetails } from './acp-approval-details.js'
+import { codebuddySystemPromptArgs } from './codebuddy-system-prompt.js'
 /** ACP v1 native conversations using the official SDK, shared by Cursor, Claude and custom Agents. */
 import { client, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { client as rolePromptClient } from '@agentclientprotocol/sdk/unstable'
+import { openNativeRolePrompt, checkNativeRolePrompt, nativeRoleInstructions } from './native-role-prompt.js'
 import { Readable, Writable } from 'node:stream'
 import { randomUUID } from 'node:crypto'
 import { writeFile, mkdtemp, rm } from 'node:fs/promises'
@@ -39,6 +43,28 @@ function abortable(task, signal) {
 export class AcpTurnCancelledError extends Error {
   constructor() { super('ACP turn cancelled'); this.name = 'AcpTurnCancelledError' }
 }
+// Terminal ACP counters are reported evidence, not a verified billing receipt.
+// Claude's uncached input excludes both cache reads and writes. Model totals
+// include subagents/compaction and need not equal the main-loop usage total.
+export function acpTerminalUsage(result, { threadId, turnId, promptId, profileType }) {
+  const normalize = raw => {
+    const keys = ['inputTokens', 'outputTokens', 'cachedReadTokens', 'cachedWriteTokens', 'totalTokens']
+    if (!keys.every(key => Number.isSafeInteger(raw?.[key]) && raw[key] >= 0 && raw[key] <= 1e12)) return null
+    const input = raw.inputTokens + raw.cachedReadTokens + raw.cachedWriteTokens
+    if (input + raw.outputTokens !== raw.totalTokens) return null
+    return { input_tokens: input, uncached_input_tokens: raw.inputTokens, cached_input_tokens: raw.cachedReadTokens,
+      cache_write_input_tokens: raw.cachedWriteTokens, output_tokens: raw.outputTokens, total_tokens: raw.totalTokens }
+  }
+  const rows = result?._meta?.quota?.model_usage
+  return { threadId, turnId, promptId, source: 'acp_session_prompt_terminal', scope: profileType === 'claude' ? 'prompt_turn_reported' : 'unknown',
+    stop_reason: result?.stopReason ?? null, billing_eligible: false, status: 'unresolved',
+    reason: 'owned_baseline_and_model_attribution_required',
+    main_loop_total: normalize(result?.usage),
+    model_totals: Array.isArray(rows) && rows.length <= 64 ? rows.map(row => ({
+      model: typeof row?.model === 'string' && row.model.length > 0 && row.model.length <= 256 && !/[\u0000-\u001f]/.test(row.model) ? row.model : null,
+      counters: normalize({ ...row?.token_count, cachedReadTokens: row?.token_count?.cachedInputTokens }),
+    })) : null }
+}
 export class AcpSession {
   constructor(profile, cwd, handlers = {}) {
     this.profile = profile; this.cwd = cwd; this.handlers = handlers
@@ -55,9 +81,9 @@ export class AcpSession {
       this.lifetime.signal.throwIfAborted()
       this.process = spawnAgent(process.execPath, [fileURLToPath(import.meta.resolve('@agentclientprotocol/claude-agent-acp/dist/index.js'))], this.cwd, { ...this.profile.env, CLAUDE_CODE_EXECUTABLE: launcher })
     } else {
-      this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
+      this.process = spawnAgent(this.profile.executable, [...(this.profile.type === 'codebuddy' ? this.codebuddyLaunchArgs ?? this.profile.args ?? [] : this.profile.args ?? []), ...(this.profile.type === 'cursor' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
     }
-    const app = client({ name: 'kode-dsh' })
+    const app = (this.handlers.resolveRolePrompt || this.handlers.nativePlanning ? rolePromptClient : client)({ name: 'kode-dsh' })
     app.onNotification('session/update', ({ params }) => this.update(params))
     app.onRequest('session/request_permission', ({ params, signal }) => this.permission(params, signal))
     app.onRequest('elicitation/create', ({ params, signal }) => {
@@ -90,7 +116,28 @@ export class AcpSession {
   }
   async open(binding, tools, signal = this.lifetime.signal) {
     signal.throwIfAborted()
+    const cliRole = this.profile.type === 'codebuddy' && Boolean(this.handlers.resolveRolePrompt || this.handlers.nativePlanning)
+    if (cliRole) {
+      const accepted = await openNativeRolePrompt(this.handlers, binding.threadId ? 'restore' : 'fresh')
+      const text = nativeRoleInstructions(accepted, this.handlers)
+      if (this.initialized && this.codebuddyRoleText !== text) throw new Error('CodeBuddy trusted prompt requires a fresh configured process')
+      this.acceptedRolePrompt = accepted
+      this.codebuddyRoleText = text
+      if (text) {
+        if (typeof this.handlers.bindNativeSystemPrompt !== 'function') throw new Error('Trusted native system prompt persistence unavailable')
+        const args = codebuddySystemPromptArgs(this.profile.args ?? [], text)
+        await this.handlers.bindNativeSystemPrompt({text:args[args.length-1],mode:binding.threadId?'restore':'fresh'})
+        this.codebuddyLaunchArgs = Object.freeze(args)
+      }
+      await checkNativeRolePrompt(this.handlers, accepted)
+      await this.handlers.checkPlanningContext?.()
+      signal.throwIfAborted()
+    }
     await this.initialize(signal)
+    if (!cliRole) this.acceptedRolePrompt = await openNativeRolePrompt(this.handlers, binding.threadId ? 'restore' : 'fresh')
+    const roleText = nativeRoleInstructions(this.acceptedRolePrompt, this.handlers)
+    if (roleText && !cliRole && !this.info.agentCapabilities?.sessionCapabilities?.systemPrompt) throw new Error('ACP executor does not advertise role prompt append support')
+    const roleSettings = roleText && !cliRole ? { systemPrompt: { mode: 'append', content: [{ type: 'text', text: roleText }] } } : {}
     this.tools = tools
     const mcpServers = []
     if (tools.length) {
@@ -106,9 +153,9 @@ export class AcpSession {
       const resume = this.info.agentCapabilities?.sessionCapabilities?.resume
       if (!this.info.agentCapabilities?.loadSession && !resume) throw new Error('This ACP Agent cannot restore saved conversations; it will not silently start a new one')
       this.threadId = binding.threadId
-      this.state = await this.request(resume ? 'session/resume' : 'session/load', { sessionId: this.threadId, cwd: this.cwd, mcpServers, ...settings }, signal) ?? {}
+      this.state = await this.request(resume ? 'session/resume' : 'session/load', { sessionId: this.threadId, cwd: this.cwd, mcpServers, ...settings, ...roleSettings }, signal) ?? {}
     } else {
-      this.state = await this.request('session/new', { cwd: this.cwd, mcpServers, ...settings }, signal)
+      this.state = await this.request('session/new', { cwd: this.cwd, mcpServers, ...settings, ...roleSettings }, signal)
       this.threadId = this.state.sessionId
     } } finally { this.opening = false }
     if (!this.threadId) throw new Error('ACP Agent returned no session ID')
@@ -134,8 +181,8 @@ export class AcpSession {
     const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
     if (this.profile.fixedPolicy && (policy.mode !== this.profile.fixedPolicy.mode || (this.handlers.approvalPolicy?.() ?? 'ask') !== this.profile.fixedPolicy.approval)) throw new Error('此 dsh ACP 版本不支持运行中修改权限，请新建会话应用新的权限。')
     const available = this.state.modes?.availableModes ?? []
-    const preferred = policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : policy.mode==='danger-full-access'?['bypassPermissions','fullAccess','yolo','default','agent','code']:['acceptEdits','default','agent','code']
-    const requestedMode = this.handlers.mode?.()
+    const preferred = this.handlers.nativeInteractiveTeam && policy.mode !== 'read-only' ? ['default','agent','code','ask'] : policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : policy.mode==='danger-full-access'?['bypassPermissions','fullAccess','yolo','default','agent','code']:['acceptEdits','default','agent','code']
+    const requestedMode = this.handlers.nativeInteractiveTeam ? undefined : this.handlers.mode?.()
     const mode = requestedMode && modeAllowed(requestedMode, policy.mode) ? available.find(mode => mode.id === requestedMode) : preferred.map(id => available.find(m => m.id === id)).find(Boolean)
     if (policy.mode === 'read-only' && !mode && !this.profile.policyManagedByHost) throw new Error('This ACP Agent advertises no read-only mode; choose an Agent with one or explicitly change the session file policy')
     if (mode && this.state.modes.currentModeId !== mode.id) {
@@ -207,7 +254,7 @@ export class AcpSession {
   }
   async permission(params, requestSignal) {
     if (!this.active || params.sessionId !== this.threadId) return { outcome: { outcome: 'cancelled' } }
-    const request = { threadId: this.threadId, turnId: this.active.turnId, itemId: params.toolCall.toolCallId, reason: params.toolCall.title ?? 'ACP Agent requests permission', command: JSON.stringify(params.toolCall.rawInput ?? {}) }
+    const request = { threadId: this.threadId, turnId: this.active.turnId, itemId: params.toolCall.toolCallId, reason: acpApprovalDetails(params.toolCall, this.active.tools.get(params.toolCall.toolCallId)) }
     const turnSignal = this.active.promptSignal ?? this.active.signal
     const signal = requestSignal ? AbortSignal.any([requestSignal, turnSignal]) : turnSignal
     const allowed = await this.handlers.approve?.(params.toolCall.kind === 'edit' ? 'item/fileChange/requestApproval' : 'item/commandExecution/requestApproval', request, signal)
@@ -236,13 +283,16 @@ export class AcpSession {
   }
   startPrompt(active, input) {
     const prompt = {}
+    const identity = { threadId: this.threadId, turnId: active.turnId, promptId: randomUUID(), profileType: this.profile.type }
     active.prompt = prompt
     active.promptAbort = new AbortController()
     active.promptSignal = AbortSignal.any([active.signal, active.promptAbort.signal])
     active.promptTask = this.request('session/prompt', { sessionId: this.threadId, prompt: input }, active.signal, 0)
     active.ready = true
     const task = active.promptTask.then(result => {
-      if (active.restarting || active.prompt !== prompt) return
+      if (this.active !== active || active.done || active.prompt !== prompt) return
+      if (result.usage || result._meta?.quota) active.push({ method: 'kode/acp_terminal_usage', params: acpTerminalUsage(result, identity) })
+      if (active.restarting) return
       if (result.stopReason === 'cancelled') active.end(new AcpTurnCancelledError())
       else if (result.stopReason !== 'end_turn') active.end(new Error(`ACP turn stopped: ${result.stopReason}`))
       else active.end()
@@ -280,6 +330,8 @@ export class AcpSession {
     rebound.throwIfAborted()
   }
   async steer(input, signal = this.lifetime.signal) {
+    await checkNativeRolePrompt(this.handlers, this.acceptedRolePrompt ?? null)
+    await this.handlers.checkPlanningContext?.()
     if (!this.canSteer()) throw Object.assign(new Error('当前原生轮次已结束。'), { rpcRejected: true })
     this.validateInput(input)
     const active = this.active
@@ -313,13 +365,21 @@ export class AcpSession {
       active.push({ method: 'item/completed', params: { ...base, item: { id: 'answer', type: 'agentMessage' } } })
       active.turnId = randomUUID()
       active.restarting = false
+      await this.handlers.checkPlanningContext?.()
       this.startPrompt(active, input)
       active.push({ method: 'turn/started', params: { threadId: this.threadId, turn: { id: active.turnId } } })
       return { turnId: active.turnId }
     } catch (error) { active.end(error); throw error }
     finally { active.restarting = false }
   }
-  async *turn(input, { model, signal = this.lifetime.signal, command, effort, fast } = {}) {
+  async *turn(input, { model, signal = this.lifetime.signal, command, effort, fast, beforeInference, beforeInteractiveInput } = {}) {
+    await checkNativeRolePrompt(this.handlers, this.acceptedRolePrompt ?? null)
+    if (this.codebuddyRoleText !== undefined && nativeRoleInstructions(this.acceptedRolePrompt ?? null, this.handlers) !== this.codebuddyRoleText) throw new Error('CodeBuddy process prompt changed; a fresh authorized process is required')
+    if(beforeInteractiveInput!==undefined&&(typeof beforeInteractiveInput!=='function'||beforeInference||command))throw new Error('Invalid interactive pre-input hook')
+    if (beforeInference !== undefined) {
+      if (typeof beforeInference !== 'function' || command) throw new Error('Invalid native pre-inference hook')
+      input = structuredClone(input)
+    }
     if (this.active) throw new Error('ACP conversation already has an active turn')
     const fused = AbortSignal.any([signal, this.lifetime.signal]), queue = []
     const active = { turnId: randomUUID(), turnSignal: signal, signal: fused, tools: new Map(), done: false, error: undefined,
@@ -357,11 +417,26 @@ export class AcpSession {
       fused.throwIfAborted()
       if (command) await this.waitForCommands(fused)
       if (command && !this.commands.some(row => row.name === command.name)) throw new Error(`此 Agent 未公布 /${command.name}，请使用 /help 查看可用命令。`)
+      if (beforeInference || beforeInteractiveInput) {
+        if (selection.model.status !== 'reported' || selection.model.observed !== model ||
+          effort !== undefined && (selection.effort.status !== 'reported' || selection.effort.observed !== effort)) {
+          throw Object.assign(new Error('ACP selection is not confirmed before inference'), { code: 'selection_confirmation_unsupported' })
+        }
+        const admission = await (beforeInference??beforeInteractiveInput)({ threadId: this.threadId, selection: structuredClone(beforeInteractiveInput?{...selection,scope:'executor_configuration'}:selection), input: structuredClone(input), signal: fused })
+        fused.throwIfAborted()
+        if(beforeInteractiveInput){if(admission?.state!=='claimed'||admission.dispatch_allowed!==true||typeof admission.receipt_id!=='string')throw new Error('Interactive source admission missing')}
+        else if (admission?.new_admission !== true || admission.dispatch_allowed !== true || admission.state !== 'admitted' || typeof admission.admission_id !== 'string' || !admission.admission_id) throw new Error('Native input admission missing or replayed')
+      }
+      await checkNativeRolePrompt(this.handlers, this.acceptedRolePrompt ?? null)
+      fused.throwIfAborted()
+      await this.handlers.checkPlanningContext?.()
+      fused.throwIfAborted()
       this.startPrompt(active, input)
       yield { method: 'turn/started', params: { threadId: this.threadId, turn: { id: active.turnId } } }
       while (!active.done || queue.length) {
         if (!queue.length && !active.done) await new Promise(resolve => { active.wake = resolve })
-        if (active.error) throw active.error
+        // Drain terminal evidence before propagating a cancellation/error.
+        if (active.error && !queue.length) throw active.error
         if (queue.length) yield queue.shift()
       }
       if (active.error) throw active.error

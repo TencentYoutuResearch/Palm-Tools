@@ -66,6 +66,11 @@ export function createCollabData({ request, readRequest = requestConversationRea
     }, signal)
   }
   return {
+    acceptScopedTeams(teams, home) {
+      if(home!==snapshot.homeHub || teams.some(team=>team.home_hub!==home||!identity(team.id)||!identity(team.superagent_id)||!identity(team.conversation_id)||!validContact(team.contact))) throw Error('Invalid scoped teams')
+      const knownTeams={...snapshot.knownTeams};for(const team of teams)knownTeams[team.superagent_id]=team
+      publish({knownTeams})
+    },
     getSnapshot: () => snapshot,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     loadReadState: (id, options) => readPosition(id, undefined, options?.signal),
@@ -224,7 +229,8 @@ export async function requestConversationReadState(path, { body, signal, fetcher
 }
 
 export async function requestCollabRead(path, { signal, fetcher = globalThis.fetch } = {}) {
-  if (!path.startsWith('/api/kode/work-run/trace?') && !path.startsWith('/api/kode/work-run/execution?') && !path.startsWith('/api/kode/work-run/waiver?') && !path.startsWith('/api/kode/builder/default-selection?') && !path.startsWith('/api/kode/builder/conversation?') && !path.startsWith('/api/kode/builder/funding?') && !path.startsWith('/api/kode/builder/selection?') && !path.startsWith('/api/kode/builder/models?') && !path.startsWith('/api/kode/collab/budgets?') && !path.startsWith('/api/kode/resource-coverage?') && !path.startsWith('/api/kode/builder/patch-status?') && !path.startsWith('/api/kode/builder/workspace-directory?') && !path.startsWith('/api/kode/builder/drafts?') && !path.startsWith('/api/kode/collab/evidence?') && !path.startsWith('/api/kode/work-run?') && !path.startsWith('/api/kode/collab/runs?') && !path.startsWith('/api/kode/collab/teams?') && !path.startsWith('/api/kode/conversation/messages?')) throw Error('Unsupported collaboration read')
+  const taskRead = /^\/api\/kode\/collaboration\?path=tasks%2F(?:[A-Za-z0-9_.-]|%3A){1,160}$/.test(path)
+  if (!taskRead && !path.startsWith('/api/kode/work-run/trace?') && !path.startsWith('/api/kode/work-run/execution?') && !path.startsWith('/api/kode/work-run/waiver?') && !path.startsWith('/api/kode/builder/default-selection?') && !path.startsWith('/api/kode/builder/conversation?') && !path.startsWith('/api/kode/builder/planning?') && !path.startsWith('/api/kode/builder/funding?') && !path.startsWith('/api/kode/builder/selection?') && !path.startsWith('/api/kode/builder/models?') && !path.startsWith('/api/kode/collab/budgets?') && !path.startsWith('/api/kode/resource-coverage?') && !path.startsWith('/api/kode/builder/patch-status?') && !path.startsWith('/api/kode/builder/workspace-directory?') && !path.startsWith('/api/kode/builder/drafts?') && !path.startsWith('/api/kode/collab/evidence?') && !path.startsWith('/api/kode/work-run?') && !path.startsWith('/api/kode/collab/runs?') && !path.startsWith('/api/kode/collab/teams?') && !path.startsWith('/api/kode/conversation/messages?')) throw Error('Unsupported collaboration read')
   const controller = new AbortController()
   const abort = () => controller.abort()
   if (signal?.aborted) abort()

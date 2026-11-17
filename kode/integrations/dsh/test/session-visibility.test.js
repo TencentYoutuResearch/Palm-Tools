@@ -2,14 +2,17 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { isSetupOnlySession } from '../src/session-visibility.js'
 import { hostDirectory } from '../src/workspace-directory.js'
-const setup = { events: [{ type: 'permission/preset' }, { type: 'turn/start' }, { type: 'turn/end' }] }
+const setup = { inheritedEventCount: 0, events: [{ type: 'permission/preset' }, { type: 'turn/start' }, { type: 'turn/end' }] }
 test('setup-only histories are hidden but messages, native threads and queued work remain', () => {
   assert.equal(isSetupOnlySession({}, setup), true)
   for (const type of ['user/message', 'assistant/message', 'tool/call', 'plugin:kode/shared-interaction']) assert.equal(isSetupOnlySession({}, { events: [...setup.events, { type }] }), false)
   assert.equal(isSetupOnlySession({}, setup, { threadId: 'native' }), false)
+  assert.equal(isSetupOnlySession({}, { ...setup, inheritedEventCount: 3 }), false, 'inherited conversation history must remain visible')
   assert.equal(isSetupOnlySession({ running: true }, setup), false)
   assert.equal(isSetupOnlySession({ projections: { values: { inbox: { pending: [{}] } } } }, setup), false)
   assert.equal(isSetupOnlySession({}, { unavailable: true, events: [] }), false)
+  assert.equal(isSetupOnlySession({}, { events: setup.events }), false, 'missing inheritance metadata stays visible')
+  assert.equal(isSetupOnlySession({}, { inheritedEventCount: 0, events: [{ type: 'plugin:future/work' }] }), false)
 })
 test('desktop publishes hidden IDs so its original ungrouped source cannot resurrect drafts', async () => {
   const services = { workspaceRegistry: { archivedSessionIds: [], list: () => [] }, sessionController: {

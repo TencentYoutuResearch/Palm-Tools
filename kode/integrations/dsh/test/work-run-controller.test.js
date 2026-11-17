@@ -187,6 +187,9 @@ test('delivery awaiting exact human acceptance is waiting_user and never reporte
 test('budget waiting requires typed schedule conflict and never masks generic authority failures', async () => {
   for (const [error, expected] of [
     [{ status: 409, code: 'team_budget_exhausted', path: '/api/v1/messaging/work-runs/run/schedule' }, 'waiting_resource'],
+    [{ status: 409, code: 'team_assignment_capacity_exhausted', path: '/api/v1/messaging/work-runs/run/schedule' }, 'waiting_resource'],
+    [{ status: 400, code: 'team_assignment_capacity_exhausted', path: '/api/v1/messaging/work-runs/run/schedule' }, 'progression_failed'],
+    [{ status: 409, code: 'team_assignment_capacity_exhausted', path: '/api/v1/messaging/teams/team/activation' }, 'progression_failed'],
     [{ status: 400, code: 'team_budget_exhausted', path: '/api/v1/messaging/work-runs/run/schedule' }, 'progression_failed'],
     [{ status: 409, code: 'team_budget_exhausted', path: '/api/v1/messaging/teams/team/activation' }, 'progression_failed'],
     [{ status: 409, code: 'unauthorized', path: '/api/v1/messaging/work-runs/run/schedule' }, 'progression_failed'],

@@ -5,7 +5,7 @@ import { mountOfficialBuilderTools } from '../src/official-builder-tools.js'
 test('scoped Builder catalog exposes unregistered methods without registering or activating them', async () => {
   const agent = { id: 'builder' }, operation = { id: 'operation', attempt: 1, epoch: 1 }
   const workspace = { host_id: 'home', workspace_id: 'project', root_ref: '/owned-project' }
-  const binding = { managedOperation: operation }, calls = [], entries = new Map(), policies = new Map()
+  const binding = { managedOperation: operation, managedBuilder: {draft_id:'draft'}, profile:{id:'builder-profile',type:'dsh',name:'Builder'} }, calls = [], entries = new Map(), policies = new Map()
   const draft = { revision: 2, home_hub: 'home', status: 'draft', interview: { workspace_refs: [workspace] } }
   const tools = {
     register: entry => { entries.set(entry.name, entry); return () => entries.delete(entry.name) },
@@ -40,6 +40,13 @@ test('scoped Builder catalog exposes unregistered methods without registering or
     await assert.rejects(catalog.execute({ ...args, expected_revision: 1 }), /revision conflict/)
     await assert.rejects(catalog.execute({ ...args, limit: 0 }), /Invalid Builder/)
     await assert.rejects(catalog.execute({ ...args, command_revision: 'injected' }), /Invalid Builder/)
+    const discoveryArgs = {expected_revision:2,kind:'runtime_discovery',after_id:'builder-profile',after_version:'',limit:1}
+    const discovery = await catalog.execute(discoveryArgs)
+    assert.equal(discovery.items[0].cli.status,'not_applicable')
+    assert.equal(discovery.items[0].eligible_for_execution,false)
+    await assert.rejects(catalog.execute({...discoveryArgs,after_id:'unselected'}),/scope/)
+    await assert.rejects(catalog.execute({...discoveryArgs,expected_revision:1}),/revision conflict/)
+    await assert.rejects(catalog.execute({...discoveryArgs,after_version:'injected'}),/Invalid Builder/)
     draft.interview.workspace_refs = [{ ...workspace, root_ref: '/other-project' }]
     await assert.rejects(catalog.execute(args), /workspace scope changed/)
     assert.ok(calls.every(row => row.body === undefined))

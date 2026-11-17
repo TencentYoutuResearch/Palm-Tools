@@ -1,3 +1,5 @@
+import { ownerWorkerDirectory, OWNER_WORKER_CANDIDATE_LIMIT } from './owner-worker-directory.js'
+import { registerTeamConfiguration } from './team-configuration-route.js'
 import { registerWorkRunTrace } from './work-run-trace-route.js'
 import { registerWorkRunReceipt } from './work-run-receipt-route.js'
 import { registerWorkRunExecution } from './work-run-execution-route.js'
@@ -15,6 +17,7 @@ import { registerBuilderWorkspaceDirectory } from './builder-workspace-directory
 import { registerBuilderCreate } from './builder-create-route.js'
 import { registerBuilderAnswers as registerBuilderAnswerBatch } from './builder-answers-route.js'
 import { registerBuilderDrafts } from './builder-drafts-route.js'
+import { registerBuilderOptimization } from './builder-optimization-route.js'
 import { registerExecutionEvidence } from './execution-evidence.js'
 import { createRemoteSession, lookupRemoteSessionCreation, registerSessionCreationRoutes } from './creation-capabilities.js'
 import { registerOperationControl } from './operation-control.js'
@@ -35,6 +38,7 @@ import { registerBuilderDraftInspection } from './builder-draft-inspection.js'
 import { registerBuilderInterview } from './builder-interview.js'
 import { registerWorkRun } from './work-run-route.js'
 import { registerConversation } from './conversation-route.js'
+import { registerCollaboration } from './collaboration-route.js'
 import { registerConversationStream } from './conversation-stream-route.js'
 import { registerWorkStageWaiver } from './work-stage-waiver-route.js'
 import { registerWorkDeliveryDecision } from './work-delivery-decision-route.js'
@@ -144,6 +148,11 @@ export class ProjectHosts {
   }
   async directory(current = 'local') {
     const local = await hostDirectory(this.ctx, this.config)
+    // Owner-local UI metadata must not enter runtime, mobile or federation catalogues.
+    if (current === 'local') {
+      local.ownerManagedSessions = await ownerWorkerDirectory(this.ctx, this.config.backendClient, local)
+      local.ownerManagedCandidateLimit = OWNER_WORKER_CANDIDATE_LIMIT
+    }
     for (const host of this.hosts) {
       if (this.directoryJobs.has(host.id)) continue
       const previous = this.directoryCache.get(host.id)
@@ -423,6 +432,7 @@ export async function registerProjectHosts(ctx, config) {
   ctx.effect(() => registerTeamActivation(ctx, config), 'kode.team-activation')
   ctx.effect(() => registerTeamBudget(ctx, config), 'kode.team-budget')
   ctx.effect(() => registerTeamAuthority(ctx, config), 'kode.team-authority')
+  ctx.effect(() => registerTeamConfiguration(ctx, config), 'kode.team-configuration')
   ctx.effect(() => registerTeamScheduling(ctx, config), 'kode.team-scheduling')
   ctx.effect(() => registerTeamCapabilityUpdate(ctx, config), 'kode.team-capability-update')
   ctx.effect(() => registerTeamResource(ctx, config), 'kode.team-resource')
@@ -431,11 +441,13 @@ export async function registerProjectHosts(ctx, config) {
   ctx.effect(() => registerBuilderWorkflowSetup(ctx, config), 'kode.builder-workflow-setup')
   ctx.effect(() => registerBuilderAnswers(ctx, config), 'kode.builder-answer')
   ctx.effect(() => registerBuilderDrafts(ctx, config), 'kode.builder-drafts')
+  ctx.effect(() => registerBuilderOptimization(ctx, config), 'kode.builder-optimization')
   ctx.effect(() => registerCollabBudgets(ctx, config), 'kode.collab-budgets')
   ctx.effect(() => registerCollabTeams(ctx, config), 'kode.collab-teams')
   ctx.effect(() => registerCollabRuns(ctx, config), 'kode.collab-runs')
   ctx.effect(() => registerCollabEvidence(ctx, config), 'kode.collab-evidence')
   ctx.effect(() => registerConversation(ctx, config), 'kode.conversation')
+  ctx.effect(() => registerCollaboration(ctx, config), 'kode.collaboration')
   ctx.effect(() => registerConversationStream(ctx, config), 'kode.conversation-stream')
   ctx.effect(() => registerConversationRead(ctx, config), 'kode.conversation-read')
   ctx.effect(() => registerWorkDeliveryDecision(ctx, config), 'kode.work-delivery-decision')

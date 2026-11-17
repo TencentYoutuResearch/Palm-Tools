@@ -1,8 +1,8 @@
 /** Real Hub owner configuration for intake tests; no model or runtime is started. */
-export async function conversationTeam(hub) {
+export async function conversationTeam(hub, {workspace: requestedWorkspace} = {}) {
   const profileHash = 'f'.repeat(64)
   const root='/api/v1/messaging',call=(p,b)=>hub.client.call(`${root}/${p}`,b),at=Date.now()
-  const workspace={host_id:hub.node,workspace_id:'workspace',root_ref:'/fixture'},target={host:hub.node,workspace:'workspace',root:'/fixture'}
+  const workspace=requestedWorkspace??{host_id:hub.node,workspace_id:'workspace',root_ref:'/fixture'},target={host:workspace.host_id,workspace:workspace.workspace_id,root:workspace.root_ref}
   const version=r=>({id:r.id,version:r.version,hash:r.hash}),policy=r=>({id:r.id,revision:r.revision,hash:r.hash})
   const flow=await call('workflows',{id:'flow',version:'1',inputs:['request'],stages:[{id:'inspect',role:'coordinator',requires:['request'],produces:['artifact'],independent_from:[],execution:{task_tag:'inspection',repository_binding:'code',capabilities:['read'],tools:['kode_artifact_capture','kode_coordinator_publish_reply'],network:false}}],completion_stages:['inspect'],evidence_rules:{artifact:{kind:'artifact',repository_binding:'code'}}})
   const project=await call('project-configs',{id:'project',version:'1',spec:{kind:'project_bindings',repositories:{code:{repository_id:'repo',workspace}},environments:{},commands:{},connections:{}}})

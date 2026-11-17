@@ -19,8 +19,8 @@ test('model and effort return to the parent menu; repeated Fast switches never d
     useEffect: fn => { if (!mounted) fn() },
     useDirectory: () => ({ id: 'session', data, busy: false, store: { operate: body => { requests.push(body); return Promise.resolve() } } }),
   }
-  vm.runInNewContext(source.slice(source.indexOf('  function ModelControl('), source.indexOf('  async function projectCall')), scope)
-  const render = () => { cursor = 0; const tree = scope.ModelControl({ sessionId: 'session', sessions: {} }); mounted = true; return tree.children[0] }
+  vm.runInNewContext(source.slice(source.indexOf('  function ModelPicker('), source.indexOf('  async function projectCall')), scope)
+  const render = () => { cursor = 0; const wrapper = scope.ModelControl({ sessionId: 'session', sessions: {} }); assert.equal(wrapper.type,scope.ModelPicker); const tree=scope.ModelPicker(wrapper.props); mounted = true; return tree.children[0] }
   let menu = render()
   menu.props.anchor.props.onClick(); menu = render(); assert.equal(menu.props.open, true)
   menu.props.onSelect('models'); menu = render(); assert.ok(menu.props.items.some(row => row.id === 'model:1'))

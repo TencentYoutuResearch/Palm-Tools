@@ -1,6 +1,7 @@
 /** Durable, at-most-once creation commands for the controlled official loop Host. */
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { assertLegacyCoordinatorContext } from './context-scope.js'
 import { appendPluginRecord, pluginRecordOf } from '@deepseek-ai/dsh-session'
 import { mountOfficialBuilderTools, OFFICIAL_BUILDER_TOOLS } from './official-builder-tools.js'
 import { mountCoordinatorContext } from './coordinator-context.js'
@@ -10,6 +11,7 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,1
 const string = value => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0')
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key))
 function normalize(input) {
+  if (input?.coordinator) assertLegacyCoordinatorContext(input, input.coordinator)
   if (!exact(input, ['command_id', 'session_id', 'operation', 'profile_revision', 'provider', 'model', 'effort', 'cwd', 'tools', 'builder', 'coordinator'])
       || !id(input.command_id) || !id(input.session_id)
       || !exact(input.operation, ['id', 'attempt', 'epoch', 'home_node']) || !id(input.operation.id)
@@ -43,6 +45,7 @@ function normalize(input) {
     ...(input.coordinator === undefined ? {} : { coordinator: {...input.coordinator} }) }
 }
 function coordinatorMatches(binding,request) {
+  if (request.coordinator || binding.managedCoordinator) assertLegacyCoordinatorContext(binding, binding.managedCoordinator, request.coordinator)
   return isDeepStrictEqual(binding.managedCoordinator,request.coordinator)
     && (!request.coordinator || (!binding.managedBuilder && !binding.managedAssignment))
 }

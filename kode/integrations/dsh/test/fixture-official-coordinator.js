@@ -41,6 +41,7 @@ test('Coordinator official loop consumes home conversation inputs exactly once w
   class Fixture extends LlmAdapter{
    async *stream(options){
     assert.match(JSON.stringify(options.messages.filter(m=>m.role==='system')),new RegExp(COORDINATOR_PROMPT_VERSION))
+    if(process.env.KODE_TEST_ROLE_PROMPT)assert.match(JSON.stringify(options.messages.filter(m=>m.role==='system')),/OWNER_FROZEN_COORDINATOR_ROLE/)
     assert.match(JSON.stringify(options.messages),/Implement the requirement/)
     assert.deepEqual(options.tools.map(t=>t.name).sort(),['kode_coordinator_publish_reply','kode_coordinator_workflow_start','kode_coordinator_configuration','kode_coordinator_workflow_status'].sort())
     assert.match(JSON.stringify(options.messages),new RegExp(currentReply.source_message_id))
@@ -105,6 +106,7 @@ test('Coordinator official loop consumes home conversation inputs exactly once w
   const resource={host:hub.node,profile:'profile',account_id:'account',account_epoch:1,binding_revision:1,limit_ids:['daily'],unknown_quota:'team_budget'}
   const schedule=await call('team-policies',{id:'schedule',team_id:'team',expected_revision:0,policy:{kind:'scheduling',targets:{control:{resource,capability_id:'capability',capability_revision:1,preferred:false}},weights:{quality:1,cost:0,latency:0},minimum_quality:0,minimum_confidence:0}})
   const spec={name:'Team',purpose:'Work',kind:'coordinator',workspace_refs:[workspace],execution_targets:[{id:'control',host_id:hub.node,executor_profile_id:'profile',executor_profile_revision:profileHash,provider_id:'fixture',model_id:'model',effort:null,account_binding_id:'account',capability_profile_revision:'1'}],workers:[],coordinator_targets:['control'],workflow_pack_refs:[version(flow)],delivery_bindings:[{id:'local',workflow:version(flow),project:version(project),delivery_policy:version(delivery)}],grant_id:'grant',budget_policy_id:'budget-policy',scheduling_policy_id:'schedule',limits:{max_active_assignments:2,max_active_runs:2},proactive_mode:'off'}
+  if(process.env.KODE_TEST_ROLE_PROMPT)spec.coordinator_prompt='OWNER_FROZEN_COORDINATOR_ROLE'
   const team=await call('teams',{id:'team',request_id:'create',expected_revision:0,spec})
   const grant=(await call('team-grants',{expected_revision:0,policy:{id:'grant',team_id:'team',enabled:true,expires_at:at+60000,targets:[target],capabilities:['read','delegate'],tools:['kode_artifact_capture','kode_coordinator_publish_reply','kode_coordinator_workflow_start','kode_coordinator_configuration','kode_coordinator_workflow_status'],network:false,budget_ids:['budget']}})).grant
   await call('teams/team/activation',{action:'activate',request_id:'activate',expected_revision:0,team_revision:1,grant_revision:grant.revision,budget_policy:policy(budget),scheduling_policy:policy(schedule)})
@@ -217,6 +219,7 @@ test('Coordinator official loop consumes home conversation inputs exactly once w
   try{
    const {events}=await stored.read(0,4096)
    assert.equal(events.filter(e=>e.type==='plugin:kode/official-creation').length,1)
+   if(process.env.KODE_TEST_ROLE_PROMPT){const rows=events.filter(e=>e.type==='plugin:kode/coordinator-role-prompt');assert.equal(rows.length,1);assert.equal(rows[0].data.snapshot.text,'OWNER_FROZEN_COORDINATOR_ROLE');assert.equal(rows[0].data.snapshot.team_revision,1)}
    assert.equal(events.filter(e=>e.type==='plugin:kode/coordinator-resume').length,recovering?1:0)
    for(const inputId of inputIds)assert.equal(events.filter(e=>e.type==='user/message'&&e.data.id===inputId).length,1)
    assert.match(JSON.stringify(events),/execution is pending/)

@@ -38,7 +38,7 @@ import { registerConversation } from '../src/conversation-route.js'
 import { registerConversationStream } from '../src/conversation-stream-route.js'
 import { registerConversationRead } from '../src/conversation-read-route.js'
 
-test('actual collab React seats render contacts, send once and retain draft across IM/Session switches', { skip: !process.env.KODE_TEST_BROWSER_BIN || !process.env.KODE_TEST_BACKEND_URL, timeout: 45000 }, async () => {
+test('actual collab React seats render unified groups, send once and retain the active draft', { skip: !process.env.KODE_TEST_BROWSER_BIN || !process.env.KODE_TEST_BACKEND_URL, timeout: 45000 }, async () => {
   const hub = await isolatedHub('collab-render'), profile = await mkdtemp(join(tmpdir(), 'kode-collab-render-'))
   let streamsOpened = 0, externalStreamEvents = 0
   let browser, server, acceptanceWrites = 0, activationWrites = 0, accountWrites = 0, authorityWrites = 0, initialBudgetWrites = 0, workflowWrites = 0, workflowReceipt, activationRuntime
@@ -119,7 +119,7 @@ test('actual collab React seats render contacts, send once and retain draft acro
           } })
         }
         if (route) return await route.handler(req, res)
-        if (await collabRenderPage(req, res)) return
+        if (await collabRenderPage(req, res, {hub})) return
         res.writeHead(404); res.end()
       } catch { if (!res.headersSent) res.writeHead(500); res.end() }
     })
@@ -128,34 +128,46 @@ test('actual collab React seats render contacts, send once and retain draft acro
     const page = await browser.page(`http://127.0.0.1:${server.address().port}`)
     const wait = expression => page.evaluate(`(async()=>{const deadline=Date.now()+10000;while(Date.now()<deadline){if(${expression})return true;await new Promise(r=>setTimeout(r,25))}throw Error('Render predicate timed out: '+JSON.stringify({selection:document.querySelector('.kode-collab-selection-form')?.innerText,body:document.body.innerText.slice(0,800)})+' '+JSON.stringify(globalThis.fixtureErrors))})()`)
     await wait('globalThis.fixture')
+    await wait(`document.querySelector('.kode-collab-mode-switch button')`)
+    if(await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').getAttribute('aria-label').includes('会话')`)){
+      await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').click()`)
+      await wait(`Array.from(document.querySelectorAll('[role=menuitem]')).some(b=>b.textContent.includes('协作'))`)
+      await page.evaluate(`Array.from(document.querySelectorAll('[role=menuitem]')).find(b=>b.textContent.includes('协作')).click()`)
+    }
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
-    await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]').click()`)
-    await wait(`document.querySelector('.kode-collab-contact-name')`)
-    await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
-    await wait(`document.querySelector('.kode-collab-composer textarea')`)
-    await page.evaluate(`document.querySelector('textarea').focus()`)
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
+    await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`)
+    assert.equal(await page.evaluate(`document.querySelectorAll('.kode-collab-mode-switch').length`),1)
+    assert.deepEqual(await page.evaluate(`Array.from(document.querySelectorAll('[data-sidebar-section]')).map(x=>x.dataset.sidebarSection)`),['channels','direct','sessions'])
+    assert.equal(await page.evaluate(`document.querySelectorAll('button[aria-label="邀请成员"]').length`),1,'Builder is available from the workspace heading')
+    await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`)
+    await wait(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]')`)
+    await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').focus()`)
     await page.call('Input.insertText', { text: '请实现这个需求' })
-    await page.evaluate(`document.querySelector('.kode-collab-composer button[type="submit"]').click()`)
+    await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,isComposing:true,bubbles:true}))`)
+    assert.equal((await hub.client.call(`/api/v1/messaging/conversations/${team.conversation_id}/messages`)).items.length, 0, 'Chinese IME composition must not submit')
+    await page.evaluate(`document.querySelector('.kode-collab-composer button[aria-label="发送"]').click()`)
     await wait(`document.body.innerText.includes('Hub 已接收') && document.querySelector('.kode-collab-message-content')`)
     assert.equal((await hub.client.call(`/api/v1/messaging/conversations/${team.conversation_id}/messages`)).items.length, 1)
-    await page.evaluate(`document.querySelector('textarea').focus()`); await page.call('Input.insertText', { text: '尚未发送的下一条需求' })
-    await page.evaluate(`document.querySelector('[aria-label="切换到 Session 模式"]').click()`)
-    await wait(`document.body.innerText.includes('Session fixture')`)
-    await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]').click()`)
-    await wait(`document.querySelector('textarea')`)
-    assert.equal(await page.evaluate(`document.querySelector('textarea').value`), '尚未发送的下一条需求')
+    await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').focus()`); await page.call('Input.insertText', { text: '尚未发送的下一条需求' })
+    await page.evaluate(`document.querySelector('[data-sidebar-section=sessions] summary').click()`)
+    await wait(`!document.querySelector('[data-sidebar-section=sessions]').open`)
+    assert.equal(await page.evaluate(`Boolean(document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]'))`),true,'folding sidebar groups retains the active conversation')
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
+    await wait(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]')`)
+    assert.equal(await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').textContent`), '尚未发送的下一条需求')
     await page.evaluate(`document.querySelector('.kode-collab-search input').focus()`)
     await page.call('Input.insertText', { text: 'no-matching-team' })
     await page.evaluate(`document.querySelector('.kode-collab-search button[type="submit"]').click()`)
-    await wait(`document.body.innerText.includes('没有找到匹配的联系人。')`)
-    assert.equal(await page.evaluate(`document.querySelector('textarea').value`), '尚未发送的下一条需求')
+    await wait(`document.body.innerText.includes('没有找到匹配的频道。')`)
+    assert.equal(await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').textContent`), '尚未发送的下一条需求')
     assert.ok(await page.evaluate(`Boolean(document.querySelector('.kode-collab-message-content'))`))
     if (process.env.KODE_TEST_CONTACT_SCREENSHOT_PATH) {
       const shot = await page.call('Page.captureScreenshot', { format: 'png' })
       await writeFile(process.env.KODE_TEST_CONTACT_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'))
     }
     await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-search button')).find(button => button.textContent === '清除搜索').click()`)
-    await wait(`document.querySelector('.kode-collab-contact-name')`)
+    await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`)
     await wait(`document.querySelector('[data-message-sequence]')`)
     const visibleSequence = await page.evaluate(`Number(document.querySelector('[data-message-sequence]').dataset.messageSequence)`)
     for (let attempt = 0; attempt < 30; attempt++) {
@@ -165,32 +177,24 @@ test('actual collab React seats render contacts, send once and retain draft acro
     }
     assert.ok((await hub.client.call(`/api/v1/messaging/conversations/${team.conversation_id}/read-state`)).through_sequence >= visibleSequence)
     assert.equal(await page.evaluate('fixture.created()'), 0)
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '团队预算').click()`)
-    await wait(`document.querySelector('[aria-label="团队预算"]').innerText.includes('总额度')`)
-    assert.ok(await page.evaluate(`document.querySelector('[aria-label="团队预算"]').innerText.includes('credits')`))
-    assert.ok(await page.evaluate(`document.querySelector('[aria-label="团队预算"]').innerText.includes('不是供应商余额')`))
-    await page.evaluate(`const input=document.querySelector('.kode-collab-budget-form input');input.focus();input.select()`)
-    await page.call('Input.insertText', { text: '150' })
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='核对预算修改').click()`)
+    // No budget entry for now (owner decision); the existing budget record stays as it was.
+    assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('button')).some(b=>/预算/.test(b.textContent+(b.getAttribute('aria-label')??'')))`), false, 'no budget entry in the DM')
     assert.equal((await hub.client.call('/api/v1/messaging/budgets/budget')).budget.limit, 100)
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='确认修改团队预算').click()`)
-    await wait(`document.querySelector('.kode-collab-budget-form').innerText.includes('团队预算已保存')`)
-    assert.equal((await hub.client.call('/api/v1/messaging/budgets/budget')).budget.limit, 150)
-
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '收起预算').click()`)
 
     await hub.client.call(`/api/v1/messaging/conversations/${team.conversation_id}/messages`, { request_id: 'external-message', content: '另一入口提交的新消息' })
     await wait(`Array.from(document.querySelectorAll('.kode-collab-message-content')).some(node => node.textContent === '另一入口提交的新消息')`)
-    assert.equal(await page.evaluate(`document.querySelector('textarea').value`), '尚未发送的下一条需求')
+    assert.equal(await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').textContent`), '尚未发送的下一条需求')
     assert.ok(streamsOpened > 0); assert.equal(externalStreamEvents, 1)
 
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '团队管理').click()`)
+    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'SuperAgent 设置').click()`)
+    await wait(`Array.from(document.querySelectorAll('.kode-superagent-settings button')).some(button => button.textContent === '展开高级设置')`)
+    await page.evaluate(`Array.from(document.querySelectorAll('.kode-superagent-settings button')).find(button => button.textContent === '展开高级设置').click()`)
     await wait(`Array.from(document.querySelectorAll('.kode-collab-team-management button')).some(button => button.textContent === '核对激活条件' && !button.disabled)`)
     await page.evaluate(`Array.from(document.querySelectorAll('.kode-collab-team-management button')).find(button => button.textContent === '核对激活条件').click()`)
     await wait(`document.querySelector('.kode-collab-team-management')?.innerText.includes('无需重复激活')`)
     assert.ok(await page.evaluate(`document.querySelector('.kode-collab-team-management .kode-collab-team-deactivation') !== null`), 'Hub activation exposes deactivation without a local activation receipt')
     assert.equal(activationWrites, 0)
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '收起团队管理').click()`)
+    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === '关闭设置').click()`)
 
     await hub.client.call('/api/v1/messaging/work-runs', { id: 'render-work', request_id: 'render-work', team_id: 'team', team_revision: 1, binding_id: 'local', inputs: { request: '查看任务过程的需求' }, prior_run_id: null })
     await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '工作过程').click()`)
@@ -220,15 +224,15 @@ test('actual collab React seats render contacts, send once and retain draft acro
 
 
 
-    assert.equal(await page.evaluate(`document.querySelector('textarea').value`), '尚未发送的下一条需求')
+    assert.equal(await page.evaluate(`document.querySelector('.kode-collab-composer [role=textbox][contenteditable=true]').textContent`), '尚未发送的下一条需求')
 
     assert.ok(await page.evaluate(`getComputedStyle(document.body).getPropertyValue('--dsw-alias-bg-base').trim()`))
     assert.deepEqual(await page.evaluate('fixtureErrors'), [])
-    assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('.kode-collab-contact[aria-current]')).backgroundColor !== getComputedStyle(document.querySelector('.kode-collab-contacts')).backgroundColor`), true)
+    assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('[data-sidebar-row=team][aria-current]')).backgroundColor !== getComputedStyle(document.querySelector('.kode-collab-unified-sidebar')).backgroundColor`), true)
     await hub.client.call('/api/v1/messaging/superagents/drafts', { id: 'saved-draft', request_id: 'save-draft', expected_revision: 0, revoked: false, interview: { purpose: '搭建前端开发团队', workspace_refs: [], answers: {}, questions: [{ id: 'delivery', prompt: '这项工作的交付终点是什么？' }], proposed_team: null } })
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '团队搭建助手').click()`)
+    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === '邀请成员').click()`)
     await wait(`document.querySelector('.kode-collab-builder')?.innerText.includes('搭建前端开发团队')`)
-    await page.evaluate(`document.querySelector('.kode-collab-builder .kode-collab-contact').click()`)
+    await page.evaluate(`document.querySelector('[data-sidebar-row=builder]').click()`)
     await wait(`document.querySelector('.kode-collab-builder').innerText.includes('这项工作的交付终点是什么？')`)
     await page.evaluate(`document.querySelector('.kode-collab-builder textarea').focus()`)
     await page.call('Input.insertText', { text: '本地验证通过并提供可评审的改动' })
@@ -237,10 +241,10 @@ test('actual collab React seats render contacts, send once and retain draft acro
     const answered = await hub.client.call('/api/v1/messaging/superagents/drafts/saved-draft')
     assert.equal(answered.revision, 2); assert.equal(answered.interview.answers.delivery, '本地验证通过并提供可评审的改动')
     await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '返回草案列表').click()`)
-    await wait(`document.querySelector('.kode-collab-builder-create textarea')`)
-    await page.evaluate(`document.querySelector('.kode-collab-builder-create textarea').focus()`)
+    await wait(`document.querySelector('.kode-collab-builder-create [role=textbox][contenteditable=true]')`)
+    await page.evaluate(`document.querySelector('.kode-collab-builder-create [role=textbox][contenteditable=true]').focus()`)
     await page.call('Input.insertText', { text: '维护通用研发工具' })
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '保存目标并继续').click()`)
+    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === '保存目标并继续').click()`)
     await wait(`document.querySelector('.kode-collab-builder h2')?.textContent === '维护通用研发工具'`)
     const createdDrafts = (await hub.client.call('/api/v1/messaging/superagents/drafts')).items
     assert.equal(createdDrafts.length, 2)
@@ -386,18 +390,16 @@ test('actual collab React seats render contacts, send once and retain draft acro
     await wait(`document.querySelector('.kode-collab-team-activation')?.innerText.includes('权限未配置、已撤销或已过期')`)
     assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('button')).some(button => button.textContent === '确认激活此版本团队')`), false)
     assert.equal((await hub.client.call('/api/v1/messaging/teams/' + acceptedTeam.id + '/activation-review', { team_revision: acceptedTeam.revision, request_id: 'verify-inactive' })).activation, null)
-    for (const [label, value] of [['团队预算单位', 'credits'], ['初始团队总额度', '100'], ['单次工作预留上限', '10']]) {
-      await page.evaluate(`document.querySelector('[aria-label="${label}"]').focus()`)
-      await page.call('Input.insertText', { text: value })
-    }
-    await page.evaluate(`(() => { const input = document.querySelector('[aria-label="团队预算到期时间"]'); const date = new Date(Date.now() + 3600000); date.setMinutes(date.getMinutes() - date.getTimezoneOffset()); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, date.toISOString().slice(0,16)); input.dispatchEvent(new Event('input', { bubbles: true })); })()`)
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '核对初始团队预算').click()`)
-    await wait(`document.querySelector('.kode-collab-initial-budget')?.innerText.includes('确认创建团队预算')`)
-    await assert.rejects(hub.client.call('/api/v1/messaging/team-policies/browser-budget-policy'), /404/)
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '确认创建团队预算').click()`)
-    await wait(`document.querySelector('.kode-collab-initial-budget')?.innerText.includes('恢复原初始预算')`)
-    await page.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === '恢复原初始预算').click()`)
-    await wait(`document.querySelector('.kode-collab-initial-budget')?.innerText.includes('初始团队预算与策略已保存')`)
+    // No initial-budget entry in the UI for now (owner decision). The test seeds the same owner route the
+    // removed form used (POST /api/kode/teams/budget, replayed after a lost response), so activation still
+    // reviews a real policy; nothing here is an unlimited default.
+    assert.equal(await page.evaluate(`!!document.querySelector('.kode-collab-initial-budget')`), false)
+    const seededBudget = { team_id: acceptedTeam.id, command: { request_id: 'seed-initial-budget', team_revision: acceptedTeam.revision,
+      budget: { id: 'seed-initial-budget', scope: 'team', scope_id: acceptedTeam.id, unit: 'credits', limit: 100, starts_at: Date.now(), ends_at: Date.now() + 3600000, expected_revision: 0 },
+      initial_policy: { max_assignment_charge: 10 } } }
+    const postBudget = () => page.evaluate(`fetch('/api/kode/teams/budget',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:${JSON.stringify(JSON.stringify(seededBudget))}}).then(r=>r.status)`)
+    assert.equal(await postBudget(), 503)
+    assert.equal(await postBudget(), 200)
     assert.equal(initialBudgetWrites, 2)
     const initialPolicy = await hub.client.call('/api/v1/messaging/team-policies/browser-budget-policy')
     assert.equal(initialPolicy.revision, 1); assert.equal(initialPolicy.policy.max_assignment_charge, 10)

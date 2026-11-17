@@ -1,0 +1,41 @@
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -424,7 +424,7 @@
+ 									}) })
+ 								})]
+ 							});
+-							return darwinDesktop ? (0, react_jsx_runtime.jsx)("span", {
++							const native = darwinDesktop ? (0, react_jsx_runtime.jsx)("span", {
+ 								className: clsx(SidebarRoot_module_css_default.brand, SidebarRoot_module_css_default.wide),
+ 								children: identity
+ 							}) : (0, react_jsx_runtime.jsx)("button", {
+@@ -435,9 +435,10 @@
+ 								onClick: openNewSession,
+ 								children: identity
+ 							});
++						return renderSlot("sidebar.brand.control", { wide, identity }, { fallback: native });
+ 						})(), !darwinDesktop && toggle]
+ 					}),
+-					(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
++					(() => { const native = (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+ 						label: t("session.new.label"),
+ 						shortcutKeys: newShortcut?.keys,
+ 						delayMs: 500,
+@@ -464,7 +465,7 @@
+ 								children: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.ShortcutKeys, { keys: newShortcut.keys })
+ 							})]
+ 						})
+-					}),
++					}); return renderSlot("sidebar.primary.action", { wide, native }, { fallback: native }); })(),
+ 					panels.length > 0 && (0, react_jsx_runtime.jsxs)("nav", {
+ 						className: SidebarRoot_module_css_default.panelList,
+ 						"aria-label": t("panels.label"),
+@@ -612,6 +613,8 @@
+ 				name: "sidebar",
+ 				locale: NS,
+ 				children: {
++					"sidebar.brand.control": { kind: "single", scope: "root" },
++					"sidebar.primary.action": { kind: "single", scope: "root" },
+ 					"sidebar.brand.mark": {
+ 						kind: "single",
+ 						scope: "root"

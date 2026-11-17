@@ -8,6 +8,7 @@ function fixture(open = () => {}) {
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() })
   const scope = {
     h, React: { Fragment: 'fragment', useRef: value => ({ current: value }) },
+    useSyncExternalStore: (_, getSnapshot) => getSnapshot(),
     useState: value => [typeof value === 'function' ? value() : value, () => {}], useEffect(fn) { fn() },
     transport: { current: 'local' }, requestedServiceHost: undefined, requestedSettingsSection: undefined,
     window: { dispatchEvent() {}, addEventListener() {}, removeEventListener() {} }, CustomEvent: class {}, requestAnimationFrame() {},
@@ -68,4 +69,20 @@ test('integration and mobile errors link to service management instead of offeri
     assert.equal(tree.some(node => node.type === 'recovery'), false)
   }
   assert.equal(nodes(scope.HostServiceStatus({ host: 'local' })).find(node => node.type === 'recovery').props.host, 'local')
+})
+
+
+test('optional Kode settings registry rejects duplicates and disposes safely', () => {
+  const { scope } = fixture()
+  const registry = scope.createSettingsFacade()
+  let updates = 0
+  const stop = registry.subscribe(() => updates++)
+  const remove = registry.register({ id: 'collaboration', label: '协作', component() {} })
+  assert.equal(registry.getSnapshot().length, 1)
+  assert.throws(() => registry.register({ id: 'collaboration', label: '重复', component() {} }), /Duplicate/)
+  assert.throws(() => registry.register({ id: 'agents', label: '替换', component() {} }), /Duplicate/)
+  assert.throws(() => registry.register({ id: '../bad', label: '错误', component() {} }), /Invalid/)
+  remove(); remove(); stop()
+  assert.equal(registry.getSnapshot().length, 0)
+  assert.equal(updates, 2)
 })

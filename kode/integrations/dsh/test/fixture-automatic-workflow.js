@@ -1,3 +1,5 @@
+import { createClarificationFixture } from './support/collaboration-clarification-fixture.js'
+import { createCollaborationExecutionFixture } from './support/collaboration-execution-fixture.js'
 import { waiveStageInBrowser } from './support/stage-waiver-browser.js'
 import { acceptDeliveryInBrowser } from './support/human-delivery-browser.js'
 import { prepareWorkRunAssignment } from '../src/work-run-preparation.js'
@@ -41,7 +43,13 @@ const sharedExpert = process.env.KODE_TEST_SHARED_EXPERT_PRESSURE === '1'
 const parallelTaskWorkspace = process.env.KODE_TEST_TASK_WORKTREE_PARALLEL === '1'
 const alternateExpert = process.env.KODE_TEST_STAGE_ESCALATION_ALTERNATE === '1'
 const stageEscalation = process.env.KODE_TEST_STAGE_ESCALATION === '1'
+const collaborationQuestion = process.env.KODE_TEST_COLLABORATION_QUESTION === '1'
+const collaborationCancel = process.env.KODE_TEST_COLLABORATION_CANCEL === '1'
+const collaborationClarification = process.env.KODE_TEST_COLLABORATION_CLARIFICATION === '1'
+const collaborationTask = collaborationQuestion || collaborationCancel || collaborationClarification
 const selected = process.env.KODE_TEST_AUTOMATIC_SCENARIO
+if(collaborationQuestion&&selected!=='success')throw Error('Collaboration question fixture requires success scenario')
+if(collaborationCancel&&!['cancel-busy','cancel-tool'].includes(selected))throw Error('Collaboration cancel fixture requires active cancellation scenario')
 const humanAcceptance = process.env.KODE_TEST_HUMAN_ACCEPTANCE === '1'
 const humanReject = process.env.KODE_TEST_HUMAN_ACCEPTANCE_CHOICE === 'reject'
 if (humanAcceptance && selected !== 'success') throw Error('Human acceptance fixture requires success scenario')
@@ -148,7 +156,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       starts_at: Date.now() - 1000, ends_at: Date.now() + fixtureLifetime, expected_revision: 0 })
     if(sharedMode)await hub.client.call(`${root}/budgets`,{id:'shared-budget',scope:'shared',scope_id:'account',unit:'credits',limit:sharedExpert?62:100,starts_at:Date.now()-1000,ends_at:Date.now()+fixtureLifetime,expected_revision:0})
     const budgetCommand = { id: 'budget-policy', team_id: 'team', expected_revision: 0,
-      policy: { kind: 'budget', budget_ids: sharedMode ? ['budget','shared-budget'] : ['budget'], unit: 'credits', max_assignment_charge: sharedExpert?20:10, ...(mandateMode ? { settlement: 'internal_price' } : {}) } }
+      policy: { kind: 'budget', budget_ids: sharedMode ? ['budget','shared-budget'] : ['budget'], unit: 'credits', max_assignment_charge: collaborationClarification?20:sharedExpert?20:10, ...(mandateMode ? { settlement: 'internal_price' } : {}) } }
     const budget = await hub.client.call(`${root}/team-policies`, budgetCommand)
     const scheduleCommand = { id: 'schedule-policy', team_id: 'team', expected_revision: 0,
       policy: { kind: 'scheduling', targets: { target: { resource: { host: hub.node, profile: 'profile', account_id: 'account', account_epoch: 1,
@@ -169,7 +177,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         account_binding_id: 'account', capability_profile_revision: '1' }], workers: [], coordinator_targets: ['target'], workflow_pack_refs: [versionRef(workflow)],
       delivery_bindings: [{ id: 'local', workflow: versionRef(workflow), project: versionRef(project), delivery_policy: versionRef(delivery) }],
       grant_id: 'grant', budget_policy_id: 'budget-policy', scheduling_policy_id: 'schedule-policy',
-      limits: { max_active_assignments: parallelTaskWorkspace ? 2 : completeMode ? 1 : 2, max_active_runs: 8 }, proactive_mode: 'off' }
+      limits: { max_active_assignments: parallelTaskWorkspace || collaborationClarification ? 2 : completeMode ? 1 : 2, max_active_runs: 8 }, proactive_mode: 'off' }
     if (pipelineMode) {
       spec.execution_targets.push({ ...spec.execution_targets[0], id: 'aaa-alternate', ...(alternateExpert ? { model_id: 'expert-model' } : {}) })
       spec.coordinator_targets.unshift('aaa-alternate')
@@ -179,7 +187,8 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       targets: [{ host: hub.node, workspace: 'workspace', root: workspaceRoot }], capabilities: modelToolMode || reworkMode ? ['read', 'workspace_write'] : ['read'], tools: pipelineMode ? ['kode_verify_output', 'kode_publish_output', ...(modelToolMode || reworkMode ? ['kode_capture_output', 'kode_review_output', 'kode_list_source', 'kode_read_source', 'kode_write_source'] : [])] : ['fixture_inspect'], network: false, budget_ids: sharedMode ? ['budget','shared-budget'] : ['budget'] } }
     let grant = (await hub.client.call(`${root}/team-grants`, grantCommand)).grant
     const request = { id: 'before', request_id: 'before', team_id: 'team', team_revision: 1, binding_id: 'local', inputs: { request: sharedMode ? 'Change source.txt to team-a source.' : 'Change source.txt to repaired source.' }, prior_run_id: null }
-    const initial = await hub.client.call(runs, request)
+    let runId = 'before', collaboration
+    if(!collaborationTask)await hub.client.call(runs, request)
     const command = { action: 'activate', request_id: 'activate', expected_revision: 0, team_revision: 1, grant_revision: grant.revision,
       budget_policy: policyRef(budget), scheduling_policy: policyRef(schedule) }
 
@@ -194,8 +203,9 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
     if (alternateExpert) await hub.client.call(`${root}/capability-profiles`, { id: 'expert-capability', expected_revision: 0, host: hub.node, profile: 'profile', model: 'expert-model', assessments: {
       specialist: { evaluation: { kind: 'task_fit', tag: 'specialist', score: 95 }, source: 'user', confidence: 0.9, evidence: [], pinned: false, updated_at: at - 1000, valid_until: at + fixtureLifetime },
     } })
-    await hub.client.call(`${root}/assignment-capacities`, { account_id: 'account', expected_revision: 0, max_active_assignments: parallelTaskWorkspace || exclusiveResources&&sharedMode?2:1 })
+    await hub.client.call(`${root}/assignment-capacities`, { account_id: 'account', expected_revision: 0, max_active_assignments: collaborationClarification || parallelTaskWorkspace || exclusiveResources&&sharedMode?2:1 })
     await hub.client.call(path, command)
+    if(collaborationTask){collaboration=collaborationClarification?await createClarificationFixture(hub,workspace):await createCollaborationExecutionFixture(hub,workspace,request.inputs.request);runId=collaboration.runId}
     let verificationDefinitionB, sharedWorkspaceRoot
     if(sharedMode){
       // Both teams register the same Git workspace. Per-run worktrees provide write isolation.
@@ -231,8 +241,8 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       const until = Date.now() + 30000
       while (true) {
         const held = []
-        for (const runId of ['before', 'second']) {
-          const run = await hub.client.call(`${runs}/${runId}`)
+        for (const fixtureRunId of [runId, 'second']) {
+          const run = await hub.client.call(`${runs}/${fixtureRunId}`)
           const stage = run.stages.find(row => row.stage_id === 'inspect')
           if (!stage?.assignment_id) break
           const assignment = await hub.client.call(`${root}/work-assignments/${stage.assignment_id}`)
@@ -257,6 +267,12 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
     ctx.on('agent/error', event => errors.push(event.error.message))
     class Fixture extends LlmAdapter { async *stream(options) {
       inferenceCalls++
+      if(collaborationClarification && await collaboration.stream(execution,options)){
+        yield {type:'usage',usage:{inputTokens:1,outputTokens:1,cacheReadTokens:0,cacheWriteTokens:0}}
+        yield {type:'finish',reason:{kind:'stop'}}
+        return
+      }
+      if(collaborationQuestion){const assignment=await hub.client.call(`${root}/work-assignments/${profiles.binding(options.sessionId).managedAssignment.id}`);await collaboration.duringActiveInference(assignment,options.messages)}
       if (stageEscalation) {
         const assignment = await hub.client.call(`${root}/work-assignments/${profiles.binding(options.sessionId).managedAssignment.id}`)
         assert.equal(options.model, assignment.candidate.selection_policy.model, 'actual adapter model must match admitted assignment')
@@ -292,7 +308,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
           if (step === 0) {
             tool = 'kode_read_source'; args = { path: 'source.txt' }
           } else if (step === 1) {
-            assert.equal(previous.text, sharedMode ? sharedExpert&&sessionAttempts.get(options.sessionId)>1?'candidate source':'fixture source' : interventionMode && implementationRound > 1 ? 'owner source' : implementationRound === 1 ? 'fixture source' : 'candidate source')
+            assert.equal(previous.text, collaborationClarification ? 'fixture source' : sharedMode ? sharedExpert&&sessionAttempts.get(options.sessionId)>1?'candidate source':'fixture source' : interventionMode && implementationRound > 1 ? 'owner source' : implementationRound === 1 ? 'fixture source' : 'candidate source')
             tool = 'kode_write_source'; args = { path: 'source.txt', expected_sha256: previous.sha256, content: desiredSource(options.sessionId) }
           } else if (step === 2) {
             assert.equal(previous.state, limitMode && implementationRound === 2 ? 'already_present' : 'written')
@@ -440,6 +456,11 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
     if (mode === 'cancel-tool' || interventionMode || sharedMode || escalationBudgetBlocked || waiverMiddle) execution.verificationRunners.register(verificationDefinition)
     if(sharedMode)execution.verificationRunners.register(verificationDefinitionB)
     service.start()
+    if(collaborationClarification){
+      execution.verificationRunners.register(verificationDefinition)
+      t.diagnostic(JSON.stringify(await collaboration.finish(execution,service,states,errors)))
+      return
+    }
     if (waiverDecision) {
       const deadline = Date.now() + 45000
       while (!waiverInspected) {
@@ -449,8 +470,8 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       }
       let waiverAcceptanceConfirmed = false
       if (waiverDelivery) {
-        while ((await hub.client.call(`${runs}/before`)).state !== 'completed') {
-          const pending = await hub.client.call(`${runs}/before`)
+        while ((await hub.client.call(`${runs}/${runId}`)).state !== 'completed') {
+          const pending = await hub.client.call(`${runs}/${runId}`)
           if (humanAcceptance && pending.waiting_reason === 'human_delivery_acceptance_required') {
             assert.equal(waiverAcceptanceConfirmed, false)
             assert.equal(pending.completion_authorized, false)
@@ -464,7 +485,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         }
       }
       await service.close(); service = undefined
-      const waived = await hub.client.call(`${runs}/before`)
+      const waived = await hub.client.call(`${runs}/${runId}`)
       if (!waiverDelivery) assert.deepEqual(waived, waiverReceipt)
       assert.equal(waived.state, waiverDelivery ? 'completed' : 'waiting_user')
       assert.equal(waived.waiting_reason, waiverDelivery ? null : 'waiver_delivery_disallowed')
@@ -498,14 +519,14 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       assert.equal(inferenceCalls, waiverRework ? 20 : waiverMiddle ? 8 : 9)
       const budget = (await hub.client.call(`${root}/budgets/budget`)).budget
       assert.equal(budget.spent, waiverRework ? 40 : waiverMiddle ? 16 : 18); assert.equal(budget.reserved, 0)
-      if (!waiverDelivery) await assert.rejects(hub.client.call(`${runs}/before/delivery`, { request_id: 'bypass-waiver-policy', expected_revision: waived.revision }), /unavailable/)
+      if (!waiverDelivery) await assert.rejects(hub.client.call(`${runs}/${runId}/delivery`, { request_id: 'bypass-waiver-policy', expected_revision: waived.revision }), /unavailable/)
       await hub.stop('SIGKILL'); await hub.start()
-      assert.deepEqual(await hub.client.call(`${runs}/before/stages/${waiverTarget}/waiver`, waiverCommand), waiverReceipt)
-      assert.deepEqual((await hub.client.call(`${runs}/before/stages/${waiverTarget}/waiver-requests/${waiverCommand.request_id}`)).receipt.result, waiverReceipt)
-      const events = (await hub.client.call(`${runs}/before/events`)).events
+      assert.deepEqual(await hub.client.call(`${runs}/${runId}/stages/${waiverTarget}/waiver`, waiverCommand), waiverReceipt)
+      assert.deepEqual((await hub.client.call(`${runs}/${runId}/stages/${waiverTarget}/waiver-requests/${waiverCommand.request_id}`)).receipt.result, waiverReceipt)
+      const events = (await hub.client.call(`${runs}/${runId}/events`)).events
       assert.equal(events.filter(row => row.data.kind === 'stage_waived').length, 1)
       assert.equal(events.filter(row => row.data.kind === 'work_run_delivered').length, waiverDelivery ? 1 : 0)
-      assert.deepEqual(await hub.client.call(`${runs}/before`), waived, 'historical waiver replay cannot undo finalization')
+      assert.deepEqual(await hub.client.call(`${runs}/${runId}`), waived, 'historical waiver replay cannot undo finalization')
       assert.deepEqual(errors, [])
       return
     }
@@ -513,17 +534,17 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       const until = Date.now() + 45000
       let pending
       while (true) {
-        pending = await hub.client.call(`${runs}/before`)
+        pending = await hub.client.call(`${runs}/${runId}`)
         const budget = await hub.client.call(`${root}/budgets/budget`)
         if (pending.reworks?.length === 1 && budget.budget.spent === 24 && states.at(-1)?.state === 'waiting_resource') break
         assert.ok(Date.now() < until, 'expected budget wait: ' + JSON.stringify({ state: pending.state, states: states.slice(-8), progression: progression.slice(-3) }))
         await new Promise(resolve => setTimeout(resolve, 30))
       }
       assert.equal(pending.waiting_reason, 'team_budget_exhausted')
-      const waitEvents = (await hub.client.call(`${runs}/before/events`)).events
+      const waitEvents = (await hub.client.call(`${runs}/${runId}/events`)).events
       assert.equal(waitEvents.filter(row => row.data.kind === 'work_run_budget_wait').length, 1)
       await new Promise(resolve => setTimeout(resolve, 350))
-      assert.equal((await hub.client.call(`${runs}/before`)).revision, pending.revision,
+      assert.equal((await hub.client.call(`${runs}/${runId}`)).revision, pending.revision,
         'unchanged budget waits must not churn revisions or postpone coordinator notification')
       assert.equal(inferenceCalls, 12); assert.equal(observedModels.size, 3)
       assert.ok([...observedModels.values()].every(model => model === 'model'))
@@ -531,11 +552,11 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       assert.equal(pending.completion_authorized, false)
       const ledger = await hub.client.call(`${root}/budgets/budget`)
       assert.equal(ledger.budget.spent, 24); assert.equal(ledger.budget.reserved, 0)
-      const plan = await hub.client.call(`${runs}/before/stages/inspect/plan`)
+      const plan = await hub.client.call(`${runs}/${runId}/stages/inspect/plan`)
       assert.equal(plan.candidates.find(row => row.target_id === 'target').recommendation.recommended, false)
-      await assert.rejects(hub.client.call(`${runs}/before/stages/inspect/assignments`, { request_id: 'unsafe-fallback', expected_revision: pending.revision, target_id: 'target', worker_id: null }), /not recommended/)
-      await assert.rejects(hub.client.call(`${runs}/before/stages/inspect/assignments`, { request_id: 'unfunded-expert', expected_revision: pending.revision, target_id: 'aaa-alternate', worker_id: null }), /budget|fund|insufficient/)
-      assert.equal((await hub.client.call(`${runs}/before`)).revision, pending.revision)
+      await assert.rejects(hub.client.call(`${runs}/${runId}/stages/inspect/assignments`, { request_id: 'unsafe-fallback', expected_revision: pending.revision, target_id: 'target', worker_id: null }), /not recommended/)
+      await assert.rejects(hub.client.call(`${runs}/${runId}/stages/inspect/assignments`, { request_id: 'unfunded-expert', expected_revision: pending.revision, target_id: 'aaa-alternate', worker_id: null }), /budget|fund|insufficient/)
+      assert.equal((await hub.client.call(`${runs}/${runId}`)).revision, pending.revision)
       assert.equal((await hub.client.call(`${root}/budgets/budget`)).budget.reserved, 0)
       assert.deepEqual(errors, [])
       // An owner can raise the team allowance; the existing service must resume by itself.
@@ -554,7 +575,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       const until=Date.now()+45000
       let pending,ledger
       while(true){
-        pending=await Promise.all(['before','second'].map(id=>hub.client.call(`${runs}/${id}`)))
+        pending=await Promise.all([runId,'second'].map(id=>hub.client.call(`${runs}/${id}`)))
         ledger=(await hub.client.call(`${root}/budgets/shared-budget`)).budget
         assert.ok(ledger.spent+ledger.reserved<=ledger.limit,'shared allowance cannot be over-reserved')
         if(pending.every(run=>(run.reworks??[]).length===1&&run.stages.every(stage=>stage.assignment_id===null)
@@ -578,7 +599,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
     if(sharedMode){
       const until=Date.now()+45000;let completed
       while(true){
-        completed=await Promise.all(['before','second'].map(id=>hub.client.call(`${runs}/${id}`)))
+        completed=await Promise.all([runId,'second'].map(id=>hub.client.call(`${runs}/${id}`)))
         if(completed.every(r=>r.state==='completed'))break
         if (Date.now() >= until) {
           // Retain bounded evidence before finally removes this isolated Hub.
@@ -699,27 +720,27 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         try { return JSON.parse(await readFile(toolMarker, 'utf8')).state === 'running' }
         catch (error) { if (error.code === 'ENOENT') return false; throw error }
       }, 'verification process did not start')
-      const live = await hub.client.call(`${runs}/before`)
+      const live = await hub.client.call(`${runs}/${runId}`)
       assert.deepEqual(live.stages.map(stage => stage.state), ['passed', 'passed', 'ready'])
       const oldAssignments = await Promise.all(live.stages.map(stage => hub.client.call(`${root}/work-assignments/${stage.assignment_id}`)))
       const current = oldAssignments[2], assignmentPath = `${root}/work-assignments/${current.id}`
-      const diagnostic = await hub.client.call(`${runs}/before/diagnostics?run_revision=${live.revision}`)
+      const diagnostic = await hub.client.call(`${runs}/${runId}/diagnostics?run_revision=${live.revision}`)
       assert.equal(diagnostic.items.length, 3); assert.equal(diagnostic.read_only, true)
-      assert.deepEqual(await hub.client.call(`${runs}/before`), live)
+      assert.deepEqual(await hub.client.call(`${runs}/${runId}`), live)
       let lostTakeover = false, lostStop = false
       const call = hub.client.call.bind(hub.client)
       hub.client.call = async (...args) => {
         const result = await call(...args)
-        if (args[0] === `${runs}/before` && args[1]?.action === 'takeover' && !lostTakeover) { lostTakeover = true; throw Error('lost takeover reply') }
+        if (args[0] === `${runs}/${runId}` && args[1]?.action === 'takeover' && !lostTakeover) { lostTakeover = true; throw Error('lost takeover reply') }
         if (args[0] === `${assignmentPath}/stop-receipt` && !lostStop) { lostStop = true; throw Error('lost intervention stop reply') }
         return result
       }
       const command = { action: 'takeover', request_id: 'owner-takeover', expected_revision: live.revision, reason: 'Inspect the active verification and change the workspace' }
-      await assert.rejects(hub.client.call(`${runs}/before`, command), /lost takeover reply/)
-      const intent = await hub.client.call(`${runs}/before`, command)
+      await assert.rejects(hub.client.call(`${runs}/${runId}`, command), /lost takeover reply/)
+      const intent = await hub.client.call(`${runs}/${runId}`, command)
       assert.equal(intent.state, 'taking_over'); assert.equal(intent.intervention.stop_confirmed, false)
-      await wait(async () => (await hub.client.call(`${runs}/before`)).state === 'paused', 'takeover did not confirm pause')
-      const paused = await hub.client.call(`${runs}/before`)
+      await wait(async () => (await hub.client.call(`${runs}/${runId}`)).state === 'paused', 'takeover did not confirm pause')
+      const paused = await hub.client.call(`${runs}/${runId}`)
       assert.equal(paused.completion_authorized, false); assert.equal(paused.intervention.stop_confirmed, true)
       assert.equal(paused.intervention.accounting, 'finalized'); assert.equal(lostStop, true)
       const drained = await hub.client.call(assignmentPath)
@@ -736,12 +757,12 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       await writeFile(join(ownerTaskRoot, 'source.txt'), 'owner source')
       hub.client.call = call
       await hub.stop('SIGKILL'); await hub.start()
-      assert.deepEqual(await hub.client.call(`${runs}/before`), paused)
+      assert.deepEqual(await hub.client.call(`${runs}/${runId}`), paused)
       const resume = { action: 'resume', request_id: 'owner-resume', expected_revision: paused.revision, reason: 'Revalidate the manually edited source' }
-      const resumed = await hub.client.call(`${runs}/before`, resume)
+      const resumed = await hub.client.call(`${runs}/${runId}`, resume)
       assert.equal(resumed.state, 'waiting_resource'); assert.equal(resumed.id, live.id)
       assert.ok(resumed.stages.every(stage => stage.state === 'pending' && stage.assignment_id === null && stage.evidence === undefined))
-      assert.deepEqual(await hub.client.call(`${runs}/before`, command), intent)
+      assert.deepEqual(await hub.client.call(`${runs}/${runId}`, command), intent)
       const nextController = new WorkRunController(dispatcher, { prepare: (assignment, options) => prepareWorkRunAssignment(execution, assignment, options) })
       const nextAdvance = nextController.advance.bind(nextController)
       nextController.advance = async id => {
@@ -750,12 +771,17 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       }
       service = await new WorkRunService(nextController, { intervalMs: 100, onState: state => states.push(state) }).open()
       service.start()
+    if(collaborationClarification){
+      execution.verificationRunners.register(verificationDefinition)
+      t.diagnostic(JSON.stringify(await collaboration.finish(execution,service,states,errors)))
+      return
+    }
       await wait(async () => {
-        assert.ok(!service.rows.before?.blocked || service.rows.before.revision < resumed.revision, JSON.stringify(progression.slice(-3)))
-        return (await hub.client.call(`${runs}/before`)).state === 'completed'
+        assert.ok(!service.rows[runId]?.blocked || service.rows[runId].revision < resumed.revision, JSON.stringify(progression.slice(-3)))
+        return (await hub.client.call(`${runs}/${runId}`)).state === 'completed'
       }, 'resumed work did not finish revalidation')
       await service.close(); service = undefined
-      const completed = await hub.client.call(`${runs}/before`)
+      const completed = await hub.client.call(`${runs}/${runId}`)
       assert.deepEqual(completed.stages.map(stage => [stage.state, stage.attempt]), [['passed', 2], ['passed', 2], ['passed', 2]])
       assert.equal(completed.completion_authorized, true)
       const fresh = await Promise.all(completed.stages.map(stage => hub.client.call(`${root}/work-assignments/${stage.assignment_id}`)))
@@ -768,7 +794,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       const freshInspect= fresh.find(assignment => assignment.stage_id === 'inspect')
       await assertTaskSource(freshInspect, 'repaired source')
       assert.equal(freshInspect.execution_workspace.receipt.starting_snapshot.basis,'owner_resumed_task')
-      const events = (await hub.client.call(`${runs}/before/events`)).events
+      const events = (await hub.client.call(`${runs}/${runId}/events`)).events
       for (const kind of ['work_run_takeover_requested', 'work_run_paused', 'work_run_resumed', 'work_run_delivered']) assert.equal(events.filter(event => event.data.kind === kind).length, 1)
       assert.deepEqual(events.find(event => event.data.kind === 'work_run_resumed').data.superseded, paused.stages)
       assert.deepEqual(errors, [])
@@ -784,8 +810,8 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       // The cancellation marker belongs to verification, after two real predecessor stages.
       // Give each phase its own bounded readiness check instead of timing all three as one launch.
       if (toolMode) for (const stage of ['inspect','followup']) await wait(async () => {
-        assert.ok(!states.some(s=>s.state==='progression_failed'),'workflow failed before tool cancellation')
-        const run=await hub.client.call(`${runs}/before`)
+        assert.ok(!states.some(s=>s.state==='progression_failed'),'workflow failed before tool cancellation: '+JSON.stringify({states:states.slice(-8),progression:progression.slice(-8),errors}))
+        const run=await hub.client.call(`${runs}/${runId}`)
         return run.stages.find(s=>s.stage_id===stage)?.state==='passed'
       }, `${stage} did not complete before cancellation setup`)
       await wait(async () => {
@@ -793,7 +819,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         try { processMarker = JSON.parse(await readFile(toolMarker, 'utf8')); return processMarker.state === 'running' }
         catch (error) { if (error.code === 'ENOENT') return false; throw error }
       }, 'execution did not start')
-      const live = await hub.client.call(`${runs}/before`)
+      const live = await hub.client.call(`${runs}/${runId}`)
       const assignmentPath = `${root}/work-assignments/${live.stages[toolMode ? 2 : 0].assignment_id}`
       const assignment = await hub.client.call(assignmentPath)
       const owned = host.handles.get(assignment.worker.session_id)
@@ -803,6 +829,12 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         assert.equal(exclusiveAdmissions.size,1)
         await assert.rejects(execution.exclusiveResources.acquire(['fixture-device'],'no-premature-successor'),{code:'EXCLUSIVE_RESOURCE_BUSY'})
       }
+      const cancelRequest = collaboration ? await collaboration.ownerCancelRequest() : { path: `${runs}/${runId}`, body: { action: 'request_cancel', request_id: 'cancel-busy', expected_revision: live.revision, reason: 'Stop while model is running' } }
+      const cancelPath = cancelRequest.path, cancel = cancelRequest.body
+      let stopUnconfirmedObserved = false, oldEpochFenced = false
+      const oldOperation = collaboration ? await hub.client.call(`${root}/operations/${assignment.bundle.operation.id}`) : null
+      // Temporarily unavailable ownership is not drain. Keep the actual owned handle to restore later.
+      if(collaboration)host.handles.delete(assignment.worker.session_id)
       let disposals = 0, lostRequest = false, lostStop = false
       const dispose = owned.dispose, call = hub.client.call.bind(hub.client)
       const crash = async phase => {
@@ -815,17 +847,29 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       hub.client.call = async (...args) => {
         if (args[0] === `${assignmentPath}/stop-receipt`) await crash('drained')
         const result = await call(...args)
-        if (args[0] === `${runs}/before` && args[1]?.action === 'request_cancel' && !lostRequest) { lostRequest = true; throw new Error('lost cancel request reply') }
+        if (args[0] === cancelPath && args[1]?.request_id === cancel.request_id && !lostRequest) { lostRequest = true; throw new Error('lost cancel request reply') }
         if (args[0] === `${assignmentPath}/stop-receipt` && !lostStop) { lostStop = true; throw new Error('lost cancel stop reply') }
         return result
       }
-      const cancel = { action: 'request_cancel', request_id: 'cancel-busy', expected_revision: live.revision, reason: 'Stop while model is running' }
-      await assert.rejects(hub.client.call(`${runs}/before`, cancel), /lost cancel request reply/)
-      const requested = await hub.client.call(`${runs}/before`, cancel)
+      await assert.rejects(hub.client.call(cancelPath, cancel), /lost cancel request reply/)
+      const cancelReceipt = await hub.client.call(cancelPath, cancel)
+      const requested = collaboration ? {state:cancelReceipt.command.payload.execution.state,cancellation:{stop_confirmed:cancelReceipt.command.payload.execution.stop_confirmed}} : cancelReceipt
       assert.equal(requested.state, 'cancelling'); assert.equal(requested.cancellation.stop_confirmed, false)
+      if(collaboration){
+        await wait(async()=>states.some(row=>row.state==='cancel_unconfirmed'),'missing handle must remain unconfirmed')
+        stopUnconfirmedObserved=true
+        const held=await hub.client.call(assignmentPath),heldBudget=(await hub.client.call(`${root}/budgets/budget`)).budget
+        assert.equal(held.resources.state,'held');assert.ok(heldBudget.reserved>0);assert.ok(!held.stop?.receipt)
+        const operationPath=`${root}/operations/${oldOperation.id}`
+        const stale={attempt:oldOperation.attempt,epoch:oldOperation.epoch,expected_revision:oldOperation.revision,selection_ack:oldOperation.selection_policy}
+        await assert.rejects(hub.client.call(operationPath,{...stale,action:{kind:'renew_resource',lease_ms:30000,resource:{profile:oldOperation.resource.profile,account_epoch:oldOperation.resource.account_epoch,binding_revision:oldOperation.resource.binding_revision}}}),/revision\/attempt\/epoch conflict/)
+        const report=await hub.client.call(operationPath,{...stale,action:{kind:'report',report_id:'stale-after-task-cancel',content:'Must not be accepted'}})
+        assert.equal(report.applied,false);oldEpochFenced=true
+        host.handles.set(assignment.worker.session_id,owned)
+      }
       if(exclusiveResources){const unresolved=await hub.client.call(assignmentPath);if(!unresolved.stop?.receipt)assert.equal(unresolved.resources.state,'held')}
       await wait(async () => (toolMode || busyAborted) && Boolean((await hub.client.call(assignmentPath)).stop?.receipt), 'busy execution did not drain')
-      if (toolMode) await wait(async () => (await hub.client.call(`${runs}/before`)).state === 'cancelled', 'known-cost cancellation did not finalize')
+      if (toolMode) await wait(async () => (await hub.client.call(`${runs}/${runId}`)).state === 'cancelled', 'known-cost cancellation did not finalize')
       await service.close()
       const drained = await hub.client.call(assignmentPath)
       assert.equal(drained.stop.receipt.state, 'execution_drained')
@@ -836,8 +880,8 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       assert.deepEqual(await dispatcher.stop(assignment.id), drained.stop.receipt)
       assert.equal(disposals, 1); assert.equal(inferenceCalls, expectedCalls)
       if (!toolMode) await assert.rejects(hub.client.call(`${assignmentPath}/accounting`, { request_id: 'check-unresolved', expected_revision: drained.revision }), /official usage remains unresolved/)
-      const pending = await hub.client.call(`${runs}/before`)
-      if (!toolMode) await assert.rejects(hub.client.call(`${runs}/before`, { action: 'finalize_cancel', request_id: 'no-false-final', expected_revision: pending.revision }), /cancellation pending: exact finalized accounting/)
+      const pending = await hub.client.call(`${runs}/${runId}`)
+      if (!toolMode) await assert.rejects(hub.client.call(`${runs}/${runId}`, { action: 'finalize_cancel', request_id: 'no-false-final', expected_revision: pending.revision }), /cancellation pending: exact finalized accounting/)
       const budgetBefore = (await hub.client.call(`${root}/budgets/budget`)).budget
       if (toolMode) {
         assert.equal(budgetBefore.reserved, 0); assert.equal(budgetBefore.spent, 20)
@@ -855,26 +899,27 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       }
       assert.equal(pending.completion_authorized, false)
       await hub.stop('SIGKILL'); await hub.start()
-      assert.deepEqual(await hub.client.call(`${runs}/before`, cancel), requested)
+      assert.deepEqual(await hub.client.call(cancelPath, cancel), cancelReceipt)
       assert.deepEqual((await hub.client.call(assignmentPath)).stop.receipt, drained.stop.receipt)
       assert.deepEqual((await hub.client.call(`${root}/budgets/budget`)).budget, budgetBefore)
       const resumed = new WorkRunController(dispatcher, { prepare() { throw new Error('cancellation recovery must not start work') } })
       try {
-        if (toolMode) assert.deepEqual(await resumed.advance('before'), { state: 'cancelled', run_id: 'before', receipt: pending.cancellation.receipt })
-        else assert.equal((await resumed.advance('before')).state, 'waiting_cancellation_accounting')
+        if (toolMode) assert.deepEqual(await resumed.advance(runId), { state: 'cancelled', run_id: runId, receipt: pending.cancellation.receipt })
+        else assert.equal((await resumed.advance(runId)).state, 'waiting_cancellation_accounting')
       } finally { await resumed.close() }
       assert.equal(inferenceCalls, expectedCalls); assert.equal(disposals, 1)
       assert.equal(await readFile(join(workspaceRoot, 'source.txt'), 'utf8'), 'fixture source')
       if (toolMode) {
-        const cancelledRun = await hub.client.call(`${runs}/before`)
+        const cancelledRun = await hub.client.call(`${runs}/${runId}`)
         const inspectStage = cancelledRun.stages.find(stage => stage.stage_id === 'inspect')
         await assertTaskSource(await hub.client.call(`${root}/work-assignments/${inspectStage.assignment_id}`), 'repaired source')
       }
-      const audit = await hub.client.call(`${runs}/before/events`)
+      const audit = await hub.client.call(`${runs}/${runId}/events`)
       assert.equal(audit.events.filter(row => row.data.kind === 'work_run_cancel_requested').length, 1)
       assert.equal(audit.events.filter(row => row.data.kind === 'assignment_execution_drained').length, toolMode ? 3 : 1)
       assert.equal(audit.events.filter(row => row.data.kind === 'work_run_cancelled').length, toolMode ? 1 : 0)
       assert.equal(audit.events.filter(row => row.data.kind === 'work_run_delivered').length, 0)
+      if(collaboration)t.diagnostic(JSON.stringify({task_cancel:mode,stop_unconfirmed_observed:stopUnconfirmedObserved,old_epoch_fenced:oldEpochFenced,lost_cancel_reply_retried:lostRequest,lost_stop_reply_retried:lostStop,drained:drained.stop.receipt.state,operation:drained.stop.receipt.operation.state,run:pending.state,resources:drained.resources.state,reserved:budgetBefore.reserved,spent:budgetBefore.spent,restart_recovered:true,completion_authorized:pending.completion_authorized,external_provider_calls:0}))
       return
     }
     // Functional delivery includes two full attempts and durable 200 KiB log archival.
@@ -882,21 +927,21 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
     const deadline = Date.now() + 45000
     let delivered, registered = escalationBudgetBlocked, humanConfirmed = false
     while (true) {
-      delivered = await hub.client.call(`${runs}/before`)
+      delivered = await hub.client.call(`${runs}/${runId}`)
       if (delivered.state === 'completed' || (limitMode && delivered.state === 'waiting_user' && states.at(-1)?.state === 'waiting_user')) break
       if (humanAcceptance && delivered.waiting_reason === 'human_delivery_acceptance_required') {
         assert.equal(humanConfirmed, false)
         assert.equal(delivered.completion_authorized, false)
         assert.ok(delivered.stages.every(stage => stage.state === 'passed'))
         assert.equal(inferenceCalls, 12)
-        const decisionPath = `${runs}/before/delivery-decision`
+        const decisionPath = `${runs}/${runId}/delivery-decision`
         const decision = { request_id: 'accept-delivery', expected_revision: delivered.revision,
           evidence_hash: delivered.human_acceptance.evidence_hash, choice: 'accept', reason: 'Owner inspected archived artifact and verification evidence' }
         const observer = await hub.client.call(`${root}/sessions`, { session_id: 'acceptance-observer', title: 'Observer', runtime: 'external' })
         await assert.rejects(hub.client.forSession(observer.owner_token).call(decisionPath, decision), /403/)
         await assert.rejects(hub.client.call(decisionPath, { ...decision, expected_revision: delivered.revision - 1 }), /revision conflict/)
         await assert.rejects(hub.client.call(decisionPath, { ...decision, evidence_hash: '0'.repeat(64) }), /evidence changed/)
-        await assert.rejects(hub.client.call(`${runs}/before/delivery`, { request_id: 'skip-human', expected_revision: delivered.revision }), /unavailable/)
+        await assert.rejects(hub.client.call(`${runs}/${runId}/delivery`, { request_id: 'skip-human', expected_revision: delivered.revision }), /unavailable/)
         let accepted
         if (process.env.KODE_TEST_HUMAN_ACCEPTANCE_BROWSER === '1') accepted = await acceptDeliveryInBrowser(hub, delivered, humanReject ? 'reject' : 'accept')
         else {
@@ -908,7 +953,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         humanConfirmed = true
         if (humanReject) {
           await service.close()
-          const closed = await hub.client.call(`${runs}/before`)
+          const closed = await hub.client.call(`${runs}/${runId}`)
           assert.equal(closed.state, 'cancelled'); assert.equal(closed.completion_authorized, false)
           assert.equal(closed.human_acceptance.state, 'rejected')
           assert.equal(closed.cancellation.stop_confirmed, true); assert.equal(closed.cancellation.resources_released, true)
@@ -916,7 +961,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
           assert.equal(inferenceCalls, 12); assert.deepEqual(errors, [])
           const budget = (await hub.client.call(`${root}/budgets/budget`)).budget
           assert.equal(budget.spent, 24); assert.equal(budget.reserved, 0)
-          const events = (await hub.client.call(`${runs}/before/events`)).events
+          const events = (await hub.client.call(`${runs}/${runId}/events`)).events
           assert.equal(events.filter(row => row.data.kind === 'work_run_delivered').length, 0)
           assert.equal(events.filter(row => row.data.kind === 'delivery_acceptance_decided').length, 1)
           assert.deepEqual(events.find(row => row.data.kind === 'work_run_cancelled').data.actor, { kind: 'system', id: 'cancellation_reconciler' })
@@ -928,11 +973,11 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         assert.equal(delivered.completion_authorized, false)
         assert.equal(inferenceCalls, 9, 'missing verification runner never starts its Worker or inference')
         assert.equal(delivered.stages[2].state, 'ready')
-        await assert.rejects(hub.client.call(`${runs}/before`, { action: 'cancel_settled', request_id: 'premature-disposition', expected_revision: delivered.revision, reason: 'Must not replace stopping live work' }), /requires waiting_user/)
-        assert.equal((await hub.client.call(`${runs}/before`)).revision, delivered.revision)
+        await assert.rejects(hub.client.call(`${runs}/${runId}`, { action: 'cancel_settled', request_id: 'premature-disposition', expected_revision: delivered.revision, reason: 'Must not replace stopping live work' }), /requires waiting_user/)
+        assert.equal((await hub.client.call(`${runs}/${runId}`)).revision, delivered.revision)
         execution.verificationRunners.register(verificationDefinition)
         registered = true
-        await service.retry('before')
+        await service.retry(runId)
       }
       assert.ok(!states.some(state => state.blocked && state.state !== 'waiting_adapter' && !((limitMode || humanAcceptance) && state.state === 'waiting_user')), 'unexpected progression fence: ' + JSON.stringify({ recent_states: states.slice(-8), progression: progression.slice(-8), errors }))
       assert.ok(Date.now() < deadline, 'workflow delivery deadline: ' + JSON.stringify({ mode, inferenceCalls, recent_states: states.slice(-8), progression: progression.slice(-8), errors, stages: delivered.stages.map(({ stage_id, state, attempt, assignment_id }) => ({ stage_id, state, attempt, assignment_id })) }))
@@ -947,6 +992,7 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
     assert.equal(delivered.completion_authorized, !limited)
     assert.deepEqual(delivered.stages.map(stage => [stage.state, stage.attempt]), [['passed', attempts], ['passed', attempts], [limited ? 'rejected' : 'passed', attempts]])
     const assignments = await Promise.all(delivered.stages.map(stage => hub.client.call(`${root}/work-assignments/${stage.assignment_id}`)))
+    if(collaboration)t.diagnostic(JSON.stringify(await collaboration.verifyCompleted(delivered,assignments)))
     assert.equal(new Set(assignments.map(assignment => assignment.worker.session_id)).size, 3)
     assert.ok(assignments.every(assignment => assignment.state === 'completed' && assignment.resources.state === 'released' && assignment.pricing.price_id === (alternateExpert && assignment.stage_id === 'inspect' ? 'expert-price' : 'price')))
     assert.equal(await readFile(join(workspaceRoot, 'source.txt'), 'utf8'), 'fixture source')
@@ -997,44 +1043,44 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
       assert.equal(states.at(-1).blocked, true)
       assert.equal(controller.watches.size, 0)
       assert.ok(!delivered.delivery)
-      await assert.rejects(hub.client.call(`${runs}/before/schedule`, { request_id: 'bypass-limit', expected_revision: delivered.revision }), /no schedulable stage/)
+      await assert.rejects(hub.client.call(`${runs}/${runId}/schedule`, { request_id: 'bypass-limit', expected_revision: delivered.revision }), /no schedulable stage/)
     }
     const receipt = delivered.delivery ?? null
     await hub.stop('SIGKILL'); await hub.start()
-    const restored = await hub.client.call(`${runs}/before`)
+    const restored = await hub.client.call(`${runs}/${runId}`)
     assert.deepEqual(restored.delivery ?? null, receipt)
     assert.equal(restored.state, delivered.state)
     if (limited) {
       const restartedController = new WorkRunController(dispatcher, { prepare: () => { throw new Error('exhausted work must not restart') } })
       const restarted = await new WorkRunService(restartedController, { intervalMs: 100 }).open()
       try {
-        assert.equal(restarted.rows.before.state, 'waiting_user')
-        await assert.rejects(restarted.retry('before'), /Hub state transition/)
-        assert.equal(restarted.rows.before.blocked, true, 'retry does not clear the durable human-decision fence')
+        assert.equal(restarted.rows[runId].state, 'waiting_user')
+        await assert.rejects(restarted.retry(runId), /Hub state transition/)
+        assert.equal(restarted.rows[runId].blocked, true, 'retry does not clear the durable human-decision fence')
         await restarted.scan()
         assert.equal(restartedController.watches.size, 0)
         assert.equal(inferenceCalls, 24)
       } finally { await restarted.close() }
     }
-    const audit = await hub.client.call(`${runs}/before/events`)
+    const audit = await hub.client.call(`${runs}/${runId}/events`)
     assert.equal(audit.events.filter(event => event.data.kind === 'work_run_delivered').length, limited ? 0 : 1)
     assert.equal(audit.events.filter(event => event.data.kind === 'stage_rejected').length, mode === 'success' ? 0 : limited ? 2 : 1)
     if (limited) {
       const decision = { action: mode === 'verification-cancel' ? 'request_cancel' : 'cancel_settled', request_id: 'owner-close', expected_revision: restored.revision, reason: 'Stop this unsuccessful request and reconsider the requirement' }
       const observer = await hub.client.call(`${root}/sessions`, { session_id: 'disposition-observer', title: 'Observer', runtime: 'external' })
-      await assert.rejects(hub.client.forSession(observer.owner_token).call(`${runs}/before`, decision), /403/)
-      await assert.rejects(hub.client.call(`${runs}/before`, { ...decision, reason: ' ' }), /invalid work run command/)
-      await assert.rejects(hub.client.call(`${runs}/before`, { ...decision, expected_revision: restored.revision - 1 }), /revision conflict/)
-      const followup = { ...request, id: 'followup-request', request_id: 'followup-request', prior_run_id: 'before', inputs: { request: 'Reconsider the failed change' } }
+      await assert.rejects(hub.client.forSession(observer.owner_token).call(`${runs}/${runId}`, decision), /403/)
+      await assert.rejects(hub.client.call(`${runs}/${runId}`, { ...decision, reason: ' ' }), /invalid work run command/)
+      await assert.rejects(hub.client.call(`${runs}/${runId}`, { ...decision, expected_revision: restored.revision - 1 }), /revision conflict/)
+      const followup = { ...request, id: 'followup-request', request_id: 'followup-request', prior_run_id: runId, inputs: { request: 'Reconsider the failed change' } }
       await assert.rejects(hub.client.call(runs, followup), /prior run must be terminal/)
       await hub.client.call(path, { action: 'deactivate', request_id: 'owner-stop-team', expected_revision: 1 })
-      const cancelled = await Promise.all([hub.client.call(`${runs}/before`, decision), hub.client.call(`${runs}/before`, decision)])
+      const cancelled = await Promise.all([hub.client.call(`${runs}/${runId}`, decision), hub.client.call(`${runs}/${runId}`, decision)])
       assert.deepEqual(cancelled[0], cancelled[1])
       let closed = cancelled[0], finalDecision
       if (mode === 'verification-cancel') {
         assert.equal(closed.state, 'cancelling')
         finalDecision = { action: 'finalize_cancel', request_id: 'confirm-owner-close', expected_revision: closed.revision }
-        closed = await hub.client.call(`${runs}/before`, finalDecision)
+        closed = await hub.client.call(`${runs}/${runId}`, finalDecision)
         assert.equal(closed.cancellation.stop_confirmed, true)
         assert.equal(closed.cancellation.receipt.assignments.length, 6)
         assert.ok(closed.cancellation.receipt.assignments.every(row => row.stop_basis === 'execution_drained' && row.reservation.finalized && row.reservation.held === 0))
@@ -1047,18 +1093,18 @@ for (const mode of modes.filter(mode => selected ? selected === mode : !['shared
         assert.equal(closed.resolution.stop_basis, 'settled_assignments')
         assert.equal(closed.resolution.assignment_ids.length, 6)
       } else assert.equal(closed.cancellation.reason, decision.reason)
-      await assert.rejects(hub.client.call(`${runs}/before`, { ...decision, reason: 'Changed decision' }), /identity conflict/)
+      await assert.rejects(hub.client.call(`${runs}/${runId}`, { ...decision, reason: 'Changed decision' }), /identity conflict/)
       const nextRequest = await hub.client.call(runs, followup)
-      assert.equal(nextRequest.prior_run_id, 'before'); assert.equal(nextRequest.state, 'waiting_user')
+      assert.equal(nextRequest.prior_run_id, runId); assert.equal(nextRequest.state, 'waiting_user')
       assert.ok(nextRequest.stages.every(stage => stage.attempt === 0 && stage.assignment_id === null))
       assert.equal(inferenceCalls, 24, 'disposition and linked intake do not revive old execution')
       assert.equal((await hub.client.call(`${root}/budgets/budget`)).budget.spent, 48)
       await hub.stop('SIGKILL'); await hub.start()
-      assert.deepEqual(await hub.client.call(`${runs}/before`, decision), cancelled[0])
-      if (finalDecision) assert.deepEqual(await hub.client.call(`${runs}/before`, finalDecision), closed)
-      assert.deepEqual(await hub.client.call(`${runs}/before`), closed)
+      assert.deepEqual(await hub.client.call(`${runs}/${runId}`, decision), cancelled[0])
+      if (finalDecision) assert.deepEqual(await hub.client.call(`${runs}/${runId}`, finalDecision), closed)
+      assert.deepEqual(await hub.client.call(`${runs}/${runId}`), closed)
       assert.deepEqual(await hub.client.call(runs, followup), nextRequest)
-      const after = await hub.client.call(`${runs}/before/events`)
+      const after = await hub.client.call(`${runs}/${runId}/events`)
       assert.equal(after.events.filter(event => event.data.kind === 'work_run_cancelled').length, 1)
       assert.equal(after.events.filter(event => event.data.kind === 'work_run_delivered').length, 0)
     }

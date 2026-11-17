@@ -1,13 +1,16 @@
 /** Wake configured dormant teams only for durable human requests; never resume unknown runtimes. */
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { assertLegacyCoordinatorContext } from './context-scope.js'
 export function coordinatorBootstrapInput(home,active) {
+ assertLegacyCoordinatorContext(active, active?.snapshot?.team?.spec?.coordinator_startup)
  const team=active.snapshot.team,config=team.spec.coordinator_startup
  const key=createHash('sha256').update(JSON.stringify([home,team.id,active.revision])).digest('hex')
  return {team_id:team.id,command_id:`create-${key}`,request_id:`bootstrap-${key}`,owner_session:`owner-${key}`,
   session_id:`coordinator-${key}`,workspace_id:config.workspace_id,task_tag:config.task_tag,expected_control_revision:0}
 }
 export function coordinatorRecoveryInput(home,active,control){
+ assertLegacyCoordinatorContext(control, control?.request)
  const input=coordinatorBootstrapInput(home,active)
  const key=createHash('sha256').update(JSON.stringify([home,input.team_id,active.revision,control.revision])).digest('hex')
  return {...input,request_id:`recover-${key}`,command_id:`resume-${key}`,session_id:control.worker.session_id,
@@ -44,6 +47,7 @@ export class CoordinatorBootstrap {
     if(!active?.active||active.authority_valid!==true||saved?.home_hub!==runtime.host||saved.id!==team.id||!config)continue
     let input=coordinatorBootstrapInput(runtime.host,active)
     const {control}=await call(`teams/${team.id}/coordinator-control`)
+    assertLegacyCoordinatorContext(control, control?.request)
     if(control){
      const owned=this.host.handles.get(control.worker?.session_id)
      if(owned&&!owned.run.signal.aborted)continue

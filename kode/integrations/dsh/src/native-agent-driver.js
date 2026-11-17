@@ -1,3 +1,6 @@
+import {nativeInteractiveTeamBinding,assertNativeInteractiveAction,enqueueNativeInteractiveInput,awaitNativeInteractiveInput,assertNativeInteractiveTurn,completeNativeInteractiveTurn} from './native-interactive-team.js'
+import { checkNativePlanningContext, recordNativePlanningTurn } from './native-planning-session.js'
+import { interruptAndInsert, assertDirectInsertAvailable } from './direct-session-input.js'
 /** Native Agent scheduling. No harness prompt assembly or model-request loop. */
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -9,6 +12,8 @@ import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
 import { fastPreference, fastServiceTier } from './model-fast.js'
 import { AcpTurnCancelledError } from './acp-session.js'
+import { nativeBuilderBinding, assertNativeBuilderAction, enqueueNativeBuilderInput, awaitNativeBuilderInput, assertNativeBuilderTurn } from './native-builder-lifecycle.js'
+import {nativeCoordinatorBinding,assertNativeCoordinatorAction,enqueueNativeCoordinatorInput,awaitNativeCoordinatorInput,assertNativeCoordinatorTurn} from './native-coordinator-scope.js'
 
 export const boundaryProjection = {
   key: 'kodeTurnBoundary', stateVersion: 3,
@@ -58,7 +63,9 @@ class Inbox {
   remove(id) { for (const target of ['next-turn', 'next-step']) { const index = this.state[target].findIndex(row => row.id === id); if (index >= 0) { this.splice(target, index, 1, [], true); return true } } return false }
   clear() { for (const target of ['next-step', 'next-turn']) this.splice(target, 0, this.state[target].length, [], true) }
   claim(turn) {
-    const messages = [...this.splice('next-step', 0, this.nextStep.length, []), ...this.splice('next-turn', 0, 1, [])]
+    const first = this.nextTurn[0]
+    const direct = first && this.agent.session.snapshotEvents().some(event => event.type === 'plugin:kode/direct-insert' && event.data.inputId === first.id && event.data.stage === 'inserted')
+    const messages = direct ? this.splice('next-turn', 0, 1, []) : [...this.splice('next-step', 0, this.nextStep.length, []), ...this.splice('next-turn', 0, 1, [])]
     for (const message of messages) this.agent.events.emit('agent/inbox/claimed', { message, turn })
     return messages
   }
@@ -83,15 +90,21 @@ export class NativeAgentDriver {
   }
   setStatus(status) { if (this.status !== status) { this.status = status; this.events.emit('agent/status', { status }) } }
   selectModel({provider,model,reasoningEffort}) {
+    assertNativeInteractiveAction(this,'bypass interactive source/selection'); assertNativeCoordinatorAction(this,'change the owner-confirmed model selection')
+    assertNativeBuilderAction(this,'change the owner-confirmed model selection')
     if(!provider?.startsWith('kode-agent-')||typeof model!=='string'||!model)throw new Error('Select a native Agent model')
     const selected={provider,model,...(reasoningEffort?{reasoningEffort}:{})}
     this.session.append('model/selection',selected)
     this.options={...selected}
     return{selected}
   }
-  send(message, target, wakeup) { if (this.disposed) throw new Error('Agent runtime has been unplugged'); this.inbox.append(target, message); if (wakeup) { this.parked = false; this.wake() } }
-  followup(message) { this.send(message, 'next-turn', true) }
+  send(message, target, wakeup) { assertNativeInteractiveAction(this,'bypass interactive source/selection'); assertNativeCoordinatorAction(this,'accept input without a receipt'); assertNativeBuilderAction(this,'accept an input without an owner receipt'); if (this.disposed) throw new Error('Agent runtime has been unplugged'); this.inbox.append(target, message); if (wakeup) { this.parked = false; this.wake() } }
+  followup(message) { return nativeInteractiveTeamBinding(this)?enqueueNativeInteractiveInput(this,message):nativeCoordinatorBinding(this)?enqueueNativeCoordinatorInput(this,message):nativeBuilderBinding(this) ? enqueueNativeBuilderInput(this,message) : this.send(message, 'next-turn', true) }
+  assertDirectInsertAvailable() { assertNativeInteractiveAction(this,'bypass interactive source/selection'); assertNativeCoordinatorAction(this,'accept direct insertion'); assertNativeBuilderAction(this,'accept direct insertion'); return assertDirectInsertAvailable(this) }
+  interruptAndInsert(message, options) { assertNativeInteractiveAction(this,'bypass interactive source/selection'); assertNativeCoordinatorAction(this,'accept direct insertion'); assertNativeBuilderAction(this,'accept direct insertion'); return interruptAndInsert(this, message, options) }
   assertSteeringAvailable(message) {
+    assertNativeInteractiveAction(this,'bypass interactive source/selection'); assertNativeCoordinatorAction(this,'share a turn with steering')
+    assertNativeBuilderAction(this,'share an active turn with steering')
     if (this.runtime.profiles?.binding(this.id)?.managedOperation) throw new Error('Managed operation cannot share an active turn with steering')
     if (this.disposed) throw new Error('Agent runtime has been unplugged')
     if (this.status === 'running' && ['user', 'human'].includes(message.source?.kind) && !this.runtime.adapter.supportsSteering?.(this)) throw new Error('当前 Agent 不支持原生中途插入，请选择排队发送。')
@@ -171,7 +184,7 @@ export class NativeAgentDriver {
     }
     return { state: 'cancel_unconfirmed', reason: 'input_not_active_or_queued' }
   }
-  async whenIdle() { let pending; do { await (pending = this.activity) } while (pending !== this.activity) }
+  async whenIdle() { await awaitNativeInteractiveInput(this); await awaitNativeCoordinatorInput(this); await awaitNativeBuilderInput(this); let pending; do { await (pending = this.activity) } while (pending !== this.activity) }
   async runMaintenance(job) {
     if (this.status !== 'idle' || this.maintenance) throw new Error('Agent already has active work')
     this.maintenance = true; this.abort = new AbortController()
@@ -181,7 +194,7 @@ export class NativeAgentDriver {
   }
   start() { this.ready = true; this.wake() }
   wake() {
-    if (this.runtime.adapter.stopBlocked?.(this.id) || !this.ready || this.disposed || this.parked || this.maintenance || this.status === 'running' || !(this.inbox.nextTurn.length || this.inbox.nextStep.length || this.runtime.adapter.hasContinuation?.(this.id))) return
+    if (this.directInsertBlocked || this.runtime.adapter.stopBlocked?.(this.id) || !this.ready || this.disposed || this.parked || this.maintenance || this.status === 'running' || !(this.inbox.nextTurn.length || this.inbox.nextStep.length || !nativeInteractiveTeamBinding(this)&&!nativeCoordinatorBinding(this)&&!nativeBuilderBinding(this) && this.runtime.adapter.hasContinuation?.(this.id))) return
     this.setStatus('running'); this.abort = new AbortController()
     this.activity = this.ctx.agents.withInitiator(this, () => this.drive(this.abort.signal)).catch(error => { this.parked = true; this.lastError = error; this.ctx.logger?.warn('Kode Agent could not start: %s', error.stack ?? error.message); this.events.emit('agent/error', { turn: this.turn, step: 1, error }) }).finally(() => { this.setStatus('idle'); this.wake() })
   }
@@ -194,7 +207,8 @@ export class NativeAgentDriver {
         ?? (!selection.provider?.startsWith('kode-agent-') && this.runtime.hasRuntime('dsh') ? this.runtime.profiles.list().find(profile => profile.type === 'dsh') : undefined)
       if (profile) { binding = await this.runtime.profiles.bind(this.id, profile.id); this.runtime.recordBinding(this, profile) }
     }
-    while (!signal.aborted && !this.disposed && !this.runtime.adapter.stopBlocked?.(this.id) && (this.inbox.nextTurn.length || this.inbox.nextStep.length || this.runtime.adapter.hasContinuation?.(this.id))) {
+    while (!signal.aborted && !this.disposed && !this.maintenance && !this.directInsertPending && !this.directInsertBlocked && !this.runtime.adapter.stopBlocked?.(this.id) && (this.inbox.nextTurn.length || this.inbox.nextStep.length || !nativeInteractiveTeamBinding(this)&&!nativeCoordinatorBinding(this)&&!nativeBuilderBinding(this) && this.runtime.adapter.hasContinuation?.(this.id))) {
+      const planningContext = await checkNativePlanningContext(this)
       // A driver may be attached before an owner imports its historical seed.
       // Allocate from the current log projection, not the constructor snapshot.
       this.turn = Math.max(this.turn, this.ctx.sessionProjections.stateOf(this.session, 'kodeTurnBoundary')?.lastTurn ?? 0)
@@ -205,7 +219,7 @@ export class NativeAgentDriver {
       const recovery = new ToolCallRecovery()
       const stop = this.ctx.on('session/event', (session, event) => { if (session === this.session) recovery.observe(event) })
       try {
-        const nativeContinuation = this.runtime.adapter.hasContinuation?.(this.id) ?? false
+        const nativeContinuation = !nativeInteractiveTeamBinding(this)&&!nativeCoordinatorBinding(this)&&!nativeBuilderBinding(this) && (this.runtime.adapter.hasContinuation?.(this.id) ?? false)
         const messages = nativeContinuation ? [] : this.inbox.claim(turn)
         this.activeInputs = new Set(messages.map(message => message.id))
         if (!messages.length && !nativeContinuation) continue
@@ -215,6 +229,8 @@ export class NativeAgentDriver {
         const fast = fastPreference(fastState, selection), fastTier = fastServiceTier(fastState, selection)
         if (!selection.provider?.startsWith('kode-agent-')) throw new Error('Select an installed Agent before sending a message')
         const human = messages.length === 1 ? humanInput(messages[0]) : undefined
+        if((nativeInteractiveTeamBinding(this)||nativeCoordinatorBinding(this))&&/^[!/]/.test(human??''))throw new Error('Native scoped conversation cannot run shell or slash commands')
+        if (nativeBuilderBinding(this) && /^[!/]/.test(human ?? '')) throw new Error('Native Builder cannot run shell or slash commands')
         if (binding?.managedOperation && human?.startsWith('!')) throw new Error('Managed operation cannot bypass lease checks through human shell commands')
         if (human?.startsWith('!')) {
           this.session.append('step/start', { turn, step }); opened = true
@@ -223,10 +239,14 @@ export class NativeAgentDriver {
           continue
         }
         const tools = this.ctx.tools.schemas(this)
+        await assertNativeInteractiveTurn(this,{selection,messages,tools,nativeContinuation})
+        await assertNativeCoordinatorTurn(this,{selection,messages,tools,nativeContinuation})
+        await assertNativeBuilderTurn(this,{selection,messages,tools,nativeContinuation})
         const previous = this.session.requestHeader()
         this.session.append('request/header', { header: { config: selection, ...(tools.length ? { tools } : {}) }, reason: previous ? 'resume' : 'initial' })
         this.session.append('step/start', { turn, step }); opened = true
         for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
+        if (messages.length && !/^[!/]/.test(human ?? '')) await recordNativePlanningTurn(this, planningContext, turn, messages)
         let stream = new AssistantStreamAccumulator(), assembler = new BlockAssembler(), chunkCount = 0, started = false
         let attemptId = `kode-native:${randomUUID()}`
         const prepareStep = () => {
@@ -268,7 +288,9 @@ export class NativeAgentDriver {
         for (const event of recovery.results()) this.session.append('tool/result', event.data, { surfaceOp: 'append' })
         if (opened) this.session.append('step/end', { turn, step })
         this.session.append('turn/end', { turn, reason })
-        await this.ctx.sessions.flush(this.session)
+        const flushed=await this.ctx.sessions.flush(this.session)
+        if(nativeInteractiveTeamBinding(this)&&flushed!==true)throw new Error('Interactive completion not durable')
+        await completeNativeInteractiveTurn(this,turn,reason)
       }
     }
   }

@@ -240,6 +240,7 @@ impl Store {
             params![run["id"].as_str(), revision, serde_json::to_string(&run)?],
         )?;
         tx.execute("INSERT INTO work_run_events(run_id,body) VALUES (?1,?2)",params![run["id"].as_str(),serde_json::to_string(&json!({"kind":"assignment_clarification_requested","revision":revision,"at":at,"actor":{"kind":"host","id":executor},"receipt":receipt}))?])?;
+        super::collaboration::clarification_answers::notify(&tx, &self.node_id, &run, &receipt)?;
         tx.commit()?;
         Ok(receipt)
     }

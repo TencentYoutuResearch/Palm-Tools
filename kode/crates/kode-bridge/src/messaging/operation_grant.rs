@@ -67,10 +67,9 @@ pub(super) fn check_budget_attachment(db: &Connection, op: &Operation, at: u64) 
     }
     Ok(())
 }
-pub(super) fn admit(db: &Connection, op: &Operation, at: u64) -> Result<u64> {
-    if !op.grant_required {
-        return Ok(u64::MAX);
-    }
+/// Read-only funding/grant validation for prepared local staging. This is not
+/// lease admission; runtime callers must continue to use admit and its lease gate.
+pub(super) fn validate_authority_in(db: &Connection, op: &Operation, at: u64) -> Result<serde_json::Value> {
     let binding = read(db, &op.id)?.ok_or_else(|| anyhow::anyhow!("operation grant missing"))?;
     if binding.attempt != op.attempt
         || binding.epoch != op.epoch
@@ -83,6 +82,13 @@ pub(super) fn admit(db: &Connection, op: &Operation, at: u64) -> Result<u64> {
         bail!("operation grant denied: {}", decision["reason"])
     }
     check_budget_scope(db, op, &binding.scope, true)?;
+    Ok(decision)
+}
+pub(super) fn admit(db: &Connection, op: &Operation, at: u64) -> Result<u64> {
+    if !op.grant_required {
+        return Ok(u64::MAX);
+    }
+    let decision = validate_authority_in(db, op, at)?;
     super::coordinator_control::lease_gate(db, op, at)?;
     decision["expires_at"]
         .as_u64()

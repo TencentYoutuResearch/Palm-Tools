@@ -1,14 +1,18 @@
 import { TeamSchedulingForm } from './team-scheduling-form.js'
-import { TeamInitialBudgetForm } from './team-initial-budget-form.js'
 import { TeamAuthorityForm } from './team-authority-form.js'
 import { verifyActivationState } from './team-deactivation.js'
 import { TeamDeactivationView } from './team-deactivation-view.js'
+import { TeamConfigurationAcceptanceView } from './team-configuration-acceptance-view.js'
 import React from 'react'
 import { WorkflowDependencyReview } from './workflow-dependency-review.js'
 import { activationKey, activateReviewedTeam, activationNeedsConfirmation, verifyActivationReceipt, teamActivationRequest } from './team-activation.js'
 const h = React.createElement
 const reasons = { assignment_account_capacity_missing: '账号工作并发上限尚未配置，请在调度偏好中设置后重新核对。', coordinator_team_required: '团队不是任务协调者', configuration_incomplete: '流程、项目或执行策略尚未配齐', grant_missing_revoked_or_expired: '权限未配置、已撤销或已过期' }
-export function TeamActivationView({ team: suppliedTeam, storage }) {
+export function TeamActivationView(props) {
+  if (props.team.spec?.execution_mode === 'interactive_native') return h(TeamConfigurationAcceptanceView, props)
+  return h(ManagedTeamActivationView, props)
+}
+function ManagedTeamActivationView({ team: suppliedTeam, storage }) {
   const [updatedTeam, setUpdatedTeam] = React.useState(null)
   const team = updatedTeam?.id === suppliedTeam.id && updatedTeam.revision > suppliedTeam.revision ? updatedTeam : suppliedTeam
   const [slot, setSlot] = React.useState(null), [review, setReview] = React.useState(null), [ready, setReady] = React.useState(false)
@@ -74,7 +78,7 @@ export function TeamActivationView({ team: suppliedTeam, storage }) {
         '阶段 ',stage.stage_id,'：',stage.artifact_repository.status==='artifact_repository_baseline_unavailable'?'当前 Git 产物适配器需要已有提交的仓库根目录，请选择符合条件的工作区或调整流程。':stage.artifact_repository.status==='artifact_repository_remote_unchecked'?'远端仓库条件需要在对应 Host 核对。':'项目工作区不在当前已选择的范围内。')),
       review.activation?.active === true && !activationNeedsConfirmation(review) && h('p', null, '最近核对：团队已启用，无需重复激活。'),
       activationNeedsConfirmation(review) && review.prepared_command && !review.issues.length && review.runtime_readiness?.default_adapter_checks_complete === true && h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void confirm() }, '确认激活此版本团队')),
-    h(TeamInitialBudgetForm, { team, review, storage, onSaved: () => setReview(null) }),
+    // No budget entry here for now (owner decision); existing quotas, approvals and records still apply.
     h(TeamSchedulingForm, { team, storage, onSaved: next => { setReview(null); if (next) setUpdatedTeam(next) } }),
     h(TeamAuthorityForm, { team, review, storage, onSaved: () => setReview(null) }),
     (slot?.state === 'activated' || review?.activation) && h(TeamDeactivationView, { key: review?.activation?.revision ?? slot?.receipt?.revision, team, storage }),

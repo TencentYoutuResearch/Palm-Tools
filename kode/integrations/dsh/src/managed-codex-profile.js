@@ -16,9 +16,11 @@ export function normalizeManagedBootstrap(value) {
 export const managedCodexRoute = id => `kode-workflow-${id}`
 export const managedCodexEnabled = profile => Boolean(profile?.managedInference)
   && (profile.type === 'codex' || profile.protocol === 'codex')
+export const managedClaudeEnabled = profile => Boolean(profile?.managedInference) && profile.type === 'claude'
+export const managedNativeEnabled = profile => managedCodexEnabled(profile) || managedClaudeEnabled(profile)
 export function controlledBinding(binding) {
   if (binding?.profile.type === 'dsh') return true
-  if (!managedCodexEnabled(binding?.profile)) return false
+  if (!managedNativeEnabled(binding?.profile)) return false
   const roles = [
     binding.managedAssignment && 'worker',
     binding.managedBuilder && 'builder',
@@ -29,9 +31,14 @@ export function controlledBinding(binding) {
 
 export function normalizeManagedInference(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).some(key => !['endpoint', 'apiKeyVariable', 'reasoningEfforts', 'timeoutMs', 'bootstrap', 'roles'].includes(key))) {
+      || Object.keys(value).some(key => !['endpoint', 'apiKeyVariable', 'reasoningEfforts', 'timeoutMs', 'bootstrap', 'roles', 'responseModels'].includes(key))) {
     throw new Error('Invalid managed CLI inference configuration')
   }
+  const responseModels = value.responseModels
+  if (responseModels != null && (typeof responseModels !== 'object' || Array.isArray(responseModels)
+      || Object.keys(responseModels).length > 256 || Object.entries(responseModels).some(([requested, reported]) =>
+        !requested || requested.length > 256 || /[\x00-\x1f\x7f]/.test(requested)
+        || typeof reported !== 'string' || !reported || reported.length > 256 || /[\x00-\x1f\x7f]/.test(reported)))) throw Error('Invalid managed response model identities')
   const bootstrap = value.bootstrap == null ? null : normalizeManagedBootstrap(value.bootstrap)
   if (value.roles != null && (!Array.isArray(value.roles) || !value.roles.length || value.roles.length > 3
       || value.roles.some(role => !['worker', 'builder', 'coordinator'].includes(role))
@@ -51,6 +58,7 @@ export function normalizeManagedInference(value) {
   if (value.timeoutMs != null && (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > 1800000)) throw new Error('Invalid managed CLI inference timeout')
   return { ...(endpoint ? { endpoint: endpoint.href } : {}), ...(value.apiKeyVariable == null ? {} : { apiKeyVariable: value.apiKeyVariable }),
     ...(value.roles == null ? {} : { roles: [...value.roles] }),
+    ...(responseModels == null ? {} : { responseModels: { ...responseModels } }),
     ...(bootstrap ? { bootstrap } : {}),
     reasoningEfforts: [...efforts], ...(value.timeoutMs == null ? {} : { timeoutMs: value.timeoutMs }) }
 }

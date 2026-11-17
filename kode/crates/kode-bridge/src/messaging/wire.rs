@@ -101,6 +101,7 @@ mod tests {
                 target: a,
                 content: "中🦊".into(),
                 idempotency_key: "key".into(),
+                direct_insert: false,
                 in_reply_to: None,
                 hop_count: 2,
                 created_at: 1,

@@ -1,6 +1,12 @@
+import { prepareNativeHandoff, validateFrozenNativeHandoff, assertOrdinaryHandoffSource, assertOrdinaryHandoffIdentity } from './native-handoff-contract.js'
+import { switchSessionModel } from './session-interop-model.js'
+import { sessionExecutionState, trackSessionWaiting } from './session-runtime-state.js'
 import { resolveDefaultSelection } from './model-alias.js'
 import { appendFastPreference } from './model-fast.js'
 import { needsEmptySessionCheck, setupOnlySession, sessionInspector } from './empty-session.js'
+import { runtimeDirectory, savedRuntimeEvents } from './runtime-directory.js'
+import { savedSessionProfile } from './saved-session-profile.js'
+import { savedSessionOperation } from './saved-session-state.js'
 /** Project the existing dsh runtime into Kode. Never run a second Agent loop. */
 import { randomUUID, createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -41,11 +47,18 @@ export class RuntimeBridge {
   }
   service(name) { return this.ctx.get?.(name) ?? this.ctx[name] }
   call(name, body) { return this.backend.call(PREFIX + name, body, this.stop.signal) }
-  projection(row, agent) {
+  projection(row, agent, observed) {
     const selection = agent?.session.requestHeader?.()?.config ?? row.projections?.values?.modelSelection?.lastUsed ?? {}
-    const binding = this.service('kodeAgents').profiles.binding(row.sessionId)
-    const profile = binding?.profile
-    return { runtime_backend_key: profile ? `dsh:${profile.id}` : undefined, ...permissionSnapshot(this.service('permissionPresets'), agent?.session, row), native_thread_id: binding?.threadId, backend_key: this.service('kodeAgents').profiles.sharedState?.desktop_ids?.[profile?.id] ?? profile?.name ?? 'dsh', title: row.projections?.values?.title ?? row.title ?? '未命名会话', model: selection.model ?? profile?.defaultModel ?? '', status: agent?.status === 'running' ? 'busy' : 'idle', cwd: row.cwd ?? agent?.session.header.cwd, session_uuid: row.sessionId, tokens: { total: 0, input: 0, output: 0, cached: 0 } }
+    const profiles = this.service('kodeAgents').profiles
+    const binding = profiles.binding(row.sessionId)
+    const waiting = this.waiting?.has(row.sessionId) || [...this.pending.entries()].some(([id, request]) => request.sessionId === row.sessionId && !this.continued.get(row.sessionId)?.has(id))
+    const execution_state = sessionExecutionState({ agent, events: observed?.events ?? agent?.session.snapshotEvents?.(), unavailable: observed?.unavailable, waiting, saved: Boolean(row.savedTab) })
+    const profile = binding?.profile ?? (row.savedTab ? savedSessionProfile(profiles, row.savedTab) : undefined)
+    // This directory projection has no reconciled usage aggregate. Omit unknown
+    // counters instead of publishing synthetic zeroes as measured consumption.
+    let handoffAllowed = false
+    try { assertOrdinaryHandoffSource(profiles, row.sessionId, agent, row); handoffAllowed = true } catch { /* Missing or controlled authority stays fenced. */ }
+    return { handoff_allowed: handoffAllowed, direct_insert_supported: typeof agent?.interruptAndInsert === 'function' && Boolean(binding?.profile) && !binding.managedOperation && !binding.managedAssignment && !binding.managedCoordinator && !binding.managedBuilder, execution_state, execution_state_observed_at: Math.floor(Date.now() / 5000) * 5000, runtime_backend_key: profile ? `dsh:${profile.id}` : undefined, ...permissionSnapshot(this.service('permissionPresets'), agent?.session, row), ...(row.savedTab ? { runtime_saved: true } : {}), native_thread_id: binding?.threadId ?? row.savedTab?.session_id, backend_key: row.savedTab?.backend_key ?? profiles.sharedState?.desktop_ids?.[profile?.id] ?? profile?.name ?? 'dsh', title: row.projections?.values?.title ?? row.title ?? '未命名会话', model: selection.model ?? profile?.defaultModel ?? '', status: agent?.status === 'running' ? 'busy' : 'idle', cwd: row.cwd ?? agent?.session.header.cwd, session_uuid: row.sessionId }
   }
   publish() {
     const task = (this.publishing ?? Promise.resolve()).then(() => this.publishSnapshot())
@@ -56,8 +69,12 @@ export class RuntimeBridge {
     const controller = this.service('sessionController'), directory = await controller.list({}, this.stop.signal)
     // Empty composer placeholders are not saved conversations. Retire older
     // publications too, so another frontend cannot persist and reimport them.
-    const archived = new Set(this.service('workspaceRegistry')?.archivedSessionIds ?? [])
-    const items = directory.items.filter(row => !row.blank && !archived.has(row.sessionId))
+    const registry = this.service('workspaceRegistry')
+    const archived = new Set(registry?.archivedSessionIds ?? [])
+    const available = directory.items.filter(row => !archived.has(row.sessionId))
+    const items = typeof registry?.list === 'function'
+      ? await runtimeDirectory(this.ctx, this.backend, available)
+      : available.filter(row => !row.blank)
     if (!this.known) {
       const saved = await this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)
       this.known = new Map(saved.sessions.filter(row => row.runtime === this.runtime).map(row => [row.runtime_session_id, row]))
@@ -69,9 +86,19 @@ export class RuntimeBridge {
     }
     for (const row of items) {
       this.stop.signal.throwIfAborted()
-      const agent = this.service('agents').get(row.sessionId)
-      const observed = agent ? { events: agent.session.snapshotEvents() } : await sessionInspector(controller, this.service('sessionQuery'))(row.sessionId, this.stop.signal)
-      if (!agent && needsEmptySessionCheck(row) && setupOnlySession(observed)) {
+      const agent = this.service('agents')?.get(row.sessionId)
+      let observed
+      try {
+        observed = row.savedTab ? { events: await savedRuntimeEvents(this.backend, row.savedTab) }
+          : agent ? { events: agent.session.snapshotEvents() } : await sessionInspector(controller, this.service('sessionQuery'))(row.sessionId, this.stop.signal)
+      } catch (error) {
+        this.stop.signal.throwIfAborted()
+        // Preserve the directory entry and the last delivered history/cursor.
+        // A failed read is not an empty conversation and must not block later rows.
+        this.ctx.logger?.warn('Kode session history unavailable (%s): %s', row.sessionId, error.message)
+        observed = { events: [], unavailable: true }
+      }
+      if (!agent && !row.savedTab && !this.service('kodeAgents')?.profiles.binding(row.sessionId)?.threadId && !observed.unavailable && needsEmptySessionCheck(row) && setupOnlySession(observed)) {
         const previous = this.known.get(row.sessionId)
         if (previous && previous.status !== 'exited') {
           await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [{ session_id: row.sessionId, dto: { ...previous, status: 'exited' }, events: [] }] })
@@ -125,7 +152,7 @@ export class RuntimeBridge {
       const extra = [...(this.extra.get(row.sessionId) ?? [])]
       const committed = new Set(projected.filter(event => event.kind === 'message' && event.payload.streaming === false).map(event => event.payload.id))
       const publication = [...projected, ...extra.filter(event => !committed.has(event.payload.id))]
-      const dto = this.projection(row, agent)
+      const dto = this.projection(row, agent, observed)
       this.known.set(row.sessionId, dto)
       for (let offset = 0; offset < Math.max(1, publication.length); offset += 128) {
         const response = await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [{ session_id: row.sessionId, dto, events: publication.slice(offset, offset + 128) }] })
@@ -139,6 +166,7 @@ export class RuntimeBridge {
   async execute(command) {
     const { id, session_id: sessionId, kind, payload } = command, controller = this.service('sessionController')
     const runtime = this.service('kodeAgents')
+    if (kind === 'prepare_handoff') return prepareNativeHandoff(this, payload)
     if (kind === 'backends') return { home: homedir(), backends: runtime.profiles.list().filter(profile => runtime.hasRuntime(profile.type)).map(profile => ({ key: `dsh:${profile.id}`, display_name: `${profile.name} · dsh`, enabled: true, model_flag: '--model' })) }
     if (kind === 'models') {
       const profile = runtime.profiles.list().find(profile => `dsh:${profile.id}` === payload.backend_key)
@@ -147,9 +175,11 @@ export class RuntimeBridge {
       return { models: models.map(model => ({ id: model.id, label: model.name })), custom_allowed: true }
     }
     if (kind === 'create_session') {
+      if(payload.handoff_source_session_id)await assertOrdinaryHandoffIdentity(this,payload.handoff_source_session_id)
       const profile = runtime.profiles.list().find(profile => `dsh:${profile.id}` === payload.backend_key && runtime.hasRuntime(profile.type))
       if (!profile) throw new Error('Agent configuration unavailable')
       if (!isAbsolute(payload.cwd ?? '') || !(await stat(payload.cwd)).isDirectory()) throw new Error('Choose an existing absolute directory on the execution Host')
+      const frozenHandoff = payload.profile_revision !== undefined || payload.selection !== undefined ? await validateFrozenNativeHandoff(this, payload, profile) : null
       const registry = this.service('workspaceRegistry')
       const workspace = await registry.resolveByPath(payload.cwd) ?? await registry.create(payload.cwd)
       // The backend request id also names the session. An uncertain creation is
@@ -162,8 +192,8 @@ export class RuntimeBridge {
       if (error) throw new Error(error.message)
       if (resolved.status === 'running' || resolved.session.snapshotEvents?.().some(event => ['turn/start', 'user/message', 'request/header'].includes(event.type))) throw new Error('Partial session already has activity; inspect it before retrying creation')
       const provider = profileRoute(profile.id), preference = payload.model ? { model: payload.model } : runtime.profiles.defaultModelFor?.(profile.id)
-      const models = await runtime.adapter.listModels(provider, profile, preference?.model ?? profile.defaultModel)
-      const selection = resolveDefaultSelection(models, preference, profile.defaultModel), model = selection.model
+      const models = frozenHandoff?.models ?? await runtime.adapter.listModels(provider, profile, preference?.model ?? profile.defaultModel)
+      const selection = frozenHandoff?.selection ?? resolveDefaultSelection(models, preference, profile.defaultModel), model = selection.model
       const selectedModel = models.find(row => row.id === model), route = { provider, model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) }
       let agent = resolved
       if (typeof agent.selectModel !== 'function') {
@@ -193,19 +223,28 @@ export class RuntimeBridge {
     }
     if (!sessionId) throw new Error('Session identity required')
     if (kind === 'input') {
+      if (payload.handoff_source_session_id) {
+        await assertOrdinaryHandoffIdentity(this,payload.handoff_source_session_id)
+        const source = (await controller.list({})).items.find(row => row.sessionId === payload.handoff_source_session_id)
+        if (!source) throw new Error('Native handoff source is unavailable')
+        assertOrdinaryHandoffSource(runtime.profiles, payload.handoff_source_session_id, this.service('agents')?.get(payload.handoff_source_session_id), source)
+      }
       if (typeof payload.text !== 'string' || !payload.text.trim()) throw new Error('Message must contain text')
       return controller.prompt({ sessionId, requestId: id, mode: 'queue', content: [{ type: 'text', text: payload.text }] }, this.stop.signal)
     }
     if (kind === 'interrupt') return controller.cancel({ sessionId })
-    if (kind === 'delete') { await this.service('workspaceRegistry').archiveSession(sessionId, { stopActivity: true }); await this.publish(); return { accepted: true } }
+    if (kind === 'delete') {
+      const saved = (typeof this.service('workspaceRegistry')?.list === 'function'
+        ? await runtimeDirectory(this.ctx, this.backend, (await controller.list({})).items, { includeArchived: true }) : []).find(row => row.sessionId === sessionId)?.savedTab
+      if (saved) await savedSessionOperation(this.backend, { operation: 'archive-session', nativeSession: { backend_key: saved.backend_key, session_id: saved.session_id } })
+      else await this.service('workspaceRegistry').archiveSession(sessionId, { stopActivity: true })
+      await this.publish(); return { accepted: true }
+    }
     if (kind === 'answer' || kind === 'plan_response') return this.answer(sessionId, payload, kind)
     const { agent, error } = await controller.resolveAgent(sessionId)
     if (error) throw new Error(error.message)
     if (kind === 'model') {
-      const profile = runtime.profiles.binding(sessionId)?.profile
-      if (!profile) throw new Error('Session Agent configuration unavailable')
-      const result = agent.selectModel({ provider: profileRoute(profile.id), model: payload.model })
-      await agent.ctx.sessions.flush(agent.session); return result
+      return switchSessionModel(this.ctx, sessionId, payload, { signal: this.stop.signal })
     }
     if (kind === 'mode') {
       const service = this.service('permissionPresets')
@@ -254,6 +293,8 @@ export class RuntimeBridge {
 
 export function installRuntimeBridge(ctx, backend, options) {
   const bridge = new RuntimeBridge(ctx, backend, options)
+  bridge.waiting = trackSessionWaiting(ctx)
+  ctx.effect(() => () => bridge.waiting.dispose(), 'kode.runtime-waiting')
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     if (frame.type === 'start') {
       const index = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message' && event.data.turn === frame.turn && event.data.step === frame.step).length

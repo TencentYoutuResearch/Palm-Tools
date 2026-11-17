@@ -2,7 +2,7 @@ import React from 'react'
 import { fundingKey, confirmFunding, requestBuilderFunding } from './builder-funding.js'
 const h = React.createElement
 const numeric = { limit: '创建预算总额', input_per_million: '每百万输入 token 内部计价', cached_per_million: '每百万缓存输入 token 内部计价', output_per_million: '每百万输出 token 内部计价' }
-export function BuilderFundingForm({ draft, storage, request }) {
+export function BuilderFundingForm({ draft, storage, request, onSaved }) {
   const [values, setValues] = React.useState({ unit: '', limit: '', input_per_million: '', cached_per_million: '', output_per_million: '', ends_at: '' })
   const [ready, setReady] = React.useState(false), [busy, setBusy] = React.useState(false), [message, setMessage] = React.useState('')
   const [review, setReview] = React.useState(null), [pending, setPending] = React.useState(null), [record, setRecord] = React.useState(null)
@@ -40,14 +40,14 @@ export function BuilderFundingForm({ draft, storage, request }) {
     try {
       const source = pending ?? review
       const result = await confirmFunding({ storage, draft, command: source.command, selection: source.selection, request: requestBuilderFunding, signal: active.current.signal })
-      if (!active.current.signal.aborted) { setRecord(result); setPending(null); setReview(null); setMessage('创建预算与草案权限已配置，尚未启动助手。') }
+      if (!active.current.signal.aborted) { setRecord(result); setPending(null); setReview(null); setMessage('创建预算与草案权限已配置，尚未启动助手。'); onSaved?.(result) }
     } catch {
       if (!active.current.signal.aborted) { setMessage('确认结果尚未确定，请重试原确认。'); try { setPending(await storage.read(fundingKey(draft))) } catch {} }
     } finally { running.current = false; if (!active.current.signal.aborted) setBusy(false) }
   }
   const current = pending ?? review
-  return h('section', { className: 'kode-collab-funding-form' }, h('h3', null, '团队预算 · 创建助手'),
-    h('p', null, '这份预算用于搭建团队。内部计价由你填写，不代表供应商价格或余额。保存预算不会启动助手。'),
+  return h('section', { className: 'kode-collab-funding-form' }, h('h3', null, '团队预算 · Team Builder'),
+    h('p', null, '这是搭建对话的内部用量上限，不是付款。内部计价由你填写，不代表供应商价格或余额。保存预算不会启动助手。'),
     record && h('p', null, '初始确认记录：', record.budget.limit, ' ', record.budget.unit, '；有效至 ', new Date(record.budget.ends_at).toLocaleString(), '。此处不是实时可用余额。'),
     !record && !current && h('form', { className: 'kode-collab-composer', onSubmit: prepare },
       h('label', null, '预算单位', h('input', { 'aria-label': '预算单位', value: values.unit, required: true, disabled: !ready || busy, onChange: event => setValues(previous => ({ ...previous, unit: event.target.value })) })),

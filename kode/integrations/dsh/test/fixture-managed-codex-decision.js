@@ -1,6 +1,6 @@
 /** Unpaid protocol peer. Only its owned HTTP endpoint can be contacted. */
 import { createInterface } from 'node:readline'
-import { existsSync } from 'node:fs'
+import { existsSync, appendFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 if (!existsSync(process.env.CODEX_HOME)) process.exit(1)
 const args = process.argv.slice(2), config = new Map()
@@ -27,6 +27,7 @@ async function request(method, params, id) {
   if (method === 'initialize') return result(id)
   if (method === 'initialized') return
   if (method === 'thread/start') {
+    if (process.env.KODE_MANAGED_FIXTURE_RPC_LOG) appendFileSync(process.env.KODE_MANAGED_FIXTURE_RPC_LOG, JSON.stringify({ method, params }) + '\n')
     tools = params.dynamicTools
     const mismatch = mode === 'mismatch' || (mode === 'environment' && process.env.KODE_MANAGED_PARENT_MARKER)
     return result(id, { thread: { id: threadId }, model: mismatch ? 'other' : params.model,
@@ -86,7 +87,12 @@ async function request(method, params, id) {
       await retry.text()
       return notify('turn/completed', { turn: { id: turnId, status: 'failed' } })
     }
-    if (['text', 'no-usage', 'late-usage', 'invalid-late-usage', 'foreign-late-usage', 'foreign-turn-late-usage'].includes(mode)) {
+    if (mode === 'large-text') {
+      usage()
+      for (let index = 0; index < 4; index++) notify('item/completed', { item: { type: 'agentMessage', text: 'x'.repeat(512 * 1024) } })
+      return notify('turn/completed', { turn: { id: turnId, status: 'completed' } })
+    }
+    if (['progress-text', 'text', 'no-usage', 'late-usage', 'invalid-late-usage', 'foreign-late-usage', 'foreign-turn-late-usage'].includes(mode)) {
       if (mode !== 'late-usage') usage()
       notify('item/completed', { item: { type: 'agentMessage', text: 'Checked fixture' } })
       return notify('turn/completed', { turn: { id: turnId, status: 'completed' } })

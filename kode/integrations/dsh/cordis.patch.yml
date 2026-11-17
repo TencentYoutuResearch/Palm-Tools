@@ -15,11 +15,24 @@
       name: '@kode/dsh-directory-browse'
     # Loader entries are keyed by id; the appended entry replaces the base Chat
     # while preserving the namespace used by official onboarding and settings.
+    # Explicit pinned sidebar extension; preserves native slots, footer and plugin panels.
+    - id: ui-sidebar
+      name: '@kode/dsh-sidebar'
     - id: ui-chat
       name: '@kode/dsh-chat'
       config:
         transcriptView: standard
         collapseTiming: completion
+    - id: kode-composer
+      name: '@kode/dsh-composer'
+    # Pinned native Conversation with the reviewed composer root/file-picker ownership
+    # patch (patches/dsh-conversation-0.2.1-rc.5). Replaces, never duplicates, ui-conversation.
+    - id: ui-conversation
+      name: '@kode/dsh-conversation'
+    # Pinned native right Sidebar with panel host scopes (patches/dsh-sidebar-right-0.2.1-rc.5):
+    # a main panel may own a surface for a real resource scope. Replaces, never duplicates, ui-sidebar-right.
+    - id: ui-sidebar-right
+      name: '@kode/dsh-sidebar-right'
     - id: kode-collab
       name: '@kode/dsh-collab'
     - id: kode-sidebar-browser

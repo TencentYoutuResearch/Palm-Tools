@@ -7,11 +7,11 @@ for(const native of [false,true])test(`owner ${native?'native':'dsh'} default pr
  const draft = { id: 'draft', home_hub: 'home', revision: 1, status: 'draft', interview: { workspace_refs: [{ host_id: 'home', workspace_id: 'workspace' }] } }
  registerBuilderDefaults({ webServer: { register: value => route = value }, connection: { admit: () => ({ peer: { principal: { kind: principal } } }) } }, {
   home: 'home', backendClient: { call: async (path, body) => { assert.equal(body, undefined); assert.equal(path, '/api/v1/messaging/superagents/drafts/draft'); reads++; return structuredClone(draft) } },
-  service: { profiles: { defaultProfileId: 'profile', list: () => [{ id: 'profile',
+  service: { profiles: { defaultProfileId: 'profile', list: () => [{ id: 'profile', name: 'Profile',
    ...(native?{type:'codex',managedInference:{roles:['builder'],endpoint:'https://example.com/responses'},env:{PRIVATE_FIXTURE:'never-project'}}:{type:'dsh'}),
    defaultModel: changed ? 'different' : 'model' }] }, hasRuntime: () => true,
    officialResourceDirectory: () => ({ items: [{ provider_id: native?'kode-workflow-profile':'provider', registered: true }] }) },
-  llm: { listModels: async provider => { models++; return [{ provider, id: 'model' }] }, resolveModelInfo: async (provider, id) => { if (mutate) changed = true; return { provider, id } } },
+  llm: { listProviders: () => [{ id: native ? 'kode-workflow-profile' : 'provider' }], listModels: async provider => { models++; return [{ provider, id: 'model' }] }, resolveModelInfo: async (provider, id) => { if (mutate) changed = true; return { provider, id } } },
  })
  const get = async (url = '/?draft_id=draft&revision=1', method = 'GET') => { let status, result; const req = Readable.from([]); req.url = url; req.method = method; await route.handler(req, { writeHead: value => status = value, end: value => result = JSON.parse(value) }); return { status, result } }
  let response = await get(); assert.equal(response.status, 200); assert.equal(response.result.state, 'proposed'); assert.equal(response.result.eligible_for_execution, false); assert.equal(reads, 2)
@@ -50,4 +50,23 @@ test('default lookup rejects a concurrent preference change and times out withou
  assert.equal(timeout.status, 409); assert.equal(timeout.result.eligible_for_execution, false)
  resolveLookup([{ provider: 'provider', id: 'model' }])
  await new Promise(resolve => setImmediate(resolve))
+})
+
+
+test('managed defaults recheck private profile revision and registered route without exporting configuration', async () => {
+ let route, mutate = () => {}, registered = true
+ const profile = { id: 'builder', name: 'Builder', type: 'codex', defaultModel: 'model', managedInference: { endpoint: 'https://example.com/responses', roles: ['builder'] } }
+ const draft = { id: 'draft', home_hub: 'home', revision: 1, status: 'draft', interview: { workspace_refs: [{ host_id: 'home', workspace_id: 'workspace' }] } }
+ registerBuilderDefaults({ webServer: { register: value => route = value }, connection: { admit: () => ({ peer: { principal: { kind: 'owner' } } }) } }, {
+  home: 'home', backendClient: { call: async () => draft },
+  service: { profiles: { list: () => [profile] }, hasRuntime: () => true, officialResourceDirectory: () => ({ items: [] }) },
+  llm: { listProviders: () => registered ? [{ id: 'kode-workflow-builder' }] : [], listModels: async provider => [{ provider, id: 'model' }], resolveModelInfo: async (provider, id) => { mutate(); return { provider, id } } },
+ })
+ const get = async () => { let status, value; await route.handler({ method: 'GET', url: '/?draft_id=draft&revision=1' }, { writeHead: v => status = v, end: v => value = JSON.parse(v) }); return { status, value } }
+ let result = await get(); assert.equal(result.status, 200); assert.match(result.value.selection.profile_revision, /^[a-f0-9]{64}$/)
+ mutate = () => { profile.env = { FIXTURE_CHANGED: 'private' } }; assert.equal((await get()).status, 409)
+ mutate = () => { registered = false }; assert.equal((await get()).status, 409)
+ mutate = () => {}; result = await get(); assert.equal(result.value.state, 'needs_configuration')
+ registered = true; profile.managedInference.roles = ['worker']; result = await get(); assert.equal(result.value.state, 'needs_configuration')
+ delete profile.managedInference; result = await get(); assert.equal(result.value.state, 'needs_configuration')
 })

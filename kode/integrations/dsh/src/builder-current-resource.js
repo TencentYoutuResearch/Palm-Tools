@@ -1,5 +1,5 @@
 import { profileRevision } from './agent-profiles.js'
-import { controlledBinding, managedCodexEnabled, managedCodexRoute } from './managed-codex-profile.js'
+import { controlledBinding, managedNativeEnabled, managedCodexRoute } from './managed-codex-profile.js'
 /** The current Builder's own public execution identity; never a Host-wide inventory. */
 export async function readBuilderCurrentResource(runtime,agent,draft){
  const binding=runtime.profiles.binding(agent.id),operation=binding?.managedOperation
@@ -8,7 +8,7 @@ export async function readBuilderCurrentResource(runtime,agent,draft){
  const op=await runtime.client.call(`/api/v1/messaging/operations/${encodeURIComponent(operation.id)}`)
  if(op.id!==operation.id||op.attempt!==operation.attempt||op.epoch!==operation.epoch||op.worker?.node_id!==runtime.host||op.worker?.session_id!==agent.id
    ||!op.selection_policy||op.selection_policy.model!==agent.options.model||!agent.options.provider||agent.options.provider.startsWith('kode-agent-')
-   ||(managedCodexEnabled(binding.profile)&&(!binding.managedBuilder||agent.options.provider!==managedCodexRoute(binding.profile.id))))throw Error('Current Builder execution identity changed')
+   ||(managedNativeEnabled(binding.profile)&&(!binding.managedBuilder||agent.options.provider!==managedCodexRoute(binding.profile.id))))throw Error('Current Builder execution identity changed')
  const account=await runtime.client.call(`/api/v1/messaging/resource-binding?host=${encodeURIComponent(runtime.host)}&profile=${encodeURIComponent(binding.profile.id)}`)
  if(account.host!==runtime.host||account.profile!==binding.profile.id)throw Error('Current Builder account identity mismatch')
  return {host_id:runtime.host,executor_profile_id:binding.profile.id,executor_profile_revision:profileRevision(binding.profile),provider_id:agent.options.provider,

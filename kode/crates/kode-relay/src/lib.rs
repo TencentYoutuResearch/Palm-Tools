@@ -13,7 +13,6 @@ use std::{
 };
 
 use axum::{
-    extract::DefaultBodyLimit,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -318,12 +317,6 @@ pub fn build_router(state: RelayState) -> Router {
         .route("/api/v1/backends", get(setup::backends))
         .route("/api/v1/backends/:key/models", get(setup::models))
         .route("/api/v1/fs/list", get(setup::directories))
-        .route(
-            "/api/v1/attachments",
-            post(setup::attachment).layer(DefaultBodyLimit::max(
-                kode_relay_protocol::MAX_ATTACHMENT_REQUEST_BYTES,
-            )),
-        )
         .route(
             "/api/v1/sessions/:id",
             get(mobile::get_session).delete(mobile::delete_session),

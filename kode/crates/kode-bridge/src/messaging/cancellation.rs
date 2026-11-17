@@ -155,6 +155,7 @@ mod tests {
                 },
                 content: "fixture".into(),
                 idempotency_key: "control".into(),
+                direct_insert: false,
                 in_reply_to: None,
                 hop_count: 0,
                 created_at: now(),

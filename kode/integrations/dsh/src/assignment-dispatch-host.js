@@ -4,10 +4,10 @@ import { assignmentHomeCall, readAssignmentRun } from './assignment-home.js'
 import { isDeepStrictEqual } from 'node:util'
 import { prepareDispatchWorkspace } from './assignment-dispatch-workspace.js'
 import { profileRevision } from './agent-profiles.js'
-import { managedCodexEnabled } from './managed-codex-profile.js'
+import { managedNativeEnabled } from './managed-codex-profile.js'
 const prefix = '/api/v1/messaging/'
 export class AssignmentDispatchHost {
-  constructor(host) { this.host = host; this.pending = new Map(); this.pendingScopes = new Map(); this.stopping = new Map(); this.stopScopes = new Map(); this.closed = false }
+  constructor(host) { this.host = host; this.pending = new Map(); this.pendingScopes = new Map(); this.stopping = new Map(); this.stopScopes = new Map(); this.stopEvidence = new Map(); this.closed = false }
   dispatch(id, { setup, homeScope } = {}) {
     if (this.closed) return Promise.reject(new Error('Assignment dispatcher closed'))
     if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(id)) return Promise.reject(new Error('Invalid Assignment identity'))
@@ -51,7 +51,7 @@ export class AssignmentDispatchHost {
     command = assignment.dispatch.command
     await profiles.update(state => {
       const profile = state.profiles.find(row => row.id === assignment.candidate.resource.profile)
-      if (!profile || (profile.type !== 'dsh' && !managedCodexEnabled(profile)) || profileRevision(profile) !== command.profile_revision) throw new Error('Assignment official profile unavailable or changed')
+      if (!profile || (profile.type !== 'dsh' && !managedNativeEnabled(profile)) || profileRevision(profile) !== command.profile_revision) throw new Error('Assignment official profile unavailable or changed')
       const existing = state.bindings[session]
       if (existing) {
         if (existing.operationClosed || existing.profile.id !== profile.id || existing.revision !== command.profile_revision
@@ -137,7 +137,9 @@ export class AssignmentDispatchHost {
     return task
   }
   async stopOwned(id, homeScope) {
-    await this.pending.get(id)
+    // A failed creation acknowledgement does not prove that no Worker exists.
+    // Settle the concurrent dispatch, then inspect its durable and owned evidence.
+    await this.pending.get(id)?.catch(() => {})
     const runtime = this.host.execution, profiles = runtime.profiles, client = runtime.client
     const path = `${prefix}work-assignments/${encodeURIComponent(id)}`
     const scope = homeScope ? { id, host: runtime.host, worker: homeScope.worker_session, operation: homeScope.operation } : null
@@ -145,7 +147,7 @@ export class AssignmentDispatchHost {
     const assignment = scope ? await assignmentHomeCall(client, scope, 'context') : await client.call(path)
     if (scope && !isDeepStrictEqual(assignment.dispatch.command.operation, scope.operation)) throw new Error('Assignment frozen stop home scope mismatch')
     const session = assignment.worker.session_id, command = assignment.dispatch.command
-    if (assignment.id !== id || assignment.worker.node_id !== runtime.host || assignment.creation?.state !== 'created') throw new Error('Assignment stop requires owned creation')
+    if (assignment.id !== id || assignment.worker.node_id !== runtime.host) throw new Error('Assignment stop requires owned identity')
     let binding = profiles.binding(session)
     const run = await readAssignmentRun(runtime, { id: session }, binding, assignment)
     // A proof captured before interruption may carry the old epoch. Preserve an
@@ -157,21 +159,47 @@ export class AssignmentDispatchHost {
     if (!isDeepStrictEqual(binding?.managedAssignment, { id }) || !isDeepStrictEqual(binding?.managedOperation, command.operation)) throw new Error('Assignment stop binding changed')
     if (binding.assignmentStop && !isDeepStrictEqual(binding.assignmentStop.request, request)) throw new Error('Assignment stop identity conflict')
     if (binding.assignmentStop?.state !== 'drained') {
-      const owned = this.host.handles.get(session)
-      if (!owned) throw new Error('Assignment stop recovery requires actual execution ownership')
+      let evidence = this.stopEvidence.get(id)
+      if (evidence && (evidence.session !== session || !isDeepStrictEqual(evidence.request, request))) throw new Error('Assignment retained stop identity conflict')
+      if (!evidence) {
+        const owned = this.host.handles.get(session)
+        if (!owned) throw new Error('Assignment stop recovery requires actual execution ownership')
+        evidence = { session, request: structuredClone(request), owned }
+        this.stopEvidence.set(id, evidence)
+      }
       await profiles.patchBinding(session, { assignmentStop: { request, state: 'stopping' } })
-      await owned.dispose()
+      if (evidence.observedAt === undefined) {
+        await evidence.owned.dispose()
+        // Retain the completed drain even if the following durable write fails.
+        // This is process-local evidence, never a recovery claim after a restart.
+        evidence.observedAt = Date.now()
+      }
       await profiles.update(state => {
         const current = state.bindings[session]
         if (!isDeepStrictEqual(current?.assignmentStop?.request, request)
             || !isDeepStrictEqual(current?.managedOperation, command.operation)
             || !isDeepStrictEqual(current?.managedAssignment, { id })) throw new Error('Assignment stop binding changed during drain')
         current.operationClosed = true
-        current.assignmentStop = { request, state: 'drained', observed_at: Date.now() }
+        current.assignmentStop = { request, state: 'drained', observed_at: evidence.observedAt }
       })
+      this.stopEvidence.delete(id)
       binding = profiles.binding(session)
     }
     if (!binding.operationClosed || this.host.handles.has(session)) throw new Error('Assignment stop not durably closed')
+    if (assignment.creation?.state !== 'created') {
+      // Drain a known local Worker first. Reconcile creation from existing ledger
+      // evidence only; never dispatch/recreate it merely to obtain a stop receipt.
+      let saved = this.host.dispatches.get(session, id)
+      if (saved && !isDeepStrictEqual(saved.request, command)) throw new Error('Assignment stop creation ledger identity conflict')
+      if (saved && saved.state !== 'created') saved = await this.host.dispatches.reconcile(session, id)
+      if (saved?.state !== 'created' || !isDeepStrictEqual(saved.request, command)) throw new Error('Assignment creation remains uncertain; execution drained locally')
+      const creation = { request_id: `${id}-created`, command, state: 'created' }
+      if (scope) await assignmentHomeCall(client, scope, 'creation', creation)
+      else await client.call(`${path}/creation`, creation)
+      const confirmed = scope ? await assignmentHomeCall(client, scope, 'context') : await client.call(path)
+      if (confirmed.id !== id || confirmed.worker.node_id !== runtime.host || confirmed.worker.session_id !== session
+          || !isDeepStrictEqual(confirmed.dispatch.command, command) || confirmed.creation?.state !== 'created') throw new Error('Assignment stop creation acknowledgement not confirmed')
+    }
     const receipt = scope ? await assignmentHomeCall(client, scope, 'stop', binding.assignmentStop.request) : await client.call(`${path}/stop-receipt`, binding.assignmentStop.request)
     if (receipt.assignment_id !== id || receipt.session_id !== session || receipt.state !== 'execution_drained') throw new Error('Assignment stop receipt mismatch')
     return receipt

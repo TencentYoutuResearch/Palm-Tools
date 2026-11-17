@@ -51,6 +51,11 @@ pub(super) fn lease_gate(db: &Connection, op: &Operation, at: u64) -> Result<()>
     let Some(binding) = read(db, &key("operation", &op.id))? else {
         return Ok(());
     };
+    if binding.get("context_scope").is_some() {
+        // Only the internal owner-frozen conversation profile can enter the
+        // original claim transaction. Scoped model calls have a separate gate.
+        return super::coordinator_context_host_binding::lease_gate(db, op, &binding, at);
+    }
     let team = binding["team_id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("invalid Coordinator binding"))?;
@@ -138,6 +143,48 @@ pub(super) fn bind_in(
     if read(&tx, &key("operation", &input.operation_id))?.is_some() {
         bail!("Coordinator operation already bound")
     }
+    let (op, active, at) = admit_binding(tx, home, team, &input)?;
+    let revision = input.expected_revision + 1;
+    let mut result = json!({"team_id":team,"superagent_id":active["snapshot"]["team"]["superagent_id"],"conversation_id":active["snapshot"]["team"]["conversation_id"],"home_hub":home,"revision":revision,"request":request,"worker":op.worker,"created_at":at,"actor":{"kind":"human","id":"local_owner"},"dispatch_state":"not_dispatched"});
+    if let Some(previous) = current {
+        result["predecessor"] = json!({"control_revision":previous["revision"],"operation_id":previous["request"]["operation_id"],"attempt":previous["request"]["attempt"],"epoch":previous["request"]["epoch"],"worker":previous["worker"]});
+    }
+    for k in [key("control", team), key("operation", &op.id), receipt_key] {
+        tx.execute("INSERT INTO workbench_documents(key,revision,value) VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,value=excluded.value",params![k,revision,serde_json::to_string(&result)?])?;
+    }
+    tx.execute(
+        "INSERT INTO team_events(team_id,body) VALUES (?1,?2)",
+        params![
+            team,
+            serde_json::to_string(&json!({"kind":"coordinator_control_bound","control":result}))?
+        ],
+    )?;
+    Ok(result)
+}
+
+/// Shared authorization validation, independent of control storage identity.
+/// Call only inside the same transaction that persists the control binding.
+pub(super) fn admit_binding(
+    tx: &rusqlite::Transaction,
+    home: &str,
+    team: &str,
+    input: &Bind,
+) -> Result<(Operation, Value, u64)> {
+    inspect_binding_in(tx, home, team, input, GrantCheck::Runtime)
+}
+
+/// Complete authority validation for a prepared staging ledger only. This creates
+/// no lease and must never be treated as runtime admission.
+pub(super) fn inspect_binding_for_staging(
+    tx: &Connection, home: &str, team: &str, input: &Bind,
+) -> Result<(Operation, Value, u64)> {
+    inspect_binding_in(tx, home, team, input, GrantCheck::Staging)
+}
+
+enum GrantCheck { Runtime, Staging }
+fn inspect_binding_in(
+    tx: &Connection, home: &str, team: &str, input: &Bind, check: GrantCheck,
+) -> Result<(Operation, Value, u64)> {
     let op = builder_authority::operation(&tx, &input.operation_id)?;
     if op.state != State::Prepared
         || op.revision != input.operation_revision
@@ -150,6 +197,35 @@ pub(super) fn bind_in(
     {
         bail!("Coordinator requires exact prepared funded local operation")
     }
+    inspect_bound_policy_in(tx, team, input, op, check)
+}
+
+/// Read-only Active policy inspection, not lease admission. Initial bind revision
+/// remains immutable; the caller supplies the exact current ledger observation.
+pub(super) fn inspect_active_policy_in(
+    tx: &Connection, home: &str, team: &str, input: &Bind,
+    current_revision: u64,
+) -> Result<(Operation, Value, u64)> {
+    let op = builder_authority::operation(tx, &input.operation_id)?;
+    if op.state != State::Active || op.revision != current_revision
+        || op.revision <= input.operation_revision
+        || op.attempt != input.attempt || op.epoch != input.epoch
+        || op.worker.node_id != home || !op.budget_required || !op.grant_required
+        || !op.resource_required || op.lease_until.is_none_or(|until| until <= now()) {
+        bail!("Coordinator requires exact active funded local operation")
+    }
+    let result = inspect_bound_policy_in(tx, team, input, op, GrantCheck::Staging)?;
+    if result.0.lease_until.is_none_or(|until| until <= result.2) {
+        bail!("Coordinator active lease expired")
+    }
+    Ok(result)
+}
+
+// Shared without changing Prepared wrapper ordering: role, activation, target,
+// capability, budget, grant (with original gate when Runtime), resource, pricing.
+fn inspect_bound_policy_in(
+    tx: &Connection, team: &str, input: &Bind, op: Operation, check: GrantCheck,
+) -> Result<(Operation, Value, u64)> {
     let assigned: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM work_assignments WHERE operation_id=?1)",
         [&op.id],
@@ -210,7 +286,13 @@ pub(super) fn bind_in(
         bail!("Coordinator capability identity mismatch")
     }
     super::operation_budget::admit(&tx, &op, at)?;
-    super::operation_grant::admit(&tx, &op, at)?;
+    match check {
+        GrantCheck::Runtime => { super::operation_grant::admit(&tx, &op, at)?; }
+        GrantCheck::Staging => {
+            super::operation_grant::validate_authority_in(&tx, &op, at)?["expires_at"]
+                .as_u64().ok_or_else(|| anyhow::anyhow!("grant expiry missing"))?;
+        }
+    }
     if !super::resource_admission::admit(&tx, &op, at)?.allowed {
         bail!("Coordinator resource unavailable")
     }
@@ -262,20 +344,5 @@ pub(super) fn bind_in(
     {
         bail!("Coordinator funding differs from activated policy")
     }
-    let revision = input.expected_revision + 1;
-    let mut result = json!({"team_id":team,"superagent_id":active["snapshot"]["team"]["superagent_id"],"conversation_id":active["snapshot"]["team"]["conversation_id"],"home_hub":home,"revision":revision,"request":request,"worker":op.worker,"created_at":at,"actor":{"kind":"human","id":"local_owner"},"dispatch_state":"not_dispatched"});
-    if let Some(previous) = current {
-        result["predecessor"] = json!({"control_revision":previous["revision"],"operation_id":previous["request"]["operation_id"],"attempt":previous["request"]["attempt"],"epoch":previous["request"]["epoch"],"worker":previous["worker"]});
-    }
-    for k in [key("control", team), key("operation", &op.id), receipt_key] {
-        tx.execute("INSERT INTO workbench_documents(key,revision,value) VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,value=excluded.value",params![k,revision,serde_json::to_string(&result)?])?;
-    }
-    tx.execute(
-        "INSERT INTO team_events(team_id,body) VALUES (?1,?2)",
-        params![
-            team,
-            serde_json::to_string(&json!({"kind":"coordinator_control_bound","control":result}))?
-        ],
-    )?;
-    Ok(result)
+    Ok((op, active, at))
 }

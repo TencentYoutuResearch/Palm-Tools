@@ -1,4 +1,5 @@
 import React from 'react'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { BuilderPatchRecovery } from './builder-patch-recovery.js'
 import { workspaceKey, submitWorkspaces, requestBuilderWorkspaces } from './builder-workspaces.js'
 const h = React.createElement
@@ -7,16 +8,17 @@ export function BuilderWorkspaceForm({ draft, storage, request, onSaved, onRefre
   const [hosts, setHosts] = React.useState([]), [rows, setRows] = React.useState([]), [node, setNode] = React.useState('')
   const [selected, setSelected] = React.useState(draft.interview.workspace_refs), [pending, setPending] = React.useState(null)
   const [ready, setReady] = React.useState(false), [busy, setBusy] = React.useState(false), [error, setError] = React.useState('')
+  const [generation,reload]=React.useState(0)
   const lifetime = React.useRef(null), discovery = React.useRef(null), running = React.useRef(false)
   React.useEffect(() => {
-    const controller = new AbortController(); lifetime.current = controller
+    const controller = new AbortController(); lifetime.current = controller;setReady(false)
     void Promise.all([storage.read(workspaceKey(draft)), request('/api/kode/builder/workspace-directory?', { signal: controller.signal })]).then(([record, directory]) => {
       if (controller.signal.aborted) return
       if (directory.home_hub !== draft.home_hub || !Array.isArray(directory.hosts)) throw Error('Wrong home')
-      setPending(record?.state !== 'accepted' ? record : null); setHosts(directory.hosts); setReady(true)
+      setPending(record?.state !== 'accepted' ? record : null); setHosts(directory.hosts);setError(''); setReady(true);if(node)void chooseHost(node)
     }).catch(() => { if (!controller.signal.aborted) setError('无法读取工作区目录或保存记录，请刷新后重试。') })
     return () => { controller.abort(); discovery.current?.abort() }
-  }, [draft.id, draft.home_hub])
+  }, [draft.id, draft.home_hub,generation])
   const chooseHost = async value => {
     discovery.current?.abort(); const controller = new AbortController(); discovery.current = controller
     setNode(value); setRows([]); setError('')
@@ -39,7 +41,9 @@ export function BuilderWorkspaceForm({ draft, storage, request, onSaved, onRefre
     } finally { running.current = false; if (!lifetime.current.signal.aborted) setBusy(false) }
   }
   return h('form', { className: 'kode-collab-composer kode-collab-workspace-form', onSubmit: submit },
-    h('h3', null, '工作区'), h('p', { className: 'kode-collab-note' }, '选择团队使用的工作区。修改后需要重新检查项目并生成方案。'),
+    h('h3', null, '工作区'), h('p', { className: 'kode-collab-note' }, '选择团队使用的工作区。保存只更新团队草案，不改变已有规划会话的位置或文件访问权限。草案变更后，请明确确认按最新草案继续规划，再重新生成方案。'),
+    h('div',{className:'kode-builder-header-actions'},h(Button,{type:'button',variant:'outline',disabled:busy,onClick:()=>window.dispatchEvent(new CustomEvent('kode-create-project',{detail:{preserveOrbit:true}}))},'添加工作区'),h(Button,{type:'button',variant:'outline',disabled:busy,onClick:()=>reload(value=>value+1)},'刷新工作区目录')),
+    h('p',{className:'kode-collab-note'},'登记完成后刷新目录，再手动选择并保存。不会自动授权新工作区。'),
     h('label', null, '所在主机', h('select', { value: node, disabled: !ready || busy || !!pending, onChange: event => void chooseHost(event.target.value) }, h('option', { value: '' }, '选择主机'), ...hosts.map(host => h('option', { key: host.node_id, value: host.node_id }, host.name)))),
     ...rows.map(row => h('label', { key: keyOf(row), className: 'kode-collab-workspace-option' }, h('input', { type: 'checkbox', disabled: busy || !!pending, checked: selected.some(value => keyOf(value) === keyOf(row)), onChange: event => setSelected(values => event.target.checked ? [...values.filter(value => keyOf(value) !== keyOf(row)), { host_id: row.host_id, workspace_id: row.workspace_id, root_ref: row.root_ref }] : values.filter(value => keyOf(value) !== keyOf(row))) }), row.name, ' · ', row.root_ref)),
     h('h4', null, pending ? '待确认的原选择' : '已选择'), ...(pending?.command.workspace_refs ?? selected).map(row => h('p', { key: keyOf(row) }, row.host_id, ' · ', row.root_ref,

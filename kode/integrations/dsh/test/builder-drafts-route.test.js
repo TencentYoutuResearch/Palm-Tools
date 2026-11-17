@@ -15,3 +15,14 @@ test('owner draft recovery bridge rejects mixed identities and preserves fixed r
   await read('?after=d&limit=2'); assert.deepEqual(calls.pop(), ['/api/v1/messaging/superagents/drafts?after=d&limit=2'])
   failure = Object.assign(new Error('private diagnostic'), { status: 404 }); await read('?draft_id=missing'); assert.equal(status, 404); assert.deepEqual(body, { error: 'Builder drafts unavailable' })
 })
+
+test('team provenance filtering is owner-only and cannot be mixed with a draft identity', async () => {
+  let route, status, calls = []
+  registerBuilderDrafts({ webServer: { register: value => { route = value } }, connection: { admit: () => ({ peer: { principal: { kind: 'owner' } } }) } }, { backendClient: { async call(path) { calls.push(path); return { items: [] } } } })
+  const read = query => route.handler({ method: 'GET', url: '/api/kode/builder/drafts' + query }, { writeHead(code) { status = code }, end() {} })
+  for (const query of ['?team_id=', '?team_id=../team', '?team_id=t&team_id=u', '?draft_id=d&team_id=t', '?team_id=t&limit=51']) { await read(query); assert.equal(status, 400) }
+  assert.equal(calls.length, 0)
+  await read('?team_id=team:one&after=b&limit=1')
+  assert.equal(status, 200)
+  assert.deepEqual(calls, ['/api/v1/messaging/superagents/drafts?after=b&limit=1&team_id=team%3Aone'])
+})

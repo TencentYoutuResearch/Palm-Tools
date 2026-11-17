@@ -42,7 +42,7 @@ test('incoming reply stays unread offscreen and clears only after presentation i
     server = createServer(async (req, res) => { try {
       const route = routes.get(new URL(req.url, 'http://localhost').pathname)
       if (route) return await route.handler(req, res)
-      if (await collabRenderPage(req, res)) return
+      if (await collabRenderPage(req, res, {hub})) return
       res.writeHead(404); res.end()
     } catch { if (!res.headersSent) res.writeHead(500); res.end() } })
     server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -51,13 +51,13 @@ test('incoming reply stays unread offscreen and clears only after presentation i
     const wait = expression => page.evaluate(`(async()=>{const until=Date.now()+10000;while(Date.now()<until){if(${expression})return true;await new Promise(r=>setTimeout(r,50))}throw Error('Unread predicate timed out')})()`)
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
     await wait('globalThis.fixture')
-    await page.evaluate(`document.querySelector('[aria-label="切换到 IM 模式"]').click()`)
+    await page.evaluate(`(()=>{const d=document.querySelector('[data-sidebar-section=channels]');if(d&&!d.open)d.querySelector('summary').click()})()`)
     await wait(`document.querySelector('[aria-label="1 条未读消息"]')`)
     if (process.env.KODE_TEST_UNREAD_SCREENSHOT_PATH) {
       const screenshot = await page.call('Page.captureScreenshot', { format: 'png' })
       await writeFile(process.env.KODE_TEST_UNREAD_SCREENSHOT_PATH, Buffer.from(screenshot.data, 'base64'))
     }
-    await page.evaluate(`document.querySelector('.kode-collab-contact-name').click()`)
+    await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`)
     await wait(`document.querySelector('[data-message-sequence="${human.sequence}"]')`)
     // The long first message keeps the reply outside the virtual viewport. Loaded
     // history is not required to have a DOM node before it is presented.

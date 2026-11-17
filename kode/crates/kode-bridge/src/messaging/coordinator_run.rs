@@ -41,6 +41,9 @@ pub(super) fn authorize(
 ) -> Result<Value> {
     let source = coordinator_input::read(db, conversation, &input.source_message_id)?
         .ok_or_else(|| anyhow::anyhow!("Coordinator input missing"))?;
+    if !source["message"]["discussion"].is_null() {
+        bail!("discussion input is not execution or clarification authority")
+    }
     if source["request"]
         != json!({"operation_id":input.operation_id,"control_revision":input.control_revision,"attempt":input.attempt,"epoch":input.epoch})
     {
@@ -122,6 +125,9 @@ impl Store {
         let source =
             coordinator_input::read(&self.db.lock(), conversation, &input.source_message_id)?
                 .ok_or_else(|| anyhow::anyhow!("Coordinator input missing"))?;
+        if !source["message"]["clarification_target"].is_null() {
+            bail!("clarification answer input cannot start a workflow")
+        }
         let id = run_id(conversation, &input.request_id);
         let create = work_runs::Create {
             id: id.clone(),

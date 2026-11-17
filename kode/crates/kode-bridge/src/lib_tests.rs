@@ -1006,6 +1006,7 @@ async fn restore_matrix_spawns_representative_backends_with_correct_resume_args(
             rows: Some(24),
             permission_mode: None,
             model: None,
+            reasoning_effort: None,
             resume_session_uuid: Some(sid.into()),
             memory_context: None,
             extra_args: None,

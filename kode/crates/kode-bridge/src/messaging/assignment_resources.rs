@@ -197,6 +197,7 @@ pub(super) fn authorized_context(
         |r| r.get(0),
     )?;
     let run: Value = serde_json::from_str(&run_body)?;
+    super::collaboration::execution::admit_run(db, &run)?;
     if !matches!(
         run["state"].as_str(),
         Some("waiting_resource" | "queued" | "running")

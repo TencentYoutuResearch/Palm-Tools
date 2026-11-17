@@ -2,7 +2,7 @@
 //! fence each create/input operation; clients never rebuild or resend the transcript.
 use super::Hub;
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 #[derive(Deserialize)]
@@ -13,6 +13,32 @@ pub struct Request {
     pub profile_id: String,
     pub target_runtime: String,
     pub request_id: String,
+    #[serde(default)]
+    pub selection: Option<Selection>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Selection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
+}
+impl Selection {
+    fn validate(&self, frozen: bool) -> Result<()> {
+        let valid = |value: &str| {
+            !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+        };
+        if frozen && self.model.is_none()
+            || self.model.as_deref().is_some_and(|v| !valid(v))
+            || self.reasoning_effort.as_deref().is_some_and(|v| !valid(v))
+        {
+            bail!("invalid native handoff selection")
+        }
+        Ok(())
+    }
 }
 fn context(events: Vec<crate::EventEnvelope>, title: &str) -> Result<String> {
     let mut messages = vec![];
@@ -77,14 +103,30 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
     {
         bail!("invalid handoff identity or runtime")
     }
+    if !super::model::valid_id(&request.profile_id) || request.profile_id.len() > 160 {
+        bail!("invalid target Agent identity")
+    }
+    if let Some(selection) = &request.selection {
+        selection.validate(false)?;
+        if request.target_runtime != "dsh" {
+            bail!("frozen model selection requires the native dsh handoff adapter")
+        }
+    }
     let ctx = hub.ctx.upgrade().context("backend stopping")?;
-    let fingerprint = json!([
+    let mut fingerprint = json!([
         request.source_runtime,
         request.source_session_id,
         request.target_runtime,
         request.profile_id
     ]);
-    let record = {
+    // Preserve existing receipt fingerprints when no explicit selection was sent.
+    if let Some(selection) = &request.selection {
+        fingerprint
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(selection)?);
+    }
+    let mut record = {
         let _guard = hub.handoff_gate.lock().await;
         let mut document = document(&hub)?;
         if let Some(prior) = document.get(&request.request_id) {
@@ -104,6 +146,9 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
                         && row["dto"]["runtime_session_id"] == request.source_session_id
                 })
                 .context("source session is not published on this Host")?;
+            if request.source_runtime == "dsh" && source["dto"]["handoff_allowed"] != true {
+                bail!("managed, active or unconfirmed source requires controlled handoff")
+            }
             let id = source["local_id"]
                 .as_u64()
                 .context("source identity missing")?;
@@ -113,32 +158,86 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
             if !std::path::Path::new(cwd).is_absolute() {
                 bail!("source workspace must be absolute")
             }
-            let agents = hub.store.document("agents")?;
-            let profile = agents["value"]["profiles"]
-                .as_array()
-                .context("Agent registry unavailable")?
-                .iter()
-                .find(|profile| profile["id"] == request.profile_id)
-                .context("target Agent is unavailable")?;
-            let backend_key = if request.target_runtime == "dsh" {
-                format!("dsh:{}", request.profile_id)
-            } else {
-                format!(
-                    "gui:{}",
-                    agents["value"]["desktop_ids"][&request.profile_id]
-                        .as_str()
-                        .context("target Agent has no GUI adapter")?
-                )
-            };
             let title = source["dto"]["title"].as_str().unwrap_or("共享会话");
-            let payload = json!({"cwd":cwd,"backend_key":backend_key});
             let task = context(ctx.runtimes.history(id, 0, 10000)?, title)?;
-            let row = json!({"fingerprint":fingerprint,"target_runtime":request.target_runtime,"create":payload,"task":task,"source_id":id,"target_name":profile["name"]});
+            let mut row = json!({"fingerprint":fingerprint,"target_runtime":request.target_runtime,"task":task,"source_id":id,"cwd":cwd});
+            if request.target_runtime == "dsh" {
+                // Resolve canonical IDs and defaults only on the execution Host.
+                // The durable runtime receipt freezes the result across retries.
+                let mut prepare = json!({"profile_id":request.profile_id});
+                if let Some(selection) = &request.selection {
+                    prepare["selection"] = serde_json::to_value(selection)?;
+                }
+                if request.source_runtime == "dsh" {
+                    prepare["source_session_id"] = json!(request.source_session_id);
+                }
+                row["prepare"] = prepare;
+            } else {
+                let agents = hub.store.document("agents")?;
+                let profile = agents["value"]["profiles"]
+                    .as_array()
+                    .context("Agent registry unavailable")?
+                    .iter()
+                    .find(|profile| profile["id"] == request.profile_id)
+                    .context("target Agent is unavailable")?;
+                let key = agents["value"]["desktop_ids"][&request.profile_id]
+                    .as_str()
+                    .context("target Agent has no GUI adapter")?;
+                row["create"] = json!({"cwd":cwd,"backend_key":format!("gui:{key}")});
+                row["target_name"] = profile["name"].clone();
+            }
             document[&request.request_id] = row.clone();
             save(&hub, &document)?;
             row
         }
     };
+    if request.target_runtime == "dsh" && record["create"]["profile_revision"].is_null() {
+        // Legacy pending creates are not silently resumed with fresh defaults.
+        let prepare = record
+            .get("prepare")
+            .context("legacy pending handoff requires explicit recovery")?;
+        let prepared = ctx
+            .runtimes
+            .request(
+                "dsh",
+                None,
+                "prepare_handoff",
+                prepare.clone(),
+                &format!("handoff:{}:prepare", request.request_id),
+            )
+            .await?;
+        let revision = prepared["profile_revision"]
+            .as_str()
+            .context("missing native Agent revision")?;
+        if prepared["profile_id"] != request.profile_id
+            || revision.len() != 64
+            || !revision
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            bail!("native handoff preparation identity changed")
+        }
+        let selection: Selection = serde_json::from_value(prepared["selection"].clone())?;
+        selection.validate(true)?;
+        let mut create = json!({"cwd":record["cwd"],"backend_key":format!("dsh:{}",request.profile_id),"profile_revision":revision,"selection":selection});
+        if request.source_runtime == "dsh" {
+            create["handoff_source_session_id"] = json!(request.source_session_id);
+        }
+        let _guard = hub.handoff_gate.lock().await;
+        let mut document = document(&hub)?;
+        let saved = document
+            .get_mut(&request.request_id)
+            .context("handoff receipt disappeared")?;
+        if saved["fingerprint"] != fingerprint {
+            bail!("handoff request changed during preparation")
+        }
+        if !saved["create"].is_null() && saved["create"] != create {
+            bail!("native handoff preparation conflicts with its receipt")
+        }
+        saved["create"] = create;
+        record = saved.clone();
+        save(&hub, &document)?;
+    }
     let target = ctx
         .runtimes
         .request(
@@ -152,15 +251,31 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
     let id = target["id"]
         .as_u64()
         .context("runtime did not return the created session identity")?;
+    if request.source_runtime == "dsh"
+        && !ctx.runtimes.snapshots().iter().any(|row| {
+            row["local_id"] == record["source_id"] && row["dto"]["handoff_allowed"] == true
+        })
+    {
+        bail!("source became managed or active before handoff input; no prompt was sent")
+    }
+    let mut input = json!({"text":record["task"]});
+    if request.source_runtime == "dsh" && request.target_runtime == "dsh" {
+        input["handoff_source_session_id"] = json!(request.source_session_id);
+    }
     ctx.runtimes
         .command(
             id,
             "input",
-            json!({"text":record["task"]}),
+            input,
             &format!("handoff:{}:input", request.request_id),
         )
         .await?;
-    let response = json!({"sessionId":target["runtime_session_id"],"runtime":record["target_runtime"],"id":id,"sourceId":record["source_id"]});
+    let mut response = json!({"sessionId":target["runtime_session_id"],"runtime":record["target_runtime"],"id":id,"sourceId":record["source_id"]});
+    if request.target_runtime == "dsh" {
+        response["profile_id"] = json!(request.profile_id);
+        response["profile_revision"] = record["create"]["profile_revision"].clone();
+        response["selection"] = record["create"]["selection"].clone();
+    }
     {
         let _guard = hub.handoff_gate.lock().await;
         let mut document = document(&hub)?;

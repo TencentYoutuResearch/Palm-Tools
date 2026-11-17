@@ -2,7 +2,9 @@ import React from 'react'
 import { changeContactPreference, contactPreferenceKey, verifyContactIntent } from './contact-preference.js'
 const h = React.createElement
 
-export function ContactPreferenceControls({ team, storage, onChanged }) {
+/** Server pin/archive for one Team contact, with prepared-request recovery. Shared by the
+ * settings controls and the sidebar row buttons; both go through changeContactPreference. */
+export function useContactPreference({ team, storage, onChanged }) {
   const [preference, setPreference] = React.useState(team.contact?.preference)
   const [pending, setPending] = React.useState(null)
   const [ready, setReady] = React.useState(false)
@@ -50,6 +52,11 @@ export function ContactPreferenceControls({ team, storage, onChanged }) {
       if (!active.current.signal.aborted) setBusy(false)
     }
   }
+  return { preference, pending, ready, busy, message, change }
+}
+
+export function ContactPreferenceControls({ team, storage, onChanged }) {
+  const { preference, pending, ready, busy, message, change } = useContactPreference({ team, storage, onChanged })
   if (!preference) return null
   return h('div', { className: 'kode-collab-contact-preferences' },
     pending ? h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void change(pending.command.action) }, '恢复原联系人设置请求') :

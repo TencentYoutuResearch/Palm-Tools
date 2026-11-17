@@ -4,9 +4,10 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pluginRecordOf } from '@deepseek-ai/dsh-session'
 
-export async function liveTeamPipeline({ t, hub, ctx, profiles, execution, host, runService, owned, team, root, model, call, waitFor, errors }) {
+export async function liveTeamPipeline({ t, hub, ctx, profiles, execution, host, runService, owned, team, root, model, call, waitFor, errors, evidence }) {
   const human = await call(`conversations/${team.conversation_id}/messages`, { request_id: 'live-team-task',
     content: '请在已选项目中创建 implemented.txt，内容恰好是 implemented，不含换行，然后按这个团队已配置的流程交付结果。' })
+  await evidence?.capture('human_received')
   let completed
   await waitFor(async () => {
     assert.deepEqual(errors, [])
@@ -19,14 +20,26 @@ export async function liveTeamPipeline({ t, hub, ctx, profiles, execution, host,
   await waitFor(async () => {
     assert.deepEqual(errors, [])
     completed = await call(`work-runs/${completed.id}`)
-    const progress = JSON.stringify({ state: completed.state,
+    const progress = JSON.stringify({ state: completed.state, waiting_reason: completed.waiting_reason,
       stages: completed.stages.map(stage => ({ stage: stage.stage_id, state: stage.state })) })
-    if (progress !== lastProgress) { lastProgress = progress; t.diagnostic(JSON.stringify({ live_team_progress: JSON.parse(progress) })) }
+    if (progress !== lastProgress) {
+      lastProgress = progress
+      const budget = (await call('budgets/budget')).budget
+      await evidence?.capture('progress', { run: completed })
+      t.diagnostic(JSON.stringify({ live_team_progress: JSON.parse(progress), budget: {
+        limit: budget.limit, spent: budget.spent, reserved: budget.reserved,
+      } }))
+    }
     return completed.state === 'completed'
   })
+  await evidence?.capture('home_completed', { run: completed })
   assert.equal(completed.completion_authorized, true)
   assert.deepEqual(completed.stages.map(stage => stage.state), ['passed', 'passed', 'passed'])
-  assert.equal(await readFile(join(root, 'implemented.txt'), 'utf8'), 'implemented')
+  const taskRoot = completed.task_workspaces?.code?.root
+  assert.ok(taskRoot, 'completed run retains its task workspace identity')
+  assert.notEqual(taskRoot, root, 'delivery must preserve the owner project')
+  assert.equal(await readFile(join(taskRoot, 'implemented.txt'), 'utf8'), 'implemented')
+  await assert.rejects(readFile(join(root, 'implemented.txt')), error => error.code === 'ENOENT')
   let finalReply
   await waitFor(async () => {
     assert.deepEqual(errors, [])
@@ -35,6 +48,7 @@ export async function liveTeamPipeline({ t, hub, ctx, profiles, execution, host,
       && message.in_reply_to === human.id && message.created_at >= completed.delivery.at)
     return Boolean(finalReply)
   })
+  await evidence?.capture('final_reply_received', { run: completed })
   await owned.agent.whenIdle()
   const roles = []
   for (const [session, binding] of Object.entries(profiles.bindings)) {
@@ -63,11 +77,13 @@ export async function liveTeamPipeline({ t, hub, ctx, profiles, execution, host,
   await host.coordinatorCloseRecovery.close()
   if (!profiles.binding(owned.agent.id)?.operationClosed) await owned.run.finish()
   await owned.dispose()
+  await evidence?.capture('roles_stopped', { run: completed })
   const budget = (await call('budgets/budget')).budget
   assert.ok(budget.spent > 0 && budget.spent <= budget.limit)
   await hub.stop('SIGKILL'); await hub.start()
   assert.deepEqual((await call(`work-runs/${completed.id}`)).delivery, completed.delivery)
   assert.ok((await call(`conversations/${team.conversation_id}/messages`)).items.some(message => message.id === finalReply.id))
+  await evidence?.capture('restart_verified', { run: completed })
   t.diagnostic(JSON.stringify({ live_team_decisions: roles.reduce((sum, row) => sum + row.decisions, 0),
     native_roles: roles, controlled_roles: [], stages: completed.stages.map(stage => stage.state),
     completion_authorized: true, team_budget_spent: budget.spent,

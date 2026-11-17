@@ -1,4 +1,5 @@
 import React from 'react'
+import { IconButton } from './icons.js'
 import { BudgetForm } from './budget-form.js'
 const h = React.createElement
 export function BudgetView({ team, request, storage }) {
@@ -22,7 +23,7 @@ export function BudgetView({ team, request, storage }) {
   }
   React.useEffect(() => { void load(); return () => active.current?.abort() }, [team.id, team.home_hub])
   return h('section', { className: 'kode-collab-process', 'aria-label': '团队预算' },
-    h('div', { className: 'kode-collab-toolbar' }, h('h2', null, '团队预算'), h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void load() }, busy ? '正在读取…' : '刷新预算')),
+    h('div', { className: 'kode-collab-toolbar' }, h('h2', null, '团队预算'), h(IconButton, { icon: 'refresh', label: busy ? '正在读取…' : '刷新预算', disabled: busy, onClick: () => void load() })),
     h('p', { className: 'kode-collab-note' }, '内部支出限额，不是供应商余额。不同单位不合并计算。'),
     error && h('p', { role: 'status' }, error),
     value?.status === 'policy_missing' && h('p', null, '此团队尚未关联预算策略。'),

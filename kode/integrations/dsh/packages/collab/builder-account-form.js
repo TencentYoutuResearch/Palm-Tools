@@ -1,7 +1,7 @@
 import React from 'react'
 import { builderAccountKey, selectedBuilderResource, confirmBuilderAccount, requestBuilderAccount } from './builder-account.js'
 const h = React.createElement
-export function BuilderAccountForm({ draft, storage, request }) {
+export function BuilderAccountForm({ draft, storage, request, onSaved }) {
   const [account, setAccount] = React.useState(''), [epoch, setEpoch] = React.useState('1'), [create, setCreate] = React.useState(true)
   const [review, setReview] = React.useState(null), [pending, setPending] = React.useState(null), [ready, setReady] = React.useState(false)
   const [busy, setBusy] = React.useState(false), [message, setMessage] = React.useState('')
@@ -34,13 +34,13 @@ export function BuilderAccountForm({ draft, storage, request }) {
     if (running.current || !intent) return
     running.current = true; setBusy(true); setMessage('')
     try {
-      await confirmBuilderAccount({ storage, draft, command: intent.command, selection: intent.selection, request: requestBuilderAccount, signal: active.current.signal })
-      if (!active.current.signal.aborted) { setPending(null); setReview(null); setMessage('账户绑定已确认。供应商额度仍需独立采集，可刷新执行资源查看。') }
+      const receipt = await confirmBuilderAccount({ storage, draft, command: intent.command, selection: intent.selection, request: requestBuilderAccount, signal: active.current.signal })
+      if (!active.current.signal.aborted) { setPending(null); setReview(null); setMessage('账户绑定已确认。供应商额度仍需独立采集，可刷新执行资源查看。'); onSaved?.(receipt) }
     } catch {
       if (!active.current.signal.aborted) { setMessage('绑定结果尚未确认，请恢复原请求。'); try { const row = await storage.read(builderAccountKey(draft)); if (row?.state !== 'accepted') setPending(row) } catch {} }
     } finally { running.current = false; if (!active.current.signal.aborted) setBusy(false) }
   }
-  return h('section', { className: 'kode-collab-account-form' }, h('h3', null, '创建助手账户归属'),
+  return h('section', { className: 'kode-collab-account-form' }, h('h3', null, 'Team Builder 账户归属'),
     h('p', null, '账户标识用于归集同一账户的用量，请勿填写密钥。此设置不代表已连接供应商或已有余额。'),
     pending ? h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void confirm() }, '恢复原账户确认') :
     review ? h('div', null, h('p', null, '执行资源：', review.selection.selection.profile_id, '；账户：', review.command.account_id, review.command.create_account ? '（新建归属记录）' : '（使用已有归属记录）'),

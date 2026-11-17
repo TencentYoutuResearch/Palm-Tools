@@ -1,6 +1,8 @@
 /** Owner-only Agent configuration API over dsh's existing authenticated Web carrier. */
+import { createAgentMigrationApi } from './agent-profile-migration-api.js'
 import { HistoryEditor } from './history-edit.js'
 import { AGENT_TYPES } from './agent-profiles.js'
+import { preferenceId } from './local-agent-preferences.js'
 import { profileRoute } from './agent-runtime.js'
 import { SUPPORTED_AGENT_TYPES } from './native-session.js'
 import { resolveAdvertisedModel, resolveDefaultSelection } from './model-alias.js'
@@ -13,6 +15,7 @@ export function registerAgentApi(ctx, service) {
   const streams = new Set(), historyEditor = new HistoryEditor(ctx, service)
   const controller = () => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用，请稍后重试。'); return value }
   const { profiles, adapter } = service
+  const migrations = createAgentMigrationApi(profiles)
   const available = profile => service.hasRuntime ? service.hasRuntime(profile.type) : Object.hasOwn(service.types ?? AGENT_TYPES, profile.type)
   const positionOf = agent => ctx.sessionProjections.stateOf(agent.session, agent.isKodeNativeAgent ? 'kodeTurnBoundary' : 'turnBoundary')
   const selected = agent => {
@@ -40,9 +43,12 @@ export function registerAgentApi(ctx, service) {
     if (admitted.peer.principal.kind !== 'owner') { json(res, 403, { error: 'only the Host owner may configure executable Agents' }); return }
     try {
       if (req.method === 'GET') {
-        await profiles.reload?.()
         const appearanceIndex = await service.appearance?.load()
         const query = new URL(req.url, 'http://localhost').searchParams
+        const teamId = query.get('team_id')
+        if (teamId !== null && (!preferenceId(teamId) || query.getAll('team_id').length !== 1)) throw new Error('Invalid Team preference scope')
+        try { await profiles.reload?.() } catch (error) { if (teamId === null) throw error }
+        await profiles.localPreferences.open()
         const sessionId = query.get('session_id')
         const configurationOnly = query.get('configuration') === '1'
         const agent = sessionId ? ctx.agents.get(sessionId) : undefined
@@ -52,7 +58,8 @@ export function registerAgentApi(ctx, service) {
         const stored = storedRow?.projections?.values?.modelSelection
         const selection = agent ? selected(agent) : stored?.pending ?? stored?.next ?? stored?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
         const inferred = profiles.list().find(p => profileRoute(p.id) === selection?.provider)
-        const configuredDefault = profiles.list().find(p => p.id === profiles.defaultProfileId && available(p))
+        const configuredDefaultId = profiles.defaultProfileId // Migration never changes the default execution identity.
+        const configuredDefault = profiles.list().find(p => p.id === configuredDefaultId && available(p))
         const requestedProfileId = configurationOnly && !sessionId ? query.get('profile_id') : null
         if (requestedProfileId && !profiles.list().some(profile => profile.id === requestedProfileId)) throw new Error('unknown Agent profile')
         const selectedProfileId = binding?.profile.id ?? requestedProfileId ?? (!sessionId ? configuredDefault?.id : undefined) ?? inferred?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
@@ -60,22 +67,29 @@ export function registerAgentApi(ctx, service) {
         const catalog = { groups: [] }
         if (query.get('refresh') === '1' && profile) adapter.invalidateModels?.(profileRoute(profile.id))
         const defaultPreference = configurationOnly && profile ? profiles.defaultModelFor?.(profile.id) : undefined
-        const modelHint = configurationOnly ? defaultPreference?.model ?? profile?.defaultModel : selection?.provider === profileRoute(profile?.id) ? selection.model : undefined
+        const modelHint = configurationOnly ? defaultPreference?.model : selection?.provider === profileRoute(profile?.id) ? selection.model : undefined
         let models = [], modelError, defaultModelSelection
         try { if (!managed && profile && available(profile)) models = await modelsFor(profile, catalog, modelHint) } catch (error) { modelError = error.message }
         if (configurationOnly && profile && models.length) {
-          try { defaultModelSelection = resolveDefaultSelection(models, defaultPreference, profile.defaultModel) }
+          try { defaultModelSelection = resolveDefaultSelection(models, defaultPreference) }
           catch (error) { modelError = error.message }
         }
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })
-        const installed = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
+        const nativeAgents = profiles.listAgents?.() ?? profiles.list()
+        const defaultCandidates = profiles.list().filter(available) // Keep implicit defaults on their original profile too.
+        const presentation = new Map((service.appearance?.profilesView() ?? []).map(profile => [profile.id, profile]))
+        const installed = nativeAgents.filter(available).map(profile => {
+          const { defaultModel, defaultReasoningEffort, ...display } = presentation.get(profile.id) ?? {}
+          return { ...display, ...profile }
+        })
         const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
         const skills = !managed && query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         const fastState = agent ? ctx.sessionProjections.stateOf(agent.session, 'kodeFast') : storedRow?.projections?.values?.kodeFast
         const selectedModel = models.find(row => row.id === selection?.model)
         const fast = effectiveFast(fastState, selection, selectedModel)
-        json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
-          selectedProfileId, selection, defaultModelSelection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
+        json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? defaultCandidates.find(p => p.type === 'codex')?.id ?? defaultCandidates[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
+          selectedProfileId, selection, defaultModelSelection, catalog, models, modelError,
+          ...(teamId === null ? {} : { teamRoleTargets: { version: 1, teamId, assignments: profiles.teamRoleTargetsFor(teamId), diagnostics: await profiles.teamRoleTargetDiagnostics(teamId), preferenceRevision: profiles.localPreferences.state.revision, scope: 'local_host', eligibleForExecution: false }, teamRolePreferences: { teamId, assignments: profiles.teamRolesFor(teamId), preferenceRevision: profiles.localPreferences.state.revision, scope: 'local_host', eligibleForExecution: false } }), ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
           ...(managed ? { managed } : {}),
           canChangeAgent: !managed && (agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true),
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
@@ -86,6 +100,26 @@ export function registerAgentApi(ctx, service) {
       let body = ''
       for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) throw new Error('Agent configuration exceeds 128 KiB') }
       const input = JSON.parse(body)
+      if (migrations.handles(input?.action)) {
+        const result = await migrations.run(input, admitted.peer.principal)
+        if (input.action.startsWith('confirm-')) service.refresh()
+        json(res, 200, result); return
+      }
+      if (input?.action === 'set-team-role-targets') {
+        if (input.version !== 1 || Object.keys(input).some(key => !['action', 'version', 'teamId', 'expectedRevision', 'assignments'].includes(key)) || !preferenceId(input.teamId) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) throw Error('Versioned local Team preferences required')
+        try { json(res, 200, await profiles.setTeamRoleTargets(input.teamId, input.assignments, input.expectedRevision)) }
+        catch (error) { if (/Local preferences changed/.test(error.message)) json(res, 409, { error: error.message, scope: 'local_host' }); else throw error }
+        return
+      }
+      if (input?.action === 'reset-default-model') {
+        json(res, 200, await profiles.setDefaultModel(input.profileId, null)); return
+      }
+      if (input?.action === 'set-team-roles') {
+        if (Object.keys(input).some(key => !['action', 'teamId', 'expectedRevision', 'assignments'].includes(key)) || !preferenceId(input.teamId) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) throw new Error('Versioned local Team preferences required')
+        try { json(res, 200, await profiles.setTeamRoles(input.teamId, input.assignments, input.expectedRevision)) }
+        catch (error) { if (/Local preferences changed/.test(error.message)) json(res, 409, { error: error.message, scope: 'local_host' }); else throw error }
+        return
+      }
       if (['select', 'session-avatar', 'edit-message'].includes(input.action) && input.sessionId && managedSessionBinding(profiles, input.sessionId)) {
         json(res, 403, { error: managedSessionReadOnlyReason }); return
       }
@@ -181,7 +215,7 @@ export function registerAgentApi(ctx, service) {
       await profiles.bind(agent.id, profile.id)
       service.recordBinding?.(agent, profile)
       json(res, 200, { ...selection, ...(fast === undefined ? {} : { fast }), ...(rebound ? {rebound:true} : {}) })
-    } catch (error) { json(res, 400, { error: error.message }) }
+    } catch (error) { json(res, error.statusCode === 409 ? 409 : 400, { error: error.message }) }
   } })
-  return () => { for (const res of streams) res.end(); disposeApi(); disposeUpdates() }
+  return () => { migrations.clear(); for (const res of streams) res.end(); disposeApi(); disposeUpdates() }
 }

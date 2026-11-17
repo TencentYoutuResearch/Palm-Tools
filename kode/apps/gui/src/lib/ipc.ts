@@ -179,7 +179,7 @@ export interface ModelUsageTotals {
   output_tokens: number
   cached_tokens: number
   total_tokens: number
-  cost_usd: number
+  cost_usd: number | null
 }
 
 export interface ModelUsageRow extends ModelUsageTotals {

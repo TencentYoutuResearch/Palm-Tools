@@ -1,12 +1,16 @@
 /** A fresh native decision yields Host tool requests only after its CLI process has stopped. */
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
+import { managedChatgptAuthPlan, officialCodexResponsesEndpoint, validateOfficialCodexEndpoint, requireManagedChatgptConfirmation, loginManagedChatgpt, suppressManagedChatgptDiagnostics } from './codex-managed-auth.js'
 import { RpcProcess } from './rpc-process.js'
 import { CodexModelGate } from './codex-model-gate.js'
 import { usageCounters } from './native-usage.js'
 import { observeCodexOutputDrain } from './codex-output-drain.js'
 import { workerQuestions } from './worker-questions.js'
+import { nativeWorkerClarificationInstructions } from './native-worker-clarification-prompt.js'
 import { isDeepStrictEqual } from 'node:util'
+import { DecisionOutput } from './decision-output.js'
+import { progressWatchdog } from './progress-watchdog.js'
 import { prepareManagedBootstrap, readManagedBootstrapReport } from './codex-managed-bootstrap.js'
 
 const defaultProvider = 'kode_workflow'
@@ -19,29 +23,44 @@ const disabledFeatures = ['multi_agent', 'plugins', 'hooks', 'apps', 'shell_tool
   'view_image', 'image_generation', 'sleep_tool', 'goals']
 
 export class CodexManagedDecision {
-  constructor({ profile, cwd, stateRoot, endpoint, model, effort, apiKeyVariable, bootstrap, admit, signal, timeoutMs = 300000, allowUserInput = true }) {
+  constructor({ profile, cwd, stateRoot, endpoint, model, effort, apiKeyVariable, bootstrap, chatgptAuth, admit, signal, timeoutMs = 300000, allowUserInput = true }) {
     if (!(profile?.type === 'codex' || profile?.protocol === 'codex') || !cwd || !stateRoot
         || (apiKeyVariable != null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyVariable))
         || (apiKeyVariable && bootstrap?.pathVariable === apiKeyVariable)
         || (bootstrap?.provider && (endpoint != null || apiKeyVariable != null))
         || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1800000) throw new Error('Managed Codex decision configuration rejected')
     if (typeof allowUserInput !== 'boolean') throw new Error('Managed Codex question policy required')
+    if (chatgptAuth != null) {
+      if (bootstrap || apiKeyVariable || profile.args?.length || Object.keys(profile.env ?? {}).length) throw new Error('Managed ChatGPT requires a plain isolated CLI profile')
+      endpoint = validateOfficialCodexEndpoint(endpoint ?? officialCodexResponsesEndpoint)
+    }
     this.allowUserInput = allowUserInput
-    this.options = { profile, cwd, stateRoot, endpoint, model, effort, apiKeyVariable, bootstrap, admit }
+    this.options = { profile, cwd, stateRoot, endpoint, model, effort, apiKeyVariable, bootstrap, chatgptAuth, admit }
     this.stop = new AbortController()
-    this.signal = AbortSignal.any([this.stop.signal, AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])])
+    this.watchdog = progressWatchdog(timeoutMs)
+    this.signal = AbortSignal.any([this.stop.signal, this.watchdog.signal, ...(signal ? [signal] : [])])
     this.events = []
     this.eventBytes = 0
     this.wake = () => { this.waiter?.(); this.waiter = undefined }
     this.signal.addEventListener('abort', this.wake, { once: true })
   }
   push(event) {
+    const params = event.params ?? {}
+    if (this.threadId && params.threadId === this.threadId
+        && (!params.turnId || params.turnId === this.turnId)
+        && ((event.method?.endsWith('/delta') && typeof params.delta === 'string' && params.delta.length)
+          || ['item/started', 'item/completed', 'turn/completed'].includes(event.method))) this.watchdog.progress()
+    // Deltas are progress-only here; completed items carry the canonical full text.
+    if (event.id === undefined && event.method?.endsWith('/delta')) return
     const bytes = Buffer.byteLength(JSON.stringify(event))
-    if (this.events.length >= 4096 || this.eventBytes + bytes > 8 * 1024 * 1024) {
+    if (this.events.length >= 4096 || this.eventBytes + bytes > 16 * 1024 * 1024) {
       this.error ??= new Error('Managed Codex notification limit exceeded')
     } else {
       this.events.push({ event, bytes })
       this.eventBytes += bytes
+      // Backpressure is based on backlog, never total output. Leave room for one
+      // transport-bounded frame already buffered by RpcProcess.
+      if (!this.draining && (this.eventBytes >= 1024 * 1024 || this.events.length >= 512)) this.rpc?.child.stdout.pause()
     }
     this.wake()
   }
@@ -53,7 +72,12 @@ export class CodexManagedDecision {
   }
   async prepareOwned({ messages, tools }) {
     this.signal.throwIfAborted()
-    const { profile, cwd, stateRoot, endpoint, model, effort, apiKeyVariable, bootstrap, admit } = this.options
+    const { profile, cwd, stateRoot, endpoint, model, effort, apiKeyVariable, bootstrap, chatgptAuth, admit } = this.options
+    if (chatgptAuth != null) {
+      this.authenticationState = 'awaiting_owner_confirmation'
+      requireManagedChatgptConfirmation(chatgptAuth)
+      this.authenticationState = 'authorized_not_started'
+    }
     if (!Array.isArray(messages) || !Array.isArray(tools)
         || messages.some(message => !Array.isArray(message.content)
           || message.content.some(block => !['text', 'tool-call', 'tool-result'].includes(block.type)))
@@ -65,12 +89,13 @@ export class CodexManagedDecision {
     this.input = input
     this.tools = new Set(tools.map(tool => tool.name))
     const provider = bootstrap?.provider ?? defaultProvider
-    this.gate = new CodexModelGate({ endpoint, deferredEndpoint: Boolean(bootstrap?.provider), model, effort, tools: [...this.tools], admit, signal: this.signal, allowUserInput: this.allowUserInput })
+    this.gate = new CodexModelGate({ endpoint, deferredEndpoint: Boolean(bootstrap?.provider), model, effort, tools: [...this.tools], admit, signal: this.signal, allowUserInput: this.allowUserInput, onProgress: () => this.watchdog.progress() })
     const base = await this.gate.open()
     this.signal.throwIfAborted()
     await mkdir(stateRoot, { recursive: true, mode: 0o700 })
     this.directory = await mkdtemp(join(stateRoot, 'codex-decision-'))
-    const providerSettings = bootstrap?.provider ? [
+    const authPlan = chatgptAuth == null ? null : managedChatgptAuthPlan({ gateBase: base, endpoint })
+    const providerSettings = authPlan ? authPlan.settings : bootstrap?.provider ? [
       `model_providers.${provider}.base_url=${JSON.stringify(base)}`, `model_providers.${provider}.wire_api="responses"`,
       `model_providers.${provider}.supports_websockets=false`, `model_providers.${provider}.request_max_retries=0`,
       `model_providers.${provider}.stream_max_retries=0`,
@@ -93,7 +118,11 @@ export class CodexManagedDecision {
     this.rpc = new RpcProcess({ ...profile, env }, cwd, {
       inheritEnvironment: false, gracefulCloseMs: 2000, appServerArgs: ['--strict-config', ...settings.flatMap(value => ['-c', value])],
     })
-    this.rpc.on('notification', event => this.push(event))
+    if (chatgptAuth != null) suppressManagedChatgptDiagnostics(this.rpc)
+    this.rpc.on('notification', event => {
+      if (chatgptAuth != null && event.method?.startsWith('account/')) return
+      this.push(event)
+    })
     this.rpc.on('request', event => this.push(event))
     this.rpc.on('closed', () => {
       if (!this.closing) this.error ??= new Error('Managed Codex process ended unexpectedly')
@@ -103,6 +132,13 @@ export class CodexManagedDecision {
     await this.rpc.request('initialize', { clientInfo: { name: 'kode-managed-decision', version: '1' },
       capabilities: { experimentalApi: true } }, { signal: this.signal })
     this.rpc.notify('initialized', {})
+    if (chatgptAuth != null) {
+      this.authenticationState = 'awaiting_official_login'
+      try {
+        await loginManagedChatgpt(this.rpc, chatgptAuth, this.signal)
+        this.authenticationState = 'authenticated_ephemeral'
+      } catch (error) { this.authenticationState = 'failed'; throw error }
+    }
     const bootstrapState = preparedBootstrap ? await readManagedBootstrapReport(preparedBootstrap.reportPath, bootstrap?.provider) : null
     if (bootstrap?.provider) this.gate.configureEndpoint(bootstrapState.endpoint)
     const metadata = await this.rpc.request('thread/start', { cwd, model, modelProvider: provider,
@@ -131,12 +167,13 @@ export class CodexManagedDecision {
     const item = this.events.shift()
     if (!item) return
     this.eventBytes -= item.bytes
+    if (this.eventBytes < 512 * 1024 && this.events.length < 256) this.rpc?.child.stdout.resume()
     return item.event
   }
   async execute() {
     if (!this.configuration || this.executed || this.closing) throw new Error('Managed Codex decision unavailable')
     this.executed = true
-    const calls = [], texts = []
+    const calls = [], output = new DecisionOutput(this.options.stateRoot)
     let failure, usage, terminal, usageEvidence, nativeUsageObserved = false, nativeUsageInvalid = false
     let outputDrainUnconfirmed = false, usageEvidenceRejected = false
     const collectUsage = event => {
@@ -152,11 +189,11 @@ export class CodexManagedDecision {
       const { model, reasoningEffort } = this.configuration
       const started = await this.rpc.request('turn/start', { threadId: this.threadId,
         input: [{ type: 'text', text: this.input }], permissions, approvalPolicy: 'never', model,
-        collaborationMode: { mode: this.allowUserInput ? 'plan' : 'default', settings: { model, reasoning_effort: reasoningEffort, developer_instructions: workflowInstructions } },
+        collaborationMode: { mode: this.allowUserInput ? 'plan' : 'default', settings: { model, reasoning_effort: reasoningEffort, developer_instructions: workflowInstructions + (this.allowUserInput ? nativeWorkerClarificationInstructions : '') } },
       }, { signal: this.signal })
       this.turnId = started.turn.id
       this.gate.sealTurn(this.threadId, this.turnId)
-      let interrupting, textBytes = 0
+      let interrupting
       while (!terminal) {
         const event = await this.next()
         if (!event) continue
@@ -182,9 +219,7 @@ export class CodexManagedDecision {
           void interrupting.catch(error => { this.error ??= error; this.wake() })
         }
         if (method === 'item/completed' && params.item?.type === 'agentMessage') {
-          textBytes += Buffer.byteLength(params.item.text ?? '')
-          if (textBytes > 1024 * 1024) throw new Error('Managed Codex output limit exceeded')
-          texts.push(params.item.text ?? '')
+          await output.append(params.item.text ?? '')
         }
         if (method === 'turn/completed' && params.turn?.id === this.turnId) terminal = params.turn.status
       }
@@ -202,6 +237,9 @@ export class CodexManagedDecision {
           collectUsage(event)
         }
       }
+      try { await output.close() } catch (error) { failure ??= error }
+      this.draining = true
+      this.rpc?.child?.stdout.resume()
       const outputDrain = observeCodexOutputDrain(this.rpc?.child?.stdout)
       try {
         collectQueuedUsage()
@@ -240,8 +278,9 @@ export class CodexManagedDecision {
         usageEvidence = Object.freeze(evidence)
       }
     }
+    if (!failure) output.seal()
     if (failure && this.gate.failureDetails) failure.managedInferenceFailure = this.gate.failureDetails
-    return { calls: failure ? [] : calls, texts: failure ? [] : texts, usage, usage_evidence: usageEvidence ?? null, terminal,
+    return { calls: failure ? [] : calls, texts: failure ? [] : output.texts, output_artifact: output.artifact, usage, usage_evidence: usageEvidence ?? null, terminal,
       transport_completion: this.gate.completionBasis ?? null,
       failure, failure_details: this.gate.failureDetails ?? null,
       configuration: this.configuration, stop: this.stopEvidence,
@@ -249,9 +288,13 @@ export class CodexManagedDecision {
   }
   close() {
     return this.closing ??= (async () => {
+      this.draining = true
+      this.rpc?.child?.stdout.resume()
+      this.watchdog.dispose()
       this.stop.abort(new Error('Managed Codex decision closed'))
       await this.preparation?.catch(() => {})
       const stopped = await this.rpc?.close()
+      if (this.options.chatgptAuth != null && this.rpc) suppressManagedChatgptDiagnostics(this.rpc)
       await this.gate?.close()
       this.signal.removeEventListener('abort', this.wake)
       if (this.directory && (!stopped || stopped.process_group_empty)) await rm(this.directory, { recursive: true, force: true })

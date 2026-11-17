@@ -1,6 +1,8 @@
+import { BuilderBoundControls } from './builder-bound-controls.js'
 import { BuilderConversationView } from './builder-conversation-view.js'
 import { BuilderCloseForm } from './builder-close-form.js'
 import React from 'react'
+import { createPortal } from 'react-dom'
 import { builderStartKey, confirmBuilderStart, requestBuilderStart, verifyBuilderCreation } from './builder-start-command.js'
 const h = React.createElement
 async function planRequest(input, signal) {
@@ -13,7 +15,7 @@ async function planRequest(input, signal) {
     return await response.json()
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
 }
-export function BuilderStartForm({ draft, storage, request, onDraftUpdated }) {
+export function BuilderStartForm({ draft, storage, request, onDraftUpdated, conversationTarget, onConversationActive }) {
   const [slot, setSlot] = React.useState(null), [plan, setPlan] = React.useState(null), [ready, setReady] = React.useState(false)
   const [amount, setAmount] = React.useState(''), [allowUnknown, setAllowUnknown] = React.useState(false)
   const [busy, setBusy] = React.useState(false), [message, setMessage] = React.useState('')
@@ -71,20 +73,22 @@ export function BuilderStartForm({ draft, storage, request, onDraftUpdated }) {
     } catch { if (!active.current.signal.aborted) { setMessage('启动结果尚未确认，重试将恢复原启动命令。'); try { setSlot(await storage.read(builderStartKey(draft))) } catch {} } }
     finally { running.current = false; if (!active.current.signal.aborted) setBusy(false) }
   }
+  React.useEffect(()=>{onConversationActive?.(slot?.state==='created')},[slot?.state,onConversationActive])
   const command = slot?.command ?? plan?.command
-  return h('section', { className: 'kode-collab-start-form' }, h('h3', null, '启动创建助手'),
+  const conversation=slot?.state==='created'&&h(BuilderConversationView,{key:slot.receipt.request.operation.id,draft,created:slot.receipt,storage,request,onDraftUpdated,readOnly:closeState!=='open',closed:closeState==='closed',accessory:h(BuilderBoundControls,{draft,created:slot.receipt,request})})
+  return h('section', { className: 'kode-collab-start-form' }, h('h3', null, '启动 Team Builder'),
     slot?.state === 'created' ? h('p', { role: 'status' }, '助手创建已确认。此记录不代表当前在线或已完成团队配置。') :
       command ? h('div', null,
         h('p', null, '模型：', command.provider, ' / ', command.start.operation.selection_policy.model),
         h('p', null, '预留团队预算：', command.start.operation.funding.amount, ' ', command.start.operation.funding.unit),
         h('p', null, command.start.operation.resource.unknown_quota === 'team_budget' ? '供应商额度未知时允许在团队预算约束下执行；已知耗尽时仍拒绝。' : '必须具备有效的供应商额度观测。'),
-        h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void confirm() }, slot ? '恢复原启动请求' : '确认启动创建助手'),
+        h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => void confirm() }, slot ? '恢复原启动请求' : '确认启动 Team Builder'),
         !slot && h('button', { type: 'button', className: 'kode-collab-button', disabled: busy, onClick: () => setPlan(null) }, '返回修改启动配置')) :
       h('form', { className: 'kode-collab-composer', onSubmit: prepare },
         h('label', null, '本次预留预算', h('input', { 'aria-label': '本次预留预算', inputMode: 'numeric', required: true, disabled: !ready || busy, value: amount, onChange: event => setAmount(event.target.value) })),
         h('label', null, h('input', { type: 'checkbox', checked: allowUnknown, disabled: !ready || busy, onChange: event => setAllowUnknown(event.target.checked) }), '供应商额度无法确认时，允许使用团队预算约束'),
         h('button', { type: 'submit', className: 'kode-collab-button', disabled: !ready || busy }, '核对启动配置')),
     slot?.state === 'created' && h(BuilderCloseForm,{key:'close:'+slot.receipt.request.operation.id,draft,startup:slot,storage,onState:setCloseState}),
-    slot?.state === 'created' && h(BuilderConversationView, { key: slot.receipt.request.operation.id, draft, created: slot.receipt, storage, request, onDraftUpdated,readOnly:closeState!=='open',closed:closeState==='closed' }),
+    conversation && (conversationTarget === undefined ? conversation : conversationTarget ? createPortal(conversation,conversationTarget) : null),
     message && h('p', { role: 'status' }, message))
 }

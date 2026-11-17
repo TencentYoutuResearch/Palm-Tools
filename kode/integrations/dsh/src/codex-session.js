@@ -1,4 +1,6 @@
 import { codexReroutedSelection } from './native-selection.js'
+import { openNativeRolePrompt, checkNativeRolePrompt, nativeRoleInstructions } from './native-role-prompt.js'
+import {unsupportedNativeBuilder,nativeBuilderThreadParams,assertNativeBuilderSelection} from './native-builder-execution.js'
 import { usageCounters, turnUsage, zeroUsage } from './native-usage.js'
 /** One persistent Codex app-server connection per dsh Session and profile snapshot. */
 import { deduplicateSkillCopies } from './codex-skills.js'
@@ -121,8 +123,27 @@ export class CodexSession {
       return this.rpc.request('thread/resume', params, { signal })
     }
   }
-  async open(binding, tools, signal) {
+  /** Non-inference protocol probe only. A successful model echo is NOT proof
+   * that ambient tools/instructions are disabled, so open/turn remain blocked. */
+  async preflightBuilder({selection,procedure,tools},signal){
+    if(this.handlers.nativeBuilder===undefined||this.threadId||this.active||this.builderPreflightAttempted)throw new Error('Fresh trusted Builder preflight required')
+    const params=nativeBuilderThreadParams({cwd:this.cwd,selection,procedure,tools})
+    this.builderPreflightAttempted=true
     await this.initialize(signal)
+    const result=await this.rpc.request('thread/start',params,{signal})
+    if(typeof result?.thread?.id!=='string'||!result.thread.id||result.cwd!==this.cwd)throw new Error('Native Builder thread metadata mismatch')
+    this.threadId=result.thread.id
+    assertNativeBuilderSelection(result,selection)
+    this.usageTotal=zeroUsage()
+    return Object.freeze({threadId:this.threadId,model:result.model,reasoningEffort:result.reasoningEffort??null,
+      source:'codex_thread_start_metadata',inference_verified:false,runtime_ready:false,
+      blocked_reason:'native_builtin_and_ambient_enforcement_unverified'})
+  }
+  async open(binding, tools, signal) {
+    if(this.handlers.nativeBuilder!==undefined)throw unsupportedNativeBuilder()
+    await this.initialize(signal)
+    this.acceptedRolePrompt = await openNativeRolePrompt(this.handlers, binding.threadId ? 'restore' : 'fresh')
+    const roleText = nativeRoleInstructions(this.acceptedRolePrompt, this.handlers)
     const params = { config: { 'features.goals': true }, cwd: this.cwd, sandbox: this.handlers.policy?.().mode ?? 'read-only', approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(this.profile.defaultModel ? { model: this.profile.defaultModel } : {}) }
     if (binding.threadId && tools.length && JSON.stringify(binding.nativeToolNames ?? []) !== JSON.stringify(tools.map(tool => tool.name))) {
       // Codex cannot replace a resumed thread's dynamicTools. An owner-scoped
@@ -134,11 +155,12 @@ export class CodexSession {
       })
       const definition = this.proxy.definition
       params.config = { ...params.config, mcp_servers: { kode: { command: definition.command, args: definition.args, env: Object.fromEntries(definition.env.map(row => [row.name, row.value])) } } }
-      params.developerInstructions = 'Use the kode MCP session tools to contact other named conversations and return requested results. A completed reply needs no acknowledgement.'
+      if (!(this.handlers.nativePlanning || this.handlers.nativeInteractiveTeam)) params.developerInstructions = 'Use the kode MCP session tools to contact other named conversations and return requested results. A completed reply needs no acknowledgement.'
     }
+    if (roleText && binding.threadId) params.developerInstructions = [params.developerInstructions ?? ((this.handlers.nativePlanning || this.handlers.nativeInteractiveTeam) ? "" : 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.'), roleText].filter(Boolean).join('\n\n')
     const result = binding.threadId
       ? await this.resumeThread({ ...params, threadId: binding.threadId }, signal)
-      : await this.rpc.request('thread/start', { ...params, dynamicTools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.parameters })), developerInstructions: 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.' }, { signal })
+      : await this.rpc.request('thread/start', { ...params, dynamicTools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.parameters })), ...(((this.handlers.nativePlanning || this.handlers.nativeInteractiveTeam) && !roleText) ? {} : { developerInstructions: [(this.handlers.nativePlanning || this.handlers.nativeInteractiveTeam) ? '' : 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.', roleText].filter(Boolean).join('\n\n') }) }, { signal })
     this.threadId = result.thread.id
     try { const { goal } = await this.rpc.request('thread/goal/get', { threadId: this.threadId }, { signal }); this.handlers.goal?.(goal) } catch (error) { if (signal?.aborted) throw error }
     this.usageTotal = binding.threadId ? null : zeroUsage()
@@ -163,6 +185,10 @@ export class CodexSession {
   canSteer() { return Boolean(!this.steeringUnsupported && this.active?.turnId && !this.active.done && !this.rpc?.closed) }
   async steer(input, signal) {
     if (!this.canSteer()) throw Object.assign(new Error('当前原生轮次已结束。'), { rpcRejected: true })
+    const active = this.active
+    await checkNativeRolePrompt(this.handlers, this.acceptedRolePrompt ?? null)
+    await this.handlers.checkPlanningContext?.()
+    if (this.active !== active || !this.canSteer()) throw Object.assign(new Error('当前原生轮次已结束。'), { rpcRejected: true })
     const expectedTurnId = this.active.turnId
     let result
     try { result = await this.rpc.request('turn/steer', { threadId: this.threadId, expectedTurnId, input }, { signal, timeoutMs: 15000 }) }
@@ -179,6 +205,18 @@ export class CodexSession {
     return { skills, errors }
   }
   hasContinuation() { return !this.rpc?.closed && this.pendingEvents.some(event => event.method === 'turn/started') }
+  /** Host-only diagnostic, no inference. An ACK is not effective configuration
+   * evidence, and read-only sandboxing does not isolate cross-workspace reads. */
+  async inspectScopeCapability({model,effort,signal}={}) {
+    if(!this.threadId||this.active)throw Error('Idle owned Codex thread required')
+    const policy=this.handlers.policy?.()??{mode:'read-only'}
+    if(policy.mode!=='read-only')throw Error('Scope diagnostic requires read-only policy')
+    const response=await this.rpc.request('thread/settings/update',{threadId:this.threadId,cwd:this.cwd,sandboxPolicy:{type:'readOnly'},approvalPolicy:'never',...(model?{model}:{}),...(effort?{effort}:{})},{signal})
+    signal?.throwIfAborted()
+    return Object.freeze({protocol:'codex',thread_id:this.threadId,configuration_acknowledged:response!==undefined,
+      selection_verified:false,tool_scope_verified:false,dispatch_allowed:false,
+      reasons:Object.freeze(['effective_selection_readback_unverified','sandbox_read_scope_unverified'])})
+  }
   async goal(input, signal, { model, effort } = {}) {
     if (['set', 'edit', 'resume'].includes(parseGoalInput(input).action)) {
       const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
@@ -187,7 +225,15 @@ export class CodexSession {
     }
     return runGoalCommand(this, input, signal)
   }
-  async *turn(input, { model, effort, serviceTier, signal, command, skillNames = [], observe = false } = {}) {
+  async *turn(input, { model, effort, serviceTier, signal, command, skillNames = [], observe = false, beforeInference, beforeInteractiveInput } = {}) {
+    await checkNativeRolePrompt(this.handlers, this.acceptedRolePrompt ?? null)
+    if(this.acceptedRolePrompt&&(command||observe))throw new Error('Role prompt native command/continuation preservation is unsupported')
+    // turn/start acknowledgement is too late to authorize its own inference.
+    // Until the native protocol confirms effective model/effort beforehand,
+    // a guarded turn cannot dispatch. Ordinary native behavior is unchanged.
+    if (beforeInference !== undefined) throw Object.assign(new Error('Codex pre-inference selection confirmation unavailable'), { code: 'selection_confirmation_unsupported' })
+    if(beforeInteractiveInput!==undefined&&(typeof beforeInteractiveInput!=='function'||command||observe||!model||model==='default'))throw new Error('Interactive Codex requires an explicit native selection and one source')
+    if(this.handlers.nativeBuilder!==undefined)throw unsupportedNativeBuilder()
     if (!this.threadId) throw new Error('Agent session has not been opened')
     if (this.active) throw new Error('Agent already has an active turn')
     signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
@@ -278,6 +324,9 @@ export class CodexSession {
       } else {
         const plan = this.handlers.collaborationMode?.()
         const collaborationMode = typeof plan === 'boolean' ? { mode: plan ? 'plan' : 'default', settings: { model: model ?? this.profile.defaultModel, reasoning_effort: effort ?? null, developer_instructions: null } } : undefined
+        await this.handlers.checkPlanningContext?.()
+        signal.throwIfAborted()
+        if(beforeInteractiveInput){const admission=await beforeInteractiveInput({threadId:this.threadId,selection:{scope:'executor_configuration',model:{requested:model,status:'requested'},effort:{requested:effort??null,status:effort?'requested':'unverifiable'},source:'turn/start_request'},input:structuredClone(input),signal});signal.throwIfAborted();if(admission?.state!=='claimed'||admission.dispatch_allowed!==true||typeof admission.receipt_id!=='string')throw new Error('Interactive source admission missing')}
         result = await this.rpc.request('turn/start', { threadId: this.threadId, cwd: this.cwd, input, sandboxPolicy, approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(model && model !== 'default' ? { model } : {}), ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTierForTurn: serviceTier } : {}), ...(collaborationMode ? { collaborationMode } : {}) }, { signal })
       }
       turnId = result?.turn?.id; active.turnId = turnId

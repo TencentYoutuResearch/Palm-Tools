@@ -1,6 +1,7 @@
 /** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
 import { BackendDocument } from './backend-state.js'
-import { classifyEmptySessions } from './empty-session.js'
+import { classifyEmptySessions, needsEmptySessionCheck } from './empty-session.js'
+import { setupOnlySessionIds } from './session-visibility.js'
 import { savedSessionProfile } from './saved-session-profile.js'
 import { groupWorktreeProjects } from './worktree-projects.js'
 import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
@@ -10,20 +11,22 @@ export async function hostDirectory(ctx, config = {}) {
   const registry = ctx.get('workspaceRegistry')
   if (!registry) throw new Error('工作区服务尚未就绪。')
   const controller = sessionController(ctx)
-  const items = await classifyEmptySessions(controller, (await controller.list({})).items, ctx.get?.('sessionQuery'))
   const runtime = ctx.get('kodeAgents'), profiles = runtime?.profiles
+  const items = await classifyEmptySessions(controller, config.sessionItems ?? (await controller.list({})).items, ctx.get?.('sessionQuery'), { preserve: row => !!profiles?.binding(row.sessionId)?.threadId })
+  const setupOnly = await setupOnlySessionIds(ctx, controller, items.filter(needsEmptySessionCheck))
   const presentation = profile => { const view = runtime?.appearance?.profileView(profile) ?? profile; return { id: view.id, name: view.name, type: view.type, ...(view.avatar ? { avatar: view.avatar } : {}) } }
   const hiddenSessionIds = []
   const sessions = items.flatMap(item => {
     const values = item.projections?.values ?? {}, model = values.modelSelection
     const binding = profiles?.binding(item.sessionId)
+    if (binding?.managedAssignment || binding?.managedCoordinator || binding?.managedBuilder) { hiddenSessionIds.push(item.sessionId); return [] }
     const recorded = values.kodeAgent
     const profile = binding?.profile ?? (recorded ? { id: recorded.profileId, name: recorded.name, type: recorded.type } : undefined)
     const provider = model?.next?.provider ?? model?.lastUsed?.provider
     const dsh = binding ? binding.profile.type === 'dsh' : !provider?.startsWith('kode-agent-')
     const type = binding?.profile.type ?? (dsh ? 'dsh' : undefined)
     if (type && runtime?.hasRuntime && !runtime.hasRuntime(type) && !item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
-    if (item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
+    if (item.blank || setupOnly.has(item.sessionId)) { hiddenSessionIds.push(item.sessionId); return [] }
     return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running, ...(profile ? { agent: presentation(profile) } : {}), ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
   })
   const result = { archivedSessionIds: [...registry.archivedSessionIds], pinnedSessionIds: [...(registry.pinnedSessionIds ?? [])], hiddenSessionIds, sessions,
@@ -31,14 +34,22 @@ export async function hostDirectory(ctx, config = {}) {
   if (config.backendClient) {
     const client = config.backendClient
     const [index, workspaces, node] = await Promise.all([new BackendDocument(client, 'session-index').read(), new BackendDocument(client, 'workspaces').read(), client.call('/api/v1/messaging/node')])
+    result.nodeId = node.node_id
     for (const row of sessions) if (row.agent && runtime?.appearance) row.agent.avatar = runtime.appearance.avatarForSession(row.id, row.agent.type, index, row.agent.id)
     if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
     for (const tab of localSavedTabs(index)) {
       // Older GUI builds persisted empty runtime placeholders as native tabs.
       // Keep their files, but do not resurrect them under a new saved: alias.
-      if (items.some(item => item.blank && (item.sessionId === tab.session_id || item.sessionId === tab.dsh_session_id || profiles?.binding(item.sessionId)?.threadId === tab.session_id))) continue
+      if (items.some(item => (item.blank || setupOnly.has(item.sessionId) || hiddenSessionIds.includes(item.sessionId)) && (item.sessionId === tab.session_id || item.sessionId === tab.dsh_session_id || profiles?.binding(item.sessionId)?.threadId === tab.session_id))) continue
       const adopted = tab.dsh_session_id ?? importedSessionId(tab)
-      if (sessions.some(row => row.id === adopted || tab.transport_kind === 'runtime' && row.id === tab.session_id || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))) continue
+      const managed = profiles?.binding(adopted)
+      if (managed?.managedAssignment || managed?.managedCoordinator || managed?.managedBuilder) continue
+      const existing = sessions.find(row => row.id === adopted || tab.transport_kind === 'runtime' && row.id === tab.session_id || row.nativeThreadId === tab.session_id && (!tab.agent_id || row.agent?.id === tab.agent_id))
+      if (existing) {
+        const source = items.find(item => item.sessionId === existing.id)
+        if (tab.title && (tab.title_pinned || !(source?.projections?.values?.title || source?.title))) existing.title = tab.title
+        continue
+      }
       const id = savedDirectoryId(node.node_id, tab)
       const profile = savedSessionProfile(profiles, tab)
       const agent = profile ? presentation(profile) : { id: tab.agent_id ?? tab.backend_key, name: tab.backend_key, type: 'custom' }

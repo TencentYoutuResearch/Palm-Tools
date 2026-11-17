@@ -47,6 +47,9 @@ pub struct Message {
     pub content: String,
     pub idempotency_key: String,
     pub in_reply_to: Option<String>,
+    /// Interrupt and insert ahead of queued input; omitted means ordinary queue.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct_insert: bool,
     /// Bounds automatic reply chains across runtimes.
     #[serde(default)]
     pub hop_count: u16,
@@ -64,9 +67,13 @@ pub struct SendRequest {
     pub content: String,
     pub idempotency_key: String,
     pub in_reply_to: Option<String>,
+    /// Interrupt and insert ahead of queued input; omitted means ordinary queue.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct_insert: bool,
     #[serde(default = "default_ttl")]
     pub ttl_seconds: u64,
 }
+fn is_false(value: &bool) -> bool { !*value }
 fn default_ttl() -> u64 {
     86400
 }

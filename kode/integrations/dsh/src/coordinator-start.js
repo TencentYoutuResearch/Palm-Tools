@@ -1,7 +1,9 @@
 /** Owner start uses atomic Hub funding/control and the existing durable official creation ledger. */
 import { isDeepStrictEqual } from 'node:util'
+import { assertLegacyCoordinatorContext } from './context-scope.js'
 import { OFFICIAL_COORDINATOR_TOOLS, coordinatorToolNames } from './official-coordinator-tools.js'
 export async function startCoordinator(host,input){
+ assertLegacyCoordinatorContext(input, input?.start, input?.start?.operation)
  const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(v)
  if(!input||Array.isArray(input)||Object.keys(input).some(k=>!['command_id','team_id','provider','start'].includes(k))
   ||!id(input.command_id)||!id(input.team_id)||!id(input.start?.request_id)||!id(input.start?.operation?.worker?.session_id)
@@ -15,6 +17,7 @@ export async function startCoordinator(host,input){
 async function perform(host,input){
  const runtime=host.execution,result=await runtime.client.call(`/api/v1/messaging/teams/${encodeURIComponent(input.team_id)}/coordinator-starts`,input.start,host.stop.signal)
  const op=result.bundle.operation,selection=op.selection_policy,control=result.control
+ assertLegacyCoordinatorContext(control, control?.request, op)
  const command={command_id:input.command_id,session_id:op.worker.session_id,operation:{id:op.id,attempt:op.attempt,epoch:op.epoch},profile_revision:selection.profile_revision,
   provider:input.provider,model:selection.model,effort:selection.effort??null,cwd:input.start.operation.grant_scope.target.root,tools:coordinatorToolNames(input.start.operation.grant_scope.tools),
   coordinator:{team_id:input.team_id,conversation_id:control.conversation_id,control_revision:control.revision}}

@@ -56,7 +56,7 @@ export async function inspectAssignmentSource(root, name, request, signal, autho
     await inspectPath(root, request.path); signal?.throwIfAborted(); await authorize()
     const bytes = buffer.subarray(0, size)
     if (bytes.includes(0)) throw new Error('Binary source is not supported')
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
     return { path: request.path, bytes: size, sha256: createHash('sha256').update(bytes).digest('hex'), text }
   } finally { await file.close() }
 }

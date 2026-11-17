@@ -1,10 +1,12 @@
 /** Prepare the official loop only from an existing, owner-authorized Coordinator control. */
 import { isDeepStrictEqual } from 'node:util'
+import { assertLegacyCoordinatorContext } from './context-scope.js'
 import { profileRevision } from './agent-profiles.js'
 import { preflightOfficialSelection } from './official-selection-preflight.js'
 import { OFFICIAL_COORDINATOR_TOOLS, coordinatorToolNames } from './official-coordinator-tools.js'
 
 export async function prepareCoordinatorDispatch(runtime, input, { signal } = {}) {
+  assertLegacyCoordinatorContext(input)
   const fields = ['command_id','team_id','control_revision','operation_revision','profile_id','provider']
   const id = v => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(v)
   if (!input || Array.isArray(input) || Object.keys(input).some(k => !fields.includes(k))
@@ -17,6 +19,7 @@ export async function prepareCoordinatorDispatch(runtime, input, { signal } = {}
   const call = (p) => runtime.client.call(`/api/v1/messaging/${p}`, undefined, signal)
   const controlPath = `teams/${encodeURIComponent(input.team_id)}/coordinator-control`
   const { control } = await call(controlPath)
+  assertLegacyCoordinatorContext(control, control?.request)
   if (!control || control.team_id !== input.team_id || control.home_hub !== runtime.host
       || control.revision !== input.control_revision || !id(control.request?.operation_id)) throw new Error('Coordinator control unavailable or changed')
   const activationPath = `teams/${encodeURIComponent(input.team_id)}/activation`
@@ -25,6 +28,7 @@ export async function prepareCoordinatorDispatch(runtime, input, { signal } = {}
   if (!activation.active || activation.revision !== control.request.activation_revision
       || !selected || selected.provider_id !== input.provider || selected.executor_profile_id !== input.profile_id) throw new Error('Coordinator activated executor changed')
   const path = `operations/${control.request.operation_id}`, op = await call(path)
+  assertLegacyCoordinatorContext(op, control.predecessor)
   if (op.id !== control.request.operation_id || op.state !== 'prepared' || op.revision !== input.operation_revision
       || op.attempt !== control.request.attempt || op.epoch !== control.request.epoch
       || op.worker?.node_id !== runtime.host || !id(op.worker.session_id) || !isDeepStrictEqual(op.worker,control.worker)
@@ -42,7 +46,7 @@ export async function prepareCoordinatorDispatch(runtime, input, { signal } = {}
   const profile = runtime.profiles.get(input.profile_id), revision = profileRevision(profile)
   const operation = { id:op.id, attempt:op.attempt, epoch:op.epoch }
   const coordinator = { team_id:input.team_id, conversation_id:control.conversation_id, control_revision:control.revision }
-  const binding = { profile, revision, seenInputs:[], managedOperation:operation, managedCoordinator:coordinator }
+  const binding = { profile, revision, seenInputs:[], managedOperation:operation, managedCoordinator:coordinator, contextIsolation:'legacy_shared' }
   const predecessor=control.predecessor
   const restores=prior=>prior&&predecessor&&isDeepStrictEqual(predecessor.worker,op.worker)
     && prior.managedCoordinator?.team_id===input.team_id&&prior.managedCoordinator?.conversation_id===control.conversation_id
@@ -54,6 +58,7 @@ export async function prepareCoordinatorDispatch(runtime, input, { signal } = {}
     runtime.tools.assertSettled(op.worker.session_id,runtime.profiles.binding(op.worker.session_id).managedOperation)
   }
   const check = prior => {
+    assertLegacyCoordinatorContext(prior, prior?.managedCoordinator, prior?.coordinatorPredecessor?.coordinator)
     if(restores(prior)&&(prior.managedBuilder||prior.managedAssignment||prior.revision!==revision||profileRevision(prior.profile)!==revision
       ||runtime.active?.has(op.worker.session_id)||runtime.ctx.get('agents')?.get(op.worker.session_id)))throw Error('Coordinator recovery binding conflict')
     if (prior && !restores(prior) && (prior.operationClosed || prior.managedBuilder || prior.managedAssignment

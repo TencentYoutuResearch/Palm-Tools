@@ -13,9 +13,6 @@ struct MobileCreate {
 }
 
 pub async fn execute(ctx: Arc<Ctx>, kind: &str, payload: Value) -> (u16, Value) {
-    if kind == kode_relay_protocol::SETUP_KIND_ATTACHMENT {
-        return crate::attachments::receive(payload).await;
-    }
     match execute_inner(ctx, kind, payload).await {
         Ok(value) => (200, value),
         Err(error) => {

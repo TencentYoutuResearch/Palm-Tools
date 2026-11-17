@@ -48,6 +48,7 @@ impl Store {
         let body: String =
             tx.query_row("SELECT body FROM work_runs WHERE id=?1", [id], |r| r.get(0))?;
         let mut run: Value = serde_json::from_str(&body)?;
+        super::collaboration::execution::admit_run(&tx, &run)?;
         if run["revision"] != input.expected_revision {
             bail!("work run revision conflict")
         }

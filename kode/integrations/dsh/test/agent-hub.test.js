@@ -67,7 +67,7 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   assert.equal((await request({ action: 'handoff', sessionId: 'source', profileId: 'target-agent', requestId: 'fixture-request' })).status, 200)
   assert.deepEqual(calls.at(-1), { path: '/api/v1/messaging/workbench/handoff', input: { source_session_id: 'source', source_runtime: 'dsh', profile_id: 'target-agent', target_runtime: 'dsh', request_id: 'fixture-request' } })
   const response = await request(undefined, '?session_id=source')
-  assert.equal((await response.json()).goal.objective, 'durable'); assert.equal(resumed, 0); assert.equal(closed, 1)
+  assert.equal((await response.json()).goal.objective, 'durable'); assert.equal(resumed, 0); assert.equal(closed, 2, 'handoff marker inspection and goal observation each close their read handle')
   assert.equal((await request({ action: 'goal', sessionId: 'source', command: 'pause' })).status, 200)
   assert.deepEqual(controlled, ['pause']); assert.equal(resumed, 1)
   assert.equal((await request({ action: 'goal', sessionId: 'source', command: 'x'.repeat(4001) })).status, 400)

@@ -73,3 +73,16 @@ test('selected contact outside the first page restores through scoped read-only 
   assert.ok(calls.every(path => path.startsWith('/api/kode/collab/teams?')))
   data.dispose()
 })
+
+
+test('legacy sidebar mode migrates without replacing native main navigation or losing the last team', async () => {
+  const storage=memory(), key=JSON.stringify(['navigation-v1','home','local_owner'])
+  storage.values.set(key,{format:'kode.navigation.v1',home_hub:'home',principal_id:'local_owner',mode:'im',lastSuperagentId:'super',lastTeamId:'team',lastHomeHub:'home',lastSessionId:'session'})
+  const current=navigator(storage)
+  await current.navigation.restore()
+  assert.deepEqual(current.modes,['session'])
+  assert.deepEqual(current.contacts,[['team','super']])
+  assert.equal(current.view.getSnapshot().lastSessionId,'session')
+  assert.equal(storage.values.get(key).format,'kode.navigation.v3')
+  assert.equal(storage.values.get(key).mode,'session')
+})

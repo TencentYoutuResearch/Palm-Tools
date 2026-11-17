@@ -1,4 +1,13 @@
+import {nativeInteractiveTeamBinding,assertNativeInteractiveTurn} from './native-interactive-team.js'
+import { createNativeSystemPromptBinder } from './native-system-prompt-snapshot.js'
 import { RemoteAssignmentDiscovery } from './remote-assignment-discovery.js'
+import { isDeepStrictEqual } from 'node:util'
+import {admitNativeBuilderTurn} from './native-builder-execution.js'
+import {nativeBuilderBinding,isBuilderSessionId} from './native-builder-lifecycle.js'
+import {nativeCoordinatorBinding,isNativeCoordinatorId,assertNativeCoordinatorTurn} from './native-coordinator-scope.js'
+import {createNativeRolePromptResolver} from './native-role-prompt.js'
+import { nativePlanningBinding, nativePlanningPrompt, nativePlanningPromptVersion, assertNativePlanningTurnContext, checkNativePlanningContext } from './native-planning-session.js'
+import { planningContextInput } from './planning-draft-context.js'
 import { RemoteAssignmentService } from './remote-assignment-service.js'
 import { WorkRunService } from './work-run-service.js'
 import { WorkRunController } from './work-run-controller.js'
@@ -33,6 +42,7 @@ import { branchHistoryInput } from './history-edit.js'
 import { nativeInput } from './native-input.js'
 import { SessionAppearance } from './session-appearance.js'
 import { fastPreference, withModelVariantFast } from './model-fast.js'
+import { readAssignmentRolePrompt } from './assignment-role-prompt.js'
 
 export { profileRoute } from './agent-profiles.js'
 export { nativeToolDescriptor } from './native-tools.js'
@@ -97,6 +107,16 @@ export class AgentRuntimeAdapter {
     throw new Error('Kode 原生 Agent 会话被普通 dsh 执行器接管，已在写入系统提示前停止。请等待原生执行器就绪后重新打开会话。')
   }
   invalidateModels(provider) { for (const key of this.catalogs.keys()) if (key === provider || key.startsWith(`${provider}:`)) this.catalogs.delete(key) }
+  /** Read only an existing exact-revision catalogue. Never starts a probe/CLI. */
+  async peekModels(provider, profile, cwd = process.cwd()) {
+    const revision = await this.extensionRevision?.() ?? 0
+    const key = `${provider}:${discoveryRevision(profile)}:${cwd}::${revision}`
+    const pending = this.catalogs.get(key)
+    if (!pending) return null
+    const result = await pending
+    if (this.catalogs.get(key) !== pending) return null
+    return structuredClone(result.models)
+  }
   async capabilities(provider, profileOverride, cwd = process.cwd(), modelHint) {
     this.stop.signal.throwIfAborted()
     const profile = profileOverride ?? this.profile(provider)
@@ -182,9 +202,35 @@ export class AgentRuntimeAdapter {
     const autoCompact = binding.profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact') : undefined
     const resolved = preparedProfile ?? await this.resolveProfile(binding.profile, agent)
     const collector = await this.quotaCollector(binding, agent.id)
+    const interactiveOwner=nativeInteractiveTeamBinding(agent)
+    const roleOwner = nativeCoordinatorBinding(agent)
+    const resolveRolePrompt = interactiveOwner ? createNativeRolePromptResolver({session:agent.session,resolve:async()=>{await interactiveOwner.check(agent);return structuredClone(interactiveOwner.snapshot.role_prompt??null)},flush:()=>agent.ctx.sessions.flush(agent.session),validateIdentity:async prompt=>{await interactiveOwner.check(agent);const b=interactiveOwner.binding;if(prompt&&(prompt.home_hub!==b.home_hub||prompt.team_id!==b.team_id||prompt.team_revision!==b.team_revision||(b.participant_id==='coordinator'?prompt.role.kind!=='coordinator':prompt.role.kind!=='worker'||prompt.role.worker_id!==b.participant_id.slice(7))))throw new Error('Interactive foreign role prompt')}}) : roleOwner ? createNativeRolePromptResolver({session:agent.session,
+      resolve:({mode})=>{
+        if(typeof roleOwner.service.resolveRolePrompt!=='function')throw new Error('Native scope role prompt resolver unavailable')
+        return roleOwner.service.resolveRolePrompt(agent,{authority:structuredClone(roleOwner.snapshot.authority),mode})
+      },flush:()=>agent.ctx.sessions.flush(agent.session),validateIdentity:async snapshot=>{
+        await roleOwner.check(agent)
+        const authority=roleOwner.snapshot.authority
+        if(snapshot&&(snapshot.home_hub!==authority.context_scope.home_hub||snapshot.team_id!==authority.context_scope.team_id||snapshot.team_revision!==authority.team_revision||snapshot.role.kind!=='coordinator'))throw new Error('Foreign role prompt authority')
+      }}) : binding.managedAssignment ? createNativeRolePromptResolver({ session: agent.session,
+        resolve: async () => {
+          const current = this.profiles.binding(agent.id), execution = this.ctx.get('kodeAgents')?.officialExecution
+          if (!execution || current?.operationClosed || current?.revision !== binding.revision
+            || !isDeepStrictEqual(current.managedAssignment, binding.managedAssignment) || !isDeepStrictEqual(current.managedOperation, binding.managedOperation)) throw new Error('Native Assignment role owner changed')
+          return readAssignmentRolePrompt(execution, agent, current, signal)
+        }, flush: () => agent.ctx.sessions.flush(agent.session), validateIdentity: async () => {
+          signal.throwIfAborted(); await this.operationLeases?.get(agent.id)?.assertActive()
+        } }) : undefined
     const runtime = await createNativeSession({ ...resolved, ...(autoCompact ? { autoCompactEnabled: autoCompact.data.enabled } : {}) }, agent.session.header.cwd ?? process.cwd(), {
+      ...(resolveRolePrompt?{resolveRolePrompt}:{}),
+      ...((resolveRolePrompt || nativePlanningBinding(agent)) ? {bindNativeSystemPrompt:createNativeSystemPromptBinder({session:agent.session,canInitialize:()=>!this.profiles.binding(agent.id)?.threadId,flush:()=>agent.ctx.sessions.flush(agent.session)})}:{}),
+      nativePlanning: Boolean(nativePlanningBinding(agent)),
+      planningPromptVersion: nativePlanningPromptVersion(agent),
+      nativeInteractiveTeam:Boolean(interactiveOwner),
+      builderPrompt: nativePlanningPrompt(agent),
+      ...(nativePlanningBinding(agent) ? { checkPlanningContext: () => checkNativePlanningContext(agent) } : {}),
       policy: () => agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session }) ?? { mode: 'read-only' },
-      approvalPolicy: () => agent.ctx.get('approval')?.effectivePolicy?.(agent.session) ?? 'ask',
+      approvalPolicy: () => interactiveOwner ? 'ask' : agent.ctx.get('approval')?.effectivePolicy?.(agent.session) ?? 'ask',
       mode: () => {
         const row = agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/native-mode')?.data
         return row && row.policy === agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })?.mode ? row.mode : undefined
@@ -221,6 +267,7 @@ export class AgentRuntimeAdapter {
         return { success: !result.isError, contentItems: result.content.filter(c => c.type === 'text').map(c => ({ type: 'inputText', text: c.text })) }
       },
       approve: async (method, request, signal) => {
+        if(interactiveOwner)await interactiveOwner.check(agent)
         await this.operationLeases?.get(agent.id)?.assertActive()
         signal.throwIfAborted()
         const callId = callIdentity(request.turnId, request.itemId)
@@ -231,10 +278,11 @@ export class AgentRuntimeAdapter {
         // full access without prompts. Grant only this operation in that mode;
         // `never` under a confined mode continues to mean deny escalation.
         const policy = agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
-        if (policy?.mode === 'danger-full-access' && approval.effectivePolicy?.(agent.session) === 'never') return true
+        if (!interactiveOwner && policy?.mode === 'danger-full-access' && approval.effectivePolicy?.(agent.session) === 'never') return true
         const decision = await approval.request({ agent, callId, toolName: method.includes('fileChange') ? 'kode_native_file_change' : 'kode_native_command', reason: request.reason ?? request.command ?? 'Native Agent requests permission', signal })
         await this.operationLeases?.get(agent.id)?.assertActive()
         signal.throwIfAborted()
+        if(interactiveOwner)await interactiveOwner.check(agent)
         return decision === 'allowed-once'
       },
       question: async (request, signal) => {
@@ -259,8 +307,14 @@ export class AgentRuntimeAdapter {
     if (evidence) {
       const stopBlocked = Boolean((evidence.spawned && (!evidence.leader_exited || (evidence.signal_scope === 'process_group' && evidence.process_group_empty !== true))) || evidence.signal_failures.length)
       const inputIds = this.profiles.binding(agent.id)?.inFlight?.inputIds ?? []
-      await this.profiles.patchBinding(agent.id, { stopEvidence: evidence, stopBlocked, stopFenceId: stopBlocked ? randomUUID() : null })
-      this.recordNative(agent.session, { ...this.boundary(agent), event: { method: 'kode/process_stop', params: { ...evidence, inputIds, stopBlocked } } })
+      const blocked = await this.profiles.update(state => {
+        const binding = state.bindings[agent.id]
+        if (!binding) throw new Error('Unknown native session binding')
+        Object.assign(binding, { stopEvidence: evidence, stopBlocked: Boolean(binding.directInsertFenceId) || stopBlocked,
+          stopFenceId: binding.directInsertFenceId ?? (stopBlocked ? randomUUID() : null) })
+        return binding.stopBlocked
+      })
+      this.recordNative(agent.session, { ...this.boundary(agent), event: { method: 'kode/process_stop', params: { ...evidence, inputIds, stopBlocked: blocked } } })
     }
     return evidence
   }
@@ -281,9 +335,12 @@ export class AgentRuntimeAdapter {
       const record = { fence_id: expected, actor: 'host_owner', kind: 'manual_attestation', reason: reason.trim(), observed_at: Date.now(), evidence: binding.stopEvidence ?? null }
       binding.stopReconciliations = [...(binding.stopReconciliations ?? []), record]
       binding.stopBlocked = false
+      binding.directInsertFenceId = null
       return record
     })
-    if (resume) this.ctx.agents.get(id)?.wake?.()
+    const agent = this.ctx.agents.get(id)
+    if (agent) agent.directInsertBlocked = false
+    if (resume && agent) { agent.parked = false; agent.wake?.() }
     return { ...this.stopStatus(id), reconciliation: result }
   }
   stopBlocked(id) { const binding = this.profiles.binding(id); return binding?.stopBlocked === true || binding?.operationClosed === true }
@@ -300,9 +357,39 @@ export class AgentRuntimeAdapter {
     if (options.prepareStep) this.stepPreparers.set(agent.id, options.prepareStep)
     let runtime, lease, accountingKey, preparedProfile, managed = false, completed = false
     try {
+      const planning = await checkNativePlanningContext(agent)
+      const planningContext = planning && !options.nativeContinuation && !(options.messages.length === 1 && /^[!/]/.test(humanInput(options.messages[0]) ?? ''))
+        ? await assertNativePlanningTurnContext(agent, options.messages) : null
       const profile = this.profile(options.provider)
+      const interactiveOwner=nativeInteractiveTeamBinding(agent)
+      const scopeOwner=nativeCoordinatorBinding(agent)
+      if(interactiveOwner){
+        await assertNativeInteractiveTurn(agent,{selection:{provider:options.provider,model:options.model,...(options.reasoningEffort===undefined?{}:{reasoningEffort:options.reasoningEffort})},messages:options.messages,nativeContinuation:options.nativeContinuation})
+        const prior=this.profiles.binding(agent.id)
+        if(prior?.managedOperation||prior?.managedAssignment||prior?.historySource||prior?.historyBootstrapped||prior?.threadId&&!this.live.has(agent.id))throw new Error('Interactive native cannot inherit managed state or unknown CLI thread')
+      }
+      if(isNativeCoordinatorId(agent.id)&&!scopeOwner)throw new Error('Native Coordinator scope owner unavailable')
+      if(scopeOwner){
+        await assertNativeCoordinatorTurn(agent,{selection:{provider:options.provider,model:options.model,...(options.reasoningEffort===undefined?{}:{reasoningEffort:options.reasoningEffort})},messages:options.messages,tools:options.tools??[],nativeContinuation:options.nativeContinuation})
+        const prior=this.profiles.binding(agent.id)
+        if(prior?.historySource||prior?.historyBootstrapped||prior?.threadId&&!this.live.has(agent.id))throw new Error('Native scope cannot inherit or blindly restore a CLI thread')
+      }
+      const builderOwner=nativeBuilderBinding(agent)
+      if(isBuilderSessionId(agent.id)&&!builderOwner)throw new Error('Native Builder lifecycle owner unavailable')
+      if(builderOwner)await admitNativeBuilderTurn(builderOwner.service,{agent,admission:builderOwner.snapshot,
+        selection:{provider:options.provider,model:options.model,...(options.reasoningEffort===undefined?{}:{reasoningEffort:options.reasoningEffort})},
+        messages:options.messages,tools:options.tools??[],signal,options,binding:this.profiles.binding(agent.id)})
       options = await this.compatibleEffort(profile, options)
+      if(scopeOwner&&['provider','model','reasoningEffort'].some(key=>options[key]!==scopeOwner.snapshot.selection[key]))throw new Error('Native scope effective selection differs from owner choice')
       const binding = await this.profiles.bind(agent.id, profile.id)
+      if(interactiveOwner&&(binding.managedOperation||binding.managedAssignment||binding.revision!==interactiveOwner.binding.selection.profile_revision||['provider','model','reasoningEffort'].some(k=>options[k]!==interactiveOwner.snapshot.selection[k])))throw new Error('Interactive profile or selection changed')
+      if (scopeOwner) {
+        if (!binding.managedOperation || binding.managedOperation.id !== scopeOwner.snapshot.authority.operation_id ||
+          !binding.revision || typeof scopeOwner.service.assertNativeBinding !== 'function' || typeof scopeOwner.service.beforeInference !== 'function') throw new Error('Native scope requires exact managed operation and Host admission service')
+        if (await scopeOwner.service.assertNativeBinding(agent, { authority: structuredClone(scopeOwner.snapshot.authority),
+          operation: structuredClone(binding.managedOperation), profile_revision: binding.revision,
+          selection: structuredClone(scopeOwner.snapshot.selection) }) !== true) throw new Error('Native scope operation/profile binding rejected')
+      }
       if (binding.managedOperation) {
         managed = true
         if (options.nativeContinuation || options.messages.filter(m => m.role === 'user').length !== 1) throw new Error('Managed operation requires one exclusive input')
@@ -355,10 +442,10 @@ export class AgentRuntimeAdapter {
       const match = human && /^\/([a-z][a-z0-9_:-]*)(?:\s|$)/.exec(human)
       const command = match ? { name: match[1], input: human.slice(match[0].length).trim() } : undefined
       if (binding.managedOperation && command) throw new Error('Managed operation does not accept native slash commands')
-      const context = command || options.nativeContinuation ? [] : pendingShellContext(agent.session)
+      const context = interactiveOwner || scopeOwner || command || options.nativeContinuation ? [] : pendingShellContext(agent.session)
       const attachments = (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments)
-      const history = await branchHistoryInput(agent.session, binding, attachments, profile.type === 'codex' || profile.protocol === 'codex', signal)
-      const input = [...history, ...await nativeInput([...context, ...messages], { attachments, codex: profile.type === 'codex' || profile.protocol === 'codex', signal })]
+      const history = interactiveOwner||scopeOwner?[]:await branchHistoryInput(agent.session, binding, attachments, profile.type === 'codex' || profile.protocol === 'codex', signal)
+      const input = [...(planningContext ? [planningContextInput(planningContext)] : []), ...history, ...await nativeInput([...context, ...messages], { attachments, codex: profile.type === 'codex' || profile.protocol === 'codex', signal })]
       const tools = options.tools ?? []
       runtime = this.live.get(agent.id)
       const autoCompactRevision = profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact')?.seq ?? -1 : -1
@@ -390,7 +477,35 @@ export class AgentRuntimeAdapter {
         text = ''; reasoning = ''; textIndex = undefined; reasoningIndex = undefined; textItemId = undefined
         if (options.onAssistantMessageBoundary) nextIndex = 0
       }
-      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, fast, serviceTier, signal, command, skillNames, observe: options.nativeContinuation })) {
+      const beforeInteractiveInput=interactiveOwner?async proof=>{
+        signal.throwIfAborted()
+        await assertNativeInteractiveTurn(agent,{selection:interactiveOwner.snapshot.selection,messages:options.messages,nativeContinuation:options.nativeContinuation})
+        const current=this.profiles.binding(agent.id)
+        if(current.revision!==interactiveOwner.binding.selection.profile_revision||current.managedOperation||current.managedAssignment)throw new Error('Interactive profile changed before input')
+        const receipt=interactiveOwner.sources.get(messages[0].id)
+        const result=await interactiveOwner.service.beforeTurn(agent,{binding:structuredClone(interactiveOwner.binding),receipt:structuredClone(receipt),selection:structuredClone(proof.selection),thread_id:proof.threadId,signal})
+        signal.throwIfAborted();await assertNativeInteractiveTurn(agent,{selection:interactiveOwner.snapshot.selection,messages:options.messages,nativeContinuation:options.nativeContinuation})
+        const after=this.profiles.binding(agent.id);if(after.revision!==interactiveOwner.binding.selection.profile_revision||after.managedOperation||after.managedAssignment)throw new Error('Interactive binding changed during admission')
+        if(result?.receipt_id!==receipt.receipt.receipt_id||result.state!=='claimed'||result.dispatch_allowed!==true)throw new Error('Interactive input authorization rejected')
+        return result
+      }:undefined
+      const beforeInference = scopeOwner ? async proof => {
+        if (!lease || lease.signal.aborted || signal.aborted) throw new Error('Native scope requires an active original operation lease')
+        const current = this.profiles.binding(agent.id)
+        if (current.revision !== binding.revision || !isDeepStrictEqual(current.managedOperation, binding.managedOperation)) throw new Error('Native scope operation/profile changed')
+        await assertNativeCoordinatorTurn(agent, { selection: scopeOwner.snapshot.selection, messages: options.messages, tools, nativeContinuation: options.nativeContinuation })
+        const source = agent.session.snapshotEvents().find(e => e.type === 'plugin:kode/native-scoped-input' && e.data.message.id === messages[0].id)?.data.proof
+        if (!source) throw new Error('Native scope durable source missing')
+        const admission = await scopeOwner.service.beforeInference(agent, { ...proof, authority: structuredClone(scopeOwner.snapshot.authority),
+          operation: structuredClone(binding.managedOperation), profile_revision: binding.revision,
+          source: structuredClone(source), lease, signal })
+        signal.throwIfAborted(); lease.signal.throwIfAborted()
+        await assertNativeCoordinatorTurn(agent, { selection: scopeOwner.snapshot.selection, messages: options.messages, tools, nativeContinuation: options.nativeContinuation })
+        const after = this.profiles.binding(agent.id)
+        if (after.revision !== binding.revision || !isDeepStrictEqual(after.managedOperation, binding.managedOperation)) throw new Error('Native scope operation/profile changed during admission')
+        return admission
+      } : undefined
+      for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, fast, serviceTier, signal, command, skillNames, observe: options.nativeContinuation, beforeInference, beforeInteractiveInput })) {
         const { method, params } = event
         if (method === 'turn/started') options.onNativeTurnReady?.()
         const messageOutput = method === 'item/agentMessage/delta' && params.delta || method === 'item/completed' && params.item?.type === 'agentMessage' && !streamed.has(params.item.id) && params.item.text
