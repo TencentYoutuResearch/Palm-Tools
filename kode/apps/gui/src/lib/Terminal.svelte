@@ -34,7 +34,7 @@
   } from './terminal_settings'
   import { TerminalAnsiThemeAdapter } from './terminal_ansi_theme'
   import { TerminalOutputBacklog } from './terminal_output_backlog'
-  import { TerminalImeOutputGate } from './terminal_ime'
+  import { pushTerminalOutputForPlatform, TerminalImeOutputGate } from './terminal_ime'
   import { installConptyCursorGuard, shouldInstallConptyCursorGuard } from './conpty_cursor'
   import {
     CODEX_MULTI_CLICK_MS,
@@ -114,7 +114,7 @@
   const mouseTrackingGate = new TerminalMouseTrackingGate()
   let disposeImeComposition: (() => void) | undefined
   function writeTerminalBytes(bytes: Uint8Array) {
-    let ready = imeOutput.push(bytes)
+    let ready = pushTerminalOutputForPlatform(imeOutput, bytes, windowsPlatform)
     if (!ready) return
     if (windowsPlatform && isTcodexBackendKey(currentBackendKey())) {
       ready = mouseTrackingGate.transform(ready)
@@ -291,7 +291,7 @@
     term.open(containerEl)
     if (destroyed || !term) return
     const textarea = (term as any).textarea ?? (term as any)._core?.textarea
-    if (textarea) {
+    if (windowsPlatform && textarea) {
       const onCompositionStart = () => imeOutput.begin()
       const onCompositionEnd = () => {
         const pending = imeOutput.end()
