@@ -1,7 +1,7 @@
 /** Owner-requested SSH deployment. Secrets stay on the Host; progress is public metadata only. */
 import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
-import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -126,8 +126,21 @@ export async function deployRemote(host, config, { signal, progress, run = runPr
     const bundle = join(local, 'bundle'); await mkdir(join(bundle, 'bin'), { recursive: true }); await mkdir(join(bundle, 'plugin'))
     for (const name of ['kode-session-server', 'kode-ssh-tunnel']) await copyFile(await binaryFor(platform, arch, name, config), join(bundle, 'bin', name))
     const sourceArchive = join(local, 'plugin.tar.gz')
-    await run('tar', ['-czf', sourceArchive, '--exclude=node_modules', '--exclude=assets/remote', '-C', pluginRoot, 'package.json', 'package-lock.json', 'src', 'assets', 'packages', 'scripts/build-remote.js', 'cordis.patch.yml', 'cordis.remote.patch.yml', 'README.md'], { signal })
+    await run('tar', ['-czf', sourceArchive, '--exclude=node_modules', '--exclude=assets/remote', '-C', pluginRoot, 'package.json', 'src', 'assets', 'packages', 'scripts/build-remote.js', 'cordis.patch.yml', 'cordis.remote.patch.yml', 'README.md'], { signal })
     await run('tar', ['-xzf', sourceArchive, '-C', join(bundle, 'plugin')], { signal })
+    // Published npm bundles embed private UI dependencies. The SSH source tree
+    // carries those packages directly, so restore their relocatable file specs.
+    const manifestPath = join(bundle, 'plugin/package.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    if (manifest.bundledDependencies?.length) {
+      for (const entry of await readdir(join(bundle, 'plugin/packages'), { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const pkg = JSON.parse(await readFile(join(bundle, 'plugin/packages', entry.name, 'package.json'), 'utf8'))
+        if (manifest.bundledDependencies.includes(pkg.name)) manifest.dependencies[pkg.name] = `file:packages/${entry.name}`
+      }
+      delete manifest.bundledDependencies
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+    }
     await copyFile(new URL('./remote-install.mjs', import.meta.url), join(bundle, 'install.mjs'))
     const revision = await contentRevision(bundle)
     const payload = join(local, 'payload.tar.gz'); await run('tar', ['-czf', payload, '-C', bundle, '.'], { signal })
