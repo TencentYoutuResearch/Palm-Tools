@@ -1876,9 +1876,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('div',{className:'kode-internal-body'},
         section.fields.length ? h('dl',null,...section.fields.map(([label,value])=>h('div',{key:label},h('dt',null,label),h('dd',null,value)))) : h(MarkdownText,{text:section.body,labels:markdownLabels})))
   }
-  function InternalMessageAdapter({ native, ...props }) {
+  function InternalMessageAdapter({ native, kodeSessions, ...props }) {
     const data=props.node?.data
     if (!data || (props.node.kind==='assistant-step' && data.status!=='settled')) return h(native,props)
+    const relay = props.node.kind === 'context' ? parseRelay(data) : undefined
+    if (relay) return h(HistoricalRelay, { relay, time: data.time, sessions: kodeSessions, sessionId: props.sessionId, node: props.node, useChat: props.useChat })
     const field=props.node.kind==='assistant-step'?'blocks':'content'
     if (!Array.isArray(data[field])) return h(native,props)
     const sections=[], content=[]
@@ -1958,6 +1960,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('p', { className: 'kode-relay-preview', style: relay.content.length <= 180 && relay.content.split('\n').length <= 3 ? { WebkitLineClamp: 'unset' } : undefined }, relay.content),
       (relay.content.length > 180 || relay.content.split('\n').length > 3) && h('details', null, h('summary', null, '展开完整消息'), h('p', { className: 'kode-relay-body' }, relay.content)),
     )
+  }
+  function HistoricalRelay({ sessions, ...props }) {
+    const nameOf = useNames(sessions)
+    return h(RelayCard, { ...props, nameOf })
   }
   function NativeSubagentTool({ block, useDisclosure, useProjection }) {
     const { expanded: open, setExpanded: setOpen } = useDisclosure()
@@ -2115,7 +2121,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const install=()=>{
         for(const entry of ctx.slots.entries('conversation.chat.node')) {
           if(!kinds.has(entry.options.key) || entry.component===RelayTrigger || adapted.has(entry))continue
-          const original=entry.component, wrapper=props=>h(InternalMessageAdapter,{...props,native:original})
+          const original=entry.component, wrapper=props=>h(InternalMessageAdapter,{...props,native:original,kodeSessions:ctx.sessions})
           adapted.set(entry,{original,wrapper});entry.component=wrapper
         }
       }

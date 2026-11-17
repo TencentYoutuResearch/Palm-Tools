@@ -880,3 +880,14 @@ test('native child cards use persisted execution status and expandable child out
   const output = findNode(view(true), node => node.props?.text === 'Child findings')
   assert.equal(output.props.text, 'Child findings')
 })
+
+test('imported relay contexts render the same communication card without requiring live inbox claims', () => {
+  const c = client()
+  const incoming = relay('Historical peer result')
+  const { tree } = internalTree(c, 'context', incoming.content[0].text, { source: incoming.source })
+  const card = tree.type(tree.props)
+  assert.equal(card.props.relay.content, 'Historical peer result')
+  assert.equal(card.props.relay.address, 'worker.example/session-same-id')
+  const rendered = card.type(card.props)
+  assert.equal(rendered.props.className, 'kode-relay')
+})
