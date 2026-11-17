@@ -209,6 +209,7 @@ pub fn run() {
             cloud_sync::cloud_sync_worker_history,
             cloud_sync::cloud_sync_worker_command,
             cloud_sync::cloud_sync_worker_backends,
+            cloud_sync::cloud_sync_worker_models,
             cloud_sync::cloud_sync_worker_create_session,
             cloud_sync::cloud_account_send_code,
             cloud_sync::cloud_account_sign_in,

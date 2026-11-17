@@ -446,7 +446,7 @@ export const ipc = {
   cloudSyncWorkerCommand: (
     workerId: string,
     sessionId: number,
-    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename',
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename' | 'model',
     body: Record<string, unknown> = {},
   ) =>
     invoke<{ command_id?: string; status?: string }>('cloud_sync_worker_command', {
@@ -459,6 +459,8 @@ export const ipc = {
     invoke<{ backends: WorkerBackendOption[]; home?: string | null }>('cloud_sync_worker_backends', {
       workerId,
     }),
+  cloudSyncWorkerModels: (workerId: string, backendKey: string) =>
+    invoke<ModelDiscoveryResult>('cloud_sync_worker_models', { workerId, backendKey }),
   cloudSyncWorkerCreateSession: (
     workerId: string,
     body: { backend_key: string; cwd?: string; model?: string },

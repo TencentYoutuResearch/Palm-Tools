@@ -75,6 +75,15 @@ impl CloudSyncManager {
             .worker_backends(worker_id)
             .await
     }
+    pub async fn worker_models(
+        &self,
+        worker_id: &str,
+        backend_key: &str,
+    ) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_models(worker_id, backend_key)
+            .await
+    }
     pub async fn worker_create_session(
         &self,
         worker_id: &str,
@@ -208,6 +217,14 @@ pub async fn cloud_sync_worker_backends(
     worker_id: String,
 ) -> Result<Value, String> {
     manager.worker_backends(&worker_id).await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_models(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    backend_key: String,
+) -> Result<Value, String> {
+    manager.worker_models(&worker_id, &backend_key).await
 }
 #[tauri::command]
 pub async fn cloud_sync_worker_create_session(

@@ -206,10 +206,18 @@ async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
     let mut headers = HeaderMap::new();
     headers.insert("Authorization", "Bearer office".parse().unwrap());
     headers.insert("X-Kode-Worker-Id", "home".parse().unwrap());
-    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers)
+    let Json(list) = list_sessions(axum::extract::State(state.clone()), headers.clone())
         .await
         .unwrap();
     assert_eq!(list["sessions"][0]["title"], "home session");
+    let Json(worker_list) = list_worker_sessions(
+        axum::extract::State(state.clone()),
+        Path("home".into()),
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(worker_list["sessions"][0]["title"], "home session");
 
     state
         .inner
@@ -228,7 +236,17 @@ async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
     let mut legacy_headers = HeaderMap::new();
     legacy_headers.insert("Authorization", "Bearer office".parse().unwrap());
     legacy_headers.insert("X-Kode-Worker-Id", "home".parse().unwrap());
-    let denied = list_sessions(axum::extract::State(state), legacy_headers).await;
+    let denied = list_sessions(axum::extract::State(state.clone()), legacy_headers.clone()).await;
+    assert!(matches!(
+        denied,
+        Err(ApiError::Forbidden(message)) if message.contains("workers.monitor")
+    ));
+    let denied = list_worker_sessions(
+        axum::extract::State(state),
+        Path("home".into()),
+        legacy_headers,
+    )
+    .await;
     assert!(matches!(
         denied,
         Err(ApiError::Forbidden(message)) if message.contains("workers.monitor")

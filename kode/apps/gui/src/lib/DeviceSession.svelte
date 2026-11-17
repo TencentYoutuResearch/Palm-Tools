@@ -8,7 +8,13 @@
    * is never transferred; this is the semantic timeline only.
    */
   import { onMount, tick } from 'svelte'
-  import { ipc, type AccountDevice, type AccountDeviceEvent, type AccountDeviceSession } from './ipc'
+  import {
+    ipc,
+    type AccountDevice,
+    type AccountDeviceEvent,
+    type AccountDeviceSession,
+    type DiscoveredModel,
+  } from './ipc'
   import Icon from './Icon.svelte'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
@@ -46,6 +52,10 @@
   let renameDraft = $state('')
   let deleteOpen = $state(false)
   let deleting = $state(false)
+  let modelCatalogue = $state<DiscoveredModel[]>([])
+  let modelLoading = $state(false)
+  let modelChanging = $state(false)
+  let modelSelection = $state('')
   let sentCommands: string[] = []
   let transcript: HTMLDivElement | undefined = $state()
   let pinnedToBottom = true
@@ -56,6 +66,25 @@
   let exited = $derived(status === 'exited')
   let agentName = $derived(session.backend_key)
   let sessionTitle = $derived(localTitle || session.title?.trim() || session.backend_key)
+  let currentModel = $derived.by(() => {
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index]
+      if (event.type === 'meta' && typeof event.payload.model === 'string' && event.payload.model) {
+        return event.payload.model
+      }
+    }
+    return session.model ?? ''
+  })
+  let modelOptions = $derived.by(() => {
+    const options = [...modelCatalogue]
+    if (currentModel && !options.some((model) => model.id === currentModel)) {
+      options.unshift({ id: currentModel, label: currentModel, is_default: false })
+    }
+    return options
+  })
+  $effect(() => {
+    if (!modelChanging) modelSelection = currentModel
+  })
 
   function loadHistory(limit = 500) {
     return workerScoped
@@ -64,14 +93,30 @@
   }
 
   function sendCommand(
-    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename',
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename' | 'model',
     body: Record<string, unknown> = {},
   ) {
     if (workerScoped) return ipc.cloudSyncWorkerCommand(device.device_id, session.id, op, body)
+    if (op === 'model') return Promise.reject(new Error('Model switching requires a Worker'))
     if (op === 'delete' || op === 'rename') {
       return Promise.reject(new Error('Session management requires a self-hosted Worker'))
     }
     return ipc.accountDeviceCommand(device.device_id, session.id, op, body)
+  }
+
+  async function loadModels() {
+    if (!workerScoped || modelLoading) return
+    modelLoading = true
+    error = ''
+    try {
+      const catalogue = await ipc.cloudSyncWorkerModels(device.device_id, session.backend_key)
+      modelCatalogue = catalogue.models
+      modelSelection = currentModel
+    } catch (reason) {
+      error = t('devices.modelLoadFailed', { error: String(reason) })
+    } finally {
+      modelLoading = false
+    }
   }
 
   async function refresh() {
@@ -92,6 +137,7 @@
   }
 
   onMount(() => {
+    void loadModels()
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
     // Chain polls so a slow relay round-trip never stacks requests.
@@ -113,7 +159,7 @@
   }
 
   async function command(
-    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename',
+    op: 'input' | 'interrupt' | 'answer' | 'plan_response' | 'delete' | 'rename' | 'model',
     body: Record<string, unknown> = {},
   ) {
     if (sending) return false
@@ -137,6 +183,39 @@
     if (!text) return
     pinnedToBottom = true
     if (await command('input', { text })) draft = ''
+  }
+
+  async function changeModel() {
+    const target = modelSelection
+    if (
+      !target ||
+      target === currentModel ||
+      sending ||
+      modelLoading ||
+      status !== 'idle' ||
+      exited
+    ) {
+      modelSelection = currentModel
+      return
+    }
+    sending = true
+    modelChanging = true
+    error = ''
+    try {
+      const receipt = await sendCommand('model', { model: target })
+      if (receipt.command_id) {
+        sentCommands = [...sentCommands.slice(-19), receipt.command_id]
+        if (receipt.status !== 'executed') await executed(receipt.command_id)
+      }
+      await refresh()
+      onChanged?.()
+    } catch (reason) {
+      error = String(reason)
+      modelSelection = currentModel
+    } finally {
+      sending = false
+      modelChanging = false
+    }
   }
 
   function onComposerKey(event: KeyboardEvent) {
@@ -271,6 +350,30 @@
       <span>{device.name} · {session.cwd}</span>
     </div>
     <span class="status {status}">{tr(`devices.status.${['busy', 'idle', 'starting', 'exited'].includes(status) ? status : 'idle'}`)}</span>
+    {#if workerScoped && !exited}
+      <label class="model" title={tr('devices.switchModel')}>
+        <span class="sr-only">{tr('devices.model')}</span>
+        <select
+          bind:value={modelSelection}
+          disabled={sending || modelLoading || modelChanging || status !== 'idle'}
+          aria-label={tr('devices.switchModel')}
+          onchange={() => void changeModel()}
+        >
+          {#each modelOptions as model (model.id)}
+            <option value={model.id}>{model.label}</option>
+          {/each}
+        </select>
+      </label>
+      <button
+        class="icon model-refresh"
+        title={tr('devices.refreshModels')}
+        aria-label={tr('devices.refreshModels')}
+        disabled={modelLoading || modelChanging || status !== 'idle'}
+        onclick={() => void loadModels()}
+      >
+        <Icon name="refresh-cw" size={13} />
+      </button>
+    {/if}
     <button class="icon" title={tr('devices.rename')} aria-label={tr('devices.rename')} onclick={openRename}>
       <Icon name="pencil" size={14} />
     </button>
@@ -411,6 +514,11 @@
   .rename { display: flex; align-items: center; gap: 2px; min-width: 0; }
   .rename input { flex: 1; min-width: 0; height: 26px; padding: 0 7px; border: 1px solid var(--bd-focus); border-radius: var(--rad-sm); background: var(--bg-input); color: var(--fg-primary); font: var(--fs-sm) var(--font-ui); outline: none; }
   .status { padding: 2px 8px; border-radius: 999px; background: var(--bg-chip); font-size: var(--fs-xs); }
+  .model { display: flex; min-width: 0; max-width: min(220px, 24vw); }
+  .model select { width: 100%; height: 28px; min-width: 0; padding: 0 26px 0 8px; border: 1px solid var(--bd-default); border-radius: var(--rad-sm); background: var(--bg-input); color: var(--fg-primary); font: var(--fs-xs) var(--font-mono); text-overflow: ellipsis; }
+  .model select:disabled { opacity: .65; }
+  .model-refresh:disabled { opacity: .5; cursor: default; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .status.busy { color: var(--st-busy); }
   .status.idle { color: var(--st-ok); }
   .status.exited { color: var(--fg-tertiary); }
