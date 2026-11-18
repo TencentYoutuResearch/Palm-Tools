@@ -94,6 +94,7 @@
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
   import { watchCloudStatus } from './lib/cloud_status_watch'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
+  import { groupMonitorSessions } from './lib/monitor_groups'
   import { currentLocale, setLocaleModeFromString, setLocaleMode, t, type Params } from './lib/i18n'
   import {
     loadScreenshotSettings,
@@ -274,8 +275,23 @@
     })),
   ])
   let monitorSessions = $state<WorkerSessionDto[]>([])
+  const monitorGroups = $derived(groupMonitorSessions(monitorSessions))
+  const monitorGrouped = $derived(monitorGroups.length > 1)
   let monitorSessionsLoading = $state(false)
   let monitorNewOpen = $state(false)
+  function monitorGroupStorageKey(cwd: string): string {
+    return `monitor:${monitorWorkerId ?? 'none'}\u0000${cwd}`
+  }
+  function isMonitorGroupCollapsed(cwd: string): boolean {
+    return collapsedCwds.has(monitorGroupStorageKey(cwd))
+  }
+  function toggleMonitorGroup(cwd: string) {
+    const key = monitorGroupStorageKey(cwd)
+    const next = new Set(collapsedCwds)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    collapsedCwds = next
+  }
   let localWorkerName = $state('Local worker')
   let activeModeWorkerName = $derived(
     workMode === 'monitor'
@@ -2451,31 +2467,63 @@
         {:else if monitorSessions.length === 0}
           <div class="placeholder">{tr('workers.noMonitorSessions')}</div>
         {:else}
-          <div class="monitor-session-list">
-            {#each monitorSessions as session (session.id)}
-              {@const openable = accountDeviceSessions.some((s) => s.id === session.id)
-                || Boolean(monitorWorkerId && !accountDeviceId(monitorWorkerId))}
-              <svelte:element
-                this={openable ? 'button' : 'div'}
-                class="monitor-session-row"
-                class:openable
-                class:active={isOpenMonitorSession(monitorWorkerId, session.id)}
-                role={openable ? undefined : 'listitem'}
-                onclick={openable ? () => openMonitorSession(session) : undefined}
-              >
-                <span class="monitor-status" class:busy={session.status === 'busy'}></span>
-                <span class="monitor-session-tile" title={`${session.title || session.backend_key} · ${session.model || session.backend_key}`}>
-                  <BackendIcon backendKey={session.backend_key} size={20} />
-                  <span class="monitor-tile-dot" class:busy={session.status === 'busy'}></span>
-                </span>
-                <span class="monitor-session-copy">
-                  <strong>{session.title || session.backend_key}</strong>
-                  <small>
-                    {session.model || session.backend_key}
-                    {#if session.cwd} · {session.cwd}{/if}
-                  </small>
-                </span>
-              </svelte:element>
+          <div class="monitor-groups">
+            {#each monitorGroups as group, groupIndex (group.id)}
+              <section class="monitor-group" aria-label={group.name}>
+                {#if monitorGrouped && sidebarMode !== 'compact'}
+                  <button
+                    type="button"
+                    class="monitor-group-header"
+                    class:collapsed={isMonitorGroupCollapsed(group.cwd)}
+                    title={group.cwd === '(no cwd)' ? group.name : group.cwd}
+                    aria-expanded={!isMonitorGroupCollapsed(group.cwd)}
+                    onclick={() => toggleMonitorGroup(group.cwd)}
+                  >
+                    <span class="monitor-group-chevron">
+                      <Icon name={isMonitorGroupCollapsed(group.cwd) ? 'chevron-right' : 'chevron-down'} size={12} />
+                    </span>
+                    <Icon name="folder" size={13} />
+                    <span class="monitor-group-title">
+                      <span class="monitor-group-name">{group.name}</span>
+                      {#if group.showPathHint}
+                        <span class="monitor-group-path">{group.pathHint}</span>
+                      {/if}
+                    </span>
+                    <span class="monitor-group-count">{group.sessions.length}</span>
+                  </button>
+                {:else if monitorGrouped && groupIndex > 0}
+                  <div class="ws-group-separator" aria-hidden="true"></div>
+                {/if}
+                {#if !monitorGrouped || sidebarMode === 'compact' || !isMonitorGroupCollapsed(group.cwd)}
+                  <div class="monitor-session-list">
+                    {#each group.sessions as session (session.id)}
+                      {@const openable = accountDeviceSessions.some((s) => s.id === session.id)
+                        || Boolean(monitorWorkerId && !accountDeviceId(monitorWorkerId))}
+                      <svelte:element
+                        this={openable ? 'button' : 'div'}
+                        class="monitor-session-row"
+                        class:openable
+                        class:active={isOpenMonitorSession(monitorWorkerId, session.id)}
+                        role={openable ? undefined : 'listitem'}
+                        onclick={openable ? () => openMonitorSession(session) : undefined}
+                      >
+                        <span class="monitor-status" class:busy={session.status === 'busy'}></span>
+                        <span class="monitor-session-tile" title={`${session.title || session.backend_key} · ${session.model || session.backend_key}`}>
+                          <BackendIcon backendKey={session.backend_key} size={20} />
+                          <span class="monitor-tile-dot" class:busy={session.status === 'busy'}></span>
+                        </span>
+                        <span class="monitor-session-copy">
+                          <strong>{session.title || session.backend_key}</strong>
+                          <small>
+                            {session.model || session.backend_key}
+                            {#if session.cwd && !monitorGrouped} · {session.cwd}{/if}
+                          </small>
+                        </span>
+                      </svelte:element>
+                    {/each}
+                  </div>
+                {/if}
+              </section>
             {/each}
           </div>
         {/if}
@@ -3641,6 +3689,72 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
+  }
+  .monitor-groups {
+    display: flex;
+    flex-direction: column;
+  }
+  .monitor-group {
+    display: flex;
+    flex-direction: column;
+  }
+  .monitor-group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    margin: 7px 1px 3px;
+    padding: 6px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--rad-md);
+    background: transparent;
+    color: var(--fg-secondary);
+    font: 600 var(--fs-xs, 11px) var(--font-ui);
+    text-align: left;
+    cursor: pointer;
+  }
+  .monitor-group:first-child .monitor-group-header { margin-top: 0; }
+  .monitor-group-header:hover {
+    border-color: color-mix(in srgb, var(--fg-primary) 7%, transparent);
+    background: var(--bg-tab-hover);
+    color: var(--fg-primary);
+  }
+  .monitor-group-chevron {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--fg-tertiary);
+  }
+  .monitor-group-title {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .monitor-group-name,
+  .monitor-group-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .monitor-group-name { color: var(--fg-secondary); }
+  .monitor-group-path {
+    color: var(--fg-tertiary);
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 12px;
+  }
+  .monitor-group-count {
+    flex-shrink: 0;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg-primary) 10%, transparent);
+    color: var(--fg-tertiary);
+    font: 500 10px/16px var(--font-mono);
+    text-align: center;
   }
   .monitor-session-row {
     display: grid;
