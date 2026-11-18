@@ -285,8 +285,12 @@ async fn workbench_transcript(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(in
     let protocol=catalog.backends.get(&input.backend_key).map(|config|config.protocol_key(&input.backend_key)).unwrap_or(&input.backend_key);
     let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(protocol).ok_or_else(|| Error(StatusCode::BAD_REQUEST, "unsupported transcript format".into()))?;
     let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-        let Some(path) = kode_core::session::jsonl_tail::resolve_session_path(backend, std::path::Path::new(&input.cwd), &input.session_id) else { return Ok(json!({"messages":[],"available":false})); };
-        super::transcript::recent_before(&path,input.limit.unwrap_or(80).clamp(1,1000),input.tail_bytes.unwrap_or(8*1024*1024).clamp(4096,64*1024*1024),input.before)
+        let (limit,tail_bytes)=(input.limit.unwrap_or(80).clamp(1,1000),input.tail_bytes.unwrap_or(8*1024*1024).clamp(4096,64*1024*1024));
+        if let Some(path) = kode_core::session::jsonl_tail::resolve_session_path(backend, std::path::Path::new(&input.cwd), &input.session_id) {
+            return super::transcript::recent_before(&path,limit,tail_bytes,input.before);
+        }
+        let Some(path) = kode_core::session::jsonl_tail::find_compressed_codex_session(backend, &input.session_id) else { return Ok(json!({"messages":[],"available":false})); };
+        super::transcript::recent_compressed_before(&path,limit,tail_bytes,input.before)
     }).await.map_err(anyhow::Error::from)??;
     Ok(Json(messages))
 }

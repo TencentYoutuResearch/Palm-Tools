@@ -11,10 +11,12 @@ export function encodeHistoryArtifact(header,events) {
   return Buffer.concat(frames)
 }
 
-export function buildHistorySeed(transcript, selection) {
+/** `firstTurn` numbers turns appended after an existing conversation's, so
+ * their turn fields and derived message/call ids stay unique. */
+export function buildHistorySeed(transcript, selection, { firstTurn = 1 } = {}) {
   const rows=transcript.timeline ?? transcript.messages ?? [], events=[]
   const stamp=row=>Number.isSafeInteger(row?.time)&&row.time>=0?row.time:undefined
-  let time=rows.map(stamp).find(value=>value!==undefined) ?? 0, turn=0, step=0, open=false, stepOpen=false, output=false
+  let time=rows.map(stamp).find(value=>value!==undefined) ?? 0, turn=firstTurn-1, step=0, open=false, stepOpen=false, output=false
   let content=[],contentAt,calls=[],pending=new Map(),waiting=[]
   const marked=rows.some(row=>row.kind==='turn_start')
   const push=(type,data,at=time,surface=false)=>{events.push({type,seq:events.length,time:at,data,...(surface?{surfaceOp:'append'}:{})})}
@@ -69,6 +71,27 @@ export function buildHistorySeed(transcript, selection) {
   if(waiting.length){start();for(const row of waiting)user(row)}
   close()
   return events
+}
+
+/**
+ * Native timeline rows a stored conversation lacks: those after its last
+ * event. Null when this window cannot show where that boundary is (it does
+ * not reach back to the conversation, or the next row is not the start of a
+ * turn), so the caller never appends a partial or duplicated turn.
+ */
+export function nativeDelta(timeline, events) {
+  const times=events.map(event=>event.time).filter(Number.isSafeInteger)
+  if(!times.length)return null
+  const boundary=Math.max(...times)
+  const lastTurn=Math.max(0,...events.map(event=>event.data?.turn).filter(Number.isSafeInteger))
+  let cut=-1
+  timeline.forEach((row,index)=>{if(Number.isSafeInteger(row.time)&&row.time<=boundary)cut=index})
+  if(cut<0)return null
+  let rows=timeline.slice(cut+1)
+  // A CLI may record its turn end just after dsh closed the same turn.
+  while(rows[0]?.kind==='turn_end')rows=rows.slice(1)
+  if(rows.length && !(rows[0].kind==='turn_start' || rows[0].kind==='text' && rows[0].role==='user'))return null
+  return {rows,lastTurn}
 }
 
 /** Keep event identities and references while repairing older reused turn IDs. */

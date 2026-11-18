@@ -291,11 +291,16 @@ impl ExtensionHost {
                     match registry.extensions.get(&bundled.id) {
                         None => true,
                         Some(entry @ Entry { source: Source::Copy { .. }, bundled: true, .. }) => {
-                            let installed = manifest::read(&self.package_dir(&bundled.id, entry))
+                            let dir = self.package_dir(&bundled.id, entry);
+                            let installed = manifest::read(&dir)
                                 .ok()
                                 .and_then(|m| semver::Version::parse(&m.version).ok());
                             let shipped = semver::Version::parse(&bundled.version).ok();
-                            installed.is_none() || shipped > installed
+                            // Rebuilt apps often ship new content under the
+                            // same version; refresh those too.
+                            installed.is_none()
+                                || shipped > installed
+                                || (shipped == installed && !same_tree(&package, &dir))
                         }
                         Some(_) => false,
                     }
@@ -411,6 +416,38 @@ pub fn seed_bundled_in_background(app: AppHandle) {
             changed(&app);
         }
     });
+}
+
+/// Whether two package directories hold the same files (ignoring `.git`, as
+/// `copy_dir` does).
+fn same_tree(a: &Path, b: &Path) -> bool {
+    fn files(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                files(root, &path, out)?;
+            } else {
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                out.push((rel, path));
+            }
+        }
+        Ok(())
+    }
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    if files(a, a, &mut left).is_err() || files(b, b, &mut right).is_err() {
+        return false;
+    }
+    left.sort();
+    right.sort();
+    left.len() == right.len()
+        && left.iter().zip(&right).all(|((ra, pa), (rb, pb))| {
+            ra == rb
+                && matches!((std::fs::read(pa), std::fs::read(pb)), (Ok(x), Ok(y)) if x == y)
+        })
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {
@@ -590,6 +627,11 @@ mod tests {
         package(&shipped.join("sample"), "kode.sample", "0.1.0");
         assert!(host.seed_bundled(&shipped, "0.2.2"));
         assert!(!host.seed_bundled(&shipped, "0.2.2"), "same version is not reinstalled");
+        std::fs::write(shipped.join("sample/payload.txt"), "rebuilt").unwrap();
+        assert!(host.seed_bundled(&shipped, "0.2.2"), "a rebuild under the same version is refreshed");
+        let copied = tmp.path().join("ext/packages/kode.sample/payload.txt");
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "rebuilt");
+        assert!(!host.seed_bundled(&shipped, "0.2.2"));
 
         host.set_enabled("kode.sample", false).unwrap();
         package(&shipped.join("sample"), "kode.sample", "0.2.0");

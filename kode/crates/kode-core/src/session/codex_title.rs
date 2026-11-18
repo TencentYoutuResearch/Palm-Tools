@@ -30,6 +30,11 @@ pub(super) fn thread_names(db_path: &Path) -> HashMap<String, String> {
 }
 
 pub(super) fn thread_rollout_path(db_path: &Path, session_id: &str) -> Option<PathBuf> {
+    recorded_rollout_path(db_path, session_id).filter(|path| path.is_file())
+}
+
+/// The rollout path Codex recorded, whether or not it still exists there.
+pub(super) fn recorded_rollout_path(db_path: &Path, session_id: &str) -> Option<PathBuf> {
     let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     let path: Option<String> = connection
         .query_row(
@@ -39,7 +44,7 @@ pub(super) fn thread_rollout_path(db_path: &Path, session_id: &str) -> Option<Pa
         )
         .optional()
         .ok()?;
-    path.map(PathBuf::from).filter(|path| path.is_file())
+    path.map(PathBuf::from)
 }
 
 pub(super) fn thread_rows(db_path: &Path) -> Option<Vec<CodexThreadRow>> {

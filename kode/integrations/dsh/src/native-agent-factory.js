@@ -32,6 +32,23 @@ export class NativeAgentFactory {
       await handle.flush()
     }finally{await handle.close()}
   }
+  /** Append turns the native CLI ran outside dsh (a Kode terminal) to an
+   * existing conversation. It is unloaded first, so its next open reads them.
+   * `build(events)` returns the events to add (without seq), or null. */
+  async appendHistory(id,build) {
+    const live=this.ctx.agents.get(id)
+    if(live && (live.status!=='idle' || live.inbox.nextTurn.length || live.inbox.nextStep.length))throw new Error('会话正在运行，无法重新加载历史。')
+    await this.byId.get(id)?.()
+    const handle=await this.ctx.sessionPersistence.open(id,'write')
+    try{
+      const latest=await handle.read()
+      const added=build(latest.events)
+      if(!added?.length)return 0
+      await handle.append(added.map((event,index)=>({...event,seq:latest.events.length+index})))
+      await handle.flush()
+      return added.length
+    }finally{await handle.close()}
+  }
   async attach(owner, options, resume) {
     const ctx = this.ctx, id = options.resumeSessionId ?? options.sessionId
     let handle, driver, detachSession, detachAgent, releaseOwner, published = false, closing

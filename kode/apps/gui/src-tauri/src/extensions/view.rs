@@ -121,6 +121,8 @@ pub async fn extension_view_show(
     let actions = app.clone();
     let (action_extension, action_view) = (extension.clone(), view.clone());
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(url))
+        // Let the page take file drops as plain HTML5 events, like in a browser.
+        .disable_drag_drop_handler()
         .initialization_script(embed_script(&contribution))
         // Loopback pages only; anything else opens in the system browser.
         .on_navigation(move |target| {
@@ -171,6 +173,11 @@ pub fn extension_view_hide(app: AppHandle, extension: Option<String>) -> Result<
         if let Some(webview) = app.get_webview(&label) {
             webview.hide().map_err(|e| e.to_string())?;
         }
+    }
+    // A hidden view can still be the window's first responder (e.g. after its
+    // TUI button), which would swallow typing meant for Kode's terminal.
+    if let Some(main) = app.get_webview("main") {
+        let _ = main.set_focus();
     }
     Ok(())
 }

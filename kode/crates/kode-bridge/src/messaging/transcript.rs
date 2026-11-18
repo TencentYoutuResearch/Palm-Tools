@@ -51,12 +51,28 @@ pub(super) fn recent_before(path:&Path,limit:usize,tail_bytes:usize,before:Optio
     let size=file.metadata()?.len();
     let start=size.saturating_sub(tail_bytes as u64);
     file.seek(SeekFrom::Start(start))?;
-    let mut source=String::new();
     let mut bytes=Vec::with_capacity(size.saturating_sub(start) as usize);
     file.read_to_end(&mut bytes)?;
+    from_tail(&bytes,start>0,limit,before)
+}
+/// Same window over a zstd-compressed log (Codex archives older rollouts),
+/// decoded as a stream so only the last `tail_bytes` stay in memory.
+pub(super) fn recent_compressed_before(path:&Path,limit:usize,tail_bytes:usize,before:Option<i64>)->Result<Value> {
+    let mut decoder=ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?)).map_err(|error|anyhow::anyhow!("{error}"))?;
+    let (mut bytes,mut chunk,mut cut)=(Vec::new(),vec![0u8;256*1024],false);
+    loop {
+        let read=decoder.read(&mut chunk)?;
+        if read==0 {break}
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.len()>2*tail_bytes {bytes.drain(..bytes.len()-tail_bytes);cut=true;}
+    }
+    if bytes.len()>tail_bytes {bytes.drain(..bytes.len()-tail_bytes);cut=true;}
+    from_tail(&bytes,cut,limit,before)
+}
+fn from_tail(bytes:&[u8],cut:bool,limit:usize,before:Option<i64>)->Result<Value> {
     // A tail may begin in UTF-8 or JSON; discard just that incomplete record.
-    let begin=if start==0 {0}else{bytes.iter().position(|byte|*byte==b'\n').map(|position|position+1).unwrap_or(bytes.len())};
-    source.push_str(&String::from_utf8_lossy(&bytes[begin..]));
+    let begin=if !cut {0}else{bytes.iter().position(|byte|*byte==b'\n').map(|position|position+1).unwrap_or(bytes.len())};
+    let source=String::from_utf8_lossy(&bytes[begin..]);
     let mut timeline=source.lines().flat_map(records).collect::<Vec<_>>();
     if let Some(before)=before{timeline.retain(|row|row["time"].as_i64().is_some_and(|time|time<before));}
     let texts=timeline.iter().enumerate().filter(|(_,row)|row["kind"]=="text").map(|(index,_)|index).collect::<Vec<_>>();
@@ -67,7 +83,7 @@ pub(super) fn recent_before(path:&Path,limit:usize,tail_bytes:usize,before:Optio
     if first>0 {timeline.drain(..first);}
     let messages=timeline.iter().filter(|row|row["kind"]=="text").cloned().collect::<Vec<_>>();
     let count=messages.len();
-    Ok(json!({"messages":messages,"timeline":timeline,"available":true,"history_window":{"count":count,"truncated":start>0||omitted>0}}))
+    Ok(json!({"messages":messages,"timeline":timeline,"available":true,"history_window":{"count":count,"truncated":cut||omitted>0}}))
 }
 
 #[cfg(test)]
@@ -84,6 +100,16 @@ mod tests {
         let result=recent(&path,2,4096).unwrap();
         assert_eq!(result["history_window"],json!({"count":2,"truncated":true}));
         assert_eq!(result["messages"][0]["text"],"recent request");assert_eq!(result["messages"][1]["text"],"recent answer");
+    }
+    #[test]
+    fn compressed_codex_rollouts_read_like_plain_ones(){
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("rollout.jsonl.zst");
+        let plain=["older","recent request","recent answer"].map(|text|json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}}).to_string()).join("\n");
+        std::fs::write(&path,ruzstd::encoding::compress_to_vec(plain.as_bytes(),ruzstd::encoding::CompressionLevel::Fastest)).unwrap();
+        let result=recent_compressed_before(&path,80,8*1024*1024,None).unwrap();
+        assert_eq!(result["history_window"],json!({"count":3,"truncated":false}));
+        let result=recent_compressed_before(&path,80,4096.min(plain.len()-10),None).unwrap();
+        assert_eq!(result["history_window"]["truncated"],true);assert_eq!(result["messages"][1]["text"],"recent answer");
     }
     #[test]
     fn native_timestamps_tools_and_completion_are_retained(){

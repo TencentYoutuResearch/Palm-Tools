@@ -271,6 +271,45 @@ pub fn find_codex_session_by_id(backend: Backend, session_id: &str) -> Option<Pa
         .or_else(|| find_codex_session_by_id_under(&home.join("sessions"), session_id))
 }
 
+/// Codex compresses older rollouts to `<rollout>.jsonl.zst` while its state db
+/// keeps the original `.jsonl` path. Only for reading history: live tails
+/// follow uncompressed rollouts.
+pub fn find_compressed_codex_session(backend: Backend, session_id: &str) -> Option<PathBuf> {
+    if !backend.is_codex_family() {
+        return None;
+    }
+    let home = codex_home(backend)?;
+    if let Some(recorded) = codex_title::recorded_rollout_path(&home.join("state_5.sqlite"), session_id) {
+        let mut name = recorded.into_os_string();
+        name.push(".zst");
+        let compressed = PathBuf::from(name);
+        if compressed.is_file() {
+            return Some(compressed);
+        }
+    }
+    let suffix = format!("{session_id}.jsonl.zst");
+    let mut found = None;
+    collect_by_suffix(&home.join("sessions"), &suffix, &mut found);
+    found
+}
+
+fn collect_by_suffix(dir: &Path, suffix: &str, found: &mut Option<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if found.is_some() {
+            return;
+        }
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            collect_by_suffix(&path, suffix, found);
+        } else if path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(suffix)) {
+            *found = Some(path);
+        }
+    }
+}
+
 /// 兼容旧 API 名(只用于 codebuddy);新代码请用 `Backend::session_path` 或 `session_path_for`。
 #[doc(hidden)]
 pub fn codebuddy_session_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {

@@ -7,7 +7,8 @@
 //   CSS --kode-traffic-lights-inset: room the macOS window buttons need at
 //     the top-left, because the view covers Kode's titlebar;
 //   window.kodeHost.request(action, params): ask Kode to do something
-//     ("switch-view" {to: "tui", session}, "leave");
+//     ("switch-view" {to: "tui", session}, "open-session" {session, tab},
+//     "leave");
 //   window "kode-host" CustomEvent: messages from Kode. Kode draws its own
 //     notifications on top of the view, so views need not handle "toast".
 (() => {

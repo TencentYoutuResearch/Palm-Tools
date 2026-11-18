@@ -721,7 +721,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const CHAT_GLYPH = 'M3 4.2c0-.66.54-1.2 1.2-1.2h7.6c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H7l-2.6 2v-2h-.2c-.66 0-1.2-.54-1.2-1.2z'
   function KodeViewSwitch({ sessionId }) {
     return h('div', { className: 'kode-view-switch', role: 'group', 'aria-label': '会话视图' },
-      h('button', { type: 'button', title: '在 Kode 终端中继续这段对话', onClick: () => window.kodeHost.request('switch-view', { to: 'tui', session: sessionId }) }, glyph(TERMINAL_GLYPH), h('span', null, 'TUI')),
+      h('button', { type: 'button', title: '所有会话切换到 Kode 终端', onClick: () => window.kodeHost.request('switch-view', { to: 'tui', session: sessionId }) }, glyph(TERMINAL_GLYPH), h('span', null, 'TUI')),
       h('button', { type: 'button', className: 'active', 'aria-pressed': true, tabIndex: -1 }, glyph(CHAT_GLYPH), h('span', null, 'dsh')))
   }
   function KodeLeavePage() {
@@ -742,7 +742,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           try {
             requestId.current ??= crypto.randomUUID()
             const result = await hubCall({ action: 'handoff', sessionId, profileId: target, requestId: requestId.current }, transport?.current ?? 'local')
-            await sessions.refresh(); await avatarContext.get('uiWorkspace').openSession(result.sessionId); setOpen(false)
+            await sessions.refresh(); showShared(null); await avatarContext.get('uiWorkspace').openSession(result.sessionId); setOpen(false)
           } catch (error) { setError(error.message) } finally { setBusy(false) }
         } }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
         h('div', { className: 'kode-handoff-body', 'aria-busy': busy },
@@ -1352,7 +1352,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       return () => { window.removeEventListener('kode-session-avatar', show); window.removeEventListener('kode-resume-session', resume) }
     }, [merged])
     const navigate = async (id, target) => { if (busy) return; setBusy(true); setError(''); setNotice(''); try {
-      if (target.sessionId?.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId }); if (imported.sharedSession) { if ((transport?.current ?? 'local') !== imported.hostId) await switchHost(imported.hostId); showShared({ session: imported.sharedSession, host: imported.hostId }); return true } showShared(null); id = imported.hostId; target = { ...target, sessionId: imported.sessionId }; if(imported.historyWindow?.truncated)setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`) }
+      if (target.sessionId?.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId }); if (imported.sharedSession) { if (kodeEmbedded() && imported.hostId === 'local' && imported.sharedSession.runtime === 'gui') { showShared(null); window.kodeHost.request('open-session', { session: imported.sharedSession.session_uuid, tab: imported.sharedSession.id }); return true } if ((transport?.current ?? 'local') !== imported.hostId) await switchHost(imported.hostId); showShared({ session: imported.sharedSession, host: imported.hostId }); return true } showShared(null); id = imported.hostId; target = { ...target, sessionId: imported.sessionId }; if(imported.historyWindow?.truncated)setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`) }
       await switchHost(id, target); await refreshWorkspaceDirectory(); return true
     } catch (error) { setError(error.message) } finally { setBusy(false) } }
     const open = id => { showShared(null); const route = merged.routes.get(id); if (route) void navigate(route.hostId, { sessionId: route.id }); else props.open(id) }
@@ -1440,6 +1440,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search)
       // Cancel rc.2's asynchronous saved-draft restoration before opening a link.
       layout.beginNavigation()
+      // A Kode-owned conversation left on screen would hide the arriving session.
+      showShared(null)
       setError('')
       Promise.resolve(match[1] === 'session' ? uiWorkspace.openSession(target) : uiWorkspace.openWorkspace(target)).catch(error => setError(error.message))
     }, [uiWorkspace, workspacePhase, sessionPhase, arrivals])

@@ -248,3 +248,26 @@ test('0.2.2 query-only cold placeholders retire existing shared publications wit
  assert.equal(disposed,2);assert.equal(publications.length,1)
  assert.equal(publications[0].sessions[0].dto.status,'exited');assert.deepEqual(publications[0].sessions[0].events,[])
 })
+test('unchanged unloaded conversations are not re-read every pass, changed or unarchived ones are', async () => {
+ let reads=0,row={sessionId:'cold',blank:false,running:false,updatedAt:1,title:'Cold'}
+ const archived=[]
+ const services={
+  sessionController:{list:async()=>({items:[row]})},
+  sessionQuery:{observeSession:async()=>{reads++;return{inheritedEventCount:0,events:[{type:'turn/start',seq:0,time:1,data:{turn:1}},{type:'turn/end',seq:1,time:2,data:{turn:1,reason:{kind:'completed'}}}],[Symbol.dispose](){}}}},
+  agents:{get:()=>undefined},
+  workspaceRegistry:{get archivedSessionIds(){return archived}},
+  kodeAgents:{profiles:{binding:()=>undefined}},
+ }
+ const publications=[]
+ const backend={call:async(path,body)=>{if(path.endsWith('/sessions'))return{sessions:[]};publications.push(body);return{sessions:(body.sessions??[]).map((s,i)=>({session_id:s.session_id,id:i+1}))}}}
+ const bridge=new RuntimeBridge({get:key=>services[key]},backend)
+ const last=()=>publications.filter(body=>body.sessions?.[0]?.session_id==='cold').at(-1).sessions[0].dto.status
+ await bridge.publish();await bridge.publish();await bridge.publish()
+ assert.equal(reads,1)
+ row={...row,updatedAt:2};await bridge.publish()
+ assert.equal(reads,2)
+ archived.push('cold');await bridge.publish()
+ assert.equal(last(),'exited')
+ archived.pop();await bridge.publish()
+ assert.equal(reads,3);assert.notEqual(last(),'exited')
+})

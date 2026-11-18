@@ -1,4 +1,5 @@
 import { savedSessionTime } from './saved-session-state.js'
+import { hasTranscript } from './workspace-directory.js'
 /** Kode owns SSH; the remote dsh Host owns all workspace and execution services. */
 import { createServer, request as httpRequest } from 'node:http'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
@@ -126,6 +127,8 @@ export class ProjectHosts {
         if (endpointId && !target) continue
         const hostId = target?.id ?? 'local', host = hosts.find(row => row.id === hostId)
         if (!host) continue
+        // A tab never prompted has no transcript to open; do not list it.
+        if (hostId === 'local' && !await hasTranscript(this.config.backendClient, tab)) continue
         const key = `saved:${createHash('sha256').update(`${hostId}:${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0,32)}`
         const adopted = tab.dsh_session_id ?? `session-kode-${createHash('sha256').update(`${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0,32)}`
         if (host.hiddenSessionIds?.includes(adopted) || host.hiddenSessionIds?.includes(tab.session_id)) continue

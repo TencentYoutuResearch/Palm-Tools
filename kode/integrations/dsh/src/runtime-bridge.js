@@ -38,7 +38,7 @@ export function projectSessionEvent(event, messageId) {
 export class RuntimeBridge {
   constructor(ctx, backend, { runtime = 'dsh', intervalMs = 500 } = {}) {
     this.ctx = ctx; this.backend = backend; this.runtime = runtime; this.intervalMs = intervalMs
-    this.bootId = randomUUID(); this.stop = new AbortController(); this.cursors = new Map(); this.ids = new Map(); this.pending = new Map(); this.extra = new Map(); this.results = new Map(); this.streams = new Map(); this.known = null; this.continued = new Map(); this.answeredContinued = new Set()
+    this.bootId = randomUUID(); this.stop = new AbortController(); this.cursors = new Map(); this.ids = new Map(); this.pending = new Map(); this.extra = new Map(); this.results = new Map(); this.streams = new Map(); this.known = null; this.continued = new Map(); this.answeredContinued = new Set(); this.coldStamps = new Map()
   }
   service(name) { return this.ctx.get?.(name) ?? this.ctx[name] }
   call(name, body) { return this.backend.call(PREFIX + name, body, this.stop.signal) }
@@ -71,6 +71,14 @@ export class RuntimeBridge {
     for (const row of items) {
       this.stop.signal.throwIfAborted()
       const agent = this.service('agents').get(row.sessionId)
+      // An unloaded conversation changes only through its catalog row; skip
+      // re-reading its whole log every pass while that row is unchanged.
+      // A row that returns from the archive was published as exited; republish.
+      const stamp = agent ? null : JSON.stringify([row, this.service('kodeAgents')?.profiles.binding(row.sessionId) ?? null])
+      if (stamp && this.coldStamps.get(row.sessionId) === stamp && this.known.get(row.sessionId)?.status !== 'exited' && this.known.has(row.sessionId)
+        && !this.extra.get(row.sessionId)?.length && !this.continued.get(row.sessionId)?.size
+        && ![...this.pending.values()].some(request => request.sessionId === row.sessionId)) continue
+      if (stamp) this.coldStamps.set(row.sessionId, stamp); else this.coldStamps.delete(row.sessionId)
       const observed = agent ? { events: agent.session.snapshotEvents() } : await sessionInspector(controller, this.service('sessionQuery'))(row.sessionId, this.stop.signal)
       if (!agent && needsEmptySessionCheck(row) && setupOnlySession(observed)) {
         const previous = this.known.get(row.sessionId)
@@ -244,7 +252,8 @@ export class RuntimeBridge {
       const [cloud, directory] = await Promise.all([this.backend.call('/api/v1/messaging/cloud/status', undefined, this.stop.signal), this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)])
       this.mobileEnabled = cloud.sync_enabled === true && cloud.binding_count > 0; this.guiEnabled = directory.runtimes?.gui === true; this.lastPolicyCheck = Date.now()
     }
-    await this.publish()
+    // Commands first: Kode waits on them (a mode switch stops sessions one by
+    // one) and must not queue behind a publication pass.
     // A lost settlement response is retried without re-executing the command.
     for (const [id, result] of this.results) { await this.call('settle', { runtime: this.runtime, boot_id: this.bootId, id, result }); this.results.delete(id) }
     const { commands } = await this.call('claim', { runtime: this.runtime, boot_id: this.bootId })
@@ -254,6 +263,7 @@ export class RuntimeBridge {
       this.results.set(command.id, result)
       await this.call('settle', { runtime: this.runtime, boot_id: this.bootId, id: command.id, result }); this.results.delete(command.id)
     }
+    await this.publish()
   }
   start() {
     this.heartbeat = setInterval(() => { if (!this.heartbeatPending) this.heartbeatPending = this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [] }).catch(error => { if (!this.stop.signal.aborted) this.ctx.logger.warn('Kode runtime heartbeat: %s', error.message) }).finally(() => { this.heartbeatPending = null }) }, 4000)
