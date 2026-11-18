@@ -151,3 +151,22 @@ test('late native events cannot append a tool lifecycle after its step has close
  assert.throws(()=>adapter.logResult(agent,'late',[]),/open dsh step/)
  assert.equal(writes.length,0)
 })
+
+test('Claude title events synchronize cold sessions and live rename uses the existing native runtime', async () => {
+  const binding = { threadId: 'claude-thread', profile: { id: 'claude', type: 'claude' } }
+  let listener, synchronized = 0, renamed
+  const ctx = { on: (name, fn) => { listener = fn }, agents: { get: () => undefined }, logger: { warn: assert.fail } }
+  const adapter = new AgentRuntimeAdapter(ctx, { binding: () => binding }, { onThread: async agent => {
+    assert.equal(agent.id, 'cold-session'); synchronized++
+  } })
+  listener({ id: 'cold-session' }, { type: 'session/title', data: { title: 'Renamed' } })
+  await adapter.titleUpdates.get('cold-session')
+  assert.equal(synchronized, 1)
+  adapter.live.set('cold-session', { rename: async title => { renamed = title } })
+  await adapter.renameSession({ id: 'cold-session' }, 'New native title')
+  assert.equal(renamed, 'New native title')
+  adapter.live.clear()
+  await adapter.renameSession({ id: 'cold-session' }, 'Cold title')
+  assert.equal(adapter.probes.size, 0, 'cold renaming never launches a model or CLI')
+  await adapter.close()
+})

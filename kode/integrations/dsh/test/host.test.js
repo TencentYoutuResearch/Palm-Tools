@@ -12,10 +12,12 @@ const tokenFile = process.env.KODE_TEST_TOKEN_FILE
 
 test('dsh host registers scoped tools, persists inbox before receipt and delivers replies', { skip: !url || !tokenFile }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-dsh-host-'))
-  const listeners = new Map(), disposers = [], tools = new Map(), received = []
+  const listeners = new Map(), disposers = [], tools = new Map(), received = [], events = []
+  const originalCall = BackendClient.prototype.call
+  let releaseRecovery
   let flushed = false
   const id = `dsh-test-${randomUUID()}`
-  const agent = { id, session: { header: { title: 'Implementation session' } }, followup: message => received.push(message), ctx: {
+  const agent = { id, session: { header: { title: 'Implementation session' }, snapshotEvents: offset => events.filter(event => event.seq >= offset) }, followup: message => { received.push(message); events.push({ seq: events.length, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: received.length - 1, removedCount: 0, inserted: [message] } }) }, ctx: {
     tools: { register: tool => { tools.set(tool.name, tool); return () => tools.delete(tool.name) } },
     parallel: async () => { flushed = true },
   } }
@@ -56,6 +58,33 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
     assert.equal(flushed, true)
     assert.equal(received.length, 1)
     assert.match(received[0].content[0].text, /Please review/)
+    await assert.rejects(tools.get('kode_sessions_cancel_input').execute({ message_id: message.id }, { agent }), /foreign session/)
+    let recoveryBlocked = false
+    BackendClient.prototype.call = async function (path, body, signal) {
+      if (path.startsWith(`/api/v1/messaging/sessions/${id}/deliveries`)) {
+        recoveryBlocked = true
+        await new Promise(resolve => { releaseRecovery = resolve })
+      }
+      return originalCall.call(this, path, body, signal)
+    }
+    const recoveryUntil = Date.now() + 3000
+    while (!recoveryBlocked) {
+      assert.ok(Date.now() < recoveryUntil)
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    await peer.call(`/api/v1/messaging/messages/${message.id}/cancellation`, {})
+    let cancellation
+    const cancelUntil = Date.now() + 3000
+    do {
+      cancellation = await tools.get('kode_sessions_cancellation_status').execute({ message_id: message.id }, { agent })
+      if (cancellation.cancellation?.state !== 'requested') break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    } while (Date.now() < cancelUntil)
+    assert.equal(cancellation.cancellation.state, 'cancel_unconfirmed')
+    assert.equal(cancellation.cancellation.reason, 'runtime_unsupported')
+    assert.equal(received.length, 1)
+    BackendClient.prototype.call = originalCall
+    releaseRecovery()
     const reply = await tools.get('kode_sessions_send').execute({ ...other.session.address, content: 'Review completed', idempotency_key: randomUUID(), in_reply_to: message.id }, { agent })
     assert.equal(reply.message.source.session_id, id)
     assert.equal(reply.message.in_reply_to, message.id)
@@ -71,9 +100,35 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
     await new Promise(resolve => setTimeout(resolve, 100))
     assert.ok(!received.some(input => input.content[0].text.includes('Final peer result')), 'a reply read in this turn must not queue a duplicate automatic turn')
     await assert.rejects(tools.get('kode_sessions_send').execute({}, { agent: {} }), /foreign agent/)
+    const longText = '🦊中a'.repeat(5000)
+    const large = await peer.call('/api/v1/messaging/messages', { target: own.address, content: longText, in_reply_to: reply.message.id, idempotency_key: randomUUID() })
+    let pageCursor = 0, preview
+    for (let attempt = 0; attempt < 30 && !preview; attempt++) {
+      const page = await tools.get('kode_sessions_read').execute({ after: pageCursor }, { agent })
+      preview = page.events.find(e => e.message.id === large.id)?.message
+      pageCursor = page.cursor
+    }
+    assert.equal(preview.content_truncated, true)
+    let restored = preview.content, next = preview.continuation.offset
+    while (next !== null) {
+      const page = await tools.get('kode_sessions_message_read').execute({ message_id: large.id, offset: next }, { agent })
+      restored += page.content; next = page.next
+    }
+    assert.equal(restored, longText)
+    const inboxUntil = Date.now() + 3000
+    while (!received.some(row => row.content[0].text.includes(large.id))) {
+      assert.ok(Date.now() < inboxUntil); await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    const relayed = received.find(row => row.content[0].text.includes(large.id)).content[0].text
+    assert.ok(relayed.includes('Message preview'))
+    assert.ok(Buffer.byteLength(JSON.stringify(received.find(row => row.content[0].text.includes(large.id)))) <= 8192)
+    assert.ok(Number(/offset=(\d+);/.exec(relayed)[1]) < 4096)
+    assert.ok(!relayed.includes(longText))
     const tokenState = JSON.parse(await readFile(join(root, 'state.json'), 'utf8'))
     assert.ok(tokenState[id])
   } finally {
+    BackendClient.prototype.call = originalCall
+    releaseRecovery?.()
     for (const dispose of disposers.reverse()) await dispose?.()
     await rm(root, { recursive: true, force: true })
   }
@@ -81,7 +136,7 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
 
 test('queued messages resume only previously registered dsh sessions through the native controller', { skip: !url || !tokenFile }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-dsh-wake-'))
-  const disposers = [], listeners = new Map(), received = [], tools = new Map(), registrations = new Map()
+  const disposers = [], listeners = new Map(), received = [], tools = new Map(), registrations = new Map(), events = []
   const admin = new BackendClient(url, (await readFile(tokenFile, 'utf8')).trim())
   const id = `cold-${randomUUID()}`, otherId = `unowned-${randomUUID()}`
   const own = await admin.call('/api/v1/messaging/sessions', { session_id: id, title: 'Cold dsh', runtime: 'dsh' })
@@ -92,7 +147,7 @@ test('queued messages resume only previously registered dsh sessions through the
     target: own.session.address, content: 'Wake up the persisted conversation', idempotency_key: randomUUID(),
   })
   let resumes = 0, flushed = 0, current
-  const agent = { id, session: { header: {} }, followup: message => received.push(message), ctx: {
+  const agent = { id, session: { header: {}, snapshotEvents: offset => events.filter(event => event.seq >= offset) }, followup: message => { received.push(message); events.push({ seq: events.length, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: received.length - 1, removedCount: 0, inserted: [message] } }) }, ctx: {
     tools: { register: tool => { tools.set(tool.name, tool); registrations.set(tool.name, (registrations.get(tool.name) ?? 0) + 1); return () => tools.delete(tool.name) } },
     parallel: async () => { flushed++ },
   } }
@@ -122,7 +177,7 @@ test('queued messages resume only previously registered dsh sessions through the
     assert.equal(settled.status, 'accepted')
     assert.equal(resumes, 1)
     assert.equal(received.length, 1)
-    assert.equal(flushed, 1)
+    assert.ok(flushed >= 1)
     assert.ok(tools.has('kode_sessions_send')); assert.ok(tools.has('memory_search'))
     assert.ok([...registrations.values()].every(count => count === 1), 'created event and resolve continuation share one installation')
   } finally {

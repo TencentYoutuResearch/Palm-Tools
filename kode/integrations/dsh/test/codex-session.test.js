@@ -154,3 +154,17 @@ test('long-thread resume excludes native history larger than the transport frame
     assert.equal(records.find(row => row.method === 'turn/start').params.threadId, threadId)
   } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('Codex child execution state and output follow known native threads', async () => {
+  const children = []
+  const session = new CodexSession({ executable: process.execPath, args: [fixture] }, tmpdir(), { subagent: child => children.push(child) })
+  try {
+    await session.open({}, [])
+    const events = await collect(session.turn([{ type: 'text', text: 'NATIVE_SUBAGENTS' }]))
+    assert.ok(children.some(child => child.id === 'codex-child' && child.status === 'running'))
+    assert.ok(children.some(child => child.id === 'codex-child' && child.delta === 'Child live output'))
+    assert.ok(children.some(child => child.id === 'codex-child' && child.status === 'completed'))
+    assert.ok(children.every(child => child.id !== 'foreign-child'))
+    assert.doesNotMatch(events.filter(event => event.method === 'item/agentMessage/delta').map(event => event.params.delta).join(''), /Child live output|Foreign output/)
+  } finally { await session.close() }
+})

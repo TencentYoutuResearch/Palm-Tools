@@ -7,6 +7,8 @@ const upstream = resolve('@deepseek-ai/dsh-client-ui-chat/client')
 let source = await readFile(upstream, 'utf8')
 function replace(from, to) { if (!source.includes(from)) throw new Error(`Pinned Chat contract changed: ${from}`); source = source.replace(from, to) }
 replace('id: "@deepseek-ai/dsh-client-ui-chat",','id: "@kode/dsh-chat",')
+// Imported relay messages have no live inbox claim, so remain Context nodes.
+replace('node.kind !== "context" || node.data.content.some', 'node.kind !== "context" || (node.data.source?.kind === "agent-message" && node.data.source?.form === "relay") || node.data.content.some')
 // Stable user-bubble seat for scene-aware appearance without matching generated classes.
 replace('className: MessageItem_module_css_default.bubble,', 'className: MessageItem_module_css_default.bubble, "data-kode-user-bubble": true,')
 // Keep history editing separate from the generated renderer and preserve its native bubble/actions.

@@ -1,6 +1,10 @@
 //! Opt-in durable session messaging. No Tauri dependencies and no PTY byte-path changes.
 //! `KODE_MESSAGING_CONFIG` selects a JSON config; disabled bridges behave as before.
 mod api;
+pub mod bootstrap;
+mod delivery;
+mod cancellation;
+mod wire;
 mod extensions;
 mod extension_files;
 mod handoff;
@@ -18,7 +22,9 @@ mod store;
 mod session_catalog;
 mod session_visibility;
 pub use session_visibility::filter_visible_runtime_sessions;
+pub(crate) use session_visibility::project_mobile_workspaces;
 mod transcript;
+mod native_title;
 pub mod workspaces;
 pub mod server;
 #[cfg(test)]
@@ -35,7 +41,7 @@ use std::{
         Arc, Weak,
     },
 };
-use store::Store;
+pub(crate) use store::Store;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -60,7 +66,7 @@ pub struct Hub {
     extensions: extensions::Extensions,
     handoff_gate: tokio::sync::Mutex<()>,
     memory: Mutex<Option<Arc<crate::MemoryHandle>>>,
-    store: Store,
+    store: Arc<Store>,
     config: Config,
     peers: Mutex<Vec<Peer>>,
     ctx: Weak<crate::Ctx>,
@@ -96,7 +102,8 @@ impl Hub {
                 }
             }
         }
-        let store = Store::open(&config.database, &config.node_id)?;
+        let store = Arc::new(Store::open(&config.database, &config.node_id)?);
+        *ctx.runtimes.workbench_store.lock() = Arc::downgrade(&store);
         ctx.runtimes.open(&config.database.with_extension("runtime.sqlite"))?;
         let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
@@ -323,7 +330,7 @@ impl Hub {
         let _guard = self.gate.lock();
         self.store.heartbeat(session)?;
         let mut pending = Vec::new();
-        for mut m in self.store.messages()? {
+        for mut m in self.store.inbox(session)? {
             if m.target.node_id == self.node_id()
                 && m.target.session_id == session
                 && m.status == Status::Received
@@ -496,7 +503,7 @@ impl Hub {
             .filter(|s| s.online)
             .map(|s| s.address.session_id)
             .collect();
-        for mut m in self.store.messages()? {
+        for mut m in self.store.open_messages()? {
             if m.target.node_id == self.node_id()
                 && m.status == Status::Delivering
                 && !online.contains(&m.target.session_id)

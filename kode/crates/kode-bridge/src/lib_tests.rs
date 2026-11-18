@@ -10,16 +10,18 @@ fn native_transcripts_decode_codex_and_claude_envelopes_without_system_or_tool_n
         json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"检查完成"}]}}),
         json!({"type":"response_item","payload":{"type":"function_call_output","output":"large tool output"}}),
         json!({"type":"user","message":{"role":"user","content":"继续"}}),
+        json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-1","content":"private file contents"}]}}),
+        json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-2","content":"another file"},{"type":"text","text":"Keep this human request"}]}}),
         json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"已完成"}]}}),
     ];
     let messages = parse_transcript_lines(rows.iter().map(Value::to_string));
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.len(), 5);
     assert_eq!(
         messages
             .iter()
             .map(|row| row["text"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["检查工作区", "检查完成", "继续", "已完成"]
+        vec!["检查工作区", "检查完成", "继续", "Keep this human request", "已完成"]
     );
 }
 

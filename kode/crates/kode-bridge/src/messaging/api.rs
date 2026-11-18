@@ -68,6 +68,12 @@ fn owner(hub: &Hub, h: &HeaderMap, id: &str) -> Result<()> {
 }
 pub(super) fn router(hub: Arc<Hub>) -> Router {
     Router::new()
+        .route("/api/v1/messaging/messages/:id/delivery", get(delivery).post(observe_delivery))
+        .route("/api/v1/messaging/sessions/:id/deliveries", get(pending_deliveries))
+        .route("/api/v1/messaging/messages/:id/cancellation", get(cancellation).post(request_cancellation))
+        .route("/api/v1/messaging/messages/:id/cancellation/result", post(report_cancellation))
+        .route("/api/v1/messaging/sessions/:id/cancellations", get(pending_cancellations))
+
         .route("/api/v1/messaging/workbench/agent-hub", get(agent_hub).post(change_agent_hub))
         .route("/api/v1/messaging/workbench/handoff", post(handoff))
         .route("/api/v1/messaging/model-usage", get(model_usage))
@@ -104,7 +110,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/runtime/sessions", get(runtime_sessions))
         .route("/api/v1/messaging/runtime/history", get(runtime_history))
         .route("/api/v1/messaging/node", get(node))
-        .route("/api/v1/messaging/workbench/peers", post(add_peer))
+        .route("/api/v1/messaging/workbench/peers", get(workbench_peers).post(add_peer))
         .route("/api/v1/messaging/workbench/peers/remove", post(remove_peer))
         .route("/api/v1/messaging/workbench/catalog", get(workbench_catalog))
         .route("/api/v1/messaging/workbench/agents", get(agent_catalog).post(change_agent))
@@ -112,7 +118,9 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/workbench/workspaces", get(workspaces).post(change_workspace))
         .route("/api/v1/messaging/workbench/workspaces/hosts", get(workspace_hosts))
         .route("/api/v1/messaging/workbench/transcript", post(workbench_transcript))
-        .route("/api/v1/messaging/workbench/documents/:key", get(workbench_document).post(save_workbench_document))
+        .route("/api/v1/messaging/workbench/native-title", post(workbench_native_title))
+        // Session indexes and Agent bindings grow with persisted conversations.
+        .route("/api/v1/messaging/workbench/documents/:key", get(workbench_document).post(save_workbench_document).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/v1/messaging/self", get(own_session))
         .route("/api/v1/messaging/native/resolve", post(resolve_native))
         .route(
@@ -135,7 +143,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
 async fn node(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     auth(&hub, &h)?;
     let (executable, built_at) = server_binary();
-    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"managed_peers":true,
+    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"delivery_tracking":true,"input_cancellation":true,"managed_peers":true,
         "pid":std::process::id(),"executable":executable,"built_at":built_at})))
 }
 /// Executable path and its modification time (Unix seconds), so a host app
@@ -158,6 +166,10 @@ pub fn server_binary() -> (Option<String>, Option<u64>) {
 async fn model_usage(State(hub): State<Arc<Hub>>, h: HeaderMap, Query(query): Query<crate::model_usage::ModelUsageQuery>) -> Response {
     if let Err(error) = admin(&hub, &h) { return error.into_response(); }
     crate::get_model_usage(Query(query)).await.into_response()
+}
+async fn workbench_peers(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    Ok(Json(json!({"peers":hub.peers()})))
 }
 async fn add_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(peer): Json<super::Peer>) -> Result<Json<serde_json::Value>> {
     admin(&hub, &h)?;
@@ -218,7 +230,7 @@ async fn change_workspace(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input)
 }
 async fn workspace_hosts(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;
-    Ok(Json(json!({"local_node_id":hub.node_id(),"hosts":hub.peers().iter().map(|peer| json!({"node_id":peer.node_id,"ssh_host":peer.ssh.as_ref().map(|ssh| &ssh.host)})).collect::<Vec<_>>()})))
+    Ok(Json(json!({"local_node_id":hub.node_id(),"hosts":hub.peers().iter().map(|peer| json!({"node_id":peer.node_id,"ssh_host":peer.ssh.as_ref().map(|ssh| &ssh.host),"ssh_port":peer.ssh.as_ref().map(|ssh| ssh.port)})).collect::<Vec<_>>()})))
 }
 async fn workbench_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;
@@ -277,6 +289,45 @@ async fn workbench_transcript(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(in
         super::transcript::recent_before(&path,input.limit.unwrap_or(80).clamp(1,1000),input.tail_bytes.unwrap_or(8*1024*1024).clamp(4096,64*1024*1024),input.before)
     }).await.map_err(anyhow::Error::from)??;
     Ok(Json(messages))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeTitle {
+    backend_key: String,
+    session_id: String,
+    cwd: String,
+    title: String,
+}
+async fn workbench_native_title(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Json(input): Json<NativeTitle>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    if !valid_id(&input.session_id) || !std::path::Path::new(&input.cwd).is_absolute() {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid saved session".into()));
+    }
+    let title = input.title.trim().to_owned();
+    if title.is_empty() || title.chars().count() > 512 {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid session title".into()));
+    }
+    let catalog = super::agents::catalog(&hub)?;
+    let protocol = catalog.backends.get(&input.backend_key)
+        .map(|config| config.protocol_key(&input.backend_key)).unwrap_or(&input.backend_key);
+    use kode_core::session::jsonl_tail::{Backend, resolve_session_path};
+    let backend = Backend::from_backend_key(protocol);
+    if !matches!(backend, Some(Backend::Claude | Backend::Tclaude)) {
+        return Ok(Json(json!({"supported":false})));
+    }
+    let updated = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+        let Some(path) = resolve_session_path(backend.unwrap(), std::path::Path::new(&input.cwd), &input.session_id) else {
+            return Ok(false);
+        };
+        let _guard = hub.gate.lock();
+        super::native_title::write_claude_title(&path, &input.session_id, &title)?;
+        Ok(true)
+    }).await.map_err(anyhow::Error::from)??;
+    Ok(Json(json!({"supported":true,"updated":updated})))
 }
 async fn own_session(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     let Principal::Session(id) = auth(&hub, &h)? else {
@@ -345,7 +396,7 @@ async fn register(
     let id = req.session_id.clone();
     let registration = hub.store.register(req)?;
     // A new activation fences the previous token. Claimed external work is never replayed.
-    for mut m in hub.store.messages()? {
+    for mut m in hub.store.open_messages()? {
         if m.target.node_id == hub.node_id()
             && m.target.session_id == id
             && m.status == Status::Delivering
@@ -806,4 +857,96 @@ async fn change_agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):J
 async fn handoff(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):Json<super::handoff::Request>)->Result<Json<serde_json::Value>>{
     admin(&hub,&h)?;
     Ok(Json(super::handoff::execute(hub,input).await?))
+}
+
+async fn delivery(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    // Reuse the participant visibility check, without changing the strict Message DTO.
+    let Json(message) = message(State(hub.clone()), h, Path(id.clone())).await?;
+    let local = message.target.node_id == hub.node_id();
+    let record = if local {
+        hub.store.delivery(&id)?
+    } else {
+        hub.store.delivery_mirror(&id)?
+    };
+    Ok(Json(
+        json!({"delivery":record,"scope":if local {"execution_host"} else {"remote_mirror"},"execution_node":message.target.node_id}),
+    ))
+}
+async fn observe_delivery(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<super::delivery::Observation>,
+) -> Result<Json<super::delivery::Record>> {
+    owner(&hub, &h, &input.session_id)?;
+    Ok(Json(hub.observe_delivery(&id, input)?))
+}
+#[derive(Deserialize, Default)]
+struct DeliveryCursor {
+    #[serde(default)]
+    after: String,
+}
+async fn pending_deliveries(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(cursor): Query<DeliveryCursor>,
+) -> Result<Json<serde_json::Value>> {
+    owner(&hub, &h, &id)?;
+    let records = hub.store.pending_deliveries(&id, &cursor.after)?;
+    let next = if records.len() == 200 {
+        records.last().map(|r| r.message_id.clone())
+    } else {
+        None
+    };
+    Ok(Json(json!({"deliveries":records,"next":next})))
+}
+
+async fn cancellation(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let _ = message(State(hub.clone()), h, Path(id.clone())).await?;
+    Ok(Json(json!({"cancellation":hub.cancellation(&id)?})))
+}
+async fn request_cancellation(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<super::cancellation::Record>> {
+    let m = hub
+        .store
+        .get(&id)?
+        .ok_or_else(|| Error(StatusCode::NOT_FOUND, "unknown message".into()))?;
+    owner(&hub, &h, &m.source.session_id)?;
+    Ok(Json(hub.request_cancellation(&id)?))
+}
+async fn report_cancellation(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(report): Json<super::cancellation::Report>,
+) -> Result<Json<super::cancellation::Record>> {
+    owner(&hub, &h, &report.session_id)?;
+    Ok(Json(hub.report_cancellation(&id, report)?))
+}
+async fn pending_cancellations(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(cursor): Query<DeliveryCursor>,
+) -> Result<Json<serde_json::Value>> {
+    owner(&hub, &h, &id)?;
+    let records = hub.pending_cancellations(&id, &cursor.after)?;
+    let next = if records.len() == 200 {
+        records.last().map(|r| r.message_id.clone())
+    } else {
+        None
+    };
+    Ok(Json(json!({"cancellations":records,"next":next})))
 }

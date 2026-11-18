@@ -44,7 +44,7 @@ function importFixture({ registered = false, cached = false, persisted = cached,
   const id = `session-kode-${createHash('sha256').update('codex:saved-thread').digest('hex').slice(0,32)}`
   let workspace = registered ? { id: 'workspace', attachSession: async () => {} } : undefined
   const calls = [], state = { version: 1, ...(cached ? { imports: { [id]: { formatVersion: 3 } } } : {}) }
-  const registry = { resolveByPath: async path => { calls.push(['resolve',path]); return workspace }, create: async path => { calls.push(['register',path]); return workspace ??= { id: 'workspace', attachSession: async id => calls.push(['attach',id]) } } }
+  const registry = { list: () => workspace ? [{ ...workspace, path: tab.cwd }] : [], resolveByPath: async path => { calls.push(['resolve',path]); return workspace }, create: async path => { calls.push(['register',path]); return workspace ??= { id: 'workspace', attachSession: async id => calls.push(['attach',id]) } } }
   const client = { call: async (path, update) => path.endsWith('/transcript') ? { available, messages: [] } : { revision: 1, value: update?.value ?? state } }
   const agent = { selectModel() {}, session: {}, ctx: { sessions: { flush: async () => {} } } }
   const services = { workspaceRegistry: registry, kodeAgents: { profiles: { list: () => profile ? [{ id: 'kode-codex', name: 'codex' }] : [], bindNative: async () => {} }, recordBinding() {} }, kodeNativeFactory: { importHistory: async (...args) => calls.push(['seed', ...args]) }, sessionController: { list: async () => ({ items: persisted ? [{ sessionId: id }] : [] }), create: async request => { persisted = true; calls.push(['session',request]); return {sessionId:request.sessionId} }, resolveAgent: async () => ({agent}), rename: async () => {} } }
@@ -157,4 +157,40 @@ test('cold saved runtime projections do not bypass local history recovery', asyn
   const result = await importSavedSession(h.ctx, h.client, h.tab)
   assert.equal(result.sessionId, h.id)
   assert.ok(h.calls.some(row => row[0] === 'seed'))
+})
+
+test('saved history remains readable in a registered workspace whose directory was removed', async () => {
+  const h = importFixture({ registered: true })
+  h.ctx.get('workspaceRegistry').resolveByPath = async () => { throw new Error('ENOENT') }
+  const result = await importSavedSession(h.ctx, h.client, h.tab)
+  assert.equal(result.sessionId, h.id)
+  assert.ok(h.calls.some(row => row[0] === 'seed'))
+  assert.ok(!h.calls.some(row => row[0] === 'register'))
+})
+
+test('Claude title synchronization persists through Kode and retries failures before committing metadata', async () => {
+  const h = fixture(), calls = [], call = h.client.call
+  h.profiles.binding = () => ({ threadId: 'claude-thread', profile: { id: 'kode-claude', type: 'claude', name: 'Claude', executable: 'claude' } })
+  let fail = true
+  h.client.call = async (path, body) => {
+    if (path.endsWith('/catalog')) return { backends: { claude: { command: 'claude' } } }
+    if (path.endsWith('/native-title')) {
+      calls.push(body)
+      if (fail) throw new Error('fixture native title write failed')
+      return { updated: true }
+    }
+    return call(path, body)
+  }
+  const agent = { id: 'session', session: { header: { cwd: '/srv/project' }, requestHeader: () => ({}) } }
+  let liveTitle
+  const options = { renameNative: async title => { liveTitle = title } }
+  await assert.rejects(saveNativeTab(h.client, h.profiles, agent, 'Renamed Claude', options), /native title write failed/)
+  assert.equal(h.state().native_sessions, undefined)
+  fail = false
+  await saveNativeTab(h.client, h.profiles, agent, 'Renamed Claude', options)
+  assert.equal(liveTitle, 'Renamed Claude')
+  assert.equal(h.state().native_sessions[0].native_title, 'Renamed Claude')
+  await saveNativeTab(h.client, h.profiles, agent, 'Renamed Claude', options)
+  assert.equal(calls.length, 2, 'unchanged titles require no additional native writes')
+  assert.deepEqual(calls[0], { backend_key: 'claude', session_id: 'claude-thread', cwd: '/srv/project', title: 'Renamed Claude' })
 })

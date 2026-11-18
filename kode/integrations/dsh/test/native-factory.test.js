@@ -808,3 +808,96 @@ test('image prompt admission uses the native current model, keeps attachments, a
     assert.equal(commits, process.env.KODE_TEST_SESSION_COMMANDS ? 3 : 2)
   } finally { await h.ctx.fiber.dispose() }
 })
+
+test('scoped cancellation removes only its queued input and recovers a lost response', async () => {
+  const h = await host({ closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.inject(message('withdraw', 'queued'))
+    agent.inject(message('keep', 'unrelated'))
+    assert.deepEqual(await agent.cancelInput('withdraw'), { state: 'queued_removed' })
+    assert.deepEqual(await agent.cancelInput('withdraw'), { state: 'queued_removed' })
+    assert.deepEqual(agent.inbox.nextStep.map(m => m.id), ['keep'])
+    assert.equal((await agent.cancelInput('unknown')).state, 'cancel_unconfirmed')
+    assert.equal(h.stored.get(agent.id).events.filter(e => e.type === 'user/message').length, 0)
+  } finally { await h.fiber.dispose() }
+})
+
+test('scoped cancellation does not abort a shared turn', async () => {
+  let started, release, signal
+  const running = new Promise(resolve => { started = resolve })
+  const done = new Promise(resolve => { release = resolve })
+  const h = await host({ async *stream(input) { signal = input.signal; started(); await done }, closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.inject(message('other', 'already queued steering'))
+    agent.followup(message('target', 'work'))
+    await running
+    assert.deepEqual(await agent.cancelInput('target'), { state: 'cancel_unconfirmed', reason: 'shared_turn' })
+    assert.equal(signal.aborted, false)
+    release(); await agent.whenIdle()
+  } finally { release(); await h.fiber.dispose() }
+})
+
+test('scoped active cancellation requests stop without claiming confirmed termination', async () => {
+  let started, calls = 0
+  const running = new Promise(resolve => { started = resolve })
+  const h = await host({ async *stream({ signal }) {
+    calls++
+    if (calls > 1) return
+    started(); await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); signal.throwIfAborted()
+  }, closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.followup(message('target', 'work')); await running
+    agent.followup(message('other', 'next task'))
+    assert.deepEqual(await agent.cancelInput('unknown'), { state: 'cancel_unconfirmed', reason: 'input_not_active_or_queued' })
+    const flush = agent.ctx.sessions.flush
+    let failOnce = true
+    agent.ctx.sessions.flush = async (...args) => { if (failOnce) { failOnce = false; throw new Error('fixture cancellation flush failed') }; return flush.call(agent.ctx.sessions, ...args) }
+    try { await assert.rejects(agent.cancelInput('target'), /cancellation flush failed/) }
+    finally { agent.ctx.sessions.flush = flush }
+    assert.deepEqual(await agent.cancelInput('target'), { state: 'cancel_unconfirmed', reason: 'stop_requested' })
+    await agent.whenIdle()
+    assert.equal(calls, 2, 'unrelated queued input still executes')
+    assert.deepEqual(await agent.cancelInput('target'), { state: 'cancel_unconfirmed', reason: 'stop_requested' })
+    assert.equal(h.stored.get(agent.id).events.filter(e => e.type === 'plugin:kode/input-cancellation').length, 1)
+    assert.deepEqual(h.stored.get(agent.id).events.filter(e => e.type === 'user/message').map(e => e.data.id), ['target', 'other'])
+  } finally { await h.fiber.dispose() }
+})
+
+test('queue cancellation cannot acknowledge failed persistence and retries from log evidence', async () => {
+  const h = await host({ closeSession: async () => {} })
+  try {
+    const { agent } = await h.ctx.agents.create(options)
+    agent.inject(message('withdraw', 'queued'))
+    const original = agent.ctx.sessions.flush
+    agent.ctx.sessions.flush = async () => { throw new Error('fixture disk unavailable') }
+    try { await assert.rejects(agent.cancelInput('withdraw'), /disk unavailable/) }
+    finally { agent.ctx.sessions.flush = original }
+    assert.deepEqual(await agent.cancelInput('withdraw'), { state: 'queued_removed' })
+    assert.equal(agent.inbox.nextStep.length, 0)
+  } finally { await h.fiber.dispose() }
+})
+
+test('native child observations use the shipped external catalog and balanced read-only tool cards', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-native-children-'))
+  const h = await host({ closeSession: async () => {} })
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))] }])
+  const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
+  Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
+    agent.followup(message('children', 'NATIVE_SUBAGENTS')); await agent.whenIdle()
+    const events = h.stored.get(agent.id).events
+    assert.equal(events.filter(event => event.type === 'subagent/catalog').length, 1)
+    assert.equal(events.find(event => event.type === 'subagent/catalog').data.mode, 'external')
+    assert.equal(h.ctx.sessionProjections.stateOf(agent.session, 'kodeNativeSubagents')['codex-child'].status, 'completed')
+    assert.ok(events.some(event => event.type === 'tool/call' && event.data.name === 'subagent_native'))
+    assert.equal(events.at(-1).data.reason.kind, 'completed')
+    if (process.env.KODE_TEST_DSH_NODE_MODULES) {
+      const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+      assertReleasedV4Relationships({ header: h.stored.get(agent.id).header, events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES)
+    }
+  } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})

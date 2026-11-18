@@ -250,6 +250,11 @@ pub async fn deploy_remote_bridge(
         },
     );
 
+    let (client, document_url, token) = crate::workbench_state::connection().await.map_err(|error| error.to_string())?;
+    let base = document_url.trim_end_matches("/documents/session-index");
+    crate::remote_workbench::pair(&client, base, &token, &ssh_host, req.ssh_port, true)
+        .await.map_err(|error| format!("bridge installed, Kode backend pairing failed: {error}"))?;
+
     emit(&app, "Done", "done", "deployment complete");
     Ok(DeployResult {
         endpoint_id,
@@ -260,7 +265,7 @@ pub async fn deploy_remote_bridge(
 
 /// 定位本地 tarball:优先从当前可执行文件附近找 resource,
 /// fallback 到 target/ 编译产物(dev 自测用,允许资源未打包时也能部署)。
-fn resolve_local_tarball() -> Result<String, String> {
+pub(crate) fn resolve_local_tarball() -> Result<String, String> {
     // 1. dev/run 模式:target/debug/resources/...
     // 2. app bundle:.../Contents/Resources/resources/...
     if let Ok(exe) = std::env::current_exe() {

@@ -421,10 +421,11 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
   for (const current of ['local', 'build']) {
     const foreign = current === 'local' ? 'build' : 'local'
     const c = client({ current, hosts: ['local', 'build'].map(id => ({ id, name: id, sessions: [{ id: 'same', title: id }], workspaces: [], pinnedSessionIds: ['same'], archivedSessionIds: [] })) })
+    const useSessionAccess = () => true
     const pin = () => null, archive = () => null
     c.addSlot('sidebar.workspaces.session.menu.item', 'pin', pin)
     c.addSlot('sidebar.workspaces.session.menu.item', 'archive', archive)
-    const wrapper = c.workspaceShell.component({ useSessions: select => select({ ids: ['same'], byId: { same: { id: 'same' } } }), useWorkspaces: select => select({ items: [], pinnedSessionIds: [], archivedSessionIds: [] }) })
+    const wrapper = c.workspaceShell.component({ useSessionAccess, useSessions: select => select({ ids: ['same'], byId: { same: { id: 'same' } } }), useWorkspaces: select => select({ items: [], pinnedSessionIds: [], archivedSessionIds: [] }) })
     wrapper.type(wrapper.props); await new Promise(resolve => setImmediate(resolve))
     const tree = wrapper.type(wrapper.props), native = tree.children.find(child => child?.type === c.native)
     const id = `kode-host:${foreign}/same`, menuState = [true, () => {}]
@@ -434,6 +435,7 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
     assert.ok(controls.some(control => control.type === archive))
     assert.equal(pinControl.props.usePinned(set => set.has(id)), true)
     assert.equal(pinControl.props.useMenuOpenState(), menuState)
+    for (const control of controls) assert.equal(control.props.useSessionAccess, useSessionAccess)
     for (const [callback, operation] of [['pinSession', 'pin-session'], ['unpinSession', 'unpin-session'], ['archiveSession', 'archive-session'], ['unarchiveSession', 'unarchive-session']]) {
       pinControl.props[callback](id); await new Promise(resolve => setImmediate(resolve))
       assert.deepEqual(c.requests.at(-1), { action: 'host-operation', id: foreign, operation, args: { sessionId: 'same' } })
@@ -617,16 +619,18 @@ test('existing session identity remains visible when its runtime is idle or unlo
 
 test('goal dock reuses the queued composer width and panel presentation',()=>{
  assert.match(source,/className: 'kode-goal-panel'/)
- assert.match(source,/\.kode-goal-bar\{box-sizing:border-box;width:calc\(100% - var\(--dsh-composer-side-clearance\)/)
+ assert.match(source,/\.kode-goal-bar\{[^}]*box-sizing:border-box;width:calc\(100% - var\(--dsh-composer-side-clearance\)/)
  assert.match(source,/max-width:calc\(var\(--dsh-composer-card-max-width\)/)
+ assert.match(source,/\[data-composer-seat\]>:has\(\.kode-goal-bar\)\{row-gap:0\}/)
+ assert.match(source,/\.kode-goal-bar\{[^}]*margin:0 auto -1px/)
  assert.match(source,/\.kode-goal-panel\{[^}]*border-radius:var\(--dsw-radius-lg\) var\(--dsw-radius-lg\) 0 0/)
- assert.match(source,/goal\.status === 'active' \? IconPlayOutlineRegular : IconPauseOutlineRegular/)
+ assert.match(source,/goal\.status === 'active' \? IconPauseOutlineRegular : IconPlayOutlineRegular/)
  assert.match(source,/IconCloseOutlineRegular/)
  assert.match(source,/operate\('clear'\)/)
  assert.match(source,/IconGoalOutlineRegular/)
- assert.match(source,/IconPanelLeftOutlineRegular/)
+ assert.match(source,/IconEditOutlineRegular/)
  assert.match(source,/sidebarRightTabs\.register\(\{ id: 'kode-goal', kind: 'kode-goal'/)
- assert.match(source,/sidebar\.openTab\('kode-goal'\)/)
+ assert.match(source,/id: 'kode-goal-bar', order: 100/)
  assert.doesNotMatch(source,/replaceTab: true/)
  assert.match(source,/function GoalSidebar\(/)
  assert.match(source,/name: 'sidebar\.right\.pane\.tab', key: 'kode-goal'/)
@@ -671,9 +675,17 @@ test('goal dock pause, resume and clear controls retain the current session iden
  const c=client(),render=c.entryById('kode-goal-bar')
  const walk=node=>Array.isArray(node)?node.flatMap(walk):node&&typeof node==='object'?[node,...walk(node.children??[])]:[]
  const view=status=>render({sessionId:'session-goal-fixture',useProjection:()=>({objective:'Fixture goal',status})})
- for(const [status,label,command] of [['active','暂停 Goal','pause'],['paused','继续 Goal','resume'],['active','清除 Goal','clear']]){
+ for(const status of ['active','paused','complete','blocked']){
+  const tree=view(status),rows=walk(tree)
+  assert.equal(tree.props['data-goal-status'],status)
+  assert.ok(!rows.some(row=>row.props?.className==='kode-goal-status'))
+  const edit=rows.find(row=>row.props?.['aria-label']==='编辑目标')
+  assert.equal(edit.children[0].type,'IconEditOutlineRegular')
+  assert.equal(edit.props.onClick,rows.find(row=>row.props?.className==='kode-goal-objective').props.onClick)
+ }
+ for(const [status,label,command,icon] of [['active','暂停 Goal','pause','IconPauseOutlineRegular'],['paused','继续 Goal','resume','IconPlayOutlineRegular'],['active','清除 Goal','clear','IconCloseOutlineRegular']]){
   const button=walk(view(status)).find(row=>row.props?.['aria-label']===label)
-  assert.ok(button);button.props.onClick();await new Promise(resolve=>setImmediate(resolve))
+  assert.ok(button);assert.equal(button.children[0].type,icon);button.props.onClick();await new Promise(resolve=>setImmediate(resolve))
   assert.deepEqual(c.requests.at(-1),{action:'goal',sessionId:'session-goal-fixture',command})
  }
  assert.equal(render({sessionId:'session-goal-fixture',useProjection:()=>null}),null)
@@ -827,4 +839,55 @@ test('global activity follows native subscriptions without any mounted shell or 
  assert.equal(c.ctx.kodeActivity.getSnapshot().state, 'idle', 'native clearing facts override an older running catalog')
  for (const dispose of c.disposers) dispose()
  assert.equal(nativeListeners.size, 0); assert.equal(workspaceListeners.size, 0)
+})
+
+
+test('goal pencil edits inline and saves the existing session goal', async () => {
+  const state = [], requests = []
+  let index = 0
+  const scope = {
+    h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    React: { Fragment: 'fragment' }, transport: { current: 'local' },
+    useState(initial) { const key = index++; if (!(key in state)) state[key] = initial; return [state[key], value => { state[key] = value }] },
+    useEffect() {}, hubCall: async (args, host) => requests.push({ args, host }),
+    Button: 'button', Failure: 'failure', IconGoalOutlineRegular: 'goal',
+    IconPauseOutlineRegular: 'pause', IconPlayOutlineRegular: 'play',
+    IconCloseOutlineRegular: 'close', IconEditOutlineRegular: 'edit',
+  }
+  vm.runInNewContext(source.slice(source.indexOf('  function GoalBar('), source.indexOf('  function HandoffMenu(')), scope)
+  const render = () => { index = 0; return scope.GoalBar({ sessionId: 'goal-edit-fixture', useProjection: () => ({ objective: 'Original objective', status: 'active' }) }) }
+  const walk = node => Array.isArray(node) ? node.flatMap(walk) : node && typeof node === 'object' ? [node, ...walk(node.children ?? [])] : []
+  walk(render()).find(node => node.props['aria-label'] === '编辑目标').props.onClick()
+  const editing = walk(render()), input = editing.find(node => node.type === 'input')
+  assert.equal(input.props.value, 'Original objective')
+  input.props.onChange({ target: { value: 'Updated objective' } })
+  await walk(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{ args: { action: 'goal', sessionId: 'goal-edit-fixture', command: 'edit Updated objective' }, host: 'local' }])
+  assert.ok(!walk(render()).some(node => node.type === 'form'))
+})
+
+test('native child cards use persisted execution status and expandable child output', () => {
+  const render = client().entry('tool.call.toolview', 'subagent_native')
+  const args = { id: 'native-child', title: 'Verifier', task: 'Check source' }
+  const view = expanded => render({ block: { args: { text: key => args[key] } }, useDisclosure: () => ({ expanded, setExpanded() {} }), useProjection: (key, select) => {
+    assert.equal(key, 'kodeNativeSubagents')
+    return select({ 'native-child': { name: 'Verifier', task: 'Check source', status: 'running', output: 'Child findings' } })
+  } })
+  assert.match(visibleText(view(false)), /Verifier.*运行中/)
+  assert.doesNotMatch(visibleText(view(false)), /Child findings/)
+  assert.match(visibleText(view(true)), /Check source/)
+  const output = findNode(view(true), node => node.props?.text === 'Child findings')
+  assert.equal(output.props.text, 'Child findings')
+})
+
+test('imported relay contexts render the same communication card without requiring live inbox claims', () => {
+  const c = client()
+  const incoming = relay('Historical peer result')
+  const { tree } = internalTree(c, 'context', incoming.content[0].text, { source: incoming.source })
+  const card = tree.type(tree.props)
+  assert.equal(card.props.relay.content, 'Historical peer result')
+  assert.equal(card.props.relay.address, 'worker.example/session-same-id')
+  const rendered = card.type(card.props)
+  assert.equal(rendered.props.className, 'kode-relay')
 })

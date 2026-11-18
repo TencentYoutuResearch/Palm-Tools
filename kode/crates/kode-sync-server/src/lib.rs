@@ -1543,7 +1543,21 @@ fn persist_agent_event(
         }
     };
     if publish {
+        // Older phones remove directory rows only on session.exited. A runtime
+        // may retire a conversation through a full DTO or a status update before
+        // the next hello, which then sees the row already exited in SQLite.
+        let retired = matches!(
+            envelope.kind.as_str(),
+            "session.created" | "session.updated" | "session.status"
+        ) && envelope.payload["status"] == "exited";
+        let cloud_id = envelope.session_id;
         state.publish(device_id, envelope);
+        if retired {
+            state.publish(
+                device_id,
+                CloudEnvelope::new(cloud_id, "session.exited", json!({})),
+            );
+        }
     }
     Ok(())
 }
@@ -2611,6 +2625,57 @@ mod tests {
         sync_session_snapshot(&state, "d", "boot", vec![tab(1099511627779)]).unwrap();
         while let Ok(env) = mobile.try_recv() {
             assert_ne!(env.kind, "session.exited");
+        }
+    }
+
+    #[test]
+    fn runtime_retirement_notifies_phones_before_the_next_snapshot() {
+        for kind in ["session.updated", "session.status"] {
+            let (_dir, state) = state();
+            state.inner.db.lock().execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES('d','i','desktop','x',1,1)",
+                [],
+            ).unwrap();
+            sync_session_snapshot(
+                &state,
+                "d",
+                "boot",
+                vec![AgentSession {
+                    local_id: 7,
+                    dto: json!({"id":7,"backend_key":"claude","status":"idle","tokens":{}}),
+                }],
+            ).unwrap();
+            let mut mobile = state.mobile_bus("d").subscribe();
+            persist_agent_event(
+                &state,
+                "d",
+                "boot",
+                7,
+                AgentEnvelope {
+                    protocol_version: "v1".into(),
+                    schema_version: 1,
+                    session_id: 7,
+                    ts: 123,
+                    kind: kind.into(),
+                    payload: json!({"id":7,"backend_key":"claude","status":"exited","tokens":{}}),
+                },
+            ).unwrap();
+            let update = mobile.try_recv().unwrap();
+            assert_eq!(update.kind, kind);
+            let removal = mobile.try_recv().unwrap();
+            assert_eq!(removal.kind, "session.exited");
+            assert_eq!(removal.session_id, update.session_id);
+            let status: String = state.inner.db.lock().query_row(
+                "SELECT json_extract(dto_json, '$.status') FROM sessions",
+                [],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(status, "exited");
+            // The authoritative refresh has nothing left to announce, so the
+            // retirement event itself must have removed the phone's cached row.
+            sync_session_snapshot(&state, "d", "boot", vec![]).unwrap();
+            assert!(mobile.try_recv().is_err());
         }
     }
 

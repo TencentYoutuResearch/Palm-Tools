@@ -17,6 +17,7 @@ pub async fn run(args: impl Iterator<Item=String>) -> Result<()> {
     let cloud=crate::cloud_sync::CloudSyncManager::new(ctx.clone());cloud.start_saved();
     let listener=tokio::net::TcpListener::bind(&bind).await?;
     println!("kode-session-server {} {}",hub.node_id(),listener.local_addr()?);
-    axum::serve(listener,router).with_graceful_shutdown(async{let _=tokio::signal::ctrl_c().await;}).await?;
+    let shutdown_hub=hub.clone();
+    axum::serve(listener,router).with_graceful_shutdown(async move{let _=tokio::signal::ctrl_c().await;shutdown_hub.shutdown();}).await?;
     hub.shutdown();Ok(())
 }

@@ -27,6 +27,29 @@ async fn archive_document_changes_retire_projections_without_host_publication() 
     assert!(events.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn mobile_cloud_grouping_follows_workspace_moves_from_the_backend() {
+    let server = server("workspace-mobile", vec![]).await;
+    let ctx = &server._ctx;
+    let publication = serde_json::from_value(json!({
+        "runtime":"dsh","boot_id":"test",
+        "sessions":[{"session_id":"restored","dto":{"status":"idle","cwd":"/deleted/kode"}}]
+    })).unwrap();
+    ctx.runtimes.publish(ctx, publication).unwrap();
+    let workspaces = |path: &str| json!({"tables":{"workspaces":{
+        "project":{"path":path,"sessionIds":["restored"]}
+    }}});
+    server.hub.store.save_document("workspaces", 0, workspaces("/projects/kode")).unwrap();
+    let mobile = crate::cloud_sync::session_snapshots(ctx);
+    assert_eq!(mobile[0]["dto"]["cwd"], "/projects/kode");
+    assert_eq!(mobile[0]["dto"]["execution_cwd"], "/deleted/kode");
+    assert_eq!(ctx.runtimes.snapshots()[0]["dto"]["cwd"], "/deleted/kode");
+    server.hub.store.save_document("workspaces", 1, workspaces("/projects/moved")).unwrap();
+    let moved = crate::cloud_sync::session_snapshots(ctx);
+    assert_eq!(moved[0]["dto"]["cwd"], "/projects/moved");
+    assert_eq!(moved[0]["local_id"], mobile[0]["local_id"]);
+}
+
 struct Server {
     hub: Arc<Hub>,
     url: String,
@@ -102,6 +125,9 @@ async fn owner_can_pair_live_hosts_without_restart_or_exposing_link_secrets() {
     let response = client.post(&path).bearer_auth("admin-test").json(&remote).send().await.unwrap();
     assert!(response.status().is_success());
     assert!(!response.text().await.unwrap().contains(SECRET));
+    assert_eq!(client.get(&path).bearer_auth(&sender.owner_token).send().await.unwrap().status(), 403);
+    let paired:Value=client.get(&path).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();
+    assert_eq!(paired["peers"][0]["link_token"],SECRET);
     let stored = left.hub.store.document("managed-peers").unwrap();
     assert_eq!(stored["revision"], 1);
     assert_eq!(super::peers::load(&left.hub.store, &left.hub.config).unwrap().len(), 1);
@@ -143,6 +169,21 @@ async fn workbench_configuration_is_durable_versioned_and_not_agent_accessible()
     let current: Value = client.get(&url).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();
     assert_eq!(current, saved);
     assert_eq!(client.get(format!("{}/api/v1/messaging/workbench/documents/arbitrary-file", s.url)).bearer_auth("admin-test").send().await.unwrap().status(), 400);
+}
+
+#[tokio::test]
+async fn workbench_session_index_accepts_documents_larger_than_message_limit() {
+    let s = server("large-index-test", vec![]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/workbench/documents/session-index", s.url);
+    let value = json!({"version": 1, "native_sessions": [], "metadata": "x".repeat(256 * 1024)});
+    let saved: Value = client.post(&url).bearer_auth("admin-test")
+        .json(&json!({"expected_revision": 0, "value": value}))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(saved["value"], value);
+    let loaded: Value = client.get(&url).bearer_auth("admin-test")
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(loaded, saved);
 }
 
 #[cfg(not(windows))]
@@ -1165,4 +1206,20 @@ async fn usage_history_requires_admin_and_valid_period_and_timezone() {
         assert_eq!(client.get(format!("{url}?{query}")).bearer_auth("admin-test").send().await.unwrap().status(), 400);
     }
     assert_eq!(client.post(format!("{url}?period=today")).bearer_auth("admin-test").send().await.unwrap().status(), 405);
+}
+
+#[tokio::test]
+async fn native_title_requires_admin_and_valid_native_identity() {
+    let s = server("native-title", vec![]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/workbench/native-title", s.url);
+    let input = json!({"backend_key":"codex","session_id":"thread","cwd":"/srv/project","title":"Renamed"});
+    assert_eq!(client.post(&url).json(&input).send().await.unwrap().status(), 401);
+    let result: Value = client.post(&url).bearer_auth("admin-test").json(&input).send().await.unwrap().json().await.unwrap();
+    assert_eq!(result["supported"], false);
+    for invalid in [json!({"session_id":"../thread"}), json!({"cwd":"relative"}), json!({"title":"  "})] {
+        let mut body = input.clone();
+        for (key, value) in invalid.as_object().unwrap() { body[key] = value.clone(); }
+        assert_eq!(client.post(&url).bearer_auth("admin-test").json(&body).send().await.unwrap().status(), 400);
+    }
 }

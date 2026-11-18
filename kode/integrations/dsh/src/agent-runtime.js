@@ -1,4 +1,5 @@
 /** Native CLI protocols and model discovery; the Kode driver owns inbox scheduling and the shell renders canonical events. */
+import { nativeSubagentRecord } from './native-subagents.js'
 import { randomUUID } from 'node:crypto'
 import { AgentProfiles, profileRevision, profileRoute } from './agent-profiles.js'
 import { createNativeSession } from './native-session.js'
@@ -32,11 +33,19 @@ function codexFastCapability(model) {
 }
 export class AgentRuntimeAdapter {
   constructor(ctx, profiles, { recordNative = (session, data) => appendPluginRecord(session, 'plugin:kode/native-event', data), resolveProfile = async profile => profile, onThread = async () => {} } = {}) {
-    this.ctx = ctx; this.profiles = profiles; this.live = new Map(); this.busy = new Set(); this.catalogs = new Map(); this.positions = new WeakMap(); this.stop = new AbortController(); this.probes = new Set()
+    this.ctx = ctx; this.profiles = profiles; this.live = new Map(); this.busy = new Set(); this.catalogs = new Map(); this.positions = new WeakMap(); this.stop = new AbortController(); this.probes = new Set(); this.titleUpdates = new Map()
     this.recordNative = recordNative
     this.resolveProfile = resolveProfile
     this.onThread = onThread
     ctx.on?.('session/event', (session, event) => {
+      if (event.type === 'session/title' && this.profiles.binding(session.id)?.profile.type === 'claude') {
+        const agent = this.ctx.agents?.get(session.id) ?? { id: session.id, session }
+        const update = (this.titleUpdates.get(session.id) ?? Promise.resolve())
+          .then(() => this.onThread(agent))
+          .catch(error => this.ctx.logger.warn('Native title synchronization failed: %s', error.message))
+        this.titleUpdates.set(session.id, update)
+        void update.then(() => { if (this.titleUpdates.get(session.id) === update) this.titleUpdates.delete(session.id) })
+      }
       if (event.type === 'step/start') this.positions.set(session, { turn: event.data.turn, step: event.data.step })
       if (event.type === 'step/end' || event.type === 'turn/end') this.positions.delete(session)
     })
@@ -88,7 +97,7 @@ export class AgentRuntimeAdapter {
               commands.push(...skills.map(skill => ({ name: skill.name, description: skill.description, kind: 'skill', input: { hint: '技能参数或任务' } })))
             } catch (error) { this.stop.signal.throwIfAborted(); this.ctx.logger?.warn('Codex skill discovery failed: %s', error.message) }
           }
-          const rows = models.filter(m => (m.model ?? m.id) !== 'default' || m.fastCapability).map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, isDefault: Boolean(m.isDefault), inputModalities: profile.type === 'codex' || profile.protocol === 'codex' || profile.type === 'claude' ? ['text', 'image'] : m.inputModalities ?? ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}), ...(m.fastCapability ? { fastCapability: m.fastCapability } : {}), ...(profile.type === 'codex' || profile.protocol === 'codex' ? { fastCapability: codexFastCapability(m) } : {}) }))
+          const rows = models.filter(m => (m.model ?? m.id) !== 'default' || m.fastCapability).map(m => ({ provider, id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, ...(m.aliases ? { aliases: m.aliases } : {}), isDefault: Boolean(m.isDefault), inputModalities: profile.type === 'codex' || profile.protocol === 'codex' || profile.type === 'claude' ? ['text', 'image'] : m.inputModalities ?? ['text'], reasoningEfforts: m.reasoningEfforts ?? (m.supportedReasoningEfforts ?? []).map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort, description: effort.description })), ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}), ...(m.fastCapability ? { fastCapability: m.fastCapability } : {}), ...(profile.type === 'codex' || profile.protocol === 'codex' ? { fastCapability: codexFastCapability(m) } : {}) }))
           return { models: profile.type === 'cursor' ? withModelVariantFast(rows) : rows, commands, modes: session.state?.modes?.availableModes ?? [] }
         } finally { this.probes.delete(session); await session.close() }
       })().catch(error => { if (this.catalogs.get(key) === task) this.catalogs.delete(key); throw error })
@@ -150,7 +159,30 @@ export class AgentRuntimeAdapter {
     const callIdentity = (turnId, itemId) => `kode:${epoch}:${turnId}:${itemId}`
     const autoCompact = binding.profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact') : undefined
     const resolved = await this.resolveProfile(binding.profile, agent)
+    const knownChildren = new Set((agent.session.snapshotEvents?.() ?? []).filter(event => event.type === 'subagent/catalog').map(event => event.data.childId))
+    let childFlush
+    const sessionStore = agent.ctx.sessions
     const runtime = await createNativeSession({ ...resolved, ...(autoCompact ? { autoCompactEnabled: autoCompact.data.enabled } : {}) }, agent.session.header.cwd ?? process.cwd(), {
+      subagent: update => {
+        const data = nativeSubagentRecord(update)
+        if (!data) return
+        const childId = `kode-native:${agent.id}:${update.id}`
+        const known = knownChildren.has(childId)
+        if (!(known && update.replay)) appendPluginRecord(agent.session, 'plugin:kode/subagent-update', data)
+        if (!known) {
+          knownChildren.add(childId)
+          agent.session.append('subagent/catalog', { version: 2, childId, childCreatedAt: Date.now(), mode: 'external', label: data.name || data.task?.slice(0, 120) || data.id })
+          if (this.busy.has(agent.id) && !update.replay) {
+            const callId = `kode:${epoch}:subagent:${update.id}`
+            this.logCall(agent, callId, 'subagent_native', { id: data.id, title: data.name || data.task?.slice(0, 120) || data.id, task: data.task, model: data.model })
+            this.logResult(agent, callId, [{ type: 'text', text: '原生子 Agent 已登记。' }])
+          }
+        }
+        if (!childFlush) childFlush = setTimeout(() => {
+          childFlush = undefined
+          void Promise.resolve().then(() => sessionStore.flush(agent.session)).catch(error => this.ctx.logger?.warn('Native child persistence failed: %s', error.message))
+        }, 100).unref()
+      },
       policy: () => agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session }) ?? { mode: 'read-only' },
       approvalPolicy: () => agent.ctx.get('approval')?.effectivePolicy?.(agent.session) ?? 'ask',
       mode: () => {
@@ -197,6 +229,11 @@ export class AgentRuntimeAdapter {
         return { answers: Object.fromEntries(response.answers.map(a => [a.id, { answers: [...a.selected, ...(a.custom ? [a.custom] : [])], ...(request.structured ? { selected: a.selected, ...(a.custom ? { custom: a.custom } : {}) } : {}) }])) }
       },
     })
+    const closeNative = runtime.close.bind(runtime)
+    runtime.close = async () => {
+      try { await closeNative() }
+      finally { clearTimeout(childFlush); childFlush = undefined }
+    }
     runtime.nativeCalls = nativeCalls
     runtime.autoCompactRevision = autoCompact?.seq ?? -1
     runtime.callIdentity = callIdentity
@@ -375,9 +412,10 @@ export class AgentRuntimeAdapter {
   }
   async renameSession(agent, title, signal) {
     const binding = this.profiles.binding(agent.id)
-    if (!binding?.threadId || binding.profile.type !== 'codex') return
+    if (!binding?.threadId || !['codex', 'claude'].includes(binding.profile.type)) return
     const live = this.live.get(agent.id)
     if (live?.rename) return live.rename(title, signal)
+    if (binding.profile.type === 'claude') return // Persisted titles are synchronized by the Kode backend.
     const runtime = await createNativeSession(await this.resolveProfile(binding.profile, agent), agent.session.header.cwd ?? process.cwd())
     this.probes.add(runtime)
     try { await runtime.initialize(signal); runtime.threadId = binding.threadId; await runtime.rename(title, signal) }
@@ -411,7 +449,7 @@ export async function installAgentRuntime(ctx, config) {
   await profiles.ensureBuiltins(builtinProfiles(types))
   const runtimes = new Map(Object.entries(types).filter(([key]) => key !== 'dsh'))
   const adapter = new AgentRuntimeAdapter(ctx, profiles, { onThread: async agent => {
-    if (config.sharedBackendState && config.backendClient) { const { saveNativeTab } = await import('./workbench-import.js'); await saveNativeTab(config.backendClient, profiles, agent, ctx.get('sessionTitle')?.get(agent.session)?.title ?? '未命名会话') }
+    if (config.sharedBackendState && config.backendClient) { const { saveNativeTab } = await import('./workbench-import.js'); await saveNativeTab(config.backendClient, profiles, agent, ctx.get('sessionTitle')?.get(agent.session)?.title ?? '未命名会话', { renameNative: title => adapter.renameSession(agent, title) }) }
   }, resolveProfile: async (profile, agent) => {
     const runtime = runtimes.get(profile.type)
     if (!runtime) throw new Error('此 Agent 的执行插件已拔出。')

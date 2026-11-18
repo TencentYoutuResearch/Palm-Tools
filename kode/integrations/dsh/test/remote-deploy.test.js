@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { deploymentHost, sshArgs, shellQuote, bootstrapScript, runProcess } from '../src/remote-deploy.js'
+import { deploymentHost, sshArgs, shellQuote, bootstrapScript, runProcess, deployRemote } from '../src/remote-deploy.js'
 import { ProjectHosts } from '../src/project-hosts.js'
 
 test('SSH deployment validates targets, retains host verification and quotes shell data', () => {
@@ -59,4 +59,49 @@ test('failed and cancelled deployments never register an incomplete Host', async
     cancelled.controller.abort(new Error('cancelled')); await cancelled.promise
     assert.equal(cancelled.status, 'cancelled'); assert.equal(manager.hosts.length, 0)
   } finally { await manager.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('installed plugin deployment packages published files and pairs the shared Kode backend', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-published-deploy-'))
+  const artifacts = join(root, 'linux-x64')
+  await mkdir(artifacts)
+  for (const name of ['kode-session-server', 'kode-ssh-tunnel']) await writeFile(join(artifacts, name), 'fixture binary, never executed')
+  const packed = [], paired = []
+  let stagedManifest
+  const config = {
+    remoteArtifactsDirectory: root,
+    backendClient: { async call(path, input) {
+      if (path.endsWith('/node')) return { node_id: 'desktop-test', managed_peers: true }
+      paired.push(input)
+    } },
+  }
+  const run = async (command, args, options = {}) => {
+    if (command === 'tar' && args[0] === '-xzf') {
+      const plugin = args.at(-1)
+      await mkdir(join(plugin, 'packages/private-ui'), { recursive: true })
+      await writeFile(join(plugin, 'package.json'), JSON.stringify({ dependencies: { '@kode/private-ui': '0.1.0' }, bundledDependencies: ['@kode/private-ui'] }))
+      await writeFile(join(plugin, 'packages/private-ui/package.json'), JSON.stringify({ name: '@kode/private-ui', version: '0.1.0' }))
+    }
+    if (command === 'tar' && args[0] === '-czf') {
+      if (!args.includes('package.json')) stagedManifest = JSON.parse(await readFile(join(args[args.indexOf('-C') + 1], 'plugin/package.json'), 'utf8'))
+      packed.push(args)
+      await writeFile(args[1], 'fixture archive')
+    }
+    if (options.input && typeof options.input !== 'string') for await (const _chunk of options.input) {}
+    if (options.onLine) options.onLine(JSON.stringify({ kind: 'ready', nodeId: 'remote-test', webPort: 47980, backendPort: 47870, token: 'private-web-token', linkToken: 'private-pairing-token-at-least-32-bytes' }))
+    return command === 'ssh' && args.at(-1).includes('KODE_PLATFORM') ? 'KODE_PLATFORM=Linux:x86_64' : ''
+  }
+  try {
+    const result = await deployRemote(deploymentHost({ name: 'Builder', host: 'builder.example' }), config, { run, progress() {} })
+    assert.equal(result.node_id, 'remote-test')
+    assert.equal(stagedManifest.dependencies['@kode/private-ui'], 'file:packages/private-ui')
+    assert.equal(stagedManifest.bundledDependencies, undefined)
+    const source = packed.find(args => args.includes('package.json'))
+    assert.ok(source)
+    assert.ok(!source.includes('package-lock.json'))
+    assert.equal(paired[0].node_id, 'remote-test')
+    assert.equal(paired[0].ssh.remote_port, 47870)
+    assert.equal(result.remote_port, 47980)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

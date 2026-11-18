@@ -40,6 +40,7 @@ mod term_theme;
 mod transport;
 mod workspace;
 mod workbench_state;
+mod remote_workbench;
 mod shared_agents;
 
 // 集成测试入口(`tests/bridge_e2e.rs` 等)。生产代码请用 `run()` 启动。

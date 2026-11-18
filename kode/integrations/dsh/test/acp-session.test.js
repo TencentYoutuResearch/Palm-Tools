@@ -18,6 +18,7 @@ test('ACP supports independent profiles, scoped MCP tools, permissions, models, 
   try {
     const [id, same] = await Promise.all([a.open({}, tools), b.open({}, tools)])
     assert.equal(id, same)
+    await a.rename('Renamed original', AbortSignal.timeout(5000))
     const [first, second] = await Promise.all([collect(a.turn([{ type: 'text', text: 'APPROVAL TOOL first' }], { model: 'fixture-large' })), collect(b.turn([{ type: 'text', text: 'second' }]))])
     assert.equal(toolCalls, 1); assert.equal(permissions, 1)
     assert.equal(first.find(e => e.method === 'item/agentMessage/delta').params.delta, 'one: APPROVAL TOOL first')
@@ -31,6 +32,7 @@ test('ACP supports independent profiles, scoped MCP tools, permissions, models, 
     const again = await collect(resumed.turn([{ type: 'text', text: 'restored followup' }]))
     assert.equal(again.filter(e => e.method === 'item/agentMessage/delta').map(e => e.params.delta).join(''), 'one: restored followup')
     const records = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(records.some(r => r.method === '_session/rename' && r.params.sessionId === id && r.params.title === 'Renamed original'))
     assert.ok(records.some(r => r.method === 'session/set_mode' && r.params.modeId === 'plan'))
     assert.ok(records.some(r => r.method === 'session/set_mode' && r.params.modeId === 'agent'))
     assert.ok(records.filter(r => ['session/new', 'session/load'].includes(r.method)).every(r => r.params.cwd === root), 'ACP workspace is the owning session directory')
@@ -81,4 +83,49 @@ for (const type of ['claude', 'cursor','codebuddy']) test(`installed ${type} sup
     assert.ok(['plan', 'ask', 'read-only'].includes(session.state.modes.currentModeId))
     assert.ok(session.proxy)
   } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('native ACP child streams and team members remain separate from the parent answer', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-acp-children-')), children = []
+  const session = new AcpSession({ type: 'custom', executable: process.execPath, args: [fixture] }, root, { subagent: update => children.push(update) })
+  try {
+    await session.open({}, [])
+    const result = await collect(session.turn([{ type: 'text', text: 'NATIVE_SUBAGENTS' }]))
+    const parentText = result.filter(event => event.method === 'item/agentMessage/delta').map(event => event.params.delta).join('')
+    assert.doesNotMatch(parentText, /Child-only output|Buddy-only output/)
+    assert.ok(children.some(child => child.id === 'claude-child' && child.delta === 'Child-only output'))
+    assert.ok(children.some(child => child.id === 'buddy-child' && child.delta === 'Buddy-only output'))
+    assert.ok(children.some(child => child.id === 'cursor-child' && child.status === 'completed'))
+    assert.ok(children.some(child => child.id === 'claude-child' && child.status === 'completed'))
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('known ACP child permissions inherit the active parent approval flow', async () => {
+  let approvals = 0
+  const session = new AcpSession({}, tmpdir(), { approve: async () => { approvals++; return true } })
+  session.threadId = 'parent'
+  session.active = { turnId: 'turn', signal: new AbortController().signal }
+  session.observeSubagent({ id: 'known-child', status: 'running' })
+  const request = { sessionId: 'known-child', toolCall: { toolCallId: 'child-call', kind: 'execute' }, options: [{ optionId: 'allow', kind: 'allow_once' }] }
+  assert.equal((await session.permission(request)).outcome.optionId, 'allow')
+  assert.equal((await session.permission({ ...request, sessionId: 'foreign-child' })).outcome.outcome, 'cancelled')
+  assert.equal(approvals, 1)
+})
+
+test('Claude model aliases use authoritative native resolution and retain the canonical picker identity', async () => {
+  const session = new AcpSession({ type: 'claude' }, tmpdir())
+  session.state = { configOptions: [{ id: 'model', category: 'model', type: 'select', currentValue: 'claude-default', options: [{ value: 'claude-kimi-k3.1-pro[1m]', name: 'Kimi' }] }] }
+  session.open = async () => {}
+  session.waitForCommands = async () => {}
+  session.info = { agentCapabilities: {} }
+  session.request = async (method, params) => {
+    assert.equal(method, 'session/set_config_option')
+    assert.equal(params.configId, 'model')
+    if (params.value !== 'kimi-k3.1-pro') throw new Error('Native model rejected')
+    return { configOptions: [{ ...session.state.configOptions[0], currentValue: 'claude-kimi-k3.1-pro[1m]' }] }
+  }
+  const models = await session.listModels(undefined, { model: 'kimi-k3.1-pro' })
+  assert.equal(models[0].id, 'claude-kimi-k3.1-pro[1m]')
+  assert.deepEqual(models[0].aliases, ['kimi-k3.1-pro'])
+  await assert.rejects(session.selectModel('unknown-model'), /Native model rejected/)
 })

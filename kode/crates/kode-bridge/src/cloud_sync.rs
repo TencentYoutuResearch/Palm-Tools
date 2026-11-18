@@ -1677,7 +1677,7 @@ impl CloudSyncManager {
         Ok(session_ids)
     }
 
-    async fn send_event<S>(&self, socket: &mut S, event: crate::EventEnvelope) -> Result<(), String>
+    async fn send_event<S>(&self, socket: &mut S, mut event: crate::EventEnvelope) -> Result<(), String>
     where
         S: SinkExt<Message> + Unpin,
         S::Error: std::fmt::Display,
@@ -1687,6 +1687,11 @@ impl CloudSyncManager {
         // messages out of bounded history pages and overload the mobile WS.
         if matches!(event.r#type.as_str(), "pty_bytes" | "shell.pty_bytes") {
             return Ok(());
+        }
+        if matches!(event.r#type.as_str(), "session.created" | "session.updated") {
+            let mut snapshots = [json!({"dto": event.payload})];
+            project_mobile_workspaces(&self.inner.ctx, &mut snapshots);
+            event.payload = snapshots[0]["dto"].take();
         }
         send_json(
             socket,
@@ -1888,7 +1893,22 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
                         || s["dto"]["owner_alive"] == true)
             }),
     );
+    project_mobile_workspaces(ctx, &mut snapshots);
     snapshots
+}
+
+fn project_mobile_workspaces(ctx: &crate::Ctx, snapshots: &mut [Value]) {
+    let store = ctx.runtimes.workbench_store.lock().upgrade();
+    if let Some(store) = store {
+        match (store.document("workspaces"), store.document("session-index")) {
+            (Ok(workspaces), Ok(index)) => {
+                crate::messaging::project_mobile_workspaces(snapshots, &workspaces, &index);
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                tracing::warn!(%error, "mobile workspace projection unavailable");
+            }
+        }
+    }
 }
 
 fn snapshot_session_ids(sessions: &[Value]) -> HashSet<u64> {

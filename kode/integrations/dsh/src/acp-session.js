@@ -1,4 +1,6 @@
 /** ACP v1 native conversations using the official SDK, shared by Cursor, Claude and custom Agents. */
+import { z } from 'zod'
+import { acpSubagents } from './native-subagents.js'
 import { client, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { Readable, Writable } from 'node:stream'
 import { randomUUID } from 'node:crypto'
@@ -35,6 +37,7 @@ export class AcpSession {
   constructor(profile, cwd, handlers = {}) {
     this.profile = profile; this.cwd = cwd; this.handlers = handlers
     this.lifetime = new AbortController(); this.rpc = { closed: false }; this.requests = new Set()
+    this.children = new Map(); this.members = new Map()
     this.commands = []; this.setupUpdates = []; this.commandsReady = Promise.withResolvers()
   }
   async launch() {
@@ -50,18 +53,34 @@ export class AcpSession {
       this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
     }
     const app = client({ name: 'kode-dsh' })
+    // Preserve native extension updates alongside the standard ACP updates.
     app.onNotification('session/update', ({ params }) => this.update(params))
+    app.onNotification('cursor/task', z.object({ toolCallId: z.string() }).passthrough(), ({ params }) => {
+      this.observeSubagent({ id: params.agentId ?? params.toolCallId, name: params.description, task: params.prompt, model: params.model,
+        ...(Number.isFinite(params.durationMs) ? { status: 'completed' } : {}) })
+    })
     app.onRequest('session/request_permission', ({ params, signal }) => this.permission(params, signal))
     app.onRequest('elicitation/create', ({ params, signal }) => {
-      if (!this.active || (params.sessionId && params.sessionId !== this.threadId)) return { action: 'cancel' }
+      if (!this.active || (params.sessionId && params.sessionId !== this.threadId && !this.children.has(params.sessionId))) return { action: 'cancel' }
       return askAcpForm(params, (request, signal) => this.handlers.question?.(request, signal), AbortSignal.any([signal, this.active.promptSignal ?? this.active.signal]))
     })
     app.onRequest('*', context => this.extension(context))
     const agentProcess = this.process
-    const connection = this.connection = app.connect(ndJsonStream(Writable.toWeb(agentProcess.child.stdin), Readable.toWeb(agentProcess.child.stdout)))
+    const stream = ndJsonStream(Writable.toWeb(agentProcess.child.stdin), Readable.toWeb(agentProcess.child.stdout))
+    // The released SDK validates its session router before custom handlers.
+    // Consume negotiated native extensions before that stable schema boundary.
+    const readable = stream.readable.pipeThrough(new TransformStream({ transform: (message, controller) => {
+      const params = message.params
+      if (message.method === 'session/update' && typeof params?.sessionId === 'string' &&
+          ['subagent_spawned', 'subagent_state_update', 'subagent_update'].includes(params.update?.sessionUpdate)) {
+        this.update(params)
+      } else controller.enqueue(message)
+    } }))
+    const connection = this.connection = app.connect({ ...stream, readable })
     connection.closed.then(() => {
       if (this.connection !== connection) return
       this.rpc.closed = true
+      for (const child of this.children.values()) if (child.status === 'running') this.observeSubagent({ id: child.id, status: 'disconnected' })
       if (!this.active?.restarting) this.active?.end(agentProcess.error ?? new Error('ACP connection closed'))
     })
     agentProcess.child.on('error', error => connection.close(error))
@@ -76,7 +95,7 @@ export class AcpSession {
     return this.initialized ??= (async () => {
       this.lifetime.signal.throwIfAborted(); signal?.throwIfAborted()
       await this.launch()
-      this.info = await this.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'kode-dsh', version: '0.1.0' }, clientCapabilities: { elicitation: { form: {} } } }, signal, this.profile.startupTimeoutMs ?? 15000)
+      this.info = await this.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'kode-dsh', version: '0.1.0' }, clientCapabilities: { elicitation: { form: {} }, ...(this.profile.type === 'claude' ? { _meta: { jetbrains: { air: { version: 1, capabilities: ['sessionIndex', 'nativeSubagentSessions'] } } } } : {}) } }, signal, this.profile.startupTimeoutMs ?? 15000)
       if (this.info.protocolVersion !== 1) throw new Error('Agent did not negotiate ACP v1')
     })()
   }
@@ -107,6 +126,10 @@ export class AcpSession {
     for (const update of this.setupUpdates.splice(0)) this.update(update)
     return this.threadId
   }
+  async rename(title, signal) {
+    if (!this.threadId) throw new Error('Native session is not ready for renaming')
+    await this.request('_session/rename', { sessionId: this.threadId, title }, signal)
+  }
   async listModels(signal, { model } = {}) {
     await this.open({}, [], signal)
     await this.waitForCommands(signal)
@@ -114,7 +137,7 @@ export class AcpSession {
     const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
     const effort = effortOption(this.state), fast = fastOption(this.state), current = option?.currentValue ?? this.state.models?.currentModelId
     const models = option ? flattenOptions(option.options).map(m => ({ id: m.value, model: m.value, displayName: m.name, isDefault: m.value === current })) : (this.state.models?.availableModels ?? []).map(m => ({ id: m.modelId, model: m.modelId, displayName: m.name, isDefault: m.modelId === current }))
-    return models.map(row => ({ ...row, inputModalities: this.info.agentCapabilities?.promptCapabilities?.image || this.profile.type === 'claude' ? ['text', 'image'] : ['text'], ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}), ...(fast && row.id === current ? { fastCapability: { transport: 'config-option', defaultEnabled: fastValue(fast.currentValue) ?? false } } : {}) }))
+    return models.map(row => ({ ...row, ...(model && row.id === current && model !== current ? { aliases: [model] } : {}), inputModalities: this.info.agentCapabilities?.promptCapabilities?.image || this.profile.type === 'claude' ? ['text', 'image'] : ['text'], ...(effort && row.id === current ? { reasoningEfforts: flattenOptions(effort.options).map(value => ({ id: value.value, name: value.name, description: value.description })), defaultReasoningEffort: effort.currentValue } : {}), ...(fast && row.id === current ? { fastCapability: { transport: 'config-option', defaultEnabled: fastValue(fast.currentValue) ?? false } } : {}) }))
   }
   async waitForCommands(signal = this.lifetime.signal) {
     // Claude sends its authoritative commands after the setup response.
@@ -156,7 +179,8 @@ export class AcpSession {
     if (model && model !== 'default') {
       const option = this.state.configOptions?.find(o => o.category === 'model' || o.id === 'model')
       if (option) {
-        model = resolveAdvertisedModel(flattenOptions(option.options), model)
+        // Claude's bridge resolves native aliases, including provider models and context suffixes.
+        if (this.profile.type !== 'claude' && model !== option.currentValue) model = resolveAdvertisedModel(flattenOptions(option.options), model)
         const result = await this.request('session/set_config_option', { sessionId: this.threadId, configId: option.id, value: model }, signal)
         if (result.configOptions) this.state.configOptions = result.configOptions
         else option.currentValue = model
@@ -167,18 +191,38 @@ export class AcpSession {
       } else throw new Error('This ACP Agent does not advertise model selection')
     }
   }
+  observeSubagent(update) {
+    if (typeof update.id !== 'string' || !update.id || update.id.length > 512) return
+    if (update.member) this.members.set(update.member, update.id)
+    this.children.set(update.id, { ...this.children.get(update.id), ...update })
+    this.handlers.subagent?.({ ...update, replay: this.opening === true })
+  }
+  childContent(id, update) {
+    if (update.sessionUpdate === 'agent_message_chunk' && update.content?.type === 'text') this.observeSubagent({ id, delta: update.content.text })
+    if (['tool_call', 'tool_call_update'].includes(update.sessionUpdate) && update.title) this.observeSubagent({ id, delta: '\n' + update.title + '\n' })
+  }
   update({ sessionId, update }) {
+    if (sessionId !== this.threadId && this.children.has(sessionId)) { this.childContent(sessionId, update); return }
+
     const metadata = ['available_commands_update', 'config_option_update', 'current_mode_update'].includes(update.sessionUpdate)
     if (!this.threadId && this.opening && metadata && this.setupUpdates.length < 32) { this.setupUpdates.push({ sessionId, update }); return }
     if (sessionId !== this.threadId) return
+    const member = update._meta?.['codebuddy.ai/memberEvent']
+    if (typeof member === 'string') {
+      const id = this.members.get(member) ?? `member:${member}`
+      if (!this.children.has(id)) this.observeSubagent({ id, member, name: member })
+      this.childContent(id, update)
+      return
+    }
+    for (const child of acpSubagents(update)) this.observeSubagent(child)
     if (update.sessionUpdate === 'available_commands_update') { this.commands = update.availableCommands ?? []; this.commandsReady.resolve(); this.handlers.commands?.(this.commands) }
     if (update.sessionUpdate === 'config_option_update' && this.state) this.state.configOptions = update.configOptions
     if (update.sessionUpdate === 'current_mode_update' && this.state?.modes) this.state.modes.currentModeId = update.currentModeId
     if (!this.active) return // replay is owned by the persisted dsh log
     const active = this.active, base = { threadId: this.threadId, turnId: active.turnId }
     if (update.sessionUpdate === 'usage_update') active.push({ method: 'session/update', params: { ...base, update } })
-    if (update.sessionUpdate === 'agent_thought_chunk' && update.content.type === 'text') active.push({ method: 'item/reasoning/summaryTextDelta', params: { ...base, itemId: 'reasoning', delta: update.content.text } })
-    if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') active.push({ method: 'item/agentMessage/delta', params: { ...base, itemId: 'answer', delta: update.content.text } })
+    if (update.sessionUpdate === 'agent_thought_chunk' && update.content?.type === 'text') active.push({ method: 'item/reasoning/summaryTextDelta', params: { ...base, itemId: 'reasoning', delta: update.content.text } })
+    if (update.sessionUpdate === 'agent_message_chunk' && update.content?.type === 'text') active.push({ method: 'item/agentMessage/delta', params: { ...base, itemId: 'answer', delta: update.content.text } })
     if (['tool_call', 'tool_call_update'].includes(update.sessionUpdate)) {
       const old = active.tools.get(update.toolCallId) ?? { id: update.toolCallId, type: 'commandExecution' }
       const item = acpToolItem(old, update)
@@ -188,7 +232,7 @@ export class AcpSession {
     }
   }
   async permission(params, requestSignal) {
-    if (!this.active || params.sessionId !== this.threadId) return { outcome: { outcome: 'cancelled' } }
+    if (!this.active || params.sessionId !== this.threadId && !this.children.has(params.sessionId)) return { outcome: { outcome: 'cancelled' } }
     const request = { threadId: this.threadId, turnId: this.active.turnId, itemId: params.toolCall.toolCallId, reason: params.toolCall.title ?? 'ACP Agent requests permission', command: JSON.stringify(params.toolCall.rawInput ?? {}) }
     const turnSignal = this.active.promptSignal ?? this.active.signal
     const signal = requestSignal ? AbortSignal.any([requestSignal, turnSignal]) : turnSignal

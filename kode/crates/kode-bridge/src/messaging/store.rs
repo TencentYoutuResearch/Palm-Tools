@@ -9,8 +9,13 @@ use std::{
     path::Path,
 };
 
+// UNION preserves both directions, including terminal receipts, and deduplicates
+// self-addressed events. Each branch seeks its participant+cursor index.
+const SESSION_EVENTS: &str = "SELECT seq,message FROM events WHERE json_extract(message,'$.source.node_id')=?3 AND json_extract(message,'$.source.session_id')=?2 AND seq>?1
+    UNION SELECT seq,message FROM events WHERE json_extract(message,'$.target.node_id')=?3 AND json_extract(message,'$.target.session_id')=?2 AND seq>?1 ORDER BY seq LIMIT 200";
+
 pub struct Store {
-    db: Mutex<Connection>,
+    pub(super) db: Mutex<Connection>,
     pub node_id: String,
     _lock: Option<File>,
 }
@@ -66,6 +71,22 @@ impl Store {
           CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, source_node TEXT NOT NULL, source_session TEXT NOT NULL, target_node TEXT NOT NULL, target_session TEXT NOT NULL, idem TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(source_node,source_session,idem));
           CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS message_target ON messages(target_node,target_session);
+          CREATE INDEX IF NOT EXISTS message_status ON messages(json_extract(body,'$.status'));
+          CREATE INDEX IF NOT EXISTS message_inbox_status ON messages(target_node,target_session,json_extract(body,'$.status'));
+          CREATE INDEX IF NOT EXISTS message_route ON messages(source_node,target_node,json_extract(body,'$.status'));
+          CREATE INDEX IF NOT EXISTS event_source_cursor ON events(json_extract(message,'$.source.node_id'),json_extract(message,'$.source.session_id'),seq);
+          CREATE INDEX IF NOT EXISTS event_target_cursor ON events(json_extract(message,'$.target.node_id'),json_extract(message,'$.target.session_id'),seq);
+          CREATE TABLE IF NOT EXISTS cancellation_peers (peer TEXT PRIMARY KEY, supported INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS input_cancellations (message_id TEXT PRIMARY KEY, session TEXT NOT NULL, pending INTEGER NOT NULL CHECK(pending IN (0,1)), body TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS input_cancellation_pending ON input_cancellations(session,pending,message_id);
+          CREATE TABLE IF NOT EXISTS input_cancellation_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS runtime_deliveries (message_id TEXT PRIMARY KEY, session TEXT NOT NULL, phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 2), body TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS runtime_delivery_pending ON runtime_deliveries(session,phase,message_id);
+          CREATE UNIQUE INDEX IF NOT EXISTS runtime_delivery_input ON runtime_deliveries(session,json_extract(body,'$.input_id'));
+          CREATE TABLE IF NOT EXISTS delivery_peer_cursors (peer TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS delivery_mirrors (message_id TEXT PRIMARY KEY, body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS delivery_mirror_events (peer TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(peer,seq));
+          CREATE TABLE IF NOT EXISTS runtime_delivery_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS workbench_documents (key TEXT PRIMARY KEY, revision INTEGER NOT NULL, value TEXT NOT NULL);")?;
         db.execute(
             "INSERT OR IGNORE INTO identity VALUES ('node_id',?1)",
@@ -84,7 +105,7 @@ impl Store {
             node_id: node_id.into(),
             _lock: lock,
         };
-        for mut m in store.messages()? {
+        for mut m in store.open_messages()? {
             if m.target.node_id == node_id && m.status == Status::Delivering {
                 m.status = Status::Uncertain;
                 m.detail = Some("bridge restarted during runtime submission".into());
@@ -198,10 +219,29 @@ impl Store {
         })
         .collect()
     }
+    #[cfg(test)]
     pub fn messages(&self) -> Result<Vec<Message>> {
         let db = self.db.lock();
         let mut q = db.prepare("SELECT body FROM messages ORDER BY rowid")?;
         let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    }
+    pub fn open_messages(&self) -> Result<Vec<Message>> {
+        let db = self.db.lock();
+        let mut q = db.prepare("SELECT body FROM messages WHERE json_extract(body,'$.status') IN ('queued','received','delivering') ORDER BY rowid")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    }
+    pub fn inbox(&self, session: &str) -> Result<Vec<Message>> {
+        let db = self.db.lock();
+        let mut q = db.prepare("SELECT body FROM messages WHERE target_node=?1 AND target_session=?2 AND json_extract(body,'$.status')='received' ORDER BY rowid")?;
+        let rows = q.query_map(params![self.node_id, session], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    }
+    pub fn peer_messages(&self, peer: &str) -> Result<Vec<Message>> {
+        let db = self.db.lock();
+        let mut q = db.prepare("SELECT body FROM messages WHERE (source_node=?1 AND target_node=?2 AND json_extract(body,'$.status') IN ('queued','received','delivering')) OR (source_node=?2 AND target_node=?1) ORDER BY rowid")?;
+        let rows = q.query_map(params![self.node_id, peer], |r| r.get::<_, String>(0))?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
     }
     pub fn get(&self, id: &str) -> Result<Option<Message>> {
@@ -271,24 +311,193 @@ impl Store {
     /// Read-only wakeup probe; unlike claim this never renews ownership or consumes work.
     pub fn pending_count(&self, session: &str) -> Result<u64> {
         Ok(self.db.lock().query_row(
-            "SELECT COUNT(*) FROM messages WHERE target_node=?1 AND target_session=?2 AND json_extract(body,'$.status')='received' AND json_extract(body,'$.expires_at')>?3",
+            "SELECT COUNT(*) FROM messages m WHERE target_node=?1 AND target_session=?2 AND (
+                (json_extract(m.body,'$.status')='received' AND json_extract(m.body,'$.expires_at')>?3)
+                OR EXISTS (SELECT 1 FROM runtime_deliveries d WHERE d.message_id=m.id AND d.session=?2 AND d.phase<2
+                    AND NOT EXISTS (SELECT 1 FROM input_cancellations c WHERE c.message_id=m.id))
+                OR EXISTS (SELECT 1 FROM input_cancellations c WHERE c.message_id=m.id AND c.session=?2 AND c.pending=1)
+            )",
             params![self.node_id, session, now()],
             |r| r.get(0),
         )?)
     }
     pub fn events(&self, after: u64, session: Option<&str>) -> Result<Vec<Event>> {
         let db = self.db.lock();
-        let mut q = db.prepare("SELECT seq,message FROM events WHERE seq>?1 AND (?2 IS NULL OR (json_extract(message,'$.source.node_id')=?3 AND json_extract(message,'$.source.session_id')=?2) OR (json_extract(message,'$.target.node_id')=?3 AND json_extract(message,'$.target.session_id')=?2)) ORDER BY seq LIMIT 200")?;
-        let rows = q.query_map(params![after, session, self.node_id], |r| {
-            Ok((r.get(0)?, r.get::<_, String>(1)?))
+        let mut q = db.prepare(if session.is_some() {
+            SESSION_EVENTS
+        } else {
+            "SELECT seq,message FROM events WHERE seq>?1 ORDER BY seq LIMIT 200"
         })?;
-        rows.map(|r| {
-            let (seq, text) = r?;
-            Ok(Event {
+        let mut rows = if let Some(session) = session {
+            q.query(params![after, session, self.node_id])?
+        } else {
+            q.query([after])?
+        };
+        let mut events = Vec::new();
+        let mut bytes = 0;
+        while let Some(row) = rows.next()? {
+            let (seq, text): (u64, String) = (row.get(0)?, row.get(1)?);
+            // Keep full v1 DTOs, but cap aggregate bytes. A first event is always
+            // returned so a large valid message cannot permanently stall cursors.
+            if !events.is_empty() && bytes + text.len() > 256 * 1024 {
+                break;
+            }
+            bytes += text.len();
+            events.push(Event {
                 seq,
                 message: serde_json::from_str(&text)?,
+            });
+        }
+        Ok(events)
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+    fn message(id: &str, source: &str, target: &str, session: &str, status: Status) -> Message {
+        Message {
+            id: id.into(),
+            source: Address {
+                node_id: source.into(),
+                session_id: "sender".into(),
+            },
+            target: Address {
+                node_id: target.into(),
+                session_id: session.into(),
+            },
+            content: "fixture".into(),
+            idempotency_key: id.into(),
+            in_reply_to: None,
+            hop_count: 0,
+            created_at: now(),
+            expires_at: now() + 60_000,
+            status,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn inbox_polling_excludes_history_but_peer_reconnect_keeps_terminal_receipts() {
+        let store = Store::init(Connection::open_in_memory().unwrap(), "local", None).unwrap();
+        for m in [
+            message("old", "peer", "local", "worker", Status::Accepted),
+            message("ready", "peer", "local", "worker", Status::Received),
+            message("other-session", "peer", "local", "other", Status::Received),
+            message(
+                "other-peer",
+                "elsewhere",
+                "local",
+                "worker",
+                Status::Rejected,
+            ),
+            message("outgoing", "local", "peer", "remote", Status::Queued),
+            message(
+                "finished-outgoing",
+                "local",
+                "peer",
+                "remote",
+                Status::Accepted,
+            ),
+            message("uncertain", "peer", "local", "worker", Status::Uncertain),
+        ] {
+            store.insert(m).unwrap();
+        }
+        let ids = |messages: Vec<Message>| messages.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(store.inbox("worker").unwrap()), ["ready"]);
+        assert_eq!(
+            ids(store.open_messages().unwrap()),
+            ["ready", "other-session", "outgoing"]
+        );
+        assert_eq!(
+            ids(store.peer_messages("peer").unwrap()),
+            ["old", "ready", "other-session", "outgoing", "uncertain"]
+        );
+        let mut ready = store.get("ready").unwrap().unwrap();
+        ready.status = Status::Accepted;
+        store.save(&ready).unwrap();
+        assert!(store.inbox("worker").unwrap().is_empty());
+        assert_eq!(
+            ids(store.peer_messages("peer").unwrap()),
+            ["old", "ready", "other-session", "outgoing", "uncertain"]
+        );
+        assert_eq!(
+            store.messages().unwrap().len(),
+            7,
+            "polling must not delete history"
+        );
+    }
+
+    #[test]
+    fn participant_event_indexes_keep_receipts_and_deduplicate_self_messages() {
+        let store = Store::init(Connection::open_in_memory().unwrap(), "local", None).unwrap();
+        for index in 0..500 {
+            store
+                .insert(message(
+                    &format!("noise-{index}"),
+                    "peer",
+                    "local",
+                    "other",
+                    Status::Accepted,
+                ))
+                .unwrap();
+        }
+        let mut own = message("self", "local", "local", "sender", Status::Received);
+        store.insert(own.clone()).unwrap();
+        let first = store.events(0, Some("sender")).unwrap();
+        assert_eq!(first.len(), 1, "self-addressed events occur once");
+        own.status = Status::Accepted;
+        store.save(&own).unwrap();
+        store
+            .insert(message(
+                "reply",
+                "peer",
+                "local",
+                "sender",
+                Status::Rejected,
+            ))
+            .unwrap();
+        let after = first[0].seq;
+        let next = store.events(after, Some("sender")).unwrap();
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].message.status, Status::Accepted);
+        assert_eq!(next[1].message.status, Status::Rejected);
+        assert!(next.iter().all(|row| row.seq > after));
+        assert!(store
+            .events(next[1].seq, Some("sender"))
+            .unwrap()
+            .is_empty());
+        assert!(store.events(0, Some("foreign")).unwrap().is_empty());
+        let db = store.db.lock();
+        let details = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {SESSION_EVENTS}"))
+            .unwrap()
+            .query_map(params![after, "sender", "local"], |row| {
+                row.get::<_, String>(3)
             })
-        })
-        .collect()
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        for index in ["event_source_cursor", "event_target_cursor"] {
+            assert!(details.contains(index), "{details}");
+        }
+        assert!(!details.contains("SCAN events"), "{details}");
+    }
+
+    #[test]
+    fn sqlite_uses_inbox_and_route_indexes() {
+        let store = Store::init(Connection::open_in_memory().unwrap(), "local", None).unwrap();
+        let db = store.db.lock();
+        for (query, expected) in [
+            ("EXPLAIN QUERY PLAN SELECT body FROM messages WHERE target_node='local' AND target_session='worker' AND json_extract(body,'$.status')='received' ORDER BY rowid", "message_inbox_status"),
+            ("EXPLAIN QUERY PLAN SELECT body FROM messages WHERE json_extract(body,'$.status') IN ('queued','received','delivering') ORDER BY rowid", "message_status"),
+            ("EXPLAIN QUERY PLAN SELECT body FROM messages WHERE (source_node='local' AND target_node='peer' AND json_extract(body,'$.status') IN ('queued','received','delivering')) OR (source_node='peer' AND target_node='local') ORDER BY rowid", "message_route"),
+        ] {
+            let mut q = db.prepare(query).unwrap();
+            let details = q.query_map([], |r| r.get::<_, String>(3)).unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap().join("\n");
+            assert!(details.contains(expected), "expected {expected}: {details}");
+            assert!(!details.contains("SCAN messages"), "unexpected full scan: {details}");
+        }
     }
 }

@@ -110,7 +110,10 @@ AI title cannot overwrite the user's name on mobile.
 
 Snapshots contain active sessions only. Exited sessions remain server-side for
 audit/history retention but are excluded from the mobile list, and a live
-`session.exited` event removes the row immediately. Raw `pty_bytes` frames stay
+`session.exited` event removes the row immediately. Runtime DTO/status updates
+with `status: exited` also emit `session.exited`, so monitors that only consume
+that removal event discard cached rows before the next authoritative snapshot.
+Raw `pty_bytes` frames stay
 local: only semantic events are persisted, replayed, and forwarded to mobile.
 An initial history request (`from=0`) returns the newest bounded semantic window
 in chronological order so high-volume sessions still show their current
@@ -307,3 +310,11 @@ register a replacement and must pair again.
 Desktop exposes this only as a secondary danger zone in Worker Details for
 Offline Workers. A destructive confirmation names the Worker and explains that
 monitor access and actionable sessions will be revoked.
+
+For DSH sessions owned by a registered workspace, the cloud DTO `cwd` is the
+current workspace's project path, following `session-index.worktreeParents`.
+`workspace_id` identifies that project, and `execution_cwd` retains the original
+session directory. This keeps existing mobile cwd-based grouping aligned with
+the desktop after workspace moves. Execution and history still route through
+the session identity and its original runtime directory. Unregistered sessions
+and non-DSH sessions retain their original DTO paths.

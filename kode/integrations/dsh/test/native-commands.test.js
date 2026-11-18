@@ -118,3 +118,8 @@ test('Codex duplicate skill installations produce one typed input while differen
     assert.equal(after.length, 2)
   } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('model identity resolution accepts only authoritative advertised aliases', () => {
+  assert.equal(resolveAdvertisedModel([{ id: 'claude-kimi-k3.1-pro[1m]', aliases: ['kimi-k3.1-pro'] }], 'kimi-k3.1-pro'), 'claude-kimi-k3.1-pro[1m]')
+  assert.throws(() => resolveAdvertisedModel([{ id: 'claude-kimi-k3.1-pro[1m]' }], 'kimi-k3.1-pro'), /未公布/)
+})

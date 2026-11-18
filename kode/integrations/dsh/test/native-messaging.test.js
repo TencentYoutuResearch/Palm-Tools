@@ -18,8 +18,8 @@ for (const type of ['codex', 'cursor', 'custom']) test(`${type} native tools sen
   const tools = new Map(), disposers = [], inbox = [], events = []
   const sessionId = `native-${randomUUID()}`, peerId = `peer-${randomUUID()}`
   let adapter
-  const session = { header: { cwd: root }, append: (type, data) => events.push({ type, data }) }
-  const agent = { id: sessionId, session, followup: input => inbox.push(input), ctx: {
+  const session = { header: { cwd: root }, append: (type, data) => events.push({ seq: events.length, type, data }), snapshotEvents: (offset = 0) => events.filter(event => event.seq >= offset) }
+  const agent = { id: sessionId, session, followup: input => { inbox.push(input); session.append('agent/inbox/spliced', { target: 'next-turn', start: inbox.length - 1, removedCount: 0, inserted: [input] }) }, ctx: {
     parallel: async () => {}, get: () => undefined,
     tools: {
       register: tool => { tools.set(tool.name, tool); return () => tools.delete(tool.name) },

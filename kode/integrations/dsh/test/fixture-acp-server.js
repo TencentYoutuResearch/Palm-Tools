@@ -39,6 +39,7 @@ app.onRequest('session/load', async ({ params, client }) => {
   await announceCommands(client)
   return { modes, configOptions }
 })
+app.onRequest('_session/rename', { parse: value => value }, async ({ params }) => { await record('_session/rename', params); return {} })
 app.onRequest('session/set_mode', async ({ params }) => { await record('session/set_mode', params); modes.currentModeId = params.modeId; return {} })
 app.onRequest('session/set_config_option', async ({ params }) => { await record('session/set_config_option', params); configOptions.find(option => option.id === params.configId).currentValue = params.value; return { configOptions } })
 app.onNotification('session/cancel', async ({ params }) => { await record('session/cancel', params); pending.get(params.sessionId)?.() })
@@ -56,6 +57,15 @@ app.onRequest('session/prompt', async ({ params, client, signal }) => {
   const waiting = text.includes('WAIT') ? new Promise(resolve => { pending.set(params.sessionId, resolve); signal.addEventListener('abort', () => resolve(), { once: true }) }) : undefined
   if (process.env.KODE_ACP_PROMPT_LOG_DELAY) await new Promise(resolve => setTimeout(resolve, Number(process.env.KODE_ACP_PROMPT_LOG_DELAY)))
   await record('session/prompt', params)
+  if (text.includes('NATIVE_SUBAGENTS')) {
+    const notify = update => client.notify('session/update', { sessionId, update })
+    await notify({ sessionUpdate: 'subagent_spawned', subagentSessionId: 'claude-child', name: 'Verifier', task: 'Verify behavior' })
+    await client.notify('session/update', { sessionId: 'claude-child', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Child-only output' } } })
+    await notify({ sessionUpdate: 'subagent_state_update', subagentSessionId: 'claude-child', state: 'completed' })
+    await notify({ sessionUpdate: 'session_info_update', _meta: { 'codebuddy.ai/teamUpdate': { type: 'member_status_change', members: [{ name: 'Reviewer', sessionId: 'buddy-child', status: 'running' }] } } })
+    await notify({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Buddy-only output' }, _meta: { 'codebuddy.ai/memberEvent': 'Reviewer' } })
+    await client.notify('cursor/task', { toolCallId: 'cursor-task', agentId: 'cursor-child', description: 'Explore', prompt: 'Find entry points', durationMs: 12 })
+  }
   if (text.includes('WAIT_TOOL')) await client.notify('session/update', { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'waiting-operation', title: 'Pending operation', kind: 'execute', status: 'in_progress', rawInput: { command: 'waiting' } } })
   if (waiting) { const reason = await waiting; pending.delete(params.sessionId); return { stopReason: reason ?? 'cancelled' } }
   if (text.includes('APPROVAL')) {
