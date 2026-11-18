@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { absoluteDroppedFilePaths, absoluteOsDroppedPaths } from '../src/lib/file_drop.ts'
+import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences } from '../src/lib/file_drop.ts'
 
 test('uses the absolute path supplied by the desktop webview', () => {
   const files = { 0: { name: 'notes.md', path: '/Users/dev/docs/notes.md' }, length: 1 }
@@ -40,8 +40,44 @@ test('uses native OS drop paths from Tauri', () => {
     absoluteOsDroppedPaths([
       '/Users/dev/docs/notes.md',
       'file:///Users/dev/My%20Project/spec.md',
+      'C:\\work\\file.txt',
+      'D:\\work\\folder',
       'notes.md',
     ]),
-    ['/Users/dev/docs/notes.md', '/Users/dev/My Project/spec.md'],
+    [
+      '/Users/dev/docs/notes.md',
+      '/Users/dev/My Project/spec.md',
+      'C:\\work\\file.txt',
+      'D:\\work\\folder',
+    ],
+  )
+})
+
+test('normalizes Windows verbatim and UNC paths', () => {
+  assert.deepEqual(
+    absoluteOsDroppedPaths([
+      '\\\\?\\C:\\work\\file.txt',
+      '\\\\?\\UNC\\server\\share\\folder',
+      '\\\\server\\share\\file.txt',
+      'file://server/share/My%20Folder',
+    ]),
+    [
+      'C:\\work\\file.txt',
+      '\\\\server\\share\\folder',
+      '\\\\server\\share\\file.txt',
+      '\\\\server\\share\\My Folder',
+    ],
+  )
+})
+
+test('formats dropped paths as non-submitting references', () => {
+  assert.equal(
+    composerPathReferences([
+      'C:\\work\\file.txt',
+      'D:\\work folder',
+      'C:\\work\\file.txt',
+      'relative.txt',
+    ]),
+    '@C:\\work\\file.txt @D:\\work folder @relative.txt ',
   )
 })
