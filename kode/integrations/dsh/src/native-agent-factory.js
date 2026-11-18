@@ -90,6 +90,9 @@ export class NativeAgentFactory {
     } catch (error) { setupDone.resolve(); try { await dispose() } finally { await releaseOwner() }; throw error }
     finally { if (!published) this.live.delete(dispose) }
   }
+  /** Stop one session's native CLI process (app-server/ACP) without unloading
+   * the runtime. A later turn resumes the same native thread again. */
+  async release(id) { await this.byId.get(id)?.() }
   async close() { this.stopping = true; this.stop.abort(new Error('Agent runtime unplugged')); await Promise.allSettled([...this.pending]); await Promise.all([...this.live].map(dispose => dispose())) }
 }
 /** Route only explicit Kode selections; other plugins retain the official factory. */

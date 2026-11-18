@@ -11,8 +11,13 @@
   import { selectTab, tabs } from './sessions'
   import { outsideElementPressClose } from './outside_close'
   import { currentLocale, t, type Params } from './i18n'
+  import { holdOverlay } from './overlay_guard'
 
   let open = $state(false)
+  // The dropdown opens over the session area, where extension views sit.
+  $effect(() => {
+    if (open) return holdOverlay()
+  })
 
   const sortedEvents = $derived([...$appEvents].sort((a, b) => b.updatedAt - a.updatedAt))
   const activeCount = $derived($activeAppEventCount)

@@ -13,7 +13,8 @@
 //! - ✅ codebuddy: type="message" 提取 user/assistant 文本 + tool_use(待实测)
 //! - ✅ claude: type="user|assistant" 提取 content 数组中的 text / tool_use / tool_result
 //! - ⏳ ask_user_question / plan_proposed / task_create / task_update — 9.2 联调时按真实 jsonl 实测补
-//! - ✅ session.turn_finished:codebuddy/claude/codex 一轮回复完成通知
+//! - ✅ session.turn_finished:codebuddy/claude/codex/kimi 一轮回复完成通知
+//! - ✅ kimi: `agents/main/wire.jsonl` 的用户消息 / content.part / tool.call / tool.result
 //!
 //! tool_use 当前是 best-effort:把已知工具名 + input 摘要写成卡片。
 //! 详细 input/output 在 PROTOCOL.md 里允许 < 4KB 截断。
@@ -46,6 +47,19 @@ pub fn spawn(
         let Some(path) = kode_core::session::cursor_tail::cursor_transcript_path(&cwd, &session_id)
         else {
             tracing::debug!(?cwd, %session_id, "no cursor transcript path; semantic tail not spawned");
+            return;
+        };
+        spawn_path(id, backend, path, bus);
+        return;
+    }
+    // kimi 的 wire.jsonl 不在 jsonl_tail 的路径体系里(那套按 codebuddy/claude 格式解析),
+    // 这里单独按会话目录定位。会话 id 来自 kimi_tail,此时 state.json 已存在。
+    if backend == Backend::Kimi {
+        let path = kode_core::session::kimi_tail::kimi_home()
+            .and_then(|home| kode_core::session::kimi_tail::find_session(&home, &cwd, &session_id))
+            .map(|session| session.wire);
+        let Some(path) = path else {
+            tracing::debug!(?cwd, %session_id, "no kimi wire.jsonl; semantic tail not spawned");
             return;
         };
         spawn_path(id, backend, path, bus);
@@ -195,9 +209,9 @@ pub fn parse_line(id: SessionId, backend: Backend, line: &str) -> Vec<EventEnvel
         Backend::Claude | Backend::Tclaude => parse_claude(id, line),
         Backend::Codex | Backend::Tcodex => parse_codex(id, line),
         Backend::Cursor => parse_cursor(id, line),
+        Backend::Kimi => parse_kimi(id, line),
         // opencode 没有 transcript 行可解析;结构化事件走 ACP。
-        // kimi 的 wire.jsonl 只接了 metadata(kimi_tail),语义事件尚未解析。
-        Backend::Opencode | Backend::Kimi => vec![],
+        Backend::Opencode => vec![],
     };
     events.iter_mut().for_each(crate::session_relay::annotate);
     events
@@ -904,6 +918,176 @@ fn cursor_user_query(text: &str) -> String {
 }
 
 // ============================================================================
+// kimi
+// ============================================================================
+
+/// kimi-code `wire.jsonl`:用户消息是 `context.append_message`(origin.kind=user),
+/// assistant 内容是 `context.append_loop_event` 里的 `content.part`(每个完整 block
+/// 一条,不是流式增量)、`tool.call`、`tool.result`;一轮由 `turn.prompt` /
+/// `turn.ended` 包住。失败原因只在 `turn.ended.error` 里,转成 system 消息给手机端看。
+fn parse_kimi(id: SessionId, line: &str) -> Vec<EventEnvelope> {
+    // profile.bind 等行带整段 system prompt,先按子串粗筛。
+    if ![
+        "\"context.append_message\"",
+        "\"context.append_loop_event\"",
+        "\"turn.prompt\"",
+        "\"turn.ended\"",
+    ]
+    .iter()
+    .any(|ty| line.contains(ty))
+    {
+        return vec![];
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return vec![];
+    };
+    // 子 agent 的步骤写在它自己的文件里;主文件只认 main。
+    if v.get("agentId").and_then(Value::as_str).is_some_and(|a| a != "main") {
+        return vec![];
+    }
+    let timestamp_ms = v.get("time").and_then(Value::as_i64);
+    let turn_id = |v: &Value| match v.get("turnId") {
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let message = |msg_id: String, role: &str, text: &str| {
+        EventEnvelope::new(
+            id,
+            "message",
+            json!({
+                "id": msg_id,
+                "role": role,
+                "text": cap_text(text, 16 * 1024),
+                "tool_calls": Vec::<Value>::new(),
+                "timestamp_ms": timestamp_ms,
+            }),
+        )
+    };
+    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+        "context.append_message" => {
+            let msg = v.get("message").unwrap_or(&Value::Null);
+            let from_user = msg.get("role").and_then(Value::as_str) == Some("user")
+                && msg.pointer("/origin/kind").and_then(Value::as_str) == Some("user");
+            let text = msg
+                .get("content")
+                .and_then(content_to_text)
+                .unwrap_or_default();
+            let text = text.trim();
+            if !from_user || text.is_empty() {
+                return vec![];
+            }
+            let msg_id = msg
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|m| format!("{id}-{m}"))
+                .unwrap_or_else(|| format!("{id}-user-{}", fnv_hash(text)));
+            vec![message(msg_id, "user", text)]
+        }
+        "context.append_loop_event" => {
+            let event = v.get("event").unwrap_or(&Value::Null);
+            let uuid = event.get("uuid").and_then(Value::as_str).unwrap_or("");
+            match event.get("type").and_then(Value::as_str).unwrap_or("") {
+                "content.part" => {
+                    let part = event.get("part").unwrap_or(&Value::Null);
+                    if part.get("type").and_then(Value::as_str) != Some("text") {
+                        return vec![];
+                    }
+                    let text = part.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                    if text.is_empty() {
+                        return vec![];
+                    }
+                    let msg_id = if uuid.is_empty() {
+                        format!("{id}-assistant-{}", fnv_hash(text))
+                    } else {
+                        format!("{id}-{uuid}")
+                    };
+                    vec![message(msg_id, "assistant", text)]
+                }
+                "tool.call" => {
+                    let Some(call_id) = event.get("toolCallId").and_then(Value::as_str) else {
+                        return vec![];
+                    };
+                    let tool = event.get("name").and_then(Value::as_str).unwrap_or("?");
+                    let input = event.get("args").cloned().unwrap_or(Value::Null);
+                    let mut payload = json!({
+                        "id": call_id,
+                        "tool": tool,
+                        "input_summary": summarize_tool_input(tool, &input),
+                        "output_preview": Value::Null,
+                        "status": "running",
+                    });
+                    crate::session_relay::attach_tool(&mut payload, tool, &input);
+                    vec![EventEnvelope::new(id, "tool_use", payload)]
+                }
+                "tool.result" => {
+                    let Some(call_id) = event.get("toolCallId").and_then(Value::as_str) else {
+                        return vec![];
+                    };
+                    let result = event.get("result").unwrap_or(&Value::Null);
+                    let is_error = result.get("isError").and_then(Value::as_bool) == Some(true);
+                    let preview = result
+                        .get("output")
+                        .map(|o| content_to_text(o).unwrap_or_else(|| value_to_preview(o, 4 * 1024)))
+                        .map(|o| cap_text(&o, 4 * 1024))
+                        .unwrap_or_default();
+                    vec![EventEnvelope::new(
+                        id,
+                        "tool_use",
+                        json!({
+                            "id": call_id,
+                            "tool": null,
+                            "input_summary": null,
+                            "output_preview": preview,
+                            "status": if is_error { "error" } else { "ok" },
+                        }),
+                    )]
+                }
+                _ => vec![],
+            }
+        }
+        "turn.prompt" => vec![EventEnvelope::new(
+            id,
+            "session.turn_started",
+            json!({ "turn_id": turn_id(&v) }),
+        )],
+        "turn.ended" => {
+            let reason = v.get("reason").and_then(Value::as_str).unwrap_or("");
+            let status = match reason {
+                "failed" | "error" => "failed",
+                "cancelled" | "canceled" | "interrupted" | "aborted" => "cancelled",
+                _ => "completed",
+            };
+            let turn_id = turn_id(&v);
+            let error = v
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|e| !e.is_empty());
+            let mut out = Vec::new();
+            if let Some(error) = error {
+                // turn id 在 resume 后会从 0 重新数,带上时间戳避免不同轮互相覆盖。
+                let msg_id = format!(
+                    "{id}-turn-error-{}-{}",
+                    turn_id.as_deref().unwrap_or("?"),
+                    timestamp_ms.unwrap_or_default()
+                );
+                out.push(message(msg_id, "system", &format!("Kimi: {error}")));
+            }
+            out.push(turn_finished_event(
+                id,
+                status,
+                error,
+                v.get("durationMs").and_then(Value::as_u64),
+                turn_id.as_deref(),
+            ));
+            out
+        }
+        _ => vec![],
+    }
+}
+
+// ============================================================================
 // helpers
 // ============================================================================
 
@@ -1078,6 +1262,67 @@ pub(crate) fn value_to_preview(v: &Value, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kimi_wire_turn_maps_to_messages_tools_and_lifecycle() {
+        let lines = [
+            r#"{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/k","systemPrompt":"turn.prompt context.append_message"}"#,
+            r#"{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"列文件"}],"origin":{"kind":"user"},"turnId":3,"time":1}"#,
+            r#"{"type":"context.append_message","agentId":"main","message":{"role":"user","content":[{"type":"text","text":"列文件"}],"id":"msg_1","origin":{"kind":"user"}},"time":2}"#,
+            r#"{"type":"context.append_message","agentId":"main","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>x</system-reminder>"}],"origin":{"kind":"injection"}},"time":3}"#,
+            r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","uuid":"p0","stepUuid":"s1","part":{"type":"think","think":"hmm"}},"time":4}"#,
+            r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","uuid":"p1","stepUuid":"s1","part":{"type":"text","text":"好的"}},"time":5}"#,
+            r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.call","uuid":"t1","stepUuid":"s1","toolCallId":"call_1","name":"Bash","args":{"command":"ls"}},"time":6}"#,
+            r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","uuid":"r1","toolCallId":"call_1","result":{"output":"a.txt","isError":false}},"time":7}"#,
+            r#"{"type":"context.append_loop_event","agentId":"sub","event":{"type":"content.part","uuid":"p9","part":{"type":"text","text":"subagent"}}}"#,
+            r#"{"type":"turn.ended","agentId":"main","turnId":3,"reason":"completed","durationMs":40,"time":8}"#,
+        ];
+        let events: Vec<_> = lines
+            .iter()
+            .flat_map(|l| parse_line(9, Backend::Kimi, l))
+            .collect();
+        let kinds: Vec<_> = events.iter().map(|e| e.r#type.as_str()).collect();
+        assert_eq!(
+            kinds,
+            [
+                "session.turn_started",
+                "message",
+                "message",
+                "tool_use",
+                "tool_use",
+                "session.turn_finished"
+            ]
+        );
+        assert_eq!(events[0].payload["turn_id"], "3");
+        assert_eq!(events[1].payload["role"], "user");
+        assert_eq!(events[1].payload["text"], "列文件");
+        assert_eq!(events[1].payload["id"], "9-msg_1");
+        assert_eq!(events[1].payload["timestamp_ms"], 2);
+        assert_eq!(events[2].payload["role"], "assistant");
+        assert_eq!(events[2].payload["text"], "好的");
+        assert_eq!(events[3].payload["id"], "call_1");
+        assert_eq!(events[3].payload["status"], "running");
+        assert_eq!(events[4].payload["id"], "call_1");
+        assert_eq!(events[4].payload["output_preview"], "a.txt");
+        assert_eq!(events[4].payload["status"], "ok");
+        assert_eq!(events[5].payload["status"], "completed");
+        assert_eq!(events[5].payload["turn_id"], "3");
+    }
+
+    #[test]
+    fn kimi_failed_turn_surfaces_error_as_system_message() {
+        let line = r#"{"type":"turn.ended","agentId":"main","turnId":0,"reason":"failed","error":{"code":"provider.auth_error","message":"Your current subscription does not have access to Kimi Code right now."},"durationMs":371,"time":1794550015075}"#;
+        let events = parse_line(9, Backend::Kimi, line);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].r#type, "message");
+        assert_eq!(events[0].payload["role"], "system");
+        assert!(events[0].payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("subscription does not have access"));
+        assert_eq!(events[1].r#type, "session.turn_finished");
+        assert_eq!(events[1].payload["status"], "failed");
+    }
 
     #[tokio::test]
     async fn rebinding_stops_events_from_the_previous_transcript() {

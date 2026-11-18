@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto'
 import { BackendDocument } from './backend-state.js'
 export const importedSessionId = tab => `session-kode-${createHash('sha256').update(`${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0, 32)}`
+export const freshImportIdentity = tab => `session-kode-${createHash('sha256').update(`${tab.backend_key}:${tab.session_id}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 32)}`
 export const savedDirectoryId = (node, tab) => `saved:${createHash('sha256').update(`${node}:${tab.backend_key}:${tab.session_id}`).digest('hex').slice(0, 32)}`
 export function savedSessionTime(tab) {
   for (const value of [tab.updatedAt, tab.updated_at, tab.createdAt, tab.created_at]) {

@@ -820,8 +820,8 @@ async fn list_worker_sessions(
     Path(worker_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let viewer_id = worker_viewer_from_headers(&state, &headers, "sessions.read")?;
-    if viewer_id != worker_id && !*state.inner.allow_shared_inventory.lock() {
+    let auth = worker_auth_from_headers(&state, &headers, "sessions.read")?;
+    if auth.worker_id != worker_id {
         return Err(ApiError::NotFound(format!("worker {worker_id}")));
     }
     let db = state.inner.db.lock();

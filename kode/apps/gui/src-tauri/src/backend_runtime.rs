@@ -291,6 +291,25 @@ pub async fn shared_command(id: u64, kind: &str, mut payload: Value) -> Result<V
     .await
 }
 
+/// Ask a runtime host (dsh) to take over a native session the GUI has just
+/// stopped. The host imports the CLI transcript and resumes the same native
+/// thread on its next turn.
+#[tauri::command]
+pub async fn shared_runtime_request(runtime: String, kind: String, payload: Value) -> Result<Value, String> {
+    call(
+        "/runtime/request",
+        Some(json!({"runtime":runtime,"kind":kind,"payload":payload,"request_id":uuid::Uuid::new_v4().to_string()})),
+    )
+    .await
+}
+
+/// Archive a runtime-hosted session so its host stops driving the native
+/// thread before the GUI resumes it in a PTY.
+#[tauri::command]
+pub async fn shared_runtime_archive(id: u64) -> Result<Value, String> {
+    shared_command(id, "delete", json!({})).await
+}
+
 /// Shared service controls: the GUI owns no plugin filesystem or handoff state.
 #[tauri::command]
 pub async fn agent_hub_action(payload: Option<Value>) -> Result<Value, String> {

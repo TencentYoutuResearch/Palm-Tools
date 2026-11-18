@@ -1,4 +1,4 @@
-import { savedImportIdentity } from './saved-session-state.js'
+import { freshImportIdentity, savedImportIdentity } from './saved-session-state.js'
 import { savedSessionProfile } from './saved-session-profile.js'
 /** Kode saved CLI sessions: import display history once, retain the original native thread. */
 import { BackendDocument } from './backend-state.js'
@@ -94,7 +94,10 @@ export async function syncNativeTabs(controller, client, profiles, signal) {
     }, typeof projections?.title === 'string' ? projections.title : undefined)
   }
 }
-export async function importSavedSession(ctx, client, tab) {
+/** `fresh` takes over a native session another runtime has just been driving:
+ * any earlier dsh copy of it is stale, so the import always gets a new id and
+ * re-reads the CLI transcript instead of reopening that copy. */
+export async function importSavedSession(ctx, client, tab, { fresh = false } = {}) {
   if (!tab.session_id || !tab.cwd || !tab.backend_key) throw new Error('Saved session is missing its native identity')
   const published = await client.call('/api/v1/messaging/runtime/sessions')
   const live = (published.sessions ?? []).find(row => row.backend_key === tab.backend_key
@@ -106,7 +109,7 @@ export async function importSavedSession(ctx, client, tab) {
   let workspace = registry.list().find(workspace => workspace.path === tab.cwd) ?? await registry.resolveByPath(tab.cwd)
   const profile = savedSessionProfile(runtime.profiles, tab)
   if (!profile) throw new Error(`This saved ${tab.backend_key} session has no installed inline protocol adapter`)
-  const id = savedImportIdentity(tab, profile.id, runtime.profiles.bindings, registry.archivedSessionIds)
+  const id = fresh ? freshImportIdentity(tab) : savedImportIdentity(tab, profile.id, runtime.profiles.bindings, registry.archivedSessionIds)
   const priorBinding = runtime.profiles.binding?.(id)
   if (priorBinding?.threadId && (priorBinding.threadId !== tab.session_id || priorBinding.profile.id !== profile.id)) throw new Error('Saved session identity conflicts with an existing native conversation')
   const doc = new BackendDocument(client, 'session-index'), state = await doc.read() ?? { version: 1 }

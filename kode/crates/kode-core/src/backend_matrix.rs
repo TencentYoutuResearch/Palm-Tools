@@ -9,8 +9,8 @@
 //! 决定无法单文件覆盖六环节。各层靠 `BACKEND_KEYS` golden 与
 //! `cases().len() == 17` 保持一致 —— 新增 backend 忘记登记会立刻失败。
 //!
-//! 能力不齐(仅 codebuddy / opencode 声明 acp、opencode / kimi 无 transcript 语义解析、
-//! 10 个 preset 既无 mcp_setup 也无 acp,其中只有 kimi 接了 metadata tail)由 [`tier`] 分派 `Assert` /
+//! 能力不齐(仅 codebuddy / opencode 声明 acp、opencode 无 transcript 语义解析、
+//! 10 个 preset 既无 mcp_setup 也无 acp,其中只有 kimi 接了 wire.jsonl tail)由 [`tier`] 分派 `Assert` /
 //! `Placeholder`，占位只登记原因、不写空测试假装覆盖。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,7 +90,7 @@ const PLACEHOLDER_REASONS: &[(&str, &str)] = &[
     ),
     (
         "communicate",
-        "opencode 无 transcript 解析(结构化事件走 ACP);kimi 只接 metadata;其余 9 个 preset 无 tail",
+        "opencode 无 transcript 解析(结构化事件走 ACP);其余 8 个 preset 无 tail",
     ),
     (
         "menu",
@@ -130,7 +130,7 @@ fn cases() -> Vec<Case> {
             has_acp: b.acp.is_some(),
             has_mcp: b.mcp_setup.is_some(),
             has_semantic: Backend::from_backend_key(key)
-                .map_or(false, |kind| !matches!(kind, Backend::Opencode | Backend::Kimi)),
+                .map_or(false, |kind| kind != Backend::Opencode),
             resume_style: profile_for_key(key)
                 .map(|p| p.resume_style())
                 .unwrap_or(ResumeStyle::Flag),
@@ -284,8 +284,8 @@ fn acp_capability_all() {
     assert!(spec.model_flag.is_none());
 }
 
-/// 能力分组与 golden 一致：有 jsonl 语义解析的是 7 个 backend(opencode 走 ACP、
-/// kimi 只接 metadata、其余 preset 无 tail);mcp_setup 只有其中 5 个 —— tclaude / tcodex 是
+/// 能力分组与 golden 一致：有 jsonl 语义解析的是 8 个 backend(opencode 走 ACP、
+/// 其余 8 个 preset 无 tail);mcp_setup 只有其中 5 个 —— tclaude / tcodex 是
 /// opt-in,出厂 `mcp_setup = None`(见 config.rs 的 t-backends 回归)。
 #[test]
 fn capability_groups_match_golden() {
@@ -306,6 +306,7 @@ fn capability_groups_match_golden() {
         "codebuddy",
         "codex",
         "cursor",
+        "kimi",
         "tclaude",
         "tcodex",
     ]
@@ -323,7 +324,7 @@ fn capability_groups_match_golden() {
     assert_eq!(semantic, expected_semantic);
     assert_eq!(mcp, expected_mcp);
     assert!(mcp.is_subset(&semantic));
-    assert_eq!(cases.len() - semantic.len(), 10, "10 presets have no semantic parser");
+    assert_eq!(cases.len() - semantic.len(), 9, "8 presets + opencode have no semantic parser");
 }
 
 /// 骨架自检：17 × 6 个单元格全部被分类,且每个 Placeholder 都有登记的原因。

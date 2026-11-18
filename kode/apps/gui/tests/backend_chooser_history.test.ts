@@ -14,6 +14,36 @@ test('session history reserves stable space before asynchronous results arrive',
   assert.match(historyStyles, /height:\s*208px/)
   assert.match(historyStyles, /min-height:\s*208px/)
   assert.match(historyStyles, /overflow:\s*hidden/)
+  // The slot is a fixed flex sibling of the card, never squeezed away.
+  assert.match(historyStyles, /flex-shrink:\s*0/)
+})
+
+test('new session is a single view with a backend dropdown, no phase swapping', () => {
+  assert.doesNotMatch(chooserSource, /phase\s*===\s*'(list|configure)'/)
+  assert.doesNotMatch(chooserSource, /\{#if phase/)
+  assert.match(chooserSource, /let selectedValue = \$state\(''\)/)
+  assert.match(chooserSource, /<optgroup/)
+})
+
+test('new session button requires both a backend and a working directory', () => {
+  assert.match(chooserSource, /disabled=\{submitting \|\| !selected \|\| !cwd\.trim\(\)\}/)
+})
+
+test('card keeps a fixed height so the view never jumps', () => {
+  const cardStyles = chooserSource.match(/\.card\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? ''
+
+  assert.match(cardStyles, /height:\s*min\(90vh/)
+  assert.match(cardStyles, /overflow:\s*hidden/)
+  assert.doesNotMatch(cardStyles, /overflow-y:\s*auto/)
+  assert.match(cardStyles, /box-sizing:\s*border-box/)
+})
+
+test('unused vertical space goes to session history instead of an empty gap', () => {
+  const historyStyles = chooserSource.match(/\.session-history\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? ''
+  const scrollStyles = chooserSource.match(/\.setup-scroll\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? ''
+
+  assert.match(historyStyles, /flex-grow:\s*1/)
+  assert.doesNotMatch(scrollStyles, /flex:\s*1\s*;/)
 })
 
 test('session history results scroll inside the reserved space', () => {

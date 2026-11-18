@@ -213,6 +213,9 @@ pub struct Inner {
     config_path: PathBuf,
     config: Mutex<CloudSyncConfig>,
     status: Mutex<CloudSyncStatus>,
+    /// Ticks on every status or config change; status surfaces subscribe
+    /// instead of polling.
+    status_changes: tokio::sync::watch::Sender<()>,
     generation: AtomicU64,
     boot_id: String,
     client: reqwest::Client,
@@ -229,6 +232,30 @@ pub struct Inner {
     relay_sessions_unsupported: std::sync::atomic::AtomicBool,
     /// After a failed exchange, epoch ms before which none is retried.
     upgrade_retry_at: AtomicU64,
+}
+
+struct StatusGuard<'a> {
+    status: parking_lot::MutexGuard<'a, CloudSyncStatus>,
+    changes: &'a tokio::sync::watch::Sender<()>,
+}
+
+impl std::ops::Deref for StatusGuard<'_> {
+    type Target = CloudSyncStatus;
+    fn deref(&self) -> &CloudSyncStatus {
+        &self.status
+    }
+}
+
+impl std::ops::DerefMut for StatusGuard<'_> {
+    fn deref_mut(&mut self) -> &mut CloudSyncStatus {
+        &mut self.status
+    }
+}
+
+impl Drop for StatusGuard<'_> {
+    fn drop(&mut self) {
+        self.changes.send_modify(|_| {});
+    }
 }
 
 impl CloudSyncManager {
@@ -283,6 +310,7 @@ impl CloudSyncManager {
                 config_path,
                 config: Mutex::new(config),
                 status: Mutex::new(status),
+                status_changes: tokio::sync::watch::Sender::new(()),
                 generation: AtomicU64::new(0),
                 boot_id: Uuid::new_v4().to_string(),
                 client: reqwest::Client::builder()
@@ -316,6 +344,27 @@ impl CloudSyncManager {
         status.active_backend_id = config.active_backend_id.clone();
         apply_account(&mut status, config.active_backend().and_then(|backend| backend.account.as_ref()));
         status
+    }
+
+    /// Wakes on every status or config change. Changes come in bursts and
+    /// some leave the visible status as it was, so compare `status()`
+    /// before forwarding.
+    pub fn subscribe_status(&self) -> tokio::sync::watch::Receiver<()> {
+        self.inner.status_changes.subscribe()
+    }
+
+    /// Status for writing; subscribers are woken when the guard drops.
+    fn status_mut(&self) -> StatusGuard<'_> {
+        StatusGuard {
+            status: self.inner.status.lock(),
+            changes: &self.inner.status_changes,
+        }
+    }
+
+    fn save_config(&self, config: &CloudSyncConfig) -> Result<(), String> {
+        let saved = save_config(&self.inner.config_path, config);
+        self.inner.status_changes.send_modify(|_| {});
+        saved
     }
 
     pub async fn list_workers(&self) -> Result<Value, String> {
@@ -444,13 +493,14 @@ impl CloudSyncManager {
         {
             return Err("invalid worker id".into());
         }
-        let (server_url, token) = self.device_http_context()?;
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
         let worker = url::form_urlencoded::byte_serialize(worker_id.as_bytes()).collect::<String>();
         let response = self
             .inner
             .client
             .get(format!("{server_url}/api/v1/workers/{worker}/sessions"))
             .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
             .send()
             .await
             .map_err(friendly_network_error)?;
@@ -499,7 +549,7 @@ impl CloudSyncManager {
     ) -> Result<Value, String> {
         if !matches!(
             op,
-            "input" | "interrupt" | "answer" | "plan_response" | "delete" | "rename"
+            "input" | "interrupt" | "answer" | "plan_response" | "delete" | "rename" | "model"
         ) {
             return Err(format!("unsupported Worker command: {op}"));
         }
@@ -548,6 +598,40 @@ impl CloudSyncManager {
             .json::<Value>()
             .await
             .map_err(|error| format!("invalid Worker backend response: {error}"))
+    }
+
+    pub async fn worker_models(
+        &self,
+        worker_id: &str,
+        backend_key: &str,
+    ) -> Result<Value, String> {
+        if backend_key.is_empty()
+            || backend_key.len() > 200
+            || !backend_key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err("invalid backend key".into());
+        }
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let backend =
+            url::form_urlencoded::byte_serialize(backend_key.as_bytes()).collect::<String>();
+        let response = self
+            .inner
+            .client
+            .get(format!("{server_url}/api/v1/backends/{backend}/models"))
+            .bearer_auth(token)
+            .header(WORKER_HEADER, &worker_id)
+            .send()
+            .await
+            .map_err(friendly_network_error)?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("invalid Worker model catalogue: {error}"))
     }
 
     pub async fn worker_create_session(
@@ -606,6 +690,9 @@ impl CloudSyncManager {
             .clone()
             .ok_or_else(|| "Worker is not registered with the sync server".to_string())?;
         let device = url::form_urlencoded::byte_serialize(device_id.as_bytes()).collect::<String>();
+        // A device bearer can only mint a monitor binding for itself. The
+        // resulting binding token has workers.monitor and may then target any
+        // registered Worker through X-Kode-Worker-Id.
         let response = self
             .inner
             .client
@@ -636,7 +723,7 @@ impl CloudSyncManager {
                 .find(|candidate| candidate.id == backend.id)
                 .ok_or_else(|| "cloud sync backend changed during monitor binding".to_string())?;
             current.monitor_token = Some(token.clone());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         Ok((backend.server_url, token, worker_id.to_string()))
     }
@@ -714,7 +801,7 @@ impl CloudSyncManager {
                 });
             }
             config.active_backend_id = Some(id);
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         self.reset_status_for_active_backend();
         self.restart_agent();
@@ -804,7 +891,7 @@ impl CloudSyncManager {
         if let Some(current) = config.backends.iter_mut().find(|b| b.id == backend_id) {
             current.account = Some(session.clone());
         }
-        save_config(&self.inner.config_path, &config)?;
+        self.save_config(&config)?;
         Ok(session)
     }
 
@@ -987,7 +1074,7 @@ impl CloudSyncManager {
                     backend.name = format!("Kode account · {}", current.label());
                 }
             }
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         Ok(self.status())
     }
@@ -1023,7 +1110,7 @@ impl CloudSyncManager {
             if config.active_backend_id.as_deref() == Some(backend_id) {
                 config.active_backend_id = config.backends.first().map(|backend| backend.id.clone());
             }
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
             config.active_backend_id.is_some()
         };
         self.reset_status_for_active_backend();
@@ -1047,7 +1134,7 @@ impl CloudSyncManager {
                 return Err("cloud sync backend was not found".into());
             }
             config.active_backend_id = Some(backend_id.to_string());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
         self.reset_status_for_active_backend();
         self.restart_agent();
@@ -1105,7 +1192,7 @@ impl CloudSyncManager {
                 });
             }
             config.active_backend_id = Some(id.clone());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
             id
         };
         self.reset_status_for_active_backend();
@@ -1119,7 +1206,7 @@ impl CloudSyncManager {
     fn reset_status_for_active_backend(&self) {
         let config = self.inner.config.lock();
         let active = config.active_backend();
-        let mut status = self.inner.status.lock();
+        let mut status = self.status_mut();
         status.server_url = active
             .map(|backend| backend.server_url.clone())
             .unwrap_or_default();
@@ -1180,7 +1267,7 @@ impl CloudSyncManager {
             };
             let switched = config.active_backend_id.as_deref() != Some(backend_id.as_str());
             config.active_backend_id = Some(backend_id);
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
             switched
         };
         self.reset_status_for_active_backend();
@@ -1258,9 +1345,9 @@ impl CloudSyncManager {
                 .ok_or_else(|| "cloud sync backend changed during registration".to_string())?;
             current.device_id = Some(registration.device_id.clone());
             current.device_token = Some(registration.device_token.clone());
-            save_config(&self.inner.config_path, &config)?;
+            self.save_config(&config)?;
         }
-        self.inner.status.lock().device_id = Some(registration.device_id.clone());
+        self.status_mut().device_id = Some(registration.device_id.clone());
         Ok(registration)
     }
 
@@ -1278,7 +1365,7 @@ impl CloudSyncManager {
             match result {
                 Ok(()) => {}
                 Err(error) => {
-                    let mut status = self.inner.status.lock();
+                    let mut status = self.status_mut();
                     status.state = "offline".into();
                     status.connected = false;
                     status.sync_enabled = false;
@@ -1311,7 +1398,7 @@ impl CloudSyncManager {
             return Err("sign in to the account relay first".into());
         }
         let session = self.fresh_session(&backend.id).await?;
-        self.inner.status.lock().device_id = Some(installation_id.clone());
+        self.status_mut().device_id = Some(installation_id.clone());
         Ok((installation_id, session.access_token, backend.kind))
     }
 
@@ -1342,7 +1429,7 @@ impl CloudSyncManager {
                 .map_err(|_| "invalid device token".to_string())?,
         );
         {
-            let mut status = self.inner.status.lock();
+            let mut status = self.status_mut();
             status.state = "connecting".into();
             status.last_error = None;
         }
@@ -1350,7 +1437,7 @@ impl CloudSyncManager {
             .await
             .map_err(|error| format!("WebSocket connect failed: {error}"))?;
         {
-            let mut status = self.inner.status.lock();
+            let mut status = self.status_mut();
             status.connected = true;
             status.state = idle_state(kind).into();
             status.last_error = None;
@@ -1503,7 +1590,7 @@ impl CloudSyncManager {
     }
 
     fn set_binding_status(&self, kind: BackendKind, enabled: bool, binding_count: u64) {
-        let mut status = self.inner.status.lock();
+        let mut status = self.status_mut();
         status.connected = true;
         status.sync_enabled = enabled;
         status.binding_count = binding_count;
@@ -1738,7 +1825,7 @@ impl CloudSyncManager {
         while receipts.len() > MAX_COMMAND_RECEIPTS {
             receipts.pop_front();
         }
-        save_config(&self.inner.config_path, &config)
+        self.save_config(&config)
     }
 }
 
@@ -1754,7 +1841,9 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
         .lock()
         .values()
         .filter(|session| {
-            session.pty.as_ref().is_some_and(|pty| pty.is_alive())
+            (session.pty.as_ref().is_some_and(|pty| pty.is_alive())
+                || ctx.acp.get(session.id).is_some()
+                || session.args.iter().any(|arg| arg == "--acp"))
                 && !matches!(
                     session.state.status,
                     kode_core::session::state::Status::Exited(_)
@@ -2158,6 +2247,71 @@ mod tests {
         assert_eq!(disk.backends[0].account.as_ref().unwrap().refresh_token, "refresh-1");
     }
 
+    #[tokio::test]
+    async fn worker_session_list_uses_monitor_binding_for_selected_worker() {
+        use axum::{routing::get, Json, Router};
+
+        let app = Router::new().route(
+            "/api/v1/workers/:worker_id/sessions",
+            get(
+                |axum::extract::Path(worker_id): axum::extract::Path<String>,
+                 headers: axum::http::HeaderMap| async move {
+                    let authorized = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .is_some_and(|value| value == "Bearer monitor-token")
+                        && headers
+                            .get("x-kode-worker-id")
+                            .is_some_and(|value| value == worker_id.as_str());
+                    let status = if authorized {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::UNAUTHORIZED
+                    };
+                    (
+                        status,
+                        Json(json!({
+                            "sessions": [{
+                                "id": 42,
+                                "title": "sibling session",
+                                "backend_key": "tcodex"
+                            }]
+                        })),
+                    )
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cloud-sync.json");
+        std::fs::write(
+            &config_path,
+            json!({
+                "installation_id": "monitor-client",
+                "active_backend_id": "local",
+                "backends": [{
+                    "id": "local",
+                    "name": "Local",
+                    "server_url": base,
+                    "device_id": "self",
+                    "device_token": "device-token",
+                    "monitor_token": "monitor-token"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manager = CloudSyncManager::with_config_path(
+            crate::build_test_ctx(kode_core::config::Config::default(), "monitor".into()),
+            config_path,
+        );
+
+        let sessions = manager.worker_sessions("sibling").await.unwrap();
+        assert_eq!(sessions["sessions"][0]["title"], "sibling session");
+    }
+
     /// A provider session saved before relay sessions is exchanged on its
     /// next use, and from then on refreshes at the relay, not the issuer.
     #[tokio::test]
@@ -2292,6 +2446,27 @@ mod tests {
         for session in saved {
             assert_eq!(ctx.runtimes.history(session["local_id"].as_u64().unwrap(), 0, 10).unwrap().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn snapshots_include_structured_acp_sessions_without_a_pty() {
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "test".into());
+        ctx.sessions.lock().insert(
+            7,
+            kode_core::session::Session::structured(
+                7,
+                "codebuddy",
+                "codebuddy",
+                std::path::Path::new("/tmp"),
+                "acp-session".into(),
+                "claude-sonnet-5".into(),
+            ),
+        );
+        let snapshots = session_snapshots(&ctx);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0]["local_id"], 7);
+        assert_eq!(snapshots[0]["dto"]["backend_key"], "codebuddy");
+        assert_eq!(snapshots[0]["dto"]["transport_kind"], "acp");
     }
 
     #[test]
@@ -2542,6 +2717,29 @@ mod tests {
         assert!(!summaries[0].active);
         assert!(summaries[1].active);
         assert!(summaries[0].managed);
+    }
+
+
+    /// Status surfaces are pushed changes instead of polling: writes to the
+    /// status and saved config both wake subscribers; reads do not.
+    #[tokio::test]
+    async fn status_writes_and_config_saves_wake_subscribers() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::build_test_ctx(kode_core::config::Config::default(), "status-push".into());
+        let manager = CloudSyncManager::with_config_path(ctx, dir.path().join("cloud-sync.json"));
+        let mut changes = manager.subscribe_status();
+        changes.mark_unchanged();
+
+        let _ = manager.status();
+        assert!(!changes.has_changed().unwrap());
+
+        manager.status_mut().connected = true;
+        tokio::time::timeout(Duration::from_secs(1), changes.changed()).await.unwrap().unwrap();
+        assert!(manager.status().connected);
+
+        let config = manager.inner.config.lock().clone();
+        manager.save_config(&config).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), changes.changed()).await.unwrap().unwrap();
     }
 }
 

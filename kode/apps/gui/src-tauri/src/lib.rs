@@ -23,6 +23,7 @@ mod shared_services;
 mod commands;
 mod deploy;
 mod endpoints;
+mod extensions;
 mod memory;
 mod memory_mcp;
 mod model_monitor;
@@ -94,7 +95,7 @@ pub fn run() {
         builder
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -108,7 +109,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             #[cfg(windows)]
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 window.set_decorations(false)?;
             }
             let handle = app.handle().clone();
@@ -135,10 +136,19 @@ pub fn run() {
                 &app_state.protocol_ctx,
             ));
             cloud_sync.start_saved();
+            crate::cloud_sync::start_status_feed(handle.clone());
             if std::env::var("KODE_DISABLE_AUTO_SETUP").as_deref()!=Ok("1"){shared_services::start_saved(app_state.ctx.backend_configs.read().clone());}
             app.manage(app_state);
             app.manage(cloud_sync);
             app.manage(shell_pty::ShellPtyManager::new());
+            match extensions::ExtensionHost::new() {
+                Ok(host) => {
+                    host.attach(handle.clone());
+                    app.manage(host);
+                    extensions::seed_bundled_in_background(handle.clone());
+                }
+                Err(error) => tracing::warn!(%error, "extension host unavailable"),
+            }
             // Phase 9.1:启动本地协议桥(127.0.0.1:47870 默认)
             spawn_bridge(ctx_for_bridge, BridgeConfig::default());
             // M4:memory review queue —— 共享 ~/.kode-memory(env KODE_MEMORY_ROOT 可覆盖),
@@ -196,6 +206,8 @@ pub fn run() {
             commands::get_pairing_payload,
             backend_runtime::integration_action,
             backend_runtime::shared_runtime_sessions,
+            backend_runtime::shared_runtime_request,
+            backend_runtime::shared_runtime_archive,
             backend_runtime::agent_hub_action,
             backend_runtime::shared_session_handoff,
             shared_services::setup_shared_services,
@@ -210,6 +222,7 @@ pub fn run() {
             cloud_sync::cloud_sync_worker_history,
             cloud_sync::cloud_sync_worker_command,
             cloud_sync::cloud_sync_worker_backends,
+            cloud_sync::cloud_sync_worker_models,
             cloud_sync::cloud_sync_worker_create_session,
             cloud_sync::cloud_account_send_code,
             cloud_sync::cloud_account_sign_in,
@@ -345,6 +358,18 @@ pub fn run() {
             shell_pty::subscribe_shell_bytes,
             shell_pty::unsubscribe_shell_bytes,
             shell_pty::get_shell_snapshot,
+            // Extensions: install/enable/remove at runtime, backends, session views
+            extensions::extension_list,
+            extensions::extension_install,
+            extensions::extension_uninstall,
+            extensions::extension_set_enabled,
+            extensions::extension_start,
+            extensions::extension_restart,
+            extensions::extension_logs,
+            extensions::view::extension_view_show,
+            extensions::view::extension_view_hide,
+            extensions::view::extension_view_eval,
+            extensions::view::extension_view_post,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -355,6 +380,9 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 let state = app_handle.state::<AppState>();
                 state.specops.shutdown_all();
+                if let Some(host) = app_handle.try_state::<extensions::ExtensionHost>() {
+                    host.shutdown();
+                }
             }
             // macOS 点击 Dock 图标会触发 Reopen。即使 model monitor 等辅助窗口
             // 仍可见，也必须显式恢复 main；否则最小化后的主窗口不会重新出现。

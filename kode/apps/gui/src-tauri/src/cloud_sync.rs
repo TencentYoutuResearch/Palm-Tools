@@ -75,6 +75,15 @@ impl CloudSyncManager {
             .worker_backends(worker_id)
             .await
     }
+    pub async fn worker_models(
+        &self,
+        worker_id: &str,
+        backend_key: &str,
+    ) -> Result<Value, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_models(worker_id, backend_key)
+            .await
+    }
     pub async fn worker_create_session(
         &self,
         worker_id: &str,
@@ -134,6 +143,54 @@ impl CloudSyncManager {
         )
     }
 }
+/// Forwards the service's status stream to the webview as `cloud-status`,
+/// so the sidebar and the account pane follow the agent socket connecting
+/// or dropping without reading on a timer. Reconnects when the service
+/// restarts; a service too old to stream just leaves surfaces reading
+/// status on open.
+pub fn start_status_feed(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut backoff = std::time::Duration::from_secs(1);
+        loop {
+            let started = std::time::Instant::now();
+            if let Err(error) = forward_status(&app).await {
+                tracing::debug!(%error, "cloud status stream closed");
+            }
+            if started.elapsed() > std::time::Duration::from_secs(30) {
+                backoff = std::time::Duration::from_secs(1);
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+        }
+    });
+}
+
+async fn forward_status(app: &tauri::AppHandle) -> Result<(), String> {
+    use futures_util::StreamExt;
+    use tauri::Emitter;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
+    let (_, document, token) = crate::workbench_state::connection()
+        .await
+        .map_err(|e| e.to_string())?;
+    let base = document.trim_end_matches("/workbench/documents/session-index");
+    let url = format!("ws{}/cloud/status/ws", base.strip_prefix("http").ok_or("unexpected service URL")?);
+    let mut request = url.into_client_request().map_err(|e| e.to_string())?;
+    request.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {}", token.trim())).map_err(|e| e.to_string())?,
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|e| e.to_string())?;
+    while let Some(message) = socket.next().await {
+        if let Message::Text(text) = message.map_err(|e| e.to_string())? {
+            let status: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            let _ = app.emit("cloud-status", status);
+        }
+    }
+    Ok(())
+}
+
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
@@ -208,6 +265,14 @@ pub async fn cloud_sync_worker_backends(
     worker_id: String,
 ) -> Result<Value, String> {
     manager.worker_backends(&worker_id).await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_models(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    backend_key: String,
+) -> Result<Value, String> {
+    manager.worker_models(&worker_id, &backend_key).await
 }
 #[tauri::command]
 pub async fn cloud_sync_worker_create_session(

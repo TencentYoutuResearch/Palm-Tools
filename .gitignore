@@ -29,6 +29,8 @@ kode/apps/gui/src-tauri/binaries
 # 部署用 musl tarball —— build-remote-memory-bridge.sh --musl 产出后 copy 进来,
 # 不入库(dev 模式下 Tauri 找不到也不报错,只有 release 打包才需要)
 kode/apps/gui/src-tauri/resources/*.tar.gz
+# 内置插件在打包时从 kode-plugins 复制进来(run.sh ensure_bundled_extensions),不入库
+kode/apps/gui/src-tauri/resources/extensions/
 kode/services/kode-server-go/deploy/config.yaml
 # 中心同步部署域名/ACME 邮箱等主机配置,由 .env.sync.example 初始化。
 kode/deploy/.env.sync

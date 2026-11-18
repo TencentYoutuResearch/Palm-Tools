@@ -118,6 +118,19 @@ validate_prebuilt_linux_bundle() {
   info "使用 CI 预编译 Linux bundle: $resource"
 }
 
+# Extensions shipped inside the app and installed on first start. Each is
+# built from this repository, so a commit always bundles the same extension.
+ensure_bundled_extensions() {
+  local target="$TAURI_DIR/resources/extensions"
+  rm -rf "$target"
+  mkdir -p "$target"
+  # Tauri bundles the directory even when no extension was built.
+  printf 'Bundled Kode extensions, copied here by run.sh at build time.\n' > "$target/README.md"
+  info "构建内置插件 kode-new-ui(integrations/dsh)"
+  (cd "$ROOT_DIR/integrations/dsh" && node scripts/build-kode-extension.js)
+  cp -R "$ROOT_DIR/integrations/dsh/dist/kode-extension" "$target/kode-new-ui"
+}
+
 ensure_sync_server_bundle() {
   local resource="$TAURI_DIR/resources/kode-sync-server-linux-musl.tar.gz"
   if [ "${KODE_USE_PREBUILT_LINUX_BUNDLES:-0}" = "1" ]; then
@@ -179,19 +192,19 @@ set_tauri_resource_args() {
   if [ -f "$bridge_resource" ] && [ -f "$sync_resource" ]; then
     info "remote bridge 与 sync server 资源已存在,将打入 app"
   else
-    local resources='["resources/skills"]'
+    local resources='["resources/skills","resources/extensions"]'
     if [ -f "$bridge_resource" ]; then
-      resources='["resources/skills","resources/kode-remote-memory-bridge-linux-musl.tar.gz"]'
+      resources='["resources/skills","resources/extensions","resources/kode-remote-memory-bridge-linux-musl.tar.gz"]'
     fi
     if [ -f "$sync_resource" ]; then
       if [ -f "$bridge_resource" ]; then
-        resources='["resources/skills","resources/kode-remote-memory-bridge-linux-musl.tar.gz","resources/kode-sync-server-linux-musl.tar.gz"]'
+        resources='["resources/skills","resources/extensions","resources/kode-remote-memory-bridge-linux-musl.tar.gz","resources/kode-sync-server-linux-musl.tar.gz"]'
       else
-        resources='["resources/skills","resources/kode-sync-server-linux-musl.tar.gz"]'
+        resources='["resources/skills","resources/extensions","resources/kode-sync-server-linux-musl.tar.gz"]'
       fi
     fi
     warn "部分 Linux 部署资源不存在,本次只打包现有资源"
-    # 数组 override 会替换 tauri.conf.json 的全部 resources,因此始终保留 skills。
+    # 数组 override 会替换 tauri.conf.json 的全部 resources,因此始终保留 skills 与 extensions。
     TAURI_RESOURCE_ARGS=(--config "{\"bundle\":{\"resources\":$resources}}")
   fi
 }
@@ -315,6 +328,7 @@ case "$CMD" in
     validate_updater_signing_key
     ensure_sync_server_bundle
     ensure_remote_bridge_bundle
+    ensure_bundled_extensions
     APP_PATH="$ROOT_DIR/target/release/bundle/macos/kode.app"
     DMG_DIR="$ROOT_DIR/target/release/bundle/dmg"
     # 避免打包中途失败后误装上一次遗留的 DMG。
