@@ -32,6 +32,7 @@ import { BuilderView, PlanningHostContext, BuilderDraftSettings, BuilderHomeSett
 import { usePlanningChoice } from './builder-planning-controls.js'
 import { PLANNING_SLOT, PlanningConversationPanel } from './planning-session-embed.js'
 import { OrbitSessionView } from './orbit-session-view.js'
+import { resolveViewTabList } from './session-view-tabs.js'
 import { ProcessView } from './process-view.js'
 import { installManagedSessionUi } from './managed-session-ui.js'
 import { styles } from './styles.js'
@@ -400,7 +401,7 @@ function applyReady(ctx) {
     useEffect(() => { if (processTarget) setShowProcess(true) }, [processTarget])
     // One right-hand inspector seat: execution details or this DM's settings.
     const [showSettings, setShowSettings] = useState(false), [viewTab, setViewTab] = useState('discussion')
-    const TabList = ctx.get('uiConversation')?.kodeChannelViewTabs
+    const TabList = resolveViewTabList(ctx)
     const settingsButton = useRef(null)
     const closeSettings = () => { setShowSettings(false); setViewTab('discussion'); requestAnimationFrame(() => settingsButton.current?.focus()) }
     const inlineRequest = useSyncExternalStore(inlineSettings.subscribe, inlineSettings.get)
@@ -535,7 +536,7 @@ function applyReady(ctx) {
       void discussions.openTeamDm(nativeTeam, state.workspace).catch(() => {})
     }, [nativeTeamKey])
     if (state.orbitSessionId && host.renderSession) return h(OrbitSessionView, { key: state.orbitSessionId, host, views: teamSidebar.sessionViews, viewSource: teamSidebar.sessionViewSource, sessionId: state.orbitSessionId, actions: h(NativeHandoff, { sessionId: state.orbitSessionId }), onClose: () => view.openOrbitSession(null) })
-    if (builder) return h(PlanningHostContext.Provider, {value:host}, h(BuilderControlsContext.Provider, {value:ctx.get('kodeAgentControls')}, h(TeamSidebarContext.Provider, {value:sidebar}, h(BuilderView, { initialTeam, TabList:ctx.get('uiConversation')?.kodeChannelViewTabs, request: requestCollabRead, storage: outboxStorage, appearance, onScope: setBuilderShows, onTeamSaved: () => { void data.loadTeams() } }))))
+    if (builder) return h(PlanningHostContext.Provider, {value:host}, h(BuilderControlsContext.Provider, {value:ctx.get('kodeAgentControls')}, h(TeamSidebarContext.Provider, {value:sidebar}, h(BuilderView, { initialTeam, TabList:resolveViewTabList(ctx), request: requestCollabRead, storage: outboxStorage, appearance, onScope: setBuilderShows, onTeamSaved: () => { void data.loadTeams() } }))))
     if(state.workspace&&(!catalogue.ready||!catalogue.keys.includes(workspaceScopeKey(state.workspace))))return h('section',{className:'kode-collab-empty'},h('p',{role:'status'},'正在核对登记工作区…'))
     if (team && ((state.workspace && !teamInWorkspace(team,state.workspace)) || (!state.workspace && team.spec?.workspace_refs?.length))) return h('section',{className:'kode-collab-empty'},h('h1',null,'请从所属工作区打开团队'),h('p',null,'频道、任务与团队资源按已登记工作区显示。'))
     if (nativeTeam) return h('section', { className: 'kode-collab-empty' }, h('p', { role: 'status' }, '正在打开团队私信…'))

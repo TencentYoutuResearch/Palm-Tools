@@ -375,7 +375,7 @@ function ConversationQuestions({ team, target, disabled, onSelect, compact = fal
   return h2(
     "section",
     { className: "kode-collab-conversation-questions", "aria-label": "\u9009\u62E9\u8981\u56DE\u7B54\u7684\u95EE\u9898" },
-    h2("style", null, `.kode-collab-conversation-questions{min-width:0;max-height:30dvh;overflow:auto;overflow-wrap:anywhere}.kode-collab-conversation-questions .kode-collab-toolbar{flex-wrap:wrap}.kode-collab-conversation-questions ul{margin:6px 0 12px;padding-inline-start:24px}.kode-collab-question-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.kode-collab-question-heading .kode-collab-button{flex:none}`),
+    h2("style", null, `.kode-collab-conversation-questions{min-width:0;max-height:30dvh;overflow:auto;overflow-wrap:anywhere}.kode-collab-conversation-questions .kode-collab-toolbar{flex-wrap:wrap}.kode-collab-conversation-questions .kode-trigger{min-width:0;max-width:100%;overflow:hidden}.kode-collab-conversation-questions .kode-trigger span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-collab-conversation-questions ul{margin:6px 0 12px;padding-inline-start:16px}.kode-collab-conversation-questions :is(strong,p,li){min-width:0;overflow-wrap:anywhere}.kode-collab-question-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}.kode-collab-question-heading .kode-collab-button{flex:0 1 auto;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}`),
     h2(
       "div",
       { className: "kode-collab-toolbar" },
@@ -2951,6 +2951,32 @@ var classes = () => {
   const prefix = nativeCssPrefix(CONVERSATION_CSS, "viewTabs");
   return prefix ? { tabs: `${prefix}_tabs`, viewTabs: `${prefix}_viewTabs`, tab: `${prefix}_tab`, active: `${prefix}_tabActive`, tabLabel: `${prefix}_tabLabel` } : null;
 };
+function FallbackViewTabList({ tabs, value, onSelect }) {
+  const css = import_react17.default.useMemo(classes, []);
+  return h13(
+    "div",
+    { className: css?.tabs },
+    h13(
+      "div",
+      { className: css?.viewTabs, role: "tablist", "data-conversation-tabs": "" },
+      tabs.map((tab) => h13(
+        "button",
+        {
+          key: tab.id,
+          type: "button",
+          role: "tab",
+          "aria-selected": tab.id === value,
+          className: [css?.tab, tab.id === value && css?.active].filter(Boolean).join(" ") || void 0,
+          onClick: () => onSelect(tab.id)
+        },
+        h13("span", { className: css?.tabLabel }, tab.label)
+      ))
+    )
+  );
+}
+function resolveViewTabList(ctx) {
+  return ctx.get("uiConversation")?.kodeChannelViewTabs ?? FallbackViewTabList;
+}
 function createTabbedConversationView(source) {
   return function TabbedConversationView(props) {
     const sessionSource = import_react17.default.useMemo(() => source.forSession?.(props.sessionId) ?? source, [source, props.sessionId]);
@@ -4020,7 +4046,7 @@ function installDiscussions(ctx, { storage, teams = () => [], renderTeamAvatar, 
         live = false;
       };
     }, [key2]);
-    return h18("section", { className: "kode-discussion-home" }, h18(Icon, { name: "channel", size: 28 }), h18("h1", null, "\u5728\u9891\u9053\u4E2D\u534F\u4F5C"), onBuilder && h18(import_dsh_client_ui_primitives9.Button, { variant: "primary", onClick: onBuilder }, "\u521B\u5EFA\u56E2\u961F"), h18("p", null, "\u9700\u6C42\u3001\u8BA8\u8BBA\u548C\u4EFB\u52A1\u5F52\u6863\u96C6\u4E2D\u5728\u9891\u9053\u91CC\u3002\u79C1\u4FE1\u7528\u4E8E\u6838\u5FC3\u66F4\u65B0\uFF0C\u6267\u884C\u8BB0\u5F55\u53EF\u4ECE\u5BF9\u5E94\u4EFB\u52A1\u6253\u5F00\u3002"), h18("p", null, requirementGuidance), h18("p", null, requirementExample), !scope ? h18("p", null, "\u5148\u4ECE\u4FA7\u8FB9\u680F\u9009\u62E9\u4E00\u4E2A\u5DE5\u4F5C\u533A\u3002") : h18(import_react22.default.Fragment, null, h18("div", { className: "kode-discussion-home-links" }, (page?.items ?? []).filter((s) => s.kind === "channel" && s.enabled).map((s) => h18(import_dsh_client_ui_primitives9.Button, { key: s.id, onClick: () => select(scope, s) }, h18(Icon, { name: "channel", size: 16 }), s.title))), page && !page.items.some((s) => s.kind === "channel" && s.enabled) && h18("p", null, "\u70B9\u51FB\u5DE6\u4FA7\u300C\u9891\u9053\u300D\u65C1\u7684 + \u521B\u5EFA\u7B2C\u4E00\u4E2A\u9891\u9053\u3002\u539F\u6709\u79C1\u4FE1\u4E0D\u4F1A\u88AB\u79FB\u52A8\u6216\u53D1\u5E03\u3002"), error && h18("p", { role: "alert" }, error)));
+    return h18("section", { className: "kode-discussion-home" }, h18(Icon, { name: "channel", size: 28 }), h18("h1", null, "\u5728\u9891\u9053\u4E2D\u534F\u4F5C"), onBuilder && h18(import_dsh_client_ui_primitives9.Button, { variant: "primary", onClick: onBuilder }, "\u521B\u5EFA\u56E2\u961F"), h18("p", null, "\u9700\u6C42\u3001\u8BA8\u8BBA\u548C\u4EFB\u52A1\u5F52\u6863\u96C6\u4E2D\u5728\u9891\u9053\u91CC\u3002\u79C1\u4FE1\u7528\u4E8E\u6838\u5FC3\u66F4\u65B0\uFF0C\u6267\u884C\u8BB0\u5F55\u53EF\u4ECE\u5BF9\u5E94\u4EFB\u52A1\u6253\u5F00\u3002"), h18("p", null, requirementGuidance), h18("p", null, requirementExample), !scope ? h18("p", null, "\u5148\u4ECE\u4FA7\u8FB9\u680F\u9009\u62E9\u4E00\u4E2A\u5DE5\u4F5C\u533A\u3002") : h18(import_react22.default.Fragment, null, h18("div", { className: "kode-discussion-home-links" }, (page?.items ?? []).filter((s) => s.kind === "channel" && s.enabled).map((s) => h18(import_dsh_client_ui_primitives9.Button, { key: s.id, onClick: () => select(scope, s) }, h18(Icon, { name: "channel", size: 16 }), s.title))), page && !page.items.some((s) => s.kind === "channel" && s.enabled) && h18("p", null, "\u70B9\u51FB\u5DE6\u4FA7\u300C\u9891\u9053\u300D\u65C1\u7684 + \u521B\u5EFA\u7B2C\u4E00\u4E2A\u9891\u9053\u3002"), error && h18("p", { role: "alert" }, error)));
   }
   function Main() {
     useVersion();
@@ -4036,7 +4062,7 @@ function installDiscussions(ctx, { storage, teams = () => [], renderTeamAvatar, 
       if (selected?.thread) heading.current?.focus();
     }, [selectionKey]);
     if (!selected || !sameDiscussionScope(selected.scope, activeScope)) return h18(import_react22.default.Fragment, null, h18("style", null, STYLES), h18(ChannelHome, { key: activeScope ? discussionKey(activeScope) : "unscoped" }));
-    const { scope, surface, thread } = selected, key2 = discussionKey(scope) + ":" + surface.id, TabList = ctx.get("uiConversation")?.kodeChannelViewTabs;
+    const { scope, surface, thread } = selected, key2 = discussionKey(scope) + ":" + surface.id, TabList = resolveViewTabList(ctx);
     const dmTeam = surface.kind === "dm" && surface.team_ids?.length === 1 ? teams().find((t) => t.home_hub === scope.home_hub && t.id === surface.team_ids[0]) : null;
     const interactiveDm = dmTeam?.spec?.execution_mode === "interactive_native";
     const hasTabs = !!TabList && (interactiveDm || surface.kind === "channel");
@@ -7083,7 +7109,7 @@ function TeamManagementView({ team, request, storage, controls, focusInstruction
       generation.current++;
       setConfiguration(row2);
       setMessage(row2.spec.execution_mode === "interactive_native" ? `\u5DF2\u4FDD\u5B58\u7B2C ${row2.revision} \u7248\u914D\u7F6E\uFF0C\u8EAB\u4EFD\u4E0E\u5386\u53F2\u4FDD\u6301\u4E0D\u53D8\u3002\u5C1A\u672A\u53D1\u9001\u4EFB\u52A1\uFF1B\u8BF7\u5728\u4E0B\u65B9\u5355\u72EC\u786E\u8BA4\u5F53\u524D\u7248\u672C\u3002` : `\u5DF2\u4FDD\u5B58\u7B2C ${row2.revision} \u7248\u8349\u7A3F\uFF0C\u5C1A\u672A\u6FC0\u6D3B\u3002`);
-    } }), configuration.spec.execution_mode === "interactive_native" && h34(TeamActivationView, { key: generation.current, team: configuration, storage })),
+    } }), h34(TeamActivationView, { key: generation.current, team: configuration, storage })),
     message && h34("p", { role: "status" }, message)
   );
 }
@@ -13514,7 +13540,7 @@ function applyReady(ctx) {
       if (processTarget) setShowProcess(true);
     }, [processTarget]);
     const [showSettings, setShowSettings] = useState6(false), [viewTab, setViewTab] = useState6("discussion");
-    const TabList = ctx.get("uiConversation")?.kodeChannelViewTabs;
+    const TabList = resolveViewTabList(ctx);
     const settingsButton = useRef5(null);
     const closeSettings = () => {
       setShowSettings(false);
@@ -13728,7 +13754,7 @@ function applyReady(ctx) {
       });
     }, [nativeTeamKey]);
     if (state.orbitSessionId && host.renderSession) return h71(OrbitSessionView, { key: state.orbitSessionId, host, views: teamSidebar.sessionViews, viewSource: teamSidebar.sessionViewSource, sessionId: state.orbitSessionId, actions: h71(NativeHandoff, { sessionId: state.orbitSessionId }), onClose: () => view.openOrbitSession(null) });
-    if (builder) return h71(PlanningHostContext.Provider, { value: host }, h71(BuilderControlsContext.Provider, { value: ctx.get("kodeAgentControls") }, h71(TeamSidebarContext.Provider, { value: sidebar }, h71(BuilderView, { initialTeam, TabList: ctx.get("uiConversation")?.kodeChannelViewTabs, request: requestCollabRead, storage: outboxStorage, appearance, onScope: setBuilderShows, onTeamSaved: () => {
+    if (builder) return h71(PlanningHostContext.Provider, { value: host }, h71(BuilderControlsContext.Provider, { value: ctx.get("kodeAgentControls") }, h71(TeamSidebarContext.Provider, { value: sidebar }, h71(BuilderView, { initialTeam, TabList: resolveViewTabList(ctx), request: requestCollabRead, storage: outboxStorage, appearance, onScope: setBuilderShows, onTeamSaved: () => {
       void data.loadTeams();
     } }))));
     if (state.workspace && (!catalogue.ready || !catalogue.keys.includes(workspaceScopeKey(state.workspace)))) return h71("section", { className: "kode-collab-empty" }, h71("p", { role: "status" }, "\u6B63\u5728\u6838\u5BF9\u767B\u8BB0\u5DE5\u4F5C\u533A\u2026"));

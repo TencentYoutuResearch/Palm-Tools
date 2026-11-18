@@ -6,6 +6,7 @@ import {useDiscussionSidebarDirectory} from './discussion-sidebar-directory.js'
 import {DiscussionTaskPanel,discussionTaskStyles} from './discussion-task-ui.js'
 import {collaborationLayout} from './collaboration-layout.js'
 import {createScopeSource} from './team-sidebar.js'
+import {resolveViewTabList} from './session-view-tabs.js'
 import {ClarificationCard,clarificationStyles} from './clarification-card.js'
 import * as conversationModule from '@kode/dsh-composer'
 import {portableComposerSupport,portableDiscussionProps} from './portable-composer.js'
@@ -160,14 +161,14 @@ export function installDiscussions(ctx,{storage,teams=()=>[],renderTeamAvatar,re
  function ChannelHome(){
   const [page,setPage]=useState(null),[error,setError]=useState(''),scope=activeScope,key=scope?discussionKey(scope):''
   useEffect(()=>{let live=true;setPage(null);setError('');if(scope)requestDiscussion('surfaces',discussionScope(scope)).then(data=>{if(!sameDiscussionScope(data.scope,scope)||data.items.some(s=>!sameDiscussionScope(s.scope,scope)))throw Error('scope mismatch');if(live)setPage(data)}).catch(()=>{if(live)setError('频道暂不可用，请从左侧重试。')});return()=>{live=false}},[key])
-  return h('section',{className:'kode-discussion-home'},h(Icon,{name:'channel',size:28}),h('h1',null,'在频道中协作'),onBuilder&&h(Button,{variant:'primary',onClick:onBuilder},'创建团队'),h('p',null,'需求、讨论和任务归档集中在频道里。私信用于核心更新，执行记录可从对应任务打开。'),h('p',null,requirementGuidance),h('p',null,requirementExample),!scope?h('p',null,'先从侧边栏选择一个工作区。'):h(React.Fragment,null,h('div',{className:'kode-discussion-home-links'},(page?.items??[]).filter(s=>s.kind==='channel'&&s.enabled).map(s=>h(Button,{key:s.id,onClick:()=>select(scope,s)},h(Icon,{name:'channel',size:16}),s.title))),page&&!page.items.some(s=>s.kind==='channel'&&s.enabled)&&h('p',null,'点击左侧「频道」旁的 + 创建第一个频道。原有私信不会被移动或发布。'),error&&h('p',{role:'alert'},error)))
+  return h('section',{className:'kode-discussion-home'},h(Icon,{name:'channel',size:28}),h('h1',null,'在频道中协作'),onBuilder&&h(Button,{variant:'primary',onClick:onBuilder},'创建团队'),h('p',null,'需求、讨论和任务归档集中在频道里。私信用于核心更新，执行记录可从对应任务打开。'),h('p',null,requirementGuidance),h('p',null,requirementExample),!scope?h('p',null,'先从侧边栏选择一个工作区。'):h(React.Fragment,null,h('div',{className:'kode-discussion-home-links'},(page?.items??[]).filter(s=>s.kind==='channel'&&s.enabled).map(s=>h(Button,{key:s.id,onClick:()=>select(scope,s)},h(Icon,{name:'channel',size:16}),s.title))),page&&!page.items.some(s=>s.kind==='channel'&&s.enabled)&&h('p',null,'点击左侧「频道」旁的 + 创建第一个频道。'),error&&h('p',{role:'alert'},error)))
  }
  function Main(){
   useVersion();const [full,setFull]=useState(false),[viewTab,setViewTab]=useState('discussion'),[latestSessionId,setLatestSessionId]=useState(null),[contextMenuOpen,setContextMenuOpen]=useState(false),heading=useRef(null)
   const selectionKey=selected?discussionKey(selected.scope)+':'+selected.surface.id+':'+selected.thread:''
   useEffect(()=>{setFull(false);setLatestSessionId(null);setContextMenuOpen(false);const wanted=requestedTab&&selected&&requestedTab.surfaceId===selected.surface.id?requestedTab.tab:'discussion';requestedTab=null;setViewTab(wanted);if(selected?.thread)heading.current?.focus()},[selectionKey])
   if(!selected||!sameDiscussionScope(selected.scope,activeScope))return h(React.Fragment,null,h('style',null,STYLES),h(ChannelHome,{key:activeScope?discussionKey(activeScope):'unscoped'}))
-  const {scope,surface,thread}=selected,key=discussionKey(scope)+':'+surface.id,TabList=ctx.get('uiConversation')?.kodeChannelViewTabs
+  const {scope,surface,thread}=selected,key=discussionKey(scope)+':'+surface.id,TabList=resolveViewTabList(ctx)
   const dmTeam=surface.kind==='dm'&&surface.team_ids?.length===1?teams().find(t=>t.home_hub===scope.home_hub&&t.id===surface.team_ids[0]):null
   const interactiveDm=dmTeam?.spec?.execution_mode==='interactive_native'
   const hasTabs=!!TabList&&(interactiveDm||surface.kind==='channel')

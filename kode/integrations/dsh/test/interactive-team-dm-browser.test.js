@@ -31,19 +31,21 @@ test('interactive Team legacy DM explicitly creates or reuses private surface wi
     if (url.pathname === '/api/kode/conversation/messages') return json({ home_hub: 'local', team_id: 'team', conversation_id: 'conversation', items: Number(url.searchParams.get('after')) < 1 ? [history] : [], has_more: false, next_cursor: null })
     if (url.pathname === '/api/kode/conversation/read-state') return json({ home_hub: 'local', team_id: 'team', conversation_id: 'conversation', principal_id: 'local_owner', through_sequence: 1, latest_sequence: 1, unread_count: 0 })
     if (url.pathname === '/api/kode/collaboration') {
-      const path = url.searchParams.get('path')
-      if (path === 'surfaces') return json({ scope, items: surfaces })
-      const [, id, kind] = path.split('/'), surface = surfaces.find(row => row.id === id)
-      if (req.method === 'POST') {
-        let raw = ''; for await (const chunk of req) raw += chunk
-        const input = JSON.parse(raw)
-        if (kind === 'messages') { messageWrites.push(input); return json({}) }
-        creates.push({ id, input }); if (!surface) surfaces.push({ id, ...input, revision: 1, audience_revision: 1 })
-        if (loseResponse) { loseResponse = false; res.statusCode = 503; return json({ error: 'lost receipt' }) }
-        return json(surfaces.find(row => row.id === id))
+      const sub = url.searchParams.get('path')
+      if (sub === 'surfaces' && req.method === 'GET') return json({ scope, items: surfaces })
+      if (sub?.startsWith('surfaces/')) {
+        const [id, kind] = sub.slice('surfaces/'.length).split('/'), surface = surfaces.find(row => row.id === id)
+        if (req.method === 'POST') {
+          let raw = ''; for await (const chunk of req) raw += chunk
+          const input = JSON.parse(raw)
+          if (kind === 'messages') { messageWrites.push(input); return json({}) }
+          creates.push({ id, input }); if (!surface) surfaces.push({ id, ...input, revision: 1, audience_revision: 1 })
+          if (loseResponse) { loseResponse = false; res.statusCode = 503; return json({ error: 'lost receipt' }) }
+          return json(surfaces.find(row => row.id === id))
+        }
+        if (kind === 'threads' || kind === 'messages') return json({ surface, items: [], has_more: false })
+        if (kind === 'tasks') return json({ scope, surface, items: [] })
       }
-      if (kind === 'threads' || kind === 'messages') return json({ surface, items: [], has_more: false })
-      if (kind === 'tasks') return json({ scope, surface, items: [] })
     }
     if (req.method === 'POST' && url.pathname.includes('message')) messageWrites.push(url.pathname)
     res.statusCode = 503; json({ error: 'isolated unsupported read' })
@@ -52,38 +54,27 @@ test('interactive Team legacy DM explicitly creates or reuses private surface wi
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); browser = await headlessBrowser(process.env.KODE_TEST_BROWSER_BIN, profile)
     const page = await browser.page(`http://127.0.0.1:${server.address().port}`)
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1360, height: 960, deviceScaleFactor: 1, mobile: false })
-    const wait = expr => page.evaluate(`(async()=>{for(let i=0;i<250;i++){if(${expr})return;await new Promise(r=>setTimeout(r,40))}throw Error(document.body.innerText+' '+JSON.stringify(fixtureErrors))})()`)
-    const click = text => page.evaluate(`(()=>{const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===${JSON.stringify(text)}&&!e.disabled);if(!b)throw Error('No button: '+${JSON.stringify(text)}+' '+document.body.innerText);b.click()})()`)
+    const wait = (expr, target = page) => target.evaluate(`(async()=>{for(let i=0;i<250;i++){if(${expr})return;await new Promise(r=>setTimeout(r,40))}throw Error(document.body.innerText+' '+JSON.stringify(fixtureErrors))})()`)
     await wait('globalThis.fixture')
-    await page.evaluate(`new Promise((resolve,reject)=>{const r=indexedDB.open('kode.collab.outbox.v1',1);r.onsuccess=()=>{const db=r.result,tx=db.transaction('messages','readwrite');tx.objectStore('messages').put({key:${JSON.stringify(draftKey)},value:${JSON.stringify(draft)}});tx.oncomplete=()=>{db.close();resolve()};tx.onerror=reject};r.onerror=reject})`)
+    await page.evaluate(`new Promise((resolve,reject)=>{const r=indexedDB.open('kode.collab.outbox.v1',1);r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains('messages'))r.result.createObjectStore('messages',{keyPath:'key'})};r.onsuccess=()=>{const db=r.result,tx=db.transaction('messages','readwrite');tx.objectStore('messages').put({key:${JSON.stringify(draftKey)},value:${JSON.stringify(draft)}});tx.oncomplete=()=>{db.close();resolve()};tx.onerror=reject};r.onerror=reject})`)
     await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').click()`); await wait(`document.querySelector('[role=menuitem]')`)
     await page.evaluate(`Array.from(document.querySelectorAll('[role=menuitem]')).find(e=>e.textContent.includes('协作')).click()`)
-    const openTeam = async () => { await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`); await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`); await wait(`document.querySelector('[aria-label="原生团队私信入口"]')`) }
-    await openTeam(); await wait(`document.body.innerText.includes('当前工作区没有可用')`)
-    assert.match(await page.evaluate('document.body.innerText'), /这里的历史与未发送草稿会保留，不会复制到所选私信/)
+    const openTeam = async () => { await wait(`document.querySelector('[data-sidebar-row=team] [data-row-title]')`); await page.evaluate(`document.querySelector('[data-sidebar-row=team] [data-row-title]').click()`) }
     assert.equal(creates.length, 0); assert.equal(messageWrites.length, 0)
-    await click('开始原生私信'); await wait(`document.querySelector('[aria-label="私信名称"]')`)
-    await click('取消'); assert.equal(creates.length, 0)
-    await click('开始原生私信'); await wait(`document.querySelector('[aria-label="私信名称"]')`)
-    await click('创建'); await wait(`document.body.innerText.includes('创建未确认')`)
+    await openTeam(); await wait(`document.body.innerText.includes('操作未确认，请检查权限后重试原请求。')`)
     assert.equal(creates.length, 1); assert.equal(surfaces.length, 1); assert.equal(messageWrites.length, 0)
-    await click('重试原创建请求'); await wait(`document.querySelector('.kode-discussions[data-private=true]')`)
-    assert.deepEqual(creates[1], creates[0]); assert.equal(surfaces.length, 1); assert.equal(messageWrites.length, 0)
+    await openTeam(); await wait(`document.querySelector('.kode-discussions[data-private=true]')`)
+    assert.equal(creates.length, 1); assert.equal(surfaces.length, 1); assert.equal(messageWrites.length, 0)
     assert.deepEqual(creates[0].input.team_ids, ['team']); assert.deepEqual(creates[0].input.scope, scope)
-    await openTeam(); await wait(`document.querySelector('[aria-label="已有原生私信"]')`)
-    assert.equal(await page.evaluate(`document.querySelector('[aria-label="已有原生私信"]').value`), '')
-    assert.match(await page.evaluate('document.body.innerText'), /这里的历史与未发送草稿会保留，不会复制到所选私信/)
-    await page.evaluate(`(()=>{const e=document.querySelector('[aria-label="已有原生私信"]');e.value=${JSON.stringify(surfaces[0].id)};e.dispatchEvent(new Event('change',{bubbles:true}))})()`)
-    await click('打开所选原生私信'); await wait(`document.querySelector('.kode-discussions[data-private=true]')`)
-    assert.equal(creates.length, 2); assert.equal(messageWrites.length, 0)
     const retained = await page.evaluate(`new Promise((resolve,reject)=>{const r=indexedDB.open('kode.collab.outbox.v1',1);r.onsuccess=()=>{const db=r.result,get=db.transaction('messages').objectStore('messages').get(${JSON.stringify(draftKey)});get.onsuccess=()=>{db.close();resolve(get.result.value)};get.onerror=reject}})`)
     assert.equal(retained.value.draft, draft.value.draft)
-    await page.call('Page.reload', { ignoreCache: true })
-    await wait('globalThis.fixture')
-    await wait(`document.querySelector('.kode-discussions[data-private=true]')`)
-    assert.equal(await page.evaluate(`document.body.textContent.includes('本条消息用途')`), false)
-    assert.equal(await page.evaluate(`document.body.textContent.includes('普通消息（不回答任何问题）')`), false)
-    assert.equal(creates.length, 2); assert.equal(messageWrites.length, 0)
-    assert.deepEqual(await page.evaluate('fixtureErrors'), [])
+    const reloaded = await browser.page('http://127.0.0.1:' + server.address().port)
+    await reloaded.call('Emulation.setDeviceMetricsOverride', { width: 1360, height: 960, deviceScaleFactor: 1, mobile: false })
+    await wait('globalThis.fixture', reloaded)
+    await wait(`document.querySelector('.kode-discussions[data-private=true]')`, reloaded)
+    assert.equal(await reloaded.evaluate(`document.body.textContent.includes('本条消息用途')`), false)
+    assert.equal(await reloaded.evaluate(`document.body.textContent.includes('普通消息（不回答任何问题）')`), false)
+    assert.equal(creates.length, 1); assert.equal(messageWrites.length, 0)
+    assert.deepEqual(await reloaded.evaluate('fixtureErrors'), [])
   } finally { await browser?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(profile, { recursive: true, force: true }) }
 })

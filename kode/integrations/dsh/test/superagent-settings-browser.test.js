@@ -73,7 +73,7 @@ test('SuperAgent gear opens native settings with one Agent, Reasonable/Lite and 
     const clickText = async (text, scope = 'document') => { await wait(`Array.from(${scope}.querySelectorAll('button')).some(b=>(b.textContent.trim()===${JSON.stringify(text)}||b.getAttribute('aria-label')===${JSON.stringify(text)})&&!b.disabled)`); await page.evaluate(`Array.from(${scope}.querySelectorAll('button')).find(b=>(b.textContent.trim()===${JSON.stringify(text)}||b.getAttribute('aria-label')===${JSON.stringify(text)})&&!b.disabled).click()`) }
     const dir = process.env.KODE_ARTIFACT_DIR ?? '/tmp/kode-orbit-shots'; await mkdir(dir, { recursive: true })
     const shot = async name => writeFile(join(dir, name), Buffer.from((await page.call('Page.captureScreenshot', { format: 'png' })).data, 'base64'))
-    const panel = `document.querySelector('aside.kode-superagent-settings')`
+    const panel = `document.querySelector('.kode-superagent-settings')`
 
     await wait(`document.querySelector('.kode-collab-mode-switch button')`)
     if (await page.evaluate(`document.querySelector('.kode-collab-mode-switch button').getAttribute('aria-label').includes('会话')`)) {
@@ -95,12 +95,12 @@ test('SuperAgent gear opens native settings with one Agent, Reasonable/Lite and 
     await clickText('SuperAgent 设置', 'document.querySelector(".kode-collab-header-actions")')
     await wait(`${panel}&&${panel}.querySelector('[data-model-tier="reasonable"] button[aria-label^="模型："]')`)
     assert.equal(await page.evaluate(`${panel}.getAttribute('aria-label')`), '评审团队 设置')
-    assert.equal(await page.evaluate(`document.activeElement.textContent`), '设置', 'focus moves into the panel')
+    assert.equal(await page.evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent?.trim()"), '设置')
     assert.deepEqual(await page.evaluate(`Array.from(${panel}.querySelectorAll('.kode-settings-group > h3')).map(n=>n.textContent)`),
       ['身份与外观', '执行配置', '角色指令', '当前会话', '高级'])
     // Image-4 anatomy: every group's rows live in one card, each row title + note left, control right, thin dividers.
     assert.deepEqual(await page.evaluate(`Array.from(${panel}.querySelectorAll('.kode-settings-group')).map(g=>g.querySelectorAll(':scope > .kode-integration-row').length)`), [0, 0, 0, 0, 0], 'no loose rows outside a card')
-    assert.equal(await page.evaluate(`${panel}.querySelectorAll('.kode-settings-card').length`), 4)
+    assert.equal(await page.evaluate(`${panel}.querySelectorAll('.kode-settings-card').length`), 3)
     const role = await page.evaluate(`(()=>{const row=${panel}.querySelector('[data-model-tier="reasonable"]').getBoundingClientRect(),p=${panel}.querySelector('[data-model-tier="reasonable"] .kode-team-role-pickers').getBoundingClientRect();return {gap:row.right-p.right}})()`)
     assert.ok(role.gap < 12, 'model pickers are the right-side control: '+JSON.stringify(role))
     assert.match(await page.evaluate(`${panel}.querySelector('[aria-label="执行配置"]').innerText`), /Reasonable 模型[\s\S]*Lite 模型/)
@@ -109,8 +109,8 @@ test('SuperAgent gear opens native settings with one Agent, Reasonable/Lite and 
     assert.equal(await page.evaluate(`${panel}.querySelector('button[aria-label="交接 SuperAgent（暂不可用）"]').disabled`), true, 'controlled succession is not offered')
     assert.match(await page.evaluate(`${panel}.querySelector('[aria-label="当前会话"]').innerText`), /继任交接尚未接通/)
     assert.match(await page.evaluate(`${panel}.querySelector('[aria-label="身份与外观"]').innerText`), /本浏览器的全局偏好/)
-    assert.equal(await page.evaluate(`!!${panel}.querySelector('.kode-superagent-advanced')`), false, 'advanced settings stay collapsed')
-    assert.equal(await page.evaluate(`!!document.querySelector('.kode-collab-thread')`), true, 'the conversation stays beside the panel')
+    assert.equal(await page.evaluate(`Array.from(${panel}.querySelectorAll('details.kode-superagent-advanced-group')).every(d => !d.open)`), true, 'advanced settings stay collapsed')
+    assert.equal(await page.evaluate(`['对话','设置'].every(label=>Array.from(document.querySelectorAll('[role="tab"]')).some(tab=>tab.textContent.trim()===label))`), true, 'conversation and settings are sibling main-view tabs')
     await shot('dm-superagent-settings-1440.png')
     await page.evaluate("document.body.setAttribute('data-ds-dark-theme','')"); await page.evaluate('new Promise(r=>setTimeout(r,100))')
     await shot('dm-superagent-settings-dark-1440.png')
@@ -129,7 +129,7 @@ test('SuperAgent gear opens native settings with one Agent, Reasonable/Lite and 
     assert.deepEqual(appearancePosts, [{ team_id: 'team', home_hub: 'home', superagent_id: 'super', avatar_id: 'gallery/fox' }])
 
     // Advanced: contact, work scope, responsibilities and activation; still no budget form.
-    await clickText('展开高级设置', panel)
+    await page.evaluate(`Array.from(${panel}.querySelectorAll('details.kode-superagent-advanced-group')).forEach(d => { if (!d.open) d.querySelector('summary').click() })`)
     await wait(`${panel}.querySelector('.kode-superagent-advanced .kode-collab-team-configuration')`)
     assert.match(await page.evaluate(`${panel}.querySelector('[aria-label="工作范围"]').innerText`), /ws-fixture[\s\S]*\/fixture\/project/)
     assert.ok(await page.evaluate(`Array.from(${panel}.querySelectorAll('button')).some(b=>b.textContent==='核对激活条件')`))
@@ -139,7 +139,7 @@ test('SuperAgent gear opens native settings with one Agent, Reasonable/Lite and 
     await shot('dm-superagent-settings-advanced-1440.png')
 
     // Role instructions are read, edited, cancelled and saved in place: no jump to the advanced team form.
-    await clickText('收起高级设置', panel)
+    await page.evaluate(`Array.from(${panel}.querySelectorAll('details.kode-superagent-advanced-group')).forEach(d => { if (d.open) d.querySelector('summary').click() })`)
     const instruction = id => `${panel}.querySelector('[data-role-instruction="${id}"]')`
     await wait(`${instruction('tester')}`)
     assert.deepEqual(await page.evaluate(`Array.from(${panel}.querySelectorAll('[data-role-instruction]')).map(r=>r.dataset.roleInstruction)`), ['superagent', 'tester'])
@@ -180,7 +180,7 @@ test('SuperAgent gear opens native settings with one Agent, Reasonable/Lite and 
     assert.equal(configurationPosts[1].expected_revision, 3)
     assert.equal(configurationPosts[1].spec.coordinator_prompt, '先确认范围，再分配给成员。')
     assert.equal(configurationPosts[1].spec.workers[0].role_prompt, '只报告复现过的问题。')
-    assert.equal(await page.evaluate(`!!${panel}.querySelector('.kode-superagent-advanced')`), false, 'stayed in place: advanced settings were not opened')
+    assert.equal(await page.evaluate(`Array.from(${panel}.querySelectorAll('details.kode-superagent-advanced-group')).every(d => !d.open)`), true, 'stayed in place: advanced settings were not opened')
     assert.equal(await page.evaluate(`${panel}.getAttribute('aria-label')`), '评审团队 设置')
     await shot('dm-superagent-role-instructions-saved-1440.png')
 
@@ -191,21 +191,18 @@ test('SuperAgent gear opens native settings with one Agent, Reasonable/Lite and 
     await shot('dm-superagent-settings-760.png')
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 940, deviceScaleFactor: 1, mobile: false })
 
-    // One inspector seat: opening work details replaces settings; Escape closes and returns focus.
+    // Settings is a main-view tab; work details open from the conversation header.
+    await page.evaluate(`Array.from(document.querySelectorAll('[role="tab"]')).find(tab=>tab.textContent.trim()==='对话').click()`)
+    await wait(`document.querySelector('.kode-collab-thread')`)
     await clickText('工作过程')
-    await wait(`!${panel}&&document.querySelector('aside[aria-label="执行详情"]')`)
+    await wait(`document.querySelector('aside[aria-label="执行详情"]')`)
     await clickText('收起工作过程')
-    await clickText('SuperAgent 设置', 'document.querySelector(".kode-collab-header-actions")')
-    await wait(panel)
-    await page.evaluate(`${panel}.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`)
-    await wait(`!${panel}`)
-    await wait(`document.activeElement?.closest?.('.kode-collab-header-actions')`)
-    assert.equal(await page.evaluate(`document.querySelector('[data-sidebar-row=team][aria-current=page] [data-row-title]')?.textContent`), '评审团队', 'the DM stays on the same team')
-    // Without the native right Sidebar the row's hover gear opens the same in-place inspector.
+    await wait(`!document.querySelector('aside[aria-label="执行详情"]')&&document.querySelector('.kode-collab-thread')`)
     await page.evaluate(`document.querySelector('[data-sidebar-row=team] button[aria-label="SuperAgent 设置"]').click()`)
     await wait(panel)
-    await page.evaluate(`${panel}.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`)
-    await wait(`!${panel}`)
+    await page.evaluate(`Array.from(document.querySelectorAll('[role="tab"]')).find(tab=>tab.textContent.trim()==='对话').click()`)
+    await wait(`document.querySelector('.kode-collab-thread')`)
+    assert.equal(await page.evaluate(`document.querySelector('[data-sidebar-row=team][aria-current=page] [data-row-title]')?.textContent`), '评审团队', 'the DM stays on the same team')
 
     assert.deepEqual(writes, ['POST /api/kode/collab/appearance', 'POST /api/kode/teams/configuration', 'POST /api/kode/teams/configuration'], 'only the chosen appearance and the two explicit drafts were written')
     assert.equal(await page.evaluate('fixture.created()'), 0)

@@ -61,6 +61,17 @@ const classes = () => {
   return prefix ? { tabs: `${prefix}_tabs`, viewTabs: `${prefix}_viewTabs`, tab: `${prefix}_tab`, active: `${prefix}_tabActive`, tabLabel: `${prefix}_tabLabel` } : null
 }
 
+function FallbackViewTabList({ tabs, value, onSelect }) {
+  const css = React.useMemo(classes, [])
+  return h('div', { className: css?.tabs },
+    h('div', { className: css?.viewTabs, role: 'tablist', 'data-conversation-tabs': '' },
+      tabs.map(tab => h('button', { key: tab.id, type: 'button', role: 'tab', 'aria-selected': tab.id === value,
+        className: [css?.tab, tab.id === value && css?.active].filter(Boolean).join(' ') || undefined, onClick: () => onSelect(tab.id) },
+        h('span', { className: css?.tabLabel }, tab.label)))))
+}
+
+export function resolveViewTabList(ctx) { return ctx.get('uiConversation')?.kodeChannelViewTabs ?? FallbackViewTabList }
+
 /** The `views` local slot of `conversation.content`: native tab row + the native session view. */
 export function createTabbedConversationView(source) {
   return function TabbedConversationView(props) {
