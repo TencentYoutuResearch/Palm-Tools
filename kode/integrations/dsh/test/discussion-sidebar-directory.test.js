@@ -97,5 +97,5 @@ test('channel sidebar recovery retains the native refresh control and accessible
   const ui = readFileSync(new URL('../packages/collab/discussion-ui.js', import.meta.url), 'utf8')
   assert.match(ui, /useDiscussionSidebarDirectory\(scope,tick\)/)
   assert.match(ui, /kind==='channel'&&error/)
-  assert.match(ui, /IconButton,\{icon:'refresh',label:'重新读取频道目录',onClick:retry\}/)
+  assert.match(ui, /IconButton,\{icon:'refresh',size:'sm',label:'重新读取频道目录',onClick:retry\}/)
 })
