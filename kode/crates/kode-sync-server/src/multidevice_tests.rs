@@ -106,6 +106,7 @@ async fn worker_directory_lists_same_server_workers_and_marks_the_viewer() {
                 os: Some(if worker == "office" { "macos" } else { "linux" }.into()),
                 arch: Some("arm64".into()),
                 capabilities: vec!["inventory.v1".into()],
+                sync_enabled: false,
             },
         );
     }
@@ -210,6 +211,7 @@ async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
         .await
         .unwrap();
     assert_eq!(list["sessions"][0]["title"], "home session");
+    assert!(state.sync_enabled("home").unwrap());
     let Json(worker_list) = list_worker_sessions(
         axum::extract::State(state.clone()),
         Path("home".into()),
@@ -254,6 +256,117 @@ async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
 }
 
 #[tokio::test]
+async fn monitor_request_enables_target_sync_until_its_lease_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "home"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(worker)],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('office','office','phone',?1,?2,1)",
+            params![
+                token_hash("office"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "home".into(),
+        AgentConnection {
+            connection_id: "home-agent".into(),
+            tx: tx.clone(),
+            kode_version: Some("0.2.6".into()),
+            os: Some("windows".into()),
+            arch: Some("x86_64".into()),
+            capabilities: Vec::new(),
+            sync_enabled: false,
+        },
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office".parse().unwrap());
+    headers.insert("X-Kode-Worker-Id", "home".parse().unwrap());
+    let Json(initial) = list_worker_sessions(
+        axum::extract::State(state.clone()),
+        Path("home".into()),
+        headers.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(initial["sessions"], json!([]));
+
+    assert!(state.sync_enabled("home").unwrap());
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        ServerFrame::BindingChanged {
+            sync_enabled: true,
+            ..
+        }
+    ));
+    handle_agent_frame(
+        &state,
+        "home",
+        AgentFrame::Hello {
+            boot_id: "windows-boot".into(),
+            sessions: vec![AgentSession {
+                local_id: 3,
+                dto: json!({
+                    "id": 3,
+                    "backend_key": "tcodex",
+                    "title": "Windows probe",
+                    "status": "idle",
+                    "tokens": {}
+                }),
+            }],
+            kode_version: Some("0.2.6".into()),
+            os: Some("windows".into()),
+            arch: Some("x86_64".into()),
+            capabilities: Vec::new(),
+        },
+        &tx,
+    )
+    .unwrap();
+    let Json(refreshed) = list_worker_sessions(
+        axum::extract::State(state.clone()),
+        Path("home".into()),
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(refreshed["sessions"][0]["title"], "Windows probe");
+
+    state
+        .inner
+        .monitor_targets
+        .lock()
+        .insert("home".into(), now_ms().saturating_sub(MONITOR_TARGET_TTL_MS + 1));
+    handle_agent_frame(&state, "home", AgentFrame::Ping, &tx).unwrap();
+
+    assert!(!state.sync_enabled("home").unwrap());
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        ServerFrame::BindingChanged {
+            sync_enabled: false,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn worker_inventory_rejects_legacy_and_cross_worker_access_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {
@@ -282,6 +395,7 @@ async fn worker_inventory_rejects_legacy_and_cross_worker_access_by_default() {
             os: Some("linux".into()),
             arch: Some("x86_64".into()),
             capabilities: Vec::new(),
+            sync_enabled: false,
         },
     );
     let mut headers = HeaderMap::new();
@@ -335,6 +449,7 @@ async fn worker_inventory_relays_a_typed_setup_result_to_an_online_worker() {
             os: Some("linux".into()),
             arch: Some("x86_64".into()),
             capabilities: vec!["inventory.v1".into()],
+            sync_enabled: false,
         },
     );
     let mut headers = HeaderMap::new();
@@ -412,6 +527,7 @@ async fn independent_devices_share_server_without_sharing_sessions_or_commands()
                 os: Some("test".into()),
                 arch: Some("arm64".into()),
                 capabilities: vec!["inventory.v1".into()],
+                sync_enabled: true,
             },
         );
         agents.push(rx);
@@ -571,6 +687,7 @@ async fn session_management_dispatches_rename_and_delete_to_the_owning_desktop()
             os: Some("test".into()),
             arch: Some("arm64".into()),
             capabilities: vec!["inventory.v1".into()],
+            sync_enabled: true,
         },
     );
     sync_session_snapshot(
@@ -662,6 +779,7 @@ async fn executed_delete_cleans_up_a_stale_cloud_session() {
             os: Some("macos".into()),
             arch: Some("aarch64".into()),
             capabilities: vec!["inventory.v1".into()],
+            sync_enabled: true,
         },
     );
     sync_session_snapshot(
@@ -951,6 +1069,7 @@ async fn online_worker_cannot_be_removed() {
             os: Some("macos".into()),
             arch: Some("aarch64".into()),
             capabilities: vec!["inventory.v1".into()],
+            sync_enabled: false,
         },
     );
     let mut headers = HeaderMap::new();

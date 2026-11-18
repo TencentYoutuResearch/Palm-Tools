@@ -35,6 +35,7 @@ mod mobile_setup;
 
 const PAIRING_TTL_MS: u64 = 2 * 60 * 1000;
 const COMMAND_TTL_MS: u64 = 30 * 1000;
+const MONITOR_TARGET_TTL_MS: u64 = 30 * 1000;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const DEFAULT_SCOPES: [&str; 4] = [
     "sessions.read",
@@ -61,6 +62,7 @@ struct Inner {
     allow_shared_inventory: parking_lot::Mutex<bool>,
     mirror_all_workers: bool,
     agents: parking_lot::Mutex<HashMap<String, AgentConnection>>,
+    monitor_targets: parking_lot::Mutex<HashMap<String, u64>>,
     setup_pending: parking_lot::Mutex<mobile_setup::Pending>,
     mobile_buses: parking_lot::Mutex<HashMap<String, broadcast::Sender<CloudEnvelope>>>,
 }
@@ -73,6 +75,7 @@ struct AgentConnection {
     os: Option<String>,
     arch: Option<String>,
     capabilities: Vec<String>,
+    sync_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +228,7 @@ impl ServerState {
                     .ok()
                     .is_some_and(|value| value == "1"),
                 agents: parking_lot::Mutex::new(HashMap::new()),
+                monitor_targets: parking_lot::Mutex::new(HashMap::new()),
                 setup_pending: parking_lot::Mutex::new(HashMap::new()),
                 mobile_buses: parking_lot::Mutex::new(HashMap::new()),
             }),
@@ -262,7 +266,42 @@ impl ServerState {
     }
 
     fn sync_enabled(&self, device_id: &str) -> Result<bool, ApiError> {
-        Ok(self.inner.mirror_all_workers || self.binding_count(device_id)? > 0)
+        let monitor_active = {
+            let now = now_ms();
+            let mut targets = self.inner.monitor_targets.lock();
+            targets.retain(|_, seen| now.saturating_sub(*seen) < MONITOR_TARGET_TTL_MS);
+            targets.contains_key(device_id)
+        };
+        Ok(self.inner.mirror_all_workers || monitor_active || self.binding_count(device_id)? > 0)
+    }
+
+    fn refresh_monitor_target(&self, worker_id: &str) -> Result<(), ApiError> {
+        self.inner
+            .monitor_targets
+            .lock()
+            .insert(worker_id.to_string(), now_ms());
+        self.notify_agent_sync_state(worker_id)
+    }
+
+    fn notify_agent_sync_state(&self, device_id: &str) -> Result<(), ApiError> {
+        let enabled = self.sync_enabled(device_id)?;
+        let binding_count = self.binding_count(device_id)?;
+        let tx = {
+            let mut agents = self.inner.agents.lock();
+            let Some(agent) = agents.get_mut(device_id) else {
+                return Ok(());
+            };
+            if agent.sync_enabled == enabled {
+                return Ok(());
+            }
+            agent.sync_enabled = enabled;
+            agent.tx.clone()
+        };
+        let _ = tx.send(ServerFrame::BindingChanged {
+            sync_enabled: enabled,
+            binding_count,
+        });
+        Ok(())
     }
 
     fn device_authorized(&self, device_id: &str, token: &str) -> Result<bool, ApiError> {
@@ -824,6 +863,7 @@ async fn list_worker_sessions(
     if auth.worker_id != worker_id {
         return Err(ApiError::NotFound(format!("worker {worker_id}")));
     }
+    state.refresh_monitor_target(&worker_id)?;
     let db = state.inner.db.lock();
     let mut stmt = db.prepare(
         "SELECT dto_json FROM sessions
@@ -982,10 +1022,10 @@ async fn claim_pairing(
         tx.commit()?;
         (device_id, device_name)
     };
-    if let Some(agent) = state.inner.agents.lock().get(&device_id).cloned() {
-        let _ = agent.tx.send(ServerFrame::PairingBound {
-            binding_count: state.binding_count(&device_id)?,
-        });
+    let binding_count = state.binding_count(&device_id)?;
+    if let Some(agent) = state.inner.agents.lock().get_mut(&device_id) {
+        agent.sync_enabled = true;
+        let _ = agent.tx.send(ServerFrame::PairingBound { binding_count });
     }
     Ok(Json(ClaimPairingResp {
         server_url: state.inner.public_url.clone(),
@@ -1010,9 +1050,11 @@ async fn revoke_current_binding(
         )?;
     }
     let binding_count = state.binding_count(&auth.device_id)?;
-    if let Some(agent) = state.inner.agents.lock().get(&auth.device_id).cloned() {
+    let sync_enabled = state.sync_enabled(&auth.device_id)?;
+    if let Some(agent) = state.inner.agents.lock().get_mut(&auth.device_id) {
+        agent.sync_enabled = sync_enabled;
         let _ = agent.tx.send(ServerFrame::BindingChanged {
-            sync_enabled: state.sync_enabled(&auth.device_id)?,
+            sync_enabled,
             binding_count,
         });
     }
@@ -1152,6 +1194,8 @@ enum ServerFrame {
 async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) {
     let connection_id = Uuid::new_v4().to_string();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerFrame>();
+    let binding_count = state.binding_count(&device_id).unwrap_or(0);
+    let sync_enabled = state.sync_enabled(&device_id).unwrap_or(false);
     {
         let mut agents = state.inner.agents.lock();
         let active = state
@@ -1182,11 +1226,10 @@ async fn agent_socket(socket: WebSocket, state: ServerState, device_id: String) 
                 os: None,
                 arch: None,
                 capabilities: Vec::new(),
+                sync_enabled,
             },
         );
     }
-    let binding_count = state.binding_count(&device_id).unwrap_or(0);
-    let sync_enabled = state.sync_enabled(&device_id).unwrap_or(false);
     let _ = tx.send(ServerFrame::Hello {
         sync_enabled,
         binding_count,
@@ -1308,6 +1351,7 @@ fn handle_agent_frame(
         }
         AgentFrame::Ping => {
             touch_worker(state, device_id)?;
+            state.notify_agent_sync_state(device_id)?;
             let _ = tx.send(ServerFrame::Pong);
         }
     }
@@ -1686,6 +1730,7 @@ async fn list_sessions(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let auth = worker_auth_from_headers(&state, &headers, "sessions.read")?;
+    state.refresh_monitor_target(&auth.worker_id)?;
     let db = state.inner.db.lock();
     let mut stmt = db.prepare(
         "SELECT dto_json FROM sessions
@@ -3031,6 +3076,7 @@ mod tests {
             .unwrap();
         assert_eq!(sessions_after_exit["sessions"], json!([]));
 
+        state.inner.monitor_targets.lock().clear();
         let revoked = client
             .delete(format!("{origin}/api/v1/bindings/current"))
             .bearer_auth(mobile_token)
