@@ -1,7 +1,15 @@
 type DroppedFile = Pick<File, 'name'> & { path?: string }
 
+function withoutWindowsVerbatimPrefix(path: string): string {
+  return path
+    .replace(/^\\\\\?\\UNC\\/i, '\\\\')
+    .replace(/^\\\\\?\\(?=[A-Za-z]:[\\/])/, '')
+}
+
 function isAbsolutePath(path: string): boolean {
-  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)
+  return path.startsWith('/')
+    || /^[A-Za-z]:[\\/]/.test(path)
+    || /^\\\\[^\\]/.test(path)
 }
 
 function pathFromFileUri(raw: string): string | null {
@@ -10,6 +18,8 @@ function pathFromFileUri(raw: string): string | null {
     if (url.protocol !== 'file:') return null
     let path = decodeURIComponent(url.pathname)
     if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1)
+    else if (url.hostname) path = `\\\\${url.hostname}${path.replace(/\//g, '\\')}`
+    path = withoutWindowsVerbatimPrefix(path)
     return isAbsolutePath(path) ? path : null
   } catch {
     return null
@@ -18,8 +28,8 @@ function pathFromFileUri(raw: string): string | null {
 
 /** Accept only trustworthy absolute paths or file:// URIs; never a bare filename. */
 export function normalizeDroppedPath(raw: string): string | null {
-  const value = raw.trim().replace(/^['"]|['"]$/g, '')
-  if (!value || value.startsWith('#')) return null
+  const value = withoutWindowsVerbatimPrefix(raw.trim().replace(/^['"]|['"]$/g, ''))
+  if (!value || value.startsWith('#') || /[\u0000-\u001f\u007f]/.test(value)) return null
   if (isAbsolutePath(value)) return value
   return pathFromFileUri(value)
 }
@@ -52,4 +62,16 @@ export function absoluteDroppedFilePaths(
 /** OS-level paths from Tauri `onDragDropEvent` (native Finder / Explorer drop). */
 export function absoluteOsDroppedPaths(rawPaths: string[]): string[] {
   return collectUniquePaths(rawPaths)
+}
+
+/**
+ * Format trusted composer paths as non-submitting @references. External callers
+ * pass these through absolute-path normalization first; workspace Git rows may
+ * intentionally provide repository-relative paths.
+ */
+export function composerPathReferences(rawPaths: Iterable<string>): string {
+  const paths = [...new Set([...rawPaths]
+    .map(path => withoutWindowsVerbatimPrefix(path.trim()))
+    .filter(path => path && !/[\u0000-\u001f\u007f]/.test(path)))]
+  return paths.map(path => `@${path}`).join(' ') + (paths.length ? ' ' : '')
 }

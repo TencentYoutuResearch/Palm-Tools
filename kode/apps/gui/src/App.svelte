@@ -25,6 +25,7 @@
     PhysicalSize,
     type Monitor,
   } from '@tauri-apps/api/window'
+  import { getCurrentWebview } from '@tauri-apps/api/webview'
   import { open } from '@tauri-apps/plugin-dialog'
   import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
   import StartupProgress from './lib/StartupProgress.svelte'
@@ -64,7 +65,7 @@
   import UpdateButton from './lib/UpdateButton.svelte'
   import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
-  import { absoluteDroppedFilePaths, absoluteOsDroppedPaths } from './lib/file_drop'
+  import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences } from './lib/file_drop'
   import { insertRemoteAttachments, RemoteDropGuard, withRemoteUpload } from './lib/remote_attachments'
   import {
     tabs,
@@ -1119,10 +1120,7 @@
       lastExternalDropKey = key
       lastExternalDropAt = now
     }
-    const text = paths.map((p) => `@${p}`).join(' ') + ' '
-    ipc.writeInput(tab.id, new TextEncoder().encode(text), tab.endpointId)
-      .then(() => focusTerminal())
-      .catch((err) => console.warn(`${source} drag-drop failed:`, err))
+    void insertWorkspaceReference(composerPathReferences(paths))
   }
   function receiveWorkspaceReference(reference: WorkspaceReference) {
     const tab = $activeTab
@@ -1132,7 +1130,7 @@
       pushToast({ severity: 'error', title: t('workspace.files.differentEndpoint') })
       return
     }
-    void insertWorkspaceReference(`@${reference.path.replace(/[\u0000-\u001f\u007f]/g, ' ')} `)
+    void insertWorkspaceReference(composerPathReferences([reference.path]))
   }
   function onMainDragOver(e: DragEvent) {
     const types = e.dataTransfer?.types ?? []
@@ -1181,18 +1179,41 @@
     )
   }
   function onNativeFileDrop(event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) {
-    if (routeWorkspaceNativeDrop(event.payload)) { dragOver = false; return }
-    if (event.payload.type === 'enter' || event.payload.type === 'over') {
+    const payload = event.payload
+    const signature = `${payload.type}:${payload.position?.x ?? ''}:${payload.position?.y ?? ''}:${(payload.paths ?? []).join('\0')}`
+    const now = Date.now()
+    if (signature === lastNativeDropSignature && now - lastNativeDropAt < 100) return
+    lastNativeDropSignature = signature
+    lastNativeDropAt = now
+
+    if (routeWorkspaceNativeDrop(payload)) { dragOver = false; return }
+    if (payload.type === 'enter' || payload.type === 'over') {
       dragOver = true
       return
     }
-    if (event.payload.type === 'leave') {
+    if (payload.type === 'leave') {
       dragOver = false
       return
     }
-    if (event.payload.type !== 'drop') return
+    if (payload.type !== 'drop') return
     dragOver = false
-    insertDroppedPaths(absoluteOsDroppedPaths(event.payload.paths ?? []), 'external')
+    insertDroppedPaths(absoluteOsDroppedPaths(payload.paths ?? []), 'external')
+  }
+  async function installNativeFileDropListeners() {
+    let installed = 0
+    try {
+      fileDropUnlisten = await getCurrentWebview().onDragDropEvent(onNativeFileDrop)
+      installed++
+    } catch (e) {
+      console.warn('webview onDragDropEvent failed:', e)
+    }
+    try {
+      fileDropWindowUnlisten = await getCurrentWindow().onDragDropEvent(onNativeFileDrop)
+      installed++
+    } catch (e) {
+      console.warn('window onDragDropEvent failed:', e)
+    }
+    return installed
   }
   /** 拖拽完成后 focus 到终端,让用户直接继续打字 */
   function focusTerminal() {
@@ -1547,6 +1568,8 @@
 
   onMount(async () => {
     try {
+      // File drop must not depend on optional startup services or tab restoration.
+      await installNativeFileDropListeners()
       // theme 优先 — 在拉 backends 前加载,避免页面闪 dark→light
       try {
         const l = await ipc.getLocale()
@@ -1665,11 +1688,6 @@
         await waitForRestoredTabsReady(localRestoredIds)
       }
       // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
-      try {
-        fileDropUnlisten = await getCurrentWindow().onDragDropEvent(onNativeFileDrop)
-      } catch (e) {
-        console.warn('onDragDropEvent failed:', e)
-      }
     } catch (e) {
       bootError = String(e)
       console.error(e)
@@ -1684,11 +1702,14 @@
   /** backend 开关/增删变更 unlisten — 同上 */
   let backendsUnlisten: (() => void) | null = null
   let fileDropUnlisten: (() => void) | null = null
+  let fileDropWindowUnlisten: (() => void) | null = null
   /** 文件正在拖入窗口(用于终端区高亮提示) */
   let dragOver = $state(false)
   const remoteDropGuard = new RemoteDropGuard()
   let lastExternalDropKey = ''
   let lastExternalDropAt = 0
+  let lastNativeDropSignature = ''
+  let lastNativeDropAt = 0
 
   onDestroy(() => {
     stopEventSubscriptions()
@@ -1697,6 +1718,7 @@
     remoteMemoryUnlisten?.()
     backendsUnlisten?.()
     fileDropUnlisten?.()
+    fileDropWindowUnlisten?.()
     screenshotSettingsUnlisten?.()
     if (registeredScreenshotShortcut) {
       void unregister(registeredScreenshotShortcut).catch(() => {})
