@@ -135,8 +135,12 @@
   let nameError = $state('')
   let selectedText = $state('')
 
+  /// Edits belong to one workspace. Compare the key's value, not the tab:
+  /// the tab object is replaced on every status/metadata update, which used
+  /// to drop an open rename or delete prompt a moment after it appeared.
+  let editWorkspaceKey = $derived(workspaceKeyFor(tab))
   $effect(() => {
-    workspaceKeyFor(tab)
+    void editWorkspaceKey
     inlineEdit = null; deleteDialog = null; fileError = ''; selectedText = ''
   })
 
