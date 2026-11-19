@@ -32,6 +32,55 @@ function resumeCandidates(hosts, target, query = '', nativeSessions = []) {
     .filter(row => `${row.title} ${row.cwd} ${row.nativeThreadId}`.toLocaleLowerCase().includes(text))
     .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
 }
+// Composer recall: ↑ at the draft start walks back through this conversation's
+// sent messages and cleared drafts; ↓ at the end walks forward, then restores
+// what was being typed. Cleared drafts live in sessionStorage, best effort.
+const COMPOSER_HISTORY_PREFIX = 'kode.composer-history:v1:', COMPOSER_HISTORY_LIMIT = 40
+function composerHistoryStorage() { try { return globalThis.sessionStorage } catch { return undefined } }
+function readComposerHistory(sessionId, storage = composerHistoryStorage()) {
+  try {
+    const rows = JSON.parse(storage?.getItem(COMPOSER_HISTORY_PREFIX + sessionId) ?? '[]')
+    return Array.isArray(rows) ? rows.filter(row => typeof row?.text === 'string' && row.text.trim() && Number.isFinite(row.time) && ['sent', 'draft'].includes(row.source)) : []
+  } catch { return [] }
+}
+function archiveComposerText(sessionId, text, source, time = Date.now(), storage = composerHistoryStorage()) {
+  const trimmed = typeof text === 'string' ? text.trim() : ''
+  if (!sessionId || !trimmed || !storage) return
+  try {
+    const rows = [{ text: trimmed, time, source }, ...readComposerHistory(sessionId, storage).filter(row => row.text.trim() !== trimmed)]
+    storage.setItem(COMPOSER_HISTORY_PREFIX + sessionId, JSON.stringify(rows.slice(0, COMPOSER_HISTORY_LIMIT)))
+  } catch { /* Recall must never block editing or sending. */ }
+}
+function composerRecallEntries(sessionId, nodes, current = '', storage = composerHistoryStorage()) {
+  const sent = []
+  for (const node of nodes ?? []) {
+    const data = node?.data
+    if (!['user', 'steering'].includes(node?.kind) || !['user', 'human'].includes(data?.source?.kind)) continue
+    const text = (data.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n').trim()
+    if (text) sent.push({ text, time: data.time ?? 0, source: 'sent' })
+  }
+  const seen = new Set([current.trim()])
+  return [...readComposerHistory(sessionId, storage), ...sent].sort((a, b) => b.time - a.time)
+    .filter(row => !seen.has(row.text) && seen.add(row.text)).slice(0, COMPOSER_HISTORY_LIMIT)
+}
+/** One ↑/↓ step: shows `text` and consumes the key when present; otherwise the editor keeps the key. Typing ends navigation. */
+function composerRecallStep(nav, key, draft, caret, load) {
+  if (nav && draft.trim() !== nav.entries[nav.index]?.text) nav = null
+  if (caret.start !== caret.end) return { nav }
+  if (key === 'up') {
+    if (!nav) {
+      const entries = caret.start === 0 ? load() : []
+      if (entries.length === 0) return { nav }
+      nav = { entries, index: -1, scratch: draft }
+    }
+    const index = Math.min(nav.index + 1, nav.entries.length - 1)
+    return { nav: { ...nav, index }, text: nav.entries[index].text }
+  }
+  if (key !== 'down' || !nav || caret.end !== draft.length) return { nav }
+  const index = nav.index - 1
+  return index < 0 ? { nav: null, text: nav.scratch } : { nav: { ...nav, index }, text: nav.entries[index].text }
+}
+const composerRecallLabel = nav => nav && `${nav.entries[nav.index].source === 'draft' ? '已删除草稿' : '历史消息'} ${nav.index + 1}/${nav.entries.length}`
 var directoryBindingCache = new WeakMap()
 function stableDirectoryBindings(entry, host) {
   const cached = directoryBindingCache.get(entry)
@@ -78,7 +127,7 @@ function changedFileSummary({ path, paths, changes, patch }) {
 window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const React = require('react'), h = React.createElement
   const { createPortal } = require('react-dom')
-  const { useState, useEffect, useSyncExternalStore } = React
+  const { useState, useEffect, useMemo, useRef, useSyncExternalStore } = React
   const { Menu, Modal, Button, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
@@ -162,6 +211,66 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     return stores.get(key)
   }
   const catalogBlank = (sessions, id) => sessions.list.getSnapshot().byId[id]?.blank === true
+  /** ↑/↓ recall over the shipped composer keymap; an open trigger menu keeps the arrows. */
+  function ComposerRecall({ native, ...props }) {
+    const { keyboard } = props
+    const nodes = props.useChat?.(snapshot => snapshot.nodes)
+    const live = useRef()
+    live.current = { nodes, sessionId: props.sessionId, inputActions: props.inputActions }
+    const recall = useMemo(() => {
+      if (!keyboard) return undefined
+      const state = { nav: null, peak: keyboard.snapshot?.draft ?? '', arrow: null }
+      const label = () => {
+        const root = keyboard.editor?.getRootElement?.(), text = composerRecallLabel(state.nav)
+        if (text) root?.setAttribute('aria-description', text); else root?.removeAttribute('aria-description')
+      }
+      const arbitrate = (key, composing) => {
+        const verdict = keyboard.arbitrate(key, composing), event = state.arrow
+        state.arrow = null
+        if (verdict !== 'pass' || composing || !event || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return verdict
+        const input = keyboard.snapshot, draft = input?.draft ?? ''
+        if (input?.phase !== 'plain') return verdict
+        const step = composerRecallStep(state.nav, key, draft, keyboard.caretSpan(),
+          () => composerRecallEntries(live.current.sessionId, live.current.nodes?.values(), draft))
+        state.nav = step.nav; label()
+        if (step.text === undefined) return verdict
+        state.peak = step.text
+        // Arrow commands run inside the editor update, where a discrete draft write throws.
+        queueMicrotask(() => live.current.inputActions?.setDraft(step.text))
+        return 'consumed'
+      }
+      const submit = (mode, ...args) => {
+        archiveComposerText(live.current.sessionId, keyboard.snapshot?.draft, 'sent')
+        state.nav = null; state.peak = ''; label()
+        return keyboard.submit(mode, ...args)
+      }
+      // A draft emptied without sending is kept at its longest form.
+      const observe = () => {
+        const draft = keyboard.snapshot?.draft ?? ''
+        if (draft.trim()) { if (!state.peak.trim() || draft.length >= state.peak.length) state.peak = draft }
+        else if (state.peak.trim()) { archiveComposerText(live.current.sessionId, state.peak, 'draft'); state.peak = '' }
+      }
+      const wrapped = new Proxy(keyboard, { get(target, key) {
+        if (key === 'arbitrate') return arbitrate
+        if (key === 'submit') return submit
+        const value = Reflect.get(target, key)
+        return typeof value === 'function' ? value.bind(target) : value
+      } })
+      return { state, observe, keyboard: wrapped }
+    }, [keyboard])
+    useEffect(() => {
+      if (!recall) return
+      const editor = keyboard.editor
+      // The keymap hands arbitrate the key name only; modifiers come from the keydown itself.
+      const capture = event => {
+        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') recall.state.arrow = editor?.getRootElement?.()?.contains(event.target) ? event : null
+      }
+      document.addEventListener('keydown', capture, true)
+      const unregister = editor?.registerUpdateListener?.(() => queueMicrotask(recall.observe))
+      return () => { document.removeEventListener('keydown', capture, true); unregister?.() }
+    }, [recall])
+    return h(native, { ...props, keyboard: recall?.keyboard ?? keyboard })
+  }
   function SteeringControls({ native, seat, ...props }) {
     const binding = props.useProjection('kodeAgent')
     const capable = ['codex', 'claude', 'cursor', 'codebuddy'].includes(binding?.type)
@@ -2251,7 +2360,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const install = () => {
         for (const entry of ctx.slots.entries(seat)) {
           if (seat === 'conversation.input.dock' && entry.options.id !== 'queue' || adapted.has(entry)) continue
-          const native = entry.component, wrapper = props => h(SteeringControls, { ...props, native, seat })
+          const native = entry.component, steering = props => h(SteeringControls, { ...props, native, seat })
+          const wrapper = seat === 'conversation.composer.bar' ? props => h(ComposerRecall, { ...props, native: steering }) : steering
           adapted.set(entry, { native, wrapper }); entry.component = wrapper
         }
       }
