@@ -83,3 +83,27 @@ test('native delta appends only newer turns, as a valid continuation, and refuse
  assert.equal(nativeDelta([...timeline,{kind:'text',role:'agent',text:'mid-turn',time:end+5000}],stored),null,'would start mid-turn')
  assert.equal(nativeDelta(timeline,[]),null,'no stored times')
 })
+
+test('delta repairs the remainder of a verified truncated turn and ignores later metadata', async () => {
+  const { nativeDelta } = await import('../src/native-history.js')
+  const partial = timeline.slice(0, 7)
+  const stored = buildHistorySeed({ timeline: partial }, selection)
+  stored.push({ type: 'session/end-seed', time: time + 200_000 })
+  const newer = [
+    { kind: 'turn_start', time: time + 60_000 },
+    { kind: 'text', role: 'user', text: 'CLI follow-up', time: time + 60_001 },
+    { kind: 'text', role: 'agent', text: 'CLI answer', time: time + 60_002 },
+    { kind: 'turn_end', time: time + 60_003 },
+    { kind: 'turn_start', time: time + 70_000 },
+    { kind: 'text', role: 'user', text: 'Still running', time: time + 70_001 },
+  ]
+  const complete = [...timeline, ...newer]
+  const delta = nativeDelta(complete, stored)
+  assert.equal(delta.rows[0].text, 'All done.')
+  const appended = buildHistorySeed({ timeline: delta.rows }, selection, { firstTurn: delta.lastTurn + 1 })
+  assert.deepEqual(appended.filter(e => e.type === 'user/message').map(e => e.data.content[0].text), ['CLI follow-up'])
+  assert.deepEqual(appended.filter(e => e.type === 'turn/end').map(e => e.data.turn), [2, 3])
+  assert.deepEqual(nativeDelta(complete, [...stored, ...appended]).rows, [])
+  const altered = complete.map(row => row.call_id === 'one' && row.kind === 'tool_result' ? { ...row, text: 'mismatched tool result' } : row)
+  assert.equal(nativeDelta(altered, stored), null)
+})

@@ -14,6 +14,7 @@ import { BackendDocument } from './backend-state.js'
 import { resolveBundledSshTunnel } from './bundle-runtime.js'
 import { createHash } from 'node:crypto'
 import { importSavedSession } from './workbench-import.js'
+import { registerNativeSessionDirectory } from './native-session-directory.js'
 import { deployRemote, deploymentHost, DEPLOY_STEPS } from './remote-deploy.js'
 import { registerWorktreeApi } from './worktree-api.js'
 import { registerBrowserApi } from './browser-host.js'
@@ -364,6 +365,7 @@ export async function registerProjectHosts(ctx, config) {
   const manager = new ProjectHosts(ctx, config); await manager.load()
   ctx.provide('kodeProjectHosts', manager)
   ctx.effect(() => registerHostDirectory(ctx, config), 'kode.host-directory')
+  ctx.effect(() => registerNativeSessionDirectory(ctx, config.backendClient), 'kode.native-session-directory')
   ctx.effect(() => () => manager.close(), 'kode.project-hosts')
   const owner = req => { const admitted = ctx.connection.admit(req); return !('rejection' in admitted) && admitted.peer.principal.kind === 'owner' }
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-import', handler: async (req, res) => {

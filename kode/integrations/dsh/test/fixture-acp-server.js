@@ -21,7 +21,12 @@ const sessionId = 'same-native-session', clients = new Map(), pending = new Map(
 const modes = { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'plan', name: 'Plan' }] }
 const configOptions = [{ id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: 'fixture-fast', options: [{ value: 'fixture-fast', name: 'Fast fixture' }, { value: 'fixture-large', name: 'Large fixture' }] }, { id: 'effort', category: 'thought_level', name: 'Effort', type: 'select', currentValue: 'medium', options: [{ value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }] }, { id: 'fast', category: 'model_config', name: 'Fast', type: 'select', currentValue: 'off', options: [{ value: 'off', name: 'Off' }, { value: 'on', name: 'On' }] }]
 const record = async (method, params) => { if (process.env.KODE_ACP_FIXTURE_LOG) await appendFile(process.env.KODE_ACP_FIXTURE_LOG, JSON.stringify({ method, params, label: process.env.KODE_ACP_FIXTURE_LABEL }) + '\n') }
-app.onRequest('initialize', async ({ params }) => { await record('initialize', params); return { protocolVersion: 1, _meta: { steering: { supported: process.env.KODE_ACP_STEERING === '1' } }, agentCapabilities: { loadSession: process.env.KODE_ACP_NO_RESUME !== '1', promptCapabilities: { image: process.env.KODE_ACP_IMAGES === '1' } }, agentInfo: { name: 'Fixture', version: '1' }, authMethods: [] } })
+app.onRequest('initialize', async ({ params }) => { await record('initialize', params); return { protocolVersion: 1, _meta: { steering: { supported: process.env.KODE_ACP_STEERING === '1' } }, agentCapabilities: { ...(process.env.KODE_ACP_LIST === '1' ? { sessionCapabilities: { list: {} } } : {}), loadSession: process.env.KODE_ACP_NO_RESUME !== '1', promptCapabilities: { image: process.env.KODE_ACP_IMAGES === '1' } }, agentInfo: { name: 'Fixture', version: '1' }, authMethods: [] } })
+app.onRequest('session/list', async ({ params }) => {
+  await record('session/list', params)
+  return params.cursor ? { sessions: [{ sessionId: 'older-thread', cwd: '/srv/older', title: 'Older work' }] }
+    : { sessions: [{ sessionId, cwd: '/srv/project', title: 'Current work' }], nextCursor: 'next-page' }
+})
 async function configureServers(params) {
   for (const spec of params.mcpServers) {
     const client = new Client({ name: 'fixture-acp-agent', version: '1' })

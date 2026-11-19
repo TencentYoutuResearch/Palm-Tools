@@ -168,3 +168,23 @@ test('Codex child execution state and output follow known native threads', async
     assert.doesNotMatch(events.filter(event => event.method === 'item/agentMessage/delta').map(event => event.params.delta).join(''), /Child live output|Foreign output/)
   } finally { await session.close() }
 })
+
+test('Codex lists desktop and CLI threads across workspaces and pages through its archive', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-codex-directory-')), log = join(root, 'requests.jsonl')
+  const session = new CodexSession({ executable: process.execPath, args: [fixture], env: { KODE_FIXTURE_RPC_LOG: log } }, root)
+  try {
+    const signal = AbortSignal.timeout(5000)
+    const first = await session.listSessions(null, signal)
+    const next = await session.listSessions(first.nextCursor, signal)
+    const final = await session.listSessions(next.nextCursor, signal)
+    assert.deepEqual(first.sessions, [{ sessionId: 'desktop-thread', title: 'Native title', cwd: '/srv/project', updatedAt: 1767225600 }])
+    assert.equal(next.sessions[0].sessionId, 'older-thread')
+    assert.equal(final.sessions[0].sessionId, 'archived-thread')
+    assert.equal(final.nextCursor, null)
+    const records = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    const listing = records.filter(row => row.method === 'thread/list')
+    assert.deepEqual(listing.map(row => [row.params.cursor, row.params.archived]), [[undefined, false], ['next-page', false], [undefined, true]])
+    assert.ok(listing.every(row => row.params.sourceKinds.includes('vscode') && row.params.cwd === undefined))
+    assert.ok(!records.some(row => ['thread/start', 'thread/resume', 'thread/unarchive'].includes(row.method)))
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }) }
+})

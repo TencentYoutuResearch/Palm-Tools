@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectHosts, validateHost } from '../src/project-hosts.js'
 import { searchSessions } from '../src/session-search.js'
+import { NATIVE_SESSIONS_PATH, registerNativeSessionDirectory } from '../src/native-session-directory.js'
 
 test('name discovery ranks exact titles, keeps ambiguous matches and never invents addresses', () => {
   const sessions = ['架构评审', '架构评审：远端', '架构评审', '其他会话'].map((title, i) => ({ title, address: { node_id: 'host.example', session_id: `session-${i}` } }))
@@ -59,9 +60,18 @@ test('SSH settings edits retain private credentials, persist changes, and protec
 })
 test('SSH portal isolates authentication, preserves streams, rejects CSRF, and closes owned tunnel', async t => {
   const upstreamRequests = []
+  const profile = { id: 'remote-codex', type: 'codex', name: 'Remote Codex' }
+  const runtime = { profiles: { list: () => [profile] }, hasRuntime: () => true, adapter: { listSessions: async () => ({
+    supported: true, sessions: [{ sessionId: 'remote-native', title: 'SSH work', cwd: '/srv/project' }],
+  }) } }
+  const nativeRoute = registerNativeSessionDirectory({
+    connection: { admit: req => ({ peer: { principal: { kind: req.headers.cookie === 'upstream=owner' ? 'owner' : 'viewer' } } }) },
+    webServer: { register: route => route }, get: key => key === 'kodeAgents' ? runtime : undefined,
+  }, {})
   const upstream = createServer(async (req, res) => {
     upstreamRequests.push({ url: req.url, cookie: req.headers.cookie, origin: req.headers.origin })
     if (req.url === '/?token=upstream-secret') { res.writeHead(303, { 'set-cookie': 'upstream=owner; HttpOnly', location: './' }); res.end(); return }
+    if (new URL(req.url, 'http://localhost').pathname === NATIVE_SESSIONS_PATH) return nativeRoute.handler(req, res)
     if (req.headers.cookie !== 'upstream=owner') { res.writeHead(401); res.end(); return }
     if (req.url === '/api/kode/project-hosts') { res.end('{}'); return }
     if (req.url === '/api/kode/host-directory') {
@@ -95,5 +105,11 @@ test('SSH portal isolates authentication, preserves streams, rejects CSRF, and c
   assert.equal(directory.current, 'build'); assert.doesNotMatch(JSON.stringify(directory), /upstream-secret/)
   await portal.operation({operation:'archive-session',args:{sessionId:'saved:local-alias'},nativeSession:{backend_key:'builtin-dsh',session_id:'original-thread'}})
   assert.deepEqual(upstreamRequests.at(-1).body,{operation:'archive-session',args:{sessionId:'saved:local-alias'},nativeSession:{backend_key:'builtin-dsh',session_id:'original-thread'}})
+  const listPath = `${NATIVE_SESSIONS_PATH}?profile_id=${profile.id}`
+  assert.equal((await fetch(`http://127.0.0.1:${upstream.address().port}${listPath}`)).status, 403)
+  const sources = await (await fetch(portal.origin + listPath, { headers: { cookie } })).json()
+  assert.deepEqual(sources.sessions.map(row => [row.nativeThreadId, row.title]), [['remote-native', 'SSH work']])
+  const forged = await fetch(portal.origin + NATIVE_SESSIONS_PATH, { method: 'POST', headers: { cookie, origin: portal.origin, 'content-type': 'application/json' }, body: JSON.stringify({ selection: 'not-listed' }) })
+  assert.equal(forged.status, 400)
   await manager.disconnect('build'); assert.equal(closed, 1)
 })

@@ -522,6 +522,13 @@ test('/resume filters by execution host and Agent and retains original native id
   assert.deepEqual(Array.from(context.resumeCandidates(hosts, target), row => row.id), ['recent', 'saved:old'])
   assert.equal(context.resumeCandidates(hosts, target, 'native-saved:old')[0].nativeThreadId, 'native-saved:old')
   assert.equal(context.resumeCandidates(hosts, { ...target, hostId: 'missing' }).length, 0)
+  const native = [
+    { nativeThreadId: 'native-saved:old', selection: 'original', title: 'Actual title', cwd: '/another-project', updatedAt: 3 },
+    { nativeThreadId: 'native-cli-only', selection: 'new', title: 'CLI-only', cwd: '/another-project', updatedAt: 4 },
+    { nativeThreadId: 'native-current', selection: 'duplicate-current', title: 'Current', cwd: '/project', updatedAt: 5 },
+  ]
+  assert.deepEqual(Array.from(context.resumeCandidates(hosts, target, '', native), row => row.title), ['CLI-only', 'Actual title', 'recent'])
+  assert.equal(context.resumeCandidates(hosts, target, 'actual', native)[0].selection, 'original')
 })
 
 test('directory browsing keeps injected callbacks stable across unrelated rerenders but renews them for a new Host', () => {

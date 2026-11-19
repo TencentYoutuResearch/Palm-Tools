@@ -73,6 +73,22 @@ export class CodexSession {
     }
     return this.ready
   }
+  async listSessions(cursor, signal) {
+    await this.initialize(signal)
+    // Desktop threads are indexed as vscode; subprocess threads are separate.
+    // Codex exposes archived and ordinary threads through separate queries.
+    const archived = cursor?.startsWith('archived:') ?? false
+    const position = cursor?.slice(archived ? 'archived:'.length : 'active:'.length)
+    const page = await this.rpc.request('thread/list', {
+      archived, sortKey: 'updated_at', limit: 100, sourceKinds: ['cli', 'vscode', 'exec', 'appServer'],
+      ...(position ? { cursor: position } : {}),
+    }, { signal })
+    return {
+      supported: true,
+      sessions: page.data.map(row => ({ sessionId: row.id, cwd: row.cwd, title: row.name?.trim() || row.preview, updatedAt: row.updatedAt })),
+      nextCursor: page.nextCursor ? `${archived ? 'archived' : 'active'}:${page.nextCursor}` : archived ? null : 'archived:',
+    }
+  }
   async answer(message) {
     const { method, params = {}, id } = message
     try {

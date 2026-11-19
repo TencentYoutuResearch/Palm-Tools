@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { saveNativeTab, syncNativeTabs } from '../src/workbench-import.js'
+import { NativeSessionDirectory } from '../src/native-session-directory.js'
+import { buildHistorySeed } from '../src/native-history.js'
 
 function fixture() {
   let value = { version: 1, gui: { tabs: [{ session_id: 'opened-tab' }] } }, revision = 0
@@ -211,7 +213,7 @@ test('a takeover reloads the stored copy in place and falls back to a fresh copy
   controller.list=async()=>({items:[{sessionId:'stored-copy'}]})
   const time=1767225600000,selection={provider:'kode-agent-kode-codex',model:'m'}
   const stored=[{type:'turn/start',seq:0,time,data:{turn:1}},{type:'request/header',seq:1,time,data:{header:{config:selection},reason:'initial'}},{type:'turn/end',seq:2,time:time+10,data:{turn:1,reason:{kind:'completed'}}}]
-  const timeline=placeable?[{kind:'turn_end',time:time+5},{kind:'turn_start',time:time+100},{kind:'text',role:'user',text:'later',time:time+101}]:[{kind:'text',role:'user',text:'no boundary',time:time+100}]
+  const timeline=placeable?[{kind:'turn_end',time:time+5},{kind:'turn_start',time:time+100},{kind:'text',role:'user',text:'later',time:time+101},{kind:'turn_end',time:time+102}]:[{kind:'text',role:'user',text:'no boundary',time:time+100}]
   h.client.call=async(path,update)=>path.endsWith('/transcript')?{available:true,timeline,messages:[]}:{revision:1,value:update?.value??{version:1}}
   let appended=null;factory.appendHistory=async(id,build)=>{appended=build(stored);return appended?.length??0}
   const result=await importSavedSession(h.ctx,h.client,h.tab,{fresh:true})
@@ -223,4 +225,71 @@ test('a takeover reloads the stored copy in place and falls back to a fresh copy
    assert.notEqual(result.sessionId,'stored-copy');assert.deepEqual(unarchived,[]);assert.ok(h.calls.some(row=>row[0]==='seed'))
   }
  }
+})
+
+test('owner-selected CLI-only sessions are bound to the listed profile, ID and working directory', async () => {
+  const h = importFixture()
+  const runtime = h.ctx.get('kodeAgents'), profiles = runtime.profiles
+  const profile = { id: 'kode-codex', name: 'Codex', type: 'codex', executable: 'codex' }
+  profiles.list = () => [profile]
+  runtime.hasRuntime = () => true
+  const nativeId = 'cli-only-thread'
+  const binding = []
+  profiles.bindNative = async (...args) => binding.push(args)
+  runtime.adapter = {
+    listSessions: async (selected, cursor) => {
+      assert.equal(selected, profile)
+      return { supported: true, nextCursor: cursor ? null : 'next', sessions: [
+        { sessionId: nativeId, cwd: '/srv/another-project', title: 'Native title' },
+        { sessionId: 'invalid-path', cwd: 'relative/path' },
+      ] }
+    },
+  }
+  const directory = new NativeSessionDirectory(h.ctx, h.client)
+  await assert.rejects(directory.list('different-profile', null), /Agent 配置/)
+  const page = await directory.list(profile.id, null)
+  assert.deepEqual(page.sessions.map(row => row.title), ['Native title'])
+  await assert.rejects(directory.open({ selection: 'forged', cwd: '/srv/third-project', nativeId }), /已过期/)
+  assert.equal(h.calls.length, 0)
+  const result = await directory.open({ selection: page.sessions[0].selection, cwd: '/srv/third-project' })
+  assert.equal(result.imported, true)
+  assert.deepEqual(binding, [[result.sessionId, profile.id, nativeId]])
+  assert.deepEqual(h.calls.find(row => row[0] === 'register'), ['register', '/srv/another-project'])
+  profile.executable = 'new-codex'
+  await assert.rejects(directory.open({ selection: page.sessions[0].selection }), /配置已更新/)
+})
+
+test('resume widens a truncated transcript and reopens one stored session without replaying earlier turns', async () => {
+  const h = importFixture({ registered: true, cached: true })
+  const runtime = h.ctx.get('kodeAgents'), controller = h.ctx.get('sessionController'), factory = h.ctx.get('kodeNativeFactory')
+  runtime.profiles.bindings = { [h.id]: { threadId: h.tab.session_id, profile: { id: 'kode-codex' } } }
+  runtime.profiles.binding = id => runtime.profiles.bindings[id]
+  const selection = { provider: 'kode-agent-kode-codex', model: 'fixture' }
+  const first = [{ kind: 'turn_start', time: 10 }, { kind: 'text', role: 'user', text: 'before', time: 11 }, { kind: 'turn_end', time: 15 }]
+  const next = [{ kind: 'turn_start', time: 20 }, { kind: 'text', role: 'user', text: 'after', time: 21 }, { kind: 'turn_end', time: 25 }]
+  const stored = [...buildHistorySeed({ timeline: first }, selection), { type: 'session/end-seed', time: 40 }]
+  const call = h.client.call, windows = []
+  h.client.call = async (path, args) => {
+    if (!path.endsWith('/transcript')) return call(path, args)
+    windows.push(args.tail_bytes)
+    return { available: true, timeline: args.tail_bytes ? [...first, ...next] : next, history_window: { truncated: true } }
+  }
+  factory.appendHistory = async (id, build) => {
+    assert.equal(id, h.id)
+    const added = build(stored) ?? []
+    stored.push(...added)
+    return added.length
+  }
+  controller.rename = async input => h.calls.push(['rename', input])
+  const [opened, repeated] = await Promise.all([
+    importSavedSession(h.ctx, h.client, { ...h.tab, title: 'From CLI' }, { discovered: true }),
+    importSavedSession(h.ctx, h.client, h.tab, { localSessionId: h.id, refreshOnly: true }),
+  ])
+  assert.equal(opened.sessionId, h.id)
+  assert.equal(opened.reloaded, true)
+  assert.equal(repeated.historyPending, false)
+  assert.deepEqual(windows, [undefined, 64 * 1024 * 1024, undefined])
+  assert.deepEqual(stored.filter(row => row.type === 'user/message').map(row => row.data.content[0].text), ['before', 'after'])
+  assert.deepEqual(h.calls.find(row => row[0] === 'rename'), ['rename', { sessionId: h.id, title: 'From CLI' }])
+  assert.ok(!h.calls.some(row => ['session', 'seed'].includes(row[0])))
 })

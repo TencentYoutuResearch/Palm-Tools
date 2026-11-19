@@ -105,6 +105,20 @@ export class AgentRuntimeAdapter {
     }
     return this.catalogs.get(key)
   }
+  async probeNativeHistory(profile, cwd, signal, read) {
+    const request = AbortSignal.any([this.stop.signal, AbortSignal.timeout(30000), ...(signal ? [signal] : [])])
+    request.throwIfAborted()
+    const session = await createNativeSession(await this.resolveProfile(profile), cwd)
+    this.probes.add(session)
+    try { return await read(session, request) }
+    finally { this.probes.delete(session); await session.close() }
+  }
+  listSessions(profile, cursor, signal) {
+    return this.probeNativeHistory(profile, process.cwd(), signal, (session, request) => session.listSessions(cursor, request))
+  }
+  readSessionHistory(profile, threadId, cwd) {
+    return this.probeNativeHistory(profile, cwd, undefined, (session, request) => session.readHistory?.(threadId, request))
+  }
   async listModels(provider, profile, modelHint) {
     const { models } = await this.capabilities(provider, profile, process.cwd(), modelHint)
     // The UI uses flat effort fields, while dsh validates the canonical ModelInfo.

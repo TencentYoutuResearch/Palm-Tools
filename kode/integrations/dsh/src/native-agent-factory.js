@@ -36,8 +36,14 @@ export class NativeAgentFactory {
    * existing conversation. It is unloaded first, so its next open reads them.
    * `build(events)` returns the events to add (without seq), or null. */
   async appendHistory(id,build) {
-    const live=this.ctx.agents.get(id)
-    if(live && (live.status!=='idle' || live.inbox.nextTurn.length || live.inbox.nextStep.length))throw new Error('会话正在运行，无法重新加载历史。')
+    const live = this.ctx.agents.get(id)
+    const assertIdle = () => {
+      if (live && (live.status !== 'idle' || live.inbox.nextTurn.length || live.inbox.nextStep.length)) throw new Error('会话正在运行，无法重新加载历史。')
+    }
+    assertIdle()
+    // An unchanged history should leave an already attached Agent alone.
+    if (live && !build(live.session.snapshotEvents())?.length) return 0
+    assertIdle()
     await this.byId.get(id)?.()
     const handle=await this.ctx.sessionPersistence.open(id,'write')
     try{
