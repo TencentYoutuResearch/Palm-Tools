@@ -1004,8 +1004,11 @@ struct CreateSessionReq {
 
 async fn create_session(
     Extension(ctx): Extension<Arc<Ctx>>,
-    Json(req): Json<CreateSessionReq>,
+    Json(mut req): Json<CreateSessionReq>,
 ) -> Result<Json<SessionDto>, ApiError> {
+    if let Some(catalog) = ctx.agent_backends.read().as_ref() {
+        req.backend_key = catalog.canonical_key(&req.backend_key).to_owned();
+    }
     let mut backend = ctx.backend_for_session(&req.backend_key,req.resume_session_uuid.as_deref())
         .map_err(|error|ApiError::BadRequest(error.to_string()))?;
     // Append extra_args to the backend args (e.g. --add-dir for directory trust).

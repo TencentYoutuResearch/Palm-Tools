@@ -65,6 +65,7 @@ impl Backend {
             // lifecycle, so treating it as an unknown raw PTY leaves status
             // stuck on busy after idle redraws.
             _ if normalized.ends_with("codebuddy") => Some(Backend::Codebuddy),
+            _ if normalized.ends_with("tclaude") => Some(Backend::Tclaude),
             _ if normalized.ends_with("claude") => Some(Backend::Claude),
             _ if normalized.ends_with("tcodex") => Some(Backend::Tcodex),
             _ if normalized.ends_with("codex") => Some(Backend::Codex),
@@ -1934,6 +1935,10 @@ mod tests {
             Some(Backend::Claude)
         );
         assert_eq!(Backend::from_backend_key("codex"), Some(Backend::Codex));
+        assert_eq!(Backend::from_backend_key("Builtin-TCodex"), Some(Backend::Tcodex));
+        assert_eq!(Backend::from_backend_key("builtin-codex"), Some(Backend::Codex));
+        assert_eq!(Backend::from_backend_key("work-tclaude"), Some(Backend::Tclaude));
+        assert_eq!(Backend::from_backend_key("builtin-claude"), Some(Backend::Claude));
         assert_eq!(Backend::from_backend_key("cursor"), Some(Backend::Cursor));
         assert_eq!(Backend::from_backend_key("kimi"), Some(Backend::Kimi));
         assert_eq!(Backend::from_backend_key("tclaude"), Some(Backend::Tclaude));

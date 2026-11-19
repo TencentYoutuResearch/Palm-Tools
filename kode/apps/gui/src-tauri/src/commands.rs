@@ -596,9 +596,16 @@ pub async fn spawn_session(
     state: State<'_, AppState>,
 ) -> Result<SpawnedSession, String> {
     let endpoint_id = endpoint_id.unwrap_or(EndpointId::Local);
-    if matches!(endpoint_id, EndpointId::Local) {
-        crate::shared_agents::refresh(&state).await?;
-    }
+    // Tabs saved under a shadowed built-in key (`builtin-codex`) relaunch as the
+    // native key; the returned backend_key migrates the tab.
+    let backend_key = if matches!(endpoint_id, EndpointId::Local) {
+        crate::shared_agents::refresh(&state)
+            .await?
+            .canonical_key(&backend_key)
+            .to_owned()
+    } else {
+        backend_key
+    };
     let transport = get_transport(&state, &endpoint_id)?;
 
     // cwd 解析仅对 Local endpoint 有意义。Remote 的 cwd 必须是 server 端绝对路径
