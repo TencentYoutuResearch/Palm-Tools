@@ -1086,6 +1086,7 @@
   "devices.removeAttachment": { "message": "移除附件" },
   "devices.attachmentLimit": { "message": "单条消息最多发送 6 个附件。" },
   "devices.attachmentUploadFailed": { "message": "附件上传失败：{error}" },
+  "devices.copyMessage": { "message": "复制消息" },
   "devices.status.busy": { "message": "工作中" },
   "devices.status.idle": { "message": "空闲" },
   "devices.status.starting": { "message": "启动中" },

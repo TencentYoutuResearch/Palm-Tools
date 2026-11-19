@@ -157,6 +157,12 @@ async fn dispatch(
     };
     let auth = worker_auth_from_headers(state, headers, scope)?;
     let id = format!("setup_{}", Uuid::new_v4().simple());
+    // A desktop monitor token can inspect and control a sibling Worker without
+    // a mobile pairing. Wake that Worker before sending the setup frame so its
+    // agent does not reject the request while sync_enabled is still false.
+    if auth.binding_id.starts_with("desktop-monitor-") {
+        state.refresh_monitor_target(&auth.worker_id)?;
+    }
     // Keep the desktop connection stable through insertion and dispatch.
     let agent = state.inner.agents.lock().get(&auth.worker_id).cloned();
     if creating {

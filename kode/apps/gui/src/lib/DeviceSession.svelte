@@ -11,12 +11,14 @@
   import { open } from '@tauri-apps/plugin-dialog'
   import {
     ipc,
+    workspaceFiles,
     type AccountDevice,
     type AccountDeviceEvent,
     type AccountDeviceSession,
     type DiscoveredModel,
   } from './ipc'
   import Icon from './Icon.svelte'
+  import LinkedText from './LinkedText.svelte'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import {
@@ -447,14 +449,24 @@
       {@const p = item.payload}
       {#if item.type === 'message' && p.relay}
         <article class="relay">
-          <div class="relay-head"><strong>{relaySender(p.relay)}</strong> → {sessionTitle}</div>
+          <div class="relay-head">
+            <span><strong>{relaySender(p.relay)}</strong> → {sessionTitle}</span>
+            <button class="icon message-copy" title={tr('devices.copyMessage')} aria-label={tr('devices.copyMessage')} onclick={() => workspaceFiles.copyText(String(p.relay.content ?? ''))}>
+              <Icon name="copy" size={12} />
+            </button>
+          </div>
           <span class="muted small">{p.relay.reply_to ? tr('devices.relay.replied') : tr('devices.relay.sent')}</span>
-          <div class="content">{p.relay.content}</div>
+          <div class="content"><LinkedText text={String(p.relay.content ?? '')} /></div>
         </article>
       {:else if item.type === 'message'}
         <article class:user={p.role === 'user'}>
-          <strong>{p.role === 'user' ? tr('devices.you') : agentName}</strong>
-          <div class="content">{p.text}</div>
+          <div class="message-head">
+            <strong>{p.role === 'user' ? tr('devices.you') : agentName}</strong>
+            <button class="icon message-copy" title={tr('devices.copyMessage')} aria-label={tr('devices.copyMessage')} onclick={() => workspaceFiles.copyText(String(p.text ?? ''))}>
+              <Icon name="copy" size={12} />
+            </button>
+          </div>
+          <div class="content"><LinkedText text={String(p.text ?? '')} /></div>
         </article>
       {:else if item.type === 'tool_use' && p.relay_tool}
         <article class="relay">
@@ -611,7 +623,10 @@
   article.user { background: var(--bg-base); }
   article.relay { border-color: var(--acc-soft); background: var(--bg-base); }
   article.ask { border-color: var(--st-warn); }
-  .relay-head { margin-bottom: 2px; }
+  .relay-head, .message-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+  .relay-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .message-copy { flex-shrink: 0; color: var(--fg-tertiary); opacity: 0; }
+  article:hover .message-copy, article:focus-within .message-copy { opacity: 1; }
   .content { margin-top: 8px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
   details.tool { padding: 8px 16px; color: var(--fg-secondary); font-size: var(--fs-sm); }
   summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }

@@ -29,6 +29,8 @@ Desktop Monitor 的 Composer 目前只能用 Shift+Enter 换行，Alt+Enter 会�
 - Monitor 文本消息按 mobile 协议规范化，并在发送前补齐末尾 LF。
 - 为 self-hosted Worker 增加文件选择、分块上传、附件 chip 和移除操作。
 - 上传复用 `/api/v1/attachments`、目标 Worker header 和 `Attached file:` 引用格式。
+- 消息正文中的 http(s) URL 可点击，并在 Windows 使用系统默认浏览器打开。
+- 多行消息保持原始换行，提供整条消息精确复制入口。
 
 ## Acceptance criteria
 
@@ -38,3 +40,6 @@ Desktop Monitor 的 Composer 目前只能用 Shift+Enter 换行，Alt+Enter 会�
 - [x] 附件通过当前 Worker 上传，并显示上传/失败状态。
 - [x] 发送时附件路径以 mobile 兼容格式追加到消息正文。
 - [x] 单条消息最多 6 个附件，上传完成前不能发送。
+- [x] URL 位于后续行或缩进后仍可点击。
+- [x] Windows `open_path` 支持 http(s) URL 和 Windows 绝对路径。
+- [x] 消息复制使用原始 text，不引入展示层空格。

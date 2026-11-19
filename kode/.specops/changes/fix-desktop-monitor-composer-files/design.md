@@ -20,6 +20,15 @@ Worker 写入自己的 `kode-attachments` 临时目录并返回本地绝对路�
 消息正文沿用 mobile 的 `Attached file: <path>` 引用格式，因此 CLI 和后续
 transcript 展示无需新增协议。
 
+## 决策 4：文本渲染保持源字符串
+
+消息正文只把 URL 切成链接 token，其余文本节点原样保留，不按 HTML 空白折叠，
+也不在换行间插入空格。每条消息提供使用原始 text 的复制按钮，避免复制 DOM
+布局产生的软换行和缩进。
+
+Windows 的 `open_path` 使用 `rundll32 url.dll,FileProtocolHandler` 打开 URL，
+使用 Explorer 打开文件路径；不再返回平台不支持。
+
 ## Verification
 
 - `cargo test -p kode-bridge worker_attachment_upload_uses_monitor_binding --lib`
