@@ -1,4 +1,4 @@
-import { savedSessionTime } from './saved-session-state.js'
+import { openTabKey, savedSessionTime } from './saved-session-state.js'
 import { hasTranscript } from './workspace-directory.js'
 /** Kode owns SSH; the remote dsh Host owns all workspace and execution services. */
 import { createServer, request as httpRequest } from 'node:http'
@@ -117,10 +117,14 @@ export class ProjectHosts {
     const hosts = [{ id: 'local', name: '此计算机', status: 'online', ...local }, ...this.hosts.map(host => ({ id: host.id, name: host.name, status:'connecting', workspaces:[], sessions:[], archivedSessionIds:[], pinnedSessionIds:[], ...this.directoryCache.get(host.id) }))]
     if (this.config.backendClient) {
       const catalog = await this.config.backendClient.call('/api/v1/messaging/workbench/catalog')
+      // The catalog also lists every conversation ever opened; the sidebar
+      // shows only the tabs Kode has open.
+      const index = await new BackendDocument(this.config.backendClient, 'session-index').read()
+      const open = new Set((index?.gui?.tabs ?? []).map(openTabKey))
       this.saved.clear()
       for (const host of hosts) for (const row of host.sessions ?? []) if (row.savedTab) this.saved.set(row.id, { tab: row.savedTab, hostId: host.id })
       for (const tab of catalog.tabs ?? []) {
-        if (!tab.session_id || !tab.cwd) continue
+        if (!tab.session_id || !tab.cwd || !open.has(openTabKey(tab))) continue
         const endpointId = typeof tab.endpoint_id === 'object' ? tab.endpoint_id?.id : tab.endpoint_id
         const endpoint = (catalog.endpoints ?? []).find(row => row.id === endpointId)
         const remote = endpoint?.ssh_host?.split('@').at(-1)

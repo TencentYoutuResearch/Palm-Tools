@@ -151,6 +151,8 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   if (priorBinding?.threadId && (priorBinding.threadId !== tab.session_id || priorBinding.profile.id !== profile.id)) throw new Error('Saved session identity conflicts with an existing native conversation')
   const doc = new BackendDocument(client, 'session-index'), state = await doc.read() ?? { version: 1 }
   const locallyStored = (await controller.list({})).items.some(row => row.sessionId === id)
+  // Archiving closed it; opening it again (resume, a saved tab) reopens it.
+  if (locallyStored && registry.archivedSessionIds?.includes(id)) await registry.unarchiveSession(id)
   if (locallyStored && priorBinding?.threadId === tab.session_id) {
     workspace ??= await registry.create(tab.cwd)
     await workspace.attachSession(id)

@@ -289,7 +289,9 @@ export async function startEventSubscriptions() {
     // come back next launch, so leave the list (and its saved copy) alone.
     if (quitting) return
     const ended = get(tabs).find((t) => t.id === m.id)
-    if (ended?.sessionId && !ended.sharedRuntime) exitedTabs.set(m.id, sessionTabToPersisted(ended))
+    // A phone closing the session is a close like closing the tab here; the
+    // open list (and every client reading it) drops it.
+    if (ended?.sessionId && !ended.sharedRuntime && !m.closed) exitedTabs.set(m.id, sessionTabToPersisted(ended))
     sessionStatuses.delete(m.id)
     sessionMetadata.delete(m.id)
     // 子进程退出 → tab 直接从列表消失(不展示 exited 状态)。复用 closeTab 的
@@ -315,7 +317,7 @@ export async function startEventSubscriptions() {
       detail: exitTitle,
       source: tab?.backendKey,
     })
-    if (isWindowsUserAgent(navigator.userAgent) && shouldOfferTcodexExitRecovery(tab, m.code)) {
+    if (!m.closed && isWindowsUserAgent(navigator.userAgent) && shouldOfferTcodexExitRecovery(tab, m.code)) {
       tabs.update((arr) => arr.map((t) => t.id === m.id ? { ...t, exited: 0, status: 'exited' } : t))
       sessionExitRecovery.set({
         id: m.id,
@@ -326,7 +328,7 @@ export async function startEventSubscriptions() {
       return
     }
     // Keep failed resumes inspectable for this run; persistableTabs drops them on restart.
-    if (m.code !== 0) {
+    if (m.code !== 0 && !m.closed) {
       tabs.update((arr) => arr.map((t) => t.id === m.id ? { ...t, exited: m.code, status: 'exited' } : t))
       schedulePersist()
       return
@@ -514,6 +516,12 @@ export async function restoreTabs(
   persisted: PersistedTab[],
   onRestored?: (tab: TabInfo) => void,
   onProgress?: (progress: { current: number; total: number; name: string }) => void,
+  view?: {
+    backends: string[]
+    /** Open a saved conversation in the view's runtime; null when it has to
+     *  stay a terminal (no transcript yet, or the import failed). */
+    open: (tab: PersistedTab) => Promise<TabInfo | null>
+  },
 ): Promise<number> {
   // restoring 标记让 schedulePersist 全程跳过 —— 避免「成功 tab 子集」覆盖 state.json
   // 导致失败 tab 的持久化项被永久清掉。结束后按成功与否决定是否补一次 persist。
@@ -522,7 +530,7 @@ export async function restoreTabs(
   const shared = await sharedSessions().catch(() => [] as SharedSession[])
   // 纯决策层(restore_plan.ts):去重、shared 认领、runtime 拒绝、参数收窄、progress。
   // I/O 与模块级状态留在本函数,便于 node --test 直接测决策。
-  const steps = planRestoreTabs(persisted, shared, { sanitizeModelName, localEndpoint: ENDPOINT_LOCAL })
+  const steps = planRestoreTabs(persisted, shared, { sanitizeModelName, localEndpoint: ENDPOINT_LOCAL, viewBackends: view?.backends })
   let ok = 0
   try {
     for (const step of steps) {
@@ -535,6 +543,13 @@ export async function restoreTabs(
           selectTab(tab.id); onRestored?.(tab); ok++; continue
         }
         if (step.kind === 'failed') throw new Error(step.reason)
+        if (step.kind === 'import') {
+          const opened = await view!.open(p).catch((error) => {
+            console.warn(`opening ${p.backend_key}@${p.cwd} in the view failed; resuming it as a terminal:`, error)
+            return null
+          })
+          if (opened) { onRestored?.(opened); ok++; continue }
+        }
         // SpawnOptions 与 NewTabOptions 结构一致;endpointId 在纯决策层是
         // 宽类型 EndpointIdLike,这里窄回 ipc.ts::EndpointId。
         const restored = await newTab(p.backend_key, step.options as NewTabOptions)

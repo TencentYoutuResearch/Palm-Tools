@@ -3,7 +3,7 @@ import { BackendDocument } from './backend-state.js'
 import { classifyEmptySessions } from './empty-session.js'
 import { savedSessionProfile } from './saved-session-profile.js'
 import { groupWorktreeProjects } from './worktree-projects.js'
-import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
+import { importedSessionId, savedSessionTime, openSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
 const sessionController = ctx => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用；工作区配置仍保留，请先恢复会话服务。'); return value }
 export const DIRECTORY_PATH = '/api/kode/host-directory'
 // A saved tab whose CLI never wrote a transcript (opened, never prompted) has
@@ -47,7 +47,7 @@ export async function hostDirectory(ctx, config = {}) {
     const [index, workspaces, node] = await Promise.all([new BackendDocument(client, 'session-index').read(), new BackendDocument(client, 'workspaces').read(), client.call('/api/v1/messaging/node')])
     for (const row of sessions) if (row.agent && runtime?.appearance) row.agent.avatar = runtime.appearance.avatarForSession(row.id, row.agent.type, index, row.agent.id)
     if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
-    const saved = localSavedTabs(index), present = await Promise.all(saved.map(tab => hasTranscript(client, tab)))
+    const saved = openSavedTabs(index), present = await Promise.all(saved.map(tab => hasTranscript(client, tab)))
     for (const tab of saved.filter((_, i) => present[i])) {
       // Older GUI builds persisted empty runtime placeholders as native tabs.
       // Keep their files, but do not resurrect them under a new saved: alias.

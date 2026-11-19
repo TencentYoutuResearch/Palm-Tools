@@ -308,3 +308,11 @@ test('a takeover reloads the copy the conversation last ran in instead of import
  assert.equal(result.sessionId,'copy-b-new');assert.equal(result.reloaded,true);assert.deepEqual(unarchived,['copy-b-new'])
  assert.ok(!h.calls.some(row=>row[0]==='seed'),'no fresh copy is imported')
 })
+test('reopening a closed (archived) conversation unarchives its stored copy', async () => {
+ const h=importFixture({registered:true,persisted:true}),profiles=h.ctx.get('kodeAgents').profiles,registry=h.ctx.get('workspaceRegistry')
+ profiles.bindings={[h.id]:{threadId:h.tab.session_id,profile:{id:'kode-codex'}}};profiles.binding=id=>profiles.bindings[id]
+ registry.archivedSessionIds=[h.id];const unarchived=[];registry.unarchiveSession=async id=>unarchived.push(id)
+ const result=await importSavedSession(h.ctx,h.client,h.tab)
+ assert.equal(result.sessionId,h.id);assert.deepEqual(unarchived,[h.id])
+ assert.ok(!h.calls.some(row=>row[0]==='seed'),'the stored copy is reused, not imported again')
+})

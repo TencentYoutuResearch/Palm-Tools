@@ -249,7 +249,7 @@ test('0.2.2 query-only cold placeholders retire existing shared publications wit
  assert.equal(publications[0].sessions[0].dto.status,'exited');assert.deepEqual(publications[0].sessions[0].events,[])
 })
 test('unchanged unloaded conversations are not re-read every pass, changed or unarchived ones are', async () => {
- let reads=0,row={sessionId:'cold',blank:false,running:false,updatedAt:1,title:'Cold'}
+ let reads=0,row={sessionId:'cold',blank:false,running:false,updatedAt:1,title:'Cold',cwd:'/srv/project'}
  const archived=[]
  const services={
   sessionController:{list:async()=>({items:[row]})},
@@ -259,7 +259,11 @@ test('unchanged unloaded conversations are not re-read every pass, changed or un
   kodeAgents:{profiles:{binding:()=>undefined}},
  }
  const publications=[]
- const backend={call:async(path,body)=>{if(path.endsWith('/sessions'))return{sessions:[]};publications.push(body);return{sessions:(body.sessions??[]).map((s,i)=>({session_id:s.session_id,id:i+1}))}}}
+ let index={version:1,gui:{tabs:[]}},revision=0
+ const backend={call:async(path,body)=>{
+  if(path.endsWith('/sessions'))return{sessions:[]}
+  if(path.endsWith('/documents/session-index')){if(body){assert.equal(body.expected_revision,revision);index=body.value;revision++}return{revision,value:structuredClone(index)}}
+  publications.push(body);return{sessions:(body.sessions??[]).map((s,i)=>({session_id:s.session_id,id:i+1}))}}}
  const bridge=new RuntimeBridge({get:key=>services[key]},backend)
  const last=()=>publications.filter(body=>body.sessions?.[0]?.session_id==='cold').at(-1).sessions[0].dto.status
  await bridge.publish();await bridge.publish();await bridge.publish()
@@ -270,4 +274,9 @@ test('unchanged unloaded conversations are not re-read every pass, changed or un
  assert.equal(last(),'exited')
  archived.pop();await bridge.publish()
  assert.equal(reads,3);assert.notEqual(last(),'exited')
+ // Archiving and unarchiving here edit Kode's shared open list; the first pass
+ // only took the baseline, so nothing was added for what was open before.
+ assert.deepEqual(index.gui.tabs.map(tab=>tab.dsh_session_id),['cold'])
+ archived.push('cold');await bridge.publish()
+ assert.deepEqual(index.gui.tabs,[])
 })

@@ -51,11 +51,17 @@ export interface RestoreProgress {
 export type PlanStep<T extends RestoreTabInput, S extends SharedRow> =
   | { kind: 'shared'; input: T; owner: S; progress: RestoreProgress }
   | { kind: 'spawn'; input: T; options: SpawnOptions; progress: RestoreProgress }
+  /** Open in the view's runtime directly; `options` spawns a terminal instead
+   *  if the conversation cannot be imported. */
+  | { kind: 'import'; input: T; options: SpawnOptions; progress: RestoreProgress }
   | { kind: 'failed'; input: T; reason: string; progress: RestoreProgress }
 
 export interface PlanDeps<E extends EndpointIdLike> {
   sanitizeModelName: (raw: string) => string
   localEndpoint: E
+  /** Backends the view's runtime hosts; set only when Kode starts in the view
+   *  mode, so its conversations open there without a terminal first. */
+  viewBackends?: string[]
 }
 
 const RUNTIME_UNAVAILABLE =
@@ -86,7 +92,8 @@ export function dedupePersistedTabs<T extends RestoreTabInput>(list: T[]): T[] {
 
 /// 把持久化项 + shared 列表变成一组决策;不产生任何副作用。
 /// - shared:命中在线 owner → 复用 shared tab,不 spawn
-/// - failed:runtime transport 且无 owner → 执行层按 reason 抛错并记入失败
+/// - import:view 模式下本地、带原生会话 id、视图支持的后端 → 直接导入视图 runtime
+/// - failed:runtime transport 且无 owner、也无法导入 → 执行层按 reason 抛错并记入失败
 /// - spawn:其余走 newTab,options 已收窄好 model / permission / endpoint
 export function planRestoreTabs<
   T extends RestoreTabInput,
@@ -108,7 +115,13 @@ export function planRestoreTabs<
       row.status !== 'exited',
     )
     if (owner) return { kind: 'shared', input: p, owner, progress } as const
-    if (p.transport_kind === 'runtime') {
+    const local = !p.endpoint_id || p.endpoint_id.kind === 'local'
+    // A runtime tab without its own native thread (a dsh-only conversation)
+    // has nothing a terminal or an import could resume.
+    const native = !!p.session_id && p.session_id !== p.dsh_session_id
+    const importable = !!deps.viewBackends && local && native && !!p.cwd
+      && p.transport_kind !== 'acp' && deps.viewBackends.includes(p.backend_key)
+    if (p.transport_kind === 'runtime' && !importable) {
       return { kind: 'failed', input: p, reason: RUNTIME_UNAVAILABLE, progress } as const
     }
     // permission_mode 持久化值是 "default" | "bypass" | null;其它值降级 null。
@@ -127,19 +140,17 @@ export function planRestoreTabs<
     // spawn 会返 transport not registered,执行层 catch 跳过、不阻断别的 tab。
     const endpointId: EndpointIdLike =
       p.endpoint_id && p.endpoint_id.kind === 'remote' ? p.endpoint_id : deps.localEndpoint
-    return {
-      kind: 'spawn',
-      input: p,
-      progress,
-      options: {
-        cwd: p.cwd || undefined,
-        transportKind: p.transport_kind ?? 'pty',
-        resumeSessionId: p.session_id ?? null,
-        permissionMode: mode,
-        model: restoredModel,
-        endpointId,
-      },
-    } as const
+    const options: SpawnOptions = {
+      cwd: p.cwd || undefined,
+      transportKind: p.transport_kind === 'acp' ? 'acp' : 'pty',
+      resumeSessionId: p.session_id ?? null,
+      permissionMode: mode,
+      model: restoredModel,
+      endpointId,
+    }
+    return importable
+      ? { kind: 'import', input: p, progress, options } as const
+      : { kind: 'spawn', input: p, progress, options } as const
   })
 }
 

@@ -106,7 +106,7 @@
   import { extensionIpc, type ExtensionViewAction } from './lib/ipc'
   import ExtensionViewPort from './lib/ExtensionViewPort.svelte'
   import { autostartRuntimeHosts, sessionViews, startExtensionWatch, viewForRuntime } from './lib/extensions'
-  import { loadUiMode, migrationFailures, movableToTui, movableToView, nativeKey, retryMigration, setUiMode, startModeWatch, switchProgress, uiMode, type UiMode } from './lib/runtime_switch'
+  import { alignSharedTabs, alignWhenOnline, loadUiMode, migrationFailures, openInView, prepareViewRestore, movableToTui, movableToView, nativeKey, retryMigration, setUiMode, startModeWatch, switchProgress, uiMode, type UiMode } from './lib/runtime_switch'
   import SwitchProgressOverlay from './lib/SwitchProgressOverlay.svelte'
   import { toasts } from './lib/toast'
   import { floatingOverlays } from './lib/overlay_guard'
@@ -1702,7 +1702,10 @@
       advanceBoot(6)
       await startExtensionWatch(onExtensionViewAction)
       const persisted = await ipc.getPersistedTabs()
-      if (persisted) autostartRuntimeHosts(persisted)
+      // Reopening in the view: its runtime comes up first, so conversations
+      // open there directly instead of as terminals that then move over.
+      const viewBackends = $uiMode === 'view' ? await prepareViewRestore() : null
+      if (persisted && !viewBackends) autostartRuntimeHosts(persisted)
       if (persisted && persisted.length > 0) {
         const localRestoredIds: SessionId[] = []
         await restoreTabs(persisted, (tab) => {
@@ -1711,11 +1714,17 @@
           bootSessionProgress = tr('app.startup.sessionProgress', {
             current: progress.current, total: progress.total, name: progress.name,
           })
-        })
+        }, viewBackends ? { backends: viewBackends, open: openInView } : undefined)
         bootWaitingIds = localRestoredIds
         advanceBoot(7)
         await waitForRestoredTabsReady(localRestoredIds)
       }
+      // One open list for both modes: runtime sessions the saved list does not
+      // have (closed while the other mode was in front) are closed too.
+      // An empty list may only be an unreadable state file; never close
+      // everything because of it.
+      if (persisted?.length && viewBackends) await alignSharedTabs(persisted)
+      else if (persisted?.some((tab) => tab.transport_kind === 'runtime')) alignWhenOnline(persisted)
       // After restore: restored tabs follow the session view mode too.
       startModeWatch(migrationFailed)
       // Reopening in the view: cover Kode until the view is up.

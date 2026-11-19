@@ -14,7 +14,8 @@ function groupProjectWorkspaces(items, parents = {}) {
 // Keep complete host directories for explicit resume/search; scope only the sidebar.
 function remoteSidebarSessions(host) {
   const visible = new Set([...(host.workspaces ?? []).flatMap(row => row.sessionIds ?? []), ...(host.pinnedSessionIds ?? [])])
-  const hidden = new Set(host.hiddenSessionIds ?? [])
+  // Archiving closes a conversation, as closing a Kode tab does.
+  const hidden = new Set([...(host.hiddenSessionIds ?? []), ...(host.archivedSessionIds ?? [])])
   return (host.sessions ?? []).filter(row => visible.has(row.id) && !hidden.has(row.id))
 }
 function resumeCandidates(hosts, target, query = '', nativeSessions = []) {
@@ -759,6 +760,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   // The view is only hidden after leaving, so the panel would still be open on
   // the next entry and send Kode straight back; return to the conversation once
   // Kode has had time to hide the view.
+  const RESUME_PROFILE_KEY = 'kode.resumeProfile'
+  const HISTORY_GLYPH = 'M2.8 8a5.2 5.2 0 1 0 1.5-3.7M2.6 2.6v2.6h2.6M8 5.2V8l2 1.4'
+  // Closed conversations come back through resume, as in Kode's terminals.
+  function KodeResumePage({ layout }) {
+    useEffect(() => {
+      window.dispatchEvent(new CustomEvent('kode-resume-session', { detail: { global: true, hostId: transport?.current ?? 'local' } }))
+      layout?.selectPanel(null)
+    }, [])
+    return null
+  }
   function KodeLeavePage({ layout }) {
     useEffect(() => {
       window.kodeHost.request('leave')
@@ -1358,15 +1369,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const sessionStatusSource = avatarContext?.get?.('uiSession')?.sessionStatus
     const sessionStatuses = useSyncExternalStore(sessionStatusSource?.subscribe ?? emptyAvatarSubscribe, sessionStatusSource?.getSnapshot ?? emptyAvatarSnapshot)
     const merged = React.useMemo(() => {
-      const own = data.hosts.find(host => host.id === data.current), hidden = new Set(own?.hiddenSessionIds ?? [])
+      // Kode keeps one list of open conversations for its terminals and this
+      // view: archiving here closes a conversation like closing a Kode tab, so
+      // archived ones are gone from the tree, search and every filter; resume
+      // brings one back.
+      const own = data.hosts.find(host => host.id === data.current)
+      const hidden = new Set([...(own?.hiddenSessionIds ?? []), ...workspaceSource.archivedSessionIds, ...(own?.archivedSessionIds ?? [])])
       const byId = Object.fromEntries(Object.entries(source.byId).filter(([id]) => !hidden.has(id)))
       for (const row of own?.sessions ?? []) if (byId[row.id] && row.agent) byId[row.id] = { ...byId[row.id], agent: row.agent }
       const ids = source.ids.filter(id => !hidden.has(id)), items = [], routes = new Map(), remoteRows = []
-      const archivedSessionIds = [...workspaceSource.archivedSessionIds], pinnedSessionIds = [...workspaceSource.pinnedSessionIds]
+      const pinnedSessionIds = [...workspaceSource.pinnedSessionIds]
       for (const host of data.hosts) {
         if (host.id === data.current) {
-          archivedSessionIds.push(...(host.archivedSessionIds ?? [])); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
-          const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:'))
+          pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
+          const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:') && !hidden.has(row.id))
           for (const row of saved) { ids.push(row.id); byId[row.id] = { ...row, updatedAt: row.updatedAt ?? 0, displayTitle: row.title, retainedBy: {}, blank: false, projectionValues: {} }; routes.set(row.id, { hostId: host.id, id: row.id }) }
           items.push(...groupProjectWorkspaces(workspaceSource.items, host.worktreeParents).map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds ?? [])])] })))
           if (host.id !== 'local') remoteRows.push(...workspaceSource.items.map(w => ({ id: w.workspaceId, name: host.name })))
@@ -1393,23 +1409,35 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           routes.set(id, { hostId: host.id, placeholder: true })
           remoteRows.push({ id, name: host.status === 'online' ? (ungrouped.length ? '未分组' : '添加项目') : host.status === 'connecting' ? '正在连接…' : '连接失败', placeholder: host.status ?? 'offline' })
         }
-        archivedSessionIds.push(...(host.archivedSessionIds ?? []).map(key)); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []).map(key))
+        pinnedSessionIds.push(...(host.pinnedSessionIds ?? []).map(key))
       }
       if (!data.hosts.length) items.push(...workspaceSource.items)
       // Sidebar presence follows visible conversations; the complete project
       // catalog remains available in the workspace picker and creation flow.
       const populated = items.filter(workspace => workspace.sessionIds.some(id => byId[id] && !byId[id].blank))
-      return { sessions: { ...source, ids, byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds, pinnedSessionIds }, routes, remoteRows }
+      return { sessions: { ...source, ids, byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds: [], pinnedSessionIds }, routes, remoteRows }
     }, [source, workspaceSource, data])
     useEffect(() => {
       if (!window.addEventListener) return
       const show = event => { const id = event.detail?.sessionId, profile = merged.sessions.byId[id]?.agent; if (!profile) return; const route = merged.routes.get(id) ?? { id, hostId: data.current }; openAvatarDialog({ profile, sessionId: route.id, host: route.hostId }) }
       const resume = event => {
         const target = event.detail
-        if (!target?.profile) return
-        setResumeTarget(target); setResumeQuery(''); setError('')
-        void loadNativePage(target)
+        if (!target?.profile && !target?.global) return
+        setResumeQuery(''); setError('')
         void refreshWorkspaceDirectory()
+        if (target.profile) { setResumeTarget(target); void loadNativePage(target); return }
+        // The sidebar's resume entry: choose among the CLI Agents installed here.
+        void (async () => {
+          const hostId = target.hostId ?? data.current, store = directory(undefined, hostId, true)
+          await store.load()
+          const info = store.getSnapshot().data
+          const choices = (info?.profiles ?? []).filter(profile => profile.type !== 'dsh' && (!info?.supportedTypes || info.supportedTypes.includes(profile.type)))
+          if (!choices.length) { setError(info ? '没有可恢复会话的 CLI Agent。' : store.getSnapshot().error || 'Agent 列表暂不可用。'); return }
+          const remembered = (() => { try { return localStorage.getItem(RESUME_PROFILE_KEY) } catch { return null } })()
+          const profile = choices.find(row => row.id === remembered) ?? choices[0]
+          const next = { hostId, profile, choices }
+          setResumeTarget(next); void loadNativePage(next)
+        })().catch(error => setError(error.message))
       }
       window.addEventListener('kode-session-avatar', show)
       window.addEventListener('kode-resume-session', resume)
@@ -1458,6 +1486,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       else props.open(id)
     }
     const resumeRows = resumeCandidates(data.hosts, resumeTarget, resumeQuery, nativePage.rows)
+    // There is no archived view to filter to; keep the browser on its default.
+    useEffect(() => { props.actions?.setArchivedFilter?.('default') }, [props.actions])
+    const viewActions = React.useMemo(() => props.actions && { ...props.actions, setArchivedFilter: () => props.actions.setArchivedFilter('default') }, [props.actions])
+    const useViewStore = React.useCallback(selector => props.useStore(state => selector((state.archivedFilter ?? 'default') === 'default' ? state : { ...state, archivedFilter: 'default' })), [props.useStore])
     const mutate = async (id, operation, args) => {
       const route = merged.routes.get(id)
       await projectCall({ action: 'host-operation', id: route.hostId, operation, args })
@@ -1504,7 +1536,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('style', null, remoteCss + savedCss), h(Failure, { text: error || data.error }),
       busy && h('div', { className: 'kode-host-progress', role: 'status', 'aria-live': 'polite' }, '正在打开会话…'),
       notice && h('div', { className: 'kode-host-progress', role: 'status' }, notice),
-      h(native, { ...props, useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
+      h(native, { ...props, ...(props.useStore ? { useStore: useViewStore } : {}), ...(viewActions ? { actions: viewActions } : {}), useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
         startSession: (id, options) => { const route = merged.routes.get(id); if (route) void navigate(route.hostId, route.placeholder ? { create: true } : { workspaceId: route.id }); else props.startSession(id, options) },
         renameWorkspace: (id, title) => merged.routes.has(id) ? mutate(id, 'rename-workspace', { workspaceId: merged.routes.get(id).id, title }) : props.renameWorkspace(id, title),
         deleteWorkspace: id => merged.routes.has(id) ? mutate(id, 'delete-workspace', { workspaceId: merged.routes.get(id).id }) : props.deleteWorkspace(id),
@@ -1516,6 +1548,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         unarchiveSession: id => merged.routes.has(id) ? mutate(id, 'unarchive-session', { sessionId: merged.routes.get(id).id }) : props.unarchiveSession(id),
       }),
       h(Modal, { open: Boolean(resumeTarget), title: '恢复原生会话', closeLabel: '关闭', onClose: closeResume },
+        resumeTarget?.choices?.length > 1 && h('label', { className: 'kode-field' }, 'Agent', h('select', { value: resumeTarget.profile.id, disabled: busy, onChange: event => {
+          const profile = resumeTarget.choices.find(row => row.id === event.target.value)
+          if (!profile) return
+          try { localStorage.setItem(RESUME_PROFILE_KEY, profile.id) } catch { /* best effort */ }
+          const next = { ...resumeTarget, profile }
+          setResumeTarget(next); void loadNativePage(next)
+        } }, ...resumeTarget.choices.map(row => h('option', { key: row.id, value: row.id }, row.name)))),
         h('label', { className: 'kode-field' }, '搜索会话', h('input', { autoFocus: true, value: resumeQuery, placeholder: '名称、工作区或原生会话 ID', onChange: event => setResumeQuery(event.target.value) })),
         h('div', { className: 'kode-resume-list', 'aria-busy': Boolean(nativePage.loading) }, ...resumeRows.map(row => h(Button, { key: row.nativeThreadId, variant: 'outline', disabled: busy, onClick: async () => {
           if (await navigate(resumeTarget.hostId, { sessionId: row.id, selection: row.selection, refreshNative: !row.selection, resume: true })) closeResume()
@@ -2398,6 +2437,8 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
       if (kodeEmbedded()) {
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
         scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-leave', order: 7, label: 'Kode 终端' }, () => glyph(TERMINAL_GLYPH)))
+        scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-resume' }, () => h(KodeResumePage, { layout: scope.layout })))
+        scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-resume', order: 8, label: '恢复会话' }, () => glyph(HISTORY_GLYPH)))
       }
       openKodeSettings = section => {
         requestedSettingsSection = section

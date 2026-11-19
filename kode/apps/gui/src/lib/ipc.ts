@@ -134,6 +134,8 @@ export interface SessionCreatedEvent {
 export interface SessionExited {
   id: SessionId
   code: number | null
+  /** Closed rather than exited on its own: by a Kode tab, a phone or another client. */
+  closed?: boolean
 }
 
 /// "需要用户操作"提示。Rust 端在收到 ask_user_question / plan_proposed 时 emit。

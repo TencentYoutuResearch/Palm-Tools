@@ -24,6 +24,33 @@ export function savedImportIdentity(tab, profileId, bindings, archivedIds = []) 
   return active.find(id => id === tab.dsh_session_id) ?? active[0] ?? matches.find(id => id === tab.dsh_session_id) ?? matches[0] ?? tab.dsh_session_id ?? importedSessionId(tab)
 }
 const local = tab => !tab.endpoint_id || tab.endpoint_id.kind === 'local'
+/** Identity of an open Kode tab, across endpoints. */
+export const openTabKey = tab => JSON.stringify([local(tab) ? null : (tab.endpoint_id?.id ?? tab.endpoint_id), tab.backend_key, tab.session_id])
+/** Kode's open conversations: the tabs it last saved. `native_sessions` also
+ *  keeps every conversation ever opened, which closing intentionally keeps;
+ *  those come back through resume, not the sidebar. */
+export const openSavedTabs = index => localSavedTabs({ gui: index?.gui })
+/**
+ * Opening and closing a conversation here edits Kode's open list as much as
+ * opening and closing a Kode tab does; both write the same document, under its
+ * revision. Only entries this view owns are removed: a conversation that is a
+ * Kode terminal now keeps its entry even though its view copy was archived.
+ */
+export async function updateOpenTabs(client, { open = [], closed = [] }) {
+  const document = new BackendDocument(client, 'session-index'), gone = new Set(closed)
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const state = await document.read() ?? { version: 1 }
+    const before = state.gui?.tabs ?? []
+    const tabs = before.filter(tab => !(tab.transport_kind === 'runtime' && gone.has(tab.dsh_session_id)))
+    for (const row of open) {
+      if (!tabs.some(tab => openTabKey(tab) === openTabKey(row) || (row.dsh_session_id && tab.dsh_session_id === row.dsh_session_id))) tabs.push(row)
+    }
+    if (tabs.length === before.length && tabs.every((tab, index) => tab === before[index])) return false
+    state.gui = { ...state.gui, tabs }
+    try { await document.write(state); return true }
+    catch (error) { if (attempt === 3 || !/configuration changed/.test(error.message)) throw error }
+  }
+}
 export function localSavedTabs(index) {
   const seen = new Set()
   return [...(index?.native_sessions ?? []), ...(index?.gui?.tabs ?? [])].filter(tab => {

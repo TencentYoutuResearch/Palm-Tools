@@ -336,9 +336,13 @@ fn spawn_event_router(
                     let backend_key = sessions.lock().get(&id).map(|session| session.backend_key.clone());
                     crate::terminal_audit::record_exit(id, code, backend_key.as_deref());
                     if let Some(a) = &app {
+                        // Closing (a Kode tab, or a phone or another client
+                        // deleting it) takes the session out of the map
+                        // before its CLI ends; a CLI that exits on its own is
+                        // still listed. Only a close leaves the open list.
                         let _ = a.emit(
                             "session-exited",
-                            serde_json::json!({ "id": id, "code": code }),
+                            serde_json::json!({ "id": id, "code": code, "closed": backend_key.is_none() }),
                         );
                     }
                     bus.emit(EventEnvelope::new(

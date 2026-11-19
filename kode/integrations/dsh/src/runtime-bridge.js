@@ -8,6 +8,7 @@ import { isAbsolute } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { profileRoute } from './agent-profiles.js'
 import { importSavedSession } from './workbench-import.js'
+import { updateOpenTabs } from './saved-session-state.js'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { installRuntimeInteractions, questionSchema, questionAnswer } from './runtime-interactions.js'
 
@@ -144,6 +145,24 @@ export class RuntimeBridge {
       this.extra.set(row.sessionId, (this.extra.get(row.sessionId) ?? []).filter(event => !extra.includes(event)))
     }
     if (!items.length) await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [] })
+    await this.syncOpenList(listed, archived)
+  }
+  /** Conversations opened here (created, sent their first turn, unarchived)
+   *  join Kode's open list; archived ones leave it. The first pass only takes
+   *  the baseline: what was open before this run is Kode's to reconcile. */
+  async syncOpenList(listed, archived) {
+    if (!this.openSeen) { this.openSeen = listed; return }
+    const open = [...listed].filter(id => !this.openSeen.has(id)).map(id => {
+      const dto = this.known.get(id)
+      return dto && { backend_key: dto.backend_key, transport_kind: 'runtime', title: dto.title, title_pinned: false, cwd: dto.cwd, workspace_title: null,
+        session_id: dto.native_thread_id ?? id, dsh_session_id: id, model: dto.model || null, permission_mode: null, endpoint_id: null, avatar_id: null }
+    }).filter(row => row?.cwd)
+    const closed = [...this.openSeen].filter(id => !listed.has(id) && archived.has(id))
+    if (open.length || closed.length) {
+      try { await updateOpenTabs(this.backend, { open, closed }) }
+      catch (error) { this.ctx.logger?.warn?.('Kode open list update failed; retrying: %s', error.message); return }
+    }
+    this.openSeen = listed
   }
   async execute(command) {
     const { id, session_id: sessionId, kind, payload } = command, controller = this.service('sessionController')

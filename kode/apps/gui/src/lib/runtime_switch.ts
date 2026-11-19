@@ -12,7 +12,7 @@
  */
 import { get, writable } from 'svelte/store'
 import { invoke } from '@tauri-apps/api/core'
-import { ENDPOINT_LOCAL, extensionIpc, type SessionId } from './ipc'
+import { ENDPOINT_LOCAL, extensionIpc, ipc, type PersistedTab, type SessionId } from './ipc'
 import { activeId, closeTab, mountedIds, newTab, selectTab, syncSharedSessions, tabs, type TabInfo } from './sessions'
 import { sessionViews, viewForRuntime, type SessionViewTarget } from './extensions'
 
@@ -67,13 +67,16 @@ export const switchProgress = writable<SwitchProgress | null>(null)
 const step = (current: SwitchStep) => switchProgress.update((p) => (p ? { ...p, current } : p))
 
 /**
- * TUI mode's own conversation list, kept apart from dsh's. Every terminal
- * that leaves for the view is remembered here and resumed when Kode returns
- * to TUI, whatever dsh did with it meanwhile (archive, restart, failed
- * import). dsh's catalog and archive are never consulted or changed.
+ * Conversations caught half-way through a move. Kode keeps one list of open
+ * conversations for both modes (its tabs; on the view side, the runtime's
+ * unarchived sessions), so closing one in the view is final. A move remembers
+ * its conversation until the other side holds it, so a failed or interrupted
+ * move resumes it as a terminal instead of losing it.
  */
 type RosterEntry = { backendKey: string; sessionId: string; cwd: string; permissionMode?: TabInfo['permissionMode'] }
-const ROSTER_KEY = 'kode.tuiRoster'
+// v1 also kept every terminal that had moved to the view, including ones the
+// user closed there since; those must not come back.
+const ROSTER_KEY = 'kode.tuiRoster.v2'
 function readRoster(): RosterEntry[] {
   try {
     const value = JSON.parse(localStorage.getItem(ROSTER_KEY) ?? '[]')
@@ -149,6 +152,70 @@ async function startHost(target: SessionViewTarget) {
   await waitFor(`${target.extensionName} did not come online`, 60_000, async () => (await runtimeSnapshot()).runtimes[runtime])
 }
 
+/**
+ * Starting in the view mode: bring the view's runtime up before conversations
+ * are restored, so they open there directly instead of as terminals first.
+ * Resolves with the backends it hosts, or null to restore as terminals.
+ */
+export async function prepareViewRestore(): Promise<string[] | null> {
+  const target = dshTarget()
+  if (get(uiMode) !== 'view' || !target?.view.runtime) return null
+  try {
+    await startHost(target)
+    await syncSharedSessions()
+    return target.view.backends
+  } catch (error) {
+    console.warn('view runtime unavailable; restoring terminals first:', error)
+    return null
+  }
+}
+
+/** Open a saved conversation in the view's runtime without a terminal. */
+export async function openInView(saved: PersistedTab): Promise<TabInfo | null> {
+  const target = dshTarget()
+  if (!target?.view.runtime || !saved.session_id) return null
+  const probe = { backendKey: saved.backend_key, sessionId: saved.session_id, cwd: saved.cwd } as TabInfo
+  // A never-prompted terminal has nothing to show in the view.
+  if (!await hasTranscript(probe)) return null
+  const imported = await extensionIpc.runtimeImport(target.view.runtime, {
+    backend_key: saved.backend_key,
+    session_id: saved.session_id,
+    cwd: saved.cwd,
+    title: saved.title || undefined,
+  })
+  return waitFor('the structured session did not appear', 15_000, async () => {
+    await syncSharedSessions()
+    return get(tabs).find((t) => t.sharedRuntime && (imported.id != null ? t.id === imported.id : t.dshSessionId === imported.runtime_session_id))
+  })
+}
+
+type OpenIdentity = { backend_key: string; session_id?: string | null; dsh_session_id?: string | null }
+const identity = (row: OpenIdentity) => [row.session_id, row.dsh_session_id].filter(Boolean).map((id) => `${row.backend_key}:${id}`)
+
+/**
+ * One list of open conversations for both modes, which the view also edits
+ * (`updateOpenTabs` in the dsh integration). A runtime-hosted session outside
+ * `expected` (left from before the list was shared, or closed while the
+ * runtime was down) is closed here too. Busy sessions stay.
+ */
+export async function alignSharedTabs(expected: OpenIdentity[]) {
+  const open = new Set(expected.flatMap(identity))
+  const extra = get(tabs).filter((tab) => tab.sharedRuntime && settled(tab)
+    && !identity({ backend_key: tab.backendKey, session_id: tab.sessionId, dsh_session_id: tab.dshSessionId }).some((key) => open.has(key)))
+  for (const tab of extra) await closeTab(tab.id).catch((error) => console.warn('closing a session the open list no longer has failed:', error))
+}
+
+/** Align once the view's runtime comes online, for a start in the terminal
+ *  mode that still brought it up (it hosts conversations of its own). */
+export function alignWhenOnline(expected: OpenIdentity[]) {
+  const runtime = dshTarget()?.view.runtime
+  if (!runtime) return
+  void waitFor('view runtime offline', 120_000, async () => (await runtimeSnapshot()).runtimes[runtime])
+    .then(() => syncSharedSessions())
+    .then(() => alignSharedTabs(expected))
+    .catch(() => {})
+}
+
 /** PTY → extension runtime. Resolves with the runtime-hosted tab id. */
 async function moveToView(tab: TabInfo, target: SessionViewTarget): Promise<SessionId> {
   const runtime = target.view.runtime!
@@ -156,6 +223,7 @@ async function moveToView(tab: TabInfo, target: SessionViewTarget): Promise<Sess
   const index = get(tabs).findIndex((t) => t.id === tab.id)
   const previous = get(activeId)
   step('stop')
+  // Until the view holds it; closing it there later is final.
   remember(tab)
   await closeTab(tab.id)
   try {
@@ -175,13 +243,14 @@ async function moveToView(tab: TabInfo, target: SessionViewTarget): Promise<Sess
       const row = get(tabs).find((t) => t.sharedRuntime && (imported.id != null ? t.id === imported.id : t.dshSessionId === imported.runtime_session_id))
       return row?.id
     })
+    forget(native)
     placeAt(id, index)
     restoreFocus(previous, tab.id, id)
     return id
   } catch (error) {
     // Hand the conversation back to a terminal rather than leave it nowhere.
     const back = await newTab(tab.backendKey, { cwd: tab.cwd, resumeSessionId: native, permissionMode: tab.permissionMode, endpointId: ENDPOINT_LOCAL }).catch(() => null)
-    if (back) placeAt(back.id, index)
+    if (back) { forget(native); placeAt(back.id, index) }
     restoreFocus(previous, tab.id, back?.id ?? null)
     throw error
   }
@@ -323,7 +392,14 @@ async function moveAll(mode: UiMode, announce: boolean, target: SessionViewTarge
   }
   if (mode === 'view') {
     progress(due[0] ?? null, 0, ['start'])
+    const before = get(tabs).map((tab) => ({ backend_key: tab.backendKey, session_id: tab.sessionId, dsh_session_id: tab.dshSessionId }))
     await startHost(target)
+    // The runtime publishes what it last had open. The open list is shared
+    // (the view edits it too), so keep what it holds as well as what Kode had
+    // in front before the switch.
+    const saved = await ipc.getPersistedTabs().catch(() => null)
+    await syncSharedSessions()
+    if (saved) await alignSharedTabs([...before, ...saved])
   }
   // A fresh terminal may not report its session id yet.
   const resumed = new Set<string>()

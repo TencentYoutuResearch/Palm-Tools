@@ -4,7 +4,7 @@ import { hostDirectory, hostOperation } from '../src/workspace-directory.js'
 import { importedSessionId, savedSessionOperation } from '../src/saved-session-state.js'
 const tab={backend_key:'removed-tclaude',session_id:'old-thread',cwd:'/srv/project',title:'Old conversation',env:{API_KEY:'must-not-leak'}}
 function backend(){
- const documents={'session-index':{version:1,native_sessions:[tab]},workspaces:{version:2,tables:{workspaces:{project:{title:'Project',path:'/srv/project',sessionIds:[]}}},global:{initialized:true,workspaceIds:['project'],archivedSessionIds:[],pinnedSessionIds:[]}}},revisions={}
+ const documents={'session-index':{version:1,native_sessions:[tab],gui:{tabs:[tab]}},workspaces:{version:2,tables:{workspaces:{project:{title:'Project',path:'/srv/project',sessionIds:[]}}},global:{initialized:true,workspaceIds:['project'],archivedSessionIds:[],pinnedSessionIds:[]}}},revisions={}
  return{documents,async call(path,body){if(path.endsWith('/native-title'))return{supported:false};if(path.endsWith('/node'))return{node_id:'example-node'};const key=path.split('/').at(-1);if(!body)return{revision:revisions[key]??0,value:structuredClone(documents[key])};assert.equal(body.expected_revision,revisions[key]??0);documents[key]=structuredClone(body.value);return{revision:revisions[key]=(revisions[key]??0)+1,value:structuredClone(documents[key])}}}
 }
 test('removed Agent tabs can pin, archive and unarchive without an adapter, transcript import or runtime',async()=>{
@@ -56,4 +56,15 @@ test('legacy runtime snapshots without dsh IDs archive the actual owner instead 
  await savedSessionOperation(client,{nativeSession:{backend_key:tab.backend_key,session_id:tab.session_id},operation:'archive-session'})
  assert.deepEqual(client.documents.workspaces.global.archivedSessionIds,['session-original'])
  assert.equal(client.documents['session-index'].native_sessions[0].dsh_session_id,'session-original')
+})
+
+test('the view opens and closes conversations in Kode\'s shared open list without touching terminals', async () => {
+ const { updateOpenTabs } = await import('../src/saved-session-state.js')
+ const client=backend(),gui=client.documents['session-index'].gui
+ gui.tabs=[{backend_key:'codex',session_id:'thread-a',dsh_session_id:'session-a',transport_kind:'runtime',cwd:'/srv/project'},{backend_key:'codex',session_id:'thread-b',dsh_session_id:'session-b',transport_kind:'pty',cwd:'/srv/project'}]
+ const opened={backend_key:'codex',session_id:'thread-c',dsh_session_id:'session-c',transport_kind:'runtime',cwd:'/srv/project'}
+ assert.equal(await updateOpenTabs(client,{open:[opened],closed:['session-a','session-b']}),true)
+ // session-b is a Kode terminal now; archiving its view copy leaves its tab.
+ assert.deepEqual(client.documents['session-index'].gui.tabs.map(tab=>tab.session_id),['thread-b','thread-c'])
+ assert.equal(await updateOpenTabs(client,{open:[opened],closed:['session-a']}),false,'nothing to write the second time')
 })
