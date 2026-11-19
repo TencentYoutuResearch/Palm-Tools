@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const CODEX_BACKENDS: &[&str] = &["codex", "tcodex"];
+const CODEX_BACKENDS: &[&str] = &["codex"];
 
 const MEMORY_TRIGGER_MARKERS: &[&str] = &[
     "记住",
@@ -253,7 +253,7 @@ fn relay_to_kode(input: &str) -> Result<()> {
 
 #[cfg(test)]
 fn supports_backend_key(backend: &str) -> bool {
-    backend == "codex" || backend.ends_with("codex")
+    crate::runtime_context::backend_matches("codex", backend)
 }
 
 /// 把 Codex hook payload 改写成 GUI relay 可路由的形式。
@@ -350,7 +350,18 @@ mod tests {
                 .is_none());
             }
         }
-        for backend in ["tclaude", "claude", "custom-codex"] {
+        for backend in ["builtin-codex", "custom-codex"] {
+            assert_eq!(
+                crate::runtime_context::active_backend_for_values(
+                    Some("1"),
+                    Some("42"),
+                    Some(backend),
+                    CODEX_BACKENDS
+                ),
+                Some(backend)
+            );
+        }
+        for backend in ["tclaude", "claude", "codex-wrapper"] {
             assert!(crate::runtime_context::active_backend_for_values(
                 Some("1"),
                 Some("42"),

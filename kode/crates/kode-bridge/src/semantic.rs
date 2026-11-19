@@ -256,21 +256,23 @@ fn parse_codebuddy_message(id: SessionId, v: &Value) -> Vec<EventEnvelope> {
         .as_ref()
         .and_then(content_to_text)
         .unwrap_or_default();
+    let images = content_val
+        .as_ref()
+        .map(crate::session_images::from_content)
+        .unwrap_or_default();
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() && images.is_empty() {
         return vec![];
     }
-    let out = vec![EventEnvelope::new(
-        id,
-        "message",
-        json!({
-            "id": format!("{}-{}", id, fnv_hash(trimmed)),
-            "role": role,
-            "text": cap_text(trimmed, 16 * 1024),
-            "tool_calls": Vec::<Value>::new(),
-            "timestamp_ms": source_timestamp_ms(v),
-        }),
-    )];
+    let mut payload = json!({
+        "id": format!("{}-{}", id, message_hash(trimmed, &images)),
+        "role": role,
+        "text": cap_text(trimmed, 16 * 1024),
+        "tool_calls": Vec::<Value>::new(),
+        "timestamp_ms": source_timestamp_ms(v),
+    });
+    attach_images(&mut payload, images);
+    let out = vec![EventEnvelope::new(id, "message", payload)];
     // 不基于 `status=="completed"` emit turn_finished:codebuddy jsonl 里每条
     // assistant message 都标 `status=completed`(语义是"这条 message 流完了",
     // 不是"整轮 turn 结束")。一轮含工具调用的 turn 会有多条 assistant message,
@@ -548,6 +550,7 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
     let mut out: Vec<EventEnvelope> = Vec::new();
     let mut tool_call_ids: Vec<Value> = Vec::new();
     let mut text_parts: Vec<String> = Vec::new();
+    let mut images: Vec<Value> = Vec::new();
 
     if let Some(content) = msg.content {
         if let Some(s) = content.as_str() {
@@ -568,6 +571,9 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
                                 text_parts.push(t.to_string());
                             }
                         }
+                    }
+                    "image" => {
+                        images.extend(crate::session_images::from_item(item));
                     }
                     "tool_use" => {
                         let tool = obj
@@ -710,17 +716,20 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
                             .get("content")
                             .map(|c| value_to_preview(c, 4 * 1024))
                             .unwrap_or_default();
-                        out.push(EventEnvelope::new(
-                            id,
-                            "tool_use",
-                            json!({
-                                "id": tool_use_id,
-                                "tool": null,
-                                "input_summary": null,
-                                "output_preview": preview,
-                                "status": if is_error { "error" } else { "ok" },
-                            }),
-                        ));
+                        let mut payload = json!({
+                            "id": tool_use_id,
+                            "tool": null,
+                            "input_summary": null,
+                            "output_preview": preview,
+                            "status": if is_error { "error" } else { "ok" },
+                        });
+                        if let Some(content) = obj.get("content") {
+                            attach_images(
+                                &mut payload,
+                                crate::session_images::from_content(content),
+                            );
+                        }
+                        out.push(EventEnvelope::new(id, "tool_use", payload));
                     }
                     _ => {}
                 }
@@ -729,14 +738,15 @@ fn parse_claude(id: SessionId, line: &str) -> Vec<EventEnvelope> {
     }
 
     let merged = text_parts.join("\n").trim().to_string();
-    if !merged.is_empty() {
+    if !merged.is_empty() || !images.is_empty() {
         let mut payload = json!({
-            "id": format!("{}-{}", id, fnv_hash(&merged)),
+            "id": format!("{}-{}", id, message_hash(&merged, &images)),
             "role": role,
             "text": cap_text(&merged, 16 * 1024),
             "tool_calls": tool_call_ids,
             "timestamp_ms": timestamp_ms,
         });
+        attach_images(&mut payload, images);
         // 把 message 放在 tool_use 之前,符合 jsonl 时序(text 先于工具调用结果)
         let env = EventEnvelope::new(id, "message", payload.take());
         out.insert(0, env);
@@ -777,21 +787,25 @@ fn parse_codex_response_item(id: SessionId, v: &Value) -> Vec<EventEnvelope> {
         .and_then(content_to_text)
         .unwrap_or_default();
     let trimmed = text.trim();
-    if trimmed.is_empty() || is_codex_control_message(role, trimmed) {
+    if is_codex_control_message(role, trimmed) {
         return vec![];
     }
-
-    vec![EventEnvelope::new(
-        id,
-        "message",
-        json!({
-            "id": format!("{}-{}", id, fnv_hash(trimmed)),
-            "role": role,
-            "text": cap_text(trimmed, 16 * 1024),
-            "tool_calls": Vec::<Value>::new(),
-            "timestamp_ms": source_timestamp_ms(v),
-        }),
-    )]
+    let images = payload
+        .get("content")
+        .map(crate::session_images::from_content)
+        .unwrap_or_default();
+    if trimmed.is_empty() && images.is_empty() {
+        return vec![];
+    }
+    let mut message = json!({
+        "id": format!("{}-{}", id, message_hash(trimmed, &images)),
+        "role": role,
+        "text": cap_text(trimmed, 16 * 1024),
+        "tool_calls": Vec::<Value>::new(),
+        "timestamp_ms": source_timestamp_ms(v),
+    });
+    attach_images(&mut message, images);
+    vec![EventEnvelope::new(id, "message", message)]
 }
 
 fn parse_codex_event_msg(id: SessionId, v: &Value) -> Vec<EventEnvelope> {
@@ -1122,7 +1136,9 @@ fn content_to_text(v: &Value) -> Option<String> {
                 // codebuddy 用 "input_text" / "output_text",claude 用 "text" — 都收
                 if matches!(ty, "text" | "input_text" | "output_text") {
                     if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
-                        parts.push(t.to_string());
+                        if !is_image_wrapper(t) {
+                            parts.push(t.to_string());
+                        }
                     }
                 }
             }
@@ -1132,6 +1148,30 @@ fn content_to_text(v: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// Codex frames each pasted image with `<image name=... path=...>` and
+/// `</image>` text items; the image itself is sent as an `images` ref.
+fn is_image_wrapper(text: &str) -> bool {
+    let text = text.trim();
+    text == "</image>" || (text.starts_with("<image name=") && text.ends_with('>'))
+}
+
+/// Message id seed: the text, plus the image ids when there are any so an
+/// image-only message still gets a stable, distinct id.
+fn message_hash(text: &str, images: &[Value]) -> u32 {
+    if images.is_empty() {
+        return fnv_hash(text);
+    }
+    let ids: Vec<&str> = images.iter().filter_map(|i| i["id"].as_str()).collect();
+    fnv_hash(&format!("{text}\n{}", ids.join(",")))
+}
+
+/// Adds `images` only when present, so image-free payloads keep their shape.
+fn attach_images(payload: &mut Value, images: Vec<Value>) {
+    if !images.is_empty() {
+        payload["images"] = Value::Array(images);
+    }
 }
 
 /// Read the message's own timestamp from a backend transcript record.

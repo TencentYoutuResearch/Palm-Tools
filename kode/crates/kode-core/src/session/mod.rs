@@ -597,7 +597,7 @@ impl Session {
         if matches!(line.trim(), "❯" | "›" | ">" | "→") {
             return true;
         }
-        if self.backend_key == "cursor"
+        if self.backend_kind() == Some(jsonl_tail::Backend::Cursor)
             && !matches!(
                 line.trim().strip_prefix("→ ").map(str::trim),
                 Some(
@@ -622,7 +622,7 @@ impl Session {
             }
             // Cursor's software caret renders the first placeholder character
             // at full brightness. The remaining hint must still be dim.
-            if self.backend_key == "cursor" && column == col {
+            if self.backend_kind() == Some(jsonl_tail::Backend::Cursor) && column == col {
                 continue;
             }
             if !cell.dim() {
@@ -637,11 +637,12 @@ impl Session {
     /// footer. Other backends keep the hardware cursor in the composer.
     pub fn model_command_prompt_position(&self) -> Option<(u16, u16)> {
         let screen = self.parser.screen();
-        if self.backend_key != "cursor" && self.backend_key != "tclaude" {
+        let kind = self.backend_kind();
+        if !matches!(kind, Some(jsonl_tail::Backend::Cursor | jsonl_tail::Backend::Tclaude)) {
             return Some(screen.cursor_position());
         }
         let rows: Vec<_> = screen.rows(0, screen.size().1).collect();
-        if self.backend_key == "tclaude" {
+        if kind == Some(jsonl_tail::Backend::Tclaude) {
             let row = rows
                 .iter()
                 .rposition(|line| line.trim_start().starts_with("❯"))?;

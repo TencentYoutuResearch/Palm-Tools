@@ -98,6 +98,32 @@ pub(super) async fn attachment(
     .await
 }
 
+#[derive(Deserialize)]
+pub(super) struct ImageQuery {
+    #[serde(default)]
+    offset: u64,
+}
+
+/// One chunk of a transcript image the desktop cached for phones. The center
+/// keeps no copy; the id is the content id named by a session event.
+pub(super) async fn image(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<ImageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if id.is_empty() || id.len() > 64 {
+        return Err(ApiError::BadRequest("Invalid image id".into()));
+    }
+    dispatch(
+        &state,
+        &headers,
+        "image",
+        json!({"id": id, "offset": query.offset}),
+    )
+    .await
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateRequest {

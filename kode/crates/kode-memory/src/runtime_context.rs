@@ -14,13 +14,13 @@ pub fn is_active(expected_backend: Option<&str>) -> bool {
     )
 }
 
-/// Return the actual backend only for a Kode-owned session in the allowed family.
-pub fn active_backend_for(allowed_backends: &[&str]) -> Option<String> {
+/// Return the actual backend only for a Kode-owned session in one of the families.
+pub fn active_backend_for(families: &[&str]) -> Option<String> {
     active_backend_for_values(
         std::env::var("KODE_HOST").ok().as_deref(),
         std::env::var("KODE_SESSION_ID").ok().as_deref(),
         std::env::var("KODE_BACKEND_KEY").ok().as_deref(),
-        allowed_backends,
+        families,
     )
     .map(str::to_owned)
 }
@@ -29,12 +29,16 @@ pub(crate) fn active_backend_for_values<'a>(
     host: Option<&str>,
     session_id: Option<&str>,
     backend_key: Option<&'a str>,
-    allowed_backends: &[&str],
+    families: &[&str],
 ) -> Option<&'a str> {
     if !is_active_values(host, session_id, backend_key, None) {
         return None;
     }
-    backend_key.filter(|backend| allowed_backends.contains(backend))
+    backend_key.filter(|backend| {
+        families
+            .iter()
+            .any(|family| backend_matches(family, backend))
+    })
 }
 
 fn is_active_values(
@@ -56,16 +60,13 @@ fn is_active_values(
     expected_backend.is_none_or(|expected| backend_matches(expected, backend_key))
 }
 
-fn backend_matches(expected: &str, actual: &str) -> bool {
-    if expected == actual {
-        return true;
-    }
-    match expected {
-        "codex" => actual.ends_with("codex"),
-        "claude" => matches!(actual, "claude" | "claude-internal" | "tclaude"),
-        "codebuddy" => actual.ends_with("codebuddy"),
-        _ => false,
-    }
+/// Backend keys belong to a CLI family by case-insensitive suffix, so wrappers
+/// (`tcodex`, `tclaude`) and shared Agent keys (`builtin-codex`) need no list.
+pub fn backend_matches(family: &str, key: &str) -> bool {
+    let family = family.trim().to_ascii_lowercase();
+    let key = key.trim().to_ascii_lowercase();
+    !family.is_empty()
+        && (key.ends_with(&family) || (family == "claude" && key.ends_with("claude-internal")))
 }
 
 #[cfg(test)]
@@ -81,7 +82,7 @@ mod tests {
 
     #[test]
     fn family_detection_preserves_backend_identity_and_requires_ownership() {
-        let allowed = &["codex", "tcodex"];
+        let allowed = &["codex"];
         for backend in ["codex", "tcodex"] {
             assert_eq!(
                 active_backend_for_values(Some("1"), Some("42"), Some(backend), allowed),
@@ -96,7 +97,13 @@ mod tests {
                 None
             );
         }
-        for backend in ["claude", "custom-codex", "unknown", " "] {
+        for backend in ["builtin-codex", "custom-codex", "Codex"] {
+            assert_eq!(
+                active_backend_for_values(Some("1"), Some("42"), Some(backend), allowed),
+                Some(backend)
+            );
+        }
+        for backend in ["claude", "codex-wrapper", "unknown", " "] {
             assert_eq!(
                 active_backend_for_values(Some("1"), Some("42"), Some(backend), allowed),
                 None

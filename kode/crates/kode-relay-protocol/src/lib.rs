@@ -30,6 +30,13 @@ pub const MAX_ATTACHMENT_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 /// the small envelope fields.
 pub const MAX_ATTACHMENT_REQUEST_BYTES: usize = MAX_ATTACHMENT_CHUNK_BYTES / 3 * 4 + 64 * 1024;
 
+/// Setup request kind that reads one chunk of a transcript image the desktop
+/// cached under a content id named by a `message` or `tool_use` event.
+pub const SETUP_KIND_IMAGE: &str = "image";
+
+/// Largest decoded image chunk per reply.
+pub const IMAGE_CHUNK_BYTES: usize = 1024 * 1024;
+
 /// Event delivered to mobile clients over `/ws` and in `/history` responses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CloudEnvelope {

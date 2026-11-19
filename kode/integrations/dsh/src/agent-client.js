@@ -72,6 +72,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const { Menu, Modal, Button, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
+  const startupRetryDelays = [250, 500, 1000, 2000, 4000, 8000]
   let stagedAgent, transport, avatarContext
   const fetchHost = (url, options, host) => transport ? transport.fetch(url, options, host) : fetch(url, options)
   const switchHost = (id, target) => { if (!transport) throw new Error('Kode 主机传输插件尚未就绪。'); return transport.select(id, target) }
@@ -96,8 +97,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn) }, getSnapshot: () => snapshot,
         load: (refresh = false) => pending ??= (async () => {
           const ticket = ++revision
-          try { const data = await call(undefined, id, refresh, host, configurationOnly, profileId); if (ticket === revision) publish({ data, error: '' }) }
-          catch (error) { if (ticket === revision) publish({ error: error.message }) }
+          const delays = host === 'local' && !snapshot.data ? startupRetryDelays : []
+          try {
+            for (let attempt = 0; ticket === revision; attempt++) {
+              try {
+                const data = await call(undefined, id, refresh, host, configurationOnly, profileId)
+                if (ticket === revision) publish({ data, error: '' })
+                break
+              } catch (error) {
+                // Desktop can serve the page before the Kode Agent route is mounted.
+                if (error.code !== 'KODE_SERVICE_UPDATE_REQUIRED' || attempt >= delays.length) throw error
+                await new Promise(resolve => setTimeout(resolve, delays[attempt]))
+              }
+            }
+          } catch (error) { if (ticket === revision) publish({ error: error.message }) }
           finally { pending = undefined }
         })(),
         operate: async body => {
@@ -301,8 +314,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const CommandGlyph = props => h(LineGlyph, { ...props, kind: 'command' }), SkillGlyph = props => h(LineGlyph, { ...props, kind: 'skill' })
   const ModelGlyph = props => h(LineGlyph, { ...props, kind: 'model' }), InfoGlyph = props => h(LineGlyph, { ...props, kind: 'info' }), CompactGlyph = props => h(LineGlyph, { ...props, kind: 'compact' }), PermissionGlyph = props => h(LineGlyph, { ...props, kind: 'permission' })
   function Trigger({ label, open, onClick, disabled, agent = false, model = false, profile }) {
-    return h('button', { type: 'button', className: `kode-trigger${agent ? ' kode-agent-trigger' : ''}`, 'aria-label': agent ? `Agent：${label}` : `模型：${label}`, 'aria-haspopup': 'menu', 'aria-expanded': open, disabled, onClick },
-      agent && h(AgentAvatar, { profile, size: 18 }), model && h(ModelGlyph, { size: 14 }), h('span', null, label), h(IconChevronDownOutlineRegular, { size: 12, className: open ? 'kode-chevron-open' : '' }))
+    return h('button', { type: 'button', className: `kode-trigger${agent ? ' kode-agent-trigger' : ''}`, 'aria-label': agent ? `Agent：${label}` : `模型：${label}`, 'aria-haspopup': open === undefined ? undefined : 'menu', 'aria-expanded': open, disabled, onClick },
+      agent && h(AgentAvatar, { profile, size: 18 }), model && h(ModelGlyph, { size: 14 }), h('span', null, label), open !== undefined && h(IconChevronDownOutlineRegular, { size: 12, className: open ? 'kode-chevron-open' : '' }))
   }
   function Failure({ text }) { return text ? h('p', { className: 'kode-error', role: 'alert' }, text) : null }
   function SelectField({ label, labelHeading = false, value, options, onChange, disabled = false }) {
@@ -358,7 +371,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h(Menu, { open, onClose: () => setOpen(false), selectedId: current?.id, items, side: 'bottom', portal: true,
         footer: !data?.canChangeAgent && current ? h('div', { className: 'kode-menu-note' }, '新建会话后可切换 Agent') : undefined,
         onSelect: profileId => { setOpen(false); if (profileId === 'configure') { requestedProfile = current?.origin !== 'builtin' ? current?.id : undefined; try { openSettings(slots) } catch (e) { setNavigationError(e.message) } } else void store.operate({ action: 'select', profileId, sessionId: id }).catch(() => {}) },
-        anchor: h(Trigger, { agent: true, profile: current, label: current?.name ?? '选择 Agent', open, disabled: busy || !data, onClick: () => setOpen(!open) }),
+        anchor: h(Trigger, { agent: true, profile: current, label: current?.name ?? (error ? '重试加载 Agent' : '正在加载 Agent…'), open: data ? open : undefined, disabled: busy || (!data && !error), onClick: () => data ? setOpen(!open) : void store.load() }),
       }),
       current?.type === 'dsh' && h(DshModeControl, { id, sessions, remote, canChange: data.canChangeAgent }),
       h(Failure, { text: navigationError || error }),
@@ -718,8 +731,19 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const kodeEmbedded = () => !!globalThis.document?.documentElement?.hasAttribute?.('data-kode-embed') && typeof globalThis.window?.kodeHost?.request === 'function'
   const glyph = d => h('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
   const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
-  function KodeLeavePage() {
-    useEffect(() => { window.kodeHost.request('leave') }, [])
+  // Inside Kode the sidebar wordmark names Kode; dsh stays credited below it.
+  function KodeBrandName() {
+    return h('span', { className: 'kode-brand-name' }, h('span', { className: 'kode-brand-title' }, 'Kode Harness'), h('span', { className: 'kode-brand-subtitle' }, 'Powered by dsh'))
+  }
+  // The view is only hidden after leaving, so the panel would still be open on
+  // the next entry and send Kode straight back; return to the conversation once
+  // Kode has had time to hide the view.
+  function KodeLeavePage({ layout }) {
+    useEffect(() => {
+      window.kodeHost.request('leave')
+      const timer = setTimeout(() => layout?.selectPanel(null), 600)
+      return () => clearTimeout(timer)
+    }, [])
     return h('div', { className: 'kode-leave-page' }, '正在返回 Kode…')
   }
   function HandoffMenu({ sessionId, sessions }) {
@@ -2257,6 +2281,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-settings-general .kode-notification-permission>button{flex:none;margin-left:auto}
 .kode-settings-general .kode-settings-group>.kode-config-note:last-of-type{margin-top:8px}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
+html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
+.kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}
 html[data-kode-embed][data-kode-platform=macos] #root{box-sizing:border-box;height:100%;padding-top:28px}
 [data-kode-titlebar]{display:none}
 html[data-kode-embed] .kode-token-notch{display:none}
@@ -2271,6 +2297,7 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
     document.head.append(style)
     ctx.effect(() => () => style.remove(), 'kode.agent-styles')
     ctx.slots.inject('conversation.hero.agentPreset', () => ctx.slots.register({ name: 'conversation.hero.agentPreset', id: 'kode-agent', inject: sessionId => ({ sessionId, sessions: ctx.sessions, remote: ctx.remote, slots: ctx.slots }) }, AgentControl))
+    if (kodeEmbedded()) ctx.slots.inject('sidebar.brand.name', () => ctx.slots.register({ name: 'sidebar.brand.name' }, KodeBrandName))
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'agent-presets', order: 5, label: () => 'Kode', inject: () => ({ sessions: ctx.sessions, slots: ctx.slots }) }, KodeSettings))
     ctx.inject(['layout'], scope => {
       if (!scope.layout?.selectPanel) return
@@ -2278,7 +2305,7 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-settings' }, KodeMainPage))
       scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode' }, IconAgentPresetOutlineRegular))
       if (kodeEmbedded()) {
-        scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, KodeLeavePage))
+        scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
         scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-leave', order: 7, label: 'Kode 终端' }, () => glyph(TERMINAL_GLYPH)))
       }
       openKodeSettings = section => {

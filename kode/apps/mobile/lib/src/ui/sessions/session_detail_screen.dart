@@ -26,9 +26,11 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../../protocol/attachments.dart';
 import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
+import '../../storage/session_images.dart';
 import '../theme.dart';
 import '../glass.dart';
 import 'attachment_views.dart';
+import 'session_images_view.dart';
 import 'backend_identity.dart';
 import 'composer_attachments.dart';
 import 'message_markdown.dart';
@@ -1184,6 +1186,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
         return _MessageBubble(
           role: role,
           text: text,
+          images: SessionImageRef.listFrom(item.payload['images']),
           backendKey: backendKey,
           turnDurationMs: turnDurationMs,
           timestamp: (item.payload['timestamp_ms'] as num?)?.toInt(),
@@ -1739,6 +1742,7 @@ class _ScrollToBottomButton extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   final String role;
   final String text;
+  final List<SessionImageRef> images;
   final String backendKey;
   final int? timestamp;
   final int? turnDurationMs;
@@ -1749,6 +1753,7 @@ class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.role,
     required this.text,
+    this.images = const [],
     required this.backendKey,
     required this.timestamp,
     this.turnDurationMs,
@@ -1844,22 +1849,29 @@ class _MessageBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // MarkdownBody(不是 Markdown):后者自带滚动容器,在 ListView 里会冲突。
-          MarkdownBody(
-            data: normalizeMessageMarkdown(text),
-            selectable: true,
-            styleSheet: _markdown(colors, identity.accent),
-          ),
+          if (text.isNotEmpty)
+            MarkdownBody(
+              data: normalizeMessageMarkdown(text),
+              selectable: true,
+              styleSheet: _markdown(colors, identity.accent),
+            ),
+          if (images.isNotEmpty)
+            Padding(
+              padding: EdgeInsets.only(top: text.isEmpty ? 0 : 8),
+              child: SessionImages(images: images),
+            ),
           Row(
             children: [
               if (tail.isNotEmpty) Text(tail, style: muted),
-              IconButton(
-                tooltip: 'Copy reply',
-                visualDensity: VisualDensity.compact,
-                iconSize: 16,
-                color: colors.onSurfaceVariant,
-                icon: const Icon(Icons.copy_rounded),
-                onPressed: () => Clipboard.setData(ClipboardData(text: text)),
-              ),
+              if (text.isNotEmpty)
+                IconButton(
+                  tooltip: 'Copy reply',
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 16,
+                  color: colors.onSurfaceVariant,
+                  icon: const Icon(Icons.copy_rounded),
+                  onPressed: () => Clipboard.setData(ClipboardData(text: text)),
+                ),
             ],
           ),
         ],
@@ -1920,6 +1932,21 @@ class _MessageBubble extends StatelessWidget {
               child: Padding(
                 padding: EdgeInsets.only(top: message.text.isEmpty ? 0 : 6),
                 child: MessageAttachments(attachments: message.attachments),
+              ),
+            ),
+          if (images.isNotEmpty)
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: Padding(
+                padding: EdgeInsets.only(
+                  top: message.text.isEmpty && message.attachments.isEmpty
+                      ? 0
+                      : 6,
+                ),
+                child: SessionImages(
+                  images: images,
+                  alignment: WrapAlignment.end,
+                ),
               ),
             ),
           if (delivery != null || time.isNotEmpty)

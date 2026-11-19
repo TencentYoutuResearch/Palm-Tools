@@ -21,7 +21,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-const RELAY_BACKENDS: &[&str] = &["codebuddy", "claude", "claude-internal", "tclaude"];
+const RELAY_BACKENDS: &[&str] = &["codebuddy", "claude"];
 
 /// `kode-memory codebuddy-hook` 子命令入口。读 stdin JSON,改写后转发到 relay。
 pub fn run() -> Result<()> {
@@ -52,7 +52,9 @@ fn relay_to_kode(input: &str) -> Result<()> {
 
 #[cfg(test)]
 fn supports_backend_key(backend: &str) -> bool {
-    backend.ends_with("codebuddy") || matches!(backend, "claude" | "claude-internal" | "tclaude")
+    RELAY_BACKENDS
+        .iter()
+        .any(|family| crate::runtime_context::backend_matches(family, backend))
 }
 
 /// 把原始 hook JSON 改写为 relay 可路由的形式(纯函数,供测试)。
@@ -104,7 +106,14 @@ mod tests {
 
     #[test]
     fn relay_backend_allowlist_requires_kode_owned_session() {
-        for backend in ["codebuddy", "claude", "claude-internal", "tclaude"] {
+        for backend in [
+            "codebuddy",
+            "claude",
+            "claude-internal",
+            "tclaude",
+            "builtin-claude",
+            "builtin-codebuddy",
+        ] {
             assert_eq!(
                 crate::runtime_context::active_backend_for_values(
                     Some("1"),
@@ -122,7 +131,7 @@ mod tests {
             )
             .is_none());
         }
-        for backend in ["codex", "tcodex", "custom-claude"] {
+        for backend in ["codex", "tcodex", "claude-wrapper"] {
             assert!(crate::runtime_context::active_backend_for_values(
                 Some("1"),
                 Some("42"),

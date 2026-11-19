@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
 const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
-function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}) {
+function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}, globals = {}) {
   let plugin
   const registry = [], openedSections = [], requests = [], native = () => null, disposers = []
   const shell = { options: {}, component: native, locale: 'settings', children: { 'settings.section': { kind: 'list', scope: 'root' } }, store: { create: () => ({ actions: { openSection: id => openedSections.push(id) } }) } }
@@ -20,7 +20,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
   vm.runInNewContext(source, { window: { addEventListener() {}, removeEventListener() {}, ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
-    setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } },
+    setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } }, ...globals,
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
   const ctx = { provide(name, value) { this[name] = value }, get(name) { return this[name] }, sessions: { list: { subscribe: fn => { sessionListeners.add(fn); return () => sessionListeners.delete(fn) }, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
@@ -53,6 +53,50 @@ function visibleText(node) {
   if(typeof node.type==='function')return visibleText(node.type(node.props))
   return (node.type==='MarkdownText'?node.props.text:node.type==='TerminalBlock'?[node.props.command,node.props.output].filter(Boolean).join('\n'):'')+' '+visibleText(node.children)
 }
+test('Agent selector loads the local directory when its route registers after the page', async () => {
+  const profile = { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }
+  const delays = []
+  let requests = 0
+  const c = client(undefined, {}, {}, {
+    setTimeout: (resolve, delay) => { delays.push(delay); queueMicrotask(resolve) },
+    fetch: async url => {
+      if (!String(url).startsWith('/api/kode/agents?')) return Response.json({})
+      if (++requests <= 2) return new Response(null, { status: 404 })
+      return Response.json({ profiles: [profile], currentProfile: profile, supportedTypes: ['codex'], canChangeAgent: true })
+    },
+  })
+  const render = () => c.entryById('kode-agent')({ sessionId: 'draft', sessions: c.ctx.sessions }).children[0].props
+  assert.equal(render().anchor.props.disabled, true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(delays, [250, 500])
+  assert.equal(requests, 3)
+  const menu = render()
+  assert.equal(menu.anchor.props.disabled, false)
+  assert.equal(menu.anchor.props.label, 'Codex')
+  assert.equal(menu.items.find(item => item.id === 'codex').disabled, false)
+})
+
+test('Agent selector stops automatic retries and can reload after a prolonged startup', async () => {
+  const delays = []
+  let ready = false
+  const c = client(undefined, {}, {}, {
+    setTimeout: (resolve, delay) => { delays.push(delay); queueMicrotask(resolve) },
+    fetch: async () => ready ? Response.json({ profiles: [], supportedTypes: [] }) : new Response(null, { status: 404 }),
+  })
+  const trigger = () => c.entryById('kode-agent')({ sessionId: 'draft', sessions: c.ctx.sessions }).children[0].props.anchor.props
+  trigger()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(delays, [250, 500, 1000, 2000, 4000, 8000])
+  ready = true
+  const retry = trigger()
+  assert.equal(retry.label, '重试加载 Agent')
+  assert.equal(retry.disabled, false)
+  retry.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(trigger().disabled, false)
+  assert.equal(delays.length, 6)
+})
+
 test('inline native citations split line suffixes before entering the shipped file preview',async()=>{
  const c=client(),calls=[],children=c.chatShell.children,store=c.chatShell.store
  const wrapped=c.chatShell.component({openFile:async(path,options)=>calls.push({path,options})}),view=wrapped.type(wrapped.props)

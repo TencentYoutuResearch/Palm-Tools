@@ -17,10 +17,14 @@
 //! (host → view).
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Deserialize;
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl};
+use tokio::sync::Notify;
 
 use super::manifest::SessionView;
 use super::{app_version, host};
@@ -34,6 +38,41 @@ const EMBED_SCRIPT: &str = include_str!("embed.js");
 pub struct Views {
     /// webview label → extension id, for cleanup when an extension goes away.
     labels: Mutex<HashMap<String, String>>,
+    /// Pages still loading, by webview label. Their view stays off screen
+    /// until the page is up, so nobody clicks into a half-built page.
+    loading: Mutex<HashMap<String, Arc<Notify>>>,
+}
+
+/// Longest wait for a page before showing it anyway.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Where a loading view waits: off every screen, at its real size.
+const OFF_SCREEN: LogicalPosition<f64> = LogicalPosition { x: -100_000.0, y: -100_000.0 };
+
+impl Views {
+    fn start_loading(&self, label: &str) -> Arc<Notify> {
+        self.loading.lock().entry(label.to_string()).or_insert_with(|| Arc::new(Notify::new())).clone()
+    }
+
+    fn finish_loading(&self, label: &str) {
+        if let Some(notify) = self.loading.lock().remove(label) {
+            notify.notify_waiters();
+        }
+    }
+
+    /// Resolve once `label`'s page has loaded (or at once if it is not loading).
+    async fn wait_loaded(&self, label: &str) {
+        let Some(notify) = self.loading.lock().get(label).cloned() else { return };
+        let loaded = notify.notified();
+        tokio::pin!(loaded);
+        loaded.as_mut().enable();
+        if !self.loading.lock().contains_key(label) {
+            return;
+        }
+        if tokio::time::timeout(LOAD_TIMEOUT, loaded).await.is_err() {
+            tracing::warn!(target: "extension", %label, "view page did not finish loading; showing it anyway");
+            self.loading.lock().remove(label);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -71,7 +110,10 @@ pub async fn extension_view_show(
         let served = host(&app).ok().and_then(|h| h.backends.status(&extension)).map(|r| origin(&r.url));
         served.is_some() && served == webview.url().ok().map(|url| origin(url.as_str()))
     });
+    let views = &app.state::<super::ExtensionHost>().views;
     if let (Some(webview), true) = (&existing, live) {
+        // Its page may still be loading from an earlier show.
+        views.wait_loaded(&label).await;
         webview.set_position(position).map_err(|e| e.to_string())?;
         webview.set_size(size).map_err(|e| e.to_string())?;
         if let Some(fragment) = fragment {
@@ -110,20 +152,29 @@ pub async fn extension_view_show(
         url.set_fragment(Some(fragment));
     }
     if let Some(webview) = existing {
-        webview.navigate(url).map_err(|e| e.to_string())?;
-        webview.set_position(position).map_err(|e| e.to_string())?;
+        views.start_loading(&label);
+        webview.set_position(OFF_SCREEN).map_err(|e| e.to_string())?;
         webview.set_size(size).map_err(|e| e.to_string())?;
+        webview.navigate(url).map_err(|e| e.to_string())?;
         webview.show().map_err(|e| e.to_string())?;
+        views.wait_loaded(&label).await;
+        webview.set_position(position).map_err(|e| e.to_string())?;
         return Ok(());
     }
 
     let window = app.get_window("main").ok_or("main window unavailable")?;
     let actions = app.clone();
     let (action_extension, action_view) = (extension.clone(), view.clone());
+    let loads = app.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(url))
         // Let the page take file drops as plain HTML5 events, like in a browser.
         .disable_drag_drop_handler()
         .initialization_script(embed_script(&contribution))
+        .on_page_load(move |webview, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                loads.state::<super::ExtensionHost>().views.finish_loading(webview.label());
+            }
+        })
         // Loopback pages only; anything else opens in the system browser.
         .on_navigation(move |target| {
             if target.scheme() == ACTION_SCHEME {
@@ -147,14 +198,17 @@ pub async fn extension_view_show(
             }
             local || target.scheme() == "about"
         });
-    window
-        .add_child(builder, position, size)
-        .map_err(|e| e.to_string())?;
-    app.state::<super::ExtensionHost>()
-        .views
-        .labels
-        .lock()
-        .insert(label, extension);
+    views.start_loading(&label);
+    let webview = match window.add_child(builder, OFF_SCREEN, size) {
+        Ok(webview) => webview,
+        Err(error) => {
+            views.finish_loading(&label);
+            return Err(error.to_string());
+        }
+    };
+    views.labels.lock().insert(label.clone(), extension);
+    views.wait_loaded(&label).await;
+    webview.set_position(position).map_err(|e| e.to_string())?;
     Ok(())
 }
 
