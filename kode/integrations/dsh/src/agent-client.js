@@ -339,9 +339,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       agent && h(AgentAvatar, { profile, size: 18 }), model && h(ModelGlyph, { size: 14 }), h('span', null, label), open !== undefined && h(IconChevronDownOutlineRegular, { size: 12, className: open ? 'kode-chevron-open' : '' }))
   }
   function Failure({ text }) { return text ? h('p', { className: 'kode-error', role: 'alert' }, text) : null }
-  function SelectField({ label, labelHeading = false, value, options, onChange, disabled = false }) {
+  function SelectField({ label, labelHeading = false, showLabel = true, value, options, onChange, disabled = false }) {
     const [open, setOpen] = useState(false)
-    return h('div', { className: 'kode-field' }, h(labelHeading ? 'h3' : 'span', labelHeading ? { className: 'kode-settings-group-title' } : null, label), h(Menu, {
+    return h('div', { className: 'kode-field' }, showLabel && h(labelHeading ? 'h3' : 'span', labelHeading ? { className: 'kode-settings-group-title' } : null, label), h(Menu, {
       open, onClose: () => setOpen(false), portal: true, selectedId: value,
       items: options.map(option => ({ id: option.value, label: option.label })),
       onSelect: id => { setOpen(false); onChange(id) },
@@ -483,32 +483,35 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   }
   function HostServiceStatus({ host, onBusyChange }) {
     const settings = useIntegrationSettings(host)
-    return h('section', { className: 'kode-host-service', 'aria-label': '服务状态' },
+    return h('section', { className: 'kode-settings-group', 'aria-label': '服务状态' },
       h('h3', { className: 'kode-settings-group-title' }, '服务状态'),
-      h('div', { className: 'kode-host-service-body' },
-        h('p', { className: 'kode-config-note kode-service-status', role: 'status' },
-          settings.data && !settings.error && h(IconCheckOutlineRegular, { size: 14, className: 'kode-service-connected-icon', 'aria-hidden': true }),
-          settings.error ? '服务连接异常，请检查或恢复所选主机的服务。' : settings.data ? '服务已连接' : '正在检查服务状态…'),
-        h(ServiceRecovery, { host, settings, onBusyChange })),
-      h(Failure, { text: settings.error }))
+      h('div', { className: 'kode-settings-card kode-host-service' },
+        h('div', { className: 'kode-host-service-body' },
+          h('p', { className: 'kode-config-note kode-service-status', role: 'status' },
+            settings.data && !settings.error && h(IconCheckOutlineRegular, { size: 14, className: 'kode-service-connected-icon', 'aria-hidden': true }),
+            settings.error ? '服务连接异常，请检查或恢复所选主机的服务。' : settings.data ? '服务已连接' : '正在检查服务状态…'),
+          h(ServiceRecovery, { host, settings, onBusyChange })),
+        h(Failure, { text: settings.error })))
   }
   function IntegrationSettingsBody({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
     return h(React.Fragment, null,
-      !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
-      data && [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) }))),
-      h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }),
+      h('div', { className: 'kode-settings-group', 'aria-label': '内置能力' },
+        h('h3', { className: 'kode-settings-group-title' }, '内置能力'),
+        !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
+        data && h('div', { className: 'kode-settings-card' }, [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) })))),
+        h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots })),
       h(HubSettings, { key: host, host }))
   }
   function SessionBehaviorSettings({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
     return h(React.Fragment, null,
-      h('header', { className: 'kode-settings-group-header' }, h('h3', null, '会话恢复'),
-        h('p', { className: 'kode-config-note' }, '此计算机的会话行为；远端主机保留各自的配置。')),
+      h('h3', { className: 'kode-settings-group-title' }, '会话恢复'),
+      h('p', { className: 'kode-config-note' }, '此计算机的会话行为；远端主机保留各自的配置。'),
       !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取会话配置…'),
-      data && h('label', { className: 'kode-integration-row' },
+      data && h('div', { className: 'kode-settings-card' }, h('label', { className: 'kode-integration-row' },
         h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
-        h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) })),
+        h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) }))),
       h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
   }
   function MobileSettingsBody({ host, slots }) {
@@ -523,11 +526,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const value = await update({ action: 'pair', server_url: server.trim() })
       if (value?.pairing) setPairing(value.pairing)
     }
-    return h(React.Fragment, null,
+    return h('div', { className: 'kode-settings-group' },
+      h('h3', { className: 'kode-settings-group-title' }, '手机配对'),
+      h('p', { className: 'kode-config-note' }, '配对后可在手机上查看、创建和继续会话。填写手机可访问的同步服务地址，再使用 Kode 手机 App 扫码。'),
       !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取手机与同步配置…'),
-      data && h('section', { className: 'kode-mobile-pairing', 'aria-label': '手机配对' },
-        h('h3', { className: 'kode-settings-group-title' }, '手机配对'),
-        h('p', { className: 'kode-config-note' }, '配对后可在手机上查看、创建和继续会话。填写手机可访问的同步服务地址，再使用 Kode 手机 App 扫码。'),
+      data && h('section', { className: 'kode-settings-card kode-mobile-pairing', 'aria-label': '手机配对' },
         h('form', { className: 'kode-mobile-pairing-form', onSubmit: event => { event.preventDefault(); if (!busy && server.trim()) void pair() } },
           h('label', { className: 'kode-field' }, h('span', null, '同步服务地址'), h('input', { type: 'url', value: server, disabled: busy, placeholder: 'https://sync.example.com', onChange: event => { setServer(event.target.value); setPairing(null) } })),
           h('div', { className: 'kode-mobile-pairing-actions' },
@@ -578,13 +581,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       catch (error) { setError(error.message) }
       finally { setBusy(false) }
     }
-    return h('div', { className: 'kode-power-settings' },
-      !data && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取电源设置…'),
-      data && h(React.Fragment, null,
-        h('label', { className: 'kode-integration-row' }, h('span', null, h('strong', null, '息屏后继续运行'), h('span', { className: 'kode-config-note' }, '阻止此主机自动休眠，屏幕仍可熄灭。停止 Kode 后端后释放；合盖和手动休眠由系统控制。')),
-          h('input', { type: 'checkbox', role: 'switch', checked: data.keepAwake, disabled: busy || !data.power.supported, onChange: event => void update(event.target.checked) })),
-        h('p', { className: 'kode-config-note', role: 'status' }, data.power.error || (data.power.active ? '主机正在保持唤醒。' : data.power.supported ? '主机使用系统默认休眠设置。' : '此主机暂不支持保持唤醒。'))),
-      h(Failure, { text: error }))
+    return h('div', { className: 'kode-settings-group kode-power-settings' },
+      h('h3', { className: 'kode-settings-group-title' }, '电源'),
+      h('div', { className: 'kode-settings-card' },
+        !data && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取电源设置…'),
+        data && h(React.Fragment, null,
+          h('label', { className: 'kode-integration-row' }, h('span', null, h('strong', null, '息屏后继续运行'), h('span', { className: 'kode-config-note' }, '阻止此主机自动休眠，屏幕仍可熄灭。停止 Kode 后端后释放；合盖和手动休眠由系统控制。')),
+            h('input', { type: 'checkbox', role: 'switch', checked: data.keepAwake, disabled: busy || !data.power.supported, onChange: event => void update(event.target.checked) })),
+          h('p', { className: 'kode-config-note', role: 'status' }, data.power.error || (data.power.active ? '主机正在保持唤醒。' : data.power.supported ? '主机使用系统默认休眠设置。' : '此主机暂不支持保持唤醒。'))),
+        h(Failure, { text: error })))
   }
   function HubSettings({ host }) {
     const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
@@ -606,11 +611,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const field = (label, key, placeholder) => h('label', { className: `kode-field kode-source-field-${key}` }, label, h('input', { required: key !== 'subdir', value: draft[key], placeholder, onChange: event => setDraft({ ...draft, [key]: event.target.value }) }))
     const previewSource = data?.sources.find(source => source.id === previewId) ?? null
     const openPreview = id => { setPreviewPackagePath(null); setPreviewId(id) }
-    return h('div', { className: 'kode-agent-settings kode-hub-settings' },
+    return h('div', { className: 'kode-settings-group kode-hub-settings' },
+      h('h3', { className: 'kode-settings-group-title' }, 'Plugin / Skills 来源'),
       h(Failure, { text: error }),
       !data && !error && h('p', { role: 'status' }, '正在读取主机配置…'),
-      data && h(React.Fragment, null,
-        h('h4', null, 'Plugin / Skills 来源列表'),
+      data && h('div', { className: 'kode-settings-card kode-settings-card-padded kode-hub-sources-card' },
         h('p', { className: 'kode-config-note' }, '统一管理 Git 仓库或本地技能包。更新会将 SKILL.md 和引用资源同步到所选 Agent。有对应原生插件清单时保留其 hooks 和 MCP：Claude、CodeBuddy、Cursor 在下次启动 Kode 会话时加载，Codex 调用原生安装器。缺少原生清单时仅同步标准技能。'),
         h('ul', { className: 'kode-agent-rows' }, ...data.sources.map(source => {
           const presentation = sourcePresentation(source)
@@ -796,16 +801,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const snapshot = useSyncExternalStore(subscribe, () => service?.getSnapshot() ?? empty)
     const [error, setError] = useState('')
     return h(React.Fragment, null,
-      h('h3', null, '状态与用量'),
-      h('label', { className: 'kode-integration-row' },
-        h('span', null, h('strong', null, '显示 Token 刘海'), h('span', { className: 'kode-config-note' }, '显示 Token 用量与全局会话状态；关闭后立即隐藏，设置保存在当前设备。')),
-        h('input', { type: 'checkbox', role: 'switch', checked: snapshot.tokenIsland, disabled: !service, onChange: event => {
-          setError(''); try { service.update({ tokenIsland: event.target.checked }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
-        } })),
-      h(SelectField, { label: '刘海用量范围', value: snapshot.tokenPeriod ?? 'today', disabled: !service, options: [{ value: 'today', label: '今日 Token' }, { value: 'month', label: '本月 Token' }, { value: 'all', label: '全部 Token' }, { value: 'follow', label: '跟随统计范围' }], onChange: tokenPeriod => {
-        setError(''); try { service.update({ tokenPeriod }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
-      } }),
-      h('p', { className: 'kode-config-note' }, '选择“跟随统计范围”后，刘海显示详情中所选时间范围的用量，包括自定义起止时间。刘海屏仅显示状态点与用量数字。'),
+      h('h3', { className: 'kode-settings-group-title' }, '状态与用量'),
+      h('div', { className: 'kode-settings-card' },
+        h('label', { className: 'kode-integration-row' },
+          h('span', null, h('strong', null, '显示 Token 刘海'), h('span', { className: 'kode-config-note' }, '显示 Token 用量与全局会话状态；关闭后立即隐藏，设置保存在当前设备。')),
+          h('input', { type: 'checkbox', role: 'switch', checked: snapshot.tokenIsland, disabled: !service, onChange: event => {
+            setError(''); try { service.update({ tokenIsland: event.target.checked }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
+          } })),
+        h('div', { className: 'kode-integration-row kode-settings-select-row' },
+          h('span', null, h('strong', null, '刘海用量范围'), h('span', { className: 'kode-config-note' }, '选择“跟随统计范围”后，刘海显示详情中所选时间范围的用量，包括自定义起止时间。')),
+          h('div', { className: 'kode-settings-row-control' }, h(SelectField, { label: '刘海用量范围', showLabel: false, value: snapshot.tokenPeriod ?? 'today', disabled: !service, options: [{ value: 'today', label: '今日 Token' }, { value: 'month', label: '本月 Token' }, { value: 'all', label: '全部 Token' }, { value: 'follow', label: '跟随统计范围' }], onChange: tokenPeriod => {
+            setError(''); try { service.update({ tokenPeriod }) } catch { setError('无法保存显示设置，请检查当前设备的存储权限。') }
+          } })))),
       h(Failure, { text: error }))
   }
   function NotificationSettingsBody() {
@@ -817,13 +824,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const labels = { granted: '通知发送权限已允许，横幅由系统设置控制', default: '允许通知后，后台会话就能提醒你', denied: '通知权限已关闭，请在浏览器或 macOS 系统设置的通知中允许 DeepSeek Harness。', unsupported: '当前环境不支持系统通知，请使用 Desktop 或支持通知的浏览器。', loading: '正在连接通知服务…' }
     const authorize = async () => { setBusy(true); setError(''); try { await (snapshot.permission === 'default' ? service.enable() : service.openSettings()) } catch (error) { setError(error.message || '无法打开通知设置，请手动前往系统设置。') } finally { setBusy(false) } }
     return h(React.Fragment, null,
-      h('header', { className: 'kode-settings-group-header' }, h('h3', null, '会话通知'),
-        h('p', { className: 'kode-config-note' }, '会话完成或等待你操作时提醒你；点击通知可返回对应会话。')),
-      h('div', { className: 'kode-integration-row kode-notification-permission' }, h('span', { role: 'status' }, labels[snapshot.permission]),
-        snapshot.permission === 'default' || snapshot.systemSettings ? h(Button, { variant: snapshot.permission === 'granted' ? 'outline' : 'primary', disabled: busy, onClick: () => void authorize() }, busy ? '正在打开…' : snapshot.systemSettings ? '前往系统设置' : '开启通知') : null),
-      snapshot.systemSettings ? h('p', { className: 'kode-config-note' }, '请在 macOS 系统设置 → 通知中允许当前应用，并开启横幅。开发模式请选择“DeepSeek Harness 开发版”；镜像或共享屏幕期间，系统可能隐藏横幅。') : null,
-      snapshot.deliveryError ? h(Failure, { text: '系统未能显示通知，请检查系统通知权限与应用签名。' }) : null,
-      ...[{ key: 'completed', label: '会话完成', detail: '本轮回答完成且队列为空时提醒。主动停止和执行失败不会触发完成通知。' }, { key: 'waiting', label: '等待操作', detail: 'Agent 请求回答、计划确认或操作审批时提醒。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: snapshot[item.key], disabled: !service, onChange: event => service.update({ [item.key]: event.target.checked }) }))),
+      h('h3', { className: 'kode-settings-group-title' }, '会话通知'),
+      h('p', { className: 'kode-config-note' }, '会话完成或等待你操作时提醒你；点击通知可返回对应会话。'),
+      h('div', { className: 'kode-settings-card' },
+        h('div', { className: 'kode-integration-row kode-notification-permission' }, h('span', { role: 'status' }, labels[snapshot.permission]),
+          snapshot.permission === 'default' || snapshot.systemSettings ? h(Button, { variant: snapshot.permission === 'granted' ? 'outline' : 'primary', disabled: busy, onClick: () => void authorize() }, busy ? '正在打开…' : snapshot.systemSettings ? '前往系统设置' : '开启通知') : null),
+        snapshot.systemSettings ? h('p', { className: 'kode-config-note' }, '请在 macOS 系统设置 → 通知中允许当前应用，并开启横幅。开发模式请选择“DeepSeek Harness 开发版”；镜像或共享屏幕期间，系统可能隐藏横幅。') : null,
+        snapshot.deliveryError ? h(Failure, { text: '系统未能显示通知，请检查系统通知权限与应用签名。' }) : null,
+        ...[{ key: 'completed', label: '会话完成', detail: '本轮回答完成且队列为空时提醒。主动停止和执行失败不会触发完成通知。' }, { key: 'waiting', label: '等待操作', detail: 'Agent 请求回答、计划确认或操作审批时提醒。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: snapshot[item.key], disabled: !service, onChange: event => service.update({ [item.key]: event.target.checked }) })))),
       h('p', { className: 'kode-config-note' }, '通知偏好保存在当前设备。已连接过的 SSH 主机会继续在后台提供提醒。'),
       h(Failure, { text: error }))
   }
@@ -861,8 +869,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (!options.some(row => row.value === agentHost)) options.push({ value: agentHost, label: '正在读取主机…' })
     const bodies = {
       agents: () => h(React.Fragment, null,
-        h('div', { className: 'kode-settings-scope' },
-          h(SelectField, { label: '配置主机', value: agentHost, options, onChange: setAgentHost })),
+        h('div', { className: 'kode-settings-group' },
+          h('h3', { className: 'kode-settings-group-title' }, '配置主机'),
+          h('div', { className: 'kode-settings-card kode-settings-card-padded kode-settings-scope' },
+            h(SelectField, { label: '配置主机', showLabel: false, value: agentHost, options, onChange: setAgentHost }))),
         h(Failure, { text: error }),
         h(AgentSettingsBody, { key: agentHost, sessions, slots, settingsHost: agentHost })),
       integrations: () => h(IntegrationSettingsBody, { host: 'local', slots }),
@@ -871,7 +881,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h('div', { className: 'kode-settings-group' }, h(NotificationSettingsBody))),
       appearance: () => h(React.Fragment, null,
         h('div', { className: 'kode-settings-group' }, h(InterfaceSettingsBody)),
-        h('div', { className: 'kode-settings-group' }, h('h3', null, '头像与背景'), h(PersonalizationSettings, { sessions, close }))),
+        h('div', { className: 'kode-settings-group' }, h('h3', { className: 'kode-settings-group-title' }, '头像与背景'),
+          h('div', { className: 'kode-settings-card kode-settings-card-padded' }, h(PersonalizationSettings, { sessions, close })))),
       mobile: () => h(MobileSettingsBody, { host: 'local', slots }),
       ssh: () => h(SshSettings, { host: serviceHost, onBusyChange: setServiceBusy }),
     }
@@ -939,25 +950,26 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         ),
       h('div', { className: 'kode-settings-footer' }, draft.id && customProfiles.some(p => p.id === draft.id) && h(Button, { variant: 'outline', className: 'kode-delete', disabled: busy, onClick: () => setDeleting(true) }, '删除配置'), h(Button, { variant: 'outline', disabled: busy, onClick: () => setEditing(false) }, '取消'), h(Button, { variant: 'primary', type: 'submit', form: 'kode-agent-form', disabled: busy }, busy ? '保存中…' : '保存配置')))
     return h('section', { className: 'kode-agent-settings', 'aria-label': 'Agent 设置' },
-      h('div', { className: 'kode-settings-scope' },
-        h(SelectField, { label: '默认 Agent', labelHeading: true, value: data?.configuredDefaultProfileId ?? data?.profiles?.find(profile => `kode-agent-${profile.id}` === data?.selection?.provider)?.id ?? '', disabled: busy || defaultBusy || !data, options: [{ value: '', label: '自动选择' }, ...(data?.profiles ?? []).map(profile => ({ value: profile.id, label: profile.name }))], onChange: profileId => { setSaved(false); setFormError(''); setDefaultBusy(true); void saveDefaultAgent(settingsHost, profileId ? data.profiles.find(profile => profile.id === profileId) : null).then(async () => { await store.load(); setSaved(true) }).catch(error => setFormError(error.message)).finally(() => setDefaultBusy(false)) } })),
+      h('div', { className: 'kode-settings-group' }, h('h3', { className: 'kode-settings-group-title' }, '默认 Agent'),
+        h('div', { className: 'kode-settings-card kode-settings-card-padded' }, h('div', { className: 'kode-settings-scope' },
+          h(SelectField, { label: '默认 Agent', showLabel: false, value: data?.configuredDefaultProfileId ?? data?.profiles?.find(profile => `kode-agent-${profile.id}` === data?.selection?.provider)?.id ?? '', disabled: busy || defaultBusy || !data, options: [{ value: '', label: '自动选择' }, ...(data?.profiles ?? []).map(profile => ({ value: profile.id, label: profile.name }))], onChange: profileId => { setSaved(false); setFormError(''); setDefaultBusy(true); void saveDefaultAgent(settingsHost, profileId ? data.profiles.find(profile => profile.id === profileId) : null).then(async () => { await store.load(); setSaved(true) }).catch(error => setFormError(error.message)).finally(() => setDefaultBusy(false)) } })))),
       !data && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在连接并读取 Agent 配置…'),
       error && h(Button, { onClick: () => store.load(), disabled: busy }, '重试连接'),
       saved && h('p', { className: 'kode-config-note', role: 'status' }, '已保存'),
       h(Failure, { text: !editing ? formError || error : '' }),
-      h('h3', { className: 'kode-settings-group-title' }, '内置 Agent'),
-      h('ul', { className: 'kode-agent-rows' },
+      h('div', { className: 'kode-settings-group' }, h('h3', { className: 'kode-settings-group-title' }, '内置 Agent'),
+        data && h('div', { className: 'kode-settings-card kode-agent-list-card' }, h('ul', { className: 'kode-agent-rows' },
         ...(data?.profiles ?? []).filter(profile => profile.origin === 'builtin' && profile.type !== 'dsh').map(profile => h('li', { className: 'kode-agent-row', key: profile.id },
           h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${profile.name} 默认头像`, onClick: () => openAvatarDialog({ profile, host: settingsHost }) }, h(EditableAgentAvatar, { profile, host: settingsHost })), h('span', { className: 'kode-agent-name' }, profile.name), modelButton(profile)), modelEditor(profile))),
         data?.types?.dsh && h('li', { className: 'kode-agent-row' },
           h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置 DeepSeek Harness 默认头像', onClick: () => openAvatarDialog({ profile: data.profiles.find(profile => profile.type === 'dsh'), host: settingsHost }) }, h(EditableAgentAvatar, { profile: data.profiles.find(profile => profile.type === 'dsh'), host: settingsHost })), h('span', { className: 'kode-agent-name' }, 'DeepSeek Harness'), modelButton(data.profiles.find(profile => profile.type === 'dsh')), settingsHost === (transport?.current ?? 'local') && h(Button, { variant: 'outline', className: 'kode-agent-edit', 'aria-label': '编辑 DeepSeek Harness', onClick: () => openSettings(slots, 'models') }, '模型设置')), modelEditor(data.profiles.find(profile => profile.type === 'dsh'))),
-      ),
-      h('h3', { className: 'kode-settings-group-title' }, '自定义 Agent'),
-      h('ul', { className: 'kode-agent-rows' },
+      ))),
+      h('div', { className: 'kode-settings-group' }, h('h3', { className: 'kode-settings-group-title' }, '自定义 Agent'),
+        customProfiles.length > 0 && h('div', { className: 'kode-settings-card kode-agent-list-card' }, h('ul', { className: 'kode-agent-rows' },
         ...customProfiles.map(p => h('li', { className: 'kode-agent-row', key: p.id },
           h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${p.name} 默认头像`, onClick: () => openAvatarDialog({ profile: p, host: settingsHost }) }, h(EditableAgentAvatar, { profile: p, host: settingsHost })), h('span', { className: 'kode-agent-name' }, p.name), h('span', { className: 'kode-agent-tag' }, data.types[p.type]?.name), modelButton(p), h(Button, { variant: 'outline', className: 'kode-agent-edit', disabled: busy, 'aria-label': `编辑 ${p.name}`, 'aria-expanded': editing && draft.id === p.id, onClick: () => editing && draft.id === p.id ? setEditing(false) : edit(p) }, editing && draft.id === p.id ? '收起' : '编辑')),
           modelEditor(p), editing && draft.id === p.id && h('div', { className: 'kode-agent-editor' }, editor))),
-      ),
+      ))),
       h(Button, { variant: 'outline', className: 'kode-agent-add', disabled: busy || !data, onClick: () => edit(newDraft(data?.types)) }, h(IconPlusOutlineRegular, { size: 16 }), '添加 Agent'),
       editing && !draft.id && h('div', { className: 'kode-agent-editor' }, editor),
       h(Modal, { open: deleting, title: `删除 ${draft.name}？`, closeLabel: '关闭', onClose: () => setDeleting(false), description: '此配置将从 Agent 列表移除。已有会话和启动配置会保留。', footer: h(React.Fragment, null, h(Button, { variant: 'outline', onClick: () => setDeleting(false) }, '取消'), h(Button, { variant: 'primary', disabled: busy, onClick: () => { void store.operate({ action: 'remove', profileId: draft.id }).then(async result => { if (result) { if (data?.selection?.provider === `kode-agent-${draft.id}`) await saveDefaultAgent(settingsHost, null); await store.load(); setDeleting(false); setEditing(false); setSaved(false) } }).catch(error => setFormError(error.message)) } }, '删除配置')) }, h(Failure, { text: error })),
@@ -1165,12 +1177,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     return h('div', { className: 'kode-agent-settings' },
       h(HostServiceStatus, { key: host, host, onBusyChange }),
       h(PowerSettings, { key: host, host }),
-      h('h3', { className: 'kode-settings-group-title' }, 'SSH 连接'),
-      data.current !== 'local' && h('div', null, h('p', { className: 'kode-config-note' }, '当前连接的主机需返回此计算机后编辑，其他主机可直接管理。'), h(Button, { disabled: busy, onClick: async () => { setBusy(true); try { await switchHost('local') } catch (error) { setError(error.message) } finally { setBusy(false) } } }, '返回此计算机')),
-      h('ul', { className: 'kode-agent-rows' }, ...hosts.map(host => h('li', { key: host.id, className: 'kode-agent-row' },
-        h('div', { className: 'kode-agent-row-head' }, h(RemoteComputerIcon), h('span', { className: 'kode-agent-name' }, host.name), host.id === data.current && h('span', { className: 'kode-agent-tag' }, '当前主机'), h(Button, { className: 'kode-agent-edit', disabled: host.id === data.current, onClick: () => { setInitial(host); setEditing(true) } }, '编辑')),
-        h('span', { className: 'kode-secondary' }, `${host.host}:${host.port}`)))),
-      h(Button, { className: 'kode-agent-add', onClick: () => { setInitial(undefined); setEditing(true) } }, h(IconPlusOutlineRegular, { size: 16 }), '添加 SSH 主机'),
+      h('div', { className: 'kode-settings-group' }, h('h3', { className: 'kode-settings-group-title' }, 'SSH 连接'),
+        h('div', { className: 'kode-settings-card kode-settings-card-padded kode-ssh-hosts-card' },
+          data.current !== 'local' && h('div', null, h('p', { className: 'kode-config-note' }, '当前连接的主机需返回此计算机后编辑，其他主机可直接管理。'), h(Button, { disabled: busy, onClick: async () => { setBusy(true); try { await switchHost('local') } catch (error) { setError(error.message) } finally { setBusy(false) } } }, '返回此计算机')),
+          h('ul', { className: 'kode-agent-rows' }, ...hosts.map(host => h('li', { key: host.id, className: 'kode-agent-row' },
+            h('div', { className: 'kode-agent-row-head' }, h(RemoteComputerIcon), h('span', { className: 'kode-agent-name' }, host.name), host.id === data.current && h('span', { className: 'kode-agent-tag' }, '当前主机'), h(Button, { className: 'kode-agent-edit', disabled: host.id === data.current, onClick: () => { setInitial(host); setEditing(true) } }, '编辑')),
+            h('span', { className: 'kode-secondary' }, `${host.host}:${host.port}`)))),
+          h(Button, { className: 'kode-agent-add', onClick: () => { setInitial(undefined); setEditing(true) } }, h(IconPlusOutlineRegular, { size: 16 }), '添加 SSH 主机'))),
       h(Failure, { text: error || loadError }),
       h(RemoteHostForm, { open: editing, initial, supportsDeployment: data.deploymentSupported, onClose: () => setEditing(false), onSaved: () => setEditing(false) }))
   }
@@ -2359,18 +2372,29 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-settings-page .kode-integration-row>span{gap:4px}
 .kode-settings-page .kode-integration-row strong{font-size:14px;font-weight:500;line-height:22px}
 .kode-settings-page .kode-config-note{font-size:12px;font-weight:400;line-height:20px}
-.kode-settings-general{display:flex;flex-direction:column;gap:28px}
-.kode-settings-general .kode-settings-group{gap:0}
-.kode-settings-general .kode-settings-group+.kode-settings-group{margin:0;padding-top:24px}
-.kode-settings-group-header{display:flex;flex-direction:column;gap:4px;margin:0 0 12px}
-.kode-settings-page .kode-settings-group-header h3{margin:0;font-size:15px;font-weight:600;line-height:22px;color:var(--dsw-alias-label-primary)}
-.kode-settings-page .kode-settings-group-header .kode-config-note{margin:0}
-.kode-settings-general .kode-integration-row{padding:16px 0;border-bottom:0}
-.kode-settings-general .kode-integration-row+.kode-integration-row{border-top:1px solid var(--dsw-alias-border-l2)}
-.kode-settings-general .kode-config-note{max-width:80ch;margin:0}
-.kode-settings-general .kode-notification-permission{padding:4px 0 10px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}
-.kode-settings-general .kode-notification-permission>button{flex:none;margin-left:auto}
-.kode-settings-general .kode-settings-group>.kode-config-note:last-of-type{margin-top:8px}
+.kode-settings-page .kode-settings-section,.kode-settings-general{display:flex;flex-direction:column;gap:24px}
+.kode-settings-page .kode-settings-group+.kode-settings-group{margin-top:0;padding-top:0;border-top:0}
+.kode-settings-page .kode-settings-group>.kode-settings-group-title{margin:0;font-size:15px;font-weight:600;line-height:22px}
+.kode-settings-page .kode-settings-group>.kode-config-note{margin:0}
+.kode-settings-page .kode-settings-card{display:flex;flex-direction:column;min-width:0;padding:0 16px;border:.5px solid var(--dsw-alias-settings-card-stroke);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-settings-card-fill)}
+.kode-settings-page .kode-settings-card-padded,.kode-settings-page .kode-settings-card:is(.kode-host-service,.kode-mobile-pairing){padding:16px}
+.kode-settings-page .kode-settings-card>.kode-settings-scope{padding:0;border:0;background:transparent}
+.kode-settings-card>.kode-integration-row{padding:14px 0;border:0}
+.kode-settings-card>.kode-integration-row+.kode-integration-row{border-top:.5px solid var(--dsw-alias-border-l2)}
+.kode-settings-card>.kode-config-note{margin:0 0 14px}
+.kode-settings-card>.kode-config-note:only-child{margin:14px 0}
+.kode-settings-page .kode-notification-permission{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}
+.kode-settings-page .kode-notification-permission>button{flex:none;margin-left:auto}
+.kode-settings-page .kode-settings-select-row{flex-wrap:wrap;gap:10px 20px}
+.kode-settings-select-row>span{flex:1 1 180px}
+.kode-settings-row-control{flex:0 1 180px;min-width:0}
+.kode-settings-row-control .kode-field{margin:0}
+.kode-settings-card:is(.kode-agent-list-card,.kode-hub-sources-card,.kode-ssh-hosts-card)>.kode-agent-rows{gap:0}
+.kode-settings-card:is(.kode-agent-list-card,.kode-hub-sources-card,.kode-ssh-hosts-card)>.kode-agent-rows>.kode-agent-row{padding:14px 0;border:0;border-radius:0;background:transparent}
+.kode-settings-card:is(.kode-agent-list-card,.kode-hub-sources-card,.kode-ssh-hosts-card)>.kode-agent-rows>.kode-agent-row+.kode-agent-row{border-top:.5px solid var(--dsw-alias-border-l2)}
+.kode-settings-card>.kode-personalization{height:auto;overflow:visible}
+.kode-ssh-hosts-card>.kode-agent-add{margin-top:12px}
+@media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}

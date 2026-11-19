@@ -308,7 +308,9 @@ test('Agent list keeps editors collapsed until requested', () => {
   assert.match(JSON.stringify(tree), /配置主机/)
   const body = findNode(tree, child => child?.props?.settingsHost)?.type({ sessions: c.ctx.sessions, settingsHost: 'local' })
   assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
-  assert.equal(findNode(body, child => child?.props?.label === '默认 Agent')?.props.labelHeading, true)
+  const defaultAgent = findNode(body, child => child?.props?.label === '默认 Agent')
+  assert.equal(defaultAgent.props.showLabel, false)
+  assert.ok(findNode(body, child => child?.type === 'h3' && child.children.includes('默认 Agent')))
   assert.ok(findNode(body, child => child?.props?.className === 'kode-settings-scope' && child.children?.some(row => row?.props?.label === '默认 Agent')), 'default Agent uses the same framed scope as the configuration Host')
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
@@ -385,7 +387,8 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
  const render=()=>{index=0;return scope.HubSettings({host:'local'})}
  render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote',subdir:'plugins/remote',targets:['dsh'],nativeStatus:{dsh:'skills-only'},updatedAt:1,release:'r1',packages:[{name:'remote',path:'.',displayName:'Remote Toolkit',description:'Remote summary',longDescription:'Long remote summary',version:'1.2.3',author:'team',category:'Engineering',logo:'assets/logo.png',skills:[{name:'example-skill',description:'Skill summary'}],agents:[{name:'reviewer',description:'Reviews changes'}],hooks:[{name:'PreToolUse',description:'Hook summary'}],commands:[{name:'build',description:'Build summary'}],rules:[{name:'discipline',description:'Rule summary'}],mcp:[{name:'remote-mcp',type:'http'}]}]},{id:'local',kind:'local',location:'/tmp/skills',targets:['dsh'],skills:['skills--local']}],targets:{dsh:{}}}
  const closed=render(),text=JSON.stringify(closed)
- assert.match(text,/Remote Toolkit/);assert.match(text,/Remote summary/);assert.match(text,/local/);assert.match(text,/Plugin \/ Skills 来源列表/);assert.doesNotMatch(text,/Git 地址/)
+ assert.match(text,/Remote Toolkit/);assert.match(text,/Remote summary/);assert.match(text,/local/);assert.match(text,/Plugin \/ Skills 来源/);assert.doesNotMatch(text,/Git 地址/)
+ const card=findNode(closed,node=>node.props?.className?.includes('kode-hub-sources-card'));assert.ok(findNode(card,node=>node.type==='ul'))
  assert.doesNotMatch(visibleText(closed),/nativeStatus|kode-agent-tag/)
  const logoNode=findNode(closed,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img');assert.match(logo.props.src,/logo=remote&package=0&v=1/)
  const imageStyle={display:''};logo.props.onError({currentTarget:{style:imageStyle}});assert.equal(imageStyle.display,'none')
@@ -699,7 +702,7 @@ test('connected service uses a success icon and hover details with compact Agent
 })
 
 test('mobile pairing uses one structured form and centers its QR invitation',()=>{
- assert.match(source,/className: 'kode-mobile-pairing', 'aria-label': '手机配对'/)
+ assert.match(source,/className: 'kode-settings-card kode-mobile-pairing', 'aria-label': '手机配对'/)
  assert.match(source,/className: 'kode-mobile-pairing-form', onSubmit:/)
  assert.match(source,/type: 'submit', variant: 'primary', disabled: busy \|\| !server\.trim\(\)/)
  assert.match(source,/\.kode-mobile-pairing-form \.kode-field\{margin:0\}/)
@@ -713,7 +716,8 @@ test('Agent avatar edit marks use a small offset badge instead of covering the a
 })
 
 test('service status and personalization use explicit labeled cards and fill the settings content width',()=>{
- assert.match(source,/className: 'kode-host-service', 'aria-label': '服务状态'/)
+ assert.match(source,/className: 'kode-settings-group', 'aria-label': '服务状态'/)
+ assert.match(source,/className: 'kode-settings-card kode-host-service'/)
  assert.match(source,/className: 'kode-host-service-body'/)
  assert.match(source,/\.kode-mobile-pairing,\.kode-host-service\{display:flex;flex-direction:column;gap:12px;padding:16px/)
  assert.match(source,/className: 'kode-personalization-session-label' \}, '当前会话'/)
@@ -831,6 +835,11 @@ test('interface settings toggle the device service directly and report save fail
  assert.equal(toggle.props.checked, true); assert.equal(toggle.props.disabled, false)
  const period = findNode(tree, node => node.type === 'select' && node.props.label === '刘海用量范围')
  assert.equal(period.props.value, 'today'); assert.deepEqual(Array.from(period.props.options, item => item.value), ['today','month','all','follow'])
+ const card = findNode(tree, node => node.props.className === 'kode-settings-card')
+ assert.equal(findNode(card, node => node === toggle), toggle)
+ assert.equal(findNode(card, node => node === period), period)
+ assert.equal(period.props.showLabel, false)
+ assert.equal(findNode(tree, node => node.type === 'details'), undefined)
  period.props.onChange('follow'); assert.equal(received.tokenPeriod, 'follow')
  period.props.onChange('month'); assert.equal(received.tokenPeriod, 'month')
  toggle.props.onChange({ target: { checked: false } }); assert.equal(received.tokenIsland, false)
@@ -861,7 +870,8 @@ test('settings group small preferences by task, preserve deep links, and keep de
  const wrapper = a.entry('main', 'kode-settings')(), tree = wrapper.children[0].type(wrapper.children[0].props)
  const appearance = findNode(tree, node => node.props.id === 'kode-settings-appearance')
  assert.equal(appearance.children[0].children[0].children[0].type.name, 'InterfaceSettingsBody')
- assert.equal(appearance.children[0].children[1].children[1].type.name, 'PersonalizationSettings')
+ const avatarCard = findNode(appearance, node => node.props.className === 'kode-settings-card kode-settings-card-padded')
+ assert.equal(avatarCard.children[0].type.name, 'PersonalizationSettings')
  const integrations = source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function SessionBehaviorSettings('))
  assert.doesNotMatch(integrations, /auto_resume_interrupted/)
  assert.match(integrations, /messaging_enabled/); assert.match(integrations, /memory_enabled/)

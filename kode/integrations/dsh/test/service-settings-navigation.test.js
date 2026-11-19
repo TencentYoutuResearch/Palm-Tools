@@ -45,7 +45,9 @@ test('service recovery navigation selects the failing Host without switching the
     assert.equal(hostSelector.length, section === 'agents' ? 1 : 0, 'only Agent settings expose a Host selector')
     if (section === 'agents') assert.equal(hostSelector[0].props.value, 'worker')
     assert.equal(nodes(scoped).filter(node => node.type === 'section').length, 1, 'only the active settings panel mounts')
-    assert.equal(nodes(scoped).filter(node => node.type === 'h3').length, 0, 'tabs do not repeat their own visible heading')
+    const content = typeof body.type === 'function' ? nodes(body.type(body.props)) : nodes(scoped)
+    const groupHeading = { agents: '配置主机', integrations: '内置能力', mobile: '手机配对' }[section]
+    assert.ok(content.some(node => node.type === 'h3' && node.children.includes(groupHeading)))
   }
   assert.equal(scope.transport.current, 'local')
   assert.equal(scope.requestedServiceHost, undefined, 'consume the navigation target once')
