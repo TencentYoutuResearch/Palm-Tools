@@ -37,6 +37,15 @@ pub struct Tunnel {
 }
 impl Tunnel {
     pub async fn start(config: &SshConfig) -> Result<Self> {
+        Self::start_inner(config, false).await
+    }
+
+    /// Match the desktop bridge, which leaves the default port to OpenSSH.
+    pub async fn start_with_config_port(config: &SshConfig) -> Result<Self> {
+        Self::start_inner(config, true).await
+    }
+
+    async fn start_inner(config: &SshConfig, use_config_port: bool) -> Result<Self> {
         config.validate()?;
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let local_port = listener.local_addr()?.port();
@@ -45,22 +54,25 @@ impl Tunnel {
         if let Some(path) = &config.config_file {
             command.arg("-F").arg(path);
         }
+        command.args([
+            "-N",
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+        ]);
+        if !use_config_port || config.port != 22 {
+            command.arg("-p").arg(config.port.to_string());
+        }
         let mut child = command
             .args([
-                "-N",
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "ConnectTimeout=8",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=3",
-                "-p",
-                &config.port.to_string(),
                 "-L",
                 &format!("127.0.0.1:{local_port}:127.0.0.1:{}", config.remote_port),
                 &config.host,

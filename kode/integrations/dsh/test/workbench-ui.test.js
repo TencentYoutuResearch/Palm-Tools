@@ -39,7 +39,7 @@ test('worktree search lives inside the dropdown and preserves selection while fi
   assert.equal(value, 'refs/remotes/origin/FEATURE'); assert.match(find(tree, node => node.props.role === 'status').children[0], /没有匹配/)
 })
 
-for (const initialPeriod of ['today', 'follow']) test(`token island (${initialPeriod}) loads selected-host statistics, changes period, and never displays a previous host snapshot`, async () => {
+for (const initialPeriod of ['today', 'follow']) test(`token island (${initialPeriod}) loads all devices, filters details and keeps polling in the background`, async () => {
   let enabled = true, meterPeriod = initialPeriod, poll
   let cursor = 0, host = 'local', activityState = { state: 'awaiting', label: '全局：2 个会话等待操作' }
   const state = [], effects = [], requests = [], listeners = new Map()
@@ -48,28 +48,32 @@ for (const initialPeriod of ['today', 'follow']) test(`token island (${initialPe
     useState(initial) { const i = cursor++; if (!(i in state)) state[i] = initial; return [state[i], value => { state[i] = typeof value === 'function' ? value(state[i]) : value }] },
     useRef(initial) { const i = cursor++; return state[i] ??= { current: initial } }, useId: () => 'usage-panel', useCallback: fn => fn, useSyncExternalStore: (subscribe, snapshot) => snapshot(),
     useEffect(fn, deps) { const i = cursor++, previous = state[i]; if (!previous || deps.some((value, j) => value !== previous.deps[j])) { previous?.cleanup?.(); const effect = { deps }; state[i] = effect; effects.push(() => { effect.cleanup = fn() }) } } }
-  const transport = { get current() { return host }, subscribe: () => () => {}, async fetch(path, options, selected) {
-    requests.push({ path, selected, options })
-    return { ok: true, json: async () => ({ totals: { total_tokens: selected !== 'local' ? 9000 : path.includes('since_ms=') ? 4800 : path.includes('period=all') ? 3600 : path.includes('period=month') ? 2400 : 1200 }, rows: [], daily: [] }) }
-  } }
+  const transport = { get current() { return host } }
+  const fetch = async (path, options) => {
+    requests.push({ path, options })
+    const remote = path.includes('since_ms=') ? 4800 : path.includes('period=all') ? 3600 : path.includes('period=month') ? 2400 : 1200
+    const rows = [{ source: 'local', backend: 'codex', model: 'shared', total_tokens: 600 }, { source: 'ssh:build', backend: 'codex', model: 'shared', total_tokens: remote }]
+    return { ok: true, json: async () => ({ totals: { total_tokens: 600 + remote }, devices: [{ id: 'local', name: '此计算机' }, { id: 'ssh:build', name: 'Build' }], rows, daily: [] }) }
+  }
   const popups = []
   const scope = { kodeDesktop: { island: true, resizeIsland() {} }, window: { open() {
     const popupListeners = new Map(), windowListeners = new Map()
     const popup = { listeners: popupListeners, addEventListener: (name, fn) => windowListeners.set(name, fn), removeEventListener: name => windowListeners.delete(name), closed: false, close() { this.closed = true }, screen: { availHeight: 1000 }, document: { hidden: false, addEventListener: (name, fn) => popupListeners.set(name, fn), removeEventListener: name => popupListeners.delete(name), createElement: () => ({}), head: { append() {} }, body: {} } }; popups.push(popup); return popup
   } }, react_dom: { createPortal: content => content }, react, context: { get: () => transport }, _deepseek_ai_dsh_client_ui_primitives: { IconChevronDownOutlineRegular: 'chevron', IconCloseOutlineRegular: 'close' },
     document: { querySelector: () => null, hidden: false, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
-    AbortController, setTimeout, clearTimeout, setInterval: fn => { poll = fn; return 1 }, clearInterval() {}, Intl }
-  const component = vm.runInNewContext(source + '\nkodeWorkbenchContext = context; KodeTokenIsland', scope)
+    fetch, AbortController, setTimeout, clearTimeout, setInterval: fn => { poll = fn; return 1 }, clearInterval() {}, Intl }
+  const component = vm.runInNewContext(source + '\nKodeTokenIsland', scope)
   const render = () => { cursor = 0; const tree = component({ appearance: { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled, tokenPeriod: meterPeriod }) }, activity: { subscribe: () => () => {}, getSnapshot: () => activityState } }); effects.splice(0).forEach(fn => fn()); return tree }
   const settle = () => new Promise(resolve => setImmediate(resolve))
   const find = (node, predicate) => node && typeof node === 'object' ? predicate(node) ? node : (node.children ?? []).map(child => find(child, predicate)).find(Boolean) : undefined
   let tree = render(); await settle(); tree = render()
   assert.match(find(tree, node => node.type === 'style' && Object.hasOwn(node.props, 'data-kode-native-island')).children.join(''), /margin:0/)
-  assert.equal(find(tree, node => node.type === 'strong').children[0], '1.2K')
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '1.8K')
   assert.equal(find(tree, node => node.type === 'i').props['data-state'], 'awaiting')
   activityState = { state: 'ongoing', label: '全局：1 个会话正在运行' }; tree = render()
   assert.equal(find(tree, node => node.type === 'i').props['data-state'], 'ongoing')
-  assert.equal(requests[0].selected, 'local'); assert.ok(requests[0].options.signal)
+  assert.ok(requests[0].path.startsWith('/api/kode/model-usage?scope=devices&'))
+  assert.ok(requests[0].options.signal)
   scope.document.hidden = true // The native island stays visible when the owner is backgrounded.
   for (const selectedPeriod of ['month', 'all', 'today']) {
     meterPeriod = selectedPeriod; tree = render()
@@ -89,6 +93,15 @@ for (const initialPeriod of ['today', 'follow']) test(`token island (${initialPe
   assert.ok(requests.length > beforePoll, 'native visibility resumes reads without foregrounding the owner')
   find(tree, node => node.props.className === 'kode-token-notch').props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(find(tree, node => node.props['aria-label'] === 'Token 用量'))
+  const device = () => find(tree, node => node.type === 'button' && node.children.includes('设备'))
+  device().props.onClick(); tree = render()
+  assert.equal(device().props['aria-pressed'], true)
+  const filters = () => find(tree, node => node.props.className === 'kode-token-filters')
+  const build = find(filters(), node => node.type === 'button' && node.props.key === 'ssh:build')
+  assert.match(build.props.title, /^Build · /)
+  build.props.onClick(); tree = render()
+  assert.equal(find(tree, node => node.props.className === 'kode-token-totals').children[0].children[1].children[0], '600')
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '1.8K', 'the menu bar stays at the all-device total')
   find(tree, node => node.type === 'button' && node.children.includes('本月')).props.onClick(); tree = render(); await settle(); tree = render()
   assert.ok(requests.some(row => row.path.includes('period=month')))
   for (const label of ['全部', '今天']) {
@@ -113,15 +126,15 @@ for (const initialPeriod of ['today', 'follow']) test(`token island (${initialPe
   meterPeriod = 'follow'; tree = render()
   assert.equal(find(tree, node => node.type === 'strong').children[0], '—')
   await settle(); tree = render()
-  assert.equal(find(tree, node => node.type === 'strong').children[0], '4.8K')
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '5.4K')
   assert.match(find(tree, node => node.props.className === 'kode-token-notch').props['aria-label'], /所选范围/)
   assert.ok(requests.at(-1).path.includes(`until_ms=${new Date('2026-01-13T12:00').getTime()}`))
   find(tree, node => typeof node.props.onKeyDown === 'function').props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); tree = render(); await settle(); tree = render()
-  assert.equal(find(tree, node => node.type === 'strong').children[0], '4.8K', 'closing details preserves the custom meter range')
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '5.4K', 'closing details preserves the custom meter range')
   poll(); await settle(); tree = render()
   assert.ok(requests.at(-1).path.includes('since_ms='))
   find(tree, node => node.props.className === 'kode-token-notch').props.onClick(); tree = render(); await settle(); tree = render()
-  for (const [label, total] of [['本月', '2.4K'], ['全部', '3.6K']]) {
+  for (const [label, total] of [['本月', '3K'], ['全部', '4.2K']]) {
     const before = requests.length
     find(tree, node => node.type === 'button' && node.children.includes(label)).props.onClick()
     tree = render()
@@ -133,11 +146,11 @@ for (const initialPeriod of ['today', 'follow']) test(`token island (${initialPe
   }
   assert.equal(requests.some(row => row.path.includes('period=follow')), false)
   meterPeriod = 'today'; tree = render(); await settle(); tree = render(); await settle(); tree = render()
-  assert.equal(find(tree, node => node.type === 'strong').children[0], '1.2K', 'fixed scope is restored when follow mode is disabled')
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '1.8K', 'fixed scope is restored when follow mode is disabled')
+  const beforeSwitch = requests.length
   host = 'remote:fixture.example'; tree = render()
-  assert.equal(find(tree, node => node.type === 'strong').children[0], '—')
-  await settle(); tree = render(); assert.equal(find(tree, node => node.type === 'strong').children[0], '9K')
-  assert.equal(requests.at(-1).selected, host)
+  assert.equal(find(tree, node => node.type === 'strong').children[0], '1.8K')
+  await settle(); assert.equal(requests.length, beforeSwitch)
   find(tree, node => typeof node.props.onKeyDown === 'function').props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); tree = render()
   assert.equal(find(tree, node => node.props['aria-label'] === 'Token 用量').props['aria-hidden'], true)
   assert.equal(popups.length, 1); assert.equal(popups[0].closed, false)
@@ -167,8 +180,8 @@ test('token island is registered once on the application overlay rather than ins
 test('period buckets begin with selected activity and retain elapsed gaps with multi-select totals', () => {
   const viewOf = vm.runInNewContext(source + '\nusageView', { Intl })
   const now = new Date(2026, 10, 6, 10, 30)
-  const rows = [{ backend: 'codex', model: 'shared', total_tokens: 100, input_tokens: 80, output_tokens: 20 }, { backend: 'claude', model: 'shared', total_tokens: 50, input_tokens: 40, output_tokens: 10 }, { backend: 'claude', model: 'other', total_tokens: 30, input_tokens: 20, output_tokens: 10 }]
-  const snapshot = { rows, timeline: [{ date: '2026-11-06T02:00', rows: rows.slice(0, 1) }, { date: '2026-11-06T10:00', rows: rows.slice(1) }] }
+  const rows = [{ source: 'local', backend: 'codex', model: 'shared', total_tokens: 100, input_tokens: 80, output_tokens: 20 }, { source: 'ssh:build', backend: 'claude', model: 'shared', total_tokens: 50, input_tokens: 40, output_tokens: 10 }, { source: 'local', backend: 'claude', model: 'other', total_tokens: 30, input_tokens: 20, output_tokens: 10 }]
+  const snapshot = { rows, devices: [{ id: 'local', name: '此计算机' }, { id: 'ssh:build', name: 'Build' }], timeline: [{ date: '2026-11-06T02:00', rows: rows.slice(0, 1) }, { date: '2026-11-06T10:00', rows: rows.slice(1) }] }
   let view = viewOf(snapshot, 'today', 'backend', null, now)
   assert.equal(view.timeline.length, 9); assert.equal(view.timeline[0].key, '2026-11-06T02:00')
   assert.equal(view.totals.total_tokens, 180); assert.equal(view.timeline.reduce((sum, bucket) => sum + bucket.total, 0), 180)
@@ -178,6 +191,11 @@ test('period buckets begin with selected activity and retain elapsed gaps with m
   assert.equal(view.rows.length, 1); assert.equal(view.totals.total_tokens, 150); assert.equal(view.timeline.at(-1).total, 50)
   view = viewOf(snapshot, 'today', 'model', ['shared', 'other'], now)
   assert.equal(view.totals.total_tokens, 180)
+  view = viewOf(snapshot, 'today', 'source', ['local', 'ssh:build'], now)
+  assert.equal(view.totals.total_tokens, 180); assert.equal(view.timeline.at(-1).total, 80)
+  view = viewOf(snapshot, 'today', 'source', ['ssh:build'], now)
+  assert.equal(view.rows[0].label, 'Build'); assert.equal(view.totals.total_tokens, 50)
+  assert.equal(view.timeline[0].layers[0].label, 'Build'); assert.equal(view.timeline[0].total, 50)
   assert.equal(viewOf(snapshot, 'today', 'model', [], now).totals.total_tokens, 0)
   assert.equal(viewOf({ rows, timeline: [] }, 'month', 'model', null, now).timeline.length, 0)
   view = viewOf({ rows, timeline: [{ date: '2025-11', rows }, { date: '2026-11', rows }] }, 'all', 'model', null, now)

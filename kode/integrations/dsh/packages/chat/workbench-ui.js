@@ -2,7 +2,6 @@
  * The native job component retains its subscriptions, locale, output and kill UI. */
 const defaultIslandAppearance = { tokenIsland: true, tokenPeriod: 'today' }
 const idleIslandActivity = { state: 'idle', label: '全局：所有会话空闲' }
-let kodeWorkbenchContext
 
 // The native window has square corners; CSS owns only the two bottom corners.
 // Paint through the camera clearance, so the real cutout and wings form one bar.
@@ -46,6 +45,7 @@ function usageTableRows(snapshot) {
   return [...(snapshot?.rows ?? [])].sort((a, b) => b.total_tokens - a.total_tokens)
 }
 const usagePalette = ['#88e5b2', '#78b8ff', '#e6a58b', '#bdabff', '#f1cd78', '#ef96bd', '#63d5d1', '#d5b899']
+const usageDimensions = { backend: 'Agent', model: '模型', source: '设备' }
 function usageGroupRows(rows, dimension) {
   const groups = new Map()
   for (const row of rows) {
@@ -57,7 +57,8 @@ function usageGroupRows(rows, dimension) {
   return [...groups.values()].sort((a, b) => b.total_tokens - a.total_tokens || a.key.localeCompare(b.key))
 }
 function usageView(snapshot, period, dimension, selected, now = new Date(), startAt = null) {
-  const groups = usageGroupRows(snapshot?.rows ?? [], dimension).map((row, index) => ({ ...row, color: usagePalette[index % usagePalette.length] }))
+  const names = new Map(dimension === 'source' ? (snapshot?.devices ?? []).map(device => [device.id, device.name]) : [])
+  const groups = usageGroupRows(snapshot?.rows ?? [], dimension).map((row, index) => ({ ...row, label: names.get(row.key) ?? row.key, color: usagePalette[index % usagePalette.length] }))
   const chosen = new Set(selected ?? groups.map(row => row.key)), rows = groups.filter(row => chosen.has(row.key))
   const totals = { input_tokens: 0, output_tokens: 0, cached_tokens: 0, total_tokens: 0 }
   for (const row of rows) for (const field of Object.keys(totals)) totals[field] += row[field]
@@ -84,7 +85,7 @@ function usageView(snapshot, period, dimension, selected, now = new Date(), star
   }
   const timeline = keys.map(key => {
     const values = new Map((buckets.get(key) ?? []).map(row => [row.key, row.total_tokens]))
-    const layers = rows.map(row => ({ key: row.key, color: row.color, value: values.get(row.key) ?? 0 }))
+    const layers = rows.map(row => ({ key: row.key, label: row.label, color: row.color, value: values.get(row.key) ?? 0 }))
     return { key, layers, total: layers.reduce((sum, row) => sum + row.value, 0) }
   })
   return { groups, rows, totals, timeline, max: Math.max(1, ...timeline.map(bucket => bucket.total)) }
@@ -105,7 +106,7 @@ function usageAreaPaths(view) {
     const upper = points(base), bottom = points(lower).reverse()
     const line = upper.map(([x, y], index) => `${index ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`).join(' ')
     const area = line + bottom.map(([x, y]) => ` L${x.toFixed(2)} ${y.toFixed(2)}`).join('') + ' Z'
-    return { key: row.key, color: row.color, line, area }
+    return { key: row.key, label: row.label, color: row.color, line, area }
   })
 }
 function usageDateTime(value) {
@@ -122,12 +123,10 @@ function usageDefaultStart(snapshot, period, end) {
 }
 function KodeTokenIsland({ activity, appearance } = {}) {
   const h = react.createElement, { IconChevronDownOutlineRegular, IconCloseOutlineRegular } = _deepseek_ai_dsh_client_ui_primitives
-  const ctx = kodeWorkbenchContext, transport = ctx?.get('kodeTransport')
   const preferences = react.useSyncExternalStore(appearance?.subscribe ?? (() => () => {}), appearance?.getSnapshot ?? (() => defaultIslandAppearance))
   const enabled = preferences.tokenIsland, tokenPeriod = preferences.tokenPeriod ?? 'today'
   const followRange = tokenPeriod === 'follow'
   const status = react.useSyncExternalStore(activity?.subscribe ?? (() => () => {}), activity?.getSnapshot ?? (() => idleIslandActivity))
-  const host = react.useSyncExternalStore(react.useCallback(fn => transport?.subscribe(fn) ?? (() => {}), [transport]), () => transport?.current ?? 'local')
   const [open, setOpen] = react.useState(false), [present, setPresent] = react.useState(false), [period, setPeriod] = react.useState(followRange ? 'today' : tokenPeriod)
   const [dimension, setDimension] = react.useState('backend'), [selected, setSelected] = react.useState(null)
   const [result, setResult] = react.useState(null), [error, setError] = react.useState(''), [loading, setLoading] = react.useState(false), [refresh, setRefresh] = react.useState(0)
@@ -151,8 +150,7 @@ function KodeTokenIsland({ activity, appearance } = {}) {
   }, [enabled, nativeWindow, open])
   const bucketPeriod = usagePeriod(period, range?.since, range?.until)
   const tokenPeriodLabel = { today: '今日', month: '本月', all: '全部', custom: '所选范围' }[followRange ? period : tokenPeriod]
-  const current = result?.host === host ? result : null
-  const meter = current?.tokenPeriod === tokenPeriod && (!followRange || (current.period === period && current.range === range)) ? current.meter : null
+  const meter = result?.tokenPeriod === tokenPeriod && (!followRange || (result.period === period && result.range === range)) ? result.meter : null
   react.useEffect(() => {
     if (open) { setPresent(true); return }
     const timer = setTimeout(() => setPresent(false), 280)
@@ -168,17 +166,24 @@ function KodeTokenIsland({ activity, appearance } = {}) {
       pending = true; setLoading(true); setError('')
       try {
         const read = async (period, start, end) => {
-          const path = `/api/kode/model-usage?period=${period}&timezone_offset_minutes=${-new Date().getTimezoneOffset()}${start == null ? '' : `&since_ms=${start}`}${end == null ? '' : `&until_ms=${end}`}`
-          const options = { credentials: 'same-origin', cache: 'no-store', signal: controller.signal }
-          const response = await (transport ? transport.fetch(path, options, host) : fetch(path, options))
-          if (response.status === 404) throw new Error('此主机尚未支持 token 统计，请更新 Kode 服务。')
+          const path = `/api/kode/model-usage?scope=devices&period=${period}&timezone_offset_minutes=${-new Date().getTimezoneOffset()}${start == null ? '' : `&since_ms=${start}`}${end == null ? '' : `&until_ms=${end}`}`
+          const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
+          if (response.status === 404) throw new Error('当前 Kode 服务尚未支持 token 统计，请更新后重试。')
           const value = await response.json()
           if (!response.ok) throw new Error(value.error ?? '读取 token 统计失败，请重试。')
           return value
         }
-        const meter = followRange ? await read(bucketPeriod, range?.since, range?.until) : await read(tokenPeriod)
-        const snapshot = open && !followRange && (period !== tokenPeriod || range) ? await read(bucketPeriod, range?.since, range?.until) : meter
-        if (alive) setResult({ host, meter, tokenPeriod, snapshot, range: open || followRange ? range : null, period: open || followRange ? period : tokenPeriod })
+        const meterRequest = followRange ? read(bucketPeriod, range?.since, range?.until) : read(tokenPeriod)
+        const snapshotRequest = open && !followRange && (period !== tokenPeriod || range) ? read(bucketPeriod, range?.since, range?.until) : meterRequest
+        const [meterResult, snapshotResult] = await Promise.allSettled([meterRequest, snapshotRequest])
+        if (alive) setResult(prior => ({
+          meter: meterResult.status === 'fulfilled' ? meterResult.value : prior?.tokenPeriod === tokenPeriod && !followRange ? prior.meter : null,
+          tokenPeriod,
+          snapshot: snapshotResult.status === 'fulfilled' ? snapshotResult.value : null,
+          range: open || followRange ? range : null,
+          period: open || followRange ? period : tokenPeriod,
+        }))
+        if (snapshotResult.status === 'rejected') throw snapshotResult.reason
       } catch (error) { if (alive && !controller.signal.aborted) setError(error.message) }
       finally { pending = false; if (alive) setLoading(false) }
     }
@@ -193,17 +198,18 @@ function KodeTokenIsland({ activity, appearance } = {}) {
       nativeWindow?.document.removeEventListener('visibilitychange', wake)
       nativeWindow?.removeEventListener('focus', wake)
     }
-  }, [enabled, host, transport, tokenPeriod, period, bucketPeriod, range, open, refresh, nativeWindow])
+  }, [enabled, tokenPeriod, period, bucketPeriod, range, open, refresh, nativeWindow])
   react.useEffect(() => {
     if (!open) return
     const dismiss = event => { if (!root.current?.contains(event.target)) setOpen(false) }
     document.addEventListener('pointerdown', dismiss)
     return () => document.removeEventListener('pointerdown', dismiss)
   }, [open])
-  const snapshot = current?.period === period && current?.range === range ? current.snapshot : null
+  const snapshot = result?.period === period && result?.range === range ? result.snapshot : null
   const rangeEnd = range?.until ?? snapshot?.until_ms ?? Date.now()
   const rangeStart = range?.since ?? usageDefaultStart(snapshot, bucketPeriod, rangeEnd)
   const view = usageView(snapshot, bucketPeriod, dimension, selected, new Date(rangeEnd), rangeStart), { totals, rows, timeline } = view
+  const dimensionLabel = usageDimensions[dimension]
   const unit = bucketPeriod === 'today' ? '小时' : bucketPeriod === 'month' ? '天' : '月'
   const formatTime = value => new Date(value).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
   const startLabel = formatTime(rangeStart), endLabel = formatTime(rangeEnd)
@@ -228,11 +234,11 @@ function KodeTokenIsland({ activity, appearance } = {}) {
   const content = h('div', { className: 'kode-token-rail', ref: root, onKeyDown: event => {
     if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus() }
   } },
-    h('button', { type: 'button', ref: trigger, className: 'kode-token-notch', 'aria-expanded': open, 'aria-controls': panelId, onClick: () => setOpen(!open), title: `当前主机的${tokenPeriodLabel} CLI 历史 token 用量`, 'aria-label': `${status.label}；${tokenPeriodLabel} tokens：${usageNumber(meter?.totals?.total_tokens)}` },
-      h('span', { className: 'kode-island-host' }, h('i', { 'data-state': status.state, role: 'img', 'aria-label': status.label, title: status.label }), h('span', { className: 'kode-island-name' }, host === 'local' ? 'Kode' : '远端')), h('span', { className: 'kode-island-usage' }, h('strong', null, usageNumber(meter?.totals?.total_tokens)), h('span', { className: 'kode-island-period-label' }, `${tokenPeriodLabel} tokens`)),
+    h('button', { type: 'button', ref: trigger, className: 'kode-token-notch', 'aria-expanded': open, 'aria-controls': panelId, onClick: () => setOpen(!open), title: `本机和 SSH 设备的${tokenPeriodLabel} CLI 用量${meter?.warnings?.length ? '（部分统计不可用）' : ''}`, 'aria-label': `${status.label}；${tokenPeriodLabel} tokens：${usageNumber(meter?.totals?.total_tokens)}` },
+      h('span', { className: 'kode-island-host' }, h('i', { 'data-state': status.state, role: 'img', 'aria-label': status.label, title: status.label }), h('span', { className: 'kode-island-name' }, 'Kode')), h('span', { className: 'kode-island-usage' }, h('strong', null, usageNumber(meter?.totals?.total_tokens)), h('span', { className: 'kode-island-period-label' }, `${tokenPeriodLabel} tokens`)),
       h(IconChevronDownOutlineRegular, { size: 12, style: { transform: open ? 'rotate(180deg)' : undefined } })),
     present && h('section', { id: panelId, className: 'kode-token-panel', 'data-open': open, inert: !open ? '' : undefined, 'aria-hidden': !open || undefined, 'aria-label': 'Token 用量', 'aria-busy': loading },
-      h('header', null, h('div', null, h('strong', null, 'Token 用量'), h('p', null, `${host === 'local' ? '本机' : host} · CLI 历史统计`)),
+      h('header', null, h('div', null, h('strong', null, 'Token 用量'), h('p', null, '本机和 SSH 设备')),
         h('button', { type: 'button', className: 'kode-token-close', 'aria-label': '收起 token 统计', onClick: () => { setOpen(false); trigger.current?.focus() } }, h(IconCloseOutlineRegular, { size: 16 }))),
       h('div', { className: 'kode-token-periods', role: 'group', 'aria-label': '统计范围' }, ...[['today', '今天'], ['month', '本月'], ['all', '全部']].map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': period === id, onClick: () => { setPeriod(id); setRange(null); setRangeInputs({ start: null, end: null }); setSelected(null) } }, label))),
       h('div', { className: 'kode-token-start', role: 'group', 'aria-label': '统计时间范围' },
@@ -242,28 +248,27 @@ function KodeTokenIsland({ activity, appearance } = {}) {
       error ? h('p', { role: 'alert', className: 'kode-token-error' }, error, ' ', h('button', { type: 'button', onClick: () => setRefresh(value => value + 1) }, '重试')) : !snapshot ? h('p', { role: 'status' }, '正在读取 CLI 历史…') : h(react.Fragment, null,
         h('dl', { className: 'kode-token-totals' }, ...[['总计', 'total_tokens'], ['输入', 'input_tokens'], ['输出', 'output_tokens'], ['缓存', 'cached_tokens']].map(([label, key]) => h('div', { key }, h('dt', null, label), h('dd', { title: exact(totals?.[key]) }, usageNumber(totals?.[key]))))),
         ...(snapshot.warnings ?? []).map((warning, i) => h('p', { key: i, className: 'kode-token-error' }, warning)),
-        h('div', { className: 'kode-token-dimensions', role: 'group', 'aria-label': '统计维度' }, ...[['backend', 'Agent'], ['model', '模型']].map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': dimension === id, onClick: () => { setDimension(id); setSelected(null) } }, label)), h('button', { type: 'button', className: 'kode-token-select-all', onClick: () => setSelected(null) }, '全选')),
-        view.groups.length > 0 && h('div', { className: 'kode-token-filters', role: 'group', 'aria-label': `选择${dimension === 'model' ? '模型' : ' Agent'}，支持多选` }, ...view.groups.map(group => h('button', { key: group.key, type: 'button', 'aria-pressed': selected === null || selected.includes(group.key), onClick: () => toggle(group.key), title: `${group.key} · ${exact(group.total_tokens)} tokens` }, h('i', { style: { background: group.color }, 'aria-hidden': true }), h('span', null, group.key), h('strong', null, usageNumber(group.total_tokens))))),
+        h('div', { className: 'kode-token-dimensions', role: 'group', 'aria-label': '统计维度' }, ...Object.entries(usageDimensions).map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': dimension === id, onClick: () => { setDimension(id); setSelected(null) } }, label)), h('button', { type: 'button', className: 'kode-token-select-all', onClick: () => setSelected(null) }, '全选')),
+        view.groups.length > 0 && h('div', { className: 'kode-token-filters', role: 'group', 'aria-label': `选择${dimensionLabel}，支持多选` }, ...view.groups.map(group => h('button', { key: group.key, type: 'button', 'aria-pressed': selected === null || selected.includes(group.key), onClick: () => toggle(group.key), title: `${group.label} · ${exact(group.total_tokens)} tokens` }, h('i', { style: { background: group.color }, 'aria-hidden': true }), h('span', null, group.label), h('strong', null, usageNumber(group.total_tokens))))),
         snapshot.timeline ? h('div', { className: 'kode-token-visuals' },
           h('section', { className: 'kode-token-stack' }, h('h3', null, rangeLabel), h('div', { className: 'kode-token-scale' }, h('span', null, usageNumber(view.max)), h('span', null, 'tokens')),
-            h('svg', { viewBox: '0 0 560 112', role: 'img', 'aria-label': `${rangeLabel}，按${dimension === 'model' ? '模型' : 'Agent'}堆积面积折线用量` },
+            h('svg', { viewBox: '0 0 560 112', role: 'img', 'aria-label': `${rangeLabel}，按${dimensionLabel}堆积面积折线用量` },
               ...[12, 56, 100].map(y => h('path', { key: y, d: `M0 ${y}H560`, className: 'kode-token-axis' })),
               ...usageAreaPaths(view).flatMap(layer => [
-                h('path', { key: `${layer.key}:area`, d: layer.area, fill: layer.color, fillOpacity: .42 }, h('title', null, layer.key)),
+                h('path', { key: `${layer.key}:area`, d: layer.area, fill: layer.color, fillOpacity: .42 }, h('title', null, layer.label)),
                 h('path', { key: `${layer.key}:line`, d: layer.line, fill: 'none', stroke: layer.color, strokeWidth: 1.8, vectorEffect: 'non-scaling-stroke' }),
               ]),
-              ...timeline.map((bucket, index) => h('rect', { key: bucket.key, x: Math.max(0, (index - .5) * 560 / Math.max(1, timeline.length - 1)), y: 0, width: timeline.length === 1 ? 560 : (index === 0 || index === timeline.length - 1 ? 280 : 560) / (timeline.length - 1), height: 112, tabIndex: 0, 'aria-label': `${bucket.key}，${exact(bucket.total)} tokens`, fill: 'transparent' }, h('title', null, `${bucket.key} · 合计 ${exact(bucket.total)} tokens\n${bucket.layers.map(layer => `${layer.key} ${exact(layer.value)}`).join('\n')}`)))),
+              ...timeline.map((bucket, index) => h('rect', { key: bucket.key, x: Math.max(0, (index - .5) * 560 / Math.max(1, timeline.length - 1)), y: 0, width: timeline.length === 1 ? 560 : (index === 0 || index === timeline.length - 1 ? 280 : 560) / (timeline.length - 1), height: 112, tabIndex: 0, 'aria-label': `${bucket.key}，${exact(bucket.total)} tokens`, fill: 'transparent' }, h('title', null, `${bucket.key} · 合计 ${exact(bucket.total)} tokens\n${bucket.layers.map(layer => `${layer.label} ${exact(layer.value)}`).join('\n')}`)))),
             h('div', { className: 'kode-token-chart-labels' }, h('span', null, startLabel), h('span', null, endLabel))),
           h('section', { className: 'kode-token-heat' }, h('h3', null, `所选范围每${unit}活跃度`), h('div', { className: 'kode-token-activity', 'data-period': period }, ...timeline.map(bucket => h('span', { key: bucket.key, title: `${bucket.key} · ${exact(bucket.total)} tokens`, 'aria-label': `${bucket.key}: ${exact(bucket.total)} tokens`, 'data-level': bucket.total ? Math.max(1, Math.ceil(bucket.total / view.max * 4)) : 0 }, bucketPeriod === 'today' ? bucket.key.slice(11, 13) : bucketPeriod === 'month' ? bucket.key.slice(5) : bucket.key.slice(2)))))) : h('p', { className: 'kode-token-error', role: 'status' }, '此主机需更新 Kode 服务后才能显示分维度堆积统计。'),
-        rows.length === 0 ? h('p', { className: 'kode-token-empty' }, selected?.length === 0 ? '未选择统计项，请选择 Agent 或模型。' : '这个时间段暂无 CLI 用量记录。') : h('div', { className: 'kode-token-table-scroll' }, h('table', null,
-          h('thead', null, h('tr', null, ...[dimension === 'model' ? '模型' : 'Agent', '输入', '输出', 'Token 总计'].map(label => h('th', { key: label, scope: 'col' }, label)))),
-          h('tbody', null, ...rows.map((row, index) => h('tr', { key: row.key }, h('th', { scope: 'row' }, h('span', null, row.key)), ...['input_tokens', 'output_tokens', 'total_tokens'].map(key => h('td', { key, title: exact(row[key]) }, usageNumber(row[key])))))))),
+        rows.length === 0 ? h('p', { className: 'kode-token-empty' }, selected?.length === 0 ? `请选择要统计的${dimensionLabel}。` : '这个时间段暂无 CLI 用量记录。') : h('div', { className: 'kode-token-table-scroll' }, h('table', null,
+          h('thead', null, h('tr', null, ...[dimensionLabel, '输入', '输出', 'Token 总计'].map(label => h('th', { key: label, scope: 'col' }, label)))),
+          h('tbody', null, ...rows.map(row => h('tr', { key: row.key }, h('th', { scope: 'row' }, h('span', null, row.label)), ...['input_tokens', 'output_tokens', 'total_tokens'].map(key => h('td', { key, title: exact(row[key]) }, usageNumber(row[key])))))))),
         h('p', { className: 'kode-token-model-note' }, '图表、活跃度与明细使用同一筛选 · 悬停查看完整 token 数')),
       h('footer', null, '每 30 秒更新 · CLI 历史统计，不等同于当前对话上下文占用')))
   return !enabled ? null : nativeWindow ? react_dom.createPortal(h(react.Fragment, null, h('style', { 'data-kode-native-island': '' }, (document.querySelector('[data-kode-workbench]')?.textContent ?? '') + nativeIslandStyle), content), nativeWindow.document.body) : content
 }
 function installWorkbenchUi(ctx) {
-  kodeWorkbenchContext = ctx
   relocateWorkbenchJobs(ctx)
   ctx.inject(['kodeActivity', 'kodeInterface'], scope => scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'kode-token-island', order: 10, inject: () => ({ activity: scope.get('kodeActivity'), appearance: scope.get('kodeInterface') }) }, KodeTokenIsland)))
   ctx.effect(() => {
@@ -275,6 +280,6 @@ function installWorkbenchUi(ctx) {
 .kode-token-dimensions{display:flex;align-items:center;gap:4px;margin:4px 0 10px}.kode-token-dimensions button,.kode-token-filters button{font:inherit;font-size:12px;cursor:pointer;border:1px solid var(--island-line);border-radius:7px;background:#13171d;color:var(--island-muted);padding:6px 10px}.kode-token-dimensions button[aria-pressed=true]{color:var(--island-green);background:#1c3028;border-color:#486c59}.kode-token-dimensions .kode-token-select-all{margin-left:auto;border-color:transparent;background:transparent}.kode-token-filters{display:flex;flex-wrap:wrap;gap:6px;max-height:132px;overflow:auto;margin-bottom:18px;padding:2px}.kode-token-filters button{display:flex;align-items:center;gap:7px;max-width:100%;opacity:.5}.kode-token-filters button[aria-pressed=true]{color:var(--island-text);opacity:1;border-color:#555e6a}.kode-token-filters button:hover{background:#242b33;opacity:1}.kode-token-filters button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-token-filters i{width:8px;height:8px;border-radius:2px;flex-shrink:0}.kode-token-filters strong{font-size:11px;font-weight:500;color:var(--island-muted)}.kode-token-visuals{grid-template-columns:minmax(0,1fr);gap:18px}.kode-token-stack svg{display:block;width:100%;height:112px}.kode-token-stack svg{overflow:hidden}.kode-token-start{display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px;margin:12px 0 18px}.kode-token-start label{flex:1;min-width:0;display:grid;gap:5px;font-size:11px;color:var(--island-muted)}.kode-token-start input{width:100%;min-width:0;min-height:32px;border:1px solid #48515d;border-radius:7px;background:#171c23;color:var(--island-text);font:inherit;font-size:12px;padding:4px 8px}.kode-token-start button{cursor:pointer}.kode-token-start button:disabled{opacity:.45;cursor:default}.kode-token-start button[aria-pressed=true]{border-color:var(--island-green);color:var(--island-green)}.kode-token-start input:focus-visible,.kode-token-start button:focus-visible{outline:2px solid var(--island-cyan);outline-offset:2px}.kode-token-scale,.kode-token-chart-labels{display:flex;justify-content:space-between;color:var(--island-muted);font-size:10px;margin:4px 0}.kode-token-activity{display:flex;flex-wrap:wrap;gap:4px;max-height:100px;overflow:auto}.kode-token-activity span{display:grid;place-items:center;min-width:24px;height:22px;padding:0 3px;border-radius:4px;background:#20272b;color:var(--island-muted);font-size:9px;font-variant-numeric:tabular-nums}.kode-token-activity [data-level="1"]{background:#254a3b;color:#d1f4df}.kode-token-activity [data-level="2"]{background:#356348;color:#e0ffe9}.kode-token-activity [data-level="3"]{background:#62b885;color:#07150d}.kode-token-activity [data-level="4"]{background:var(--island-green);color:#07150d}
 `
     document.head.append(style)
-    return () => { style.remove(); if (kodeWorkbenchContext === ctx) kodeWorkbenchContext = undefined }
+    return () => style.remove()
   }, 'kode.workbench-ui')
 }
