@@ -62,3 +62,16 @@ test('default model selections persist independently of built-in executable prof
     assert.equal(reopened.defaultModelFor('worker'), undefined)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('a draft whose native thread never reached the dsh log can still change Agent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-agent-profiles-')), file = join(root, 'profiles.json')
+  try {
+    const profiles = await new AgentProfiles(file).open([{ name: 'Codex', type: 'codex' }])
+    const codex = profiles.list()[0]
+    await profiles.bind('draft', codex.id)
+    await profiles.patchBinding('draft', { threadId: 'orphan-thread', seenInputs: ['input-1'] })
+    await assert.rejects(profiles.clearUnusedBinding('draft'), /new conversation/, 'a conversation with history keeps its Agent')
+    await profiles.clearUnusedBinding('draft', { empty: true })
+    assert.equal(profiles.binding('draft'), undefined)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
