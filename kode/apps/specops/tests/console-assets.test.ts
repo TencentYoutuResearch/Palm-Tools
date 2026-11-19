@@ -67,11 +67,13 @@ describe('SpecOps console assets (Vite build output)', () => {
       'styles.css': statSync(`${publicDir}/styles.css`).size,
     }
     // The single-file bundle also embeds the backend PNG icons as base64.
-    // Baseline: 515,333 raw bytes / 245,697 gzip bytes. Keep explicit budgets
+    // It also bundles every kode-i18n locale, including the desktop GUI's
+    // strings, so GUI copy grows it too.
+    // Baseline: 565,316 raw bytes / 258,844 gzip bytes. Keep explicit budgets
     // for both the embedded payload and its compressed size as features grow.
     expect(stats['index.html']).toBeLessThan(2 * 1024)
     expect(stats['app.js']).toBeGreaterThan(10 * 1024)
-    expect(stats['app.js']).toBeLessThan(550 * 1024)
+    expect(stats['app.js']).toBeLessThan(600 * 1024)
     expect(gzipSync(readFileSync(`${publicDir}/app.js`)).length).toBeLessThan(270 * 1024)
     expect(stats['styles.css']).toBeGreaterThan(5 * 1024)
     expect(stats['styles.css']).toBeLessThan(100 * 1024)

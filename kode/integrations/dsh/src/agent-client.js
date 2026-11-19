@@ -714,16 +714,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         h(Failure, { text: error })))
   }
   // Embedded in Kode desktop (kode.extension/v1 view): Kode hides its own
-  // chrome, so the TUI ⇄ dsh switch and the way back live in dsh's UI.
+  // chrome, so the way back to its terminals ("Kode 终端") lives in dsh's UI.
   const kodeEmbedded = () => !!globalThis.document?.documentElement?.hasAttribute?.('data-kode-embed') && typeof globalThis.window?.kodeHost?.request === 'function'
   const glyph = d => h('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
   const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
-  const CHAT_GLYPH = 'M3 4.2c0-.66.54-1.2 1.2-1.2h7.6c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H7l-2.6 2v-2h-.2c-.66 0-1.2-.54-1.2-1.2z'
-  function KodeViewSwitch({ sessionId }) {
-    return h('div', { className: 'kode-view-switch', role: 'group', 'aria-label': '会话视图' },
-      h('button', { type: 'button', title: '所有会话切换到 Kode 终端', onClick: () => window.kodeHost.request('switch-view', { to: 'tui', session: sessionId }) }, glyph(TERMINAL_GLYPH), h('span', null, 'TUI')),
-      h('button', { type: 'button', className: 'active', 'aria-pressed': true, tabIndex: -1 }, glyph(CHAT_GLYPH), h('span', null, 'dsh')))
-  }
   function KodeLeavePage() {
     useEffect(() => { window.kodeHost.request('leave') }, [])
     return h('div', { className: 'kode-leave-page' }, '正在返回 Kode…')
@@ -2124,7 +2118,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'kode-goal' }, () => h(React.Fragment, null, h(IconGoalOutlineRegular, { size: 16 }), 'Goal')))
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-handoff', order: 100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, HandoffMenu))
     if (kodeEmbedded()) {
-      ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-view-switch', order: 200, inject: sessionId => ({ sessionId }) }, KodeViewSwitch))
       // Kode's window buttons sit over the page; keep a titlebar strip for
       // them that also drags the window. dsh's own desktop layout
       // (data-platform) needs its Electron bridge, so it is not used here.
@@ -2263,11 +2256,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-settings-general .kode-notification-permission{padding:4px 0 10px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}
 .kode-settings-general .kode-notification-permission>button{flex:none;margin-left:auto}
 .kode-settings-general .kode-settings-group>.kode-config-note:last-of-type{margin-top:8px}
-.kode-view-switch{display:inline-flex;align-items:center;gap:2px;height:30px;padding:2px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base)}
-.kode-view-switch>button{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border:0;border-radius:calc(var(--dsw-radius-md) - 2px);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;line-height:1;cursor:pointer}
-.kode-view-switch>button:hover:not(.active){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.kode-view-switch>button.active{background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-label-primary);cursor:default;box-shadow:0 0 0 .5px var(--dsw-alias-border-l2)}
-.kode-view-switch>button:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:1px}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 html[data-kode-embed][data-kode-platform=macos] #root{box-sizing:border-box;height:100%;padding-top:28px}
 [data-kode-titlebar]{display:none}
