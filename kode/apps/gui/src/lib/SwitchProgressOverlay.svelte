@@ -1,8 +1,8 @@
 <script lang="ts">
   /**
-   * Covers the session area while a conversation moves between the terminal
-   * and an extension view, so the user sees what is happening instead of a
-   * disappearing tab. The first switch into a view also installs that
+   * Covers the session area while a mode switch moves conversations between
+   * the terminal and an extension view, so the user sees what is happening
+   * instead of disappearing tabs. The first switch into a view also installs that
    * view's runtime; its own progress shows under the `start` step.
    */
   import Icon from './Icon.svelte'
@@ -34,8 +34,9 @@
     <div class="head">
       <Icon name={progress.to === 'view' ? 'message-square' : 'terminal'} size={16} />
       <span>{progress.to === 'view' ? tr('extensions.progress.toView', { name: progress.viewTitle }) : tr('extensions.progress.toTui')}</span>
+      {#if progress.count}<small class="count">{progress.count.current}/{progress.count.total}</small>{/if}
     </div>
-    <p class="session">{progress.title}</p>
+    {#if progress.title}<p class="session">{progress.title}</p>{/if}
     <ol>
       {#each progress.steps as step, index (step)}
         <li class:done={index < currentIndex} class:current={index === currentIndex}>
@@ -86,6 +87,16 @@
     color: var(--fg-primary);
     font-size: var(--fs-md);
     font-weight: var(--fw-semi);
+  }
+  .count {
+    margin-left: auto;
+    color: var(--fg-tertiary);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-med);
+    font-variant-numeric: tabular-nums;
+  }
+  .head + ol {
+    margin-top: var(--sp-3);
   }
   .session {
     margin: 4px 0 var(--sp-3);

@@ -278,6 +278,18 @@ pub async fn shared_runtime_sessions() -> Result<Value, String> {
     kode_bridge::messaging::filter_visible_runtime_sessions(&mut result, &workspaces);
     Ok(result)
 }
+/// Whether a native CLI has written a transcript for this session. One that
+/// was opened but never prompted has none: a structured view has nothing to
+/// show and the CLI nothing to resume. Unreadable formats count as present.
+#[tauri::command]
+pub async fn native_transcript_available(backend_key: String, session_id: String, cwd: String) -> Result<bool, String> {
+    let result = call(
+        "/workbench/transcript",
+        Some(json!({"backend_key":backend_key,"session_id":session_id,"cwd":cwd,"limit":1,"tail_bytes":4096})),
+    )
+    .await;
+    Ok(result.map_or(true, |value| value["available"] != false))
+}
 pub async fn shared_command(id: u64, kind: &str, mut payload: Value) -> Result<Value, String> {
     let request_id = payload
         .as_object_mut()

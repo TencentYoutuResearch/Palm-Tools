@@ -382,11 +382,12 @@
     } catch (e) {
       console.warn('getPathsConfig failed:', e)
     }
-    // 先把远端 options 拉齐,再恢复上次选择 —— 否则远端 option 还没到会静默失败。
-    await loadBackends()
-    // Do not overwrite a selection made while the initial IPC requests were pending.
-    if (selectedValue === '' && lastSelection
-      && (!workspaceEndpoint || sameEndpoint(workspaceEndpoint, lastSelection.endpointId))) {
+    // 本地上次选择立即恢复;远端的要等 options 拉齐,否则会静默失败。
+    // 不能让离线 SSH endpoint 的探测(十几秒)拖住本地 backend 的恢复。
+    const restoreLast = () => {
+      // Do not overwrite a selection made while the initial IPC requests were pending.
+      if (selectedValue !== '' || !lastSelection
+        || (workspaceEndpoint && !sameEndpoint(workspaceEndpoint, lastSelection.endpointId))) return
       const ep = lastSelection.endpointId
       const value = ep.kind === 'local'
         ? `local:${lastSelection.backendKey}`
@@ -394,6 +395,9 @@
       const available = [...localOptions, ...remoteOptions]
       if (available.find((o) => o.value === value)) selectOption(value)
     }
+    restoreLast()
+    await loadBackends()
+    restoreLast()
     endpointRefreshHandler = () => {
       void loadBackends()
     }

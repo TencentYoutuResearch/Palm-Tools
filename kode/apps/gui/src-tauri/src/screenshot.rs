@@ -1,6 +1,6 @@
 use base64::Engine;
 use serde::Serialize;
-use tauri::{Manager, WebviewWindow};
+use tauri::{Manager, Window};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,8 +15,10 @@ pub fn capture_window_screenshot(
     app: tauri::AppHandle,
     window_label: String,
 ) -> Result<ScreenshotDraft, String> {
+    // A window hosting extension views is no longer a "webview window", so
+    // look it up as a plain window.
     let window = app
-        .get_webview_window(&window_label)
+        .get_window(&window_label)
         .ok_or_else(|| format!("window '{window_label}' not found"))?;
     screenshot_draft(capture_window_png(&window)?)
 }
@@ -106,7 +108,7 @@ fn copy_png_to_clipboard(_png: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn capture_window_png(window: &WebviewWindow) -> Result<Vec<u8>, String> {
+fn capture_window_png(window: &Window) -> Result<Vec<u8>, String> {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     use core_graphics::window::{
         create_image, kCGWindowImageBestResolution, kCGWindowImageBoundsIgnoreFraming,
@@ -179,7 +181,7 @@ fn encode_cg_image_png(image_ref: &core_graphics::image::CGImageRef) -> Result<V
 }
 
 #[cfg(not(target_os = "macos"))]
-fn capture_window_png(_window: &WebviewWindow) -> Result<Vec<u8>, String> {
+fn capture_window_png(_window: &Window) -> Result<Vec<u8>, String> {
     Err("window screenshot is currently only supported on macOS".into())
 }
 

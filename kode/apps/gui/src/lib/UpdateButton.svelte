@@ -4,6 +4,9 @@
   import { updates, startUpdateChecks, installAppUpdate, restartAfterUpdate } from './app_updates'
   import { pushToast } from './toast'
 
+  /** `rail`: the round accent button above the account in the activity rail. */
+  let { variant = 'titlebar' }: { variant?: 'titlebar' | 'rail' } = $props()
+
   let update = $derived($updates.update)
   let phase = $derived($updates.phase)
   let currentVersion = $derived($updates.currentVersion)
@@ -31,6 +34,7 @@
   <button
     type="button"
     class="update-button"
+    class:rail={variant === 'rail'}
     class:busy={phase === 'downloading' || phase === 'installing'}
     class:installing={phase === 'installing'}
     onclick={installUpdate}
@@ -73,6 +77,18 @@
     transition: background 140ms ease, border-color 140ms ease, transform 100ms ease;
   }
 
+  .update-button.rail {
+    width: 32px;
+    height: 32px;
+    flex-basis: 32px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--acc);
+    color: var(--fg-on-accent);
+  }
+  .update-button.rail:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--acc) 86%, var(--fg-primary));
+  }
   .update-button:hover:not(:disabled) {
     background: color-mix(in srgb, var(--acc) 19%, var(--bg-elevated));
     border-color: var(--acc);

@@ -206,6 +206,7 @@ pub fn run() {
             commands::get_pairing_payload,
             backend_runtime::integration_action,
             backend_runtime::shared_runtime_sessions,
+            backend_runtime::native_transcript_available,
             backend_runtime::shared_runtime_request,
             backend_runtime::shared_runtime_archive,
             backend_runtime::agent_hub_action,

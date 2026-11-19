@@ -64,3 +64,22 @@ test('imported peer envelopes retain relay attribution and ordinary user text st
   assert.equal(users[1].data.source.kind, 'user')
   assert.doesNotThrow(() => Session.create('relay-history', events))
 })
+test('native delta appends only newer turns, as a valid continuation, and refuses unplaceable windows',async()=>{
+ const {assertReleasedV4Relationships}=await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+ const {nativeDelta}=await import('../src/native-history.js')
+ const stored=buildHistorySeed({timeline},selection),end=time+45000
+ const terminal=[{kind:'turn_end',reason:'completed',time:end+10},{kind:'turn_start',time:end+60000},{kind:'text',role:'user',text:'From terminal',time:end+61000},{kind:'text',role:'agent',text:'Terminal reply',time:end+62000},{kind:'turn_end',reason:'completed',time:end+63000}]
+ const delta=nativeDelta([...timeline,...terminal],stored)
+ assert.equal(delta.lastTurn,1);assert.equal(delta.rows[0].kind,'turn_start')
+ const added=buildHistorySeed({timeline:delta.rows},selection,{firstTurn:delta.lastTurn+1})
+ assert.equal(added.find(e=>e.type==='request/header').data.reason,'resume')
+ const combined=[...stored,...added].map((event,seq)=>({...event,seq}))
+ assert.deepEqual(combined.filter(e=>e.type==='turn/start').map(e=>e.data.turn),[1,2])
+ const ids=combined.filter(e=>e.data?.message?.id).map(e=>e.data.message.id);assert.equal(new Set(ids).size,ids.length)
+ const session=Session.create('continued',combined)
+ assert.doesNotThrow(()=>assertReleasedV4Relationships({header:session.header,events:session.snapshotEvents(),inheritedEventCount:0},KNOWN_SESSION_EVENT_TYPES))
+ assert.deepEqual(nativeDelta(timeline,stored).rows,[],'nothing new')
+ assert.equal(nativeDelta(terminal.slice(1),stored),null,'window does not reach the stored conversation')
+ assert.equal(nativeDelta([...timeline,{kind:'text',role:'agent',text:'mid-turn',time:end+5000}],stored),null,'would start mid-turn')
+ assert.equal(nativeDelta(timeline,[]),null,'no stored times')
+})

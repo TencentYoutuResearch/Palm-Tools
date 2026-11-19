@@ -6,6 +6,20 @@ import { groupWorktreeProjects } from './worktree-projects.js'
 import { importedSessionId, savedSessionTime, localSavedTabs, savedDirectoryId, savedSessionOperation } from './saved-session-state.js'
 const sessionController = ctx => { const value = ctx.get ? ctx.get('sessionController') : ctx.sessionController; if (!value) throw new Error('会话服务暂不可用；工作区配置仍保留，请先恢复会话服务。'); return value }
 export const DIRECTORY_PATH = '/api/kode/host-directory'
+// A saved tab whose CLI never wrote a transcript (opened, never prompted) has
+// nothing to show or resume. Found transcripts stay found; misses are
+// rechecked, since a live tab writes its transcript on the first prompt.
+const transcriptSeen = new Map(), MISS_RECHECK_MS = 60_000
+export async function hasTranscript(client, tab) {
+  const key = `${tab.backend_key}:${tab.session_id}`, known = transcriptSeen.get(key)
+  if (known === true || known && Date.now() - known < MISS_RECHECK_MS) return known === true
+  try {
+    const result = await client.call('/api/v1/messaging/workbench/transcript', { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd, limit: 1, tail_bytes: 4096 })
+    const available = result?.available !== false
+    transcriptSeen.set(key, available || Date.now())
+    return available
+  } catch { return true } // Formats Kode cannot read (opencode, kimi) stay listed.
+}
 export async function hostDirectory(ctx, config = {}) {
   const registry = ctx.get('workspaceRegistry')
   if (!registry) throw new Error('工作区服务尚未就绪。')
@@ -33,7 +47,8 @@ export async function hostDirectory(ctx, config = {}) {
     const [index, workspaces, node] = await Promise.all([new BackendDocument(client, 'session-index').read(), new BackendDocument(client, 'workspaces').read(), client.call('/api/v1/messaging/node')])
     for (const row of sessions) if (row.agent && runtime?.appearance) row.agent.avatar = runtime.appearance.avatarForSession(row.id, row.agent.type, index, row.agent.id)
     if (workspaces?.global) { result.archivedSessionIds = [...workspaces.global.archivedSessionIds]; result.pinnedSessionIds = [...(workspaces.global.pinnedSessionIds ?? [])] }
-    for (const tab of localSavedTabs(index)) {
+    const saved = localSavedTabs(index), present = await Promise.all(saved.map(tab => hasTranscript(client, tab)))
+    for (const tab of saved.filter((_, i) => present[i])) {
       // Older GUI builds persisted empty runtime placeholders as native tabs.
       // Keep their files, but do not resurrect them under a new saved: alias.
       if (items.some(item => item.blank && (item.sessionId === tab.session_id || item.sessionId === tab.dsh_session_id || profiles?.binding(item.sessionId)?.threadId === tab.session_id))) continue

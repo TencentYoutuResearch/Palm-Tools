@@ -37,7 +37,7 @@
   import ConfirmDialog from './lib/ConfirmDialog.svelte'
   import BackendChooser from './lib/BackendChooser.svelte'
   import PairingDialog from './lib/PairingDialog.svelte'
-  import AccountMenu from './lib/AccountMenu.svelte'
+  import ActivityRail from './lib/ActivityRail.svelte'
   import type { Tab as SettingsTab } from './lib/SettingsPanel.svelte'
   import type { AccountDevice, AccountDeviceSession, CloudSyncStatus } from './lib/ipc'
   import WorkerDetailsPanel from './lib/WorkerDetailsPanel.svelte'
@@ -52,7 +52,6 @@
   import SettingsPanel from './lib/SettingsPanel.svelte'
   import PluginPanel from './lib/PluginPanel.svelte'
   import DeployPanel from './lib/DeployPanel.svelte'
-  import MetricsHoverCard from './lib/MetricsHoverCard.svelte'
   import WorkspacePanel from './lib/WorkspacePanel.svelte'
   import DeviceSession from './lib/DeviceSession.svelte'
   import ShellTerminalPanel, { type ShellTerminalPosition } from './lib/ShellTerminalPanel.svelte'
@@ -62,7 +61,6 @@
   import AvatarPicker from './lib/AvatarPicker.svelte'
   import EventCenter from './lib/EventCenter.svelte'
   import ToastHost from './lib/ToastHost.svelte'
-  import UpdateButton from './lib/UpdateButton.svelte'
   import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
   import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences } from './lib/file_drop'
@@ -107,8 +105,8 @@
   import { pushToast } from './lib/toast'
   import { extensionIpc, type ExtensionViewAction } from './lib/ipc'
   import ExtensionViewPort from './lib/ExtensionViewPort.svelte'
-  import { autostartRuntimeHosts, sessionViews, startExtensionWatch, viewForBackend, viewForRuntime, type SessionViewTarget } from './lib/extensions'
-  import { switchProgress, switchToRuntime, switchToTui, toRuntimeBlocker, toTuiBlocker, type SwitchBlocker } from './lib/runtime_switch'
+  import { autostartRuntimeHosts, sessionViews, startExtensionWatch, viewForRuntime } from './lib/extensions'
+  import { migrationFailures, movableToTui, movableToView, nativeKey, retryMigration, setUiMode, startModeWatch, switchProgress, uiMode, type UiMode } from './lib/runtime_switch'
   import SwitchProgressOverlay from './lib/SwitchProgressOverlay.svelte'
   import { toasts } from './lib/toast'
   import { floatingOverlays } from './lib/overlay_guard'
@@ -169,7 +167,6 @@
   /** Phase 9.1.2 配对弹层(给手机 App 扫 QR)*/
   let pairingOpen = $state(false)
   let accountMenuOpen = $state(false)
-  let accountTriggerEl: HTMLButtonElement | undefined = $state()
   let accountStatus = $state<CloudSyncStatus | null>(null)
   let sidebarAccount = $derived(accountStatus?.backends.find((b) => b.kind === 'account_relay') ?? null)
   /** Sidebar identity. Follows the pushed `cloud-status`, so a socket that
@@ -200,9 +197,6 @@
     } catch {
       openSettings('account')
     }
-  }
-  function accountInitial(label: string | null | undefined): string {
-    return ((label ?? '').split('@')[0].trim().slice(0, 1) || 'K').toUpperCase()
   }
   /** A session on another desktop of the account, opened from Monitor mode
    *  and shown over the tabs. Not a tab: it is never persisted or restored,
@@ -303,8 +297,6 @@
   let endpointsOpen = $state(false)
   /** 路径配置 banner —— 默认隐藏;用户可用 Cmd+, 打开 */
   let pathsOpen = $state(false)
-  /** 隐藏的开发者细节(默认隐藏,Cmd+Shift+D 切换) */
-  let showDevInfo = $state(false)
   /** M4:memory review queue 面板。Cmd+Shift+M 打开。 */
   let memoryPanelOpen = $state(false)
   /** Memory git sync 配置面板。Cmd+P → "Memory: Sync settings…" */
@@ -1344,57 +1336,63 @@
       deployOpen ||
       pickerState != null,
   )
-  /// Session view switch for the active terminal tab. Inside an extension
-  /// view Kode's chrome is hidden and the view renders its own switch.
-  type ViewSwitch = { target: SessionViewTarget; blocker: SwitchBlocker }
-  let viewSwitch = $derived.by((): ViewSwitch | null => {
-    const tab = $activeTab
-    if (!tab || tab.sharedRuntime || tab.transportKind === 'acp') return null
-    const target = viewForBackend($sessionViews, tab.backendKey)
-    return target ? { target, blocker: toRuntimeBlocker(tab) } : null
-  })
+  /// Session view mode. In the view mode the extension view owns the whole
+  /// window and every conversation it can host moves into its runtime; in
+  /// the TUI mode they all run in terminals. See runtime_switch.ts.
   let dshView = $derived(viewForRuntime($sessionViews, 'dsh'))
+  /// A terminal the user opened from the view (a conversation the view's
+  /// runtime cannot host, or one still busy in its terminal).
+  let terminalPeek = $state<SessionId | null>(null)
+  /// The view's own home: in view mode whenever no runtime-hosted
+  /// conversation or peeked terminal is in front.
+  let viewHome = $derived(
+    $uiMode === 'view' && !!dshView && !chooserOpen && !deviceView &&
+      !$activeTab?.sharedRuntime && !(terminalPeek != null && terminalPeek === $activeId),
+  )
+  /// Phase of the extension view. Kode's chrome stays until the page is up,
+  /// so a slow or failed start never strands the user in it.
+  let extPhase = $state<'starting' | 'ready' | 'error'>('starting')
   /// An extension view owns the whole window: Kode's sidebar, titlebar,
   /// inspector and status bar give way to the view's own chrome.
-  let extImmersive = $derived(!!$activeTab?.sharedRuntime && !!dshView && !chooserOpen && !deviceView && !$switchProgress)
-  function switchBlockerText(blocker: SwitchBlocker) {
-    return blocker === 'busy' ? tr('extensions.switch.busy') : blocker === 'remote' ? tr('extensions.switch.remote') : blocker === 'no_session' ? tr('extensions.switch.noSession') : ''
-  }
-  function switchFailed(e: unknown) {
-    pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail: e instanceof Error ? e.message : String(e), durationMs: 8000 })
-  }
-  async function switchToView() {
-    const tab = $activeTab
-    const sw = viewSwitch
-    if (!tab || !sw || sw.blocker || $switchProgress) return
-    await switchToRuntime(tab, sw.target).catch(switchFailed)
-  }
-  async function switchTabToTui(tab: TabInfo) {
+  let extImmersive = $derived(
+    $uiMode === 'view' && !!dshView && extPhase === 'ready' && !chooserOpen && !deviceView && !$switchProgress &&
+      (!!$activeTab?.sharedRuntime || viewHome),
+  )
+  function switchMode(mode: UiMode) {
     if ($switchProgress) return
-    const blocker = toTuiBlocker(tab)
-    if (blocker) {
-      pushToast({ severity: 'warning', title: tr('extensions.switch.failed'), detail: switchBlockerText(blocker), durationMs: 5000 })
-      return
-    }
-    await switchToTui(tab).catch(switchFailed)
+    terminalPeek = null
+    void setUiMode(mode).catch((e) =>
+      pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail: e instanceof Error ? e.message : String(e), durationMs: 8000 }),
+    )
   }
-  /// Back to Kode's own UI without moving the conversation.
-  function leaveExtensionView() {
-    const tab = [...$tabs].reverse().find((t) => !t.sharedRuntime)
-    if (tab) selectTab(tab.id)
-    else startNewSession()
+  function migrationFailed(tab: TabInfo, message: string) {
+    pushToast({ severity: 'error', title: tr('extensions.switch.moveFailed', { title: tab.title || tab.backendKey }), detail: message, durationMs: 8000 })
   }
   function onExtensionViewAction(event: ExtensionViewAction) {
     if (!$sessionViews.some((v) => v.extension === event.extension && v.view.id === event.view)) return
-    if (event.action === 'leave') return leaveExtensionView()
+    // The view's way back to Kode's terminals switches the whole mode.
+    if (event.action === 'leave') return switchMode('tui')
     if (event.action === 'switch-view' && event.params.to === 'tui') {
+      // Keep the conversation on screen in front once it is a terminal.
       const ref = String(event.params.session ?? '')
       const tab = $tabs.find((t) => t.sharedRuntime && t.dshSessionId === ref)
+      if (tab) selectTab(tab.id)
+      return switchMode('tui')
+    }
+    // The view's sidebar picked a conversation still running in a Kode
+    // terminal: busy until its turn ends, or one the view cannot host.
+    if (event.action === 'open-session') {
+      const uuid = String(event.params.session ?? '')
+      const tab = $tabs.find((t) => !t.sharedRuntime && ((uuid && t.sessionId === uuid) || t.id === event.params.tab))
       if (!tab) {
         pushToast({ severity: 'warning', title: tr('extensions.switch.failed'), detail: tr('extensions.switch.notSwitchable'), durationMs: 6000 })
         return
       }
-      void switchTabToTui(tab)
+      terminalPeek = tab.id
+      selectTab(tab.id)
+      if (dshView && movableToView(tab, dshView) && tab.status !== 'idle') {
+        pushToast({ severity: 'info', title: tr('extensions.switch.pendingView', { name: dshView.view.title }), durationMs: 5000 })
+      }
     }
   }
   /// Kode toasts are DOM and would sit under the native view; the view's
@@ -1433,8 +1431,6 @@
     pending?.resolve(accepted)
   }
   /** memory hover 卡片显示态;徽章 hover 300ms 后显示。 */
-  let memoryHoverVisible = $state(false)
-  let memoryHoverTimer: number | null = null
   /** Browse 面板上次的 filter(从 PersistedState 加载,改动时同步回去) */
   let memoryBrowseFilter: BrowseFilterState | null = $state(null)
   /** 当前 scope(初值跟当前 active tab 的 cwd 推断;Browse 用作默认) */
@@ -1687,6 +1683,8 @@
         advanceBoot(7)
         await waitForRestoredTabsReady(localRestoredIds)
       }
+      // After restore: restored tabs follow the session view mode too.
+      startModeWatch(migrationFailed)
       // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
     } catch (e) {
       bootError = String(e)
@@ -1789,52 +1787,6 @@
     ipc.setLocale(next).catch((e) => console.warn('setLocale failed:', e))
   }
 
-  /// 状态栏右下角的 cwd 路径压缩。
-  /// 1. $HOME 前缀替换成 ~
-  /// 2. 长度 ≤ maxLen 直接返回
-  /** Phase 11.6:当前 active tab 走的远端 endpoint(local tab → null)。
-   *  用于状态栏连接指示器。 */
-  const activeRemoteEndpoint = $derived((() => {
-    const eid = $activeTab?.endpointId
-    if (!eid || eid.kind !== 'remote') return null
-    return endpoints.find((e) => e.id === eid.id) ?? { id: eid.id, display_name: eid.id, base_url: '', connected: false }
-  })())
-
-  /// 3. 否则保头(/ 或 ~)+ 从尾巴反向贪心保留**整段文件夹名**,中间用 …/ 占位
-  /// 4. 兜底:实在塞不下就保留最后一段 + … 前缀
-  function compressPath(p: string, maxLen: number): string {
-    if (!p) return ''
-    let s = p
-    if (homeDir && (s === homeDir || s.startsWith(homeDir + '/'))) {
-      s = '~' + s.slice(homeDir.length)
-    }
-    if (s.length <= maxLen) return s
-
-    const segs = s.split('/')
-    // 头部:绝对路径 → '',~ 路径 → '~'
-    const head = segs[0]
-    const tail = segs.slice(1).filter((x) => x.length > 0)
-    if (tail.length === 0) return s
-
-    // 反向贪心:从最后一段开始累加,直到放不下;中间填 …/
-    // 最终形态:<head>/…/<tail-k>/.../<tail-1>
-    const ELLIPSIS = '…'
-    let kept: string[] = []
-    let lenUsed = head.length + 1 /* '/' 分隔 */ + ELLIPSIS.length /* … 占位 */
-    for (let i = tail.length - 1; i >= 0; i--) {
-      const seg = tail[i]
-      const extra = seg.length + 1 /* '/' */
-      if (lenUsed + extra > maxLen && kept.length > 0) break
-      kept.unshift(seg)
-      lenUsed += extra
-    }
-
-    if (kept.length === 0) {
-      // 最后一段都塞不下,兜底:… + 最后一段(可能仍超长,但最起码可读)
-      return ELLIPSIS + '/' + tail[tail.length - 1]
-    }
-    return head + '/' + ELLIPSIS + '/' + kept.join('/')
-  }
 
   function statusLabel(t: { exited?: number | null; status?: string; attention?: string | null }): {
     cls: 'starting' | 'idle' | 'busy' | 'attention' | 'exited'
@@ -1982,9 +1934,6 @@
       // ⌘,:打开 Settings 面板(backend 开关 / memory 配置聚合)
       e.preventDefault()
       settingsOpen = true
-    } else if ((k === 'd' || k === 'D') && e.shiftKey) {
-      e.preventDefault()
-      showDevInfo = !showDevInfo
     } else if ((k === 'm' || k === 'M') && e.shiftKey) {
       // ⌘⇧M:打开 memory review queue 面板。Shift 必带,避免与子进程
       // ⌘M(macOS minimize)冲突 —— minimize 在 WKWebView 里走系统菜单,
@@ -2448,6 +2397,25 @@
   style={inspectorOpen ? `--inspector-w:${inspectorWidth}px` : ''}
 >
   {#if isWindows}<WindowsWindowControls />{/if}
+  <ActivityRail
+    sessionsVisible={sidebarMode !== 'hidden'}
+    onToggleSessions={() => ($uiMode === 'view' ? switchMode('tui') : (sidebarMode = sidebarMode === 'hidden' ? 'full' : 'hidden'))}
+    memoryPending={totalMemoryPendingCount}
+    onOpenMemory={() => (totalMemoryPendingCount > 0 ? (memoryPanelOpen = true) : (memoryBrowseOpen = true))}
+    onOpenPlugins={() => (pluginPanelOpen = true)}
+    views={$sessionViews}
+    activeView={$uiMode === 'view' && dshView ? dshView.extension : null}
+    switching={!!$switchProgress}
+    onOpenView={() => switchMode($uiMode === 'view' ? 'tui' : 'view')}
+    onManageExtensions={() => openSettings('extensions')}
+    {accountStatus}
+    onAccountOpen={() => void refreshAccountStatus()}
+    onAccountSettings={() => openSettings('account')}
+    onRelaySettings={() => openSettings('relay')}
+    onSignOut={() => void signOutFromMenu()}
+    onOpenSettings={() => openSettings()}
+    bind:accountOpen={accountMenuOpen}
+  />
   <aside class="sidebar" class:compact={sidebarMode === 'compact'}>
     <!-- 系统原生红绿灯(titleBarStyle: Overlay)落在这条顶栏左上角;整条 drag region。
          我们不再自绘按钮,只用 padding-left 给原生红绿灯让出位置(见 .sidebar-traffic)。 -->
@@ -2467,6 +2435,7 @@
       </button>
     </div>
 
+    <div class="sidebar-panel">
     {#if sidebarMode === 'compact'}
       {@render modeSwitcher('icon', 'right')}
     {:else}
@@ -2632,59 +2601,6 @@
         </div>
       {/if}
     </div>
-    <div class="sidebar-account">
-      <button
-        bind:this={accountTriggerEl}
-        class="account-trigger"
-        aria-haspopup="menu"
-        aria-expanded={accountMenuOpen}
-        title={sidebarAccount?.account_label ?? tr('pairing.account.sidebarSignIn')}
-        onclick={() => {
-          accountMenuOpen = !accountMenuOpen
-          if (accountMenuOpen) void refreshAccountStatus()
-        }}
-      >
-        <span class="account-avatar" class:empty={!sidebarAccount} aria-hidden="true">
-          {#if sidebarAccount?.account_picture}
-            <img src={sidebarAccount.account_picture} alt="" referrerpolicy="no-referrer" />
-          {:else if sidebarAccount}{accountInitial(sidebarAccount.account_label)}{:else}<Icon name="user" size={14} />{/if}
-          {#if sidebarAccount?.active}
-            <span class="presence" class:on={accountStatus?.connected} class:live={accountStatus?.sync_enabled}></span>
-          {/if}
-        </span>
-        <span class="account-copy">
-          <strong>{sidebarAccount?.account_label ?? tr('pairing.account.sidebarSignIn')}</strong>
-          {#if sidebarAccount}
-            <span>
-              {!sidebarAccount.active
-                ? tr('pairing.account.inactive')
-                : accountStatus?.sync_enabled
-                  ? tr('pairing.account.viewing')
-                  : accountStatus?.connected
-                    ? tr('pairing.account.standby')
-                    : tr('pairing.offline')}
-            </span>
-          {/if}
-        </span>
-      </button>
-      <button
-        class="icon-btn account-gear"
-        title={tr('settings.open')}
-        aria-label={tr('settings.open')}
-        onclick={() => openSettings()}
-      >
-        <Icon name="settings" size={16} />
-      </button>
-      {#if accountMenuOpen}
-        <AccountMenu
-          anchor={sidebarMode === 'compact' ? accountTriggerEl?.getBoundingClientRect() ?? null : null}
-          status={accountStatus}
-          onAccountSettings={() => openSettings('account')}
-          onRelaySettings={() => openSettings('relay')}
-          onSignOut={() => void signOutFromMenu()}
-          onClose={() => (accountMenuOpen = false)}
-        />
-      {/if}
     </div>
   </aside>
 
@@ -2709,38 +2625,12 @@
         >
           <Icon name="plus" size={16} />
         </button>
-        <button
-          class="icon-btn hidden-fallback-add"
-          title={tr('settings.open')}
-          aria-label={tr('settings.open')}
-          onclick={() => openSettings()}
-        >
-          <Icon name="settings" size={16} />
-        </button>
         {@render modeSwitcher('icon', 'below')}
       {/if}
       <div class="main-title-center" data-tauri-drag-region>
         <strong>{topbarTitle}</strong>
       </div>
       <div class="titlebar-actions">
-        {#if viewSwitch}
-          <div class="view-switch" role="group" aria-label={tr('extensions.switch.label')}>
-            <button class="active" aria-pressed="true" tabindex="-1">
-              <Icon name="terminal" size={13} />
-              <span>{tr('extensions.switch.tui')}</span>
-            </button>
-            <button
-              aria-pressed="false"
-              disabled={!!viewSwitch.blocker || !!$switchProgress}
-              title={switchBlockerText(viewSwitch.blocker) || tr('extensions.switch.toView', { name: viewSwitch.target.view.title })}
-              onclick={switchToView}
-            >
-              <Icon name="message-square" size={13} />
-              <span>{viewSwitch.target.view.title}</span>
-            </button>
-          </div>
-        {/if}
-        <UpdateButton />
         <EventCenter />
         {#if terminalPosition === 'bottom' && $tabs.length > 0}
           <button
@@ -2751,7 +2641,7 @@
             aria-pressed={terminalPanelOpen}
             onclick={toggleTerminalPanel}
           >
-            <Icon name="terminal" size={15} />
+            <Icon name="panel-bottom" size={15} />
           </button>
         {/if}
         <!-- 打开 inspector 的按钮只在关闭时显示;收起由右边栏顶部那一排的关闭按钮负责 -->
@@ -2855,12 +2745,28 @@
       {@const tab = $tabs.find((t) => t.id === id)}
       <!-- inert 兜底:visibility:hidden 仍可能被 Tab 键焦点穿透,inert 完全屏蔽
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
-      {@const extTarget = tab?.sharedRuntime ? viewForRuntime($sessionViews, 'dsh') : null}
+      {@const extTarget = tab?.sharedRuntime && $uiMode === 'view' ? dshView : null}
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
         {#if extTarget}
           {#if isActive}
-            <ExtensionViewPort target={extTarget} sessionRef={tab?.dshSessionId} visible={isActive} blocked={overlayBlocked || !!$switchProgress} />
+            <ExtensionViewPort target={extTarget} sessionRef={tab?.dshSessionId} visible={isActive} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} />
           {/if}
+        {:else if tab?.sharedRuntime}
+          <!-- TUI mode never opens the view: this conversation is still in
+               its runtime (mid-turn, or its move failed) and follows later. -->
+          {@const failure = $migrationFailures[nativeKey(tab)]}
+          <div class="parked-session" role="status">
+            {#if !dshView || !movableToTui(tab, dshView)}
+              <strong>{tr('extensions.switch.notSwitchable')}</strong>
+            {:else if failure}
+              <strong>{tr('extensions.parked.failed')}</strong>
+              <pre>{failure}</pre>
+              <button class="btn-ghost" onclick={() => retryMigration(tab)}>{tr('extensions.view.retry')}</button>
+            {:else}
+              <span class="parked-spinner" aria-hidden="true"></span>
+              <strong>{tr(tab.status === 'idle' ? 'extensions.parked.moving' : 'extensions.parked.busy', { name: dshView?.view.title ?? 'dsh' })}</strong>
+            {/if}
+          </div>
         {:else if tab?.transportKind === 'acp'}
           <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} agentName={tab?.backendKey === 'codebuddy' ? 'CodeBuddy' : tab?.backendKey ?? 'Agent'} />
         {:else}
@@ -2874,6 +2780,11 @@
         {/if}
       </div>
     {/each}
+    {#if viewHome && dshView}
+      <div class="term-wrapper visible">
+        <ExtensionViewPort target={dshView} sessionRef={undefined} visible={true} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} />
+      </div>
+    {/if}
     {#if $switchProgress}
       <SwitchProgressOverlay progress={$switchProgress} />
     {/if}
@@ -2978,112 +2889,6 @@
     {/if}
   </div>
 
-  <footer class="status">
-    <span class="status-left">
-      {#if $activeTab}
-        {@const s = statusLabel($activeTab)}
-        <span class="status-dot dot-{s.cls}"></span>
-        <span class="status-text">{s.text}</span>
-        <span class="dot-sep">·</span>
-        <span class="model">{compactModelName($activeTab.model)}</span>
-
-        {#if $activeTab.inputTokens != null}
-          <span class="dot-sep">·</span>
-          <span class="tok-in">
-            ↓ {formatTokens($activeTab.inputTokens)} in
-            {#if $activeTab.cachedTokens}
-              <span class="cached"> ({formatTokens($activeTab.cachedTokens)} cached)</span>
-            {/if}
-          </span>
-        {/if}
-        {#if $activeTab.outputTokens != null}
-          <span class="tok-out">↑ {formatTokens($activeTab.outputTokens)} out</span>
-        {/if}
-
-        {#if $activeTab.costUsd != null}
-          <span class="dot-sep">·</span>
-          <span class="cost">${$activeTab.costUsd.toFixed(2)}</span>
-        {/if}
-      {:else}
-        <span class="status-text muted">No active session</span>
-      {/if}
-    </span>
-    <span class="status-right">
-      {#if totalMemoryPendingCount > 0}
-        <div
-          class="mem-badge-wrap"
-          onmouseenter={() => {
-            if (memoryHoverTimer != null) window.clearTimeout(memoryHoverTimer)
-            memoryHoverTimer = window.setTimeout(() => (memoryHoverVisible = true), 300)
-          }}
-          onmouseleave={() => {
-            if (memoryHoverTimer != null) {
-              window.clearTimeout(memoryHoverTimer)
-              memoryHoverTimer = null
-            }
-            memoryHoverVisible = false
-          }}
-          role="presentation"
-        >
-          <button
-            class="mem-badge"
-            title={tr('memory.metrics.reviewQueueTitle', { count: totalMemoryPendingCount })}
-            aria-label={tr('memory.metrics.openReview')}
-            onclick={() => (memoryPanelOpen = true)}
-          >
-            <Icon name="brain" /> {totalMemoryPendingCount}
-          </button>
-          <MetricsHoverCard visible={memoryHoverVisible} />
-        </div>
-      {:else}
-        <!-- 无 pending 时也允许 hover 看 metrics(但不渲染数字徽章 — 避免空徽章) -->
-        <div
-          class="mem-badge-wrap quiet"
-          onmouseenter={() => {
-            if (memoryHoverTimer != null) window.clearTimeout(memoryHoverTimer)
-            memoryHoverTimer = window.setTimeout(() => (memoryHoverVisible = true), 300)
-          }}
-          onmouseleave={() => {
-            if (memoryHoverTimer != null) {
-              window.clearTimeout(memoryHoverTimer)
-              memoryHoverTimer = null
-            }
-            memoryHoverVisible = false
-          }}
-          role="presentation"
-        >
-          <button
-            class="mem-badge dim"
-            title={tr('memory.metrics.badgeTitle')}
-            aria-label={tr('memory.metrics.title')}
-            onclick={() => (memoryBrowseOpen = true)}
-          >
-            <Icon name="brain" />
-          </button>
-          <MetricsHoverCard visible={memoryHoverVisible} />
-        </div>
-      {/if}
-      {#if showDevInfo}
-        <span class="dev-info">{$tabs.length} tab · {$mountedIds.length} mounted · v0.2-dev</span>
-      {/if}
-      {#if activeRemoteEndpoint}
-        <!-- Phase 11.6:远端连接指示 -->
-        <button
-          class="remote-indicator"
-          class:connected={activeRemoteEndpoint.connected}
-          onclick={() => (endpointsOpen = true)}
-          title="{activeRemoteEndpoint.connected ? '已连接' : '未连接'} · 点击管理 endpoints"
-          aria-label="Remote endpoint: {activeRemoteEndpoint.display_name}"
-        >
-          <span class="remote-dot" class:on={activeRemoteEndpoint.connected}></span>
-          <span class="remote-name">{activeRemoteEndpoint.display_name}</span>
-        </button>
-      {/if}
-      {#if $activeTab?.cwd}
-        <span class="cwd-path" title={$activeTab.cwd}>{compressPath($activeTab.cwd, 48)}</span>
-      {/if}
-    </span>
-  </footer>
 </div>
 
 {#if bootLoading}
@@ -3324,17 +3129,24 @@
   }
 
   .root {
+    /* Activity rail (lib/ActivityRail.svelte), full height at the left edge. */
+    --rail-w: 52px;
+    /* Window chrome: the rail and the 44px title row share one colour; the
+       session list and the main area sit in a framed panel below it. */
+    --bg-chrome: var(--bg-sidebar);
+    --bd-panel: color-mix(in srgb, var(--bd-default) 86%, transparent);
     position: relative;
     display: grid;
-    grid-template-columns: var(--sidebar-w, 232px) minmax(0, 1fr) var(--inspector-w, 0px);
-    grid-template-rows: minmax(0, 1fr) 28px;
+    grid-template-columns: var(--rail-w) var(--sidebar-w, 232px) minmax(0, 1fr) var(--inspector-w, 0px);
+    /* The second row is a strip of chrome under the panel (see .sidebar-panel). */
+    grid-template-rows: minmax(0, 1fr) 4px;
     height: 100vh;
     min-height: 0;
     /* 透明窗口(tauri transparent:true)下,圆角靠 .root 自己画 + overflow 裁切。
        macOS 标准窗口圆角 ~10px。 */
     border-radius: 10px;
     overflow: hidden;
-    background: var(--bg-base);
+    background: var(--bg-chrome);
     color: var(--fg-primary);
     font-family: var(--font-ui);
     font-size: var(--fs-md);
@@ -3404,12 +3216,12 @@
   /* Extension view (dsh) fills the window and draws its own chrome: room
      for the traffic lights, drag regions and the TUI/dsh switch. */
   .root.ext-immersive {
-    grid-template-columns: 0 minmax(0, 1fr) 0;
+    grid-template-columns: 0 0 minmax(0, 1fr) 0;
     grid-template-rows: minmax(0, 1fr) 0;
   }
+  .root.ext-immersive > :global(.rail),
   .root.ext-immersive .sidebar,
   .root.ext-immersive .inspector-shell,
-  .root.ext-immersive .status,
   .root.ext-immersive .top-banners,
   .root.ext-immersive .bottom-terminal { display: none; }
   .root.ext-immersive .main-titlebar { display: none; }
@@ -3418,7 +3230,6 @@
      收起后不可交互,且内容不换行抖动。 */
   .root.sb-hidden .sidebar {
     pointer-events: none;
-    border-right-color: transparent;
   }
   .sidebar { white-space: nowrap; }
 
@@ -3434,7 +3245,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 0 8px 0 78px;
+    /* The traffic lights start over the rail; leave room for the rest. */
+    padding: 0 8px 0 calc(78px - var(--rail-w));
     -webkit-app-region: drag;
     user-select: none;
     -webkit-user-select: none;
@@ -3458,7 +3270,9 @@
     align-items: center;
     gap: 8px;
     padding: 0 8px;
-    background: var(--bg-base);
+    background: var(--bg-chrome);
+    /* The top edge of the panel, level with the session list's frame. */
+    box-shadow: 0 1px 0 var(--bd-panel);
     -webkit-app-region: drag;
     user-select: none;
     -webkit-user-select: none;
@@ -3467,7 +3281,7 @@
   .main-titlebar[data-tauri-drag-region] { pointer-events: auto; }
   /* hidden 模式:sidebar 收起,原生红绿灯落在这条 titlebar 左上角 → 让出 70px */
   .main-titlebar.sidebar-hidden {
-    padding-left: 78px;
+    padding-left: calc(78px - var(--rail-w));
   }
   /* hidden 模式下跟红绿灯同排的 + 按钮 */
   .main-titlebar .hidden-fallback-add {
@@ -3563,10 +3377,9 @@
   /* ===== sidebar ===== */
   .sidebar {
     grid-row: 1 / 2;
-    grid-column: 1 / 2;
+    grid-column: 2 / 3;
     margin: 0;
-    background: var(--bg-sidebar);
-    border-right: 1px solid color-mix(in srgb, var(--bd-default) 86%, transparent);
+    background: transparent;
     border-radius: 0;
     box-shadow: none;
     backdrop-filter: none;
@@ -3575,7 +3388,6 @@
     flex-direction: column;
     overflow: hidden;
     min-height: 0;
-    transition: border-right-color 180ms ease;
     user-select: none;
     -webkit-user-select: none;
   }
@@ -3630,68 +3442,17 @@
     color: var(--acc);
   }
 
-  /* Slack-style identity row: avatar + name/status opens the account menu,
-     the gear opens Settings. */
-  .sidebar-account {
-    position: relative;
-    display: flex;
-    flex-shrink: 0;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-    padding: 6px 8px;
-    border-top: 1px solid var(--bd-default);
-  }
-  .account-trigger {
-    display: flex;
+  /* The session list's part of the panel: framed all round, its left
+     corners rounded where they meet the chrome. */
+  .sidebar-panel {
     flex: 1;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    padding: 4px;
-    border: 0;
-    border-radius: var(--rad-sm);
-    background: transparent;
-    color: var(--fg-primary);
-    font: var(--fs-sm) var(--font-ui);
-    text-align: left;
-    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: color-mix(in srgb, var(--bg-sidebar) 55%, var(--bg-base));
+    border: 1px solid var(--bd-panel);
+    border-radius: 10px 0 0 10px;
   }
-  .account-trigger:hover { background: var(--bg-tab-hover); }
-  .account-avatar {
-    position: relative;
-    display: grid;
-    width: 28px;
-    height: 28px;
-    flex: 0 0 auto;
-    place-items: center;
-    border-radius: var(--rad-sm);
-    background: var(--acc);
-    color: var(--fg-on-accent);
-    font-weight: 700;
-  }
-  .account-avatar.empty { background: var(--bg-input); color: var(--fg-tertiary); }
-  .account-avatar img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
-  .presence {
-    position: absolute;
-    right: -3px;
-    bottom: -3px;
-    width: 10px;
-    height: 10px;
-    box-sizing: border-box;
-    border: 2px solid var(--bg-sidebar);
-    border-radius: 50%;
-    background: var(--fg-tertiary);
-  }
-  .presence.on { background: var(--st-warn); }
-  .presence.live { background: var(--st-ok); }
-  .account-copy { display: grid; min-width: 0; gap: 1px; }
-  .account-copy strong { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-  .account-copy span { overflow: hidden; color: var(--fg-tertiary); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
-  .account-gear { flex: 0 0 auto; }
-  .sidebar.compact .sidebar-account { flex-direction: column; padding: 6px 4px; }
-  .sidebar.compact .account-trigger { flex: 0 0 auto; justify-content: center; }
-  .sidebar.compact .account-copy { display: none; }
   .tab-list {
     flex: 1;
     overflow-y: auto;
@@ -4666,7 +4427,7 @@
   .main {
     position: relative;
     grid-row: 1 / 2;
-    grid-column: 2 / 3;
+    grid-column: 3 / 4;
     overflow: hidden;
     min-height: 0;
     background: var(--bg-base);
@@ -4704,7 +4465,7 @@
   .inspector-shell {
     position: relative;
     grid-row: 1 / 2;
-    grid-column: 3 / 4;
+    grid-column: 4 / 5;
     min-width: 0;
     min-height: 0;
     padding: 0;
@@ -4830,51 +4591,43 @@
     opacity: 0;
     transition: opacity var(--t-fast) ease;
   }
-  /* Segmented control in the style of the title pill: chip track, the
-     current view raised as an elevated segment. */
-  .view-switch {
-    -webkit-app-region: no-drag;
-    pointer-events: auto;
-    display: inline-flex;
+  .parked-session {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 2px;
-    height: 28px;
-    padding: 2px;
-    box-sizing: border-box;
-    border: 1px solid var(--bd-muted);
+    justify-content: center;
+    gap: var(--sp-3);
+    padding: var(--sp-4);
+    color: var(--fg-secondary);
+    font-size: var(--fs-sm);
+    text-align: center;
+  }
+  .parked-session pre {
+    max-width: min(640px, 90%);
+    max-height: 40%;
+    overflow: auto;
+    margin: 0;
+    padding: var(--sp-3);
     border-radius: var(--rad-md);
-    background: var(--bg-chip);
-    margin-right: 4px;
+    background: var(--bg-pre);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    white-space: pre-wrap;
   }
-  .view-switch button {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 8px;
-    border: 0;
-    border-radius: calc(var(--rad-md) - 2px);
-    background: transparent;
-    color: var(--fg-tertiary);
-    font-family: var(--font-ui);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background var(--t-fast), color var(--t-fast);
+  .parked-spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--bd-default);
+    border-top-color: var(--acc);
+    border-radius: 50%;
+    animation: parked-spin 0.9s linear infinite;
   }
-  .view-switch button:hover:not(:disabled):not(.active) {
-    color: var(--fg-primary);
-    background: var(--bg-hover);
-  }
-  .view-switch button.active {
-    background: var(--bg-elevated);
-    color: var(--fg-primary);
-    box-shadow: var(--sh-sm), 0 0 0 0.5px var(--bd-default);
-    cursor: default;
-  }
-  .view-switch button:disabled:not(.active) {
-    opacity: 0.45;
-    cursor: not-allowed;
+  @keyframes parked-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .term-wrapper.visible {
     visibility: visible;
@@ -4998,158 +4751,6 @@
   .btn-ghost:hover {
     background: var(--bg-tab-hover);
     color: var(--fg-primary);
-  }
-
-  /* ===== status bar ===== */
-  .status {
-    grid-row: 2 / 3;
-    grid-column: 1 / 4;
-    position: relative;
-    /*
-     * 状态栏要压在 .main(z-index:1, isolation:isolate)之上,否则
-     * MetricsHoverCard 向上弹的卡片会被 .main 的 stacking context 整个遮住
-     * (子元素 z-index:1200 救不了父级在 .root 栈里被压住的命运)。
-     */
-    z-index: 2;
-    background: color-mix(in srgb, var(--bg-sidebar) 88%, var(--bg-base));
-    color: var(--fg-secondary);
-    font-size: var(--fs-xs);
-    font-variant-numeric: tabular-nums;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 var(--sp-3);
-    border-top: 1px solid var(--bd-default);
-    /*
-     * 不能用 overflow:hidden —— MetricsHoverCard 向上弹的 .card 在 .status 的
-     * 子树里,会被裁掉。状态栏内容受控(文本/徽章),溢出风险低;真要兜底用
-     * .status-left/.status-right 内部处理。
-     */
-    overflow: visible;
-    user-select: none;
-    -webkit-user-select: none;
-  }
-  .status-left, .status-right {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    /* 给字体 descender 留出足够行盒空间。line-height:1 在部分字体/缩放下
-     * 会裁掉 g/j/p/y 等下半部分；状态栏本身 28px 高，1.35 仍可稳定居中。 */
-    line-height: 1.35;
-    /* 不要在这里 overflow:hidden — 会把 .dot-attention 的 box-shadow 脉冲裁掉。
-     * 父级 .status 已有 overflow: hidden 做兜底防溢出。 */
-  }
-  /* 状态栏左右两侧的所有直接子项:统一 line-height,不改变 display。
-   * 注意:不能给会做 text-overflow:ellipsis 的元素(.cwd-path)设 inline-flex,
-   * 否则截断失效。 */
-  .status-left > *,
-  .status-right > * {
-    line-height: 1.35;
-  }
-  .status-text { color: var(--fg-secondary); }
-  .status-text.muted { color: var(--fg-tertiary); }
-
-  /* Phase 11.6:远端连接指示器 */
-  .remote-indicator {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    background: none;
-    border: none;
-    padding: 1px var(--sp-2);
-    cursor: pointer;
-    border-radius: 999px;
-    color: var(--fg-secondary);
-    font: inherit;
-    font-size: var(--fs-xs);
-  }
-  .remote-indicator:hover {
-    background: var(--bg-tab-hover);
-    color: var(--fg-primary);
-  }
-  .remote-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--fg-tertiary);
-    flex-shrink: 0;
-  }
-  .remote-dot.on {
-    background: var(--st-ok, #9FE870);
-  }
-  .remote-name {
-    max-width: 14ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .cwd-path {
-    color: var(--fg-tertiary);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    max-width: 48ch;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .status .model { color: var(--st-info); font-family: var(--font-mono); }
-  .status .cost { color: var(--st-tokens); font-weight: var(--fw-med); }
-  .status .tok-in, .status .tok-out {
-    color: var(--st-tokens);
-    font-family: var(--font-mono);
-  }
-  .status .cached {
-    color: var(--fg-tertiary);
-    font-size: 10px;
-  }
-
-  .dev-info {
-    color: var(--fg-tertiary);
-    font-family: var(--font-mono);
-  }
-
-  /* M4 memory pending badge:状态栏右下角,点击打开 review 面板。
-   * 视觉权重比 cwd 重(它代表"有事要你看"),用 accent 描边但不闪 ——
-   * 有 attention 时 sidebar 已经在闪了,这里只是一个静态计数提示。 */
-  .mem-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    background: rgba(230, 180, 80, 0.12);
-    color: var(--st-warn);
-    border: 1px solid rgba(230, 180, 80, 0.38);
-    border-radius: 999px;
-    padding: 1px 8px;
-    font-size: 10.5px;
-    font-family: var(--font-mono);
-    line-height: 1;
-    cursor: pointer;
-    transition: background var(--t-fast), border-color var(--t-fast);
-  }
-  .mem-badge:hover {
-    background: rgba(230, 180, 80, 0.20);
-    border-color: var(--st-warn);
-  }
-  /* hover wrap:relative 容器让 MetricsHoverCard 用 absolute 浮上面。
-   * inline-flex + align-items:center 让内部的 .mem-badge 垂直居中,
-   * 与状态栏其它子项对齐(原 inline-block 会按基线对齐导致错位)。 */
-  .mem-badge-wrap {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-  }
-  /* 无 pending 时的 dim 徽章:暗淡,只露 brain icon,hover 才弹 metrics */
-  .mem-badge.dim {
-    background: transparent;
-    color: var(--text-muted, #888);
-    border-color: transparent;
-    padding: 1px 4px;
-    opacity: 0.5;
-  }
-  .mem-badge.dim:hover {
-    opacity: 0.85;
-    background: var(--bg-tab-hover);
-    border-color: var(--bd-default);
   }
 
   /* M4.2 prompt preview dialog —— 简单 modal,无依赖 */

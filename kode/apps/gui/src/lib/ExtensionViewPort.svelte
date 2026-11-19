@@ -16,6 +16,7 @@
     sessionRef,
     visible,
     blocked,
+    phase = $bindable('starting'),
   }: {
     target: SessionViewTarget
     /** Runtime session id the view should open (dsh session id). */
@@ -23,6 +24,8 @@
     visible: boolean
     /** A modal or dropdown is open over the session area. */
     blocked: boolean
+    /** Whether the page is up; Kode keeps its chrome until it is. */
+    phase?: 'starting' | 'ready' | 'error'
   } = $props()
 
   const tr = (key: string, params?: Record<string, string | number>) => {
@@ -30,9 +33,11 @@
     return t(key, params)
   }
 
+  // The bound phase outlives this port; a revisit retries a failed start.
+  if (phase === 'error') phase = 'starting'
+
   let host: HTMLDivElement | undefined = $state()
   let claim = 0
-  let phase = $state<'starting' | 'ready' | 'error'>('starting')
   let error = $state('')
   let attempt = $state(0)
 
@@ -45,13 +50,19 @@
     return { x: box.left, y: box.top, width: box.width, height: box.height }
   }
 
+  /** Fragment this port last delivered; re-showing after an overlay must not
+   *  pull the page back from a session the user opened inside it. */
+  let applied: string | null = null
+
   async function show() {
     if (!host) return
     claim = ++latestClaim
     const mine = claim
+    const next = fragment
     try {
-      await extensionIpc.showView(target.extension, target.view.id, rect(), fragment)
+      await extensionIpc.showView(target.extension, target.view.id, rect(), next === applied ? null : next)
       if (mine !== claim) return
+      applied = next
       phase = 'ready'
       // Starting can take minutes; Kode's chrome may have collapsed around
       // the port meanwhile, so place the view where the port is now.
@@ -110,6 +121,7 @@
   onDestroy(hide)
 
   function retry() {
+    applied = null
     phase = 'starting'
     error = ''
     attempt += 1

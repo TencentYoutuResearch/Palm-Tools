@@ -10,7 +10,7 @@ import ProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { assistantStreamFirstTokenTime, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import * as factoryPlugin from '../src/native-agent-factory.js'
 import { installNativeStartupBarrier } from '../src/native-startup.js'
-import {buildHistorySeed} from '../src/native-history.js'
+import {buildHistorySeed,nativeDelta} from '../src/native-history.js'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import Subprocess from '@deepseek-ai/dsh-subprocess-local'
 import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
@@ -357,6 +357,28 @@ test('history import is seeded with native timestamps before its driver is publi
   const rows=h.stored.get(options.sessionId).events
   assert.equal(rows.find(e=>e.type==='turn/end').time-rows.find(e=>e.type==='turn/start').time,30000)
   assert.deepEqual(rows.filter(e=>e.type==='turn/start').map(e=>e.data.turn),[1,2])
+  await h.fiber.dispose()
+})
+
+test('a takeover appends only the turns run in a terminal to the same conversation, which keeps working', async () => {
+  const h=await host({async *stream(){yield{type:'block-start',index:0,blockType:'text'};yield{type:'text-delta',index:0,text:'dsh answer'};yield{type:'block-end',index:0,block:{type:'text',text:'dsh answer'}};yield{type:'finish',reason:{kind:'stop'}}},closeSession:async()=>{}})
+  const time=Date.parse('2026-01-01T00:00:00Z')
+  const first=[{kind:'turn_start',time},{kind:'text',role:'user',text:'Old question',time:time+1000},{kind:'text',role:'agent',text:'Old answer',time:time+2000},{kind:'turn_end',reason:'completed',time:time+3000}]
+  await h.ctx.kodeNativeFactory.importHistory(options.sessionId,buildHistorySeed({timeline:first},options.agentOptions),'/tmp',options.agentOptions)
+  const agent=h.ctx.agents.get(options.sessionId);agent.followup(message('in-dsh','Asked in dsh'));await agent.whenIdle()
+  // The CLI log holds every turn: imported, driven by dsh, then run in a terminal.
+  const later=Date.now()+60000
+  const native=[...first,{kind:'turn_start',time:later-120000},{kind:'text',role:'user',text:'Asked in dsh',time:later-119000},{kind:'turn_end',reason:'completed',time:later-118000},{kind:'turn_start',time:later},{kind:'text',role:'user',text:'Asked in terminal',time:later+1000},{kind:'text',role:'agent',text:'Terminal answer',time:later+2000},{kind:'turn_end',reason:'completed',time:later+3000}]
+  const added=await h.ctx.kodeNativeFactory.appendHistory(options.sessionId,events=>{const delta=nativeDelta(native,events);return buildHistorySeed({timeline:delta.rows},options.agentOptions,{firstTurn:delta.lastTurn+1})})
+  assert.ok(added>0)
+  const rows=h.stored.get(options.sessionId).events
+  assert.deepEqual(rows.filter(e=>e.type==='turn/start').map(e=>e.data.turn),[1,2,3])
+  assert.deepEqual(rows.filter(e=>e.type==='user/message').map(e=>e.data.content[0].text),['Old question','Asked in dsh','Asked in terminal'])
+  assert.deepEqual(rows.map(e=>e.seq),rows.map((_,index)=>index))
+  const ids=rows.filter(e=>e.data?.message?.id).map(e=>e.data.message.id);assert.equal(new Set(ids).size,ids.length)
+  const reopened=(await h.ctx.agents.resume({resumeSessionId:options.sessionId,agentOptions:options.agentOptions})).agent
+  reopened.followup(message('after','Back in dsh'));await reopened.whenIdle()
+  assert.deepEqual(h.stored.get(options.sessionId).events.filter(e=>e.type==='turn/start').map(e=>e.data.turn),[1,2,3,4])
   await h.fiber.dispose()
 })
 

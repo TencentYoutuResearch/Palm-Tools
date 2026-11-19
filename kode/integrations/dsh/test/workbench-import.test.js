@@ -194,3 +194,33 @@ test('Claude title synchronization persists through Kode and retries failures be
   assert.equal(calls.length, 2, 'unchanged titles require no additional native writes')
   assert.deepEqual(calls[0], { backend_key: 'claude', session_id: 'claude-thread', cwd: '/srv/project', title: 'Renamed Claude' })
 })
+test('a takeover import archives earlier copies of the same native thread and keeps other threads', async () => {
+ const h=importFixture({registered:true}),profiles=h.ctx.get('kodeAgents').profiles,registry=h.ctx.get('workspaceRegistry'),archived=[],released=[]
+ profiles.bindings={'old-copy':{threadId:h.tab.session_id,profile:{id:'kode-codex'}},'older-archived':{threadId:h.tab.session_id,profile:{id:'kode-codex'}},'other-thread':{threadId:'another',profile:{id:'kode-codex'}}}
+ registry.archivedSessionIds=['older-archived'];registry.archiveSession=async(id,options)=>{assert.deepEqual(options,{stopActivity:true});archived.push(id)}
+ h.ctx.get('kodeNativeFactory').release=async id=>released.push(id)
+ const result=await importSavedSession(h.ctx,h.client,h.tab,{fresh:true})
+ assert.notEqual(result.sessionId,'old-copy')
+ assert.deepEqual(archived,['old-copy']);assert.deepEqual(released,['old-copy'])
+})
+test('a takeover reloads the stored copy in place and falls back to a fresh copy when turns cannot be placed', async () => {
+ for (const placeable of [true, false]) {
+  const h=importFixture({registered:true}),profiles=h.ctx.get('kodeAgents').profiles,registry=h.ctx.get('workspaceRegistry'),controller=h.ctx.get('sessionController'),factory=h.ctx.get('kodeNativeFactory')
+  profiles.bindings={'stored-copy':{threadId:h.tab.session_id,profile:{id:'kode-codex'}}};profiles.binding=id=>profiles.bindings[id]
+  registry.archivedSessionIds=['stored-copy'];const unarchived=[];registry.unarchiveSession=async id=>unarchived.push(id);registry.archiveSession=async()=>{}
+  controller.list=async()=>({items:[{sessionId:'stored-copy'}]})
+  const time=1767225600000,selection={provider:'kode-agent-kode-codex',model:'m'}
+  const stored=[{type:'turn/start',seq:0,time,data:{turn:1}},{type:'request/header',seq:1,time,data:{header:{config:selection},reason:'initial'}},{type:'turn/end',seq:2,time:time+10,data:{turn:1,reason:{kind:'completed'}}}]
+  const timeline=placeable?[{kind:'turn_end',time:time+5},{kind:'turn_start',time:time+100},{kind:'text',role:'user',text:'later',time:time+101}]:[{kind:'text',role:'user',text:'no boundary',time:time+100}]
+  h.client.call=async(path,update)=>path.endsWith('/transcript')?{available:true,timeline,messages:[]}:{revision:1,value:update?.value??{version:1}}
+  let appended=null;factory.appendHistory=async(id,build)=>{appended=build(stored);return appended?.length??0}
+  const result=await importSavedSession(h.ctx,h.client,h.tab,{fresh:true})
+  if (placeable) {
+   assert.equal(result.sessionId,'stored-copy');assert.equal(result.reloaded,true);assert.deepEqual(unarchived,['stored-copy'])
+   assert.deepEqual(appended.filter(e=>e.type==='user/message').map(e=>e.data.content[0].text),['later'])
+   assert.equal(appended.find(e=>e.type==='turn/start').data.turn,2)
+  } else {
+   assert.notEqual(result.sessionId,'stored-copy');assert.deepEqual(unarchived,[]);assert.ok(h.calls.some(row=>row[0]==='seed'))
+  }
+ }
+})

@@ -26,6 +26,14 @@ test('blank ungrouped runtime placeholders cannot return as saved native convers
   assert.equal(index.native_sessions.length,1,'the placeholder artifact is retained')
 })
 
+test('saved tabs whose CLI never wrote a transcript are not listed',async()=>{
+  const ctx=context(),tab=(session_id,title)=>({backend_key:'tclaude',session_id,cwd:'/work/project',transport_kind:'pty',title})
+  const index={native_sessions:[tab('never-prompted','tab · tclaude'),tab('talked','Real conversation')]}
+  const backendClient={call:async(path,body)=>path.endsWith('/node')?{node_id:'fixture-node'}:path.endsWith('/workbench/transcript')?{messages:[],available:body.session_id==='talked'}:{revision:1,value:path.endsWith('/session-index')?index:{global:{archivedSessionIds:[],pinnedSessionIds:[]}}}}
+  const value=await hostDirectory(ctx,{backendClient})
+  assert.deepEqual(value.sessions.filter(row=>row.savedTab).map(row=>row.savedTab.session_id),['talked'])
+})
+
 test('federated catalog does not re-add placeholders hidden by the host directory',async()=>{
   const ctx=context(),blankTab={backend_key:'dsh',session_id:'blank',cwd:'/work/project',transport_kind:'runtime'}
   const backendClient={call:async path=>{
