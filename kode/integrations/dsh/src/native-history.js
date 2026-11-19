@@ -73,25 +73,57 @@ export function buildHistorySeed(transcript, selection, { firstTurn = 1 } = {}) 
   return events
 }
 
+function matchesImportedRow(row, events, turn) {
+  // The original bounded import may have synthesized a closing event mid-turn.
+  // Reopen its suffix only when an imported message proves the exact overlap.
+  if (row.kind === 'tool_result') {
+    return events.some(event => event.type === 'tool/result' && event.time === row.time &&
+      event.data.message?.toolCallId === `history:${turn}:${row.call_id}` &&
+      event.data.message.content?.[0]?.text === (row.text ?? ''))
+  }
+  if (row.kind !== 'text') return false
+  return events.some(event => {
+    if (event.time !== row.time) return false
+    const message = row.role === 'user' && event.type === 'user/message' ? event.data
+      : row.role === 'agent' && event.type === 'assistant/message' ? event.data.message : undefined
+    return message?.id?.startsWith('history-') && message.content?.some(part => part.type === 'text' && part.text === row.text)
+  })
+}
+
 /**
- * Native timeline rows a stored conversation lacks: those after its last
- * event. Null when this window cannot show where that boundary is (it does
- * not reach back to the conversation, or the next row is not the start of a
- * turn), so the caller never appends a partial or duplicated turn.
+ * Find the last stored conversational timestamp. Title changes, preference
+ * changes and end-of-seed markers may be newer than the imported CLI turns.
  */
 export function nativeDelta(timeline, events) {
-  const times=events.map(event=>event.time).filter(Number.isSafeInteger)
-  if(!times.length)return null
-  const boundary=Math.max(...times)
-  const lastTurn=Math.max(0,...events.map(event=>event.data?.turn).filter(Number.isSafeInteger))
-  let cut=-1
-  timeline.forEach((row,index)=>{if(Number.isSafeInteger(row.time)&&row.time<=boundary)cut=index})
-  if(cut<0)return null
-  let rows=timeline.slice(cut+1)
+  let boundary = -1, lastTurn = 0
+  const conversation = new Set(['turn/end', 'user/message', 'assistant/message', 'tool/result'])
+  for (const event of events) {
+    if (conversation.has(event.type) && Number.isSafeInteger(event.time)) boundary = Math.max(boundary, event.time)
+    if (Number.isSafeInteger(event.data?.turn)) lastTurn = Math.max(lastTurn, event.data.turn)
+  }
+  if (boundary < 0) return null
+  const cut = timeline.findLastIndex(row => Number.isSafeInteger(row.time) && row.time <= boundary)
+  if (cut < 0) return null
+  let first = cut + 1
   // A CLI may record its turn end just after dsh closed the same turn.
-  while(rows[0]?.kind==='turn_end')rows=rows.slice(1)
-  if(rows.length && !(rows[0].kind==='turn_start' || rows[0].kind==='text' && rows[0].role==='user'))return null
-  return {rows,lastTurn}
+  while (timeline[first]?.kind === 'turn_end') first++
+  const start = timeline[first]
+  if (start && !(start.kind === 'turn_start' || start.kind === 'text' && start.role === 'user')) {
+    const closed = events.findLast(event => event.type === 'turn/end')
+    const tailEnd = timeline.findIndex((row, index) => index >= first && (row.kind === 'turn_end' || row.kind === 'turn_start'))
+    if (closed?.time !== timeline[cut].time || timeline[tailEnd]?.kind !== 'turn_end'
+      || !matchesImportedRow(timeline[cut], events, lastTurn)) return null
+  }
+  let rows = timeline.slice(first)
+  if (timeline.some(row => row.kind === 'turn_start')) {
+    // Leave an in-flight turn for the next refresh rather than manufacturing
+    // a completion in the persisted DSH history.
+    rows = rows.slice(0, rows.findLastIndex(row => row.kind === 'turn_end') + 1)
+  } else {
+    const lastUser = rows.findLastIndex(row => row.kind === 'text' && row.role === 'user')
+    if (lastUser >= 0 && !rows.slice(lastUser + 1).some(row => row.kind === 'text' && row.role === 'agent')) rows = rows.slice(0, lastUser)
+  }
+  return { rows, lastTurn }
 }
 
 /** Keep event identities and references while repairing older reused turn IDs. */

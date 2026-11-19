@@ -17,10 +17,19 @@ function remoteSidebarSessions(host) {
   const hidden = new Set(host.hiddenSessionIds ?? [])
   return (host.sessions ?? []).filter(row => visible.has(row.id) && !hidden.has(row.id))
 }
-function resumeCandidates(hosts, target, query = '') {
+function resumeCandidates(hosts, target, query = '', nativeSessions = []) {
   if (!target?.profile) return []
+  const indexed = (hosts.find(host => host.id === target.hostId)?.sessions ?? []).filter(row => row.nativeThreadId && row.agent?.id === target.profile.id)
+  const current = indexed.find(row => row.id === target.sessionId)?.nativeThreadId
+  const candidates = new Map()
+  for (const row of [...nativeSessions, ...indexed]) {
+    if (row.id === target.sessionId || row.nativeThreadId === current || candidates.has(row.nativeThreadId)) continue
+    candidates.set(row.nativeThreadId, row)
+  }
   const text = query.trim().toLocaleLowerCase()
-  return (hosts.find(host => host.id === target.hostId)?.sessions ?? []).filter(row => row.id !== target.sessionId && row.nativeThreadId && (row.agent?.id === target.profile.id) && `${row.title} ${row.cwd} ${row.nativeThreadId}`.toLocaleLowerCase().includes(text)).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+  return [...candidates.values()]
+    .filter(row => `${row.title} ${row.cwd} ${row.nativeThreadId}`.toLocaleLowerCase().includes(text))
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
 }
 var directoryBindingCache = new WeakMap()
 function stableDirectoryBindings(entry, host) {
@@ -83,6 +92,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }, host)
     const value = await parseHostJson(response)
     if (!response.ok) throw new Error(value.error ?? '操作失败，请重试。')
+    return value
+  }
+  async function nativeSessionRequest(host, { profileId, cursor, input, signal }) {
+    const path = '/api/kode/native-sessions'
+    const query = new URLSearchParams({ profile_id: profileId ?? '' })
+    if (cursor) query.set('cursor', cursor)
+    const response = await fetchHost(input ? path : `${path}?${query}`, {
+      credentials: 'same-origin', cache: 'no-store', signal,
+      ...(input ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) } : {}),
+    }, host)
+    const value = await parseHostJson(response)
+    if (!response.ok) throw new Error(value.error ?? '无法读取原生会话，请重试。')
     return value
   }
   async function saveDefaultAgent(host, profile) {
@@ -1314,6 +1335,25 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const treeRoot = React.useRef(null)
     const connection = useSyncExternalStore(transport?.subscribe ?? (() => () => {}), transport?.getSnapshot ?? (() => null))
     const data = useWorkspaceDirectory(), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [rename, setRename] = useState(null), [title, setTitle] = useState(''), [resumeTarget, setResumeTarget] = useState(null), [resumeQuery, setResumeQuery] = useState('')
+    const [nativePage, setNativePage] = useState({ rows: [] })
+    const resumeRequest = React.useRef(null)
+    const loadNativePage = async (target, cursor) => {
+      resumeRequest.current?.abort()
+      const request = new AbortController()
+      resumeRequest.current = request
+      setNativePage(previous => ({ ...(cursor ? previous : { rows: [] }), loading: true, error: '' }))
+      try {
+        const page = await nativeSessionRequest(target.hostId, { profileId: target.profile.id, cursor, signal: request.signal })
+        if (!request.signal.aborted) setNativePage(previous => ({
+          rows: [...(cursor ? previous.rows : []), ...(page.sessions ?? [])],
+          next: page.nextCursor, supported: page.supported,
+        }))
+      } catch (error) {
+        if (!request.signal.aborted) setNativePage(previous => ({ ...previous, loading: false, error: error.message }))
+      }
+    }
+    const closeResume = () => { resumeRequest.current?.abort(); setResumeTarget(null) }
+    useEffect(() => () => resumeRequest.current?.abort(), [])
     const source = props.useSessions(state => state), workspaceSource = props.useWorkspaces(state => state)
     const sessionStatusSource = avatarContext?.get?.('uiSession')?.sessionStatus
     const sessionStatuses = useSyncExternalStore(sessionStatusSource?.subscribe ?? emptyAvatarSubscribe, sessionStatusSource?.getSnapshot ?? emptyAvatarSnapshot)
@@ -1364,16 +1404,60 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     useEffect(() => {
       if (!window.addEventListener) return
       const show = event => { const id = event.detail?.sessionId, profile = merged.sessions.byId[id]?.agent; if (!profile) return; const route = merged.routes.get(id) ?? { id, hostId: data.current }; openAvatarDialog({ profile, sessionId: route.id, host: route.hostId }) }
-      const resume = event => { setResumeTarget(event.detail); setResumeQuery(''); void refreshWorkspaceDirectory() }
+      const resume = event => {
+        const target = event.detail
+        if (!target?.profile) return
+        setResumeTarget(target); setResumeQuery(''); setError('')
+        void loadNativePage(target)
+        void refreshWorkspaceDirectory()
+      }
       window.addEventListener('kode-session-avatar', show)
       window.addEventListener('kode-resume-session', resume)
       return () => { window.removeEventListener('kode-session-avatar', show); window.removeEventListener('kode-resume-session', resume) }
     }, [merged])
-    const navigate = async (id, target) => { if (busy) return; setBusy(true); setError(''); setNotice(''); try {
-      if (target.sessionId?.startsWith('saved:')) { const imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId }); if (imported.sharedSession) { if (kodeEmbedded() && imported.hostId === 'local' && imported.sharedSession.runtime === 'gui') { showShared(null); window.kodeHost.request('open-session', { session: imported.sharedSession.session_uuid, tab: imported.sharedSession.id }); return true } if ((transport?.current ?? 'local') !== imported.hostId) await switchHost(imported.hostId); showShared({ session: imported.sharedSession, host: imported.hostId }); return true } showShared(null); id = imported.hostId; target = { ...target, sessionId: imported.sessionId }; if(imported.historyWindow?.truncated)setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`) }
-      await switchHost(id, target); await refreshWorkspaceDirectory(); return true
-    } catch (error) { setError(error.message) } finally { setBusy(false) } }
-    const open = id => { showShared(null); const route = merged.routes.get(id); if (route) void navigate(route.hostId, { sessionId: route.id }); else props.open(id) }
+    const navigate = async (id, target) => {
+      if (busy) return
+      setBusy(true); setError(''); setNotice('')
+      try {
+        let imported
+        if (target.selection) imported = await nativeSessionRequest(id, { input: { selection: target.selection } })
+        else if (target.sessionId?.startsWith('saved:')) imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId })
+        else if (target.refreshNative) {
+          try { imported = await nativeSessionRequest(id, { input: { sessionId: target.sessionId } }) }
+          catch (error) { if (error.code !== 'KODE_SERVICE_UPDATE_REQUIRED') setNotice('暂时无法同步原生历史，已打开本地记录。') }
+        }
+        if (imported) {
+          id = imported.hostId ?? id
+          const shared = imported.sharedSession
+          if (shared) {
+            if (kodeEmbedded() && id === 'local' && shared.runtime === 'gui') {
+              showShared(null)
+              window.kodeHost.request('open-session', { session: shared.session_uuid, tab: shared.id })
+            } else {
+              if ((transport?.current ?? 'local') !== id) await switchHost(id)
+              showShared({ session: shared, host: id })
+            }
+            return true
+          }
+          showShared(null)
+          target = { ...target, sessionId: imported.sessionId }
+          if (imported.historyPending) setNotice('暂时无法同步全部原生历史，已打开现有会话。')
+          else if (!imported.reloaded && imported.historyWindow?.truncated) setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`)
+        }
+        await switchHost(id, target)
+        await refreshWorkspaceDirectory()
+        return true
+      } catch (error) { setError(error.message) }
+      finally { setBusy(false) }
+    }
+    const open = id => {
+      showShared(null)
+      const route = merged.routes.get(id), hostId = route?.hostId ?? data.current, sessionId = route?.id ?? id
+      const refreshNative = data.hosts.find(host => host.id === hostId)?.sessions.some(row => row.id === sessionId && row.nativeThreadId && !row.running)
+      if (route || refreshNative) void navigate(hostId, { sessionId, refreshNative })
+      else props.open(id)
+    }
+    const resumeRows = resumeCandidates(data.hosts, resumeTarget, resumeQuery, nativePage.rows)
     const mutate = async (id, operation, args) => {
       const route = merged.routes.get(id)
       await projectCall({ action: 'host-operation', id: route.hostId, operation, args })
@@ -1431,10 +1515,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         },
         unarchiveSession: id => merged.routes.has(id) ? mutate(id, 'unarchive-session', { sessionId: merged.routes.get(id).id }) : props.unarchiveSession(id),
       }),
-      h(Modal, { open: Boolean(resumeTarget), title: '恢复原生会话', closeLabel: '关闭', onClose: () => setResumeTarget(null) },
+      h(Modal, { open: Boolean(resumeTarget), title: '恢复原生会话', closeLabel: '关闭', onClose: closeResume },
         h('label', { className: 'kode-field' }, '搜索会话', h('input', { autoFocus: true, value: resumeQuery, placeholder: '名称、工作区或原生会话 ID', onChange: event => setResumeQuery(event.target.value) })),
-        h('div', { className: 'kode-resume-list' }, ...resumeCandidates(data.hosts, resumeTarget, resumeQuery).map(row => h(Button, { key: row.id, variant: 'outline', disabled: busy, onClick: async () => { if (await navigate(resumeTarget.hostId, { sessionId: row.id, resume: true })) setResumeTarget(null) } }, h('span', null, row.title), h('small', null, row.cwd)))),
-        !resumeCandidates(data.hosts, resumeTarget, resumeQuery).length && h('p', { className: 'kode-config-note' }, '没有匹配的历史会话。'), h(Failure, { text: error })),
+        h('div', { className: 'kode-resume-list', 'aria-busy': Boolean(nativePage.loading) }, ...resumeRows.map(row => h(Button, { key: row.nativeThreadId, variant: 'outline', disabled: busy, onClick: async () => {
+          if (await navigate(resumeTarget.hostId, { sessionId: row.id, selection: row.selection, refreshNative: !row.selection, resume: true })) closeResume()
+        } }, h('span', null, row.title), h('small', null, row.cwd)))),
+        nativePage.loading && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取 Agent 会话…'),
+        nativePage.supported === false && h('p', { className: 'kode-config-note' }, '此 Agent 未提供会话列表，当前显示 Kode 已记录的会话。'),
+        !nativePage.loading && !nativePage.error && !resumeRows.length && h('p', { className: 'kode-config-note' }, nativePage.next ? '已加载的会话中没有匹配项。' : '没有匹配的历史会话。'),
+        nativePage.error && h(Failure, { text: nativePage.error }),
+        (nativePage.next || nativePage.error) && h(Button, { variant: 'outline', disabled: busy || nativePage.loading, onClick: () => void loadNativePage(resumeTarget, nativePage.next) }, nativePage.error ? '重试读取' : '加载更多会话'),
+        h(Failure, { text: error })),
       h(Modal, { open: Boolean(rename), title: '重命名会话', closeLabel: '关闭', onClose: () => setRename(null), footer: h(React.Fragment, null, h(Button, { onClick: () => setRename(null) }, '取消'), h(Button, { variant: 'primary', disabled: !title.trim(), onClick: async () => { try { await mutate(rename, 'rename-session', { sessionId: merged.routes.get(rename).id, title: title.trim() }); setRename(null) } catch (error) { setError(error.message) } } }, '保存')) }, h('label', { className: 'kode-field' }, '会话名称', h('input', { value: title, onChange: e => setTitle(e.target.value) })), h(Failure, { text: error })),
     )
   }
@@ -1694,7 +1785,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       }), 'kode.clear-session-command')
       if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
         name: 'resume',
-        available: session => { const profile = directory(session.sessionId).getSnapshot().data?.currentProfile; return ['codex', 'claude'].includes(profile?.type) || profile?.protocol === 'codex' },
+        available: session => { const profile = directory(session.sessionId).getSnapshot().data?.currentProfile; return Boolean(profile && profile.type !== 'dsh') },
         ui: { kind: 'action', run: session => window.dispatchEvent(new CustomEvent('kode-resume-session', { detail: { sessionId: session.sessionId, hostId: transport?.current ?? 'local', profile: directory(session.sessionId).getSnapshot().data?.currentProfile } })) },
       }), 'kode.resume-session-command')
       const invalidate = () => { metadata.clear(); skillLists.clear() }

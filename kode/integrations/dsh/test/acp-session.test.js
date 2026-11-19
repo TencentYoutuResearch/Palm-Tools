@@ -129,3 +129,27 @@ test('Claude model aliases use authoritative native resolution and retain the ca
   assert.deepEqual(models[0].aliases, ['kimi-k3.1-pro'])
   await assert.rejects(session.selectModel('unknown-model'), /Native model rejected/)
 })
+
+test('ACP discovers all workspaces and pages only when listing and restoration are advertised', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-acp-directory-')), log = join(root, 'requests.jsonl')
+  const profile = { type: 'custom', executable: process.execPath, args: [fixture], env: { KODE_ACP_FIXTURE_LOG: log } }
+  const supported = new AcpSession({ ...profile, env: { ...profile.env, KODE_ACP_LIST: '1' } }, root)
+  const unsupported = new AcpSession(profile, root)
+  const noRestore = new AcpSession({ ...profile, env: { ...profile.env, KODE_ACP_LIST: '1', KODE_ACP_NO_RESUME: '1' } }, root)
+  try {
+    const signal = AbortSignal.timeout(5000)
+    const first = await supported.listSessions(null, signal)
+    const next = await supported.listSessions(first.nextCursor, signal)
+    assert.equal(first.sessions[0].title, 'Current work')
+    assert.equal(next.sessions[0].cwd, '/srv/older')
+    assert.equal((await unsupported.listSessions(null, signal)).supported, false)
+    assert.equal((await noRestore.listSessions(null, signal)).supported, false)
+    const beforeReplay = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.deepEqual(beforeReplay.filter(row => row.method !== 'initialize').map(row => [row.method, row.params]), [
+      ['session/list', {}], ['session/list', { cursor: 'next-page' }],
+    ])
+    const replay = await supported.readHistory(first.sessions[0].sessionId, signal)
+    assert.equal(replay.timeline[0].text, 'REPLAY MUST NOT REAPPEAR')
+    assert.equal(supported.threadId, undefined)
+  } finally { await Promise.all([supported.close(), unsupported.close(), noRestore.close()]); await rm(root, { recursive: true, force: true }) }
+})

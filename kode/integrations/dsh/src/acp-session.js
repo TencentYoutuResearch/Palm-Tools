@@ -99,6 +99,39 @@ export class AcpSession {
       if (this.info.protocolVersion !== 1) throw new Error('Agent did not negotiate ACP v1')
     })()
   }
+  async listSessions(cursor, signal) {
+    await this.initialize(signal)
+    const capabilities = this.info.agentCapabilities
+    if (!capabilities?.sessionCapabilities?.list || !(capabilities.loadSession || capabilities.sessionCapabilities.resume)) {
+      return { supported: false, sessions: [] }
+    }
+    const page = await this.request('session/list', cursor ? { cursor } : {}, signal)
+    return { supported: true, sessions: page.sessions, nextCursor: page.nextCursor }
+  }
+  /** Some ACP Agents can replay messages but do not expose a local transcript. */
+  async readHistory(threadId, signal) {
+    await this.initialize(signal)
+    if (!this.info.agentCapabilities?.loadSession) return
+    const messages = []
+    let characters = 0, truncated = false
+    this.replay = { threadId, add: update => {
+      const role = update.sessionUpdate === 'user_message_chunk' ? 'user' : update.sessionUpdate === 'agent_message_chunk' ? 'agent' : null
+      if (!role || update.content?.type !== 'text' || !update.content.text) return
+      const text = update.content.text.slice(-128_000), last = messages.at(-1)
+      if (text.length !== update.content.text.length) truncated = true
+      if (last?.role === role && last.text.length + text.length <= 128_000) last.text += text
+      else messages.push({ kind: 'text', role, text })
+      characters += text.length
+      while (characters > 512_000 || messages.length > 1000) {
+        characters -= messages.shift().text.length
+        truncated = true
+      }
+    } }
+    try {
+      await this.request('session/load', { sessionId: threadId, cwd: this.cwd, mcpServers: [] }, signal)
+      return { available: true, timeline: messages, history_window: { count: messages.length, truncated } }
+    } finally { this.replay = undefined }
+  }
   async open(binding, tools, signal = this.lifetime.signal) {
     signal.throwIfAborted()
     await this.initialize(signal)
@@ -202,6 +235,7 @@ export class AcpSession {
     if (['tool_call', 'tool_call_update'].includes(update.sessionUpdate) && update.title) this.observeSubagent({ id, delta: '\n' + update.title + '\n' })
   }
   update({ sessionId, update }) {
+    if (this.replay?.threadId === sessionId) { this.replay.add(update); return }
     if (sessionId !== this.threadId && this.children.has(sessionId)) { this.childContent(sessionId, update); return }
 
     const metadata = ['available_commands_update', 'config_option_update', 'current_mode_update'].includes(update.sessionUpdate)

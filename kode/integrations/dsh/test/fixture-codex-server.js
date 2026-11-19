@@ -34,6 +34,11 @@ async function receive(message) {
   if (method === 'thread/resume' && archived) return send({id,error:{code:-32600,message:`session ${params.threadId} is archived. Run codex unarchive ${params.threadId} to unarchive it first.`}})
   if (method === 'thread/unarchive') { archived=false;return result(id,{thread:{id:params.threadId}}) }
   if (method === 'thread/resume' && process.env.KODE_FIXTURE_LARGE_RESUME === '1' && params.excludeTurns !== true) return result(id, { thread: { id: params.threadId, turns: [{ text: 'x'.repeat(9 * 1024 * 1024) }] } })
+  if (method === 'thread/list') {
+    const threadId = params.archived ? 'archived-thread' : params.cursor ? 'older-thread' : 'desktop-thread'
+    return result(id, { data: [{ id: threadId, name: 'Native title', preview: 'Old preview', cwd: '/srv/project', updatedAt: 1767225600 }],
+      nextCursor: !params.archived && !params.cursor ? 'next-page' : null })
+  }
   if (method === 'thread/start' || method === 'thread/resume') return result(id, { thread: { id: params.threadId ?? (process.env.KODE_FIXTURE_UNIQUE_THREAD === '1' ? `fixture-${process.pid}` : 'same-native-id') } })
   if (method === 'turn/steer') {
     const turnId = `turn-${turn}`, threadId = params.threadId

@@ -6,6 +6,8 @@ import { buildHistorySeed, nativeDelta } from './native-history.js'
 import { normalizeProfile, profileRevision, profileRoute } from './agent-profiles.js'
 // These Kode Codex entries do not require an MCP setup declaration. Custom
 // executable names still require an explicit protocol declaration.
+const pendingImports = new WeakMap()
+const TRANSCRIPT = '/api/v1/messaging/workbench/transcript'
 const KODE_CODEX_BACKENDS = new Set(['codex', 'native-codex', 'gateway-codex', 'tcodex'])
 export function backendProfile(key, config) {
   const style = config.mcp_setup?.style
@@ -98,31 +100,47 @@ export async function syncNativeTabs(controller, client, profiles, signal) {
  * has just been driving. The stored dsh copy is reused and brought up to date
  * with the turns it missed; only when that cannot be done safely does the
  * import get a new id and re-read the whole CLI transcript. */
-export async function importSavedSession(ctx, client, tab, { fresh = false } = {}) {
+export async function importSavedSession(ctx, client, tab, options = {}) {
+  const controller = ctx.get('sessionController')
+  if (!controller) throw new Error('Session controller is unavailable')
+  let pending = pendingImports.get(controller)
+  if (!pending) pendingImports.set(controller, pending = new Map())
+  const key = JSON.stringify([tab.backend_key, tab.session_id])
+  const previous = pending.get(key)
+  const task = (previous?.catch(() => {}) ?? Promise.resolve()).then(() => importSession(ctx, client, tab, options))
+  pending.set(key, task)
+  try { return await task }
+  finally { if (pending.get(key) === task) pending.delete(key) }
+}
+
+async function importSession(ctx, client, tab, { fresh = false, discovered = false, localSessionId, refreshOnly = false } = {}) {
   if (!tab.session_id || !tab.cwd || !tab.backend_key) throw new Error('Saved session is missing its native identity')
   const published = await client.call('/api/v1/messaging/runtime/sessions')
   const live = (published.sessions ?? []).find(row => row.backend_key === tab.backend_key
     && (row.runtime === 'gui' && row.session_uuid === tab.session_id || row.runtime === 'dsh' && row.native_thread_id === tab.session_id)
     && !row.runtime_saved && row.status !== 'exited' && (row.owner_alive ?? row.runtime_online))
-  if (live) return { sharedSession: live, imported: false }
+  if (live?.runtime === 'gui' || live && live.status !== 'idle') return { sharedSession: live, imported: false }
   const runtime = ctx.get('kodeAgents'), controller = ctx.get('sessionController')
   const registry = ctx.get('workspaceRegistry')
-  let workspace = registry.list().find(workspace => workspace.path === tab.cwd) ?? await registry.resolveByPath(tab.cwd)
   const profile = savedSessionProfile(runtime.profiles, tab)
   if (!profile) throw new Error(`This saved ${tab.backend_key} session has no installed inline protocol adapter`)
   const reuse = savedImportIdentity(tab, profile.id, runtime.profiles.bindings, registry.archivedSessionIds)
-  if (fresh) {
-    const binding = runtime.profiles.binding?.(reuse)
-    const stored = binding?.threadId === tab.session_id && binding.profile.id === profile.id
-      && (await controller.list({})).items.some(row => row.sessionId === reuse)
-    if (stored && await reloadNativeTurns(ctx, client, tab, reuse)) {
-      // Kode archived it when the conversation moved to a terminal.
-      await registry.unarchiveSession(reuse)
-      workspace ??= await registry.create(tab.cwd)
-      await workspace.attachSession(reuse)
-      await retireStaleCopies(ctx, tab.session_id, reuse)
-      return { sessionId: reuse, imported: true, reloaded: true }
-    }
+  const idToRefresh = localSessionId ?? reuse
+  if (live && (live.runtime_session_id ?? live.session_uuid) !== idToRefresh) return { sharedSession: live, imported: false }
+  const existing = (await controller.list({})).items.find(row => row.sessionId === idToRefresh)
+  const binding = runtime.profiles.binding?.(idToRefresh)
+  const stored = existing && binding?.threadId === tab.session_id && binding.profile.id === profile.id
+  const update = stored && !existing.running && await reloadNativeTurns(ctx, client, tab, idToRefresh)
+  if (refreshOnly) return { sessionId: idToRefresh, historyPending: stored && !existing.running && !update?.aligned }
+  if (fresh && live && !update?.aligned) return { sharedSession: live, imported: false }
+  let workspace = registry.list().find(workspace => workspace.path === tab.cwd) ?? await registry.resolveByPath(tab.cwd)
+  if (fresh && update?.aligned) {
+    // Kode archived it when the conversation moved to a terminal.
+    await registry.unarchiveSession(reuse)
+    workspace ??= await registry.create(tab.cwd)
+    await workspace.attachSession(reuse)
+    await retireStaleCopies(ctx, tab.session_id, reuse)
+    return { sessionId: reuse, imported: true, reloaded: true }
   }
   const id = fresh ? freshImportIdentity(tab) : reuse
   const priorBinding = runtime.profiles.binding?.(id)
@@ -132,7 +150,10 @@ export async function importSavedSession(ctx, client, tab, { fresh = false } = {
   if (locallyStored && priorBinding?.threadId === tab.session_id) {
     workspace ??= await registry.create(tab.cwd)
     await workspace.attachSession(id)
-    return { sessionId: id, imported: false, historyWindow: state.imports?.[id]?.historyWindow }
+    if (discovered && tab.title && existing?.projections?.values?.title !== tab.title && !existing?.running) {
+      await controller.rename({ sessionId: id, title: tab.title }).catch(error => ctx.logger?.warn?.('Unable to refresh native title for %s: %s', id, error.message))
+    }
+    return { sessionId: id, imported: false, reloaded: Boolean(update?.appended), historyPending: !existing?.running && !update?.aligned, historyWindow: state.imports?.[id]?.historyWindow }
   }
   // Shared import markers may outlive the local artifact or come from another Host.
   if (locallyStored && state.imports?.[id]?.formatVersion >= 2) {
@@ -140,8 +161,14 @@ export async function importSavedSession(ctx, client, tab, { fresh = false } = {
     await workspace.attachSession(id)
     return { sessionId: id, imported: true, historyWindow: state.imports[id].historyWindow }
   }
-  const transcript = await client.call('/api/v1/messaging/workbench/transcript', { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd })
-  if (!transcript.available) throw new Error('Native CLI transcript is unavailable on this Host')
+  let transcript = await fetchTranscript(client, tab).catch(error => {
+    if (!discovered || !/unsupported transcript format|invalid saved session/.test(error.message)) throw error
+  })
+  if (!transcript?.available && discovered) {
+    try { transcript = await runtime.adapter?.readSessionHistory(profile, tab.session_id, tab.cwd) }
+    catch (error) { ctx.logger?.warn?.('Unable to replay native history for %s: %s', tab.session_id, error.message) }
+  }
+  if (!transcript?.available && !discovered) throw new Error('Native CLI transcript is unavailable on this Host')
   const selection = { provider: profileRoute(profile.id), model: tab.model ?? profile.defaultModel ?? 'default' }
   const factory=ctx.get('kodeNativeFactory')
   if(!factory)throw new Error('Native Agent history importer is unavailable')
@@ -149,7 +176,7 @@ export async function importSavedSession(ctx, client, tab, { fresh = false } = {
   // registration. create() canonicalizes and validates an existing directory;
   // it never creates a directory or starts an Agent, and retries reuse its ID.
   workspace ??= await registry.create(tab.cwd)
-  await factory.importHistory(id,buildHistorySeed(transcript,selection),tab.cwd,selection)
+  await factory.importHistory(id, buildHistorySeed(transcript ?? {}, selection), tab.cwd, selection)
   const previous = await controller.list({})
   let sessionId = previous.items.find(row => row.sessionId === id)?.sessionId
   if (!sessionId) sessionId = (await controller.create({ sessionId: id, workspaceId: workspace.id, agentPreset: 'kode-native' })).sessionId
@@ -165,32 +192,39 @@ export async function importSavedSession(ctx, client, tab, { fresh = false } = {
   await workspace.attachSession(id)
   for (let attempt=0;attempt<4;attempt++) {
     const latest=await doc.read() ?? {version:1}
-    latest.imports ??= {}; latest.imports[id] = { formatVersion: 3, historyWindow: transcript.history_window, nativeSessionId: tab.session_id, backendKey: tab.backend_key, cwd: tab.cwd }
+    latest.imports ??= {}; latest.imports[id] = { formatVersion: 3, historyWindow: transcript?.history_window, nativeSessionId: tab.session_id, backendKey: tab.backend_key, cwd: tab.cwd }
     try {await doc.write(latest);break} catch (error) {if(attempt===3 || !/configuration changed/.test(error.message))throw error}
   }
   if (fresh) await retireStaleCopies(ctx, tab.session_id, id)
-  return { sessionId: id, imported: true, historyWindow: transcript.history_window }
+  return { sessionId: id, imported: true, historyPending: !transcript?.available, historyWindow: transcript?.history_window }
 }
-/** Append the native turns a stored copy missed. False when they cannot be
- * placed exactly; the caller then imports a fresh copy instead. */
+function fetchTranscript(client, tab, window = {}) {
+  return client.call(TRANSCRIPT, { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd, ...window })
+}
+
+/** Recheck the boundary under the factory's write handle on every attempt. */
 async function reloadNativeTurns(ctx, client, tab, id) {
   const factory = ctx.get('kodeNativeFactory')
-  if (!factory?.appendHistory) return false
-  const transcript = await client.call('/api/v1/messaging/workbench/transcript', { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd, limit: 1000 })
-  if (!transcript.available) return false
-  let placed = true
+  if (!factory?.appendHistory) return null
   try {
-    await factory.appendHistory(id, events => {
-      const delta = nativeDelta(transcript.timeline ?? [], events)
-      const selection = events.findLast(event => event.type === 'request/header')?.data?.header?.config
-      if (!delta || !selection) { placed = false; return null }
-      return delta.rows.length ? buildHistorySeed({ timeline: delta.rows }, selection, { firstTurn: delta.lastTurn + 1 }) : null
-    })
+    for (const tail of [undefined, 64 * 1024 * 1024]) {
+      const transcript = await fetchTranscript(client, tab, { limit: 1000, ...(tail ? { tail_bytes: tail } : {}) })
+      if (!transcript.available) return null
+      let aligned = false
+      const appended = await factory.appendHistory(id, events => {
+        const delta = nativeDelta(transcript.timeline ?? [], events)
+        const selection = events.findLast(event => event.type === 'request/header')?.data?.header?.config
+        if (!delta || !selection) return null
+        aligned = true
+        return delta.rows.length ? buildHistorySeed({ timeline: delta.rows }, selection, { firstTurn: delta.lastTurn + 1 }) : null
+      })
+      if (aligned) return { aligned, appended }
+      if (!transcript.history_window?.truncated) break
+    }
   } catch (error) {
-    ctx.logger?.warn?.('reloading %s in place failed, importing a fresh copy: %s', id, error.message)
-    return false
+    ctx.logger?.warn?.('Unable to refresh native history for %s: %s', id, error.message)
   }
-  return placed
+  return null
 }
 /** A native session id is shown as one dsh conversation. Session logs are
  * append-only, so a takeover imports a fresh copy; earlier copies of the same
