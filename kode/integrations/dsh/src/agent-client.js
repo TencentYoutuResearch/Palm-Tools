@@ -128,11 +128,56 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const React = require('react'), h = React.createElement
   const { createPortal } = require('react-dom')
   const { useState, useEffect, useMemo, useRef, useSyncExternalStore } = React
-  const { Menu, Modal, Button, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const { Menu, Modal, Button, Toast, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
   const startupRetryDelays = [250, 500, 1000, 2000, 4000, 8000]
-  let stagedAgent, transport, avatarContext
+  let stagedAgent, transport, avatarContext, requestNativeRename, routedRename
+  let openingSession = false
+  const openingListeners = new Set()
+  const sessionOpening = {
+    subscribe(listener) { openingListeners.add(listener); return () => openingListeners.delete(listener) },
+    getSnapshot: () => openingSession,
+    set(value) {
+      if (openingSession === value) return
+      openingSession = value
+      for (const listener of openingListeners) listener()
+    },
+  }
+  function ConversationNavigation({ native, ...props }) {
+    const loading = useSyncExternalStore(sessionOpening.subscribe, sessionOpening.getSnapshot)
+    return h('div', { className: 'kode-conversation-navigation' },
+      h('div', { className: 'kode-conversation-body', 'aria-busy': loading, inert: loading || undefined }, h(native, props)),
+      loading && h('div', { className: 'kode-conversation-loading', role: 'status' },
+        h(IconLoadingOutlineRegular, { size: 18, 'aria-hidden': true }), '加载中…'))
+  }
+  function RoutedRenameDialog({ native, renameSession, settleSessionRename, ...props }) {
+    const rename = async (id, title) => {
+      const target = routedRename
+      if (target?.id !== id) return renameSession(id, title)
+      await projectCall({ action: 'host-operation', id: target.hostId, operation: 'rename-session', args: { sessionId: target.sessionId, title } })
+      void refreshWorkspaceDirectory()
+    }
+    return h(native, { ...props, renameSession: rename, settleSessionRename: () => { routedRename = undefined; settleSessionRename() } })
+  }
+  function wrapSlot(ctx, name, match, render) {
+    ctx.slots.inject(name, () => {
+      let entry, native, wrapped
+      const restore = () => { if (entry && entry.component === wrapped) entry.component = native }
+      const install = () => {
+        const source = ctx.slots.entries(name).find(match)
+        if (!source || source === entry) return
+        restore()
+        entry = source
+        native = source.component
+        wrapped = render(native)
+        source.component = wrapped
+      }
+      const unsubscribe = ctx.slots.subscribe(name, install)
+      install()
+      return () => { unsubscribe(); restore() }
+    })
+  }
   const fetchHost = (url, options, host) => transport ? transport.fetch(url, options, host) : fetch(url, options)
   const switchHost = (id, target) => { if (!transport) throw new Error('Kode 主机传输插件尚未就绪。'); return transport.select(id, target) }
   async function call(body, sessionId, refresh = false, host, configurationOnly = false, profileId) {
@@ -1466,8 +1511,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   }
   function FederatedWorkspaceBrowser({ native, slots, ...props }) {
     const treeRoot = React.useRef(null)
-    const connection = useSyncExternalStore(transport?.subscribe ?? (() => () => {}), transport?.getSnapshot ?? (() => null))
-    const data = useWorkspaceDirectory(), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [rename, setRename] = useState(null), [title, setTitle] = useState(''), [resumeTarget, setResumeTarget] = useState(null), [resumeQuery, setResumeQuery] = useState('')
+    const data = useWorkspaceDirectory(), [error, setError] = useState(''), [notice, setNotice] = useState(null), [busy, setBusy] = useState(false), [resumeTarget, setResumeTarget] = useState(null), [resumeQuery, setResumeQuery] = useState('')
+    const noticeSequence = React.useRef(0)
+    const notify = (text, warning = false) => setNotice({ text, warning, id: ++noticeSequence.current })
+    useEffect(() => { if (data.error) notify(data.error, true) }, [data.error])
+    const opening = React.useRef(false)
+    useEffect(() => {
+      requestNativeRename = props.requestSessionRename
+      return () => { if (requestNativeRename === props.requestSessionRename) requestNativeRename = undefined }
+    }, [props.requestSessionRename])
     const [nativePage, setNativePage] = useState({ rows: [] })
     const resumeRequest = React.useRef(null)
     const loadNativePage = async (target, cursor) => {
@@ -1566,15 +1618,23 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       return () => { window.removeEventListener('kode-session-avatar', show); window.removeEventListener('kode-resume-session', resume) }
     }, [merged])
     const navigate = async (id, target) => {
-      if (busy) return
-      setBusy(true); setError(''); setNotice('')
+      if (opening.current) return false
+      opening.current = true
+      setBusy(true); setError('')
+      const feedback = setTimeout(() => sessionOpening.set(true), 150)
       try {
-        let imported
+        avatarContext?.get?.('layout')?.selectPanel?.(null)
+        let imported, historyNotice, historyWarning = false
         if (target.selection) imported = await nativeSessionRequest(id, { input: { selection: target.selection } })
         else if (target.sessionId?.startsWith('saved:')) imported = await projectCall({ action: 'import-saved', sessionId: target.sessionId })
         else if (target.refreshNative) {
           try { imported = await nativeSessionRequest(id, { input: { sessionId: target.sessionId } }) }
-          catch (error) { if (error.code !== 'KODE_SERVICE_UPDATE_REQUIRED') setNotice('暂时无法同步原生历史，已打开本地记录。') }
+          catch (error) {
+            if (error.code !== 'KODE_SERVICE_UPDATE_REQUIRED') {
+              historyNotice = '暂时无法同步原生历史，已打开本地记录。'
+              historyWarning = true
+            }
+          }
         }
         if (imported) {
           id = imported.hostId ?? id
@@ -1591,14 +1651,22 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           }
           showShared(null)
           target = { ...target, sessionId: imported.sessionId }
-          if (imported.historyPending) setNotice('暂时无法同步全部原生历史，已打开现有会话。')
-          else if (!imported.reloaded && imported.historyWindow?.truncated) setNotice(`已加载最近 ${imported.historyWindow.count} 条消息`)
+          if (imported.historyPending) {
+            historyNotice = '暂时无法同步全部原生历史，已打开现有会话。'
+            historyWarning = true
+          } else if (!imported.reloaded && imported.historyWindow?.truncated) {
+            historyNotice = `已加载最近 ${imported.historyWindow.count} 条消息`
+          }
         }
         await switchHost(id, target)
-        await refreshWorkspaceDirectory()
+        if (historyNotice) notify(historyNotice, historyWarning)
+        void refreshWorkspaceDirectory()
         return true
-      } catch (error) { setError(error.message) }
-      finally { setBusy(false) }
+      } catch (error) {
+        if (target.resume) setError(error.message)
+        else notify(error.message, true)
+      }
+      finally { clearTimeout(feedback); sessionOpening.set(false); opening.current = false; setBusy(false) }
     }
     const open = id => {
       showShared(null)
@@ -1617,11 +1685,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       await projectCall({ action: 'host-operation', id: route.hostId, operation, args })
       await refreshWorkspaceDirectory()
     }
-    const requestRename = (id, currentTitle) => { if (!merged.routes.has(id)) return props.requestSessionRename(id, currentTitle); setRename(id); setTitle(currentTitle); setError('') }
+    const requestRename = (id, currentTitle) => {
+      const route = merged.routes.get(id)
+      routedRename = route && { id, hostId: route.hostId, sessionId: route.id }
+      props.requestSessionRename(id, currentTitle)
+    }
     const sessionOperation = (id, operation) => {
       const route = merged.routes.get(id)
-      setError('')
-      void mutate(id, operation, { sessionId: route.id }).catch(error => setError(error.message))
+      void mutate(id, operation, { sessionId: route.id }).catch(error => notify(error.message, true))
     }
     const renderSlot = (name, owner, options) => {
       const route = merged.routes.get(owner?.sessionId)
@@ -1652,12 +1723,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const selector = `[data-row-key=${cssString('session:'+id)}]>span:nth-child(3)`
       return `${selector}{font-size:0;visibility:hidden}${selector}::after{content:"已保存";font-size:12px;visibility:visible}`
     }).join('\n')
-    if (connection?.switching) return h('div', { className: 'kode-host-progress', role: 'status', 'aria-live': 'polite' }, '正在切换主机…')
     return h('div', { className: 'kode-unified-workspaces', 'aria-busy': busy, ref: treeRoot },
       h(SessionStatusAvatars, { root: treeRoot, rows: merged.sessions.byId, workspaces: merged.workspaces.items, statuses: sessionStatuses }),
-      h('style', null, remoteCss + savedCss), h(Failure, { text: error || data.error }),
-      busy && h('div', { className: 'kode-host-progress', role: 'status', 'aria-live': 'polite' }, '正在打开会话…'),
-      notice && h('div', { className: 'kode-host-progress', role: 'status' }, notice),
+      h('style', null, remoteCss + savedCss),
+      notice && h(Toast, { key: notice.id, text: notice.text, icon: notice.warning ? h(IconWarningOutlineRegular) : undefined,
+        onDone: () => setNotice(current => current?.id === notice.id ? null : current) }),
       h(native, { ...props, ...(props.useStore ? { useStore: useViewStore } : {}), ...(viewActions ? { actions: viewActions } : {}), useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
         startSession: (id, options) => {
           const route = merged.routes.get(id)
@@ -1697,7 +1767,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         nativePage.error && h(Failure, { text: nativePage.error }),
         (nativePage.next || nativePage.error) && h(Button, { variant: 'outline', disabled: busy || nativePage.loading, onClick: () => void loadNativePage(resumeTarget, nativePage.next) }, nativePage.error ? '重试读取' : '加载更多会话'),
         h(Failure, { text: error })),
-      h(Modal, { open: Boolean(rename), title: '重命名会话', closeLabel: '关闭', onClose: () => setRename(null), footer: h(React.Fragment, null, h(Button, { onClick: () => setRename(null) }, '取消'), h(Button, { variant: 'primary', disabled: !title.trim(), onClick: async () => { try { await mutate(rename, 'rename-session', { sessionId: merged.routes.get(rename).id, title: title.trim() }); setRename(null) } catch (error) { setError(error.message) } } }, '保存')) }, h('label', { className: 'kode-field' }, '会话名称', h('input', { value: title, onChange: e => setTitle(e.target.value) })), h(Failure, { text: error })),
     )
   }
   function WorkspaceArrival({ uiWorkspace, workspaces, sessions, layout }) {
@@ -1959,6 +2028,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         available: session => { const profile = directory(session.sessionId).getSnapshot().data?.currentProfile; return Boolean(profile && profile.type !== 'dsh') },
         ui: { kind: 'action', run: session => window.dispatchEvent(new CustomEvent('kode-resume-session', { detail: { sessionId: session.sessionId, hostId: transport?.current ?? 'local', profile: directory(session.sessionId).getSnapshot().data?.currentProfile } })) },
       }), 'kode.resume-session-command')
+      if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
+        name: 'rename', available: () => typeof requestNativeRename === 'function',
+        ui: { kind: 'action', run: ({ sessionId }) => {
+          const summary = scope.sessions.list.getSnapshot().byId[sessionId]
+          routedRename = undefined
+          requestNativeRename?.(sessionId, summary?.title ?? '')
+        } },
+      }), 'kode.rename-session-command')
       const invalidate = () => { metadata.clear(); skillLists.clear() }
       scope.remote.$on?.('commands/change', invalidate)
       scope.on?.('connection/reset', invalidate)
@@ -2270,22 +2347,77 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const nameOf = useNames(sessions)
     return h(RelayCard, { ...props, nameOf })
   }
+  const childStatusLabels = { running: '运行中', awaiting: '等待操作', completed: '已完成', failed: '失败', cancelled: '已停止', idle: '空闲', disconnected: '连接中断', unknown: '状态未知' }
+  const childDotStates = { running: 'ongoing', awaiting: 'awaiting', completed: 'done', failed: 'error' }
+  const childTitle = child => child.name || child.task?.split('\n')[0]?.slice(0, 120) || '子 Agent'
+  const childStatusLabel = child => childStatusLabels[child.status] ?? childStatusLabels.unknown
+  const childStateDot = child => h(StateDot, { state: childDotStates[child.status] ?? 'idle', size: 14 })
+  function NativeSubagentDetails({ child, onClose }) {
+    return h(Modal, { open: true, title: childTitle(child), closeLabel: '关闭', onClose, className: 'kode-subagent-dialog' },
+      h('div', { className: 'kode-subagent-status' }, childStateDot(child), childStatusLabel(child),
+        child.model && h('span', { className: 'kode-secondary' }, child.model)),
+      child.task && h('section', { className: 'kode-subagent-section' }, h('h4', null, '任务'), h('p', null, child.task)),
+      h('section', { className: 'kode-subagent-section' }, h('h4', null, '已记录的输出'),
+        child.output ? h(ConsoleOutput, { text: child.output }) : h('p', { className: 'kode-config-note' }, '暂无输出记录。')))
+  }
+  function NativeSubagentActivity({ sessionId, useProjection }) {
+    const children = useProjection('kodeNativeSubagents')
+    const [open, setOpen] = useState(false), [selected, setSelected] = useState(null)
+    useEffect(() => { setOpen(false); setSelected(null) }, [sessionId])
+    const active = Object.values(children ?? {}).filter(child => child.status === 'running' || child.status === 'awaiting')
+    const child = selected?.sessionId === sessionId ? children?.[selected.id] : undefined
+    const state = active.some(child => child.status === 'awaiting') ? 'awaiting' : 'running'
+    const label = `${active.length} 个活跃子 Agent${state === 'awaiting' ? '，有任务等待操作' : ''}`
+    return h(React.Fragment, null,
+      active.length > 0 && h(Menu, {
+        open, onClose: () => setOpen(false), portal: true,
+        anchor: h('button', { type: 'button', className: 'kode-trigger kode-subagent-trigger', 'aria-label': label, title: label,
+          'aria-haspopup': 'menu', 'aria-expanded': open, onClick: () => setOpen(value => !value) },
+        h(IconUsersOutlineRegular, { size: 16, 'aria-hidden': true }), active.length, childStateDot({ status: state })),
+        items: active.map(child => ({ id: child.id, icon: childStateDot(child), label: h('span', { className: 'kode-subagent-menu-item' },
+          h('span', null, childTitle(child)), h('small', { className: 'kode-secondary' }, childStatusLabel(child))) })),
+        onSelect: id => { setOpen(false); setSelected({ sessionId, id }) },
+      }),
+      child && h(NativeSubagentDetails, { child, onClose: () => setSelected(null) }))
+  }
+  const nativeCatalogCache = new WeakMap()
+  function hideLegacyNativeChildren(state) {
+    let projectionsBySession = state.projectionsBySession
+    if (!projectionsBySession) return state
+    const cached = nativeCatalogCache.get(projectionsBySession)
+    if (cached) return cached === projectionsBySession ? state : { ...state, projectionsBySession: cached }
+    for (const [id, snapshot] of Object.entries(state.projectionsBySession)) {
+      const catalog = snapshot.values?.subagentCatalog
+      if (!Array.isArray(catalog)) continue
+      const entries = catalog.filter(child => child.mode !== 'external' || !child.id?.startsWith('kode-native:'))
+      if (entries.length === catalog.length) continue
+      if (projectionsBySession === state.projectionsBySession) projectionsBySession = { ...projectionsBySession }
+      projectionsBySession[id] = { ...snapshot, values: { ...snapshot.values, subagentCatalog: entries } }
+    }
+    nativeCatalogCache.set(state.projectionsBySession, projectionsBySession)
+    return projectionsBySession === state.projectionsBySession ? state : { ...state, projectionsBySession }
+  }
+  function FilteredSubagentCatalog({ native, useSessions, ...props }) {
+    const useFilteredSessions = React.useCallback(select => useSessions(state => select(hideLegacyNativeChildren(state))), [useSessions])
+    return h(native, { ...props, useSessions: useFilteredSessions })
+  }
   function NativeSubagentTool({ block, useDisclosure, useProjection }) {
     const { expanded: open, setExpanded: setOpen } = useDisclosure()
-    const child = useProjection('kodeNativeSubagents', state => state?.[block.args.text('id')])
-    const status = child?.status ?? 'unknown'
-    const label = ({ running: '运行中', completed: '已完成', failed: '失败', cancelled: '已停止', idle: '空闲', disconnected: '连接中断', unknown: '状态未知' })[status] ?? '状态未知'
-    const name = child?.name || block.args.text('title') || '子 Agent'
+    const [details, setDetails] = useState(false)
+    const id = block.args.text('id'), title = block.args.text('title')
+    const projected = useProjection('kodeNativeSubagents', state => state?.[id])
+    const child = { name: title === id ? undefined : title, task: block.args.text('task'), ...projected }
+    const name = childTitle(child)
     return h('section', { className: 'kode-message-tool', 'aria-label': `子 Agent ${name}` },
       h('button', { type: 'button', className: 'kode-tool-heading', 'aria-expanded': open, onClick: () => setOpen(!open) },
         h(IconAgentPresetOutlineRegular, { size: 14 }), h('span', { className: 'kode-tool-action' }, name),
-        h('span', { className: 'kode-tool-summary' }, label),
-        h(StateDot, { state: ({ running: 'ongoing', completed: 'done', failed: 'error', cancelled: 'idle', unknown: 'idle' })[status] ?? 'idle', size: 14 }),
+        h('span', { className: 'kode-tool-summary' }, childStatusLabel(child)), childStateDot(child),
         h(IconChevronDownOutlineRegular, { size: 12, className: open ? 'kode-chevron-open' : '' })),
       open && h(React.Fragment, null,
-        (child?.task || block.args.text('task')) && h('p', { className: 'kode-native-input' }, child?.task || block.args.text('task')),
-        child?.model && h('span', { className: 'kode-secondary' }, child.model),
-        child?.output && h(ConsoleOutput, { text: child.output })))
+        child.task && h('p', { className: 'kode-native-input' }, child.task),
+        child.output && h(ConsoleOutput, { text: child.output }),
+        h('div', { className: 'kode-tool-detail' }, h(Button, { variant: 'outline', onClick: () => setDetails(true) }, '查看子 Agent'))),
+      details && h(NativeSubagentDetails, { child, onClose: () => setDetails(false) }))
   }
   function NativeOperationTool({toolName,phase,block,useDisclosure}) {
     const {expanded:open,setExpanded:setOpen}=useDisclosure()
@@ -2413,7 +2545,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       document.body.append(titlebar)
       ctx.effect(() => () => titlebar.remove(), 'kode.embed-titlebar')
     }
-    ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, AgentIdentity))
+    ctx.slots.inject('conversation.session.header.actions', function* () {
+      yield ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-native-subagents', order: -110 }, NativeSubagentActivity)
+      yield ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, AgentIdentity)
+    })
+    wrapSlot(ctx, 'main.conversation', entry => typeof entry.component === 'function', native => props => h(ConversationNavigation, { ...props, native }))
+    wrapSlot(ctx, 'shell.overlay', entry => entry.options.id === 'workspace.session-rename', native => props => h(RoutedRenameDialog, { ...props, native }))
+    wrapSlot(ctx, 'conversation.session.header.actions', entry => entry.options.id === 'subagent-catalog', native => props => h(FilteredSubagentCatalog, { ...props, native }))
+    wrapSlot(ctx, 'conversation.session.header.lineage', entry => typeof entry.component === 'function', native => props => h(FilteredSubagentCatalog, { ...props, native }))
     ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({ name: 'sidebar.session.row.hover', id: 'kode-saved-time' }, SavedSessionHover))
     ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'kode-agent-avatar' }, SidebarAgentAvatar))
     ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'kode-avatar', order: 350 }, SessionAvatarMenuItem))
@@ -2484,11 +2623,26 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     ctx.effect(() => { const timer = setInterval(() => { if (nameListeners.size && !document.hidden) void refreshNames() }, 10000); return () => clearInterval(timer) }, 'kode.session-names')
     const style = document.createElement('style')
     style.textContent = `
+.kode-conversation-navigation{display:grid;grid-template:minmax(0,1fr)/minmax(0,1fr);height:100%;min-height:0;min-width:0}
+.kode-conversation-body,.kode-conversation-loading{grid-area:1/1;min-height:0;min-width:0}
+.kode-conversation-body[aria-busy=true]{visibility:hidden}
+.kode-conversation-loading{display:flex;align-items:center;justify-content:center;gap:8px;color:var(--dsw-alias-label-secondary);font-size:13px}
+.kode-conversation-loading>svg{animation:kode-loading-spin 850ms linear infinite}
+@keyframes kode-loading-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.kode-conversation-loading>svg{animation:none}}
+.kode-subagent-trigger{gap:5px;padding-inline:6px;font-variant-numeric:tabular-nums}
+.kode-subagent-menu-item{display:flex;flex-direction:column;gap:2px;min-width:0;max-width:220px}
+.kode-subagent-menu-item>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kode-subagent-dialog{width:min(620px,calc(100vw - 32px))}
+.kode-subagent-status{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
+.kode-subagent-section h4{margin:16px 0 6px;font-size:13px}
+.kode-subagent-section p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.kode-subagent-section .kode-native-output{margin:0}
 .kode-branch-trigger{box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:40px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}.kode-branch-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-branch-trigger:disabled{opacity:.5;cursor:default}.kode-branch-trigger:focus-visible,.kode-branch-option:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-branch-popup{width:min(440px,calc(100vw - 24px));padding:0!important}.kode-branch-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);position:sticky;top:0;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);z-index:1}.kode-branch-search input{min-width:0;flex:1;border:0;padding:3px 0;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;outline:none}.kode-branch-search:focus-within{box-shadow:inset 0 -2px var(--dsw-focus-ring-color)}.kode-branch-results{max-height:280px;overflow-y:auto;padding:4px;scrollbar-width:thin}.kode-branch-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:9px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}.kode-branch-option>span{display:flex;flex-direction:column;gap:3px;min-width:0}.kode-branch-name{font-size:13px;overflow-wrap:anywhere}.kode-branch-option small{font-size:11px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}.kode-branch-option:hover,.kode-branch-option[aria-checked=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-branch-option[aria-checked=true]>svg{color:var(--dsw-alias-label-primary-bluish);flex-shrink:0}.kode-branch-empty{margin:0;padding:24px 12px;text-align:center;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .kode-native-input{display:block;margin:8px 0 8px 22px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-family:var(--ds-font-family-code);font-size:12px}.kode-native-output{padding:12px 0 4px;margin:0 0 0 22px;max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code);font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
 .kode-internal-stack{display:flex;flex-direction:column;gap:8px;min-width:0}.kode-internal-message{min-width:0;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-turn-trigger-bg,var(--dsw-alias-markdown-code-block));font-size:var(--dsh-content-font-size,14px);color:var(--dsw-alias-label-secondary)}.kode-internal-message>summary{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer;list-style:none;padding:12px 16px;font-size:13px}.kode-internal-message>summary::-webkit-details-marker{display:none}.kode-internal-message>summary:hover{background:var(--dsw-alias-interactive-bg-hover);border-radius:inherit}.kode-internal-title{color:var(--dsw-alias-label-primary);flex-shrink:0}.kode-internal-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary);flex:1}.kode-internal-message>summary>svg{flex-shrink:0}.kode-internal-chevron{margin-left:auto}.kode-internal-message[open]>summary>.kode-internal-chevron{transform:rotate(180deg)}.kode-internal-message summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-internal-body{padding:12px 16px 16px;min-width:0;overflow-wrap:anywhere}.kode-internal-body>dl{margin:0;display:flex;flex-direction:column;gap:6px;font-size:13px}.kode-internal-body>dl>div{display:flex;gap:12px;min-width:0;flex-wrap:wrap}.kode-internal-body dt{min-width:64px;color:var(--dsw-alias-label-tertiary)}.kode-internal-body dd{margin:0;min-width:0;flex:1;overflow-wrap:anywhere}
 [class*="hoverContent"]:has(.kode-unknown-time)>[class*="hoverTime"]{display:none}.kode-unknown-time{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.kode-unified-workspaces{flex:1;min-height:0;display:flex;flex-direction:column}.kode-host-progress{padding:12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.kode-navigation-error{position:fixed;bottom:24px;left:50%;padding:12px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-error-primary);z-index:100}
+.kode-unified-workspaces{flex:1;min-height:0;display:flex;flex-direction:column}.kode-navigation-error{position:fixed;bottom:24px;left:50%;padding:12px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-error-primary);z-index:100}
 .kode-remote-computer{display:inline-block;flex-shrink:0;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-project-dialog{width:min(580px,calc(100vw - 32px))}.kode-project-source{padding:20px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);display:flex;flex-wrap:wrap;justify-content:center;gap:12px}.kode-project-source>.kode-field{width:100%;margin-bottom:8px}.kode-project-path{width:100%;overflow-wrap:anywhere;text-align:center;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-hero-controls{flex-wrap:wrap;column-gap:6px;row-gap:4px}.kode-hero-controls>button,.kode-hero-controls>.kode-mode-control{flex:0 1 auto;min-width:0;max-width:100%;white-space:nowrap}.kode-hero-controls>.kode-mode-control{display:inline-flex}.kode-hero-controls .kode-trigger{max-width:100%;white-space:nowrap;flex-shrink:0}.kode-hero-controls .kode-trigger>svg,.kode-hero-controls .kode-trigger>.kode-hub-settings .kode-agent-row-head{flex-wrap:wrap}.kode-hub-settings h4{margin:16px 0 0}[data-composer-seat]>:has(.kode-goal-bar){row-gap:0}.kode-goal-bar{--kode-goal-state-color:var(--dsw-alias-label-secondary);box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));max-width:calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));margin:0 auto -1px;padding:0 var(--dsh-composer-dock-inset);flex:none;font-size:13px;color:var(--dsw-alias-label-primary)}.kode-goal-panel{display:flex;flex-wrap:wrap;align-items:center;gap:8px;box-sizing:border-box;width:100%;min-height:36px;padding:4px 12px;border:.5px solid var(--dsw-alias-border-l1);border-bottom:none;border-radius:var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter)}.kode-goal-status{color:var(--dsw-alias-label-secondary);white-space:nowrap}.kode-goal-objective{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}.kode-goal-objective:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-goal-actions{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto}.kode-goal-icon{display:grid;place-items:center;box-sizing:border-box;width:28px;height:28px;padding:0;border:0;border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}.kode-goal-icon:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.kode-goal-icon:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:-2px}.kode-goal-icon:disabled{cursor:default;opacity:.45}.kode-goal-leading{display:grid;place-items:center;flex:none;color:var(--kode-goal-state-color)}.kode-goal-bar[data-goal-status=active]{--kode-goal-state-color:var(--dsw-alias-state-business-primary)}.kode-goal-bar[data-goal-status=complete]{--kode-goal-state-color:var(--dsw-alias-state-success-primary)}.kode-goal-bar:is([data-goal-status=blocked],[data-goal-status=usageLimited],[data-goal-status=budgetLimited]){--kode-goal-state-color:var(--dsw-alias-state-warning-primary)}.kode-goal-bar[data-goal-status=active] .kode-goal-panel{border-color:color-mix(in srgb,var(--kode-goal-state-color) 35%,var(--dsw-alias-border-l1))}.kode-goal-sidebar{display:flex;flex-direction:column;gap:12px;box-sizing:border-box;height:100%;padding:12px;overflow:auto}.kode-goal-sidebar form{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0}.kode-goal-sidebar .kode-field{flex:1;min-height:0}.kode-goal-sidebar textarea{box-sizing:border-box;width:100%;min-height:180px;flex:1;resize:vertical;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;line-height:1.6}.kode-goal-sidebar form>button{align-self:flex-end}.kode-goal-bar form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;width:100%}.kode-goal-bar .kode-field{flex:1;min-width:160px}.kode-hub-targets{display:flex;flex-wrap:wrap;gap:12px;border:0;padding:8px 0;margin:0}.kode-hub-targets label{display:flex;align-items:center;gap:4px}.kode-agent-row p{margin:0;overflow-wrap:anywhere}
 .kode-agent-avatar{flex-shrink:0}.kode-hero-controls .kode-trigger>span:not(.kode-agent-avatar){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-hero-controls>.kode-error{flex-basis:100%;margin:0}.kode-hero-controls .kode-mode-control>.kode-trigger{flex-shrink:1}@media(max-width:600px){.kode-hero-controls{row-gap:4px;column-gap:6px}.kode-hero-controls>button,.kode-hero-controls .kode-trigger{height:auto;min-height:44px;padding-inline:8px}.kode-hero-controls>.kode-agent-trigger{max-width:100%}}
 .kode-host-location{gap:6px;padding:0 8px;white-space:nowrap}.kode-workspace-menu{width:min(400px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.kode-workspace-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}.kode-workspace-search input{font:inherit;color:var(--dsw-alias-label-primary);background:transparent;border:0;outline:none;min-width:0;width:100%}.kode-workspace-search:focus-within{box-shadow:inset 0 -2px var(--dsw-focus-ring-color)}.kode-workspace-caption{font-size:12px;color:var(--dsw-alias-label-secondary);padding:10px 12px 4px}.kode-workspace-option{display:flex;flex-direction:column;gap:3px;min-width:0;max-width:310px}.kode-workspace-option>span,.kode-workspace-option small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-workspace-option small{font-size:12px;color:var(--dsw-alias-label-secondary)}

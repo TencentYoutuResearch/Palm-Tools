@@ -1,9 +1,15 @@
 /** Read-only observations of children owned by native Agents. */
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+
+// A replayed observation cannot establish that its original connection is still live.
+const activityEpoch = randomUUID()
+export const isActiveSubagent = status => status === 'running' || status === 'awaiting'
 
 export function subagentStatus(value) {
   const status = typeof value === 'string' ? value : value?.state ?? value?.status
-  if (['running', 'pendingInit', 'in_progress', 'inProgress', 'working'].includes(status)) return 'running'
+  if (['running', 'pendingInit', 'pending_init', 'in_progress', 'inProgress', 'working'].includes(status)) return 'running'
+  if (['awaiting', 'waitingForApproval', 'waitingForInput'].includes(status)) return 'awaiting'
   if (['completed', 'done'].includes(status)) return 'completed'
   if (['failed', 'errored', 'error'].includes(status)) return 'failed'
   if (['cancelled', 'killed', 'stopped', 'interrupted', 'shutdown'].includes(status)) return 'cancelled'
@@ -22,8 +28,11 @@ export function codexSubagents(item) {
   if (item?.type !== 'collabAgentToolCall') return []
   return [...new Set([...(item.receiverThreadIds ?? []), ...Object.keys(item.agentsStates ?? {})])].map(id => {
     const state = item.agentsStates?.[id]
+    const status = state ? subagentStatus(state.status) : undefined
+    const stopped = item.tool === 'closeAgent' && item.status === 'completed' && !['completed', 'failed', 'cancelled', 'disconnected'].includes(status)
     return { id, ...(item.tool === 'spawnAgent' ? { task: item.prompt, model: item.model } : {}),
-      ...(state ? { status: subagentStatus(state.status), text: state.message } : item.tool === 'spawnAgent' ? { status: 'running' } : {}) }
+      ...(stopped ? { status: 'cancelled' } : status ? { status } : item.tool === 'spawnAgent' ? { status: 'running' } : {}),
+      ...(state ? { text: state.message } : {}) }
   })
 }
 export function nativeSubagentRecord(update) {
@@ -33,9 +42,13 @@ export function nativeSubagentRecord(update) {
   for (const [key, limit] of Object.entries(limits)) {
     if (typeof update[key] === 'string') record[key] = update[key].slice(0, limit)
   }
+  if (isActiveSubagent(record.status)) {
+    if (update.replay) record.status = 'disconnected'
+    else record.activityEpoch = activityEpoch
+  }
   return record
 }
-const childSchema = z.object({ id: z.string(), name: z.string().optional(), task: z.string().optional(), model: z.string().optional(), status: z.string(), output: z.string() })
+const childSchema = z.object({ id: z.string(), name: z.string().optional(), task: z.string().optional(), model: z.string().optional(), status: z.string(), output: z.string(), activityEpoch: z.string().optional() })
 const stateSchema = z.record(z.string(), childSchema)
 export function foldNativeSubagent(state, update) {
   const previous = state[update.id] ?? { id: update.id, status: 'unknown', output: '' }
@@ -43,6 +56,7 @@ export function foldNativeSubagent(state, update) {
   for (const [key, limit] of [['name', 200], ['task', 4096], ['model', 200], ['status', 32]]) {
     if (typeof update[key] === 'string' && update[key]) next[key] = update[key].slice(0, limit)
   }
+  if (typeof update.status === 'string' && update.status) next.activityEpoch = update.activityEpoch
   if (typeof update.text === 'string') next.output = update.text.slice(-32768)
   if (typeof update.delta === 'string') next.output = (next.output + update.delta).slice(-32768)
   const entries = Object.entries({ ...state, [update.id]: next }).slice(-256)
@@ -51,5 +65,6 @@ export function foldNativeSubagent(state, update) {
 export const nativeSubagentsProjection = {
   key: 'kodeNativeSubagents', stateVersion: 1, stateSchema, init: () => ({}),
   apply: (state, event) => event.type === 'plugin:kode/subagent-update' ? foldNativeSubagent(state, event.data) : state,
-  wire: { viewSchema: stateSchema, view: state => state },
+  wire: { viewSchema: stateSchema, view: state => Object.fromEntries(Object.entries(state).map(([id, child]) =>
+    [id, isActiveSubagent(child.status) && child.activityEpoch !== activityEpoch ? { ...child, status: 'disconnected' } : child])) },
 }

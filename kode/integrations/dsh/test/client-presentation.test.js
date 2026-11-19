@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
 const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
-function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}, globals = {}) {
+function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}, globals = {}, hooks = {}) {
   let plugin
   const registry = [], openedSections = [], requests = [], native = () => null, disposers = []
   const shell = { options: {}, component: native, locale: 'settings', children: { 'settings.section': { kind: 'list', scope: 'root' } }, store: { create: () => ({ actions: { openSection: id => openedSections.push(id) } }) } }
@@ -17,6 +17,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: value => { const initial = typeof value === 'function' ? value() : value; return [initial === 'general' && windowProperties.settingsSection ? windowProperties.settingsSection : initial, () => {}] },
     useEffect(fn) { fn() }, useRef: value => ({ current: value }), useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (subscribe, get) => { subscribe(() => {}); return get() },
+    ...hooks,
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
   vm.runInNewContext(source, { window: { addEventListener() {}, removeEventListener() {}, ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
@@ -28,7 +29,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
     inject: (_names, callback) => callback(ctx), effect: callback => { const result = callback(); if (typeof result === 'function') disposers.push(result) }, ...contextProperties,
   }
   plugin.apply(ctx)
-  return { notifySessions: () => { for (const fn of sessionListeners) fn() }, ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => registry.push({ options: { name, id }, component }), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
+  return { notifySessions: () => { for (const fn of sessionListeners) fn() }, ctx, native, shell, workspaceShell, chatShell, disposers, openedSections, requests, nodeSeat:key=>nodeSeats.get(key), addSlot: (name, id, component) => ctx.slots.register({ name, id }, component), entryById: id => registry.find(row => row.options.id === id).component, entry: (name, key) => registry.find(row => row.options.name === name && row.options.key === key).component }
 }
 const relay = (text = 'Please review <script>alert(1)</script>\nsecond line') => ({
   time: 1, source: { kind: 'agent-message', senderSessionId: 'kode:worker.example:session-same-id' },
@@ -545,6 +546,78 @@ test('archiving closes a conversation: it leaves the tree, search and every filt
  assert.deepEqual(Array.from(native.props.useWorkspaces(state=>state.archivedSessionIds)),[])
 })
 
+test('host-qualified session rename opens the DSH dialog and writes only to the owning host', async () => {
+  const hostId = 'example-host', id = `kode-host:${hostId}/session`
+  const c = client({ current: 'local', hosts: [{ id: hostId, name: 'Host', sessions: [{ id: 'session', title: 'Old' }], workspaces: [], pinnedSessionIds: ['session'] }] })
+  const calls = []
+  c.addSlot('shell.overlay', 'workspace.session-rename', c.native)
+  const sidebar = c.workspaceShell.component({
+    requestSessionRename: (...args) => calls.push(args),
+    useSessions: select => select({ ids: [], byId: {} }),
+    useWorkspaces: select => select({ items: [], pinnedSessionIds: [], archivedSessionIds: [] }),
+  })
+  sidebar.type(sidebar.props)
+  await new Promise(resolve => setImmediate(resolve))
+  const nativeSidebar = findNode(sidebar.type(sidebar.props), node => node.type === c.native)
+  nativeSidebar.props.requestSessionRename(id, 'Old')
+  assert.deepEqual(calls, [[id, 'Old']])
+  const dialog = c.entryById('workspace.session-rename')({
+    renameSession: (...args) => calls.push(args),
+    settleSessionRename: () => calls.push('closed'),
+  })
+  const nativeDialog = dialog.type(dialog.props)
+  assert.equal(nativeDialog.type, c.native)
+  await nativeDialog.props.renameSession(id, 'New')
+  assert.deepEqual(c.requests.at(-1), { action: 'host-operation', id: hostId, operation: 'rename-session', args: { sessionId: 'session', title: 'New' } })
+  nativeDialog.props.settleSessionRename()
+  await nativeDialog.props.renameSession('local', 'Local title')
+  assert.deepEqual(calls.slice(1), ['closed', ['local', 'Local title']])
+})
+
+test('slow native imports load in the conversation and show fallback history in a dismissible DSH toast', async () => {
+  let delayed, finishImport, selected, index = 0
+  const state = []
+  const session = { id: 'session', title: 'History', nativeThreadId: 'native-id' }
+  const c = client({ current: 'local', hosts: [{ id: 'local', sessions: [session], pinnedSessionIds: ['session'], workspaces: [] }] }, {}, {
+    kodeTransport: {
+      current: 'local', subscribe: () => () => {},
+      fetch: () => new Promise(resolve => { finishImport = resolve }),
+      select: async (host, target) => { selected = [host, target.sessionId] },
+    },
+  }, { URLSearchParams, setTimeout: (fn, ms) => { if (ms === 150) delayed = fn }, clearTimeout() {} }, {
+    useState(initial) {
+      const pos = index++
+      if (!(pos in state)) state[pos] = initial
+      return [state[pos], value => { state[pos] = typeof value === 'function' ? value(state[pos]) : value }]
+    },
+  })
+  c.addSlot('main.conversation', 'dsh-conversation', c.native)
+  const layout = c.entryById('dsh-conversation')({})
+  const conversation = () => layout.type(layout.props)
+  const sidebar = c.workspaceShell.component({
+    useSessions: select => select({ ids: [], byId: {} }),
+    useWorkspaces: select => select({ items: [], pinnedSessionIds: [], archivedSessionIds: [] }),
+  })
+  const renderSidebar = () => { index = 0; return sidebar.type(sidebar.props) }
+  renderSidebar()
+  await new Promise(resolve => setImmediate(resolve))
+  findNode(renderSidebar(), node => node.type === c.native).props.open('session')
+  assert.doesNotMatch(visibleText(conversation()), /加载中/)
+  delayed()
+  assert.match(visibleText(conversation()), /加载中/)
+  assert.doesNotMatch(visibleText(renderSidebar()), /正在打开会话|加载中/)
+  finishImport({ ok: true, json: async () => ({ sessionId: 'session', historyPending: true }) })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(selected, ['local', 'session'])
+  assert.doesNotMatch(visibleText(conversation()), /加载中/)
+  const tree = renderSidebar()
+  const toast = findNode(tree, node => node.type === 'Toast')
+  assert.equal(toast.props.text, '暂时无法同步全部原生历史，已打开现有会话。')
+  assert.doesNotMatch(visibleText(tree), /暂时无法同步/)
+  toast.props.onDone()
+  assert.equal(findNode(renderSidebar(), node => node.type === 'Toast'), undefined)
+})
+
 for (const pinned of [false,true]) test(`foreign loose histories ${pinned?'explicitly pinned retain their host group':'do not appear automatically in the sidebar'}`,async()=>{
  const c=client({current:'local',hosts:[{id:'local',sessions:[],workspaces:[]},{id:'ssh',name:'Build host',status:'offline',sessions:[{id:'saved:remote',title:'Remote history'}],workspaces:[],pinnedSessionIds:pinned?['saved:remote']:[]}]})
  const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:[],byId:{}}),useWorkspaces:select=>select({items:[],archivedSessionIds:[],pinnedSessionIds:[]})})
@@ -982,6 +1055,42 @@ test('native child cards use persisted execution status and expandable child out
   assert.match(visibleText(view(true)), /Check source/)
   const output = findNode(view(true), node => node.props?.text === 'Child findings')
   assert.equal(output.props.text, 'Child findings')
+})
+
+test('the child header activity menu opens recorded output and removes settled children', () => {
+  const state = []
+  let index = 0
+  const c = client(undefined, {}, {}, {}, {
+    useEffect() {},
+    useState(initial) {
+      const pos = index++
+      if (!(pos in state)) state[pos] = initial
+      return [state[pos], value => { state[pos] = typeof value === 'function' ? value(state[pos]) : value }]
+    },
+  })
+  const render = c.entryById('kode-native-subagents')
+  const child = { id: 'child', status: 'awaiting', name: 'Verifier', output: 'Recorded result' }
+  const view = () => { index = 0; return render({ sessionId: 'parent', useProjection: () => ({ child }) }) }
+  const menu = findNode(view(), node => node.type === 'Menu')
+  assert.equal(menu.props.items[0].icon.props.state, 'awaiting')
+  menu.props.onSelect(child.id)
+  child.status = 'cancelled'
+  assert.equal(findNode(view(), node => node.type === 'Menu'), undefined)
+  assert.match(visibleText(view()), /已停止.*Recorded result/)
+})
+
+test('the native subagent catalog keeps real children and filters legacy Kode placeholders', () => {
+  const c = client()
+  c.addSlot('conversation.session.header.actions', 'subagent-catalog', c.native)
+  const real = { id: 'dsh-child', mode: 'continuable' }, fake = { id: 'kode-native:parent:child', mode: 'external' }
+  const catalog = [real, fake]
+  const state = { projectionsBySession: { parent: { values: { subagentCatalog: catalog } } } }
+  const wrapper = c.entryById('subagent-catalog')({ useSessions: select => select(state) })
+  const native = wrapper.type(wrapper.props)
+  assert.equal(native.type, c.native)
+  const select = state => state.projectionsBySession.parent.values.subagentCatalog
+  assert.deepEqual(Array.from(native.props.useSessions(select)), [real])
+  assert.deepEqual(select(state), catalog)
 })
 
 test('imported relay contexts render the same communication card without requiring live inbox claims', () => {
