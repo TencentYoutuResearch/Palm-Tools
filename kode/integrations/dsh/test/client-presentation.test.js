@@ -53,6 +53,11 @@ function visibleText(node) {
   if(typeof node.type==='function')return visibleText(node.type(node.props))
   return (node.type==='MarkdownText'?node.props.text:node.type==='TerminalBlock'?[node.props.command,node.props.output].filter(Boolean).join('\n'):'')+' '+visibleText(node.children)
 }
+test('Standalone Desktop registers the Kode Harness sidebar wordmark', () => {
+  const brand = client().entry('sidebar.brand.name')
+  assert.match(visibleText(brand()), /Kode Harness/)
+})
+
 test('Agent selector loads the local directory when its route registers after the page', async () => {
   const profile = { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }
   const delays = []
