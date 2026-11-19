@@ -84,6 +84,15 @@ impl CloudSyncManager {
             .worker_models(worker_id, backend_key)
             .await
     }
+    pub async fn worker_attachments(
+        &self,
+        worker_id: &str,
+        paths: &[String],
+    ) -> Result<Vec<String>, String> {
+        kode_bridge::cloud_sync::CloudSyncManager::new(self.ctx.clone())
+            .worker_attachments(worker_id, paths)
+            .await
+    }
     pub async fn worker_create_session(
         &self,
         worker_id: &str,
@@ -273,6 +282,14 @@ pub async fn cloud_sync_worker_models(
     backend_key: String,
 ) -> Result<Value, String> {
     manager.worker_models(&worker_id, &backend_key).await
+}
+#[tauri::command]
+pub async fn cloud_sync_worker_attachments(
+    manager: State<'_, CloudSyncManager>,
+    worker_id: String,
+    paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    manager.worker_attachments(&worker_id, &paths).await
 }
 #[tauri::command]
 pub async fn cloud_sync_worker_create_session(

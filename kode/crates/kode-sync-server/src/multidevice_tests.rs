@@ -159,6 +159,87 @@ async fn desktop_monitor_binding_does_not_count_as_a_mobile_binding() {
 }
 
 #[tokio::test]
+async fn desktop_monitor_setup_activates_the_target_before_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "home"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(worker)],
+            )
+            .unwrap();
+        }
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office".parse().unwrap());
+    let Json(binding) = create_monitor_binding(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("office".into()),
+        headers,
+    )
+    .await
+    .unwrap();
+    let (tx, mut agent) = mpsc::unbounded_channel();
+    state.inner.agents.lock().insert(
+        "home".into(),
+        AgentConnection {
+            connection_id: "home".into(),
+            tx,
+            kode_version: Some("0.2.6".into()),
+            os: Some("macos".into()),
+            arch: Some("aarch64".into()),
+            capabilities: Vec::new(),
+            sync_enabled: false,
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        format!("Bearer {}", binding.access_token).parse().unwrap(),
+    );
+    headers.insert("X-Kode-Worker-Id", "home".parse().unwrap());
+    let request = tokio::spawn(mobile_setup::backends(
+        axum::extract::State(state.clone()),
+        headers,
+    ));
+
+    assert!(matches!(
+        agent.recv().await.unwrap(),
+        ServerFrame::BindingChanged {
+            sync_enabled: true,
+            ..
+        }
+    ));
+    let ServerFrame::SetupRequest {
+        request_id, kind, ..
+    } = agent.recv().await.unwrap()
+    else {
+        panic!("expected setup request");
+    };
+    assert_eq!(kind, "backends");
+    mobile_setup::complete(
+        &state,
+        "home",
+        &request_id,
+        "boot",
+        200,
+        json!({"backends": []}),
+    )
+    .unwrap();
+
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(state.sync_enabled("home").unwrap());
+}
+
+#[tokio::test]
 async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {

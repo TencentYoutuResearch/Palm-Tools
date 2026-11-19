@@ -211,8 +211,77 @@ async fn execute(
         }
         return Err("GUI session is no longer running".into());
     };
-    kode_bridge::cloud_sync::execute_local_command(ctx, id, kind, payload).await?;
+    let native_session_id = key
+        .rsplit_once(':')
+        .and_then(|(_, id)| id.parse::<u64>().ok());
+    if let Some(native_id) = native_session_id.filter(|id| ctx.sessions.lock().contains_key(id)) {
+        kode_bridge::cloud_sync::execute_local_command(ctx, native_id, kind, payload).await?;
+        return Ok(json!({"accepted":true}));
+    }
+    if let Some(result) = execute_via_gui_bridge(
+        native_session_id.unwrap_or(id),
+        kind,
+        &payload,
+        &command["id"],
+    )
+    .await
+    {
+        return result;
+    }
+    kode_bridge::cloud_sync::execute_local_command(
+        ctx,
+        native_session_id.unwrap_or(id),
+        kind,
+        payload,
+    )
+    .await?;
     Ok(json!({"accepted":true}))
+}
+
+async fn execute_via_gui_bridge(
+    id: u64,
+    kind: &str,
+    payload: &Value,
+    request_id: &Value,
+) -> Option<Result<Value, String>> {
+    let port = std::env::var("KODE_BRIDGE_PORT").unwrap_or_else(|_| "47870".into());
+    let token = crate::persistence::load().bridge_token?;
+    let base = format!("http://127.0.0.1:{port}/api/v1/sessions/{id}");
+    let request_id = request_id.as_str().unwrap_or_default();
+    let client = reqwest::Client::new();
+    let request = match kind {
+        "input" | "interrupt" | "answer" | "plan_response" | "model" => {
+            let path = match kind {
+                "input" => "input",
+                "interrupt" => "interrupt",
+                "answer" => "answer",
+                "plan_response" => "plan_response",
+                "model" => "model",
+                _ => unreachable!(),
+            };
+            client
+                .post(format!("{base}/{path}"))
+                .json(payload)
+        }
+        "delete" => client.delete(&base),
+        "rename" => client.patch(&base).json(payload),
+        _ => return None,
+    };
+    Some(
+        match request
+            .bearer_auth(token)
+            .header("Idempotency-Key", request_id)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => Ok(json!({"accepted":true})),
+            Ok(response) => Err(format!(
+                "GUI bridge rejected {kind}: {}",
+                response.status()
+            )),
+            Err(error) => Err(format!("GUI bridge unavailable: {error}")),
+        },
+    )
 }
 
 pub fn start(ctx: Arc<kode_bridge::Ctx>) {

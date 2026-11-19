@@ -463,6 +463,8 @@ export const ipc = {
     }),
   cloudSyncWorkerModels: (workerId: string, backendKey: string) =>
     invoke<ModelDiscoveryResult>('cloud_sync_worker_models', { workerId, backendKey }),
+  cloudSyncWorkerAttachments: (workerId: string, paths: string[]) =>
+    invoke<string[]>('cloud_sync_worker_attachments', { workerId, paths }),
   cloudSyncWorkerCreateSession: (
     workerId: string,
     body: { backend_key: string; cwd?: string; model?: string },

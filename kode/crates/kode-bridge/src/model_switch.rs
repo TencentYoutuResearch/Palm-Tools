@@ -110,6 +110,14 @@ pub(super) fn numbered_rows(menu: &str) -> Vec<(&str, bool)> {
         .collect()
 }
 
+fn selected_row_index(menu: &str) -> Option<usize> {
+    menu.lines()
+        .find(|line| selected(line))
+        .and_then(|line| row_text(line).split_once(". "))
+        .and_then(|(number, _)| number.parse::<usize>().ok())
+        .and_then(|number| number.checked_sub(1))
+}
+
 pub(super) fn navigate(rows: &[(&str, bool)], target: usize, accept: Key) -> Option<Key> {
     let current = rows.iter().position(|(_, active)| *active)?;
     Some(if current < target {
@@ -121,7 +129,12 @@ pub(super) fn navigate(rows: &[(&str, bool)], target: usize, accept: Key) -> Opt
     })
 }
 
-fn codex_key(screen: &str, model: &str, effort: Option<&str>) -> Option<Key> {
+fn codex_key(
+    screen: &str,
+    model: &str,
+    effort: Option<&str>,
+    target_index: Option<usize>,
+) -> Option<Key> {
     // Search from the bottom so old transcript text cannot impersonate a menu.
     if let Some((_, menu)) = screen.rsplit_once("Select Reasoning Level for ") {
         if !menu
@@ -163,18 +176,12 @@ fn codex_key(screen: &str, model: &str, effort: Option<&str>) -> Option<Key> {
         return None;
     }
     let rows = numbered_rows(menu);
-    let target = rows
-        .iter()
-        .position(|(label, _)| {
-            label
-                .split_whitespace()
-                .next()
-                .is_some_and(|name| normalized(name) == normalized(model))
-        })
-        .or_else(|| {
-            rows.iter()
-                .position(|(label, _)| label.starts_with("All models"))
-        })?;
+    let visible_target = rows.iter().position(|(label, _)| {
+        label
+            .split_whitespace()
+            .next()
+            .is_some_and(|name| normalized(name) == normalized(model))
+    });
     let accept = if menu
         .lines()
         .any(|line| line.contains("esc") && line.contains("s session"))
@@ -183,6 +190,22 @@ fn codex_key(screen: &str, model: &str, effort: Option<&str>) -> Option<Key> {
     } else {
         Key::Enter
     };
+    if let Some(target) = visible_target {
+        return navigate(&rows, target, accept);
+    }
+    if let Some(target) = target_index {
+        let current = selected_row_index(menu)?;
+        return Some(if current < target {
+            Key::Down
+        } else if current > target {
+            Key::Up
+        } else {
+            accept
+        });
+    }
+    let target = rows
+        .iter()
+        .position(|(label, _)| label.starts_with("All models"))?;
     navigate(&rows, target, accept)
 }
 
@@ -366,8 +389,9 @@ pub(super) async fn set_pty_model(ctx: &Ctx, id: SessionId, model: &str) -> Resu
     let codex = kind.is_some_and(|kind| kind.is_codex_family());
     let cursor = kind == Some(kode_core::session::jsonl_tail::Backend::Cursor);
     let target = CursorTarget::new(model);
-    // The native Cursor footer uses display names, not ids. Read the same
-    // installed CLI's catalogue before touching the current prompt.
+    let mut codex_target_index = None;
+    let mut tried_codex_catalog = false;
+    // The native Cursor footer uses display names, not ids.
     let label = if cursor {
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -377,7 +401,7 @@ pub(super) async fn set_pty_model(ctx: &Ctx, id: SessionId, model: &str) -> Resu
         .map_err(|_| "Cursor model discovery timed out")??
         .models
         .into_iter()
-        .find(|m| m.id == model)
+        .find(|candidate| candidate.id == model)
         .ok_or("Model is not available in Cursor")?
         .label
     } else {
@@ -444,7 +468,41 @@ pub(super) async fn set_pty_model(ctx: &Ctx, id: SessionId, model: &str) -> Resu
             continue;
         }
         let key = if codex {
-            codex_key(&screen, model, effort.as_deref())
+            let direct = codex_key(&screen, model, effort.as_deref(), codex_target_index);
+            if direct.is_none()
+                && codex_target_index.is_none()
+                && !tried_codex_catalog
+                && screen.rsplit_once("Select Model").is_some()
+            {
+                tried_codex_catalog = true;
+                let discovered = if let Some(config) = ctx.backends().remove(&backend) {
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        crate::model_discovery::discover_models_with_config_cached(
+                            &backend, &config, false,
+                        ),
+                    )
+                    .await
+                } else {
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        crate::model_discovery::discover_models(&backend, &command),
+                    )
+                    .await
+                };
+                codex_target_index = discovered.ok().and_then(Result::ok).and_then(|catalog| {
+                    catalog.models.iter().position(|candidate| {
+                        crate::session_model_matches(model, &candidate.id)
+                    })
+                });
+                tracing::debug!(
+                    session = id,
+                    %model,
+                    ?codex_target_index,
+                    "model switch loaded Codex catalogue index"
+                );
+            }
+            codex_key(&screen, model, effort.as_deref(), codex_target_index)
         } else if cursor && screen.contains("— Edit Parameters") {
             let key = cursor_parameter_key(&screen, &target);
             if key == Some(Key::Escape) {
@@ -479,6 +537,7 @@ pub(super) async fn set_pty_model(ctx: &Ctx, id: SessionId, model: &str) -> Resu
         };
         if let Some(key) = key {
             entered_menu = true;
+            tracing::debug!(session = id, %model, ?key, "model switch sending native key");
             // Recheck the exact screen under the session lock before writing.
             let sessions = ctx.sessions.lock();
             let session = sessions
@@ -497,6 +556,7 @@ pub(super) async fn set_pty_model(ctx: &Ctx, id: SessionId, model: &str) -> Resu
             last_action_screen = screen;
         }
     }
+    tracing::debug!(session = id, %model, "model switch ended without native confirmation");
     Err("Model change was not confirmed. Check the desktop model menu before retrying.".into())
 }
 
@@ -505,24 +565,49 @@ mod tests {
     use super::*;
     #[test]
     fn codex_requires_native_menu_and_exact_model() {
-        assert_eq!(codex_key("› draft gpt-6-astra", "gpt-6-astra", None), None);
+        assert_eq!(
+            codex_key("› draft gpt-6-astra", "gpt-6-astra", None, None),
+            None
+        );
         let menu = "Select Model and Effort\n› 1. GPT–6.1–Sol (current) Workhorse\n  2. GPT–6–Astra Frontier\nenter select · esc back";
-        assert_eq!(codex_key(menu, "gpt-6-astra", None), Some(Key::Down));
-        assert_eq!(codex_key(menu, "gpt-6", None), None);
+        assert_eq!(
+            codex_key(menu, "gpt-6-astra", None, None),
+            Some(Key::Down)
+        );
+        assert_eq!(codex_key(menu, "gpt-6", None, None), None);
         assert_eq!(
             codex_key(
                 &menu.replace("› 1.", "  1.").replace("  2.", "› 2."),
                 "gpt-6-astra",
-                None
+                None,
+                None,
             ),
             Some(Key::Enter)
         );
     }
     #[test]
+    fn codex_scrolls_offscreen_models_by_catalog_index() {
+        let menu = "Select Model and Effort\n  1. Hy4 (default)\n  2. Hy4-Flash\n  3. Echo\n› 4. GPT-6-Astra (current)\nPress enter to confirm or esc to go back";
+        assert_eq!(
+            codex_key(menu, "deepseek-v4.1-flash", None, Some(15)),
+            Some(Key::Down)
+        );
+        assert_eq!(
+            codex_key(menu, "Hy4", None, Some(0)),
+            Some(Key::Up)
+        );
+    }
+    #[test]
     fn reasoning_preserves_effort_and_prefers_session_scope() {
         let menu = "Select Reasoning Level for GPT–6–Astra\n  1. Low\n› 2. Medium (default)\nenter default · s session · esc back";
-        assert_eq!(codex_key(menu, "gpt-6-astra", Some("low")), Some(Key::Up));
-        assert_eq!(codex_key(menu, "gpt-6-astra", None), Some(Key::Session));
+        assert_eq!(
+            codex_key(menu, "gpt-6-astra", Some("low"), None),
+            Some(Key::Up)
+        );
+        assert_eq!(
+            codex_key(menu, "gpt-6-astra", None, None),
+            Some(Key::Session)
+        );
     }
     #[test]
     fn cursor_variants_and_parameters() {

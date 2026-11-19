@@ -1105,8 +1105,8 @@ fn open_path_sync(path: &str) -> Result<(), String> {
     };
 
     let s = expanded.as_ref();
-    let is_abs_path = s.starts_with('/');
-    let is_url = s.starts_with("http://") || s.starts_with("https://") || s.starts_with("file://");
+    let is_abs_path = is_absolute_open_path(s);
+    let is_url = is_open_url(s);
     if !is_abs_path && !is_url {
         return Err(format!(
             "rejected: not an absolute path or http(s) URL: {s}"
@@ -1127,12 +1127,43 @@ fn open_path_sync(path: &str) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("xdg-open failed: {e}"))?;
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = if is_url {
+            let mut command = Command::new("rundll32.exe");
+            command.args(["url.dll,FileProtocolHandler", s]);
+            command
+        } else {
+            let mut command = Command::new("explorer.exe");
+            command.arg(s);
+            command
+        };
+        command
+            .spawn()
+            .map_err(|e| format!("Windows open failed: {e}"))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         return Err("open_path not supported on this platform".into());
     }
 
     Ok(())
+}
+
+fn is_open_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("file://")
+}
+
+fn is_absolute_open_path(value: &str) -> bool {
+    if value.starts_with('/') || value.starts_with("\\\\") {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 #[cfg(test)]
@@ -1169,6 +1200,18 @@ mod tests {
                 "sub/conflict.md",
             ]
         );
+    }
+
+    #[test]
+    fn open_target_validation_accepts_urls_and_windows_paths() {
+        assert!(is_open_url("https://example.com/a?b=1"));
+        assert!(is_open_url("HTTPS://EXAMPLE.COM"));
+        assert!(is_absolute_open_path("C:\\workspace\\file.txt"));
+        assert!(is_absolute_open_path("D:/workspace/file.txt"));
+        assert!(is_absolute_open_path("\\\\server\\share\\file.txt"));
+        assert!(is_absolute_open_path("/Users/name/file.txt"));
+        assert!(!is_open_url("javascript:alert(1)"));
+        assert!(!is_absolute_open_path("relative/file.txt"));
     }
 
     #[test]

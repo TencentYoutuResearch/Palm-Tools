@@ -7,6 +7,8 @@
 
 use std::{
     collections::{HashSet, VecDeque},
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -15,7 +17,11 @@ use std::{
     time::Duration,
 };
 
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use kode_relay_protocol::{
+    ServerFrame, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_CHUNK_BYTES,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,7 +29,6 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
 };
-use kode_relay_protocol::ServerFrame;
 use uuid::Uuid;
 
 use crate::account::{
@@ -632,6 +637,91 @@ impl CloudSyncManager {
             .json::<Value>()
             .await
             .map_err(|error| format!("invalid Worker model catalogue: {error}"))
+    }
+
+    pub async fn worker_attachments(
+        &self,
+        worker_id: &str,
+        paths: &[String],
+    ) -> Result<Vec<String>, String> {
+        if paths.is_empty() || paths.len() > 6 {
+            return Err("attach between 1 and 6 files".into());
+        }
+        let mut sources = Vec::with_capacity(paths.len());
+        for raw in paths {
+            let path = PathBuf::from(raw);
+            if !path.is_absolute() {
+                return Err("attachment paths must be absolute".into());
+            }
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!("unsupported attachment: {}", path.display()));
+            }
+            if metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES {
+                return Err(format!(
+                    "attachments must be between 1 byte and {} MB",
+                    MAX_ATTACHMENT_BYTES / 1024 / 1024
+                ));
+            }
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+                .ok_or_else(|| format!("invalid attachment name: {}", path.display()))?
+                .to_string();
+            sources.push((path, name, metadata.len()));
+        }
+
+        let (server_url, token, worker_id) = self.monitor_http_context(worker_id).await?;
+        let mut uploaded = Vec::with_capacity(sources.len());
+        for (path, name, size) in sources {
+            let mut file = File::open(&path).map_err(|error| error.to_string())?;
+            let upload_id = Uuid::new_v4().simple().to_string();
+            let mut offset = 0_u64;
+            while offset < size {
+                let remaining = usize::try_from(size - offset).unwrap_or(usize::MAX);
+                let mut bytes = vec![0_u8; remaining.min(MAX_ATTACHMENT_CHUNK_BYTES)];
+                let read = file.read(&mut bytes).map_err(|error| error.to_string())?;
+                if read == 0 {
+                    return Err(format!("{} changed while uploading", path.display()));
+                }
+                bytes.truncate(read);
+                let response = self
+                    .inner
+                    .client
+                    .post(format!("{server_url}/api/v1/attachments"))
+                    .bearer_auth(&token)
+                    .header(WORKER_HEADER, &worker_id)
+                    .timeout(Duration::from_secs(60))
+                    .json(&json!({
+                        "upload_id": upload_id,
+                        "name": name,
+                        "size": size,
+                        "offset": offset,
+                        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    }))
+                    .send()
+                    .await
+                    .map_err(friendly_network_error)?;
+                if !response.status().is_success() {
+                    return Err(response_error(response).await);
+                }
+                let body = response
+                    .json::<Value>()
+                    .await
+                    .map_err(|error| format!("invalid attachment response: {error}"))?;
+                offset += read as u64;
+                if offset == size {
+                    let remote = body["path"]
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .ok_or("Worker attachment response omitted path")?;
+                    uploaded.push(remote.to_string());
+                }
+            }
+        }
+        Ok(uploaded)
     }
 
     pub async fn worker_create_session(
@@ -2310,6 +2400,75 @@ mod tests {
 
         let sessions = manager.worker_sessions("sibling").await.unwrap();
         assert_eq!(sessions["sessions"][0]["title"], "sibling session");
+    }
+
+    #[tokio::test]
+    async fn worker_attachment_upload_uses_monitor_binding() {
+        use axum::{routing::post, Json, Router};
+
+        let app = Router::new().route(
+            "/api/v1/attachments",
+            post(
+                |headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(
+                        headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok()),
+                        Some("Bearer monitor-token")
+                    );
+                    assert_eq!(
+                        headers
+                            .get("x-kode-worker-id")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("sibling")
+                    );
+                    assert_eq!(body["name"], "sample.txt");
+                    assert_eq!(body["size"], 5);
+                    assert_eq!(body["offset"], 0);
+                    assert_eq!(body["data"], "aGVsbG8=");
+                    Json(json!({
+                        "complete": true,
+                        "path": "/worker/tmp/kode-attachments/upload/sample.txt"
+                    }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("sample.txt");
+        std::fs::write(&source, b"hello").unwrap();
+        let config_path = dir.path().join("cloud-sync.json");
+        std::fs::write(
+            &config_path,
+            json!({
+                "installation_id": "monitor-client",
+                "active_backend_id": "local",
+                "backends": [{
+                    "id": "local",
+                    "name": "Local",
+                    "server_url": base,
+                    "device_id": "self",
+                    "device_token": "device-token",
+                    "monitor_token": "monitor-token"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manager = CloudSyncManager::with_config_path(
+            crate::build_test_ctx(kode_core::config::Config::default(), "monitor".into()),
+            config_path,
+        );
+
+        let paths = vec![source.to_string_lossy().into_owned()];
+        let uploaded = manager.worker_attachments("sibling", &paths).await.unwrap();
+        assert_eq!(
+            uploaded,
+            vec!["/worker/tmp/kode-attachments/upload/sample.txt"]
+        );
     }
 
     /// A provider session saved before relay sessions is exchanged on its

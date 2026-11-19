@@ -8,14 +8,17 @@
    * is never transferred; this is the semantic timeline only.
    */
   import { onMount, tick } from 'svelte'
+  import { open } from '@tauri-apps/plugin-dialog'
   import {
     ipc,
+    workspaceFiles,
     type AccountDevice,
     type AccountDeviceEvent,
     type AccountDeviceSession,
     type DiscoveredModel,
   } from './ipc'
   import Icon from './Icon.svelte'
+  import LinkedText from './LinkedText.svelte'
   import ConfirmDialog from './ConfirmDialog.svelte'
   import { currentLocale, t } from './i18n'
   import {
@@ -26,6 +29,13 @@
     relayToolTitleKey,
     sessionNameFor,
   } from './device_timeline'
+  import {
+    MAX_MONITOR_ATTACHMENTS,
+    composeMonitorMessage,
+    insertMonitorNewline,
+    monitorAttachmentName,
+    normalizeMonitorMessage,
+  } from './monitor_attachments'
 
   type Props = {
     device: AccountDevice
@@ -45,6 +55,8 @@
   let events = $state<AccountDeviceEvent[]>([])
   let loaded = $state(false)
   let draft = $state('')
+  let attachments = $state<string[]>([])
+  let uploadingAttachments = $state(false)
   let sending = $state(false)
   let error = $state('')
   let localTitle = $state('')
@@ -58,6 +70,7 @@
   let modelSelection = $state('')
   let sentCommands: string[] = []
   let transcript: HTMLDivElement | undefined = $state()
+  let composer: HTMLTextAreaElement | undefined = $state()
   let pinnedToBottom = true
 
   let items = $derived(buildTimeline(events))
@@ -179,10 +192,40 @@
   }
 
   async function send() {
-    const text = draft.trim()
+    const typed = draft.trim()
+    if ((!typed && attachments.length === 0) || uploadingAttachments) return
+    const text = normalizeMonitorMessage(composeMonitorMessage(typed, attachments))
     if (!text) return
     pinnedToBottom = true
-    if (await command('input', { text })) draft = ''
+    if (await command('input', { text })) {
+      draft = ''
+      attachments = []
+    }
+  }
+
+  async function attachFiles() {
+    if (!workerScoped || uploadingAttachments) return
+    const remaining = MAX_MONITOR_ATTACHMENTS - attachments.length
+    if (remaining <= 0) return
+    const picked = await open({
+      multiple: true,
+      directory: false,
+      title: tr('devices.attachFiles'),
+    })
+    const paths = (Array.isArray(picked) ? picked : picked ? [picked] : []).slice(0, remaining)
+    if (paths.length === 0) return
+    error = Array.isArray(picked) && picked.length > remaining
+      ? tr('devices.attachmentLimit')
+      : ''
+    uploadingAttachments = true
+    try {
+      const uploaded = await ipc.cloudSyncWorkerAttachments(device.device_id, paths)
+      attachments = [...attachments, ...uploaded]
+    } catch (reason) {
+      error = t('devices.attachmentUploadFailed', { error: String(reason) })
+    } finally {
+      uploadingAttachments = false
+    }
   }
 
   async function changeModel() {
@@ -219,7 +262,18 @@
   }
 
   function onComposerKey(event: KeyboardEvent) {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    if (event.key !== 'Enter' || event.isComposing) return
+    if (event.altKey) {
+      event.preventDefault()
+      const target = event.currentTarget as HTMLTextAreaElement
+      const start = target.selectionStart ?? draft.length
+      const end = target.selectionEnd ?? start
+      const inserted = insertMonitorNewline(draft, start, end)
+      draft = inserted.text
+      void tick().then(() => composer?.setSelectionRange(inserted.cursor, inserted.cursor))
+      return
+    }
+    if (!event.shiftKey) {
       event.preventDefault()
       void send()
     }
@@ -395,14 +449,24 @@
       {@const p = item.payload}
       {#if item.type === 'message' && p.relay}
         <article class="relay">
-          <div class="relay-head"><strong>{relaySender(p.relay)}</strong> → {sessionTitle}</div>
+          <div class="relay-head">
+            <span><strong>{relaySender(p.relay)}</strong> → {sessionTitle}</span>
+            <button class="icon message-copy" title={tr('devices.copyMessage')} aria-label={tr('devices.copyMessage')} onclick={() => workspaceFiles.copyText(String(p.relay.content ?? ''))}>
+              <Icon name="copy" size={12} />
+            </button>
+          </div>
           <span class="muted small">{p.relay.reply_to ? tr('devices.relay.replied') : tr('devices.relay.sent')}</span>
-          <div class="content">{p.relay.content}</div>
+          <div class="content"><LinkedText text={String(p.relay.content ?? '')} /></div>
         </article>
       {:else if item.type === 'message'}
         <article class:user={p.role === 'user'}>
-          <strong>{p.role === 'user' ? tr('devices.you') : agentName}</strong>
-          <div class="content">{p.text}</div>
+          <div class="message-head">
+            <strong>{p.role === 'user' ? tr('devices.you') : agentName}</strong>
+            <button class="icon message-copy" title={tr('devices.copyMessage')} aria-label={tr('devices.copyMessage')} onclick={() => workspaceFiles.copyText(String(p.text ?? ''))}>
+              <Icon name="copy" size={12} />
+            </button>
+          </div>
+          <div class="content"><LinkedText text={String(p.text ?? '')} /></div>
         </article>
       {:else if item.type === 'tool_use' && p.relay_tool}
         <article class="relay">
@@ -479,17 +543,49 @@
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   <form class="composer" onsubmit={(e) => { e.preventDefault(); void send() }}>
-    <textarea
-      bind:value={draft}
-      onkeydown={onComposerKey}
-      disabled={exited}
-      placeholder={exited ? tr('devices.exited') : t('devices.placeholder', { device: device.name })}
-      aria-label={t('devices.placeholder', { device: device.name })}
-    ></textarea>
-    {#if busy}
-      <button type="button" disabled={sending} onclick={() => command('interrupt')}>{tr('devices.stop')}</button>
+    {#if attachments.length > 0}
+      <div class="attachment-strip">
+        {#each attachments as path (path)}
+          <span class="attachment-chip" title={path}>
+            <Icon name="file-text" size={12} />
+            <span>{monitorAttachmentName(path)}</span>
+            <button
+              type="button"
+              class="attachment-remove"
+              title={tr('devices.removeAttachment')}
+              aria-label={tr('devices.removeAttachment')}
+              onclick={() => (attachments = attachments.filter((item) => item !== path))}
+            ><Icon name="x" size={11} /></button>
+          </span>
+        {/each}
+      </div>
     {/if}
-    <button type="submit" class="primary" disabled={sending || exited || !draft.trim()}>{tr('devices.send')}</button>
+    <div class="composer-row">
+      {#if workerScoped}
+        <button
+          type="button"
+          class="icon attach-files"
+          title={tr('devices.attachFiles')}
+          aria-label={tr('devices.attachFiles')}
+          disabled={sending || uploadingAttachments || exited || attachments.length >= MAX_MONITOR_ATTACHMENTS}
+          onclick={() => void attachFiles()}
+        >
+          <Icon name={uploadingAttachments ? 'refresh-cw' : 'paperclip'} size={15} class={uploadingAttachments ? 'spin' : ''} />
+        </button>
+      {/if}
+      <textarea
+        bind:this={composer}
+        bind:value={draft}
+        onkeydown={onComposerKey}
+        disabled={exited}
+        placeholder={exited ? tr('devices.exited') : t('devices.placeholder', { device: device.name })}
+        aria-label={t('devices.placeholder', { device: device.name })}
+      ></textarea>
+      {#if busy}
+        <button type="button" disabled={sending} onclick={() => command('interrupt')}>{tr('devices.stop')}</button>
+      {/if}
+      <button type="submit" class="primary" disabled={sending || uploadingAttachments || exited || (!draft.trim() && attachments.length === 0)}>{tr('devices.send')}</button>
+    </div>
   </form>
 </section>
 
@@ -527,7 +623,10 @@
   article.user { background: var(--bg-base); }
   article.relay { border-color: var(--acc-soft); background: var(--bg-base); }
   article.ask { border-color: var(--st-warn); }
-  .relay-head { margin-bottom: 2px; }
+  .relay-head, .message-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+  .relay-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .message-copy { flex-shrink: 0; color: var(--fg-tertiary); opacity: 0; }
+  article:hover .message-copy, article:focus-within .message-copy { opacity: 1; }
   .content { margin-top: 8px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
   details.tool { padding: 8px 16px; color: var(--fg-secondary); font-size: var(--fs-sm); }
   summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
@@ -549,6 +648,15 @@
   button.primary { border-color: var(--acc); background: var(--acc); color: var(--fg-on-accent); }
   button:focus-visible, textarea:focus-visible { outline: 2px solid var(--bd-focus); outline-offset: 2px; }
   .error { margin: 0; padding: 6px 20px; color: var(--st-err); font-size: var(--fs-sm); }
-  .composer { display: flex; align-items: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--bd-default); }
+  .composer { display: flex; flex-direction: column; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--bd-default); }
+  .composer-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+  .attachment-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+  .attachment-chip { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 260px; height: 26px; padding: 0 4px 0 8px; border: 1px solid var(--bd-default); border-radius: var(--rad-sm); background: var(--bg-chip); color: var(--fg-secondary); font-size: var(--fs-xs); }
+  .attachment-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attachment-remove { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; background: transparent; color: var(--fg-tertiary); }
+  .attachment-remove:hover { color: var(--fg-primary); }
+  .attach-files { flex-shrink: 0; }
+  .attach-files :global(.spin) { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   textarea { flex: 1; min-height: 44px; max-height: 200px; padding: 10px 12px; border: 1px solid var(--bd-default); border-radius: var(--rad-md); background: var(--bg-input); color: inherit; font: inherit; resize: vertical; }
 </style>

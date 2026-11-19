@@ -58,6 +58,7 @@
     | 'minimize-2'
     | 'grip-vertical'
     | 'terminal'
+    | 'paperclip'
     | 'message-square'
     | 'monitor'
     | 'info'
@@ -74,6 +75,9 @@
     x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
     // lucide:plus
     plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    // lucide:paperclip
+    paperclip:
+      '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
     // lucide:brain (简化版,只保留主轮廓)
     brain:
       '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>' +
