@@ -19,6 +19,18 @@ pub struct Catalog {
     pub extension_args: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub read_only: std::collections::HashSet<String>,
+    /// Built-in keys shadowed by a native desktop key of the same CLI type
+    /// (`builtin-codex` → `codex`). They are not listed, only resolved, so one
+    /// CLI never appears twice and older tabs still restore.
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
+}
+
+impl Catalog {
+    /// Desktop key that actually launches `key`.
+    pub fn canonical_key<'a>(&'a self, key: &'a str) -> &'a str {
+        self.aliases.get(key).map(String::as_str).unwrap_or(key)
+    }
 }
 
 fn executable_name(command: &str) -> &str {
@@ -238,13 +250,14 @@ pub(super) fn catalog(hub: &Hub) -> Result<Catalog> {
 }
 
 fn catalog_value(value: &Value) -> Result<Catalog> {
-    let backends = serde_json::from_value(value["desktop_backends"].clone())?;
+    let mut backends: HashMap<String, BackendConfig> =
+        serde_json::from_value(value["desktop_backends"].clone())?;
     let mut names = HashMap::new();
     let mut read_only = std::collections::HashSet::new();
-    for profile in value["profiles"]
+    let profiles = value["profiles"]
         .as_array()
-        .context("invalid Agent profiles")?
-    {
+        .context("invalid Agent profiles")?;
+    for profile in profiles {
         if let (Some(id), Some(name)) = (profile["id"].as_str(), profile["name"].as_str()) {
             if let Some(key) = value["desktop_ids"][id].as_str() {
                 names.insert(key.into(), name.into());
@@ -254,6 +267,23 @@ fn catalog_value(value: &Value) -> Result<Catalog> {
             }
         }
     }
+    // Same rule as dsh's profilePresentations: a desktop key equal to the CLI
+    // type already represents that CLI, so the built-in twin is only an alias.
+    let mut aliases = HashMap::new();
+    for profile in profiles.iter().filter(|profile| profile["origin"] == "builtin") {
+        let (Some(id), Some(kind)) = (profile["id"].as_str(), profile["type"].as_str()) else {
+            continue;
+        };
+        let Some(key) = value["desktop_ids"][id].as_str().filter(|key| *key != kind) else {
+            continue;
+        };
+        if backends.contains_key(kind) {
+            backends.remove(key);
+            names.remove(key);
+            read_only.remove(key);
+            aliases.insert(key.to_owned(), kind.to_owned());
+        }
+    }
     Ok(Catalog {
         backends,
         names,
@@ -261,6 +291,7 @@ fn catalog_value(value: &Value) -> Result<Catalog> {
         bindings: value["bindings"].clone(),
         extension_args: HashMap::new(),
         read_only,
+        aliases,
     })
 }
 
@@ -398,6 +429,7 @@ pub fn resolve(catalog: &Catalog, key: &str, thread_id: Option<&str>) -> Result<
             return backend(&binding["profile"], catalog.backends.get(key));
         }
     }
+    let key = catalog.canonical_key(key);
     let mut config=catalog.backends.get(key).cloned().context("Agent is not configured")?;
     config.args.extend(catalog.extension_args.get(key).cloned().unwrap_or_default());
     Ok(config)
@@ -607,6 +639,33 @@ mod tests {
         let defaults=kode_core::Config::default();let item=profile("codebuddy",&defaults.backends["codebuddy"]).unwrap();
         assert_eq!(item["type"],"codebuddy");let configured=backend(&item,None).unwrap();
         assert_eq!(configured.protocol.as_deref(),Some("codebuddy"));assert_eq!(configured.permission_mode_flag.as_deref(),Some("--permission-mode"));
+    }
+
+    #[test]
+    fn builtin_twin_of_a_native_key_is_only_an_alias() {
+        let codex = serde_json::to_value(&kode_core::Config::default().backends["codex"]).unwrap();
+        let value = json!({
+            "profiles": [
+                {"id":"builtin-codex","type":"codex","name":"Codex","origin":"builtin"},
+                {"id":"builtin-cursor","type":"cursor","name":"Cursor","origin":"builtin"},
+                {"id":"kode-codex","type":"codex","name":"codex","origin":"custom"},
+                {"id":"kode-tcodex","type":"codex","name":"tcodex","origin":"custom"},
+            ],
+            "desktop_ids": {"builtin-codex":"builtin-codex","builtin-cursor":"builtin-cursor","kode-codex":"codex","kode-tcodex":"tcodex"},
+            "desktop_backends": {"builtin-codex":codex,"builtin-cursor":codex,"codex":codex,"tcodex":codex},
+            "bindings": {},
+        });
+        let catalog = catalog_value(&value).unwrap();
+        assert!(!catalog.backends.contains_key("builtin-codex"));
+        assert!(!catalog.names.contains_key("builtin-codex"));
+        assert_eq!(catalog.canonical_key("builtin-codex"), "codex");
+        assert!(resolve(&catalog, "builtin-codex", None).is_ok());
+        // tcodex is a separate CLI of the same type, never folded into codex.
+        assert!(catalog.backends.contains_key("tcodex"));
+        assert_eq!(catalog.canonical_key("tcodex"), "tcodex");
+        // Without a native twin the built-in stays the only entry for its CLI.
+        assert!(catalog.backends.contains_key("builtin-cursor"));
+        assert_eq!(catalog.canonical_key("builtin-cursor"), "builtin-cursor");
     }
 
     fn host() -> (tempfile::TempDir, Arc<crate::Ctx>, Arc<Hub>) {

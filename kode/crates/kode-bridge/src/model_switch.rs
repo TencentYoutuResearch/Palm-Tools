@@ -362,8 +362,9 @@ pub(super) async fn set_pty_model(ctx: &Ctx, id: SessionId, model: &str) -> Resu
             session.state.model.clone(),
         )
     };
-    let codex = matches!(backend.as_str(), "codex" | "tcodex");
-    let cursor = backend == "cursor";
+    let kind = kode_core::session::jsonl_tail::Backend::from_backend_key(&backend);
+    let codex = kind.is_some_and(|kind| kind.is_codex_family());
+    let cursor = kind == Some(kode_core::session::jsonl_tail::Backend::Cursor);
     let target = CursorTarget::new(model);
     // The native Cursor footer uses display names, not ids. Read the same
     // installed CLI's catalogue before touching the current prompt.
