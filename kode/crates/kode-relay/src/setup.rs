@@ -11,7 +11,7 @@ use axum::{
 };
 use kode_relay_protocol::{
     ServerFrame, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_REQUEST_BYTES, SETUP_KIND_ATTACHMENT,
-    SETUP_KIND_HISTORY,
+    SETUP_KIND_HISTORY, SETUP_KIND_IMAGE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -149,6 +149,29 @@ pub(crate) async fn attachment(
     let payload = serde_json::to_value(&chunk).unwrap_or(Value::Null);
     Ok(response(
         request(&state, &caller, &device_id, SETUP_KIND_ATTACHMENT, payload).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ImageQuery {
+    #[serde(default)]
+    offset: u64,
+}
+
+/// One chunk of a transcript image the desktop cached for phones.
+pub(crate) async fn image(
+    State(state): State<RelayState>,
+    Path(id): Path<String>,
+    Query(query): Query<ImageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if id.is_empty() || id.len() > 64 {
+        return Err(ApiError::BadRequest("Invalid image id".into()));
+    }
+    let (caller, device_id) = open(&state, &headers).await?;
+    let payload = json!({"id": id, "offset": query.offset});
+    Ok(response(
+        request(&state, &caller, &device_id, SETUP_KIND_IMAGE, payload).await?,
     ))
 }
 

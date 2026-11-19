@@ -355,6 +355,46 @@ class ApiClient {
     }
   }
 
+  /// Reads a transcript image the desktop cached under [id] into [sink], in
+  /// the chunks the desktop returns. Returns the image's MIME type.
+  Future<String> downloadImage(String id, IOSink sink) async {
+    var offset = 0;
+    while (true) {
+      final resp = await _get(
+        '/api/v1/images/$id',
+        queryParameters: {'offset': offset},
+        options: Options(receiveTimeout: const Duration(seconds: 60)),
+      );
+      if (resp.statusCode == 405 ||
+          (resp.statusCode == 404 &&
+              !(resp.data is Map && resp.data['error'] == 'not_found')) ||
+          (resp.statusCode == 400 &&
+              resp.data is Map &&
+              '${resp.data['detail']}'.contains('Unsupported mobile setup'))) {
+        throw ApiException(
+          resp.statusCode!,
+          'unsupported',
+          'Update Kode on the desktop and the sync server to see images.',
+        );
+      }
+      _check(resp);
+      final body = resp.data;
+      final data = body is Map ? body['data'] : null;
+      if (data is! String || body['offset'] != offset) {
+        throw ApiException(502, 'bad_image', 'The desktop sent a bad image.');
+      }
+      final bytes = base64Decode(data);
+      sink.add(bytes);
+      offset += bytes.length;
+      if (body['complete'] == true) {
+        return body['mime'] as String? ?? 'image/png';
+      }
+      if (bytes.isEmpty) {
+        throw ApiException(502, 'bad_image', 'The desktop sent a bad image.');
+      }
+    }
+  }
+
   Future<List<Envelope>> getHistory(int id, {int? fromMs, int? limit}) async {
     final qp = <String, dynamic>{};
     if (fromMs != null) qp['from'] = fromMs;

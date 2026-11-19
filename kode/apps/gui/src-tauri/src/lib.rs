@@ -261,6 +261,8 @@ pub fn run() {
             workspace::workspace_git_commit_file_diff,
             commands::get_theme,
             commands::set_theme,
+            commands::get_session_view,
+            commands::set_session_view,
             commands::get_locale,
             commands::set_locale,
             commands::cwd_history_get,
@@ -378,8 +380,16 @@ pub fn run() {
             // app 退出时主动停掉所有 SpecOps sidecar 子进程,避免变成孤儿残留。
             // RunEvent::Exit 在主事件循环结束、进程真正退出前触发,比依赖
             // SpecOpsManager 的 Drop 更可靠(macOS GUI 直接 exit 时 Drop 不保证跑)。
+            // Quitting (Cmd+Q, last window closed, relaunch for an update):
+            // freeze the tab list before any CLI ends with Kode.
+            tauri::RunEvent::ExitRequested { .. } => {
+                use tauri::Emitter;
+                let _ = app_handle.emit("app-quitting", ());
+                app_handle.state::<AppState>().persist.begin_quit();
+            }
             tauri::RunEvent::Exit => {
                 let state = app_handle.state::<AppState>();
+                state.persist.begin_quit();
                 state.specops.shutdown_all();
                 if let Some(host) = app_handle.try_state::<extensions::ExtensionHost>() {
                     host.shutdown();

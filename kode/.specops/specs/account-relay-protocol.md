@@ -109,6 +109,9 @@ Same paths and bodies as the sync server; the desktop is named by the
 - `POST /api/v1/attachments` uploads one file chunk, see
   [cloud sync](./cloud-sync-protocol.md#phone-attachments). The relay keeps
   no copy; each chunk is a `setup.request` of kind `attachment`.
+- `GET /api/v1/images/:id?offset=` reads one chunk of a transcript image,
+  see [cloud sync](./cloud-sync-protocol.md#transcript-images); forwarded as a
+  `setup.request` of kind `image`.
 - `GET /ws?device_id=` sends `connection.hello{server_kind:"kode-relay",...}`
 - `DELETE /api/v1/bindings/current` is accepted as a no-op.
 

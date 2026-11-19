@@ -7,6 +7,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../storage/session_images.dart';
+import 'session_images_view.dart';
 import 'transcript_turns.dart';
 
 IconData activityIcon(ToolActivity activity) => switch (activity) {
@@ -236,6 +238,7 @@ class _ToolStepRowState extends State<ToolStepRow> {
     final running = isRunningTool(p);
     final failed = isFailedTool(p);
     final output = _output(p);
+    final images = SessionImageRef.listFrom(p['images']);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -303,6 +306,11 @@ class _ToolStepRowState extends State<ToolStepRow> {
           OutputBlock(
             text: output,
             command: activity == ToolActivity.commands ? summary : null,
+          ),
+        if (images.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 22, top: 2, bottom: 6),
+            child: SessionImages(images: images),
           ),
       ],
     );

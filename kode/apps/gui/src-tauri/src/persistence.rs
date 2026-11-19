@@ -99,6 +99,10 @@ pub struct PersistedState {
     /// 只影响 GUI / SpecOps console 的用户可见 UI;agent 生成文档仍按请求语言。
     #[serde(default)]
     pub locale: Option<String>,
+    /// 会话视图模式:`"tui"`(默认)/ `"view"`(dsh 等扩展视图)。
+    /// 重启后直接回到上次的模式;老文件没有 → None,前端按 tui 处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_view: Option<String>,
     /// 用户在 memory MCP 设置 banner 上点了"暂不提示"的 unix 秒时间戳。
     /// `None` = 从未点过 / 老文件未升级 → 启动时仍会触发 banner。
     /// 检测时若 binary 路径或 codebuddy 配置状态发生变化,我们会无视这个值
@@ -210,6 +214,7 @@ impl Default for PersistedState {
             config_path: None,
             theme: None,
             locale: None,
+            session_view: None,
             mcp_prompt_dismissed_at: None,
             kode_memory_prompt_enabled: None,
             memory_browse_state: None,
@@ -335,6 +340,9 @@ pub fn get_cwd_history(state: &PersistedState, bucket: &str) -> Vec<String> {
 pub struct PersistWriter {
     pending: Arc<Mutex<Option<PersistedState>>>,
     notify: Arc<Notify>,
+    /// Set once Kode starts quitting. From then on the tab list is frozen:
+    /// CLIs ending because Kode quits must not read as tabs the user closed.
+    quitting: std::sync::atomic::AtomicBool,
 }
 
 impl PersistWriter {
@@ -365,7 +373,7 @@ impl PersistWriter {
             }
         });
 
-        Self { pending, notify }
+        Self { pending, notify, quitting: std::sync::atomic::AtomicBool::new(false) }
     }
 
     /// 请求落盘。多次调用会被合并;最后一次的 state 胜出。
@@ -374,12 +382,40 @@ impl PersistWriter {
         self.notify.notify_one();
     }
 
-    /// 退出前同步 flush —— 调用方应在窗口关闭 handler 里调。
-    #[allow(dead_code)]
-    pub fn flush_sync(&self) {
-        let snap = self.pending.lock().take();
-        if let Some(s) = snap {
-            let _ = save_sync(&s);
+    /// 立即落盘一项改动,同时改写尚未落盘的快照,免得它稍后用旧值覆盖。
+    /// 用于必须熬过「改完马上退出」的设置(debounce 写在退出时不保证跑)。
+    pub fn update_now(&self, apply: impl Fn(&mut PersistedState)) -> std::io::Result<()> {
+        let mut pending = self.pending.lock();
+        if let Some(snapshot) = pending.as_mut() {
+            apply(snapshot);
+        }
+        let mut state = load();
+        state.version = SCHEMA_VERSION;
+        apply(&mut state);
+        save_sync(&state)
+    }
+
+    pub fn is_quitting(&self) -> bool {
+        self.quitting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Kode is quitting: write what is pending now and freeze the tab list, so
+    /// the next launch restores the tabs open when the user quit.
+    pub fn begin_quit(&self) {
+        if self.quitting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(state) = self.pending.lock().take() else { return };
+        if let Err(e) = save_sync(&state) {
+            tracing::warn!(error = %e, "state save on quit failed");
+        }
+        let shared = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(crate::workbench_state::save(&state))
+        });
+        match shared.join() {
+            Ok(Err(error)) => tracing::warn!(%error, "shared workbench state save on quit failed"),
+            Err(_) => tracing::warn!("shared workbench state save on quit panicked"),
+            Ok(Ok(())) => {}
         }
     }
 }
@@ -417,6 +453,7 @@ mod tests {
             config_path: Some("/Users/me/.config/kode/config.toml".into()),
             theme: Some("dark".into()),
             locale: Some("zh-CN".into()),
+            session_view: Some("view".into()),
             mcp_prompt_dismissed_at: Some(1_780_000_000),
             kode_memory_prompt_enabled: Some(false),
             memory_browse_state: None,
@@ -435,6 +472,7 @@ mod tests {
         assert_eq!(back.tabs[0].model.as_deref(), Some("claude-opus-4.7"));
         assert_eq!(back.tabs[0].permission_mode.as_deref(), Some("bypass"));
         assert_eq!(back.bridge_token.as_deref(), Some("deadbeef"));
+        assert_eq!(back.session_view.as_deref(), Some("view"));
         assert_eq!(
             back.session_titles.get("abc-123").map(String::as_str),
             Some("Pinned")

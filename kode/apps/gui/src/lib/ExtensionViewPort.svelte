@@ -61,7 +61,7 @@
     const next = fragment
     try {
       await extensionIpc.showView(target.extension, target.view.id, rect(), next === applied ? null : next)
-      if (mine !== claim) return
+      if (mine !== claim) return settleLate(mine)
       applied = next
       phase = 'ready'
       // Starting can take minutes; Kode's chrome may have collapsed around
@@ -77,6 +77,13 @@
   function hide() {
     if (claim && claim === latestClaim) void extensionIpc.hideViews(target.extension).catch(() => {})
     claim = 0
+  }
+
+  /** A show that lands after this port let go of the view (left the mode,
+   *  switched tabs) would leave it on screen over Kode; hide it again unless
+   *  another port has claimed it since. */
+  function settleLate(mine: number) {
+    if (mine === latestClaim) void extensionIpc.hideViews(target.extension).catch(() => {})
   }
 
   $effect(() => {
@@ -96,7 +103,10 @@
     cancelAnimationFrame(frame)
     frame = requestAnimationFrame(() => {
       if (host && claim && claim === latestClaim && phase === 'ready') {
-        void extensionIpc.showView(target.extension, target.view.id, rect(), null).catch(() => {})
+        const mine = claim
+        void extensionIpc.showView(target.extension, target.view.id, rect(), null)
+          .then(() => { if (mine !== claim) settleLate(mine) })
+          .catch(() => {})
       }
     })
   }
