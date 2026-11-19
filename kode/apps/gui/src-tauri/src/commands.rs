@@ -596,9 +596,16 @@ pub async fn spawn_session(
     state: State<'_, AppState>,
 ) -> Result<SpawnedSession, String> {
     let endpoint_id = endpoint_id.unwrap_or(EndpointId::Local);
-    if matches!(endpoint_id, EndpointId::Local) {
-        crate::shared_agents::refresh(&state).await?;
-    }
+    // Tabs saved under a shadowed built-in key (`builtin-codex`) relaunch as the
+    // native key; the returned backend_key migrates the tab.
+    let backend_key = if matches!(endpoint_id, EndpointId::Local) {
+        crate::shared_agents::refresh(&state)
+            .await?
+            .canonical_key(&backend_key)
+            .to_owned()
+    } else {
+        backend_key
+    };
     let transport = get_transport(&state, &endpoint_id)?;
 
     // cwd 解析仅对 Local endpoint 有意义。Remote 的 cwd 必须是 server 端绝对路径
@@ -1186,6 +1193,11 @@ pub async fn get_persisted_tabs() -> Vec<PersistedTabDto> {
 
 #[tauri::command]
 pub fn save_tabs(tabs: Vec<PersistedTabDto>, state: State<'_, AppState>) -> Result<(), String> {
+    // While quitting, tabs vanish because their CLIs end with Kode, not because
+    // the user closed them; keep the list as it was.
+    if state.persist.is_quitting() {
+        return Ok(());
+    }
     let bindings: Vec<_> = {
         let sessions = state.ctx.sessions.lock();
         tabs.iter().filter(|tab| !matches!(tab.endpoint_id,Some(EndpointId::Remote{..}))).filter_map(|tab| {
@@ -1275,6 +1287,29 @@ pub fn get_theme() -> String {
     crate::persistence::load()
         .theme
         .unwrap_or_else(|| "system".into())
+}
+
+// ============ Session view(TUI / dsh 视图模式持久化)============
+
+/// 读 state.json 的会话视图模式;空/None 时返回 "tui"。
+#[tauri::command]
+pub fn get_session_view() -> String {
+    crate::persistence::load()
+        .session_view
+        .unwrap_or_else(|| "tui".into())
+}
+
+/// 写 state.json 的会话视图模式。仅接受 "tui" / "view"。
+/// 同步落盘:切到 dsh 后马上退出,下次启动也要回到 dsh。
+#[tauri::command]
+pub fn set_session_view(mode: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !matches!(mode.as_str(), "tui" | "view") {
+        return Err(format!("invalid session view: {mode} (expected tui/view)"));
+    }
+    state
+        .persist
+        .update_now(|s| s.session_view = Some(mode.clone()))
+        .map_err(|e| format!("persist failed: {e}"))
 }
 
 // ============ Locale(全局 UI 语言持久化)============

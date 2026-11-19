@@ -381,6 +381,8 @@ export const ipc = {
     listen<SessionCreatedEvent>('session-created', (e) => cb(e.payload)),
   onSessionExited: (cb: (m: SessionExited) => void): Promise<UnlistenFn> =>
     listen<SessionExited>('session-exited', (e) => cb(e.payload)),
+  /** Kode is quitting; its CLIs are about to end with it. */
+  onAppQuitting: (cb: () => void): Promise<UnlistenFn> => listen('app-quitting', () => cb()),
   /** 需要用户操作的提示 — sidebar tab 应展示动效 */
   onSessionAttention: (cb: (m: SessionAttention) => void): Promise<UnlistenFn> =>
     listen<SessionAttention>('session-attention', (e) => cb(e.payload)),

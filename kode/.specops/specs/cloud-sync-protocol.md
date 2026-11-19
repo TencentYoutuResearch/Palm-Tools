@@ -217,6 +217,28 @@ The message then carries one line per file, `Attached file: <path>`, after
 the typed text. Phones parse those lines back out of the transcript and show
 their own preview copies, which they keep for 24 hours.
 
+## Transcript images
+
+Screenshots pasted on the desktop and images returned by tools stay inside
+the backend transcript (Claude `image` blocks, Codex `input_image` data URLs,
+CodeBuddy `input_image` blob files). Events never carry their bytes. The
+semantic tail (`kode-bridge::session_images`) stores each image once in
+`<user cache>/kode/session-images/<id>.<ext>`, where `id` is 32 hex chars of a
+SHA-256 content id, and adds `images: [{ id, mime, size }]` to the `message`
+(or the result `tool_use`) payload. A message may now have empty `text` when
+it only holds images. Only PNG, JPEG, GIF and WebP up to 50 MiB are kept;
+files older than 7 days are swept hourly when a new image is stored, and a
+replayed transcript stores them again.
+
+`GET /api/v1/images/:id?offset=` requires `sessions.content.read` and is
+forwarded as `setup.request` kind `image` with `{ id, offset }`; the center
+stores nothing. The desktop answers `{ id, mime, size, offset, data,
+complete }` with at most 1 MiB of decoded data per reply
+(`kode-relay-protocol::IMAGE_CHUNK_BYTES`), or `404 not_found` once the image
+is no longer cached. Phones read chunks from `offset = 0` until `complete`,
+keep their copy in the app cache for 7 days after the last view, and offer
+Save to Photos and Share from the full-screen viewer.
+
 ## Deployment
 
 `deploy/docker-compose.sync.yml` runs the Rust service behind Caddy. Caddy owns

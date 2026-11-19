@@ -79,7 +79,7 @@ pub fn build(cwd: &Path, backend_key: &str) -> String {
         ),
     };
     let project_path = cwd.to_string_lossy().to_string();
-    let (startup_search, discovery_note) = if backend_key == "cursor" {
+    let (startup_search, discovery_note) = if crate::runtime_context::backend_matches("cursor", backend_key) {
         (
             format!("memory_search(query=\"{scope}\", scope=\"{scope}\", top_k=20)"),
             "- Cursor 直接暴露 MCP tools；直接调用 memory_search / memory_propose，不需要 ToolSearch".to_string(),

@@ -28,7 +28,9 @@ use serde_json::{json, Value};
 pub fn run(event: Option<&str>) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
-    if std::env::var("KODE_BACKEND_KEY").is_ok_and(|backend| backend != "cursor") {
+    if std::env::var("KODE_BACKEND_KEY")
+        .is_ok_and(|backend| !crate::runtime_context::backend_matches("cursor", &backend))
+    {
         return Ok(());
     }
     let tab_id = std::env::var("KODE_SESSION_ID").ok();

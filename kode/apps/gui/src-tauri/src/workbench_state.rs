@@ -96,16 +96,18 @@ pub async fn load_tabs(fallback: &mut PersistedState) {
 }
 
 /// `/sessions` also lists every saved native conversation, which a CLI exit or
-/// tab close intentionally keeps. Restore only what was open at last save;
-/// without a saved snapshot (first run after migration) keep everything.
-fn opened_tabs<'a>(rows: &'a [Value], opened: Option<&Vec<Value>>) -> Vec<&'a Value> {
+/// tab close intentionally keeps. Restore only what was open at last save, in
+/// its order; without a saved snapshot (first run after migration) keep
+/// everything. A catalog row only enriches its open tab: the catalog hides
+/// conversations dsh archived (it retires its copy of a thread a terminal
+/// took over), and that must not drop a tab the user still had open.
+fn opened_tabs<'a>(rows: &'a [Value], opened: Option<&'a Vec<Value>>) -> Vec<&'a Value> {
     let Some(opened) = opened else { return rows.iter().collect() };
     let key = |row: &Value| {
         let endpoint = if row["endpoint_id"].is_null() || row["endpoint_id"]["kind"] == "local" { Value::Null } else { row["endpoint_id"]["id"].clone() };
         (endpoint.to_string(), row["backend_key"].to_string(), row["session_id"].to_string())
     };
-    let keys: std::collections::HashSet<_> = opened.iter().map(key).collect();
-    rows.iter().filter(|row| keys.contains(&key(row))).collect()
+    opened.iter().map(|tab| rows.iter().find(|row| key(row) == key(tab)).unwrap_or(tab)).collect()
 }
 pub async fn save(state: &PersistedState) -> anyhow::Result<()> {
     let Ok((client,url,token)) = connection().await else { return Ok(()) };
@@ -217,6 +219,19 @@ mod opened_tabs_tests {
         let ids: Vec<_> = opened_tabs(&rows, Some(&opened)).iter().map(|row| row["session_id"].as_str().unwrap().to_string() + "@" + row["backend_key"].as_str().unwrap()).collect();
         assert_eq!(ids, ["open@tclaude", "open@codex", "r1@codex"]);
         assert_eq!(opened_tabs(&rows, None).len(), 4);
+    }
+
+    #[test]
+    fn restore_keeps_open_tabs_the_catalog_hides() {
+        // dsh archived its copy of this thread, so the catalog leaves it out.
+        let rows = vec![json!({"backend_key":"kimi","session_id":"k1","endpoint_id":null,"title":"catalog title"})];
+        let opened = vec![
+            json!({"backend_key":"tcodex","session_id":"t1","endpoint_id":null,"title":"open"}),
+            json!({"backend_key":"kimi","session_id":"k1","endpoint_id":null,"title":"stale"}),
+        ];
+        let restored = opened_tabs(&rows, Some(&opened));
+        assert_eq!(restored.iter().map(|row| row["session_id"].as_str().unwrap()).collect::<Vec<_>>(), ["t1", "k1"]);
+        assert_eq!(restored[1]["title"], "catalog title");
     }
 }
 

@@ -318,6 +318,7 @@ pub fn build_router(state: RelayState) -> Router {
         .route("/api/v1/backends", get(setup::backends))
         .route("/api/v1/backends/:key/models", get(setup::models))
         .route("/api/v1/fs/list", get(setup::directories))
+        .route("/api/v1/images/:id", get(setup::image))
         .route(
             "/api/v1/attachments",
             post(setup::attachment).layer(DefaultBodyLimit::max(

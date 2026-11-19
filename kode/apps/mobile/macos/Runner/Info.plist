@@ -28,6 +28,8 @@
 	<string>MainMenu</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Kode uses the microphone to turn your voice into an editable session message.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Kode saves images from a session to your photo library when you ask it to.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Kode uses speech recognition to transcribe voice input in the session composer.</string>
 	<key>NSPrincipalClass</key>

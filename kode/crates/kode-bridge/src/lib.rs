@@ -42,6 +42,7 @@ pub mod hook_relay;
 pub mod mobile_setup;
 pub mod model_usage;
 pub mod semantic;
+pub mod session_images;
 mod session_relay;
 pub mod runtime;
 pub mod session_mcp;
@@ -794,6 +795,7 @@ pub fn build_router(ctx: Arc<Ctx>) -> Router {
         .route("/api/v1/fs/list", get(fs_list))
         .route("/api/v1/fs/edit", post(fs_edit))
         .route("/api/v1/fs/preview", get(fs_preview))
+        .route("/api/v1/images/:id", get(get_image))
         .route("/api/v1/git/status", get(git_status))
         .route("/api/v1/git/diff", get(git_diff))
         .route("/api/v1/git/commit-diff", get(git_commit_diff))
@@ -1004,8 +1006,11 @@ struct CreateSessionReq {
 
 async fn create_session(
     Extension(ctx): Extension<Arc<Ctx>>,
-    Json(req): Json<CreateSessionReq>,
+    Json(mut req): Json<CreateSessionReq>,
 ) -> Result<Json<SessionDto>, ApiError> {
+    if let Some(catalog) = ctx.agent_backends.read().as_ref() {
+        req.backend_key = catalog.canonical_key(&req.backend_key).to_owned();
+    }
     let mut backend = ctx.backend_for_session(&req.backend_key,req.resume_session_uuid.as_deref())
         .map_err(|error|ApiError::BadRequest(error.to_string()))?;
     // Append extra_args to the backend args (e.g. --add-dir for directory trust).
@@ -1255,6 +1260,22 @@ async fn kill_session(
 struct HistoryQuery {
     from: Option<u64>,
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ImageQuery {
+    #[serde(default)]
+    offset: u64,
+}
+
+/// One chunk of a transcript image, as the `image` setup request returns it.
+async fn get_image(Path(id): Path<String>, Query(q): Query<ImageQuery>) -> Response {
+    let (status, body) = session_images::read(json!({"id": id, "offset": q.offset})).await;
+    (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(body),
+    )
+        .into_response()
 }
 
 async fn get_history(

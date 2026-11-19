@@ -22,7 +22,7 @@ import {
 } from './app_events'
 import { pushToast } from './toast'
 import { currentTermTheme } from './terminal_settings'
-import { SessionMetadataBuffer, upsertSessionTab, persistableTabs, reconcileSharedSessionTabs } from './session_metadata'
+import { SessionMetadataBuffer, upsertSessionTab, persistableTabs, reconcileSharedSessionTabs, sessionTabToPersisted } from './session_metadata'
 import { shouldOfferTcodexExitRecovery } from './session_exit_guard'
 import { isWindowsUserAgent } from './platform'
 
@@ -161,6 +161,9 @@ export async function newTab(
 export async function closeTab(id: SessionId) {
   const tab = get(tabs).find((t) => t.id === id)
   await ipc.killSession(id, tab?.endpointId ?? null).catch(() => {})
+  // Closing by hand is the only way a session leaves the saved list.
+  exitedTabs.delete(id)
+  if (tab?.sessionId) for (const [key, row] of exitedTabs) if (row.session_id === tab.sessionId && row.backend_key === tab.backendKey) exitedTabs.delete(key)
   sessionExitRecovery.update((current) => current?.id === id ? null : current)
   sessionStatuses.delete(id)
   sessionMetadata.delete(id)
@@ -228,6 +231,9 @@ function upsertLocalTabFromDto(dto: {
 let metaUnlisten: (() => void) | null = null
 let createdUnlisten: (() => void) | null = null
 let exitUnlisten: (() => void) | null = null
+let quitUnlisten: (() => void) | null = null
+/** Kode is quitting: CLI exits from here on are not tabs closing. */
+let quitting = false
 let attentionUnlisten: (() => void) | null = null
 let attentionClearUnlisten: (() => void) | null = null
 let turnFinishedUnlisten: (() => void) | null = null
@@ -277,7 +283,13 @@ export async function startEventSubscriptions() {
     // title / model / session_id 变了要持久化(token / cost 不持久化,频繁变化没意义)
     if (m.title || m.model || m.session_id) schedulePersist()
   })
+  quitUnlisten = await ipc.onAppQuitting(() => { quitting = true })
   exitUnlisten = await ipc.onSessionExited((m) => {
+    // Quitting ends every CLI with Kode: those tabs were not closed and must
+    // come back next launch, so leave the list (and its saved copy) alone.
+    if (quitting) return
+    const ended = get(tabs).find((t) => t.id === m.id)
+    if (ended?.sessionId && !ended.sharedRuntime) exitedTabs.set(m.id, sessionTabToPersisted(ended))
     sessionStatuses.delete(m.id)
     sessionMetadata.delete(m.id)
     // 子进程退出 → tab 直接从列表消失(不展示 exited 状态)。复用 closeTab 的
@@ -430,6 +442,7 @@ export function stopEventSubscriptions() {
   metaUnlisten?.()
   createdUnlisten?.()
   exitUnlisten?.()
+  quitUnlisten?.()
   attentionUnlisten?.()
   attentionClearUnlisten?.()
   turnFinishedUnlisten?.()
@@ -438,6 +451,7 @@ export function stopEventSubscriptions() {
   metaUnlisten = null
   createdUnlisten = null
   exitUnlisten = null
+  quitUnlisten = null
   attentionUnlisten = null
   attentionClearUnlisten = null
   turnFinishedUnlisten = null
@@ -464,12 +478,18 @@ const PERSIST_FRONT_DEBOUNCE_MS = 200
  * 一起落盘,失败 tab 永远不会从 state.json 丢掉,直到下次 restore 成功或用户手动开同 session。
  */
 let restoring = false
+/**
+ * Tabs whose CLI ended on its own (exit, crash, failed resume, Kode quitting).
+ * They leave the screen but stay in the saved list, so the next launch resumes
+ * them: only closing a session by hand (`closeTab`) removes it from there.
+ */
+const exitedTabs = new Map<SessionId, PersistedTab>()
 /** 上次 restore 失败的 tab(原样保留持久化项),schedulePersist 会合并它们落盘。 */
 let failedRestoreTabs: PersistedTab[] = []
 
 export function schedulePersist() {
   // restore 期间跳过 —— 见 restoring 注释。失败 tab 不应被「成功 tab 子集」覆盖。
-  if (restoring) return
+  if (restoring || quitting) return
   if (persistTimer) clearTimeout(persistTimer)
   persistTimer = setTimeout(() => {
     persistTimer = null
@@ -477,9 +497,10 @@ export function schedulePersist() {
     // 合并 restore 失败 tab:它们不在 $tabs 里(没 spawn 成功),但 state.json 必须保留
     // 才能下次启动重试。按 session_id 去重(live 优先)。
     const liveSids = new Set(liveTabs.map((t) => t.session_id?.trim()).filter(Boolean) as string[])
+    const kept = [...failedRestoreTabs, ...exitedTabs.values()]
     const merged = dedupePersistedTabs([
       ...liveTabs,
-      ...failedRestoreTabs.filter((t) => t.session_id?.trim() && !liveSids.has(t.session_id!.trim())),
+      ...kept.filter((t) => t.session_id?.trim() && !liveSids.has(t.session_id!.trim())),
     ])
     ipc.saveTabs(merged).catch((e) => console.warn('saveTabs failed:', e))
   }, PERSIST_FRONT_DEBOUNCE_MS)
