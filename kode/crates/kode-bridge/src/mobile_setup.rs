@@ -16,6 +16,9 @@ pub async fn execute(ctx: Arc<Ctx>, kind: &str, payload: Value) -> (u16, Value) 
     if kind == kode_relay_protocol::SETUP_KIND_ATTACHMENT {
         return crate::attachments::receive(payload).await;
     }
+    if kind == kode_relay_protocol::SETUP_KIND_IMAGE {
+        return crate::session_images::read(payload).await;
+    }
     match execute_inner(ctx, kind, payload).await {
         Ok(value) => (200, value),
         Err(error) => {

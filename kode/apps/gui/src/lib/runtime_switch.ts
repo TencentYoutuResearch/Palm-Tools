@@ -27,11 +27,28 @@ type RuntimeRow = {
 type RuntimeSnapshot = { sessions: RuntimeRow[]; runtimes: Record<string, boolean> }
 
 export type UiMode = 'tui' | 'view'
-const MODE_KEY = 'kode.sessionView'
-function storedMode(): UiMode {
-  try { return localStorage.getItem(MODE_KEY) === 'view' ? 'view' : 'tui' } catch { return 'tui' }
+/** Where builds before state.json kept the mode; read once to carry it over. */
+const LEGACY_MODE_KEY = 'kode.sessionView'
+export const uiMode = writable<UiMode>('tui')
+
+/**
+ * Restore the last session view mode before conversations come back, so a
+ * Kode quit in dsh reopens in dsh. The backend keeps it in state.json and
+ * writes it at once: WebKit's localStorage may not reach disk when Kode quits
+ * right after a switch.
+ */
+export async function loadUiMode(): Promise<void> {
+  let stored = await invoke<string>('get_session_view').catch(() => 'tui')
+  try {
+    const legacy = localStorage.getItem(LEGACY_MODE_KEY)
+    if (legacy === 'view' && stored !== 'view') {
+      await invoke('set_session_view', { mode: 'view' })
+      stored = 'view'
+    }
+    localStorage.removeItem(LEGACY_MODE_KEY)
+  } catch { /* best effort */ }
+  uiMode.set(stored === 'view' ? 'view' : 'tui')
 }
-export const uiMode = writable<UiMode>(storedMode())
 
 export type SwitchStep = 'start' | 'stop' | 'import' | 'open' | 'resume'
 export type SwitchProgress = {
@@ -358,7 +375,7 @@ export function startModeWatch(failure: (tab: TabInfo, message: string) => void)
 
 /** Switch every conversation to `mode`. Resolves once the settled ones moved. */
 export async function setUiMode(mode: UiMode): Promise<void> {
-  try { localStorage.setItem(MODE_KEY, mode) } catch { /* Session-only preference still works. */ }
+  void invoke('set_session_view', { mode }).catch((error) => console.warn('session view not saved:', error))
   const changed = get(uiMode) !== mode
   uiMode.set(mode)
   if (changed) migrationFailures.set({})

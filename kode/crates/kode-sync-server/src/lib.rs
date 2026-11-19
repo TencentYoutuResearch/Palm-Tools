@@ -401,6 +401,7 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/api/v1/backends", get(mobile_setup::backends))
         .route("/api/v1/backends/:key/models", get(mobile_setup::models))
         .route("/api/v1/fs/list", get(mobile_setup::directories))
+        .route("/api/v1/images/:id", get(mobile_setup::image))
         .route(
             "/api/v1/attachments",
             post(mobile_setup::attachment).layer(axum::extract::DefaultBodyLimit::max(

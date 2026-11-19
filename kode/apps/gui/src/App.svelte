@@ -106,7 +106,7 @@
   import { extensionIpc, type ExtensionViewAction } from './lib/ipc'
   import ExtensionViewPort from './lib/ExtensionViewPort.svelte'
   import { autostartRuntimeHosts, sessionViews, startExtensionWatch, viewForRuntime } from './lib/extensions'
-  import { migrationFailures, movableToTui, movableToView, nativeKey, retryMigration, setUiMode, startModeWatch, switchProgress, uiMode, type UiMode } from './lib/runtime_switch'
+  import { loadUiMode, migrationFailures, movableToTui, movableToView, nativeKey, retryMigration, setUiMode, startModeWatch, switchProgress, uiMode, type UiMode } from './lib/runtime_switch'
   import SwitchProgressOverlay from './lib/SwitchProgressOverlay.svelte'
   import { toasts } from './lib/toast'
   import { floatingOverlays } from './lib/overlay_guard'
@@ -1358,12 +1358,43 @@
     $uiMode === 'view' && !!dshView && extPhase === 'ready' && !chooserOpen && !deviceView && !$switchProgress &&
       (!!$activeTab?.sharedRuntime || viewHome),
   )
+  // TUI mode never shows the view; a late show must not leave it over Kode.
+  $effect(() => {
+    if ($uiMode === 'tui') void extensionIpc.hideViews().catch(() => {})
+  })
+  /// A mode switch in flight. Kode stays covered and inert until the other
+  /// side is ready (conversations moved, the view's page loaded), so nothing
+  /// gets clicked half-way through.
+  let modeTarget = $state<UiMode | null>(null)
+  let modeMoving = $state(false)
+  let modeTimer: ReturnType<typeof setTimeout> | null = null
+  function coverModeSwitch(mode: UiMode) {
+    // The bound phase outlives the port; a fresh entry waits for a fresh show.
+    if (mode === 'view') extPhase = 'starting'
+    modeTarget = mode
+    if (modeTimer) clearTimeout(modeTimer)
+    // Never strand the user behind the cover.
+    modeTimer = setTimeout(() => (modeTarget = null), 120_000)
+  }
+  $effect(() => {
+    if (!modeTarget || modeMoving || $switchProgress) return
+    // In the view mode a port shows the view; without one there is nothing to wait for.
+    const port = viewHome || (!!$activeTab?.sharedRuntime && !chooserOpen && !deviceView)
+    if (modeTarget === 'view' && dshView && port && extPhase === 'starting') return
+    modeTarget = null
+    if (modeTimer) clearTimeout(modeTimer)
+    modeTimer = null
+  })
   function switchMode(mode: UiMode) {
-    if ($switchProgress) return
+    if ($switchProgress || modeTarget) return
     terminalPeek = null
-    void setUiMode(mode).catch((e) =>
-      pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail: e instanceof Error ? e.message : String(e), durationMs: 8000 }),
-    )
+    coverModeSwitch(mode)
+    modeMoving = true
+    void setUiMode(mode)
+      .catch((e) =>
+        pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail: e instanceof Error ? e.message : String(e), durationMs: 8000 }),
+      )
+      .finally(() => (modeMoving = false))
   }
   function migrationFailed(tab: TabInfo, message: string) {
     pushToast({ severity: 'error', title: tr('extensions.switch.moveFailed', { title: tab.title || tab.backendKey }), detail: message, durationMs: 8000 })
@@ -1587,6 +1618,8 @@
       } catch (e) {
         console.warn('getTheme failed:', e)
       }
+      // Before tabs come back: a Kode quit in dsh reopens straight in dsh.
+      await loadUiMode()
       mql = window.matchMedia('(prefers-color-scheme: dark)')
       systemPrefersDark = mql.matches
       mql.addEventListener('change', onSystemThemeChange)
@@ -1685,6 +1718,8 @@
       }
       // After restore: restored tabs follow the session view mode too.
       startModeWatch(migrationFailed)
+      // Reopening in the view: cover Kode until the view is up.
+      if ($uiMode === 'view') coverModeSwitch('view')
       // 没有上次状态时再展示 BackendChooser；恢复不需要额外确认。
     } catch (e) {
       bootError = String(e)
@@ -2387,7 +2422,7 @@
 
 <div
   class="root"
-  inert={bootLoading}
+  inert={bootLoading || !!modeTarget}
   class:windows={isWindows}
   class:sb-compact={sidebarMode === 'compact'}
   class:sb-hidden={sidebarMode === 'hidden'}
@@ -2785,7 +2820,7 @@
         <ExtensionViewPort target={dshView} sessionRef={undefined} visible={true} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} />
       </div>
     {/if}
-    {#if $switchProgress}
+    {#if $switchProgress && !modeTarget}
       <SwitchProgressOverlay progress={$switchProgress} />
     {/if}
     {#if deviceView}
@@ -2896,6 +2931,19 @@
     <div class="startup-indicator" aria-hidden="true"></div>
     <span role="status">{tr('app.restoringSessions')}</span>
     <StartupProgress steps={bootSteps} current={bootStep} detail={bootDetail} />
+  </div>
+{/if}
+
+{#if modeTarget && !bootLoading}
+  <div class="mode-cover" role="status" aria-live="polite">
+    {#if $switchProgress}
+      <SwitchProgressOverlay progress={$switchProgress} />
+    {:else}
+      <div class="mode-cover-card">
+        <div class="startup-indicator" aria-hidden="true"></div>
+        <span>{modeTarget === 'view' ? tr('extensions.progress.toView', { name: dshView?.view.title ?? 'dsh' }) : tr('extensions.progress.toTui')}</span>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -3120,6 +3168,24 @@
     border-top-color: var(--acc);
     border-radius: 50%;
     animation: startup-spin 900ms linear infinite;
+  }
+  .mode-cover {
+    position: fixed;
+    inset: 0;
+    z-index: 2999;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--bg-base) 82%, transparent);
+    backdrop-filter: blur(2px);
+    cursor: wait;
+  }
+  .mode-cover-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    color: var(--fg-secondary);
+    font: var(--fw-med) var(--fs-md) var(--font-ui);
   }
   @keyframes startup-spin {
     to { transform: rotate(360deg); }

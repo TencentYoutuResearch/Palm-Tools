@@ -42,6 +42,10 @@
   disabled: true
 - id: ui-agent-preset
   disabled: true
+# Kode names the sidebar brand itself (agent-client.js); the official one
+# would take the slot instead, since the later of two occupants wins.
+- id: ui-brand-official
+  disabled: true
 # Keep the official sidebar chrome with a private top-level Chromium page provider.
 - id: ui-sidebar-browser
   disabled: true

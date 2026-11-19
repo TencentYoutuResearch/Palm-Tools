@@ -73,6 +73,12 @@ async fn setup_requests_are_scoped_and_creates_are_not_replayed() {
             json!({"path":"/workspace","show_hidden":true}),
             json!({"path":"/workspace","parent":"/","entries":[]}),
         ),
+        (
+            "/api/v1/images/0123456789abcdef0123456789abcdef?offset=4",
+            "image",
+            json!({"id":"0123456789abcdef0123456789abcdef","offset":4}),
+            json!({"id":"0123456789abcdef0123456789abcdef","mime":"image/png","size":5,"offset":4,"data":"YQ==","complete":true}),
+        ),
     ] {
         let req = client.get(format!("{origin}{path}")).bearer_auth("desktop");
         let call = tokio::spawn(async move { req.send().await.unwrap() });

@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:archive/archive_io.dart';
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../protocol/attachments.dart';
 import '../../storage/attachment_previews.dart';
@@ -230,12 +232,7 @@ void openLocalAttachment(
 }) {
   final kind = attachmentKindOf(name);
   if (kind == AttachmentKind.image) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        fullscreenDialog: true,
-        builder: (_) => _ImageViewer(path: path, name: name),
-      ),
-    );
+    openImageViewer(context, path: path, name: name);
     return;
   }
   showModalBottomSheet<void>(
@@ -390,11 +387,56 @@ class _ZipListingState extends State<_ZipListing> {
   }
 }
 
-class _ImageViewer extends StatelessWidget {
+/// Opens [path] full screen with zoom, Save to Photos and Share.
+void openImageViewer(
+  BuildContext context, {
+  required String path,
+  required String name,
+}) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (_) => ImageViewerScreen(path: path, name: name),
+    ),
+  );
+}
+
+class ImageViewerScreen extends StatelessWidget {
   final String path;
   final String name;
 
-  const _ImageViewer({required this.path, required this.name});
+  const ImageViewerScreen({super.key, required this.path, required this.name});
+
+  Future<void> _save(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (!await Gal.hasPermission() && !await Gal.requestPermission()) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Allow Kode to add photos in Settings to save.'),
+          ),
+        );
+        return;
+      }
+      await Gal.putImage(path);
+      messenger.showSnackBar(const SnackBar(content: Text('Saved to Photos')));
+    } on GalException catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text(error.type.message)));
+    }
+  }
+
+  Future<void> _share(BuildContext context) async {
+    // iPad presents the share sheet as a popover anchored to the button.
+    final box = context.findRenderObject() as RenderBox?;
+    await SharePlus.instance.share(
+      ShareParams(
+        files: [XFile(path)],
+        sharePositionOrigin: box == null
+            ? null
+            : box.localToGlobal(Offset.zero) & box.size,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -404,6 +446,20 @@ class _ImageViewer extends StatelessWidget {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         title: Text(name, overflow: TextOverflow.ellipsis),
+        actions: [
+          Builder(
+            builder: (context) => IconButton(
+              tooltip: 'Share',
+              icon: Icon(Icons.adaptive.share),
+              onPressed: () => _share(context),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Save to Photos',
+            icon: const Icon(Icons.download_rounded),
+            onPressed: () => _save(context),
+          ),
+        ],
       ),
       body: InteractiveViewer(
         maxScale: 6,

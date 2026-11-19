@@ -355,6 +355,7 @@ async fn every_device_route_hides_foreign_devices() {
         (Method::GET, "/api/v1/backends", None),
         (Method::GET, "/api/v1/backends/claude/models", None),
         (Method::GET, "/api/v1/fs/list", None),
+        (Method::GET, "/api/v1/images/0123456789abcdef0123456789abcdef", None),
         (
             Method::POST,
             "/api/v1/attachments",
@@ -522,6 +523,43 @@ async fn attachment_chunks_reach_the_desktop_and_oversize_is_rejected() {
     let (status, body) = upload.await.unwrap();
     assert_eq!(status, 200);
     assert_eq!(body["path"], "/tmp/kode-attachments/upload-1/a.png");
+}
+
+#[tokio::test]
+async fn image_chunks_are_read_from_the_desktop() {
+    let h = harness().await;
+    let mut agent = h.agent(ALICE, "desk").await;
+    let mut phone = h.phone(ALICE_PHONE, "desk").await;
+    agent.expect_gate(true, json!([session(4, "files")])).await;
+    let _ = next_json(&mut phone).await;
+
+    let read = tokio::spawn({
+        let base = h.base.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .get(format!("{base}/api/v1/images/abc123?offset=7"))
+                .bearer_auth(ALICE_PHONE)
+                .header(DEVICE_HEADER, "desk")
+                .send()
+                .await
+                .unwrap();
+            (
+                response.status().as_u16(),
+                response.json::<Value>().await.unwrap(),
+            )
+        }
+    });
+    let request = agent.frame().await;
+    assert_eq!(request["type"], "setup.request");
+    assert_eq!(request["kind"], kode_relay_protocol::SETUP_KIND_IMAGE);
+    assert_eq!(request["payload"], json!({"id": "abc123", "offset": 7}));
+    agent
+        .send(json!({"type": "setup.result", "request_id": request["request_id"], "boot_id": "boot-1",
+            "status": 200, "body": {"id": "abc123", "data": "YQ==", "complete": true}}))
+        .await;
+    let (status, body) = read.await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body["data"], "YQ==");
 }
 
 #[tokio::test]
