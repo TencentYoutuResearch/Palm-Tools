@@ -2,5 +2,5 @@
 # Project-pinned toolchain. rustup will fetch this on demand without
 # changing the user's global default.
 # Requires edition 2024 stabilization (Rust 1.85+).
-channel = "1.89"
+channel = "1.90"
 components = ["rustfmt", "clippy"]
