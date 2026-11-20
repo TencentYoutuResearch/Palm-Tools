@@ -17,7 +17,11 @@ async fn main() -> Result<()> {
         bail!("missing tunnel configuration")
     };
     let config: SshConfig = serde_json::from_str(&line?)?;
-    let mut tunnel = SshTunnel::start(&config).await?;
+    let mut tunnel = if std::env::args().any(|arg| arg == "--use-config-port") {
+        SshTunnel::start_with_config_port(&config).await?
+    } else {
+        SshTunnel::start(&config).await?
+    };
     println!("{}", serde_json::json!({ "url": tunnel.url }));
     std::io::stdout().flush()?;
     // A parent crash closes stdin. No detached forwarding process survives it.

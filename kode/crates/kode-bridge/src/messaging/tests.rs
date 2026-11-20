@@ -1206,6 +1206,12 @@ async fn usage_history_requires_admin_and_valid_period_and_timezone() {
         assert_eq!(client.get(format!("{url}?{query}")).bearer_auth("admin-test").send().await.unwrap().status(), 400);
     }
     assert_eq!(client.post(format!("{url}?period=today")).bearer_auth("admin-test").send().await.unwrap().status(), 405);
+    let endpoints = format!("{}/api/v1/messaging/workbench/catalog?view=endpoints", server.url);
+    assert_eq!(client.get(&endpoints).send().await.unwrap().status(), 401);
+    assert_eq!(client.get(&endpoints).bearer_auth(register(&server, "endpoints-session").await.owner_token).send().await.unwrap().status(), 403);
+    let body: Value = client.get(&endpoints).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert!(body["endpoints"].is_array());
+    assert!(body.get("tabs").is_none());
 }
 
 #[tokio::test]

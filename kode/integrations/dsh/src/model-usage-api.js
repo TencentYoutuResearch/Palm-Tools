@@ -1,4 +1,6 @@
-/** Owner-only access to the existing CLI history aggregator on the selected Host.
+import { collectDeviceUsage } from './model-usage-devices.js'
+
+/** Owner-only access to CLI history on this host or across connected devices.
  * Keep credentials server-side and coalesce scans from multiple open chat views. */
 export function registerModelUsageApi(ctx, backend) {
   const cache = new Map()
@@ -21,18 +23,22 @@ export function registerModelUsageApi(ctx, backend) {
     if (requestedStart !== null) since = Number(requestedStart)
     else if (period !== 'all') since = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), period === 'month' ? 1 : local.getUTCDate()) - offset * 60000
     if (since !== undefined && since > until) return send(400, { error: 'Usage start must not exceed end time' })
-    const key = `${period}:${offset}:${since ?? ''}:${requestedEnd ?? ''}`
+    const devices = url.searchParams.get('scope') === 'devices'
+    const key = `${devices}:${period}:${offset}:${since ?? ''}:${requestedEnd ?? ''}`
     try {
       let entry = cache.get(key)
       if (!entry || entry.expires < Date.now()) {
         if (cache.size >= 24) cache.delete(cache.keys().next().value)
-        entry = { expires: Date.now() + 15000 }
-        entry.promise = backend.call(`/api/v1/messaging/model-usage?period=${period}&timezone_offset_minutes=${offset}${since === undefined ? '' : `&since_ms=${since}`}&until_ms=${until}`).then(snapshot => {
+        entry = { expires: Infinity }
+        const query = new URLSearchParams({ period, timezone_offset_minutes: offset, until_ms: until })
+        if (since !== undefined) query.set('since_ms', since)
+        const local = backend.call(`/api/v1/messaging/model-usage?${query}`).then(snapshot => {
           if (requestedEnd !== null && snapshot.until_ms !== until) throw Object.assign(new Error('Usage range unsupported'), { code: 'usage-range-unsupported' })
           return { ...snapshot, until_ms: until }
         })
+        entry.promise = devices ? collectDeviceUsage(backend, ctx.get?.('kodeProjectHosts'), query, requestedEnd !== null, local) : local
         cache.set(key, entry)
-        entry.promise.catch(() => { if (cache.get(key) === entry) cache.delete(key) })
+        entry.promise.then(() => { entry.expires = Date.now() + 15000 }, () => { if (cache.get(key) === entry) cache.delete(key) })
       }
       return send(200, await entry.promise)
     } catch (error) {

@@ -75,6 +75,7 @@ test('SSH portal isolates authentication, preserves streams, rejects CSRF, and c
     if (new URL(req.url, 'http://localhost').pathname === NATIVE_SESSIONS_PATH) return nativeRoute.handler(req, res)
     if (req.headers.cookie !== 'upstream=owner') { res.writeHead(401); res.end(); return }
     if (req.url === '/api/kode/project-hosts') { res.end('{}'); return }
+    if (req.url === '/api/kode/model-usage?period=today') { res.end('{"period":"today","totals":{"total_tokens":10}}'); return }
     if (req.url === '/api/kode/host-directory') {
       let body=''; for await (const chunk of req) body+=chunk
       upstreamRequests.at(-1).body=JSON.parse(body)
@@ -90,6 +91,8 @@ test('SSH portal isolates authentication, preserves streams, rejects CSRF, and c
   t.after(() => manager.close())
   const [portal, same] = await Promise.all([manager.connect('build'), manager.connect('build')])
   assert.equal(portal, same); assert.equal(calls, 1)
+  assert.deepEqual(await portal.usage(new URLSearchParams({ period: 'today' })), { period: 'today', totals: { total_tokens: 10 } })
+  assert.equal(upstreamRequests.at(-1).cookie, 'upstream=owner')
   assert.equal((await fetch(portal.origin)).status, 401)
   portal.tickets.set('one-use', Date.now() + 10000)
   const login = await fetch(`${portal.origin}/?kode_ticket=one-use`, { redirect: 'manual' })

@@ -236,7 +236,15 @@ async fn workbench_sessions(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result
     admin(&hub,&h)?;
     Ok(Json(super::session_catalog::federated(hub).await?))
 }
-async fn workbench_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+#[derive(Deserialize)]
+struct WorkbenchCatalogQuery {
+    view: Option<String>,
+}
+async fn workbench_catalog(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Query(query): Query<WorkbenchCatalogQuery>,
+) -> Result<Json<serde_json::Value>> {
     admin(&hub, &h)?;
     let state_path = std::env::var_os("KODE_GUI_STATE_PATH").map(std::path::PathBuf::from)
         .or_else(|| dirs::config_dir().map(|path| path.join("kode/state.json")));
@@ -247,6 +255,16 @@ async fn workbench_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<
             Err(error) => return Err(Error(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot read Kode saved state: {error}"))),
         }, None => serde_json::json!({}),
     };
+    if query.view.as_deref() == Some("endpoints") {
+        // GUI adds and removes endpoints in state.json before the open-tab
+        // snapshot is replicated. Use that live list when present.
+        let endpoints = match state.get("endpoints") {
+            Some(rows) => rows.clone(),
+            None => hub.store.document("session-index")?
+                .pointer("/value/gui/endpoints").cloned().unwrap_or_default(),
+        };
+        return Ok(Json(json!({"endpoints": endpoints.as_array().map(Vec::as_slice).unwrap_or_default()})));
+    }
     let document = hub.store.document("session-index")?;
     if let Some(gui) = document.pointer("/value/gui").and_then(|value| value.as_object()) {
         if let Some(state) = state.as_object_mut() { for (key, value) in gui { state.insert(key.clone(), value.clone()); } }

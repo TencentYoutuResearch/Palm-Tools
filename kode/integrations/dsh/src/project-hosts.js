@@ -33,7 +33,8 @@ export function validateHost(input, previous) {
   return { id: input.id || randomUUID(), name, host, port, remote_port: Number(url.port || 80), token: url.searchParams.get('token'), ...((input.configFile ?? previous?.config_file) ? { config_file: String(input.configFile ?? previous.config_file) } : {}), ...(!accessUrl && previous?.managed ? { managed: true, node_id: previous.node_id } : {}) }
 }
 export async function openKodeTunnel(command, host) {
-  const child = spawn(command, [], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
+  const args = host.use_config_port ? ['--use-config-port'] : []
+  const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
   let errorText = ''
   child.stderr.on('data', chunk => { errorText = (errorText + chunk).slice(-2048) })
   child.stdin.on('error', () => {})
@@ -277,11 +278,18 @@ export class ProjectHosts {
     if (this.pending.has(id)) return this.pending.get(id)
     const task = this.createPortal(id).finally(() => this.pending.delete(id)); this.pending.set(id, task); return task
   }
+  async usageHosts() {
+    if (this.document) await this.load()
+    return this.hosts.slice()
+  }
+  async openTunnel(host) {
+    const command = this.config.sshTunnelCommand ?? await resolveBundledSshTunnel() ?? 'kode-ssh-tunnel'
+    return this.tunnel(command, host)
+  }
   async createPortal(id) {
     const host = this.hosts.find(row => row.id === id)
     if (!host) throw new Error('远端主机不存在。')
-    const command = this.config.sshTunnelCommand ?? await resolveBundledSshTunnel() ?? 'kode-ssh-tunnel'
-    const tunnel = await this.tunnel(command, host)
+    const tunnel = await this.openTunnel(host)
     let server
     try {
       const login = await fetch(`${tunnel.url}/?token=${encodeURIComponent(host.token)}`, { redirect: 'manual', signal: AbortSignal.timeout(10000) })
@@ -340,7 +348,11 @@ export class ProjectHosts {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
       origin = `http://127.0.0.1:${server.address().port}`
       const sockets = new Set(); server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)) })
-      const portal = { origin, tickets, forward, upgrade, importSession: async tab => {
+      const portal = { origin, tickets, forward, upgrade, usage: async query => {
+        const response = await fetch(`${tunnel.url}/api/kode/model-usage?${query}`, { headers: { cookie }, redirect: 'error', signal: AbortSignal.timeout(12000) })
+        if (!response.ok) throw new Error('Remote usage unavailable')
+        return response.json()
+      }, importSession: async tab => {
         const response = await fetch(`${tunnel.url}/api/kode/session-import`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(tab), signal: AbortSignal.timeout(60000) })
         const value = await response.json(); if (!response.ok) throw new Error(value.error ?? 'Cannot import saved session'); return value
       }, createSession: async (input, signal) => {
