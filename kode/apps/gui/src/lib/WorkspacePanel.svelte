@@ -5,7 +5,7 @@
   import { workspaceFiles, type WorkspaceFileEdit } from './ipc'
   import { workspaceDropTarget, type WorkspaceDrop } from './workspace_drop'
   import { workspaceFileDrag } from './workspace_drag'
-  import { absoluteDroppedFilePaths } from './file_drop'
+  import { htmlDroppedPaths } from './file_drop'
   import { open } from '@tauri-apps/plugin-dialog'
   import { currentLocale, t } from './i18n'
   import { renderWorkspaceMarkdown, workspaceDiagrams } from './workspace_markdown'
@@ -253,15 +253,7 @@
     if (!raw) {
       if (!data) return
       const target = (event.target as HTMLElement).closest<HTMLElement>('[data-drop-directory]')?.dataset.dropDirectory ?? cwd
-      receiveFileDrop({
-        paths: absoluteDroppedFilePaths(
-          data.files as FileList & { [index: number]: File & { path?: string } },
-          data.getData('text/uri-list'),
-          data.getData('text/plain'),
-        ),
-        directory: target,
-        external: true,
-      })
+      void htmlDroppedPaths(data).then(paths => receiveFileDrop({ paths, directory: target, external: true }))
       return
     }
     try {

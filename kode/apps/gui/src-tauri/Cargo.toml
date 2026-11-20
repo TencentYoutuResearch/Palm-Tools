@@ -73,8 +73,8 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 # objc2-foundation 是 Tauri 自身已经传递的依赖,不增加体积。
 # 注意此 [target...] 块必须放最后,否则后续顶层依赖会被吸进 macOS-only。
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
-objc2-app-kit = { version = "0.3", features = ["NSGraphics", "NSScreen", "NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSUserDefaults"] }
+objc2-app-kit = { version = "0.3", features = ["NSGraphics", "NSPasteboard", "NSPasteboardItem", "NSScreen", "NSWindow"] }
 core-graphics = "0.25"
 
 [features]
