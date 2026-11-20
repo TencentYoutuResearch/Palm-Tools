@@ -6,7 +6,7 @@
 //! with its owner's account and uploads only while a phone is viewing it.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -1983,8 +1983,50 @@ pub fn session_snapshots(ctx: &crate::Ctx) -> Vec<Value> {
                         || s["dto"]["owner_alive"] == true)
             }),
     );
+    let mut snapshots = dedupe_session_snapshots(snapshots);
     project_mobile_workspaces(ctx, &mut snapshots);
     snapshots
+}
+
+fn snapshot_rank(snapshot: &Value) -> (u8, u8, u64, u64) {
+    let local_id = snapshot["local_id"].as_u64().unwrap_or(0);
+    (
+        u8::from(local_id < (1 << 40)),
+        u8::from(snapshot["dto"]["owner_alive"] == true),
+        snapshot["dto"]["native_process_id"].as_u64().unwrap_or(0),
+        local_id,
+    )
+}
+
+fn dedupe_session_snapshots(snapshots: Vec<Value>) -> Vec<Value> {
+    let mut slots: Vec<_> = snapshots.into_iter().map(Some).collect();
+    let mut canonical = HashMap::<String, usize>::new();
+    for index in 0..slots.len() {
+        let Some(snapshot) = slots[index].as_ref() else {
+            continue;
+        };
+        let Some(session_uuid) = snapshot["dto"]["session_uuid"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let session_uuid = session_uuid.to_string();
+        let Some(previous) = canonical.get(&session_uuid).copied() else {
+            canonical.insert(session_uuid, index);
+            continue;
+        };
+        let replace = snapshot_rank(snapshot)
+            > slots[previous].as_ref().map(snapshot_rank).unwrap_or_default();
+        if replace {
+            slots[previous] = None;
+            canonical.insert(session_uuid, index);
+        } else {
+            slots[index] = None;
+        }
+    }
+    slots.into_iter().flatten().collect()
 }
 
 fn project_mobile_workspaces(ctx: &crate::Ctx, snapshots: &mut [Value]) {
@@ -2562,7 +2604,21 @@ mod tests {
         assert_eq!(snapshot_session_ids(&sessions), HashSet::from([7, 9]));
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn shared_runtime_snapshots_dedupe_stable_session_identity_only() {
+        let snapshots = vec![
+            json!({"local_id": (1u64 << 40) + 17, "dto": {"runtime": "gui", "owner_alive": true, "native_process_id": 10, "session_uuid": "same"}}),
+            json!({"local_id": (1u64 << 40) + 24, "dto": {"runtime": "gui", "owner_alive": true, "native_process_id": 10, "session_uuid": "same"}}),
+            json!({"local_id": (1u64 << 40) + 25, "dto": {"runtime": "gui", "owner_alive": true, "native_process_id": 10, "session_uuid": null, "title": "same title"}}),
+            json!({"local_id": (1u64 << 40) + 26, "dto": {"runtime": "gui", "owner_alive": true, "native_process_id": 10, "session_uuid": null, "title": "same title"}}),
+        ];
+        let deduped = dedupe_session_snapshots(snapshots);
+        assert_eq!(deduped.len(), 3);
+        assert_eq!(deduped[0]["local_id"], (1u64 << 40) + 24);
+        assert_eq!(deduped[1]["local_id"], (1u64 << 40) + 25);
+        assert_eq!(deduped[2]["local_id"], (1u64 << 40) + 26);
+    }
+
     #[tokio::test]
     async fn cloud_excludes_dead_gui_owners_but_keeps_offline_dsh_history() {
         let dir = tempfile::tempdir().unwrap();

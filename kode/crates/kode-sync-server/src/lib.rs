@@ -1359,12 +1359,53 @@ fn handle_agent_frame(
     Ok(())
 }
 
+fn snapshot_rank(session: &AgentSession) -> (u8, u8, u64, u64) {
+    (
+        u8::from(session.local_id < (1 << 40)),
+        u8::from(session.dto["owner_alive"] == true),
+        session.dto["native_process_id"].as_u64().unwrap_or(0),
+        session.local_id,
+    )
+}
+
+fn canonical_session_snapshots(sessions: Vec<AgentSession>) -> Vec<AgentSession> {
+    let mut slots: Vec<_> = sessions.into_iter().map(Some).collect();
+    let mut canonical = HashMap::<String, usize>::new();
+    for index in 0..slots.len() {
+        let Some(session) = slots[index].as_ref() else {
+            continue;
+        };
+        let Some(session_uuid) = session.dto["session_uuid"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let session_uuid = session_uuid.to_string();
+        let Some(previous) = canonical.get(&session_uuid).copied() else {
+            canonical.insert(session_uuid, index);
+            continue;
+        };
+        let replace = snapshot_rank(session)
+            > slots[previous].as_ref().map(snapshot_rank).unwrap_or_default();
+        if replace {
+            slots[previous] = None;
+            canonical.insert(session_uuid, index);
+        } else {
+            slots[index] = None;
+        }
+    }
+    slots.into_iter().flatten().collect()
+}
+
 fn sync_session_snapshot(
     state: &ServerState,
     device_id: &str,
     boot_id: &str,
     sessions: Vec<AgentSession>,
 ) -> Result<(), ApiError> {
+    let sessions = canonical_session_snapshots(sessions);
     let mut created = Vec::new();
     let mut updated = Vec::new();
     let mut vanished = Vec::new();
@@ -2636,6 +2677,99 @@ mod tests {
         let stored:String=state.inner.db.lock().query_row("SELECT dto_json FROM sessions WHERE id=?1",[update.session_id],|row|row.get(0)).unwrap();
         let stored:Value=serde_json::from_str(&stored).unwrap();
         assert_eq!(stored["title"],"Live runtime update");assert_eq!(stored["tokens"]["total"],99);
+    }
+
+    #[test]
+    fn duplicate_shared_runtime_identity_keeps_one_active_row() {
+        let (_dir, state) = state();
+        state
+            .inner
+            .db
+            .lock()
+            .execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES('d','i','desktop','x',1,1)",
+                [],
+            )
+            .unwrap();
+        let local_ids = [(1u64 << 40) + 17, (1u64 << 40) + 20, (1u64 << 40) + 24];
+        {
+            let db = state.inner.db.lock();
+            for local_id in local_ids {
+                db.execute(
+                    "INSERT INTO sessions(device_id,boot_id,local_id,dto_json,updated_at)
+                     VALUES('d','boot',?1,?2,1)",
+                    params![
+                        local_id as i64,
+                        json!({
+                            "id": 0,
+                            "runtime": "gui",
+                            "owner_alive": true,
+                            "native_process_id": 10,
+                            "session_uuid": "same-session",
+                            "title": "same title",
+                            "status": "idle"
+                        })
+                        .to_string()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        let sessions = local_ids
+            .into_iter()
+            .map(|local_id| AgentSession {
+                local_id,
+                dto: json!({
+                    "runtime": "gui",
+                    "owner_alive": true,
+                    "native_process_id": 10,
+                    "session_uuid": "same-session",
+                    "title": "same title",
+                    "status": "idle"
+                }),
+            })
+            .collect();
+        sync_session_snapshot(&state, "d", "boot", sessions).unwrap();
+
+        let db = state.inner.db.lock();
+        let active: Vec<i64> = db
+            .prepare(
+                "SELECT local_id FROM sessions
+                 WHERE device_id='d' AND COALESCE(json_extract(dto_json,'$.status'),'starting')<>'exited'
+                 ORDER BY local_id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(active, vec![((1u64 << 40) + 24) as i64]);
+    }
+
+    #[test]
+    fn duplicate_titles_without_shared_identity_stay_independent() {
+        let snapshots = canonical_session_snapshots(vec![
+            AgentSession {
+                local_id: 7,
+                dto: json!({"session_uuid": null, "title": "same title"}),
+            },
+            AgentSession {
+                local_id: 8,
+                dto: json!({"session_uuid": "different-a", "title": "same title"}),
+            },
+            AgentSession {
+                local_id: 9,
+                dto: json!({"session_uuid": "different-b", "title": "same title"}),
+            },
+        ]);
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|session| session.local_id)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
     }
 
     #[test]
