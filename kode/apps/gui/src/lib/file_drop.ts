@@ -64,6 +64,11 @@ export function absoluteOsDroppedPaths(rawPaths: string[]): string[] {
   return collectUniquePaths(rawPaths)
 }
 
+/** Finder can expose only file URLs while omitting the generic `Files` type. */
+export function hasExternalFileDrag(types: readonly string[]): boolean {
+  return types.includes('Files') || types.includes('text/uri-list')
+}
+
 /**
  * Format trusted composer paths as non-submitting @references. External callers
  * pass these through absolute-path normalization first; workspace Git rows may

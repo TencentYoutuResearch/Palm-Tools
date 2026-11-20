@@ -337,6 +337,69 @@ async fn mobile_monitor_scope_routes_sessions_to_the_selected_worker() {
 }
 
 #[tokio::test]
+async fn monitor_and_mobile_lists_hide_duplicate_runtime_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::open(ServerConfig {
+        database_path: dir.path().join("sync.db"),
+        public_url: "https://sync.example.com".into(),
+    })
+    .unwrap();
+    {
+        let db = state.inner.db.lock();
+        for worker in ["office", "home"] {
+            db.execute(
+                "INSERT INTO devices(id,installation_id,name,token_hash,created_at,last_seen_at)
+                 VALUES(?1,?1,?1,?2,1,1)",
+                params![worker, token_hash(worker)],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO bindings(id,device_id,mobile_name,token_hash,scopes_json,created_at)
+             VALUES('office','office','phone',?1,?2,1)",
+            params![
+                token_hash("office"),
+                serde_json::to_string(&DEFAULT_SCOPES).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    let sessions = [(1u64 << 40) + 17, (1u64 << 40) + 20, (1u64 << 40) + 24]
+        .into_iter()
+        .map(|local_id| AgentSession {
+            local_id,
+            dto: json!({
+                "runtime": "gui",
+                "owner_alive": true,
+                "native_process_id": 10,
+                "session_uuid": "same-session",
+                "title": "same title",
+                "status": "idle"
+            }),
+        })
+        .collect();
+    sync_session_snapshot(&state, "home", "boot", sessions).unwrap();
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", "Bearer office".parse().unwrap());
+    headers.insert("X-Kode-Worker-Id", "home".parse().unwrap());
+    let Json(mobile) = list_sessions(axum::extract::State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(mobile["sessions"].as_array().unwrap().len(), 1);
+
+    let Json(monitor) = list_worker_sessions(
+        axum::extract::State(state),
+        Path("home".into()),
+        headers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(monitor["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(monitor["sessions"][0]["session_uuid"], "same-session");
+}
+
+#[tokio::test]
 async fn monitor_request_enables_target_sync_until_its_lease_expires() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::open(ServerConfig {

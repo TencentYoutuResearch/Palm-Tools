@@ -63,7 +63,7 @@
   import ToastHost from './lib/ToastHost.svelte'
   import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
-  import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences } from './lib/file_drop'
+  import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences, hasExternalFileDrag } from './lib/file_drop'
   import { insertRemoteAttachments, RemoteDropGuard, withRemoteUpload } from './lib/remote_attachments'
   import {
     tabs,
@@ -1125,8 +1125,8 @@
     void insertWorkspaceReference(composerPathReferences([reference.path]))
   }
   function onMainDragOver(e: DragEvent) {
-    const types = e.dataTransfer?.types ?? []
-    if (!types.includes('application/x-kode-file') && !types.includes('Files')) return
+    const types = [...(e.dataTransfer?.types ?? [])]
+    if (!types.includes('application/x-kode-file') && !hasExternalFileDrag(types)) return
     e.preventDefault()
     e.dataTransfer!.dropEffect = 'copy'
     dragOver = true
@@ -1137,8 +1137,12 @@
       || e.clientY <= bounds.top || e.clientY >= bounds.bottom) dragOver = false
   }
   function onOverlayDrop(e: DragEvent) {
-    const types = e.dataTransfer?.types ?? []
-    if (!types.includes('application/x-kode-file') && !types.includes('Files')) return
+    const types = [...(e.dataTransfer?.types ?? [])]
+    if (!types.includes('application/x-kode-file') && !hasExternalFileDrag(types)) return
+    // Workspace owns external file imports; the composer capture handler must
+    // not consume the same HTML5 drop on macOS.
+    if (!types.includes('application/x-kode-file')
+      && (e.target as Element | null)?.closest('[data-workspace-files]')) return
     e.preventDefault()
     e.stopPropagation()
     dragOver = false
@@ -1160,7 +1164,7 @@
 
     // 2. HTML5 fallback。原生 onDragDropEvent 才是外部拖入的权威路径;
     // WKWebView 经常既没有 File.path 也没有 uri-list,那时这里会得到空数组。
-    if (!dt.types.includes('Files')) return
+    if (!hasExternalFileDrag(types)) return
     insertDroppedPaths(
       absoluteDroppedFilePaths(
         dt.files as FileList & { [index: number]: File & { path?: string } },
@@ -4536,6 +4540,18 @@
     inset: 0;
     z-index: 10000;
     cursor: copy;
+  }
+  .drag-drop-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10001;
+    display: grid;
+    place-items: center;
+    border: 2px dashed var(--acc);
+    background: color-mix(in srgb, var(--acc) 9%, transparent);
+    color: var(--fg-primary);
+    font: var(--fw-med) var(--fs-md) var(--font-ui);
+    pointer-events: none;
   }
   .inspector-shell {
     position: relative;

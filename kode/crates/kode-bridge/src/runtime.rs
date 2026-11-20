@@ -55,6 +55,20 @@ pub struct ProjectedEvent {
     pub payload: Value,
 }
 
+fn process_alive(pid: u64) -> bool {
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+    system.process(pid).is_some()
+}
+
 impl Registry {
     pub fn open(&self, path: &Path) -> Result<()> {
         let mut guard = self.db.lock();
@@ -104,16 +118,11 @@ impl Registry {
                     .is_some_and(|seen| crate::now_ms().saturating_sub(*seen) < 15000);
                 dto["runtime_online"] = json!(online);
                 let mut alive = online;
-                #[cfg(unix)]
                 if dto["runtime"] == "gui" {
-                    alive = dto["native_process_id"]
+                    alive = online
+                        && dto["native_process_id"]
                         .as_u64()
-                        .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
-                        .is_some_and(|pid| unsafe {
-                            libc::kill(pid as i32, 0) == 0
-                                || std::io::Error::last_os_error().raw_os_error()
-                                    == Some(libc::EPERM)
-                        });
+                        .is_some_and(process_alive);
                 }
                 dto["owner_alive"] = json!(alive);
                 Ok(json!({"local_id":id,"dto":dto}))
@@ -511,6 +520,14 @@ pub async fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_liveness_uses_a_real_pid_on_every_platform() {
+        assert!(process_alive(std::process::id() as u64));
+        assert!(!process_alive(0));
+        assert!(!process_alive(u32::MAX as u64 + 1));
+    }
+
     #[tokio::test]
     async fn archived_existing_projections_retire_once_without_deleting_history() {
         let dir = tempfile::tempdir().unwrap();
