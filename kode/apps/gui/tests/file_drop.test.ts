@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences } from '../src/lib/file_drop.ts'
+import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences, hasExternalFileDrag } from '../src/lib/file_drop.ts'
 
 test('uses the absolute path supplied by the desktop webview', () => {
   const files = { 0: { name: 'notes.md', path: '/Users/dev/docs/notes.md' }, length: 1 }
@@ -13,6 +13,12 @@ test('falls back to decoded file URIs and preserves full paths', () => {
   assert.deepEqual(absoluteDroppedFilePaths([], uriList), [
     '/Users/dev/My Project/spec.md',
   ])
+})
+
+test('accepts Finder URI-list drags without the generic Files type', () => {
+  assert.equal(hasExternalFileDrag(['text/uri-list']), true)
+  assert.equal(hasExternalFileDrag(['Files']), true)
+  assert.equal(hasExternalFileDrag(['text/plain']), false)
 })
 
 test('falls back to absolute text/plain paths from desktop apps', () => {
