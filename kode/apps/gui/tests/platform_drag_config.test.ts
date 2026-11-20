@@ -9,7 +9,7 @@ test('native file drops use a Wry version that resolves modern Finder URLs', () 
   const base = read('tauri.conf.json')
   const baseWindow = base.app.windows[0]
   const lock = readFileSync(new URL('../../../Cargo.lock', root), 'utf8')
-  const wryVersion = lock.match(/\[\[package\]\]\nname = "wry"\nversion = "([^"]+)"/)?.[1]
+  const wryVersion = lock.match(/\[\[package\]\]\r?\nname = "wry"\r?\nversion = "([^"]+)"/)?.[1]
 
   assert.equal(baseWindow.dragDropEnabled, true)
   assert.ok(wryVersion, 'Cargo.lock must contain the Wry package')
