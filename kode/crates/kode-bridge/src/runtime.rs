@@ -55,18 +55,35 @@ pub struct ProjectedEvent {
     pub payload: Value,
 }
 
-fn process_alive(pid: u64) -> bool {
-    let Ok(pid) = u32::try_from(pid) else {
-        return false;
-    };
-    if pid == 0 {
-        return false;
+/// Which of `pids` are running. `snapshots` asks for every GUI session at once,
+/// often on hot paths and under the store lock, so this must stay cheap: a
+/// signal-0 probe per pid on Unix, one batched process refresh elsewhere.
+fn alive_pids(pids: &[u64]) -> std::collections::HashSet<u64> {
+    let valid = pids.iter().copied().filter(|pid| *pid > 0 && *pid <= i32::MAX as u64);
+    #[cfg(unix)]
+    {
+        valid
+            .filter(|pid| unsafe {
+                libc::kill(*pid as i32, 0) == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            })
+            .collect()
     }
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-    let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
-    system.process(pid).is_some()
+    #[cfg(not(unix))]
+    {
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+        let wanted: Vec<Pid> = valid.map(|pid| Pid::from_u32(pid as u32)).collect();
+        if wanted.is_empty() {
+            return Default::default();
+        }
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::Some(&wanted), false);
+        wanted
+            .into_iter()
+            .filter(|pid| system.process(*pid).is_some())
+            .map(|pid| pid.as_u32() as u64)
+            .collect()
+    }
 }
 
 impl Registry {
@@ -108,10 +125,21 @@ impl Registry {
             let mut stmt = db.prepare(
                 "SELECT id,dto FROM runtime_sessions WHERE runtime!='_reserved' ORDER BY id",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?)))?;
-            rows.map(|row| {
-                let (id, dto) = row?;
-                let mut dto: Value = serde_json::from_str(&dto)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?)))?
+                .map(|row| {
+                    let (id, dto) = row?;
+                    Ok((id, serde_json::from_str::<Value>(&dto)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let alive_owners = alive_pids(
+                &rows
+                    .iter()
+                    .filter(|(_, dto)| dto["runtime"] == "gui")
+                    .filter_map(|(_, dto)| dto["native_process_id"].as_u64())
+                    .collect::<Vec<_>>(),
+            );
+            rows.into_iter().map(|(id, mut dto)| {
                 let online = dto["runtime"]
                     .as_str()
                     .and_then(|runtime| hosts.get(runtime))
@@ -122,7 +150,7 @@ impl Registry {
                     alive = online
                         && dto["native_process_id"]
                         .as_u64()
-                        .is_some_and(process_alive);
+                        .is_some_and(|pid| alive_owners.contains(&pid));
                 }
                 dto["owner_alive"] = json!(alive);
                 Ok(json!({"local_id":id,"dto":dto}))
@@ -523,9 +551,8 @@ mod tests {
 
     #[test]
     fn process_liveness_uses_a_real_pid_on_every_platform() {
-        assert!(process_alive(std::process::id() as u64));
-        assert!(!process_alive(0));
-        assert!(!process_alive(u32::MAX as u64 + 1));
+        let me = std::process::id() as u64;
+        assert_eq!(alive_pids(&[me, 0, u32::MAX as u64 + 1]), [me].into());
     }
 
     #[tokio::test]

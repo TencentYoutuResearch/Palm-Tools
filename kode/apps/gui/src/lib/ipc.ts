@@ -275,6 +275,8 @@ export type ThemeMode = 'light' | 'dark' | 'system'
 export type LocaleMode = 'en' | 'zh-CN' | 'system'
 
 export const ipc = {
+  /** Absolute paths on the macOS drag pasteboard; see `drag_paths.rs`. */
+  dragPasteboardPaths: () => invoke<string[]>('drag_pasteboard_paths'),
   listBackends: () => invoke<BackendInfo[]>('list_backends'),
   discoverBackendModels: (backendKey: string, force = false) =>
     invoke<ModelDiscoveryResult>('discover_backend_models', { backendKey, force }),

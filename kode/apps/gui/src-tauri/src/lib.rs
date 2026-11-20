@@ -22,6 +22,7 @@ mod backend_runtime;
 mod shared_services;
 mod commands;
 mod deploy;
+mod drag_paths;
 mod endpoints;
 mod extensions;
 mod memory;
@@ -274,6 +275,7 @@ pub fn run() {
             commands::read_clipboard,
             attachments::upload_remote_attachments,
             attachments::paste_remote_clipboard,
+            drag_paths::drag_pasteboard_paths,
             screenshot::capture_window_screenshot,
             screenshot::capture_interactive_screenshot,
             screenshot::copy_screenshot_crop,

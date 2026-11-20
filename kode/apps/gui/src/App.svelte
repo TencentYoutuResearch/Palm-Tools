@@ -63,7 +63,7 @@
   import ToastHost from './lib/ToastHost.svelte'
   import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
   import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
-  import { absoluteDroppedFilePaths, absoluteOsDroppedPaths, composerPathReferences, hasExternalFileDrag } from './lib/file_drop'
+  import { absoluteOsDroppedPaths, composerPathReferences, hasExternalFileDrag, htmlDroppedPaths } from './lib/file_drop'
   import { insertRemoteAttachments, RemoteDropGuard, withRemoteUpload } from './lib/remote_attachments'
   import {
     tabs,
@@ -1162,17 +1162,10 @@
       return
     }
 
-    // 2. HTML5 fallback。原生 onDragDropEvent 才是外部拖入的权威路径;
-    // WKWebView 经常既没有 File.path 也没有 uri-list,那时这里会得到空数组。
+    // 2. 外部文件。macOS 关闭了原生 handler,只剩 HTML5 drop;WKWebView 通常既不给
+    // File.path 也不给 uri-list,这时从系统拖拽剪贴板读回这次拖拽的路径。
     if (!hasExternalFileDrag(types)) return
-    insertDroppedPaths(
-      absoluteDroppedFilePaths(
-        dt.files as FileList & { [index: number]: File & { path?: string } },
-        dt.getData('text/uri-list'),
-        dt.getData('text/plain'),
-      ),
-      'external',
-    )
+    void htmlDroppedPaths(dt).then(paths => insertDroppedPaths(paths, 'external'))
   }
   function onNativeFileDrop(event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) {
     const payload = event.payload
