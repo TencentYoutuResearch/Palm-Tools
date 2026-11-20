@@ -28,10 +28,24 @@ test('blank ungrouped runtime placeholders cannot return as saved native convers
 
 test('saved tabs whose CLI never wrote a transcript are not listed',async()=>{
   const ctx=context(),tab=(session_id,title)=>({backend_key:'tclaude',session_id,cwd:'/work/project',transport_kind:'pty',title})
-  const index={native_sessions:[tab('never-prompted','tab · tclaude'),tab('talked','Real conversation')]}
+  const index={gui:{tabs:[tab('never-prompted','tab · tclaude'),tab('talked','Real conversation')]}}
   const backendClient={call:async(path,body)=>path.endsWith('/node')?{node_id:'fixture-node'}:path.endsWith('/workbench/transcript')?{messages:[],available:body.session_id==='talked'}:{revision:1,value:path.endsWith('/session-index')?index:{global:{archivedSessionIds:[],pinnedSessionIds:[]}}}}
   const value=await hostDirectory(ctx,{backendClient})
   assert.deepEqual(value.sessions.filter(row=>row.savedTab).map(row=>row.savedTab.session_id),['talked'])
+})
+
+test('only conversations Kode has open are listed; closed history comes back through resume',async()=>{
+  const ctx=context(),tab=(session_id,title)=>({backend_key:'tclaude',session_id,cwd:'/work/project',transport_kind:'pty',title})
+  const index={native_sessions:[tab('closed-earlier','Closed'),tab('open-now','Open')],gui:{tabs:[tab('open-now','Open')]}}
+  const backendClient={call:async path=>{
+    if(path.endsWith('/node'))return{node_id:'fixture-node'}
+    if(path.endsWith('/workbench/transcript'))return{messages:[],available:true}
+    if(path.endsWith('/catalog'))return{tabs:index.native_sessions,endpoints:[]}
+    return{revision:1,value:path.endsWith('/session-index')?index:{global:{archivedSessionIds:[],pinnedSessionIds:[]}}}
+  }}
+  assert.deepEqual((await hostDirectory(ctx,{backendClient})).sessions.filter(row=>row.savedTab).map(row=>row.savedTab.session_id),['open-now'])
+  const directory=await new ProjectHosts(ctx,{backendClient}).directory()
+  assert.deepEqual(directory.hosts[0].sessions.filter(row=>row.nativeThreadId).map(row=>row.nativeThreadId),['open-now'])
 })
 
 test('federated catalog does not re-add placeholders hidden by the host directory',async()=>{

@@ -14,7 +14,8 @@ function groupProjectWorkspaces(items, parents = {}) {
 // Keep complete host directories for explicit resume/search; scope only the sidebar.
 function remoteSidebarSessions(host) {
   const visible = new Set([...(host.workspaces ?? []).flatMap(row => row.sessionIds ?? []), ...(host.pinnedSessionIds ?? [])])
-  const hidden = new Set(host.hiddenSessionIds ?? [])
+  // Archiving closes a conversation, as closing a Kode tab does.
+  const hidden = new Set([...(host.hiddenSessionIds ?? []), ...(host.archivedSessionIds ?? [])])
   return (host.sessions ?? []).filter(row => visible.has(row.id) && !hidden.has(row.id))
 }
 function resumeCandidates(hosts, target, query = '', nativeSessions = []) {
@@ -31,6 +32,55 @@ function resumeCandidates(hosts, target, query = '', nativeSessions = []) {
     .filter(row => `${row.title} ${row.cwd} ${row.nativeThreadId}`.toLocaleLowerCase().includes(text))
     .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
 }
+// Composer recall: ↑ at the draft start walks back through this conversation's
+// sent messages and cleared drafts; ↓ at the end walks forward, then restores
+// what was being typed. Cleared drafts live in sessionStorage, best effort.
+const COMPOSER_HISTORY_PREFIX = 'kode.composer-history:v1:', COMPOSER_HISTORY_LIMIT = 40
+function composerHistoryStorage() { try { return globalThis.sessionStorage } catch { return undefined } }
+function readComposerHistory(sessionId, storage = composerHistoryStorage()) {
+  try {
+    const rows = JSON.parse(storage?.getItem(COMPOSER_HISTORY_PREFIX + sessionId) ?? '[]')
+    return Array.isArray(rows) ? rows.filter(row => typeof row?.text === 'string' && row.text.trim() && Number.isFinite(row.time) && ['sent', 'draft'].includes(row.source)) : []
+  } catch { return [] }
+}
+function archiveComposerText(sessionId, text, source, time = Date.now(), storage = composerHistoryStorage()) {
+  const trimmed = typeof text === 'string' ? text.trim() : ''
+  if (!sessionId || !trimmed || !storage) return
+  try {
+    const rows = [{ text: trimmed, time, source }, ...readComposerHistory(sessionId, storage).filter(row => row.text.trim() !== trimmed)]
+    storage.setItem(COMPOSER_HISTORY_PREFIX + sessionId, JSON.stringify(rows.slice(0, COMPOSER_HISTORY_LIMIT)))
+  } catch { /* Recall must never block editing or sending. */ }
+}
+function composerRecallEntries(sessionId, nodes, current = '', storage = composerHistoryStorage()) {
+  const sent = []
+  for (const node of nodes ?? []) {
+    const data = node?.data
+    if (!['user', 'steering'].includes(node?.kind) || !['user', 'human'].includes(data?.source?.kind)) continue
+    const text = (data.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n').trim()
+    if (text) sent.push({ text, time: data.time ?? 0, source: 'sent' })
+  }
+  const seen = new Set([current.trim()])
+  return [...readComposerHistory(sessionId, storage), ...sent].sort((a, b) => b.time - a.time)
+    .filter(row => !seen.has(row.text) && seen.add(row.text)).slice(0, COMPOSER_HISTORY_LIMIT)
+}
+/** One ↑/↓ step: shows `text` and consumes the key when present; otherwise the editor keeps the key. Typing ends navigation. */
+function composerRecallStep(nav, key, draft, caret, load) {
+  if (nav && draft.trim() !== nav.entries[nav.index]?.text) nav = null
+  if (caret.start !== caret.end) return { nav }
+  if (key === 'up') {
+    if (!nav) {
+      const entries = caret.start === 0 ? load() : []
+      if (entries.length === 0) return { nav }
+      nav = { entries, index: -1, scratch: draft }
+    }
+    const index = Math.min(nav.index + 1, nav.entries.length - 1)
+    return { nav: { ...nav, index }, text: nav.entries[index].text }
+  }
+  if (key !== 'down' || !nav || caret.end !== draft.length) return { nav }
+  const index = nav.index - 1
+  return index < 0 ? { nav: null, text: nav.scratch } : { nav: { ...nav, index }, text: nav.entries[index].text }
+}
+const composerRecallLabel = nav => nav && `${nav.entries[nav.index].source === 'draft' ? '已删除草稿' : '历史消息'} ${nav.index + 1}/${nav.entries.length}`
 var directoryBindingCache = new WeakMap()
 function stableDirectoryBindings(entry, host) {
   const cached = directoryBindingCache.get(entry)
@@ -77,7 +127,7 @@ function changedFileSummary({ path, paths, changes, patch }) {
 window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   const React = require('react'), h = React.createElement
   const { createPortal } = require('react-dom')
-  const { useState, useEffect, useSyncExternalStore } = React
+  const { useState, useEffect, useMemo, useRef, useSyncExternalStore } = React
   const { Menu, Modal, Button, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
@@ -161,6 +211,66 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     return stores.get(key)
   }
   const catalogBlank = (sessions, id) => sessions.list.getSnapshot().byId[id]?.blank === true
+  /** ↑/↓ recall over the shipped composer keymap; an open trigger menu keeps the arrows. */
+  function ComposerRecall({ native, ...props }) {
+    const { keyboard } = props
+    const nodes = props.useChat?.(snapshot => snapshot.nodes)
+    const live = useRef()
+    live.current = { nodes, sessionId: props.sessionId, inputActions: props.inputActions }
+    const recall = useMemo(() => {
+      if (!keyboard) return undefined
+      const state = { nav: null, peak: keyboard.snapshot?.draft ?? '', arrow: null }
+      const label = () => {
+        const root = keyboard.editor?.getRootElement?.(), text = composerRecallLabel(state.nav)
+        if (text) root?.setAttribute('aria-description', text); else root?.removeAttribute('aria-description')
+      }
+      const arbitrate = (key, composing) => {
+        const verdict = keyboard.arbitrate(key, composing), event = state.arrow
+        state.arrow = null
+        if (verdict !== 'pass' || composing || !event || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return verdict
+        const input = keyboard.snapshot, draft = input?.draft ?? ''
+        if (input?.phase !== 'plain') return verdict
+        const step = composerRecallStep(state.nav, key, draft, keyboard.caretSpan(),
+          () => composerRecallEntries(live.current.sessionId, live.current.nodes?.values(), draft))
+        state.nav = step.nav; label()
+        if (step.text === undefined) return verdict
+        state.peak = step.text
+        // Arrow commands run inside the editor update, where a discrete draft write throws.
+        queueMicrotask(() => live.current.inputActions?.setDraft(step.text))
+        return 'consumed'
+      }
+      const submit = (mode, ...args) => {
+        archiveComposerText(live.current.sessionId, keyboard.snapshot?.draft, 'sent')
+        state.nav = null; state.peak = ''; label()
+        return keyboard.submit(mode, ...args)
+      }
+      // A draft emptied without sending is kept at its longest form.
+      const observe = () => {
+        const draft = keyboard.snapshot?.draft ?? ''
+        if (draft.trim()) { if (!state.peak.trim() || draft.length >= state.peak.length) state.peak = draft }
+        else if (state.peak.trim()) { archiveComposerText(live.current.sessionId, state.peak, 'draft'); state.peak = '' }
+      }
+      const wrapped = new Proxy(keyboard, { get(target, key) {
+        if (key === 'arbitrate') return arbitrate
+        if (key === 'submit') return submit
+        const value = Reflect.get(target, key)
+        return typeof value === 'function' ? value.bind(target) : value
+      } })
+      return { state, observe, keyboard: wrapped }
+    }, [keyboard])
+    useEffect(() => {
+      if (!recall) return
+      const editor = keyboard.editor
+      // The keymap hands arbitrate the key name only; modifiers come from the keydown itself.
+      const capture = event => {
+        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') recall.state.arrow = editor?.getRootElement?.()?.contains(event.target) ? event : null
+      }
+      document.addEventListener('keydown', capture, true)
+      const unregister = editor?.registerUpdateListener?.(() => queueMicrotask(recall.observe))
+      return () => { document.removeEventListener('keydown', capture, true); unregister?.() }
+    }, [recall])
+    return h(native, { ...props, keyboard: recall?.keyboard ?? keyboard })
+  }
   function SteeringControls({ native, seat, ...props }) {
     const binding = props.useProjection('kodeAgent')
     const capable = ['codex', 'claude', 'cursor', 'codebuddy'].includes(binding?.type)
@@ -759,6 +869,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   // The view is only hidden after leaving, so the panel would still be open on
   // the next entry and send Kode straight back; return to the conversation once
   // Kode has had time to hide the view.
+  const RESUME_PROFILE_KEY = 'kode.resumeProfile'
+  const HISTORY_GLYPH = 'M2.8 8a5.2 5.2 0 1 0 1.5-3.7M2.6 2.6v2.6h2.6M8 5.2V8l2 1.4'
+  // Closed conversations come back through resume, as in Kode's terminals.
+  function KodeResumePage({ layout }) {
+    useEffect(() => {
+      window.dispatchEvent(new CustomEvent('kode-resume-session', { detail: { global: true, hostId: transport?.current ?? 'local' } }))
+      layout?.selectPanel(null)
+    }, [])
+    return null
+  }
   function KodeLeavePage({ layout }) {
     useEffect(() => {
       window.kodeHost.request('leave')
@@ -1358,15 +1478,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const sessionStatusSource = avatarContext?.get?.('uiSession')?.sessionStatus
     const sessionStatuses = useSyncExternalStore(sessionStatusSource?.subscribe ?? emptyAvatarSubscribe, sessionStatusSource?.getSnapshot ?? emptyAvatarSnapshot)
     const merged = React.useMemo(() => {
-      const own = data.hosts.find(host => host.id === data.current), hidden = new Set(own?.hiddenSessionIds ?? [])
+      // Kode keeps one list of open conversations for its terminals and this
+      // view: archiving here closes a conversation like closing a Kode tab, so
+      // archived ones are gone from the tree, search and every filter; resume
+      // brings one back.
+      const own = data.hosts.find(host => host.id === data.current)
+      const hidden = new Set([...(own?.hiddenSessionIds ?? []), ...workspaceSource.archivedSessionIds, ...(own?.archivedSessionIds ?? [])])
       const byId = Object.fromEntries(Object.entries(source.byId).filter(([id]) => !hidden.has(id)))
       for (const row of own?.sessions ?? []) if (byId[row.id] && row.agent) byId[row.id] = { ...byId[row.id], agent: row.agent }
       const ids = source.ids.filter(id => !hidden.has(id)), items = [], routes = new Map(), remoteRows = []
-      const archivedSessionIds = [...workspaceSource.archivedSessionIds], pinnedSessionIds = [...workspaceSource.pinnedSessionIds]
+      const pinnedSessionIds = [...workspaceSource.pinnedSessionIds]
       for (const host of data.hosts) {
         if (host.id === data.current) {
-          archivedSessionIds.push(...(host.archivedSessionIds ?? [])); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
-          const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:'))
+          pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
+          const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:') && !hidden.has(row.id))
           for (const row of saved) { ids.push(row.id); byId[row.id] = { ...row, updatedAt: row.updatedAt ?? 0, displayTitle: row.title, retainedBy: {}, blank: false, projectionValues: {} }; routes.set(row.id, { hostId: host.id, id: row.id }) }
           items.push(...groupProjectWorkspaces(workspaceSource.items, host.worktreeParents).map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds ?? [])])] })))
           if (host.id !== 'local') remoteRows.push(...workspaceSource.items.map(w => ({ id: w.workspaceId, name: host.name })))
@@ -1393,23 +1518,35 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           routes.set(id, { hostId: host.id, placeholder: true })
           remoteRows.push({ id, name: host.status === 'online' ? (ungrouped.length ? '未分组' : '添加项目') : host.status === 'connecting' ? '正在连接…' : '连接失败', placeholder: host.status ?? 'offline' })
         }
-        archivedSessionIds.push(...(host.archivedSessionIds ?? []).map(key)); pinnedSessionIds.push(...(host.pinnedSessionIds ?? []).map(key))
+        pinnedSessionIds.push(...(host.pinnedSessionIds ?? []).map(key))
       }
       if (!data.hosts.length) items.push(...workspaceSource.items)
       // Sidebar presence follows visible conversations; the complete project
       // catalog remains available in the workspace picker and creation flow.
       const populated = items.filter(workspace => workspace.sessionIds.some(id => byId[id] && !byId[id].blank))
-      return { sessions: { ...source, ids, byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds, pinnedSessionIds }, routes, remoteRows }
+      return { sessions: { ...source, ids, byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds: [], pinnedSessionIds }, routes, remoteRows }
     }, [source, workspaceSource, data])
     useEffect(() => {
       if (!window.addEventListener) return
       const show = event => { const id = event.detail?.sessionId, profile = merged.sessions.byId[id]?.agent; if (!profile) return; const route = merged.routes.get(id) ?? { id, hostId: data.current }; openAvatarDialog({ profile, sessionId: route.id, host: route.hostId }) }
       const resume = event => {
         const target = event.detail
-        if (!target?.profile) return
-        setResumeTarget(target); setResumeQuery(''); setError('')
-        void loadNativePage(target)
+        if (!target?.profile && !target?.global) return
+        setResumeQuery(''); setError('')
         void refreshWorkspaceDirectory()
+        if (target.profile) { setResumeTarget(target); void loadNativePage(target); return }
+        // The sidebar's resume entry: choose among the CLI Agents installed here.
+        void (async () => {
+          const hostId = target.hostId ?? data.current, store = directory(undefined, hostId, true)
+          await store.load()
+          const info = store.getSnapshot().data
+          const choices = (info?.profiles ?? []).filter(profile => profile.type !== 'dsh' && (!info?.supportedTypes || info.supportedTypes.includes(profile.type)))
+          if (!choices.length) { setError(info ? '没有可恢复会话的 CLI Agent。' : store.getSnapshot().error || 'Agent 列表暂不可用。'); return }
+          const remembered = (() => { try { return localStorage.getItem(RESUME_PROFILE_KEY) } catch { return null } })()
+          const profile = choices.find(row => row.id === remembered) ?? choices[0]
+          const next = { hostId, profile, choices }
+          setResumeTarget(next); void loadNativePage(next)
+        })().catch(error => setError(error.message))
       }
       window.addEventListener('kode-session-avatar', show)
       window.addEventListener('kode-resume-session', resume)
@@ -1458,6 +1595,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       else props.open(id)
     }
     const resumeRows = resumeCandidates(data.hosts, resumeTarget, resumeQuery, nativePage.rows)
+    // There is no archived view to filter to; keep the browser on its default.
+    useEffect(() => { props.actions?.setArchivedFilter?.('default') }, [props.actions])
+    const viewActions = React.useMemo(() => props.actions && { ...props.actions, setArchivedFilter: () => props.actions.setArchivedFilter('default') }, [props.actions])
+    const useViewStore = React.useCallback(selector => props.useStore(state => selector((state.archivedFilter ?? 'default') === 'default' ? state : { ...state, archivedFilter: 'default' })), [props.useStore])
     const mutate = async (id, operation, args) => {
       const route = merged.routes.get(id)
       await projectCall({ action: 'host-operation', id: route.hostId, operation, args })
@@ -1504,7 +1645,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('style', null, remoteCss + savedCss), h(Failure, { text: error || data.error }),
       busy && h('div', { className: 'kode-host-progress', role: 'status', 'aria-live': 'polite' }, '正在打开会话…'),
       notice && h('div', { className: 'kode-host-progress', role: 'status' }, notice),
-      h(native, { ...props, useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
+      h(native, { ...props, ...(props.useStore ? { useStore: useViewStore } : {}), ...(viewActions ? { actions: viewActions } : {}), useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
         startSession: (id, options) => { const route = merged.routes.get(id); if (route) void navigate(route.hostId, route.placeholder ? { create: true } : { workspaceId: route.id }); else props.startSession(id, options) },
         renameWorkspace: (id, title) => merged.routes.has(id) ? mutate(id, 'rename-workspace', { workspaceId: merged.routes.get(id).id, title }) : props.renameWorkspace(id, title),
         deleteWorkspace: id => merged.routes.has(id) ? mutate(id, 'delete-workspace', { workspaceId: merged.routes.get(id).id }) : props.deleteWorkspace(id),
@@ -1516,6 +1657,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         unarchiveSession: id => merged.routes.has(id) ? mutate(id, 'unarchive-session', { sessionId: merged.routes.get(id).id }) : props.unarchiveSession(id),
       }),
       h(Modal, { open: Boolean(resumeTarget), title: '恢复原生会话', closeLabel: '关闭', onClose: closeResume },
+        resumeTarget?.choices?.length > 1 && h('label', { className: 'kode-field' }, 'Agent', h('select', { value: resumeTarget.profile.id, disabled: busy, onChange: event => {
+          const profile = resumeTarget.choices.find(row => row.id === event.target.value)
+          if (!profile) return
+          try { localStorage.setItem(RESUME_PROFILE_KEY, profile.id) } catch { /* best effort */ }
+          const next = { ...resumeTarget, profile }
+          setResumeTarget(next); void loadNativePage(next)
+        } }, ...resumeTarget.choices.map(row => h('option', { key: row.id, value: row.id }, row.name)))),
         h('label', { className: 'kode-field' }, '搜索会话', h('input', { autoFocus: true, value: resumeQuery, placeholder: '名称、工作区或原生会话 ID', onChange: event => setResumeQuery(event.target.value) })),
         h('div', { className: 'kode-resume-list', 'aria-busy': Boolean(nativePage.loading) }, ...resumeRows.map(row => h(Button, { key: row.nativeThreadId, variant: 'outline', disabled: busy, onClick: async () => {
           if (await navigate(resumeTarget.hostId, { sessionId: row.id, selection: row.selection, refreshNative: !row.selection, resume: true })) closeResume()
@@ -2212,7 +2360,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const install = () => {
         for (const entry of ctx.slots.entries(seat)) {
           if (seat === 'conversation.input.dock' && entry.options.id !== 'queue' || adapted.has(entry)) continue
-          const native = entry.component, wrapper = props => h(SteeringControls, { ...props, native, seat })
+          const native = entry.component, steering = props => h(SteeringControls, { ...props, native, seat })
+          const wrapper = seat === 'conversation.composer.bar' ? props => h(ComposerRecall, { ...props, native: steering }) : steering
           adapted.set(entry, { native, wrapper }); entry.component = wrapper
         }
       }
@@ -2398,6 +2547,8 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
       if (kodeEmbedded()) {
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
         scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-leave', order: 7, label: 'Kode 终端' }, () => glyph(TERMINAL_GLYPH)))
+        scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-resume' }, () => h(KodeResumePage, { layout: scope.layout })))
+        scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-resume', order: 8, label: '恢复会话' }, () => glyph(HISTORY_GLYPH)))
       }
       openKodeSettings = section => {
         requestedSettingsSection = section

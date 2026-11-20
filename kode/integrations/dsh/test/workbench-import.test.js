@@ -293,3 +293,26 @@ test('resume widens a truncated transcript and reopens one stored session withou
   assert.deepEqual(h.calls.find(row => row[0] === 'rename'), ['rename', { sessionId: h.id, title: 'From CLI' }])
   assert.ok(!h.calls.some(row => ['session', 'seed'].includes(row[0])))
 })
+test('a takeover reloads the copy the conversation last ran in instead of importing another', async () => {
+ const h=importFixture({registered:true}),profiles=h.ctx.get('kodeAgents').profiles,registry=h.ctx.get('workspaceRegistry'),controller=h.ctx.get('sessionController'),factory=h.ctx.get('kodeNativeFactory')
+ // Sorted keys: the oldest copy comes first and cannot be brought up to date.
+ profiles.bindings={'copy-a-old':{threadId:h.tab.session_id,profile:{id:'kode-codex'}},'copy-b-new':{threadId:h.tab.session_id,profile:{id:'kode-codex'}}};profiles.binding=id=>profiles.bindings[id]
+ registry.archivedSessionIds=['copy-a-old','copy-b-new'];const unarchived=[];registry.unarchiveSession=async id=>unarchived.push(id);registry.archiveSession=async()=>{}
+ controller.list=async()=>({items:[{sessionId:'copy-a-old',updatedAt:100},{sessionId:'copy-b-new',updatedAt:200}]})
+ const time=1767225600000,selection={provider:'kode-agent-kode-codex',model:'m'}
+ const stored={'copy-a-old':[{type:'request/header',seq:0,time:time-1e6,data:{header:{config:selection}}}],'copy-b-new':[{type:'turn/start',seq:0,time,data:{turn:1}},{type:'request/header',seq:1,time,data:{header:{config:selection}}},{type:'turn/end',seq:2,time:time+10,data:{turn:1}}]}
+ const timeline=[{kind:'turn_end',time:time+5},{kind:'turn_start',time:time+100},{kind:'text',role:'user',text:'later',time:time+101}]
+ h.client.call=async(path,update)=>path.endsWith('/transcript')?{available:true,timeline,messages:[]}:{revision:1,value:update?.value??{version:1}}
+ factory.appendHistory=async(id,build)=>build(stored[id])?.length??0
+ const result=await importSavedSession(h.ctx,h.client,h.tab,{fresh:true})
+ assert.equal(result.sessionId,'copy-b-new');assert.equal(result.reloaded,true);assert.deepEqual(unarchived,['copy-b-new'])
+ assert.ok(!h.calls.some(row=>row[0]==='seed'),'no fresh copy is imported')
+})
+test('reopening a closed (archived) conversation unarchives its stored copy', async () => {
+ const h=importFixture({registered:true,persisted:true}),profiles=h.ctx.get('kodeAgents').profiles,registry=h.ctx.get('workspaceRegistry')
+ profiles.bindings={[h.id]:{threadId:h.tab.session_id,profile:{id:'kode-codex'}}};profiles.binding=id=>profiles.bindings[id]
+ registry.archivedSessionIds=[h.id];const unarchived=[];registry.unarchiveSession=async id=>unarchived.push(id)
+ const result=await importSavedSession(h.ctx,h.client,h.tab)
+ assert.equal(result.sessionId,h.id);assert.deepEqual(unarchived,[h.id])
+ assert.ok(!h.calls.some(row=>row[0]==='seed'),'the stored copy is reused, not imported again')
+})

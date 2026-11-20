@@ -125,6 +125,43 @@ replace(`\t\t\tctx.slots.inject("conversation.composer.dock", function* () {
 \t\t\t\t\tinject: statPillInject
 \t\t\t\t}, UsagePill);
 \t\t\t});`)
+// Turn rail sits left of the transcript: short marks that fisheye open around
+// the pointer, with the preview card to their right.
+{
+  const head = 'const css$17 = ".eGxaPq_slot{', start = source.indexOf(head), end = source.indexOf('";\n', start)
+  if (start < 0 || end < 0 || !source.slice(start, end).includes('right:12px')) throw new Error('Pinned turn rail contract changed')
+  const mark = '.eGxaPq_mark', hot = ':is(:hover,:focus-visible)'
+  const turnRailCss = `
+.eGxaPq_slot{z-index:7;height:0;pointer-events:none;position:absolute;top:0;left:0;right:0;container-type:inline-size}
+[data-conversation-scroll] .eGxaPq_slot{position:sticky}
+.eGxaPq_frame{--turn-rail-band:calc(var(--dsh-conversation-viewport-height,100dvh) - var(--dsh-composer-height,152px));top:calc(var(--turn-rail-band) / 2);width:34px;max-height:min(max(0px, calc(var(--turn-rail-band) - 64px)), 420px);contain:layout;pointer-events:auto;position:absolute;left:14px;transform:translateY(-50%)}
+.eGxaPq_scroller{max-height:inherit;overscroll-behavior:contain;scrollbar-width:none;position:relative;overflow-y:auto}
+.eGxaPq_scroller::-webkit-scrollbar{display:none}
+.eGxaPq_fadeTop{mask-image:linear-gradient(#0000 0,#000 24px 100%)}
+.eGxaPq_fadeBottom{mask-image:linear-gradient(#000 0 calc(100% - 24px),#0000 100%)}
+.eGxaPq_fadeTop.eGxaPq_fadeBottom{mask-image:linear-gradient(#0000 0,#000 24px calc(100% - 24px),#0000 100%)}
+.eGxaPq_marks{position:relative}
+${mark}{cursor:pointer;background:0 0;border:0;height:10px;padding:0;position:absolute;top:0;left:0;right:0}
+${mark}:before{content:"";position:absolute;top:50%;left:0;width:30px;height:3px;border-radius:999px;background:color-mix(in srgb,var(--dsw-alias-label-tertiary) 50%,transparent);transform-origin:0;transform:translateY(-50%) scale(.3333,.6667);transition:transform .2s cubic-bezier(.2,.8,.2,1),background-color .16s ease}
+${mark}${hot}:before{background:var(--dsw-alias-label-primary);transform:translateY(-50%) scale(1)}
+${mark}:has(+ ${mark}${hot}):before,${mark}${hot} + ${mark}:before{background:var(--dsw-alias-label-secondary);transform:translateY(-50%) scale(.6667)}
+${mark}:has(+ ${mark} + ${mark}${hot}):before,${mark}${hot} + ${mark} + ${mark}:before{transform:translateY(-50%) scale(.4667,.6667)}
+.eGxaPq_markActive:before{background:var(--dsw-alias-label-secondary)}
+.eGxaPq_markActive${hot}:before{background:var(--dsw-alias-label-primary)}
+.eGxaPq_markUnloaded:before{opacity:.6}
+.eGxaPq_markBusy:before{animation:1s ease-in-out infinite eGxaPq_dsh-turn-mark-busy}
+${mark}:focus-visible{outline:none}
+${mark}:focus-visible:after{content:"";position:absolute;inset:1px 0;border:1px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));border-radius:4px}
+.eGxaPq_preview{top:var(--turn-preview-center);left:36px;box-sizing:border-box;width:min(240px,100cqw - 92px);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-panel);pointer-events:none;padding:11px 13px;line-height:1.55;text-align:left;transform:translateY(-50%);transition:top .14s cubic-bezier(.2,.8,.2,1);animation:.14s ease-out eGxaPq_dsh-turn-preview-enter;position:absolute}
+.eGxaPq_previewPrompt,.eGxaPq_previewResponse{-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}
+.eGxaPq_previewPrompt{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:650;-webkit-line-clamp:1}
+.eGxaPq_previewResponse{color:var(--dsw-alias-label-tertiary);font-size:12px;-webkit-line-clamp:3;margin-top:7px}
+@keyframes eGxaPq_dsh-turn-preview-enter{0%{opacity:0;transform:translate(-5px,-50%)}to{opacity:1;transform:translate(0,-50%)}}
+@keyframes eGxaPq_dsh-turn-mark-busy{0%,to{opacity:1}50%{opacity:.35}}
+@container (width<=900px){.eGxaPq_frame{display:none}}
+@media (prefers-reduced-motion:reduce){.eGxaPq_frame,.eGxaPq_scroller,${mark}:before,.eGxaPq_markBusy:before,.eGxaPq_preview{scroll-behavior:auto;transition:none;animation:none}}`.trim().replace(/\n/g, '')
+  source = source.slice(0, start) + 'const css$17 = ' + JSON.stringify(turnRailCss) + source.slice(end + 1)
+}
 source = source.replace(/\/\/# sourceMappingURL=.*$/m, '').replace(/^[ \t]+$/gm, '').trimEnd() + '\n'
 await writeFile(new URL('../packages/chat/client.js', import.meta.url), '// Generated from dsh-client-ui-chat 0.2.1-rc.5 (MIT); run npm run build:chat.\n' + source)
 await copyFile(join(dirname(dirname(upstream)), 'LICENSE'), new URL('../packages/chat/LICENSE.upstream', import.meta.url))

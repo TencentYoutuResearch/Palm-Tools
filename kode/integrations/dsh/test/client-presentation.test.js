@@ -487,17 +487,26 @@ test('foreign pin/archive actions reuse native controls and target the owning ho
   }
 })
 test('saved legacy tab archive controls work without importing or starting the saved Agent',async()=>{
- const c=client({current:'local',hosts:[{id:'local',sessions:[{id:'saved:legacy',title:'Removed Agent tab'}],archivedSessionIds:['saved:legacy'],workspaces:[]}]})
+ const c=client({current:'local',hosts:[{id:'local',sessions:[{id:'saved:legacy',title:'Removed Agent tab'}],archivedSessionIds:[],workspaces:[]}]})
  const archive=()=>null;c.addSlot('sidebar.workspaces.session.menu.item','archive',archive)
  const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:[],byId:{}}),useWorkspaces:select=>select({items:[],archivedSessionIds:[],pinnedSessionIds:[]}),renderSlot:name=>({type:name})})
  wrapper.type(wrapper.props);await new Promise(resolve=>setImmediate(resolve))
  const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
- assert.ok(native.props.useWorkspaces(state=>state.archivedSessionIds).includes('saved:legacy'))
+ assert.ok(native.props.useSessions(state=>state.ids).includes('saved:legacy'))
  assert.equal(native.props.renderSlot('sidebar.session.row.hover',{sessionId:'saved:legacy'},{}).type,'sidebar.session.row.hover')
  const menu=native.props.renderSlot('sidebar.workspaces.session.menu.item',{sessionId:'saved:legacy'},{hookContext:[true,()=>{}]})
  menu.children.flat().find(control => control.type === archive).props.archiveSession('saved:legacy');await new Promise(resolve=>setImmediate(resolve))
  assert.deepEqual(c.requests[0],{action:'host-operation',id:'local',operation:'archive-session',args:{sessionId:'saved:legacy'}})
  assert.ok(!c.requests.some(row=>row.action==='import-saved'))
+})
+
+test('archiving closes a conversation: it leaves the tree, search and every filter',async()=>{
+ const c=client({current:'local',hosts:[{id:'local',sessions:[{id:'saved:closed',title:'Closed tab'}],archivedSessionIds:['saved:closed','live-closed'],workspaces:[]},{id:'ssh',name:'Build host',status:'online',sessions:[{id:'remote-closed',title:'Remote'}],workspaces:[],pinnedSessionIds:['remote-closed'],archivedSessionIds:['remote-closed']}]})
+ const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:['live-closed','live-open'],byId:{'live-closed':{id:'live-closed'},'live-open':{id:'live-open'}}}),useWorkspaces:select=>select({items:[],archivedSessionIds:['live-closed'],pinnedSessionIds:[]})})
+ wrapper.type(wrapper.props);await new Promise(resolve=>setImmediate(resolve))
+ const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
+ assert.deepEqual(Array.from(native.props.useSessions(state=>state.ids)),['live-open'])
+ assert.deepEqual(Array.from(native.props.useWorkspaces(state=>state.archivedSessionIds)),[])
 })
 
 for (const pinned of [false,true]) test(`foreign loose histories ${pinned?'explicitly pinned retain their host group':'do not appear automatically in the sidebar'}`,async()=>{

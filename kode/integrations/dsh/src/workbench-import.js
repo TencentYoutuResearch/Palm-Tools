@@ -124,7 +124,11 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   const registry = ctx.get('workspaceRegistry')
   const profile = savedSessionProfile(runtime.profiles, tab)
   if (!profile) throw new Error(`This saved ${tab.backend_key} session has no installed inline protocol adapter`)
-  const reuse = savedImportIdentity(tab, profile.id, runtime.profiles.bindings, registry.archivedSessionIds)
+  // With several stored copies of the thread, continue the one it last ran in:
+  // binding order carries no recency, and an older copy that cannot be brought
+  // up to date forces yet another full import each time the thread comes back.
+  const reuse = await latestCopy(controller, runtime.profiles.bindings, tab.session_id, profile.id, registry.archivedSessionIds)
+    ?? savedImportIdentity(tab, profile.id, runtime.profiles.bindings, registry.archivedSessionIds)
   const idToRefresh = localSessionId ?? reuse
   if (live && (live.runtime_session_id ?? live.session_uuid) !== idToRefresh) return { sharedSession: live, imported: false }
   const existing = (await controller.list({})).items.find(row => row.sessionId === idToRefresh)
@@ -147,6 +151,8 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   if (priorBinding?.threadId && (priorBinding.threadId !== tab.session_id || priorBinding.profile.id !== profile.id)) throw new Error('Saved session identity conflicts with an existing native conversation')
   const doc = new BackendDocument(client, 'session-index'), state = await doc.read() ?? { version: 1 }
   const locallyStored = (await controller.list({})).items.some(row => row.sessionId === id)
+  // Archiving closed it; opening it again (resume, a saved tab) reopens it.
+  if (locallyStored && registry.archivedSessionIds?.includes(id)) await registry.unarchiveSession(id)
   if (locallyStored && priorBinding?.threadId === tab.session_id) {
     workspace ??= await registry.create(tab.cwd)
     await workspace.attachSession(id)
@@ -197,6 +203,17 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   }
   if (fresh) await retireStaleCopies(ctx, tab.session_id, id)
   return { sessionId: id, imported: true, historyPending: !transcript?.available, historyWindow: transcript?.history_window }
+}
+/** The stored dsh copy of a native thread updated last, preferring one not
+ * archived. Binding order carries no recency (the shared document sorts its
+ * keys), so the session list decides. */
+async function latestCopy(controller, bindings, threadId, profileId, archivedIds = []) {
+  const ids = Object.entries(bindings ?? {}).filter(([, binding]) => binding.threadId === threadId && binding.profile?.id === profileId).map(([id]) => id)
+  if (ids.length < 2) return ids[0]
+  const rows = new Map((await controller.list({})).items.map(row => [row.sessionId, row]))
+  const archived = new Set(archivedIds)
+  return ids.filter(id => rows.has(id)).sort((a, b) =>
+    Number(!archived.has(b)) - Number(!archived.has(a)) || (rows.get(b).updatedAt ?? 0) - (rows.get(a).updatedAt ?? 0))[0]
 }
 function fetchTranscript(client, tab, window = {}) {
   return client.call(TRANSCRIPT, { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd, ...window })

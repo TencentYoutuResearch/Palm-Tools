@@ -123,7 +123,11 @@ export function registerAgentApi(ctx, service) {
       const currentProfileId = binding?.profile.id ?? profiles.list().find(p => profileRoute(p.id) === selected(agent)?.provider)?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
       if (currentProfileId !== profile.id) {
         if (position?.lastTurn > 0 || agent.status !== 'idle') throw new Error('Start a new conversation to change its Agent; the current conversation retains its history and runtime.')
-        await profiles.clearUnusedBinding(agent.id)
+        // A draft with nothing in its log may still hold a native thread from a
+        // send whose turn never reached the log; it is not this conversation's history.
+        const empty = !agent.session.snapshotEvents?.().some(event => ['turn/start', 'user/message', 'assistant/message', 'request/header'].includes(event.type))
+        if (empty && profiles.binding(agent.id)?.threadId) await adapter.closeSession?.(agent.id)
+        await profiles.clearUnusedBinding(agent.id, { empty })
       }
       let provider, model, reasoningEffort, selectedModel, fast, requestedFast
       {

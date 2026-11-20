@@ -25,7 +25,8 @@ test('an unavailable SSH host cannot break the directory when GUI has saved remo
  const registry={list:()=>[],archivedSessionIds:[],pinnedSessionIds:[]}
  const sessionController={list:async()=>({items:[]})}
  const ctx={get:key=>key==='workspaceRegistry'?registry:key==='sessionController'?sessionController:undefined,sessionController}
- const backendClient={call:async()=>({tabs:[{backend_key:'codex',session_id:'remote-thread',cwd:'/srv/project',title:'Remote helper',endpoint_id:{kind:'remote',id:'remote'}}],endpoints:[{id:'remote',ssh_host:'builder@build.example'}]})}
+ const remoteTab={backend_key:'codex',session_id:'remote-thread',cwd:'/srv/project',title:'Remote helper',endpoint_id:{kind:'remote',id:'remote'}}
+ const backendClient={call:async path=>path.endsWith('/session-index')?{revision:1,value:{gui:{tabs:[remoteTab]}}}:{tabs:[remoteTab],endpoints:[{id:'remote',ssh_host:'builder@build.example'}]}}
  const manager=new ProjectHosts(ctx,{backendClient})
  manager.hosts=[{id:'build',name:'Build',host:'build.example'}]
  manager.directoryCache.set('build',{checkedAt:Date.now(),status:'offline',error:'Connection unavailable'})

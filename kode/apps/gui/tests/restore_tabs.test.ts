@@ -167,3 +167,29 @@ test('finalizeRestore clears failed tabs and persists only on full success', () 
   assert.deepEqual(finalizeRestore(2, 1), { clearFailed: false, persist: false })
   assert.deepEqual(finalizeRestore(3, 0), { clearFailed: false, persist: false })
 })
+
+test('starting in the view mode opens hosted conversations there without a terminal first', () => {
+  const view = { ...deps, viewBackends: ['codex', 'claude'] }
+  const steps = planRestoreTabs([
+    tab({ backend_key: 'codex', session_id: 'thread-1', transport_kind: 'pty' }),
+    // Saved as a view session, but the runtime has no copy of it any more.
+    tab({ backend_key: 'claude', session_id: 'thread-2', dsh_session_id: 'session-2', transport_kind: 'runtime' }),
+    tab({ backend_key: 'kimi', session_id: 'thread-3' }),
+    tab({ backend_key: 'codex', session_id: 'thread-4', endpoint_id: REMOTE }),
+    tab({ backend_key: 'codex', session_id: 'thread-5', transport_kind: 'acp' }),
+    tab({ backend_key: 'codex' }),
+    // A view-only conversation (no native thread) cannot be imported.
+    tab({ backend_key: 'codex', session_id: 'session-6', dsh_session_id: 'session-6', transport_kind: 'runtime' }),
+  ], [], view)
+  assert.deepEqual(steps.map((step) => step.kind), ['import', 'import', 'spawn', 'spawn', 'spawn', 'spawn', 'failed'])
+  const [first, second] = steps
+  if (first.kind !== 'import' || second.kind !== 'import') return
+  // The fallback resumes the thread as a terminal.
+  assert.equal(first.options.resumeSessionId, 'thread-1')
+  assert.equal(second.options.transportKind, 'pty')
+})
+
+test('the terminal mode never imports into the view', () => {
+  const steps = planRestoreTabs([tab({ backend_key: 'codex', session_id: 'thread-1' })], [], deps)
+  assert.equal(steps[0].kind, 'spawn')
+})

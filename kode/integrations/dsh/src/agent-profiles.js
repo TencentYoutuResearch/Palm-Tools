@@ -175,10 +175,13 @@ export class AgentProfiles {
       return binding
     })
   }
-  clearUnusedBinding(sessionId) {
+  /** `empty`: the caller verified the dsh conversation shows nothing yet. A
+   *  native thread opened for it (a send whose turn never reached the dsh log)
+   *  is then dropped with the binding instead of locking the draft to that Agent. */
+  clearUnusedBinding(sessionId, { empty = false } = {}) {
     return this.update(state => {
       const binding = Object.hasOwn(state.bindings, sessionId) ? state.bindings[sessionId] : undefined
-      if (binding && (binding.threadId || binding.seenInputs.length)) throw new Error('start a new conversation to change its Agent configuration')
+      if (binding && !empty && (binding.threadId || binding.seenInputs.length)) throw new Error('start a new conversation to change its Agent configuration')
       delete state.bindings[sessionId]
       return { cleared: sessionId }
     })

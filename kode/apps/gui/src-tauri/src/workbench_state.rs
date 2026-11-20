@@ -91,6 +91,9 @@ pub async fn load_tabs(fallback: &mut PersistedState) {
         _ => None,
     };
     let opened = opened.as_ref().and_then(|document| document.pointer("/value/gui/tabs")).and_then(Value::as_array);
+    // The startup read is the baseline; a later read (a mode switch checking
+    // the list) must not stand in for what this side last wrote.
+    if let Some(opened) = opened { OPEN_BASE.lock().get_or_insert_with(|| opened.clone()); }
     // A malformed entry must not prevent every other session from loading.
     fallback.tabs = opened_tabs(rows, opened).into_iter().filter_map(|row|serde_json::from_value(row.clone()).ok()).collect();
 }
@@ -103,11 +106,44 @@ pub async fn load_tabs(fallback: &mut PersistedState) {
 /// took over), and that must not drop a tab the user still had open.
 fn opened_tabs<'a>(rows: &'a [Value], opened: Option<&'a Vec<Value>>) -> Vec<&'a Value> {
     let Some(opened) = opened else { return rows.iter().collect() };
-    let key = |row: &Value| {
-        let endpoint = if row["endpoint_id"].is_null() || row["endpoint_id"]["kind"] == "local" { Value::Null } else { row["endpoint_id"]["id"].clone() };
-        (endpoint.to_string(), row["backend_key"].to_string(), row["session_id"].to_string())
-    };
-    opened.iter().map(|tab| rows.iter().find(|row| key(row) == key(tab)).unwrap_or(tab)).collect()
+    opened.iter().map(|tab| rows.iter().find(|row| open_key(row) == open_key(tab)).unwrap_or(tab)).collect()
+}
+
+/// Identity of an open tab across endpoints. A tab whose CLI has not reported
+/// its session yet is only ever equal to itself.
+fn open_key(row: &Value) -> String {
+    if row["session_id"].as_str().is_none_or(str::is_empty) { return format!("unsaved:{row}") }
+    let endpoint = if row["endpoint_id"].is_null() || row["endpoint_id"]["kind"] == "local" { Value::Null } else { row["endpoint_id"]["id"].clone() };
+    json!([endpoint, row["backend_key"], row["session_id"]]).to_string()
+}
+
+/// The open list as this frontend last read or wrote it.
+static OPEN_BASE: parking_lot::Mutex<Option<Vec<Value>>> = parking_lot::Mutex::new(None);
+
+/// The open list is shared: the dsh view opens and closes conversations in it
+/// too. Merge against what this frontend last saw instead of overwriting, so a
+/// conversation opened or closed there since is not undone here. A tab this
+/// side changed wins; one it left untouched follows the other side.
+fn merge_open_tabs(base: Option<&[Value]>, mine: &[Value], theirs: &[Value]) -> Vec<Value> {
+    let find = |rows: &[Value], key: &str| rows.iter().find(|row| open_key(row) == key).cloned();
+    let mut merged = Vec::new();
+    for tab in mine {
+        let key = open_key(tab);
+        let untouched = base.is_some_and(|base| find(base, &key).as_ref() == Some(tab));
+        match find(theirs, &key) {
+            Some(other) if untouched => merged.push(other),
+            // Untouched here and gone there: closed on the other side.
+            None if untouched => {}
+            _ => merged.push(tab.clone()),
+        }
+    }
+    for tab in theirs {
+        let key = open_key(tab);
+        // Opened on the other side; without a baseline, keep it too.
+        let new = base.is_none_or(|base| find(base, &key).is_none());
+        if new && find(&merged, &key).is_none() { merged.push(tab.clone()) }
+    }
+    merged
 }
 pub async fn save(state: &PersistedState) -> anyhow::Result<()> {
     let Ok((client,url,token)) = connection().await else { return Ok(()) };
@@ -122,9 +158,12 @@ pub async fn save(state: &PersistedState) -> anyhow::Result<()> {
             } else {native.push(item);}
         }
         value.insert("native_sessions".into(),json!(native));
-        value.insert("gui".into(), json!({"tabs":state.tabs,"endpoints":state.endpoints,"session_titles":state.session_titles}));
+        let theirs = value.get("gui").and_then(|gui| gui["tabs"].as_array()).cloned().unwrap_or_default();
+        let mine = state.tabs.iter().map(serde_json::to_value).collect::<Result<Vec<_>, _>>()?;
+        let tabs = merge_open_tabs(OPEN_BASE.lock().as_deref(), &mine, &theirs);
+        value.insert("gui".into(), json!({"tabs":tabs,"endpoints":state.endpoints,"session_titles":state.session_titles}));
         let response = client.post(&url).bearer_auth(&token).json(&json!({"expected_revision":row["revision"],"value":value})).send().await?;
-        if response.status().is_success() { return Ok(()) }
+        if response.status().is_success() { *OPEN_BASE.lock() = Some(tabs); return Ok(()) }
         let text = response.text().await?;
         if !text.contains("configuration changed") { anyhow::bail!("cannot save shared session index: {text}") }
     }
@@ -219,6 +258,25 @@ mod opened_tabs_tests {
         let ids: Vec<_> = opened_tabs(&rows, Some(&opened)).iter().map(|row| row["session_id"].as_str().unwrap().to_string() + "@" + row["backend_key"].as_str().unwrap()).collect();
         assert_eq!(ids, ["open@tclaude", "open@codex", "r1@codex"]);
         assert_eq!(opened_tabs(&rows, None).len(), 4);
+    }
+
+    #[test]
+    fn saving_keeps_what_the_view_opened_and_closed_since() {
+        let tab = |id: &str, title: &str| json!({"backend_key":"codex","session_id":id,"endpoint_id":null,"title":title});
+        let base = vec![tab("kept", "a"), tab("closed-there", "b"), tab("closed-here", "c")];
+        // The view opened one and closed one; this side closed one and renamed one.
+        let theirs = vec![tab("kept", "a"), tab("closed-here", "c"), tab("opened-there", "d")];
+        let mine = vec![tab("kept", "renamed"), tab("closed-there", "b"), tab("opened-here", "e")];
+        let merged = merge_open_tabs(Some(&base), &mine, &theirs);
+        let ids: Vec<_> = merged.iter().map(|row| row["session_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["kept", "opened-here", "opened-there"]);
+        assert_eq!(merged[0]["title"], "renamed");
+        // A tab this side changed survives a close on the other side.
+        let merged = merge_open_tabs(Some(&base), &[tab("closed-there", "moved to a terminal")], &theirs);
+        assert!(merged.iter().any(|row| row["session_id"] == "closed-there"));
+        // Unsaved tabs never collapse into each other.
+        let blank = json!({"backend_key":"codex","session_id":null,"title":"x"});
+        assert_eq!(merge_open_tabs(Some(&[]), &[blank.clone(), blank], &[]).len(), 2);
     }
 
     #[test]
