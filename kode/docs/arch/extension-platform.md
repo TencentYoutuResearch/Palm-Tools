@@ -296,4 +296,27 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
 - `hello` 额外返回 `event_cursor`，用于"从现在开始订阅"且不丢事件。
 - 会话只能在 GUI runtime 里创建（GUI 未运行时返回 503）；无 GUI 的 headless 创建属于 P0-c。
 
-尚未做（P0-a 余下部分）：`kode_sessions_wait` 改 long-poll、link 改事件驱动、消息库读写分离、GUI runtime 发布循环（500ms）改事件驱动。
+### P0-a 余下部分：推送替代轮询
+
+| 原来 | 现在 |
+|---|---|
+| runtime 请求每 100ms 查一次结果；宿主每 500ms 领取一次命令 | 请求唤醒宿主的长轮询领取，回执唤醒请求方 |
+| GUI 每 500ms 发布全部会话 | 会话有变化才发布（200ms 合并，5s 兜底）；领取命令改长轮询，旧后台自动退回轮询 |
+| `kode_sessions_wait` 每 250ms 拉一次 | `events?wait=` 长轮询，提交即唤醒 |
+| 跨机器连接每 500ms 发一次完整会话目录 | 存储变化、工作区请求时发送；目录没变时每 5s 才重发一次（兼作心跳）；2s 兜底 |
+
+尚未做：消息库读写分离；dsh runtime 的领取循环仍按原间隔轮询。
+
+### P0-d 伙伴（第一步）
+
+| 内容 | 位置 |
+|---|---|
+| 伙伴档案（名字、头像、角色说明、Agent、模型、权限上限、默认工作区）存为版本化文档 `bots`；第一个伙伴自动成为默认伙伴 | `crates/kode-bridge/src/messaging/bots.rs` |
+| 管理接口 `GET/POST /api/v1/messaging/workbench/bots`（仅 admin：GUI、dsh） | `messaging/api.rs` |
+| 扩展接口 `GET /api/ext/v1/bots`（`bots.read`，不含角色说明）；`POST sessions` 支持 `bot: id \| "default"` | `messaging/ext/mod.rs` |
+| 权限：默认 `min(default, 上限)`；请求高于上限直接拒绝（403），不悄悄降级 | `bots.rs` |
+| 角色说明：支持 `--append-system-prompt` 的 backend 注入系统提示（与记忆提示共用一个 flag）；其他 backend（如 Codex）作为第一条消息发送 | `kode-core/src/session/mod.rs` |
+| 记忆范围：会话标签 `bot:<id>`，角色说明里写明记忆范围 `bot:<id>` | 同上 |
+| GUI 设置页「伙伴」：新建、编辑、删除、设为默认 | `apps/gui/src/lib/BotsSettings.svelte` |
+
+尚未做：主会话与轮换（P1）、技能引用、来源权限上限（P2，`kode-bots`）、dsh 侧栏伙伴列表（P0-b 的 dsh 桥）。

@@ -54,14 +54,18 @@ export class KodeExtension {
 
   getSession(id) { return this.request('GET', `/sessions/${id}`) }
 
+  /** The user's bots: identity and limits, never their personas. */
+  listBots() { return this.request('GET', '/bots') }
+
   /**
    * Start a session in Kode. Retrying with the same `idempotencyKey` returns
    * the first outcome instead of starting a second CLI. `initialInput` is
    * sent once the CLI reaches its prompt; watch for `session.input_result`.
+   * With `bot` the bot decides the Agent, persona and permission ceiling.
    */
-  createSession({ backendKey, cwd, model, permissionMode, initialInput, labels = [], meta = {}, parent, idempotencyKey = randomUUID() }) {
+  createSession({ bot, backendKey, cwd, model, permissionMode, initialInput, labels = [], meta = {}, parent, idempotencyKey = randomUUID() }) {
     return this.request('POST', '/sessions', {
-      backend_key: backendKey, cwd, model, permission_mode: permissionMode, initial_input: initialInput,
+      bot, backend_key: backendKey, cwd, model, permission_mode: permissionMode, initial_input: initialInput,
       labels, meta, parent, idempotency_key: idempotencyKey,
     })
   }
