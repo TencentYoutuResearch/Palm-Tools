@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use std::path::PathBuf;
 
 use super::*;

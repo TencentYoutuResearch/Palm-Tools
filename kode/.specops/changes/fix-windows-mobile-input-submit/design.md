@@ -45,3 +45,18 @@ macOS 继续使用原常量，因此行为和手感不变。
 - 单元测试固定 Windows 与非 Windows 的提交间隔契约。
 - macOS 运行 bridge 全量测试，确认输入、同步和会话路由无回退。
 - Windows 用移动端连续发送两条消息，确认分别进入 Agent 而不是拼接。
+
+## Verification evidence
+
+基于 `upstream/main@77f067a` 的 PR 分支：
+
+- macOS `kode-bridge`：`225 passed`，`1 ignored`。
+- macOS `kode-core`：`261 passed`，`2 ignored`。
+- macOS `kode-memory`：`179 passed`。
+- macOS `kode-gui` 编译检查通过。
+- Windows `kode-core process::tests`：`4 passed`。
+- Windows `kode-bridge mobile_text_input`：`2 passed`，其中 Windows 合同测试确认
+  提交间隔为 `300ms`。
+
+剩余人工验证：用移动端向 Windows Worker 连续发送两条消息，确认 Agent 收到两个独立
+turn。
