@@ -2,6 +2,7 @@
 //! The published connection owns the backend lifetime independently of either frontend.
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+use kode_core::process::HideConsole;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -339,7 +340,7 @@ async fn start_or_connect(client: &reqwest::Client, connection: &Connection) -> 
         .server_config
         .as_ref()
         .context("shared Kode service has no configuration file")?;
-    let mut command = Command::new(executable);
+    let mut command = Command::new(executable).hide_console();
     command
         .args(&connection.server_args)
         .args(["--config"])

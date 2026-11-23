@@ -5,6 +5,7 @@
 
 use crate::{backend_probe, Ctx};
 use futures_util::future::join_all;
+use kode_core::process::HideConsole;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -143,7 +144,7 @@ async fn adb_inventory() -> Value {
 }
 
 async fn run_probe(command: &Path, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut process = Command::new(command);
+    let mut process = Command::new(command).hide_console();
     process.args(args).kill_on_drop(true);
     let output = tokio::time::timeout(timeout, process.output())
         .await

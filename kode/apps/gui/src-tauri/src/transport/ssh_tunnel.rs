@@ -15,6 +15,7 @@ use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+use kode_core::process::HideConsole;
 
 /// 一条活着的 SSH 本地端口转发隧道。
 pub struct SshTunnel {
@@ -47,7 +48,7 @@ impl SshTunnel {
         // -o BatchMode=yes  不交互式询问密码(隧道场景应走 key/agent;要密码就
         //                   立刻失败,而不是卡在 GUI 看不到的 stdin 上)
         let forward = format!("{local_port}:127.0.0.1:{remote_port}");
-        let mut cmd = Command::new("ssh");
+        let mut cmd = Command::new("ssh").hide_console();
         cmd.arg("-N")
             .arg("-T")
             .arg("-o")

@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use kode_core::process::HideConsole;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -311,7 +312,7 @@ fn parse_ready(line: &str) -> Result<ReadyMessage, String> {
 
 fn specops_command() -> Result<Command, String> {
     if let Some(binary) = std::env::var_os("KODE_SPECOPS_BIN") {
-        return Ok(Command::new(binary));
+        return Ok(Command::new(binary).hide_console());
     }
 
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -325,7 +326,7 @@ fn specops_command() -> Result<Command, String> {
         let script =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../specops/dist/cli/main.js");
         if script.is_file() {
-            let mut command = Command::new("node");
+            let mut command = Command::new("node").hide_console();
             command.arg(script);
             return Ok(command);
         }
@@ -334,7 +335,7 @@ fn specops_command() -> Result<Command, String> {
     if let Some(parent) = current.parent() {
         let sidecar = parent.join("specops");
         if sidecar.is_file() {
-            return Ok(Command::new(sidecar));
+            return Ok(Command::new(sidecar).hide_console());
         }
         if let Ok(entries) = std::fs::read_dir(parent) {
             if let Some(sidecar) = entries.flatten().map(|entry| entry.path()).find(|path| {
@@ -343,7 +344,7 @@ fn specops_command() -> Result<Command, String> {
                     .is_some_and(|name| name.starts_with("specops-"))
                     && path.is_file()
             }) {
-                return Ok(Command::new(sidecar));
+                return Ok(Command::new(sidecar).hide_console());
             }
         }
     }

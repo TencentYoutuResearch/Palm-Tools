@@ -19,6 +19,7 @@ use axum::{
 use base64::Engine;
 use kode_core::{
     config::{BackendConfig, Config},
+    process::HideConsole,
     session::{state::Status as CoreStatus, Session},
     CoreEvent, SessionId,
 };
@@ -3487,6 +3488,7 @@ fn resolve_diff_target(root: &std::path::Path, rel: &str) -> (PathBuf, String) {
 /// shell-out `git -C <path> <args>`,成功返回 trimmed stdout。失败返 None。
 fn run_git(path: &std::path::Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
+        .hide_console()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -3500,6 +3502,7 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> Option<String> {
 
 fn run_git_raw(path: &std::path::Path, args: &[&str]) -> Result<String, ApiError> {
     let output = std::process::Command::new("git")
+        .hide_console()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -3515,6 +3518,7 @@ fn run_git_raw(path: &std::path::Path, args: &[&str]) -> Result<String, ApiError
 
 fn run_diff_no_index(path: &std::path::Path) -> Result<String, ApiError> {
     let output = std::process::Command::new("git")
+        .hide_console()
         .args(["--no-pager", "diff", "--no-index", "--"])
         .arg("/dev/null")
         .arg(path)

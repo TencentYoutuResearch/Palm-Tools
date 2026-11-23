@@ -16,6 +16,7 @@ pub mod context;
 pub mod cost;
 pub mod event;
 pub mod model_alias;
+pub mod process;
 pub mod pty;
 pub mod session;
 pub mod transport;

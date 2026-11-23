@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kode_core::{config::BackendConfig, EndpointId, SessionId, SessionTransport, SpawnSpec};
+use kode_core::process::HideConsole;
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, State};
 
@@ -49,6 +50,7 @@ pub async fn specops_init_git_workspace(workspace: String) -> Result<(), String>
     }
     let output = tauri::async_runtime::spawn_blocking(move || {
         std::process::Command::new("git")
+            .hide_console()
             .arg("init")
             .arg("--")
             .arg(&canonical)

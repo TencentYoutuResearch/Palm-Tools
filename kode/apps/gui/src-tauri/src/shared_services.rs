@@ -1,6 +1,7 @@
 //! Owner-requested MCP setup for GUI CLIs. The managed launcher is inactive
 //! outside Kode and obtains only its own session credential at runtime.
 use kode_core::config::{BackendConfig, McpSetupSpec};
+use kode_core::process::HideConsole;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -69,7 +70,7 @@ fn launcher_args() -> Vec<&'static str> {
 }
 
 async fn command(cli: &str, args: &[&str]) -> Result<std::process::Output, String> {
-    let mut process = tokio::process::Command::new(cli);
+    let mut process = tokio::process::Command::new(cli).hide_console();
     process.args(args).kill_on_drop(true);
     tokio::time::timeout(Duration::from_secs(15), process.output())
         .await

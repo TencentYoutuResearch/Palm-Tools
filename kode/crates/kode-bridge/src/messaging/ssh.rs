@@ -1,5 +1,6 @@
 //! OpenSSH transport only. This module never replays a runtime action.
 use anyhow::{bail, Result};
+use kode_core::process::HideConsole;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 #[derive(Clone, Deserialize, Serialize)]
@@ -50,7 +51,7 @@ impl Tunnel {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let local_port = listener.local_addr()?.port();
         drop(listener);
-        let mut command = Command::new("ssh");
+        let mut command = Command::new("ssh").hide_console();
         if let Some(path) = &config.config_file {
             command.arg("-F").arg(path);
         }

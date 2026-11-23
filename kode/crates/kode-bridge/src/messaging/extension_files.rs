@@ -1,5 +1,6 @@
 //! Backend-owned extension snapshots and native installers. No frontend runtime dependency.
 use anyhow::{bail, Context, Result};
+use kode_core::process::HideConsole;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -94,7 +95,7 @@ pub fn run(root: &Path, executable: &str, args: &[String], seconds: u64) -> Resu
         options.mode(0o600);
     }
     let output = options.open(&log)?;
-    let mut command = Command::new(executable);
+    let mut command = Command::new(executable).hide_console();
     command
         .args(args)
         .stdin(Stdio::null())

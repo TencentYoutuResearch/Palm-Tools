@@ -125,7 +125,7 @@ pub struct SyncOpts {
 /// 跑 `git <args>`，工作目录 = vault_dir(root)。
 /// 非 0 退出码 → anyhow error 拼上 stderr。
 fn git(root: &Path, args: &[&str]) -> Result<Output> {
-    let out = std::process::Command::new("git")
+    let out = crate::process::command("git")
         .current_dir(vault_dir(root))
         .args(args)
         .output()
@@ -139,7 +139,7 @@ fn git(root: &Path, args: &[&str]) -> Result<Output> {
 
 /// 同 git() 但不检查退出码 —— 返回 false 时调用方自行判断。
 fn git_ok(root: &Path, args: &[&str]) -> bool {
-    std::process::Command::new("git")
+    crate::process::command("git")
         .current_dir(vault_dir(root))
         .args(args)
         .output()
@@ -182,7 +182,7 @@ fn read_git_remote(root: &Path) -> Option<String> {
 
 /// git --version 探测。ENOENT(命令不存在)→ 返回带平台安装引导的 error。
 pub fn ensure_git_available() -> Result<()> {
-    match std::process::Command::new("git").arg("--version").output() {
+    match crate::process::command("git").arg("--version").output() {
         Ok(out) if out.status.success() => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             anyhow::bail!(

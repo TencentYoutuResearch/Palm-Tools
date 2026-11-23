@@ -1,6 +1,7 @@
 //! One ACP connection owns each structured session and every pending interaction.
 //! UI ids are opaque local tokens; JSON-RPC ids and option ids never enter a PTY.
 use crate::{Ctx, EventEnvelope, SessionId};
+use kode_core::process::HideConsole;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::{
@@ -114,7 +115,8 @@ impl Client {
             .clone()
             .unwrap_or_else(kode_core::config::AcpSpec::flag);
         let model = model.or(backend.default_model.as_deref());
-        let mut command = Command::new(kode_core::pty::resolve_spawn_command(&backend.command));
+        let mut command =
+            Command::new(kode_core::pty::resolve_spawn_command(&backend.command)).hide_console();
         command
             .args(&backend.args)
             .args(&spec.args)

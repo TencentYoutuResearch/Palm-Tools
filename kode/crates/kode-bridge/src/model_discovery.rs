@@ -5,6 +5,7 @@
 //! callers should retain free-form model input as the compatibility fallback.
 
 use kode_core::config::BackendConfig;
+use kode_core::process::HideConsole;
 use kode_core::session::jsonl_tail::Backend;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -35,11 +36,11 @@ fn cli_command(program: &str) -> Command {
         Some("cmd" | "bat")
     ) {
         // Rust's CreateProcess path does not execute npm .cmd shims directly.
-        let mut command = Command::new("cmd.exe");
+        let mut command = Command::new("cmd.exe").hide_console();
         command.args(["/D", "/S", "/C"]).arg(resolved);
         return command;
     }
-    Command::new(resolved)
+    Command::new(resolved).hide_console()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
