@@ -225,6 +225,10 @@ pub fn extension_view_hide(app: AppHandle, extension: Option<String>) -> Result<
         .collect();
     for label in labels {
         if let Some(webview) = app.get_webview(&label) {
+            // A hidden WKWebView still takes file drags over its frame, so
+            // Finder drops never reach Kode's terminals. Move it out of the way;
+            // show() puts it back in place before revealing it.
+            webview.set_position(OFF_SCREEN).map_err(|e| e.to_string())?;
             webview.hide().map_err(|e| e.to_string())?;
         }
     }
