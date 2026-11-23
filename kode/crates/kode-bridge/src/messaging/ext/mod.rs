@@ -42,6 +42,7 @@ pub const CAPABILITIES: &[&str] = &[
     "sessions.input",
     "sessions.interrupt",
     "events.subscribe",
+    "bots.read",
 ];
 
 const FEATURES: &[&str] = &[
@@ -191,6 +192,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/ext/v1/sessions/:id/input", post(input))
         .route("/api/ext/v1/sessions/:id/interrupt", post(interrupt))
         .route("/api/ext/v1/sessions/:id/meta", post(update_meta))
+        .route("/api/ext/v1/bots", get(list_bots))
         .route("/api/ext/v1/events", get(events))
         .route("/api/ext/v1/events/stream", get(stream))
         .with_state(hub)
@@ -249,6 +251,19 @@ async fn hello(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<Value>>
         "event_cursor": hub.ext.store.latest_seq(),
         "runtimes": {"gui": ctx(&hub)?.runtimes.available("gui")},
     })))
+}
+
+/// The user's bots as extensions see them: identity and limits, no persona.
+async fn list_bots(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<Value>> {
+    let caller = caller(&hub, &h)?;
+    caller.require("bots.read")?;
+    let (_, roster) = super::bots::roster(&hub)?;
+    let bots: Vec<Value> = roster
+        .bots
+        .iter()
+        .map(|bot| bot.public(roster.default_bot.as_deref() == Some(bot.id.as_str())))
+        .collect();
+    Ok(Json(json!({"bots":bots,"default_bot":roster.default_bot})))
 }
 
 fn describe(dto: Value, owner: Option<&store::Owned>) -> Value {
@@ -354,8 +369,14 @@ fn validate_meta(meta: &Value) -> Result<()> {
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
-    backend_key: String,
-    cwd: String,
+    /// Run as a bot (an id, or `"default"` for the user's assistant). The bot
+    /// decides the Agent, persona, memory scope and permission ceiling.
+    #[serde(default)]
+    bot: Option<String>,
+    #[serde(default)]
+    backend_key: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -370,6 +391,48 @@ struct CreateRequest {
     parent: Option<u64>,
     idempotency_key: String,
 }
+
+/// What the runtime is asked to start, after a bot (if any) is applied.
+struct Launch {
+    backend_key: String,
+    cwd: String,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    persona: Option<String>,
+    labels: Vec<String>,
+}
+
+fn launch(hub: &Hub, caller: &Caller, req: &CreateRequest) -> Result<Launch> {
+    let mut labels = req.labels.clone();
+    let Some(bot) = req.bot.as_deref() else {
+        let backend_key = req.backend_key.clone().ok_or_else(|| Error(StatusCode::BAD_REQUEST, "backend_key or bot is required".into()))?;
+        let cwd = req.cwd.clone().ok_or_else(|| Error(StatusCode::BAD_REQUEST, "cwd is required".into()))?;
+        return Ok(Launch { backend_key, cwd, model: req.model.clone(), permission_mode: req.permission_mode.clone(), persona: None, labels });
+    };
+    caller.require("bots.read")?;
+    let bot = super::bots::resolve(hub, bot).map_err(|e| Error(StatusCode::NOT_FOUND, e.to_string()))?;
+    if req.backend_key.as_ref().is_some_and(|key| *key != bot.backend_key) {
+        return Err(Error(StatusCode::BAD_REQUEST, "a bot runs its own Agent; omit backend_key".into()));
+    }
+    let permission = super::bots::effective_permission(req.permission_mode.as_deref(), &bot.permission_ceiling)
+        .map_err(|e| Error(StatusCode::FORBIDDEN, e.to_string()))?;
+    let cwd = req.cwd.clone().or_else(|| bot.default_cwd.clone())
+        .ok_or_else(|| Error(StatusCode::BAD_REQUEST, "cwd is required: this bot has no default workspace".into()))?;
+    let label = format!("bot:{}", bot.id);
+    if !labels.contains(&label) {
+        labels.push(label);
+        validate_labels(&labels)?;
+    }
+    Ok(Launch {
+        persona: Some(bot.persona_prompt()),
+        backend_key: bot.backend_key,
+        cwd,
+        model: req.model.clone().or(bot.model),
+        permission_mode: Some(permission),
+        labels,
+    })
+}
+
 async fn create(
     State(hub): State<Arc<Hub>>,
     h: HeaderMap,
@@ -378,10 +441,7 @@ async fn create(
     let caller = caller(&hub, &h)?;
     caller.require("sessions.create")?;
     if !valid_id(&req.idempotency_key) {
-        return Err(Error(
-            StatusCode::BAD_REQUEST,
-            "invalid idempotency_key".into(),
-        ));
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid idempotency_key".into()));
     }
     validate_labels(&req.labels)?;
     validate_meta(&req.meta)?;
@@ -390,10 +450,7 @@ async fn create(
         .as_ref()
         .is_some_and(|t| t.trim().is_empty() || t.len() > super::model::MAX_CONTENT_BYTES)
     {
-        return Err(Error(
-            StatusCode::BAD_REQUEST,
-            "initial_input must be non-empty and under 64 KiB".into(),
-        ));
+        return Err(Error(StatusCode::BAD_REQUEST, "initial_input must be non-empty and under 64 KiB".into()));
     }
     if let Some(parent) = req.parent {
         owned(&hub, &caller, parent)?;
@@ -408,49 +465,31 @@ async fn create(
     {
         return Ok(Json(prior));
     }
+    let launch = launch(&hub, &caller, &req)?;
     if !ctx.runtimes.available("gui") {
-        return Err(Error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Open Kode on this computer before creating a session".into(),
-        ));
+        return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "Open Kode on this computer before creating a session".into()));
     }
     let rid = request_id(&caller.extension, &req.idempotency_key, "");
-    let payload = json!({"backend_key":req.backend_key,"cwd":req.cwd,"model":req.model,"permission_mode":req.permission_mode});
-    let dto = ctx
-        .runtimes
-        .request("gui", None, "create_session", payload, &rid)
-        .await?;
-    let id = dto["id"].as_u64().ok_or_else(|| {
-        Error(
-            StatusCode::BAD_GATEWAY,
-            "runtime did not return a session".into(),
-        )
-    })?;
-    let owner = store::Owned {
-        extension: caller.extension.clone(),
-        labels: req.labels,
-        meta: req.meta,
-        parent: req.parent,
+    let payload = json!({"backend_key":launch.backend_key,"cwd":launch.cwd,"model":launch.model,"permission_mode":launch.permission_mode,"system_prompt":launch.persona});
+    let dto = ctx.runtimes.request("gui", None, "create_session", payload, &rid).await?;
+    let id = dto["id"]
+        .as_u64()
+        .ok_or_else(|| Error(StatusCode::BAD_GATEWAY, "runtime did not return a session".into()))?;
+    // A backend without a system prompt flag (or an older Kode) gets the
+    // persona as the first message instead.
+    let persona_message = launch.persona.filter(|_| dto["system_prompt"] != "applied");
+    let first_input = match (persona_message, req.initial_input) {
+        (Some(persona), Some(text)) => Some(format!("{persona}\n\n{text}")),
+        (persona, text) => persona.or(text),
     };
+    let owner = store::Owned { extension: caller.extension.clone(), labels: launch.labels, meta: req.meta, parent: req.parent };
     hub.ext.store.own(id, &owner)?;
-    let initial = req.initial_input.is_some();
-    let result = json!({"session":describe(dto, Some(&owner)),"initial_input":if initial {json!("pending")} else {Value::Null}});
-    hub.ext
-        .store
-        .finish_request(&caller.extension, &req.idempotency_key, &result)?;
-    hub.ext.append(
-        id,
-        "session.created",
-        json!({"labels":owner.labels,"parent":owner.parent}),
-    )?;
-    if let Some(text) = req.initial_input {
-        tokio::spawn(deliver_initial(
-            hub.clone(),
-            ctx,
-            id,
-            text,
-            format!("{rid}.in"),
-        ));
+    let pending = first_input.is_some();
+    let result = json!({"session":describe(dto, Some(&owner)),"initial_input":if pending {json!("pending")} else {Value::Null}});
+    hub.ext.store.finish_request(&caller.extension, &req.idempotency_key, &result)?;
+    hub.ext.append(id, "session.created", json!({"labels":owner.labels,"parent":owner.parent}))?;
+    if let Some(text) = first_input {
+        tokio::spawn(deliver_initial(hub.clone(), ctx, id, text, format!("{rid}.in")));
     }
     Ok(Json(result))
 }

@@ -51,58 +51,65 @@ async fn server() -> Server {
 }
 
 fn publish(ctx: &Arc<crate::Ctx>, status: &str, events: Value) -> Value {
+    publish_as(ctx, "gui:1:1", "claude", status, events)
+}
+
+fn publish_as(ctx: &Arc<crate::Ctx>, native: &str, backend: &str, status: &str, events: Value) -> Value {
     let publication: Publication = serde_json::from_value(json!({
         "runtime":"gui","boot_id":BOOT,
-        "sessions":[{"session_id":"gui:1:1","dto":{"title":"Fixture","backend_key":"claude","status":status},"events":events}]
+        "sessions":[{"session_id":native,"dto":{"title":"Fixture","backend_key":backend,"status":status},"events":events}]
     }))
     .unwrap();
     ctx.runtimes.publish(ctx, publication).unwrap()
 }
 
-/// Answers `create_session` and `input` like the GUI runtime does.
-fn host(ctx: Arc<crate::Ctx>, inputs: Arc<Mutex<Vec<String>>>) -> tokio::task::JoinHandle<()> {
+#[derive(Default)]
+struct Recorded {
+    creates: Vec<Value>,
+    inputs: Vec<String>,
+}
+
+/// Answers `create_session` and `input` like the GUI runtime does: Claude
+/// takes a persona as its system prompt, Codex does not.
+fn host(ctx: Arc<crate::Ctx>, recorded: Arc<Mutex<Recorded>>) -> tokio::task::JoinHandle<()> {
     let empty: Publication =
         serde_json::from_value(json!({"runtime":"gui","boot_id":BOOT,"sessions":[]})).unwrap();
     ctx.runtimes.publish(&ctx, empty).unwrap();
     tokio::spawn(async move {
         loop {
-            let batch = ctx.runtimes.claim("gui", BOOT).unwrap();
+            let batch = ctx.runtimes.claim_wait("gui", BOOT, std::time::Duration::from_secs(5)).await.unwrap();
             for command in batch["commands"].as_array().unwrap() {
                 let value = match command["kind"].as_str().unwrap() {
                     "create_session" => {
-                        assert_eq!(command["payload"]["backend_key"], "claude");
-                        let mapped = publish(&ctx, "starting", json!([]));
-                        let mut dto = ctx
-                            .runtimes
-                            .snapshot(mapped["sessions"][0]["id"].as_u64().unwrap())
-                            .unwrap();
+                        let payload = command["payload"].clone();
+                        let native = {
+                            let mut recorded = recorded.lock();
+                            recorded.creates.push(payload.clone());
+                            format!("gui:1:{}", recorded.creates.len())
+                        };
+                        let backend = payload["backend_key"].as_str().unwrap().to_owned();
+                        let mapped = publish_as(&ctx, &native, &backend, "starting", json!([]));
+                        let mut dto = ctx.runtimes.snapshot(mapped["sessions"][0]["id"].as_u64().unwrap()).unwrap();
                         dto["id"] = mapped["sessions"][0]["id"].clone();
+                        if payload["system_prompt"].is_string() {
+                            dto["system_prompt"] = json!(if backend == "codex" { "unsupported" } else { "applied" });
+                        }
                         let ctx = ctx.clone();
                         // The CLI settles at its prompt a moment after spawning.
                         tokio::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            publish(&ctx, "idle", json!([]));
+                            publish_as(&ctx, &native, &backend, "idle", json!([]));
                         });
                         dto
                     }
                     "input" => {
-                        inputs
-                            .lock()
-                            .push(command["payload"]["text"].as_str().unwrap().into());
+                        recorded.lock().inputs.push(command["payload"]["text"].as_str().unwrap().into());
                         json!({"accepted":true})
                     }
                     other => panic!("unexpected runtime command {other}"),
                 };
-                ctx.runtimes
-                    .settle(
-                        "gui",
-                        BOOT,
-                        command["id"].as_str().unwrap(),
-                        json!({"value":value}),
-                    )
-                    .unwrap();
+                ctx.runtimes.settle("gui", BOOT, command["id"].as_str().unwrap(), json!({"value":value})).unwrap();
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
 }
@@ -124,9 +131,13 @@ async fn grant(s: &Server, extension: &str, capabilities: &[&str]) -> String {
 }
 
 async fn wait_for(s: &Server, token: &str, kind: &str) -> Value {
+    wait_for_in(s, token, kind, "").await
+}
+
+async fn wait_for_in(s: &Server, token: &str, kind: &str, filter: &str) -> Value {
     for _ in 0..200 {
         let page: Value = reqwest::Client::new()
-            .get(format!("{}/api/ext/v1/events?after=0", s.url))
+            .get(format!("{}/api/ext/v1/events?after=0{filter}", s.url))
             .bearer_auth(token)
             .send()
             .await
@@ -231,8 +242,8 @@ async fn grants_are_admin_only_scoped_and_replaced_on_reissue() {
 #[tokio::test]
 async fn owned_session_lifecycle_streams_turn_events_without_polling() {
     let s = server().await;
-    let inputs = Arc::new(Mutex::new(vec![]));
-    let _host = host(s.ctx.clone(), inputs.clone());
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    let _host = host(s.ctx.clone(), recorded.clone());
     let all = [
         "sessions.create",
         "sessions.input",
@@ -300,7 +311,7 @@ async fn owned_session_lifecycle_streams_turn_events_without_polling() {
     let delivered = wait_for(&s, &token, "session.input_result").await;
     assert_eq!(delivered["payload"]["status"], "delivered");
     assert_eq!(
-        *inputs.lock(),
+        recorded.lock().inputs,
         ["hello agent"],
         "initial input waits for the prompt and is sent once"
     );
@@ -392,4 +403,81 @@ async fn owned_session_lifecycle_streams_turn_events_without_polling() {
     assert_eq!(done["turn_id"], events[0]["payload"]["turn_id"]);
     assert_eq!(done["final_message"]["text"], "final answer");
     assert_eq!(done["final_message"]["truncated"], false);
+}
+
+async fn bots(s: &Server, change: Value) -> Value {
+    reqwest::Client::new()
+        .post(format!("{}/api/v1/messaging/workbench/bots", s.url))
+        .bearer_auth(ADMIN)
+        .json(&change)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn bot_sessions_carry_persona_scope_and_ceiling() {
+    let s = server().await;
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    let _host = host(s.ctx.clone(), recorded.clone());
+    let client = reqwest::Client::new();
+    let token = grant(&s, "team", &["sessions.create", "events.subscribe", "bots.read"]).await;
+    let blind = grant(&s, "blind", &["sessions.create", "events.subscribe"]).await;
+    let create = |token: &str, body: Value| {
+        client.post(format!("{}/api/ext/v1/sessions", s.url)).bearer_auth(token.to_owned()).json(&body).send()
+    };
+
+    let none = create(&token, json!({"bot":"default","idempotency_key":"none"})).await.unwrap();
+    assert_eq!(none.status(), 404, "no default bot until the user creates one");
+
+    let kit = bots(&s, json!({"action":"upsert","bot":{"name":"Kit","persona":"You review code.","backend_key":"claude","permission_ceiling":"default","default_cwd":"/tmp"}})).await;
+    let kit_id = kit["default_bot"].as_str().unwrap().to_owned();
+    let rex = bots(&s, json!({"action":"upsert","bot":{"name":"Rex","persona":"You write tests.","backend_key":"codex","permission_ceiling":"plan"}})).await;
+    let rex_id = rex["bots"][1]["id"].as_str().unwrap().to_owned();
+    assert_eq!(rex["default_bot"], kit_id, "the first bot stays the default");
+
+    let listed: Value = client.get(format!("{}/api/ext/v1/bots", s.url)).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed["bots"][0]["default"], true);
+    assert!(listed["bots"][0].get("persona").is_none(), "extensions never read personas");
+    let hidden = client.get(format!("{}/api/ext/v1/bots", s.url)).bearer_auth(&blind).send().await.unwrap();
+    assert_eq!(hidden.status(), 403);
+    assert_eq!(create(&blind, json!({"bot":"default","idempotency_key":"b"})).await.unwrap().status(), 403);
+
+    let over = create(&token, json!({"bot":"default","permission_mode":"bypassPermissions","idempotency_key":"over"})).await.unwrap();
+    assert_eq!(over.status(), 403, "asking above the ceiling is refused, not lowered");
+    let other_agent = create(&token, json!({"bot":"default","backend_key":"codex","idempotency_key":"agent"})).await.unwrap();
+    assert_eq!(other_agent.status(), 400);
+
+    let created: Value = create(&token, json!({"bot":"default","initial_input":"Review src/lib.rs","labels":["team:call"],"idempotency_key":"kit-1"}))
+        .await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let labels = created["session"]["ext"]["labels"].clone();
+    assert_eq!(labels, json!(["team:call", format!("bot:{kit_id}")]));
+    {
+        let recorded = recorded.lock();
+        let payload = &recorded.creates[0];
+        assert_eq!((payload["backend_key"].as_str(), payload["cwd"].as_str(), payload["permission_mode"].as_str()), (Some("claude"), Some("/tmp"), Some("default")));
+        let persona = payload["system_prompt"].as_str().unwrap();
+        assert!(persona.contains("You review code.") && persona.contains(&format!("bot:{kit_id}")));
+    }
+    let kit_session = created["session"]["id"].as_u64().unwrap();
+    wait_for_in(&s, &token, "session.input_result", &format!("&session={kit_session}")).await;
+    assert_eq!(recorded.lock().inputs, ["Review src/lib.rs"], "a system prompt persona is not repeated as a message");
+
+    let missing_cwd = create(&token, json!({"bot":rex_id,"idempotency_key":"rex-0"})).await.unwrap();
+    assert_eq!(missing_cwd.status(), 400, "Rex has no default workspace");
+    let rex_created: Value = create(&token, json!({"bot":rex_id,"cwd":"/var","initial_input":"Add tests","idempotency_key":"rex-1"}))
+        .await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(recorded.lock().creates[1]["permission_mode"], "plan");
+    let rex_session = rex_created["session"]["id"].as_u64().unwrap();
+    wait_for_in(&s, &token, "session.input_result", &format!("&session={rex_session}")).await;
+    let inputs = recorded.lock().inputs.clone();
+    assert!(inputs[1].starts_with("<kode-agent-persona") && inputs[1].ends_with("\n\nAdd tests"), "Codex gets its persona in the first message: {}", inputs[1]);
+
+    bots(&s, json!({"action":"delete","id":kit_id})).await;
+    assert_eq!(create(&token, json!({"bot":"default","idempotency_key":"after-delete"})).await.unwrap().status(), 404);
 }

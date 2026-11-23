@@ -1002,6 +1002,11 @@ struct CreateSessionReq {
     /// cursor-agent skips the OSC 11 probe that times out over PTY IPC.
     #[serde(default)]
     term_theme: Option<String>,
+    /// A Kode agent persona (`kode_core::session::persona_prompt`). Applied
+    /// to the system prompt when the backend has one; ignored otherwise, so
+    /// callers check `inject_persona` and send it as a message instead.
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 async fn create_session(
@@ -1028,6 +1033,11 @@ async fn create_session(
         .unwrap_or_else(|| PathBuf::from("/"));
     if std::env::var("KODE_GUI_RUNTIME").as_deref()==Ok("1") {
         session_mcp::reserve_gui_session(id,&req.backend_key,&cwd,req.model.as_deref()).await.map_err(|e|ApiError::BadRequest(e.to_string()))?;
+    }
+    if let Some(persona) = req.system_prompt.as_deref() {
+        if let Some(args) = kode_core::session::inject_persona(&backend.args, backend.protocol_key(&req.backend_key), persona) {
+            backend.args = args;
+        }
     }
     if backend.acp.is_none() && backend.protocol_key(&req.backend_key) == "codebuddy" {
         backend.acp = Some(kode_core::config::AcpSpec::flag());

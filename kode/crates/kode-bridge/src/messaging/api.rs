@@ -114,6 +114,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/workbench/peers/remove", post(remove_peer))
         .route("/api/v1/messaging/workbench/catalog", get(workbench_catalog))
         .route("/api/v1/messaging/workbench/agents", get(agent_catalog).post(change_agent))
+        .route("/api/v1/messaging/workbench/bots", get(bot_roster).post(change_bots))
         .route("/api/v1/messaging/workbench/sessions", get(workbench_sessions))
         .route("/api/v1/messaging/workbench/workspaces", get(workspaces).post(change_workspace))
         .route("/api/v1/messaging/workbench/workspaces/hosts", get(workspace_hosts))
@@ -211,6 +212,16 @@ async fn save_workbench_document(State(hub): State<Arc<Hub>>, h: HeaderMap, Path
 async fn agent_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<super::agents::Catalog>> {
     admin(&hub,&h)?;
     Ok(Json(tokio::task::spawn_blocking(move ||super::agents::catalog(&hub)).await.map_err(anyhow::Error::from)??))
+}
+async fn bot_roster(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;
+    let (revision, roster) = super::bots::roster(&hub)?;
+    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot})))
+}
+async fn change_bots(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(change): Json<super::bots::Change>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;
+    let roster = super::bots::change(&hub, change)?;
+    Ok(Json(json!({"bots":roster.bots,"default_bot":roster.default_bot})))
 }
 async fn change_agent(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(command): Json<super::agents::Change>) -> Result<Json<super::agents::Catalog>> {
     admin(&hub,&h)?;

@@ -7,6 +7,7 @@ mod cancellation;
 mod wire;
 mod extensions;
 pub mod ext;
+pub mod bots;
 mod extension_files;
 mod handoff;
 mod integrations;
