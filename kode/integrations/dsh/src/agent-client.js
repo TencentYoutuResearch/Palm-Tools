@@ -1659,7 +1659,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       busy && h('div', { className: 'kode-host-progress', role: 'status', 'aria-live': 'polite' }, '正在打开会话…'),
       notice && h('div', { className: 'kode-host-progress', role: 'status' }, notice),
       h(native, { ...props, ...(props.useStore ? { useStore: useViewStore } : {}), ...(viewActions ? { actions: viewActions } : {}), useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
-        startSession: (id, options) => { const route = merged.routes.get(id); if (route) void navigate(route.hostId, route.placeholder ? { create: true } : { workspaceId: route.id }); else props.startSession(id, options) },
+        startSession: (id, options) => {
+          const route = merged.routes.get(id)
+          if (route?.placeholder) return void navigate(route.hostId, { create: true })
+          const workspacePath = merged.workspaces.items.find(workspace => workspace.workspaceId === id)?.path
+            ?? data.hosts.find(host => host.id === data.current)?.workspaces?.find(workspace => workspace.id === id)?.path
+          const nativeWorkspaces = avatarContext?.get?.('workspaces')?.list?.getSnapshot() ?? workspaceSource
+          if (route || (workspacePath && !nativeWorkspaces.items.some(workspace => workspace.workspaceId === id))) {
+            return void navigate(route?.hostId ?? data.current, { workspaceId: route?.id ?? id, workspacePath, startSession: true, options })
+          }
+          props.startSession(id, options)
+        },
         renameWorkspace: (id, title) => merged.routes.has(id) ? mutate(id, 'rename-workspace', { workspaceId: merged.routes.get(id).id, title }) : props.renameWorkspace(id, title),
         deleteWorkspace: id => merged.routes.has(id) ? mutate(id, 'delete-workspace', { workspaceId: merged.routes.get(id).id }) : props.deleteWorkspace(id),
         insertWorkspaceBefore: (id, before) => {

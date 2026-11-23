@@ -1707,6 +1707,19 @@ async function openSessionTarget(ctx, target, signal) {
   layout.beginNavigation();
   ui.openSession(target.sessionId);
 }
+async function openWorkspaceTarget(ctx, target, signal) {
+  signal.throwIfAborted();
+  const workspaces = ctx.get("workspaces");
+  let { workspaceId } = target;
+  if (!workspaces.list.getSnapshot().items.some((row) => row.workspaceId === workspaceId) && target.workspacePath) {
+    const workspace = await workspaces.create({ path: target.workspacePath });
+    signal.throwIfAborted();
+    workspaceId = workspace.workspaceId;
+  }
+  const ui = ctx.get("uiWorkspace");
+  if (target.startSession) return ui.startSession(workspaceId, target.options);
+  return ui.openWorkspace(workspaceId);
+}
 
 // packages/transport/client-source.js
 var inject = [];
@@ -1831,7 +1844,7 @@ async function apply(ctx) {
       }
       signal.throwIfAborted();
       if (target.sessionId) await openSessionTarget(ctx, target, signal);
-      else if (target.workspaceId) await ctx.get("uiWorkspace").openWorkspace(target.workspaceId);
+      else if (target.workspaceId) await openWorkspaceTarget(ctx, target, signal);
       else if (target.create) window.dispatchEvent(new CustomEvent("kode-create-project", { detail: { name: target.name ?? "" } }));
       else {
         const workspace = ctx.get("workspaces").list.getSnapshot().items[0];

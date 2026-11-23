@@ -464,6 +464,34 @@ test('cross-host arrival waits for both catalogs and binds subscriptions before 
   assert.deepEqual(events, ['clear-link', 'cancel-restoration', 'remote-target'])
 })
 
+test('workspace sidebar plus recovers a stale native catalog before starting the Agent picker', async () => {
+  const workspace = { workspaceId: 'project', title: 'Example project', path: '/project/example', sessionIds: ['old'] }
+  const target = { workspaceId: workspace.workspaceId, workspacePath: workspace.path, startSession: true }
+  const calls = [], options = { agentPreset: 'example-agent' }
+  const directoryData = { current: 'local', hosts: [{ id: 'local', sessions: [], workspaces: [{ ...workspace, id: workspace.workspaceId }] }] }
+  let nativeItems = []
+  const c = client(directoryData, {}, {
+    kodeTransport: {
+      current: 'local', subscribe: () => () => {}, getSnapshot: () => ({ current: 'local' }),
+      select: async (host, request) => calls.push([host, { ...request }]),
+    },
+    workspaces: { list: { getSnapshot: () => ({ items: nativeItems }) } },
+  })
+  const wrapper = c.workspaceShell.component({
+    useSessions: select => select({ ids: ['old'], byId: { old: { id: 'old' } } }),
+    useWorkspaces: select => select({ items: [workspace], pinnedSessionIds: [], archivedSessionIds: [] }),
+    startSession: (id, selectedOptions) => calls.push(['native', { id, selectedOptions }]),
+  })
+  wrapper.type(wrapper.props)
+  await new Promise(resolve => setImmediate(resolve))
+  const native = wrapper.type(wrapper.props).children.find(child => child?.type === c.native)
+  native.props.startSession(workspace.workspaceId, options)
+  await new Promise(resolve => setImmediate(resolve))
+  nativeItems = [workspace]
+  native.props.startSession(workspace.workspaceId, options)
+  assert.deepEqual(calls, [['local', { ...target, options }], ['native', { id: workspace.workspaceId, selectedOptions: options }]])
+})
+
 test('foreign pin/archive actions reuse native controls and target the owning host in both directions', async () => {
   for (const current of ['local', 'build']) {
     const foreign = current === 'local' ? 'build' : 'local'
