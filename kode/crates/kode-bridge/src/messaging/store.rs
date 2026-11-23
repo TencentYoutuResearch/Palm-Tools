@@ -18,6 +18,9 @@ pub struct Store {
     pub(super) db: Mutex<Connection>,
     pub node_id: String,
     _lock: Option<File>,
+    /// Bumped after every message event commit: wakes long-polling readers
+    /// and peer links instead of having them poll.
+    pub(super) changed: tokio::sync::watch::Sender<u64>,
 }
 impl Store {
     pub fn document(&self, key: &str) -> Result<serde_json::Value> {
@@ -104,6 +107,7 @@ impl Store {
             db: Mutex::new(db),
             node_id: node_id.into(),
             _lock: lock,
+            changed: tokio::sync::watch::channel(0).0,
         };
         for mut m in store.open_messages()? {
             if m.target.node_id == node_id && m.status == Status::Delivering {
@@ -291,6 +295,7 @@ impl Store {
         )?;
         tx.execute("INSERT INTO events(message) VALUES (?1)", [&text])?;
         tx.commit()?;
+        self.changed.send_modify(|n| *n += 1);
         Ok(m)
     }
     pub fn save(&self, m: &Message) -> Result<()> {
@@ -306,6 +311,7 @@ impl Store {
         }
         tx.execute("INSERT INTO events(message) VALUES (?1)", [&text])?;
         tx.commit()?;
+        self.changed.send_modify(|n| *n += 1);
         Ok(())
     }
     /// Read-only wakeup probe; unlike claim this never renews ownership or consumes work.

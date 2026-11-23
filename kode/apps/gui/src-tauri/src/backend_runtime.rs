@@ -284,6 +284,21 @@ async fn execute_via_gui_bridge(
     )
 }
 
+/// Session projections and native identities shared by the publisher and the
+/// command loop.
+#[derive(Default)]
+struct Mirror {
+    native: HashMap<String, u64>,
+    seen: std::collections::HashSet<String>,
+}
+
+/// Coalesces bursts of session events into one publication.
+const PUBLISH_MIN: Duration = Duration::from_millis(200);
+/// Refresh projections (tokens, titles) even when no event arrives.
+const PUBLISH_IDLE: Duration = Duration::from_secs(5);
+/// Each claim is held open by the backend until a command is queued.
+const CLAIM_WAIT_MS: u64 = 20_000;
+
 pub fn start(ctx: Arc<kode_bridge::Ctx>) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -291,14 +306,45 @@ pub fn start(ctx: Arc<kode_bridge::Ctx>) {
             tokio::time::sleep(Duration::from_secs(4)).await;
         }
     });
+    let boot = format!("gui-{}", std::process::id());
+    let mirror = Arc::new(tokio::sync::Mutex::new(Mirror::default()));
+    {
+        // Publish when sessions change instead of on a fixed tick.
+        let (ctx, boot, mirror) = (ctx.clone(), boot.clone(), mirror.clone());
+        tauri::async_runtime::spawn(async move {
+            let mut bus = ctx.bus.subscribe();
+            loop {
+                {
+                    let mut mirror = mirror.lock().await;
+                    let Mirror { native, seen } = &mut *mirror;
+                    if let Err(error) = publish(&ctx, &boot, native, seen).await {
+                        tracing::warn!(%error, "GUI runtime publication unavailable");
+                    }
+                }
+                let changed = async {
+                    loop {
+                        match bus.recv().await {
+                            Ok(event) if !event.r#type.ends_with("pty_bytes") => return,
+                            Ok(_) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
+                        }
+                    }
+                };
+                tokio::select! {
+                    _ = changed => {}
+                    _ = tokio::time::sleep(PUBLISH_IDLE) => {}
+                }
+                tokio::time::sleep(PUBLISH_MIN).await;
+            }
+        });
+    }
     tauri::async_runtime::spawn(async move {
-        let boot = format!("gui-{}", std::process::id());
-        let mut native = HashMap::new();
-        let mut seen = std::collections::HashSet::new();
         let mut receipts = HashMap::<String, Value>::new();
+        // A backend older than the long poll rejects `wait_ms`; poll it instead.
+        let mut long_poll = true;
         loop {
             let tick = async {
-                publish(&ctx, &boot, &mut native, &mut seen).await?;
                 let completed: Vec<_> = receipts
                     .iter()
                     .map(|(id, result)| (id.clone(), result.clone()))
@@ -311,13 +357,30 @@ pub fn start(ctx: Arc<kode_bridge::Ctx>) {
                     .await?;
                     receipts.remove(&id);
                 }
-                let batch = call(
-                    "/runtime/claim",
-                    Some(json!({"runtime":"gui","boot_id":boot})),
-                )
-                .await?;
-                for command in batch["commands"].as_array().into_iter().flatten() {
-                    let result = match execute(&ctx, &boot, &mut native, &mut seen, command).await {
+                let mut claim = json!({"runtime":"gui","boot_id":boot});
+                if long_poll {
+                    claim["wait_ms"] = json!(CLAIM_WAIT_MS);
+                }
+                let batch = match call("/runtime/claim", Some(claim)).await {
+                    Err(error) if long_poll && error.contains("wait_ms") => {
+                        long_poll = false;
+                        return Err(error);
+                    }
+                    other => other?,
+                };
+                if !long_poll && batch["commands"].as_array().is_none_or(|c| c.is_empty()) {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                let commands = batch["commands"].as_array().cloned().unwrap_or_default();
+                if commands.is_empty() {
+                    return Ok(());
+                }
+                let mut mirror = mirror.lock().await;
+                let Mirror { native, seen } = &mut *mirror;
+                // Commands may name a session the publisher has not mapped yet.
+                publish(&ctx, &boot, native, seen).await?;
+                for command in &commands {
+                    let result = match execute(&ctx, &boot, native, seen, command).await {
                         Ok(value) => json!({"value":value}),
                         Err(error) => json!({"error":error}),
                     };
@@ -333,8 +396,9 @@ pub fn start(ctx: Arc<kode_bridge::Ctx>) {
             };
             if let Err(error) = tick.await {
                 tracing::warn!(%error,"GUI runtime synchronization unavailable");
+                // An older backend answers the claim at once; never spin.
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     });
 }

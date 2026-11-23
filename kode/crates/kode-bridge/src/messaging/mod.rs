@@ -78,6 +78,8 @@ pub struct Hub {
     workspace_pending: Mutex<HashMap<String, (String, workspaces::Command, tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>)>>,
     boot: String,
     stopped: AtomicBool,
+    /// Wakes peer links when a workspace request is queued for them.
+    link_wake: tokio::sync::Notify,
 }
 impl Hub {
     pub fn open(config: Config, ctx: &Arc<crate::Ctx>) -> Result<Arc<Self>> {
@@ -123,6 +125,7 @@ impl Hub {
             workspace_pending: Mutex::new(HashMap::new()),
             boot: uuid::Uuid::new_v4().to_string(),
             stopped: AtomicBool::new(false),
+            link_wake: tokio::sync::Notify::new(),
         });
         agents::initialize(&hub)?;
         hub.extensions.restore(&hub)?;
@@ -166,6 +169,8 @@ impl Hub {
     }
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+        // Links otherwise notice the stop only at their fallback tick.
+        self.link_wake.notify_waiters();
         self.ext.stop();
         self.extensions.close();
     }
@@ -181,6 +186,7 @@ impl Hub {
         let id = uuid::Uuid::new_v4().to_string();
         let (send, receive) = tokio::sync::oneshot::channel();
         { let mut pending = self.workspace_pending.lock(); if pending.len() >= 32 { bail!("too many workspace requests") }; pending.insert(id.clone(), (node.into(), command, send)); }
+        self.link_wake.notify_waiters();
         struct Cleanup<'a>(&'a Hub, String);
         impl Drop for Cleanup<'_> { fn drop(&mut self) { self.0.workspace_pending.lock().remove(&self.1); } }
         let _cleanup = Cleanup(self,id.clone());

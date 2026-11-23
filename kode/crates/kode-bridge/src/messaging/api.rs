@@ -551,6 +551,9 @@ async fn settle(
 struct Cursor {
     #[serde(default)]
     after: u64,
+    /// Seconds to hold the request open when nothing is newer than `after`.
+    #[serde(default)]
+    wait: u64,
 }
 async fn events(
     State(hub): State<Arc<Hub>>,
@@ -561,11 +564,19 @@ async fn events(
         Principal::Admin => None,
         Principal::Session(s) => Some(s),
     };
-    let events = hub.store.events(q.after, session.as_deref())?;
-    let cursor = events.last().map_or(q.after, |e| e.seq);
-    Ok(Json(json!({"events":events,"cursor":cursor})))
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(q.wait.min(30));
+    loop {
+        // Subscribe before reading so a commit in between still wakes us.
+        let mut changed = hub.store.changed.subscribe();
+        let events = hub.store.events(q.after, session.as_deref())?;
+        let now = tokio::time::Instant::now();
+        if !events.is_empty() || now >= deadline {
+            let cursor = events.last().map_or(q.after, |e| e.seq);
+            return Ok(Json(json!({"events":events,"cursor":cursor})));
+        }
+        let _ = tokio::time::timeout(deadline - now, changed.changed()).await;
+    }
 }
-
 async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(mut input): Json<crate::runtime::Publication>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     let workspace_document = hub.store.document("workspaces")?;
@@ -625,10 +636,11 @@ mod archive_visibility_tests {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeClaim { runtime:String, boot_id:String }
+struct RuntimeClaim { runtime:String, boot_id:String, #[serde(default)] wait_ms:u64 }
+/// With `wait_ms` the claim is held open until a command arrives (long poll).
 async fn runtime_claim(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<RuntimeClaim>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
-    Ok(Json(ctx.runtimes.claim(&input.runtime,&input.boot_id)?))
+    Ok(Json(ctx.runtimes.claim_wait(&input.runtime,&input.boot_id,std::time::Duration::from_millis(input.wait_ms)).await?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

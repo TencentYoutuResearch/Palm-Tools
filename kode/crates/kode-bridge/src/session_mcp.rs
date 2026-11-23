@@ -151,7 +151,8 @@ impl Client {
             "kode_sessions_read"|"kode_sessions_wait"=>{
                 let after=args["after"].as_u64().unwrap_or(0);let duration=if name.ends_with("wait"){args["timeout_seconds"].as_u64().unwrap_or(15).clamp(1,30)}else{0};
                 let until=tokio::time::Instant::now()+Duration::from_secs(duration);
-                loop{let result=self.call(&format!("events?after={after}"),None).await?;if result["events"].as_array().is_some_and(|rows|!rows.is_empty()) || tokio::time::Instant::now()>=until{return pages::events(result,after)};tokio::time::sleep(Duration::from_millis(250)).await;}
+                // The backend holds the request open until an event arrives.
+                loop{let wait=until.saturating_duration_since(tokio::time::Instant::now()).as_secs();let result=self.call(&format!("events?after={after}&wait={wait}"),None).await?;if result["events"].as_array().is_some_and(|rows|!rows.is_empty()) || tokio::time::Instant::now()>=until{return pages::events(result,after)};tokio::time::sleep(Duration::from_millis(250)).await;}
             },
             _=>bail!("Unknown session tool"),
         }

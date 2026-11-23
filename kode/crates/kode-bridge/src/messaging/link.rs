@@ -37,6 +37,47 @@ fn initial(hub: &Hub, version: u32) -> Frame {
         version,
     }
 }
+/// Links send when the store changes or a workspace request is queued; this
+/// tick only covers state without a change signal (cancellations, expiry).
+const FALLBACK_TICK: Duration = Duration::from_secs(2);
+/// The directory doubles as the heartbeat: resend it unchanged at least this
+/// often so the peer's 15 s timeout never fires on an idle link.
+const DIRECTORY_KEEPALIVE: Duration = Duration::from_secs(5);
+
+async fn wake(
+    tick: &mut tokio::time::Interval,
+    changed: &mut tokio::sync::watch::Receiver<u64>,
+    workspace: &tokio::sync::Notify,
+) {
+    tokio::select! {
+        _ = tick.tick() => {}
+        _ = changed.changed() => {}
+        _ = workspace.notified() => {}
+    }
+}
+
+/// Drops a directory frame identical to the last one sent, until keepalive.
+#[derive(Default)]
+struct DirectoryPacer {
+    last: Option<(String, Instant)>,
+}
+impl DirectoryPacer {
+    fn filter(&mut self, frames: Vec<Frame>) -> Vec<Frame> {
+        frames
+            .into_iter()
+            .filter(|frame| {
+                let Frame::Directory { sessions } = frame else { return true };
+                let encoded = serde_json::to_string(sessions).unwrap_or_default();
+                if self.last.as_ref().is_some_and(|(prior, at)| *prior == encoded && at.elapsed() < DIRECTORY_KEEPALIVE) {
+                    return false;
+                }
+                self.last = Some((encoded, Instant::now()));
+                true
+            })
+            .collect()
+    }
+}
+
 fn frames(hub: &Hub, peer: &str, sent: &mut HashMap<String, Status>) -> Result<Vec<Frame>> {
     let mut out = vec![Frame::Directory {
         sessions: hub.store.sessions()?,
@@ -335,12 +376,14 @@ async fn serve(
     hub.remember_cancel_peer(peer, delivery.cancel_enabled)?;
     let mut sent = HashMap::new();
     let mut last_seen = Instant::now();
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let mut tick = tokio::time::interval(FALLBACK_TICK);
+    let mut changed = hub.store.changed.subscribe();
+    let mut directory = DirectoryPacer::default();
     loop {
         tokio::select! {
-            _=tick.tick()=>{
+            _=wake(&mut tick,&mut changed,&hub.link_wake)=>{
                 if hub.stopped.load(Ordering::Relaxed) || !hub.peer_allowed(peer, token){break}
-                if last_seen.elapsed()>Duration::from_secs(15){bail!("peer heartbeat timed out")} for f in delivery.frames(hub,peer,&mut sent)? {tokio::time::timeout(Duration::from_secs(10),socket.send(AxMessage::Text(super::wire::encode(&f, version)?))).await??;}}
+                if last_seen.elapsed()>Duration::from_secs(15){bail!("peer heartbeat timed out")} for f in directory.filter(delivery.frames(hub,peer,&mut sent)?) {tokio::time::timeout(Duration::from_secs(10),socket.send(AxMessage::Text(super::wire::encode(&f, version)?))).await??;}}
             msg=socket.recv()=>match msg {
                 Some(Ok(AxMessage::Text(text)))=>{if !hub.peer_allowed(peer,token){break} last_seen=Instant::now();if let Some(f)=incoming(hub,peer,&text,&mut delivery).await? {tokio::time::timeout(Duration::from_secs(10),socket.send(AxMessage::Text(super::wire::encode(&f, version)?))).await??;}},
                 Some(Ok(AxMessage::Ping(b)))=>socket.send(AxMessage::Pong(b)).await?,
@@ -440,12 +483,14 @@ async fn dial(hub: &Arc<Hub>, peer: &Peer, url: &str) -> Result<()> {
     hub.remember_cancel_peer(&peer.node_id, delivery.cancel_enabled)?;
     let mut sent = HashMap::new();
     let mut last_seen = Instant::now();
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let mut tick = tokio::time::interval(FALLBACK_TICK);
+    let mut changed = hub.store.changed.subscribe();
+    let mut directory = DirectoryPacer::default();
     loop {
         tokio::select! {
-            _=tick.tick()=>{
+            _=wake(&mut tick,&mut changed,&hub.link_wake)=>{
                 if hub.stopped.load(Ordering::Relaxed) || !hub.peer_allowed(&peer.node_id, &peer.link_token){break}
-                if last_seen.elapsed()>Duration::from_secs(15){bail!("peer heartbeat timed out")} for f in delivery.frames(hub,&peer.node_id,&mut sent)? {tokio::time::timeout(Duration::from_secs(10),socket.send(TungMessage::Text(super::wire::encode(&f, version)?))).await??;}}
+                if last_seen.elapsed()>Duration::from_secs(15){bail!("peer heartbeat timed out")} for f in directory.filter(delivery.frames(hub,&peer.node_id,&mut sent)?) {tokio::time::timeout(Duration::from_secs(10),socket.send(TungMessage::Text(super::wire::encode(&f, version)?))).await??;}}
             msg=socket.next()=>match msg {
                 Some(Ok(TungMessage::Text(text)))=>{if !hub.peer_allowed(&peer.node_id,&peer.link_token){break} last_seen=Instant::now();if let Some(f)=incoming(hub,&peer.node_id,&text,&mut delivery).await? {tokio::time::timeout(Duration::from_secs(10),socket.send(TungMessage::Text(super::wire::encode(&f, version)?))).await??;}},
                 Some(Ok(TungMessage::Ping(b)))=>socket.send(TungMessage::Pong(b)).await?,
