@@ -240,6 +240,78 @@ impl Registry {
         .collect()
     }
 
+    /// Durable events of every session after `after` (the `ts` cursor), oldest
+    /// first. Readers that must not miss an event follow this cursor instead of
+    /// the lossy broadcast bus.
+    pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<EventEnvelope>> {
+        let guard = self.db.lock();
+        let Some(db) = guard.as_ref() else {
+            return Ok(vec![]);
+        };
+        let mut stmt = db.prepare(
+            "SELECT session_id,ts,kind,payload FROM runtime_events WHERE ts>?1 ORDER BY ts LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after, limit.min(10000)], |r| {
+            Ok((
+                r.get::<_, u64>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, ts, kind, payload) = row?;
+            let mut event = EventEnvelope::new(id, kind, serde_json::from_str(&payload)?);
+            event.ts = ts;
+            Ok(event)
+        })
+        .collect()
+    }
+
+    /// Newest event cursor, so a new follower can start at "now".
+    pub fn latest_event(&self) -> u64 {
+        let guard = self.db.lock();
+        guard
+            .as_ref()
+            .and_then(|db| {
+                db.query_row("SELECT COALESCE(MAX(ts),0) FROM runtime_events", [], |r| r.get(0))
+                    .ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// One published session DTO, without scanning the whole directory.
+    pub fn snapshot(&self, id: u64) -> Option<Value> {
+        let guard = self.db.lock();
+        let db = guard.as_ref()?;
+        let encoded: String = db
+            .query_row(
+                "SELECT dto FROM runtime_sessions WHERE id=?1 AND runtime!='_reserved'",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()??;
+        let mut dto: Value = serde_json::from_str(&encoded).ok()?;
+        let seen: Option<u64> = dto["runtime"].as_str().and_then(|runtime| {
+            db.query_row("SELECT seen FROM runtime_hosts WHERE runtime=?1", [runtime], |r| r.get(0))
+                .optional()
+                .ok()
+                .flatten()
+        });
+        let online = seen.is_some_and(|seen| crate::now_ms().saturating_sub(seen) < 15000);
+        let mut alive = online;
+        if dto["runtime"] == "gui" {
+            alive = online
+                && dto["native_process_id"]
+                    .as_u64()
+                    .is_some_and(|pid| alive_pids(&[pid]).contains(&pid));
+        }
+        dto["runtime_online"] = json!(online);
+        dto["owner_alive"] = json!(alive);
+        Some(dto)
+    }
+
     pub fn publish(&self, ctx: &Ctx, input: Publication) -> Result<Value> {
         if !crate::messaging::model::valid_id(&input.runtime)
             || input.boot_id.is_empty()

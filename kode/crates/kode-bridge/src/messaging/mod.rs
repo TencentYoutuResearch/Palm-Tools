@@ -6,6 +6,7 @@ mod delivery;
 mod cancellation;
 mod wire;
 mod extensions;
+pub mod ext;
 mod extension_files;
 mod handoff;
 mod integrations;
@@ -63,6 +64,7 @@ pub struct Peer {
 }
 
 pub struct Hub {
+    ext: ext::Gateway,
     extensions: extensions::Extensions,
     handoff_gate: tokio::sync::Mutex<()>,
     memory: Mutex<Option<Arc<crate::MemoryHandle>>>,
@@ -107,6 +109,7 @@ impl Hub {
         ctx.runtimes.open(&config.database.with_extension("runtime.sqlite"))?;
         let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
+            ext: ext::Gateway::open(&config.database.with_extension("ext.sqlite"))?,
             extensions: extensions::Extensions::new(config.database.with_extension("agent-hub"), home),
             handoff_gate: tokio::sync::Mutex::new(()),
             memory: Mutex::new(ctx.memory.clone()),
@@ -126,6 +129,7 @@ impl Hub {
         Ok(hub)
     }
     pub fn start(self: &Arc<Self>) {
+        ext::spawn_projector(self.clone());
         let hub = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -162,13 +166,14 @@ impl Hub {
     }
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+        self.ext.stop();
         self.extensions.close();
     }
     pub fn node_id(&self) -> &str {
         &self.config.node_id
     }
     pub fn router(self: &Arc<Self>) -> axum::Router {
-        api::router(self.clone())
+        api::router(self.clone()).merge(ext::router(self.clone()))
     }
     async fn workspace(self: &Arc<Self>, node: &str, command: workspaces::Command) -> Result<serde_json::Value> {
         if node == self.node_id() || node.is_empty() { return workspaces::execute(self.clone(), command).await }
