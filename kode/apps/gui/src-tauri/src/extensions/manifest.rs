@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 pub const FILE_NAME: &str = "kode-extension.json";
 pub const SCHEMA: &str = "kode.extension/v1";
 
-/// Capabilities an extension may request. Unknown names are rejected so a
-/// typo never silently grants nothing (or, later, something else).
+/// Host capabilities an extension may request, besides the extension API's
+/// own (`kode_bridge::messaging::ext::CAPABILITIES`). Unknown names are
+/// rejected so a typo never silently grants nothing (or something else).
 pub const CAPABILITIES: &[&str] = &[
     // Pass the shared workbench service connection (URL + admin token file)
     // to the backend. This is the session catalog, runtime registry and
@@ -149,7 +150,9 @@ impl Manifest {
                 .with_context(|| format!("invalid engines.kode `{requirement}`"))?;
         }
         for capability in &self.capabilities {
-            if !CAPABILITIES.contains(&capability.as_str()) {
+            if !CAPABILITIES.contains(&capability.as_str())
+                && !kode_bridge::messaging::ext::CAPABILITIES.contains(&capability.as_str())
+            {
                 bail!("unknown capability `{capability}`");
             }
         }
@@ -197,6 +200,16 @@ impl Manifest {
 
     pub fn has(&self, capability: &str) -> bool {
         self.capabilities.iter().any(|c| c == capability)
+    }
+
+    /// Capabilities served by the extension API (`kode.api/v1`). A backend
+    /// that requests any gets its own scoped token instead of the admin one.
+    pub fn api_capabilities(&self) -> Vec<String> {
+        self.capabilities
+            .iter()
+            .filter(|c| kode_bridge::messaging::ext::CAPABILITIES.contains(&c.as_str()))
+            .cloned()
+            .collect()
     }
 
     /// `None` when the manifest does not constrain the version.
@@ -282,6 +295,21 @@ mod tests {
     #[test]
     fn accepts_valid_manifest() {
         sample().validate().unwrap();
+    }
+
+    #[test]
+    fn extension_api_capabilities_are_accepted_and_separated() {
+        let example: Manifest = serde_json::from_str(include_str!(
+            "../../../../../integrations/ext-sample/kode-extension.json"
+        ))
+        .unwrap();
+        example.validate().unwrap();
+        assert!(!example.has("workbench"), "the sample proves the API needs no admin access");
+        let mut manifest = sample();
+        manifest.capabilities.extend(["sessions.create".into(), "events.subscribe".into()]);
+        manifest.validate().unwrap();
+        assert_eq!(manifest.api_capabilities(), ["sessions.create", "events.subscribe"]);
+        assert!(sample().api_capabilities().is_empty(), "host-only manifests get no API token");
     }
 
     #[test]
