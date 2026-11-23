@@ -56,14 +56,18 @@ export function foldNativeSubagent(state, update) {
   for (const [key, limit] of [['name', 200], ['task', 4096], ['model', 200], ['status', 32]]) {
     if (typeof update[key] === 'string' && update[key]) next[key] = update[key].slice(0, limit)
   }
-  if (typeof update.status === 'string' && update.status) next.activityEpoch = update.activityEpoch
+  if (typeof update.status === 'string' && update.status) {
+    // The Host forwards this state as lossless JSON. Omit absent epochs.
+    if (isActiveSubagent(next.status) && typeof update.activityEpoch === 'string') next.activityEpoch = update.activityEpoch
+    else delete next.activityEpoch
+  }
   if (typeof update.text === 'string') next.output = update.text.slice(-32768)
   if (typeof update.delta === 'string') next.output = (next.output + update.delta).slice(-32768)
   const entries = Object.entries({ ...state, [update.id]: next }).slice(-256)
   return Object.fromEntries(entries)
 }
 export const nativeSubagentsProjection = {
-  key: 'kodeNativeSubagents', stateVersion: 1, stateSchema, init: () => ({}),
+  key: 'kodeNativeSubagents', stateVersion: 2, stateSchema, init: () => ({}),
   apply: (state, event) => event.type === 'plugin:kode/subagent-update' ? foldNativeSubagent(state, event.data) : state,
   wire: { viewSchema: stateSchema, view: state => Object.fromEntries(Object.entries(state).map(([id, child]) =>
     [id, isActiveSubagent(child.status) && child.activityEpoch !== activityEpoch ? { ...child, status: 'disconnected' } : child])) },

@@ -47,3 +47,14 @@ test('only live parent connections project active child status after a restart o
   const stopped = foldNativeSubagent(state, nativeSubagentRecord({ id: 'live', status: 'cancelled' }))
   assert.equal(nativeSubagentsProjection.wire.view(stopped).live.status, 'cancelled')
 })
+
+test('replayed and stopped child observations survive the session summary JSON round trip', () => {
+  const records = [
+    { id: 'historical', status: 'running' },
+    nativeSubagentRecord({ id: 'live', status: 'running' }),
+    nativeSubagentRecord({ id: 'live', status: 'completed' }),
+  ]
+  const state = records.reduce(foldNativeSubagent, nativeSubagentsProjection.init())
+  const summary = { projections: { values: { kodeNativeSubagents: nativeSubagentsProjection.wire.view(state) } } }
+  assert.deepEqual(JSON.parse(JSON.stringify(summary)), summary)
+})
