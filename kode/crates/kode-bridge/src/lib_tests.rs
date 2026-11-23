@@ -263,6 +263,18 @@ fn mobile_text_input_strips_only_trailing_line_endings() {
 }
 
 #[cfg(not(windows))]
+#[test]
+fn non_windows_mobile_text_input_keeps_immediate_submit_delay() {
+    assert_eq!(TEXT_INPUT_SUBMIT_DELAY, Duration::from_millis(50));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_mobile_text_input_waits_for_conpty_render() {
+    assert_eq!(TEXT_INPUT_SUBMIT_DELAY, Duration::from_millis(300));
+}
+
+#[cfg(not(windows))]
 #[tokio::test]
 async fn mobile_text_input_submits_with_a_separate_carriage_return() {
     use std::collections::HashMap;

@@ -1537,7 +1537,14 @@ struct InputReq {
     bytes_b64: Option<String>,
 }
 
+#[cfg(not(windows))]
 const TEXT_INPUT_SUBMIT_DELAY: Duration = Duration::from_millis(50);
+
+// ConPTY and Windows TUI renderers can consume the text after the bridge has
+// already written it. Keep Enter separate, but leave enough time for the
+// composer to become ready so a later mobile message cannot append to it.
+#[cfg(windows)]
+const TEXT_INPUT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
 /// REST `text` 表示一条要提交的消息，不是原始 PTY 字节。
 ///
