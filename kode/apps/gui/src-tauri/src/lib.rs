@@ -211,6 +211,7 @@ pub fn run() {
             backend_runtime::shared_runtime_request,
             backend_runtime::shared_runtime_archive,
             backend_runtime::agent_hub_action,
+            backend_runtime::bot_action,
             backend_runtime::shared_session_handoff,
             shared_services::setup_shared_services,
             cloud_sync::cloud_sync_status,

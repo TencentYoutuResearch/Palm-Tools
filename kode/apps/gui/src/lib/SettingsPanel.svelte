@@ -7,6 +7,7 @@
     | 'backends'
     | 'plugins'
     | 'extensions'
+    | 'bots'
     | 'memory'
     | 'terminal'
     | 'capture'
@@ -37,6 +38,7 @@
   } from './ipc'
   import type { UnlistenFn } from '@tauri-apps/api/event'
   import ExtensionsSettings from './ExtensionsSettings.svelte'
+  import BotsSettings from './BotsSettings.svelte'
   import BackendIcon from './BackendIcon.svelte'
   import BackendAddPicker from './BackendAddPicker.svelte'
   import ConfirmDialog from './ConfirmDialog.svelte'
@@ -504,6 +506,10 @@
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6l4-2 4 4-4 4 2 4h-6l-2 4-4-4 2-4-4-2 4-4Z"/></svg>
         <span>{tr('plugins.title')}</span>
       </button>
+      <button class="nav-item" class:active={tab === 'bots'} onclick={() => (tab = 'bots')}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 14h.01M15 14h.01M9.5 17.5h5"/></svg>
+        <span>{tr('bots.title')}</span>
+      </button>
       <button class="nav-item" class:active={tab === 'extensions'} onclick={() => (tab = 'extensions')}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>
         <span>{tr('extensions.title')}</span>
@@ -831,6 +837,8 @@
         <ul class="list"><li class="item"><div class="item-body"><div class="item-title"><span class="name">{tr('plugins.marketplace')}</span></div><span class="item-cmd plain">{tr('plugins.marketplaceHint')}</span></div><div class="item-actions"><button class="btn ghost sm" onclick={onOpenPlugins}>{tr('settings.configure')}</button></div></li></ul>
       {:else if tab === 'extensions'}
         <ExtensionsSettings />
+      {:else if tab === 'bots'}
+        <BotsSettings />
       {:else if tab === 'terminal'}
         <div class="content-head">
           <h2>{tr('settings.terminal.title')}</h2>

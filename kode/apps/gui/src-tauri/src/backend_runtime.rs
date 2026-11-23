@@ -460,6 +460,11 @@ pub async fn shared_runtime_archive(id: u64) -> Result<Value, String> {
 pub async fn agent_hub_action(payload: Option<Value>) -> Result<Value, String> {
     call("/workbench/agent-hub", payload).await
 }
+/// Bots live in the shared backend so dsh, extensions and phones see the same ones.
+#[tauri::command]
+pub async fn bot_action(payload: Option<Value>) -> Result<Value, String> {
+    call("/workbench/bots", payload).await
+}
 #[tauri::command]
 pub async fn shared_session_handoff(payload: Value) -> Result<Value, String> {
     call("/workbench/handoff", Some(payload)).await

@@ -1667,6 +1667,34 @@ export interface ExtensionInfo {
 export type ExtensionRect = { x: number; y: number; width: number; height: number }
 export type ExtensionProgress = { id: string; message: string; step: number | null; total: number | null }
 export type ExtensionViewAction = { extension: string; view: string; action: string; params: Record<string, unknown> }
+export type PermissionCeiling = 'plan' | 'default' | 'acceptEdits' | 'bypassPermissions'
+
+/** A long-lived named agent ("伙伴"). Kept in the shared Kode backend. */
+export interface Bot {
+  id: string
+  name: string
+  avatar?: string | null
+  persona: string
+  backend_key: string
+  model?: string | null
+  permission_ceiling: PermissionCeiling
+  default_cwd?: string | null
+  created_at?: number
+  updated_at?: number
+}
+
+export interface BotRoster {
+  bots: Bot[]
+  default_bot: string | null
+}
+
+export const botIpc = {
+  roster: () => invoke<BotRoster>('bot_action'),
+  upsert: (bot: Partial<Bot>) => invoke<BotRoster>('bot_action', { payload: { action: 'upsert', bot } }),
+  remove: (id: string) => invoke<BotRoster>('bot_action', { payload: { action: 'delete', id } }),
+  setDefault: (id: string | null) => invoke<BotRoster>('bot_action', { payload: { action: 'set_default', id } }),
+}
+
 export const extensionIpc = {
   list: () => invoke<ExtensionInfo[]>('extension_list'),
   install: (path: string, link: boolean) => invoke<ExtensionInfo>('extension_install', { path, link }),
