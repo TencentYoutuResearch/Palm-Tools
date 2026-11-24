@@ -5,6 +5,22 @@ import { BackendDocument } from './backend-state.js'
 import { profileRoute } from './agent-profiles.js'
 import { resolveDefaultSelection } from './model-alias.js'
 import { appendFastPreference } from './model-fast.js'
+
+const maxTitleWords = 4
+const titleWords = new Intl.Segmenter(undefined, { granularity: 'word' })
+const defaultTitlePrompt = 'Summarize the task as Intent-Detail. Use Feat for changes or new work, Bug for diagnosis or fixes, and MR for pull or merge request work. Choose a specific detail. Examples: Feat-Session Panel, Bug-SSH Workspace Resume, MR-Review Mobile Sync.'
+
+export function sessionNamingPolicy(settings) {
+  return { prompt: settings?.session_naming_prompt?.trim() || defaultTitlePrompt, maxWords: maxTitleWords }
+}
+
+function validateAgentTitle(title) {
+  const count = Array.from(titleWords.segment(title)).filter(segment => segment.isWordLike).length
+  if (count < 1 || count > maxTitleWords || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(title)) {
+    throw new Error(`Use a single-line session title with 1–${maxTitleWords} words including any intent prefix. Read sessionNaming from kode_sessions_list and revise the title.`)
+  }
+}
+
 const required = (value, name, max = 4096) => { if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new Error(`Invalid ${name}`); return value.trim() }
 export function installSessionCreator(ctx, backend, nodeId) {
   const document = new BackendDocument(backend, 'session-index')
@@ -35,6 +51,7 @@ export function installSessionCreator(ctx, backend, nodeId) {
     const operation = (async () => {
       const record = await update(state => {
         const prior = state.creations[key]
+        if (!prior && (source || input.requester)) validateAgentTitle(title)
         if (prior && prior.fingerprint !== fingerprint) {
           // Older tools could not express model. Only an unsubmitted legacy
           // request may add it while retaining the original session/input IDs.

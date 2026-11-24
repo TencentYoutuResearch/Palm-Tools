@@ -58,6 +58,33 @@ test('creation never selects the first of multiple target workspaces',async()=>{
 })
 
 const readOnlySource = () => ({ id: 'reader', session: { header: {} }, ctx: { get: name => name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'read-only' }) } : undefined } })
+test('Agent titles count the intent and keep server validation separate from human naming', async () => {
+  const input = { task: 'Inspect a workspace', idempotency_key: 'naming' }
+  const local = fixture(), source = readOnlySource(), renames = []
+  local.services.sessionController.rename = async ({ title }) => renames.push(title)
+  for (const title of ['Bug-SSH Workspace Resume Fails', 'Feat-Session\nPanel', '排查远程主机会话同步失败原因']) {
+    await assert.rejects(local.create({ ...input, title }, source), /1–4 words/)
+  }
+  assert.deepEqual(local.createdIds, [])
+  assert.equal(local.state(), null, 'an invalid name must not consume the creation key')
+  assert.equal((await local.create({ ...input, title: 'Bug-SSH Workspace Resume' }, source)).title, 'Bug-SSH Workspace Resume')
+  assert.deepEqual(renames, ['Bug-SSH Workspace Resume'])
+
+  const remote = fixture(), target = { ...input, requester: 'source.example/session-a' }
+  await assert.rejects(remote.create({ ...target, title: 'Name Too Long for Agent' }), /1–4 words/)
+  assert.equal((await remote.create({ ...target, title: '评审-移动同步' })).title, '评审-移动同步')
+
+  const owner = fixture(), title = 'The exact title entered by a human'
+  const existing = await owner.create({ ...input, title })
+  assert.equal(existing.title, title)
+  const state = owner.state()
+  const previousKey = createHash('sha256').update('owner:naming').digest('hex')
+  const agentKey = createHash('sha256').update('reader:naming').digest('hex')
+  owner.seed({ ...state, creations: { [agentKey]: state.creations[previousKey] } })
+  assert.deepEqual(await owner.create({ ...input, title }, source), existing)
+  assert.equal(owner.createdIds.length, 1, 'legacy creations must still be retryable without another session')
+})
+
 test('creation promotes the official executor and applies read-only permission to both sessions', async () => {
   const h = fixture(), native = { ...h.agent, session: { header: { cwd: '/example/project' } } }
   delete h.agent.selectModel

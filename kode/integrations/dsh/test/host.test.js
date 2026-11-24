@@ -32,10 +32,25 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
     const creationSchema = tools.get('kode_sessions_create').parameters
     assert.equal(creationSchema.properties.model.type, 'string')
     assert.ok(!creationSchema.required.includes('model'))
+    assert.match(creationSchema.properties.title.description, /at most 4 words/)
+    assert.match(creationSchema.properties.title.description, /kode_sessions_list/)
     const directory = await tools.get('kode_sessions_list').execute({}, { agent })
     const own = directory.sessions.find(s => s.address.session_id === id)
     assert.equal(own.runtime, 'dsh')
     assert.equal(own.title, 'Implementation session')
+    assert.equal(directory.sessionNaming.maxWords, 4)
+    assert.match(directory.sessionNaming.prompt, /Feat.*Bug.*MR/)
+    const namingPath = '/api/v1/messaging/integrations'
+    const customPrompt = '用中文概括任务。\n评审名称以 Review- 开头。'
+    try {
+      await admin.call(namingPath, { session_naming_prompt: ` ${customPrompt} ` })
+      await assert.rejects(admin.call(namingPath, { session_naming_prompt: '规'.repeat(2001) }), /2000/)
+      const fresh = await tools.get('kode_sessions_list').execute({}, { agent })
+      assert.deepEqual(fresh.sessionNaming, { prompt: customPrompt, maxWords: 4 })
+    } finally {
+      await admin.call(namingPath, { session_naming_prompt: '' })
+    }
+    assert.deepEqual((await tools.get('kode_sessions_list').execute({}, { agent })).sessionNaming, directory.sessionNaming)
     agent.session.header.title = 'Renamed implementation session'
     const renamedUntil = Date.now() + 3000
     while (true) {
