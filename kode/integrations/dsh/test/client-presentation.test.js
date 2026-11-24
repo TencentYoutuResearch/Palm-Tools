@@ -867,24 +867,71 @@ test('avatar and background generation each open a dedicated named session witho
  assert.ok(requests[1].includes('mode=background&avatar=gallery%2Fperson'))
 })
 
-test('avatar drafts preview without persistence, confirm explicitly, and retain failed saves for retry',async()=>{
- const state=[],chosen=[],preferences=[],cancelled=[];let cursor=0,fail=true
- const scope={h:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity)}),useState:initial=>{const index=cursor++;if(!(index in state))state[index]=initial;return[state[index],value=>{state[index]=value}]},useEffect:()=>{},useAvatarLibrary:()=>({loaded:true,avatars:[{id:'b',name:'Beta',background:'/b.png'}],error:''}),useBackgroundPreference:()=>[true,value=>preferences.push(value)],loadAvatars:async()=>{},AgentAvatar:'avatar',Button:'button',Failure:'failure',IconPlusOutlineRegular:'plus',IconEditOutlineRegular:'edit',transport:{current:'local',path:value=>value}}
- vm.runInNewContext(source.slice(source.indexOf('  function AvatarChoices('),source.indexOf('  function AgentIdentity')),scope)
- const render=()=>{cursor=0;return scope.AvatarChoices({profile:{avatar:null},onCancel:()=>cancelled.push(true),onChoose:async id=>{chosen.push(id);if(fail)throw new Error('save unavailable')}})}
- const nodes=root=>[root,...root.children.filter(child=>child&&typeof child==='object').flatMap(nodes)]
- nodes(render()).find(node=>node.props.title==='Beta').props.onClick()
- assert.equal(nodes(render()).find(node=>node.type==='img').props.src,'/b.png')
- nodes(render()).find(node=>node.type==='input').props.onChange({target:{checked:false}})
- nodes(render()).find(node=>node.children.includes('取消')).props.onClick()
- assert.deepEqual(chosen,[]);assert.deepEqual(preferences,[]);assert.equal(cancelled.length,1)
- nodes(render()).find(node=>node.children.includes('确认应用')).props.onClick();await new Promise(resolve=>setImmediate(resolve))
- assert.deepEqual(preferences,[]);assert.equal(nodes(render()).find(node=>node.type==='failure').props.text,'save unavailable')
- assert.equal(nodes(render()).find(node=>node.props.title==='Beta').props['aria-pressed'],true)
- fail=false;nodes(render()).find(node=>node.children.includes('确认应用')).props.onClick();await new Promise(resolve=>setImmediate(resolve))
- assert.deepEqual(chosen,['b','b']);assert.deepEqual(preferences,[false])
+test('avatar and video drafts preview without writing and save only on confirmation', async () => {
+ const state = [], chosen = [], preferences = [], uploads = [], cancelled = []
+ let cursor = 0, fail = true
+ const scope = {
+   h: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
+   useState: initial => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], value => { state[index] = value }] },
+   useEffect: () => {}, useRef: () => ({}),
+   useAvatarLibrary: () => ({ loaded: true, avatars: [{ id: 'b', name: 'Beta', background: '/b.png' }], error: '' }),
+   useBackgroundPreference: () => ['still', value => preferences.push(value)], localArtworkUrl: value => value,
+   BackgroundVideo: 'video-preview', URL: { createObjectURL: () => 'blob:clip' },
+   fetchHost: async (url, options, host) => { uploads.push({ url, options, host }); return { ok: true } },
+   loadAvatars: async () => {}, AgentAvatar: 'avatar', Button: 'button', Failure: 'failure',
+   IconPlusOutlineRegular: 'plus', IconEditOutlineRegular: 'edit', transport: { current: 'local' },
+ }
+ vm.runInNewContext(source.slice(source.indexOf('  function AvatarChoices('), source.indexOf('  function AgentIdentity')), scope)
+ const render = () => {
+   cursor = 0
+   return scope.AvatarChoices({ profile: { avatar: null }, onCancel: () => cancelled.push(true), onChoose: async id => { chosen.push(id); if (fail) throw new Error('save unavailable') } })
+ }
+ const nodes = root => [root, ...root.children.filter(child => child && typeof child === 'object').flatMap(nodes)]
+ const button = label => nodes(render()).find(node => node.children.includes(label))
+ const settle = () => new Promise(resolve => setImmediate(resolve))
+ nodes(render()).find(node => node.props.title === 'Beta').props.onClick()
+ assert.equal(nodes(render()).find(node => node.type === 'img').props.src, '/b.png')
+ button('关闭').props.onClick()
+ button('取消').props.onClick()
+ assert.deepEqual(chosen, []); assert.deepEqual(preferences, []); assert.equal(cancelled.length, 1)
+ button('确认应用').props.onClick(); await settle()
+ assert.deepEqual(preferences, []); assert.equal(nodes(render()).find(node => node.type === 'failure').props.text, 'save unavailable')
+ assert.equal(nodes(render()).find(node => node.props.title === 'Beta').props['aria-pressed'], true)
+
+ const file = { name: 'scene.mp4', size: 512 }
+ nodes(render()).find(node => node.props.type === 'file').props.onChange({ currentTarget: { files: [file] } })
+ const preview = nodes(render()).find(node => node.type === 'video-preview')
+ assert.equal(preview.props.src, 'blob:clip')
+ assert.equal(preview.props.animate, true)
+ assert.deepEqual(uploads, [])
+
+ fail = false; button('确认应用').props.onClick(); await settle()
+ assert.deepEqual(chosen, ['b', 'b']); assert.deepEqual(preferences, ['motion'])
+ assert.equal(uploads.length, 1)
+ assert.equal(uploads[0].url, '/api/kode/avatars/background?avatar=b')
+ assert.equal(uploads[0].options.body, file)
+ assert.equal(uploads[0].host, 'local')
 })
 
+test('background video pauses when hidden or reduced motion is enabled', () => {
+ const calls = []
+ let visibility, motion, cleanup
+ const doc = { hidden: false, addEventListener: (_event, callback) => { visibility = callback }, removeEventListener() {} }
+ const reduced = { matches: false, addEventListener: (_event, callback) => { motion = callback }, removeEventListener() {} }
+ const video = { play: async () => calls.push('play'), pause: () => calls.push('pause') }
+ const scope = {
+   React: { useRef: () => ({ current: video }) }, useState: initial => [initial, () => {}],
+   useEffect: effect => { cleanup = effect() }, window: { matchMedia: () => reduced }, document: doc, h: (_type, props) => props,
+ }
+ vm.runInNewContext(source.slice(source.indexOf('  function BackgroundVideo('), source.indexOf('  function ConversationBackground')), scope)
+ const element = scope.BackgroundVideo({ src: '/scene.mp4', animate: true })
+ assert.ok(element.loop && element.muted && element.playsInline)
+ doc.hidden = true; visibility()
+ doc.hidden = false; visibility()
+ reduced.matches = true; motion()
+ cleanup()
+ assert.deepEqual(calls, ['play', 'pause', 'play', 'pause', 'pause'])
+})
 
 test('existing session identity remains visible when its runtime is idle or unloaded',()=>{
  const h=(type,props,...children)=>({type,props,children}),scope=vm.createContext({h,AgentAvatar:'avatar',useDirectory:()=>({data:{currentProfile:{name:'Codex',type:'codex'},types:{codex:{name:'Codex'}},canChangeAgent:true}}),useAvatarStatus:()=>undefined,useWorkspaceDirectory:()=>({current:'local',hosts:[]}),catalogBlank:()=>false})

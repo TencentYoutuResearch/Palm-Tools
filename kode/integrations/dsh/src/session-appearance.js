@@ -1,10 +1,11 @@
-import { admitHostRequest } from './host-admission.js'
 /** Frontend avatar resources and canonical, per-session appearance metadata. */
+import { admitHostRequest } from './host-admission.js'
 import { readdir, readFile, stat, realpath, lstat, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, relative } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { avatarGenerationPrompt } from './avatar-generation.js'
+import { importBackgroundVideo, MAX_BACKGROUND_VIDEO_BYTES, streamBackgroundVideo } from './avatar-background.js'
 import { BackendDocument } from './backend-state.js'
 import { profilePresentations } from './agent-presentation.js'
 import { importedSessionId } from './saved-session-state.js'
@@ -23,7 +24,7 @@ export class SessionAppearance {
     this.client = client; this.profiles = profiles
     this.root = config.avatarDirectory ?? process.env.KODE_AVATAR_DIR ?? join(process.platform === 'darwin' ? join(homedir(), 'Library/Application Support') : process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'kode/avatars')
     if (this.root.startsWith('~/')) this.root = join(homedir(), this.root.slice(2))
-    this.renameChain = Promise.resolve()
+    this.galleryWrites = Promise.resolve()
   }
   profilesView() { return profilePresentations(this.profiles.list(), this.profiles.sharedState).map(profile => ({ ...profile, avatar: this.avatarForSession(undefined, profile.type, this.index, profile.id) })) }
   async load() { return this.index = await new BackendDocument(this.client, 'session-index').read() ?? { version: 1 } }
@@ -54,8 +55,12 @@ export class SessionAppearance {
       if (await this.imagePath(id, 'idle')) {
         const prefix = `/api/kode/avatars/media?avatar=${encodeURIComponent(id)}`
         const animations = Object.fromEntries(await Promise.all([...states].map(async state => [state, (await this.animationPaths(id, state)).map((_path, index) => `${prefix}&state=${state}&frame=${index + 1}`)])))
-        const background = await this.backgroundPath(id), revision = background && await stat(background)
-        result.push({ id, name: entry.name.replace(/^\d+-/, ''), aliases: Object.keys(catalog.renamed ?? {}).filter(alias => resolveGalleryId(alias, catalog) === id), url: `${prefix}&state=idle`, animations, ...(background ? { background: `/api/kode/avatars/background?avatar=${encodeURIComponent(id)}&v=${revision.mtimeMs}-${revision.size}` } : {}) })
+        const [still, video] = await Promise.all([this.backgroundPath(id, catalog), this.backgroundVideoPath(id, catalog)])
+        const [background, backgroundVideo] = await Promise.all([
+          this.backgroundUrl(id, still),
+          this.backgroundUrl(id, video, '&variant=video'),
+        ])
+        result.push({ id, name: entry.name.replace(/^\d+-/, ''), aliases: Object.keys(catalog.renamed ?? {}).filter(alias => resolveGalleryId(alias, catalog) === id), url: `${prefix}&state=idle`, animations, ...(background ? { background } : {}), ...(backgroundVideo ? { backgroundVideo } : {}) })
       }
     }
     return result
@@ -65,7 +70,7 @@ export class SessionAppearance {
     catch (error) { if (error.code === 'ENOENT') return { version: 1 }; throw error }
   }
   renameAvatar(avatarId, inputName) {
-    const task = this.renameChain.then(async () => {
+    const task = this.galleryWrites.then(async () => {
       const name = typeof inputName === 'string' ? inputName.trim() : ''
       if (!name || name.length > 80 || Buffer.byteLength(name) > 240 || /^[.]/.test(name) || /[\/\\\x00-\x1f<>:"|?*]/.test(name) || name.includes('..') || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) throw new Error('名称不能包含路径或特殊字符，长度须为 1–80 字。')
       if (!validAvatarId(avatarId)) throw new Error('无效头像标识。')
@@ -103,15 +108,16 @@ export class SessionAppearance {
         throw error
       }
     })
-    this.renameChain = task.catch(() => {})
+    this.galleryWrites = task.catch(() => {})
     return task
   }
-  async safeImage(candidate, limit = 4 * 1024 * 1024) {
+  async safeMedia(candidate, limit = 4 * 1024 * 1024) {
     try {
       const file = await realpath(candidate), boundary = await realpath(this.root)
-      if (relative(boundary, file).startsWith('..') || !file.startsWith(boundary + '/')) return
+      const entry = relative(boundary, file)
+      if (!entry || entry === '..' || entry.startsWith(`..${sep}`) || isAbsolute(entry)) return
       const info = await stat(file)
-      if (info.isFile() && info.size <= limit) return file
+      if (info.isFile() && info.size > 0 && info.size <= limit) return file
     } catch { /* Missing or incomplete artwork is optional. */ }
   }
   async animationPaths(id, state) {
@@ -125,7 +131,7 @@ export class SessionAppearance {
       const frames = []
       for (const folder of folders) {
         for (let frame = 1; frame <= 4; frame++) {
-          const path = await this.safeImage(join(folder, `frame-${String(frame).padStart(2, '0')}.png`))
+          const path = await this.safeMedia(join(folder, `frame-${String(frame).padStart(2, '0')}.png`))
           if (path) frames.push(path)
         }
         if (frames.length >= 24) break
@@ -135,13 +141,34 @@ export class SessionAppearance {
     return []
   }
   async imagePath(id, state, frame = 1) { return (await this.animationPaths(id, state))[frame - 1] }
-  async backgroundPath(id) {
-    id = resolveGalleryId(id, await this.galleryCatalog())
-    if (!/^gallery\/[^/\\\x00]+$/.test(id) || id.includes('..')) return
+  async backgroundPath(id, catalog) {
+    id = resolveGalleryId(id, catalog ?? await this.galleryCatalog())
+    if (!id) return
     for (const name of ['background.png', 'background.jpg', 'background.jpeg', 'background.webp']) {
-      const path = await this.safeImage(join(this.root, id, name), 16 * 1024 * 1024)
+      const path = await this.safeMedia(join(this.root, id, name), 16 * 1024 * 1024)
       if (path) return path
     }
+  }
+  async backgroundVideoPath(id, catalog) {
+    id = resolveGalleryId(id, catalog ?? await this.galleryCatalog())
+    if (id) return this.safeMedia(join(this.root, id, 'background.mp4'), MAX_BACKGROUND_VIDEO_BYTES)
+  }
+  async backgroundUrl(id, path, variant = '') {
+    if (!path) return
+    const revision = await stat(path).catch(error => { if (error.code !== 'ENOENT') throw error })
+    if (revision) return `/api/kode/avatars/background?avatar=${encodeURIComponent(id)}${variant}&v=${revision.mtimeMs}-${revision.size}`
+  }
+  importBackground(id, request) {
+    const task = this.galleryWrites.then(async () => {
+      const resolved = resolveGalleryId(id, await this.galleryCatalog())
+      if (!resolved || !await this.imagePath(resolved, 'idle')) throw new Error('请先选择一个可用的自定义头像。')
+      const expected = join(await realpath(this.root), resolved)
+      const directory = await realpath(expected)
+      if (directory !== expected || !(await lstat(directory)).isDirectory()) throw new Error('无效头像目录。')
+      await importBackgroundVideo(directory, request)
+    })
+    this.galleryWrites = task.catch(() => {})
+    return task
   }
   async setAgent(profileId, avatarId) {
     if (!this.profiles.list().some(profile => profile.id === profileId)) throw new Error('Agent 不存在，请刷新列表。')
@@ -188,6 +215,18 @@ export function registerAvatarApi(ctx, appearance) {
         const input = JSON.parse(body)
         return send(200, await appearance.renameAvatar(input.avatarId, input.name))
       }
+      if (url.pathname === '/api/kode/avatars/background') {
+        const id = url.searchParams.get('avatar') ?? ''
+        if (req.method === 'POST') {
+          await appearance.importBackground(id, req)
+          return send(200, { ok: true })
+        }
+        if (['GET', 'HEAD'].includes(req.method) && url.searchParams.get('variant') === 'video') {
+          const path = await appearance.backgroundVideoPath(id)
+          if (!path) return send(404, { error: 'Background unavailable' })
+          return await streamBackgroundVideo(req, res, path)
+        }
+      }
       if (req.method !== 'GET') return send(405, { error: 'GET required' })
       if (url.pathname === '/api/kode/avatars') return send(200, { avatars: await appearance.gallery(), canRename: true })
       if (url.pathname === '/api/kode/avatars/generation-prompt') return send(200, await avatarGenerationPrompt(appearance, { avatarId: url.searchParams.get('avatar'), backgroundOnly: url.searchParams.get('mode') === 'background' }))
@@ -207,6 +246,6 @@ export function registerAvatarApi(ctx, appearance) {
       if (!path) return send(404, { error: 'Avatar unavailable' })
       const bytes = await readFile(path)
       res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'private, max-age=60', 'x-content-type-options': 'nosniff' }); res.end(bytes)
-    } catch (error) { send(req.method === 'POST' ? 400 : 404, { error: req.method === 'POST' ? error.message : 'Avatar unavailable' }) }
+    } catch (error) { send(req.method === 'POST' ? error.status ?? 400 : 404, { error: req.method === 'POST' ? error.message : 'Avatar unavailable' }) }
   } })
 }

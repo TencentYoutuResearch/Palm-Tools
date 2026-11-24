@@ -1,13 +1,13 @@
 ---
 name: kode-generate-avatar
-description: Generate, split, validate, and install a 36-frame Kode avatar from one 3x3 character sheet, with or without a layout reference image. Use when a user asks to create, customize, repair, or install a Kode tab avatar, animated CLI pet, avatar sprite sheet, or running/idle/awaiting/error animation set.
+description: Generate, split, validate, and install a 36-frame Kode avatar from one 3x3 character sheet, and create a matching static or looping conversation background in DSH. Use when a user asks to create, customize, repair, or install a Kode tab avatar, animated CLI pet, avatar sprite sheet, running/idle/awaiting/error animation set, or a matching DSH background.
 ---
 
 # Generate Kode Avatar
 
 Create one square 3x3 source sheet, split it with the bundled Python script, inspect all nine states, and publish exactly
 36 PNG frames. Keep one coherent character design across the entire sheet. Do not replace this workflow with four
-independent sheets.
+independent sheets. For a background-only request, go directly to [DSH conversation background](#dsh-conversation-background).
 
 ## Workflow
 
@@ -216,12 +216,33 @@ Confirm:
 Report the final absolute path, layout mode, source-sheet path, any backup path, and the exact splitter command in the
 selected locale. Tell the user, in that same locale, to close and reopen the avatar picker so Kode refreshes the gallery.
 
-## dsh conversation background
+## DSH conversation background
 
-This distribution is used by dsh. In addition to the 36 avatar frames, generate one matching conversation background after the character and style are confirmed. This requirement does not apply to Kode desktop's original skill.
+Generate a separate matching landscape background. Confirm the scene and whether the user wants a still or a loop
+when their request leaves either open. For background-only requests, use the supplied existing avatar frame and
+directory. Preserve the 36 existing avatar frames.
 
-- Ask about the scene together with the art style; offer a quiet scene matching the character if the user has no preference.
-- After accepting the avatar sheet, use a second image-generation call to create a separate landscape image, preferably 1920×1080 or a supported landscape size. Keep important character or scenery details near the edges, with a quiet central area for conversation text. Use a restrained palette consistent with the avatar, without text, logos, UI, panels or chat bubbles.
-- Write the accepted background to `<gallery>/<avatar-id>/background.png` (PNG, JPEG and WebP are supported; use the matching filename extension). Keep the avatar frame layout and counts unchanged. Do not include the background in the sprite sheet or overwrite animation frames.
-- Inspect the background separately, and report both the avatar directory and background path. Tell the user to refresh the avatar picker, then select the new avatar to apply its background.
-- When the launch request says “background only”, preserve all existing frames. Read the existing avatar frame provided in the request as the character reference, ask for the desired scene, then generate only its matching background.
+- Keep the center quiet enough for conversation text. Match the avatar's palette and style, and keep text, watermarks,
+  and UI out of the scene. Prefer 1920×1080 for the artwork or another supported landscape size.
+- Save a still or video poster as `background.png`, `background.jpg`, or `background.webp` in the avatar directory.
+  Keep one still with the actual format's extension. Use the existing still as the poster when it matches.
+- For a dynamic background, save `background.mp4` in the same directory. Use H.264 with `yuv420p`, no audio,
+  and fast-start metadata. Prefer 6–10 seconds at 24 fps, 1280×720 or 1920×1080. Keep it under 100 MB.
+- Use a short video generator when available. Ask for a stationary composition with subtle environmental movement
+  and a seamless loop. Inspect the transition from the last frame to the first before publishing.
+
+When video generation is unavailable, create a landscape still with the image generator and animate a subtle,
+periodic push-in as a fallback. With FFmpeg available, this command makes a six-second loop. Run it in the
+avatar directory and substitute the actual poster filename.
+
+```bash
+ffmpeg -i background.png -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,zoompan=z='1.016+0.012*(1-cos(2*PI*on/144))':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=144:s=1280x720:fps=24" \
+  -frames:v 144 -an -c:v libx264 -pix_fmt yuv420p -movflags +faststart background.mp4
+```
+
+Check the video in a player, or inspect the codec, duration, dimensions, and tracks with `ffprobe` before
+previewing it in DSH. Verify the visual seam, legibility, and silent playback. If no available tool can make the
+loop, report what was generated and which tool is missing.
+
+Report the paths in the launch locale. Ask the user to refresh 「头像与背景」, choose the avatar, and select
+「动态」 to play the loop or 「静态」 to use the poster. Use the matching English labels for an English request.

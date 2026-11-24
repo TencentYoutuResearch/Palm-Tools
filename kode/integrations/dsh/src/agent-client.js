@@ -127,7 +127,7 @@ function changedFileSummary({ path, paths, changes, patch }) {
 window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const React = require('react'), h = React.createElement
   const { createPortal } = require('react-dom')
-  const { useState, useEffect, useMemo, useRef, useSyncExternalStore } = React
+  const { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } = React
   const { Menu, Modal, Button, Toast, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
@@ -374,6 +374,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const avatarListeners = new Set(), avatarSubscribe = fn => { avatarListeners.add(fn); return () => avatarListeners.delete(fn) }
   const avatarSnapshotOf = () => avatarSnapshot
   async function loadAvatars(force = false) {
+    if (force && avatarPending) await avatarPending
     if (avatarPending) return avatarPending
     if (avatarSnapshot.loaded && !force) return avatarSnapshot
     avatarPending = (async () => {
@@ -392,11 +393,29 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     useEffect(() => { if (enabled) void loadAvatars() }, [enabled])
     return value
   }
-  function backgroundEnabled() { try { return localStorage.getItem('kode.avatar-background') !== 'off' } catch { return true } }
+  function backgroundDisplay() {
+    try {
+      const value = localStorage.getItem('kode.avatar-background')
+      if (value === 'off' || value === 'motion') return value
+    } catch {}
+    return 'still'
+  }
   function useBackgroundPreference() {
-    const [enabled, setEnabled] = useState(backgroundEnabled)
-    useEffect(() => { const update = () => setEnabled(backgroundEnabled()); window.addEventListener('kode-avatar-background', update); window.addEventListener('storage', update); return () => { window.removeEventListener('kode-avatar-background', update); window.removeEventListener('storage', update) } }, [])
-    return [enabled, value => { try { localStorage.setItem('kode.avatar-background', value ? 'on' : 'off') } catch {} setEnabled(value); window.dispatchEvent(new Event('kode-avatar-background')) }]
+    const [display, setDisplay] = useState(backgroundDisplay)
+    useEffect(() => {
+      const update = () => setDisplay(backgroundDisplay())
+      window.addEventListener('kode-avatar-background', update)
+      window.addEventListener('storage', update)
+      return () => {
+        window.removeEventListener('kode-avatar-background', update)
+        window.removeEventListener('storage', update)
+      }
+    }, [])
+    return [display, value => {
+      try { localStorage.setItem('kode.avatar-background', value === 'still' ? 'on' : value) } catch {}
+      setDisplay(value)
+      window.dispatchEvent(new Event('kode-avatar-background'))
+    }]
   }
   const emptyAvatarStatuses = new Map(), emptyAvatarSnapshot = () => emptyAvatarStatuses, emptyAvatarList = { byId: {} }, emptyAvatarListSnapshot = () => emptyAvatarList, emptyAvatarSubscribe = () => () => {}
   function useAvatarStatus(sessionId, useSessionStatus) {
@@ -463,18 +482,54 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     await refreshWorkspaceDirectory()
     input.for(binding.ctx).focus()
   }
-  function ConversationBackground({ sessionId, sessions }) {
-    const { data } = useDirectory(sessionId, sessions), library = useAvatarLibrary(), [enabled] = useBackgroundPreference(), anchor = React.useRef(null), directory = useWorkspaceDirectory()
-    const row = directory.hosts.find(host => host.id === directory.current)?.sessions?.find(row => row.id === sessionId)
-    const avatarId = (row?.agent?.avatar ?? data?.currentProfile?.avatar)?.id, background = enabled && library.avatars.find(row => row.id === avatarId || row.aliases?.includes(avatarId))?.background
+  function BackgroundVideo({ src, poster, animate, onFailure }) {
+    const ref = React.useRef(null), [ready, setReady] = useState(false)
     useEffect(() => {
-      const root = anchor.current?.closest('[data-conversation-content]')
-      if (!root || !background) return
-      const url = transport ? transport.path(background, 'local') : background
-      root.style.setProperty('--kode-scene-image', `url(${JSON.stringify(url)})`); root.setAttribute('data-kode-scene', '')
+      const video = ref.current
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+      let visible = true
+      const update = () => {
+        if (animate && visible && !document.hidden && !reduced.matches) void video.play().catch(() => {})
+        else video.pause()
+      }
+      const observer = typeof IntersectionObserver === 'function' && new IntersectionObserver(([entry]) => {
+        visible = entry.isIntersecting
+        update()
+      })
+      observer && observer.observe(video)
+      document.addEventListener('visibilitychange', update)
+      reduced.addEventListener('change', update)
+      update()
+      return () => {
+        observer && observer.disconnect()
+        document.removeEventListener('visibilitychange', update)
+        reduced.removeEventListener('change', update)
+        video.pause()
+      }
+    }, [src, animate])
+    return h('video', { ref, src, poster, muted: true, loop: true, playsInline: true, preload: poster ? 'metadata' : 'auto', 'aria-hidden': true, 'data-frame-ready': ready || undefined,
+      onLoadedData: () => setReady(true), onError: () => { setReady(false); onFailure?.() } })
+  }
+  function localArtworkUrl(url) { return url && (transport ? transport.path(url, 'local') : url) }
+  function ConversationBackground({ sessionId, sessions }) {
+    const { data } = useDirectory(sessionId, sessions), library = useAvatarLibrary(), [display] = useBackgroundPreference(), directory = useWorkspaceDirectory()
+    const [root, setRoot] = useState(null)
+    const row = directory.hosts.find(host => host.id === directory.current)?.sessions?.find(row => row.id === sessionId)
+    const avatarId = (row?.agent?.avatar ?? data?.currentProfile?.avatar)?.id
+    const artwork = display !== 'off' && library.avatars.find(row => row.id === avatarId || row.aliases?.includes(avatarId))
+    const background = localArtworkUrl(artwork?.background), video = localArtworkUrl(artwork?.backgroundVideo)
+    const anchorRef = useCallback(node => setRoot(node?.closest('[data-conversation-content]') ?? null), [])
+    useEffect(() => {
+      if (!root || (!background && !video)) return
+      if (background) root.style.setProperty('--kode-scene-image', `url(${JSON.stringify(background)})`)
+      root.setAttribute('data-kode-scene', '')
       return () => { root.style.removeProperty('--kode-scene-image'); root.removeAttribute('data-kode-scene') }
-    }, [background, sessionId])
-    return h('span', { ref: anchor, hidden: true, 'aria-hidden': true })
+    }, [root, background, video])
+    const showVideo = root && video && (display === 'motion' || !background)
+    return h(React.Fragment, null,
+      h('span', { ref: anchorRef, hidden: true, 'aria-hidden': true }),
+      showVideo && createPortal(h('div', { className: 'kode-scene-video', 'aria-hidden': true },
+        h(BackgroundVideo, { key: video, src: video, poster: background, animate: display === 'motion' })), root))
   }
   function AdvancedSection({ title, open, children }) {
     const [expanded, setExpanded] = useState(Boolean(open))
@@ -1305,19 +1360,54 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   function AvatarChoices({ profile, host, sessionId, onChoose, onGenerated, onCancel, canApply = true }) {
     const library = useAvatarLibrary(), avatars = library.loaded ? library.avatars : null
     const [error, setError] = useState(''), [busy, setBusy] = useState(false), [background, setBackground] = useBackgroundPreference()
-    const [selectedId, setSelectedId] = useState(profile.avatar?.id ?? null), [showBackground, setShowBackground] = useState(background)
+    const [selectedId, setSelectedId] = useState(profile.avatar?.id ?? null), [display, setDisplay] = useState(background)
     const [renaming, setRenaming] = useState(false), [nameDraft, setNameDraft] = useState('')
+    const [clip, setClip] = useState(null), [failedVideo, setFailedVideo] = useState(null), picker = useRef(null)
     useEffect(() => { void loadAvatars(true) }, [])
+    useEffect(() => () => { if (clip) URL.revokeObjectURL(clip.url) }, [clip])
     const apply = async () => {
-      if (busy) return
+      if (busy || clipFailed) return
       setBusy(true); setError('')
-      try { await onChoose(selected?.id ?? selectedId); setBackground(showBackground) } catch (error) { setError(error.message) } finally { setBusy(false) }
+      try {
+        if (clip && selected) {
+          const response = await fetchHost(`/api/kode/avatars/background?avatar=${encodeURIComponent(selected.id)}`, {
+            method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'video/mp4' }, body: clip.file,
+          }, 'local')
+          if (!response.ok) throw new Error((await parseHostJson(response)).error ?? '无法保存背景视频。')
+          await loadAvatars(true)
+          setClip(null)
+        }
+        await onChoose(selected?.id ?? selectedId)
+        setBackground(display)
+      } catch (error) { setError(error.message) } finally { setBusy(false) }
     }
     const generate = async backgroundOnly => { setBusy(true); setError(''); try { await stageAvatarPrompt(sessionId, host, backgroundOnly, selected?.id ?? selectedId); onGenerated?.() } catch (error) { setError(error.message) } finally { setBusy(false) } }
     const local = (host ?? transport?.current ?? 'local') === 'local' && (transport?.current ?? 'local') === 'local'
     const selected = avatars?.find(row => row.id === selectedId || row.aliases?.includes(selectedId)), previewProfile = { ...profile, avatar: selected ?? (selectedId === profile.avatar?.id ? profile.avatar : null) }
-    const previewBackground = showBackground && selected?.background
-    const select = id => { setSelectedId(id); setRenaming(false); setError('') }
+    const still = localArtworkUrl(selected?.background)
+    const video = clip?.url ?? localArtworkUrl(selected?.backgroundVideo)
+    const mode = display === 'motion' && !video ? 'still' : display
+    const clipFailed = Boolean(clip && failedVideo === clip.url)
+    const previewVideo = mode !== 'off' && video && (mode === 'motion' || !still) && failedVideo !== video
+    const previewStill = mode !== 'off' && still
+    const select = id => {
+      if (selectedId !== id) { setClip(null); setFailedVideo(null) }
+      setSelectedId(id); setRenaming(false); setError('')
+    }
+    const selectClip = event => {
+      const file = event.currentTarget.files?.[0]
+      event.currentTarget.value = ''
+      if (!file || !selected) return
+      if (!/\.mp4$/i.test(file.name) || file.size === 0 || file.size > 100 * 1024 * 1024) {
+        setError('请选择 100 MB 以内的 MP4 视频。')
+        return
+      }
+      setClip({ file, url: URL.createObjectURL(file) }); setFailedVideo(null); setDisplay('motion'); setError('')
+    }
+    const reportClipFailure = () => {
+      setFailedVideo(video)
+      setError('背景视频无法播放，请使用 H.264 编码的 MP4。')
+    }
     const renameSelected = async event => {
       event.preventDefault(); if (busy || !selected) return
       setBusy(true); setError('')
@@ -1331,17 +1421,26 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h('div', { className: 'kode-avatar-editor' },
       h('div', { className: 'kode-avatar-content' },
         h('div', { className: 'kode-avatar-preview-identity' }, h(AgentAvatar, { profile: previewProfile, host, size: 48, preview: true }), renaming ? h('form', { className: 'kode-avatar-rename', onSubmit: event => void renameSelected(event) }, h('input', { autoFocus: true, required: true, maxLength: 80, 'aria-label': '头像名称', value: nameDraft, disabled: busy, onChange: event => setNameDraft(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false) } } }), h(Button, { type: 'submit', variant: 'text', disabled: busy || !nameDraft.trim() }, '保存'), h(Button, { type: 'button', variant: 'text', disabled: busy, onClick: () => setRenaming(false) }, '取消')) : h('span', { className: 'kode-avatar-preview-name' }, h('span', null, selected?.name ?? '默认图标'), selected && library.canRename && h('button', { type: 'button', className: 'kode-avatar-name-edit', 'aria-label': '重命名头像', title: '重命名头像文件夹', disabled: busy, onClick: () => { setNameDraft(selected.name); setRenaming(true) } }, h(IconEditOutlineRegular, { size: 14 })))),
-        h('div', { className: 'kode-avatar-preview', role: 'img', 'aria-label': `${selected?.name ?? '默认图标'}的背景预览`, 'data-has-background': Boolean(previewBackground) }, previewBackground ? h('img', { src: transport ? transport.path(previewBackground, 'local') : previewBackground, alt: '', 'aria-hidden': true }) : h('span', null, selected?.background ? '背景显示已关闭' : '此头像暂无配套背景')),
+        h('div', { className: 'kode-avatar-preview', role: 'img', 'aria-label': `${selected?.name ?? '默认图标'}的背景预览`, 'data-has-background': Boolean(previewVideo || previewStill) },
+          previewVideo ? h(BackgroundVideo, { key: video, src: video, poster: still, animate: mode === 'motion', onFailure: reportClipFailure })
+            : previewStill ? h('img', { src: still, alt: '', 'aria-hidden': true })
+              : h('span', null, mode === 'off' ? '背景显示已关闭' : '此头像暂无配套背景')),
+        h('div', { className: 'kode-background-controls' },
+          h('div', { className: 'kode-background-mode', role: 'group', 'aria-label': '背景显示模式' },
+            ...[['off', '关闭'], ['still', '静态'], ['motion', '动态']].map(([id, label]) =>
+              h('button', { key: id, type: 'button', 'aria-pressed': mode === id, disabled: busy || (id === 'motion' && !video), onClick: () => setDisplay(id) }, label))),
+          selected && h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => picker.current?.click(), title: 'H.264 MP4，最大 100 MB' }, video ? '替换视频' : '导入视频'),
+          h('input', { ref: picker, type: 'file', hidden: true, accept: 'video/mp4,.mp4', onChange: selectClip })),
+        clip && h('p', { className: 'kode-config-note kode-background-filename', title: clip.file.name }, clip.file.name),
         h('div', { className: 'kode-avatar-grid', 'aria-label': '会话头像' },
           h('button', { type: 'button', className: 'kode-avatar-choice', 'aria-pressed': !selectedId, disabled: busy, onClick: () => select(null) }, h(AgentAvatar, { profile: { ...profile, avatar: null }, host, size: 36 }), h('span', { className: 'kode-avatar-caption' }, '默认图标')),
-          ...(avatars ?? []).map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': selected?.id === avatar.id, disabled: busy, title: avatar.name, onClick: () => select(avatar.id) }, h(AgentAvatar, { profile: { ...profile, avatar }, host, size: 36, preview: true }), h('span', { className: 'kode-avatar-caption' }, h('span', null, avatar.name), avatar.background && h('svg', { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.3, role: 'img', 'aria-label': '有配套背景' }, h('title', null, '有配套背景'), h('rect', { x: 1.5, y: 2, width: 13, height: 12, rx: 2 }), h('path', { d: 'm2 11 3.5-3.5L9 11l2-2 3 3M10 5.5h.01', strokeLinecap: 'round', strokeLinejoin: 'round' })))))),
-        h('label', { className: 'kode-avatar-background-toggle' }, h('input', { type: 'checkbox', checked: showBackground, disabled: busy, onChange: event => setShowBackground(event.target.checked) }), '显示会话背景'),
+          ...(avatars ?? []).map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': selected?.id === avatar.id, disabled: busy, title: avatar.name, onClick: () => select(avatar.id) }, h(AgentAvatar, { profile: { ...profile, avatar }, host, size: 36, preview: true }), h('span', { className: 'kode-avatar-caption' }, h('span', null, avatar.name), (avatar.background || avatar.backgroundVideo) && h('svg', { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.3, role: 'img', 'aria-label': '有配套背景' }, h('title', null, '有配套背景'), h('rect', { x: 1.5, y: 2, width: 13, height: 12, rx: 2 }), h('path', { d: 'm2 11 3.5-3.5L9 11l2-2 3 3M10 5.5h.01', strokeLinecap: 'round', strokeLinejoin: 'round' })))))),
         !avatars && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取头像…'),
         avatars?.length === 0 && h('p', { className: 'kode-config-note' }, '还没有自定义头像，可创建头像与背景。'),
         h('div', { className: 'kode-avatar-actions' }, h(Button, { variant: 'outline', disabled: busy || !local, onClick: () => void generate(false) }, h(IconPlusOutlineRegular, { size: 16 }), '创建头像与背景'), selected && h(Button, { variant: 'text', disabled: busy || !local, onClick: () => void generate(true) }, '生成背景'), h(Button, { variant: 'text', disabled: busy, onClick: () => void loadAvatars(true) }, '刷新')),
         !local && h('p', { className: 'kode-config-note' }, '生成素材请先切换到此计算机上的会话；SSH 会话也可使用此处的头像与背景。'),
         h(Failure, { text: error || library.error })),
-      h('div', { className: 'kode-avatar-footer' }, h(Button, { variant: 'outline', disabled: busy, onClick: onCancel }, '取消'), h(Button, { variant: 'primary', disabled: busy || !canApply || !library.loaded || Boolean(library.error), onClick: () => void apply() }, busy ? '应用中…' : '确认应用')))
+      h('div', { className: 'kode-avatar-footer' }, h(Button, { variant: 'outline', disabled: busy, onClick: onCancel }, '取消'), h(Button, { variant: 'primary', disabled: busy || clipFailed || !canApply || !library.loaded || Boolean(library.error), onClick: () => void apply() }, busy ? '应用中…' : '确认应用')))
   }
   function openAvatarDialog(target) {
     window.dispatchEvent(new CustomEvent('kode-avatar-dialog', { detail: target }))
@@ -2859,10 +2958,21 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 `
     style.textContent += `
 [data-conversation-content][data-kode-scene]{background-image:linear-gradient(color-mix(in srgb,var(--dsw-alias-bg-base) 88%,transparent),color-mix(in srgb,var(--dsw-alias-bg-base) 88%,transparent)),var(--kode-scene-image);background-size:cover;background-position:center}
+[data-conversation-content]:has(>.kode-scene-video){position:relative;isolation:isolate}
+.kode-scene-video{position:absolute;inset:0;z-index:-1;overflow:hidden;pointer-events:none;background:var(--dsw-alias-bg-base);visibility:hidden}
+.kode-scene-video:has(video[data-frame-ready]){visibility:visible}
+.kode-scene-video>video{display:block;width:100%;height:100%;object-fit:cover;opacity:.12}
 [data-kode-scene] [data-kode-user-bubble]{background:var(--dsw-specific-bubble,var(--dsw-alias-bg-module-platform));border:.5px solid var(--dsw-alias-border-l2)}
 .kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}.kode-avatar-content{display:flex;flex-direction:column;gap:12px}.kode-avatar-content>*{flex-shrink:0}.kode-avatar-content>.kode-config-note{margin:0}.kode-avatar-grid{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));max-height:min(240px,28vh);gap:8px}.kode-avatar-choice{gap:8px;padding:10px 6px}.kode-avatar-caption{display:flex;align-items:center;justify-content:center;gap:4px;max-width:100%;min-width:0;font-size:12px;line-height:16px;white-space:nowrap}.kode-avatar-caption>span{min-width:0;overflow:hidden;text-overflow:ellipsis}.kode-avatar-caption>svg{flex:none;color:var(--dsw-alias-label-secondary)}
-.kode-avatar-preview{display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-secondary);font-size:12px;min-height:112px;background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);overflow:hidden;flex:none}.kode-avatar-preview[data-has-background=true]{display:block;min-height:0}.kode-avatar-preview>img{display:block;width:100%;height:auto}.kode-avatar-preview-identity{display:flex;align-items:center;gap:12px;color:var(--dsw-alias-label-primary);font-size:14px;min-width:0}.kode-avatar-preview-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.kode-avatar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-avatar-actions>button:last-child{margin-left:auto}.kode-avatar-background-toggle{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;line-height:24px;color:var(--dsw-alias-label-primary);min-height:32px}.kode-avatar-background-toggle input{accent-color:var(--dsw-alias-state-business-primary)}.kode-avatar-footer{position:sticky;bottom:0;z-index:1;display:flex;justify-content:flex-end;gap:8px;padding:12px 0 4px;border-top:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
+.kode-avatar-preview{display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-secondary);font-size:12px;min-height:112px;background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);overflow:hidden;flex:none}.kode-avatar-preview[data-has-background=true]{display:block;min-height:0}.kode-avatar-preview>img,.kode-avatar-preview>video{display:block;width:100%;aspect-ratio:16/9;max-height:min(240px,28vh);object-fit:cover}.kode-avatar-preview-identity{display:flex;align-items:center;gap:12px;color:var(--dsw-alias-label-primary);font-size:14px;min-width:0}.kode-avatar-preview-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kode-avatar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-avatar-actions>button:last-child{margin-left:auto}.kode-background-controls{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.kode-background-mode{display:inline-flex;gap:2px;padding:3px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}
+.kode-background-mode>button{min-width:48px;min-height:28px;padding:2px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
+.kode-background-mode>button[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);font-weight:600}
+.kode-background-mode>button:not(:disabled):hover{color:var(--dsw-alias-label-primary)}
+.kode-background-mode>button:disabled{opacity:.45;cursor:default}
+.kode-background-filename{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kode-avatar-footer{position:sticky;bottom:0;z-index:1;display:flex;justify-content:flex-end;gap:8px;padding:12px 0 4px;border-top:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
 .kode-avatar-preview-name{display:flex;align-items:center;gap:6px;min-width:0}.kode-avatar-preview-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-avatar-name-edit{display:inline-flex;align-items:center;justify-content:center;flex:none;min-width:32px;min-height:32px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}.kode-avatar-name-edit:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-name-edit:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename{display:flex;align-items:center;flex:1;min-width:0;gap:4px}.kode-avatar-rename input{min-width:0;width:100%;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}.kode-avatar-rename input:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-avatar-rename button{flex:none}.kode-editable-avatar{display:inline-flex;position:relative;flex:none}.kode-avatar-edit-mark{position:absolute;right:-6px;bottom:-5px;display:flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:50%;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}.kode-agent-settings .kode-session-avatar-button{min-width:40px;min-height:40px;padding:8px}.kode-personalization{height:100%;min-height:0;box-sizing:border-box;overflow:hidden}.kode-personalization-session{display:flex;align-items:baseline;gap:8px;min-width:0;padding:0 2px}.kode-personalization-session-label{flex:none;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary)}.kode-personalization-session strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:20px;color:var(--dsw-alias-label-primary)}.kode-personalization>.kode-config-note{margin:0}.kode-personalization>.kode-avatar-editor{flex:1;min-height:0;padding-bottom:0}.kode-personalization .kode-avatar-content{flex:1;min-height:0;overflow-y:auto;padding:0 4px 4px 0}.kode-personalization .kode-avatar-footer{position:static;flex:none}.kode-personalization .kode-avatar-grid{max-height:min(320px,32vh)}
 @media(max-width:600px){.kode-avatar-grid{grid-template-columns:repeat(auto-fill,minmax(76px,1fr))}.kode-avatar-dialog{width:calc(100vw - 24px);max-width:calc(100vw - 24px)}}
 
