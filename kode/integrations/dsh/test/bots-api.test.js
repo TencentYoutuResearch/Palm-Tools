@@ -36,7 +36,7 @@ test('bots map to the dsh Agent that runs their backend and only keep live main 
 function harness({ owner = true } = {}) {
   const calls = [], created = []
   let handler
-  const roster = { default_bot: 'b1', bots: [{ id: 'b1', name: 'Kit', backend_key: 'claude', permission_ceiling: 'plan', default_cwd: '/p/kode', model: null }], persona_prompts: { b1: '<kode-agent-persona name="Kit">…</kode-agent-persona>' } }
+  const roster = { default_bot: 'b1', bots: [{ id: 'b1', name: 'Kit', backend_key: 'claude', permission_ceiling: 'plan', default_cwd: '/p/kode', model: null }], workspaces: { b1: '/p/kode' }, persona_prompts: { b1: '<kode-agent-persona name="Kit">…</kode-agent-persona>' } }
   const services = {
     kodeAgents: runtime,
     kodeSessionCreator: { create: async input => { created.push(input); return { address: { session_id: 'session-new' } } } },
@@ -75,4 +75,27 @@ test('starting a bot conversation sends the persona first, caps permissions and 
 test('only the Host owner reaches bots', async () => {
   const { request } = harness({ owner: false })
   assert.equal((await request('GET')).statusCode, 403)
+})
+
+test("a bot without a chosen workspace starts in its own folder, created and registered on first use", async () => {
+  const { mkdtemp, stat } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = await mkdtemp(join(tmpdir(), 'kode-bots-'))
+  const own = join(root, 'b1')
+  const registered = [], created = []
+  let handler
+  const roster = { default_bot: 'b1', bots: [{ id: 'b1', name: 'Kit', backend_key: 'claude', permission_ceiling: 'default', model: null }], workspaces: { b1: own }, persona_prompts: { b1: 'P' } }
+  const services = {
+    kodeAgents: runtime,
+    kodeSessionCreator: { create: async input => { created.push(input); return { address: { session_id: 's' } } } },
+    workspaceRegistry: { list: () => registered, resolveByPath: async path => registered.find(row => row.path === path), create: async (path, title) => { registered.push({ path, title }) } },
+  }
+  registerBotsApi({ get: name => services[name], connection: { admit: () => ({ peer: { principal: { kind: 'owner' } } }) }, webServer: { register: route => { handler = route.handler } } }, { call: async () => roster })
+  const res = { setHeader() {}, end(text) { this.body = JSON.parse(text) } }
+  await handler({ method: 'POST', async *[Symbol.asyncIterator]() { yield JSON.stringify({ action: 'start', id: 'b1', message: 'hi' }) } }, res)
+  assert.deepEqual(res.body, { sessionId: 's' })
+  assert.ok((await stat(own)).isDirectory())
+  assert.deepEqual(registered, [{ path: own, title: 'Kit' }])
+  assert.equal(created[0].workspace, own)
 })

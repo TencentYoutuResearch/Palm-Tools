@@ -4,8 +4,10 @@
  * as an ordinary dsh session started with the bot's Agent, persona and
  * permission limit, and records it as the bot's main session.
  */
+import { mkdir } from 'node:fs/promises'
+
 const BOTS = '/api/v1/messaging/workbench/bots'
-const ROSTER_ACTIONS = ['upsert', 'delete', 'set_default']
+const ROSTER_ACTIONS = ['upsert', 'delete', 'set_default', 'set_root']
 // dsh sandbox modes. New dsh sessions never start above workspace-write.
 const MODES = { plan: 'read-only', default: 'workspace-write', acceptEdits: 'workspace-write', bypassPermissions: 'workspace-write' }
 
@@ -28,8 +30,10 @@ export function botsView(roster, { runtime, sessions, archived, workspaces }) {
     default_bot: roster.default_bot ?? null,
     bots: roster.bots.map(bot => {
       const main = bot.main_session?.runtime === 'dsh' ? bot.main_session.session_id : null
-      return { ...bot, agent: agentFor(runtime, bot.backend_key)?.name ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null }
+      return { ...bot, workspace: roster.workspaces?.[bot.id] ?? bot.default_cwd ?? null, agent: agentFor(runtime, bot.backend_key)?.name ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null }
     }),
+    root: roster.root ?? null,
+    default_root: roster.default_root ?? null,
     agents: offered(runtime).map(profile => ({ name: profile.name, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
     workspaces: workspaces.map(row => ({ id: row.id, title: row.title, path: row.path })),
   }
@@ -51,8 +55,15 @@ export function registerBotsApi(ctx, backend) {
     if (!runtime || !creator) throw new Error('dsh 还在启动，请稍后再试')
     const agent = agentFor(runtime, bot.backend_key)
     if (!agent) throw new Error(`伙伴使用的 Agent（${bot.backend_key}）在这台电脑的 dsh 里不可用`)
-    const workspace = input.workspace || bot.default_cwd
+    const workspace = input.workspace || roster.workspaces?.[bot.id] || bot.default_cwd
     if (!workspace) throw new Error('选择伙伴的工作区')
+    // The bot's own folder is created and registered on first use, so it
+    // appears in dsh as a workspace named after the bot.
+    const registry = ctx.get('workspaceRegistry')
+    if (registry && !registry.list().some(row => row.path === workspace) && !bot.default_cwd && workspace === roster.workspaces?.[bot.id]) {
+      await mkdir(workspace, { recursive: true })
+      if (!(await registry.resolveByPath(workspace))) await registry.create(workspace, bot.name)
+    }
     const created = await creator.create({
       title: bot.name,
       // The persona rides on the first message: dsh sessions have no system prompt flag.

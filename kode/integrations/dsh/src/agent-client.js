@@ -897,7 +897,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   function BotEditor({ draft, data, busy, onChange, onSave, onCancel }) {
     const agents = data.agents.map(agent => ({ value: agent.backend_key, label: agent.name }))
     if (draft.backend_key && !agents.some(agent => agent.value === draft.backend_key)) agents.push({ value: draft.backend_key, label: `${draft.backend_key}（此电脑不可用）` })
-    const workspaces = [{ value: '', label: '每次对话时选择' }, ...data.workspaces.map(row => ({ value: row.path, label: row.title }))]
+    const own = draft.id ? `${data.root}/${draft.id}` : `${data.root}/<新伙伴>`
+    const workspaces = [{ value: '', label: `伙伴自己的空间（${own}）` }, ...data.workspaces.map(row => ({ value: row.path, label: row.title }))]
+    if (draft.default_cwd && !workspaces.some(row => row.value === draft.default_cwd)) workspaces.push({ value: draft.default_cwd, label: draft.default_cwd })
     const field = (label, key, props = {}) => h('label', { className: 'kode-field' }, h('span', null, label), h(props.rows ? 'textarea' : 'input', { value: draft[key] ?? '', disabled: busy, onChange: event => onChange({ ...draft, [key]: event.target.value }), ...props }))
     return h('form', { className: 'kode-agent-editor', onSubmit: event => { event.preventDefault(); onSave() } },
       field('名字', 'name', { maxLength: 80, required: true }),
@@ -907,6 +909,22 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h(SelectField, { label: '默认工作区', value: draft.default_cwd ?? '', options: workspaces, disabled: busy, onChange: value => onChange({ ...draft, default_cwd: value || null }) }),
       field('角色说明', 'persona', { rows: 6, placeholder: '这个伙伴负责什么、按什么标准做事、什么时候问你' }),
       h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: busy, onClick: onCancel }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.name?.trim() || !draft.backend_key }, '保存')))
+  }
+  // Where bots without a chosen workspace keep their own folder.
+  function BotsRoot({ data, busy, act }) {
+    const [path, setPath] = useState(null)
+    const editing = path !== null
+    return h('div', { className: 'kode-agent-row kode-bots-root' },
+      h('div', { className: 'kode-agent-row-head' },
+        h('span', { className: 'kode-agent-name' }, '伙伴空间目录'),
+        !editing && h('span', { className: 'kode-secondary' }, data.root),
+        !editing && h(Button, { className: 'kode-agent-edit', disabled: busy, onClick: () => setPath(data.root) }, '更改')),
+      editing && h('form', { className: 'kode-agent-editor', onSubmit: async event => { event.preventDefault(); const root = path.trim(); if (await act({ action: 'set_root', root: root && root !== data.default_root ? root : null })) setPath(null) } },
+        h('label', { className: 'kode-field' }, h('span', null, '没有指定工作区的伙伴，会在这里各有一个文件夹。已有的文件不会自动搬过去。'), h('input', { value: path, disabled: busy, onChange: event => setPath(event.target.value) })),
+        h('div', { className: 'kode-settings-footer' },
+          h(Button, { type: 'button', disabled: busy, onClick: () => setPath(data.default_root) }, '恢复默认'),
+          h(Button, { type: 'button', disabled: busy, onClick: () => setPath(null) }, '取消'),
+          h(Button, { type: 'submit', variant: 'primary', disabled: busy }, '保存'))))
   }
   function KodeBotsPage({ ui }) {
     const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
@@ -919,7 +937,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (!data) return h('div', { className: 'kode-agent-settings kode-bots-page' }, h('h2', null, '伙伴'), h(Failure, { text: error }))
     const open = async bot => {
       if (bot.main_session_id) { await ui()?.openSession(bot.main_session_id); return }
-      setStarting({ bot, message: '', workspace: bot.default_cwd ?? data.workspaces[0]?.path ?? '', key: `bot-${bot.id}-${Date.now()}` })
+      setStarting({ bot, message: '', workspace: bot.workspace ?? '', key: `bot-${bot.id}-${Date.now()}` })
     }
     const start = async () => {
       const result = await act({ action: 'start', id: starting.bot.id, message: starting.message, workspace: starting.workspace, idempotency_key: starting.key })
@@ -928,7 +946,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       await ui()?.openSession(result.sessionId)
     }
     const save = async () => {
-      const { agent, main_session_id, ...bot } = draft
+      const { agent, main_session_id, workspace, ...bot } = draft
       if (await act({ action: 'upsert', bot: { ...bot, model: bot.model?.trim() || null } })) setDraft(null)
     }
     const fresh = () => setDraft({ name: '', persona: '', backend_key: data.agents[0]?.backend_key ?? '', permission_ceiling: 'default', model: null, default_cwd: null })
@@ -947,11 +965,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
             h(Button, { className: 'kode-agent-edit', variant: 'primary', disabled: busy || !bot.agent, onClick: () => void open(bot) }, bot.main_session_id ? '继续对话' : '开始对话')),
           bot.persona && h('span', { className: 'kode-secondary kode-bot-persona' }, bot.persona),
           starting?.bot.id === bot.id && h('form', { className: 'kode-agent-editor', onSubmit: event => { event.preventDefault(); void start() } },
-            !bot.default_cwd && h(SelectField, { label: '工作区', value: starting.workspace, options: data.workspaces.map(row => ({ value: row.path, label: row.title })), disabled: busy, onChange: value => setStarting({ ...starting, workspace: value }) }),
+            h(SelectField, { label: '工作区', value: starting.workspace, options: [{ value: bot.workspace, label: bot.default_cwd ? data.workspaces.find(row => row.path === bot.workspace)?.title ?? bot.workspace : `伙伴自己的空间（${bot.workspace}）` }, ...data.workspaces.filter(row => row.path !== bot.workspace).map(row => ({ value: row.path, label: row.title }))], disabled: busy, onChange: value => setStarting({ ...starting, workspace: value }) }),
             h('label', { className: 'kode-field' }, h('span', null, `对 ${bot.name} 说`), h('textarea', { rows: 3, required: true, autoFocus: true, value: starting.message, disabled: busy, onChange: event => setStarting({ ...starting, message: event.target.value }) })),
             h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: busy, onClick: () => setStarting(null) }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !starting.message.trim() || !starting.workspace }, '发送'))),
           h('div', { className: 'kode-bot-actions' },
-            h('span', { className: 'kode-secondary' }, `记忆范围 bot:${bot.id}`),
+            h('span', { className: 'kode-secondary' }, `记忆范围 bot:${bot.id} · ${bot.workspace}`),
             data.default_bot !== bot.id && h(Button, { disabled: busy, onClick: () => void act({ action: 'set_default', id: bot.id }) }, '设为默认'),
             bot.main_session_id && h(Button, { disabled: busy, onClick: () => void act({ action: 'forget', id: bot.id }) }, '新对话'),
             h(Button, { disabled: busy || !!draft, onClick: () => setDraft({ ...bot }) }, '编辑'),
@@ -959,6 +977,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       draft && !draft.id ? h(BotEditor, { draft, data, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) })
         : h(Button, { className: 'kode-agent-add', disabled: busy || !data.agents.length, onClick: fresh }, h(IconPlusOutlineRegular, { size: 16 }), data.bots.length ? '新建伙伴' : '创建第一个伙伴'),
       !data.agents.length && h('p', { className: 'kode-config-note' }, '这台电脑的 dsh 里还没有可用的 Agent。'),
+      h(BotsRoot, { data, busy, act }),
       h(Failure, { text: error }))
   }
   const PANEL_GLYPH = 'M2.5 2.5h4.5v4.5h-4.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5h-4.5zM9 9h4.5v4.5H9z'

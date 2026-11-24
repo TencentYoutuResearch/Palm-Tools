@@ -6,6 +6,7 @@ use super::{model::valid_id, Hub};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 const DOCUMENT: &str = "bots";
 const MAX_BOTS: usize = 64;
@@ -60,6 +61,20 @@ pub struct Roster {
     pub bots: Vec<Bot>,
     #[serde(default)]
     pub default_bot: Option<String>,
+    /// Where bots without their own workspace keep one; default
+    /// `~/.kode/plugins/bots`.
+    #[serde(default)]
+    pub root: Option<String>,
+}
+
+impl Roster {
+    pub fn root(&self) -> PathBuf {
+        self.root.as_deref().map(PathBuf::from).unwrap_or_else(default_root)
+    }
+}
+
+pub fn default_root() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")).join(".kode/plugins/bots")
 }
 
 #[derive(Deserialize)]
@@ -70,9 +85,23 @@ pub enum Change {
     SetDefault { id: Option<String> },
     /// Point a bot at its main session, or clear it with `None`.
     SetMainSession { id: String, session: Option<MainSession> },
+    /// Move the folder that holds bots' own workspaces (`None` = default).
+    SetRoot { root: Option<String> },
 }
 
 impl Bot {
+    /// The bot's workspace: its own setting, else a folder of its own under
+    /// the roster root. Created on first use.
+    pub fn workspace(&self, root: &std::path::Path) -> PathBuf {
+        self.default_cwd.as_deref().map(PathBuf::from).unwrap_or_else(|| root.join(&self.id))
+    }
+
+    pub fn ensure_workspace(&self, root: &std::path::Path) -> Result<PathBuf> {
+        let path = self.workspace(root);
+        std::fs::create_dir_all(&path).with_context(|| format!("cannot create {}", path.display()))?;
+        Ok(path)
+    }
+
     pub fn memory_scope(&self) -> String {
         format!("bot:{}", self.id)
     }
@@ -199,6 +228,12 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
             bot.main_session = session;
             bot.updated_at = now;
         }
+        Change::SetRoot { root } => {
+            if root.as_deref().is_some_and(|r| !std::path::Path::new(r).is_absolute()) {
+                bail!("bots folder must be an absolute path")
+            }
+            roster.root = root.filter(|r| !r.trim().is_empty());
+        }
         Change::SetDefault { id } => {
             if id.as_ref().is_some_and(|id| !roster.bots.iter().any(|b| &b.id == id)) {
                 bail!("unknown bot")
@@ -210,14 +245,17 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
 }
 
 /// A bot by id, or the user's default bot for `"default"`.
-pub fn resolve(hub: &Hub, id: &str) -> Result<Bot> {
+/// A bot and the folder its own workspace lives in.
+pub fn resolve(hub: &Hub, id: &str) -> Result<(Bot, PathBuf)> {
     let (_, roster) = roster(hub)?;
+    let root = roster.root();
     let id = if id == "default" {
         roster.default_bot.clone().context("no default bot yet; create one in Kode first")?
     } else {
         id.to_owned()
     };
-    roster.bots.into_iter().find(|b| b.id == id).context("unknown bot")
+    let bot = roster.bots.into_iter().find(|b| b.id == id).context("unknown bot")?;
+    Ok((bot, root))
 }
 
 #[cfg(test)]
@@ -269,6 +307,20 @@ mod tests {
             let candidate: Bot = serde_json::from_value(value).unwrap();
             assert!(apply(&mut roster, Change::Upsert { bot: candidate }, 1).is_err(), "{patch}");
         }
+    }
+
+    #[test]
+    fn bots_default_to_their_own_folder_under_a_movable_root() {
+        let mut roster = Roster::default();
+        apply(&mut roster, Change::Upsert { bot: bot("Kit") }, 1).unwrap();
+        let kit = roster.bots[0].clone();
+        assert_eq!(kit.workspace(&roster.root()), default_root().join(&kit.id));
+        apply(&mut roster, Change::SetRoot { root: Some("/data/bots".into()) }, 2).unwrap();
+        assert_eq!(kit.workspace(&roster.root()), PathBuf::from("/data/bots").join(&kit.id));
+        assert!(apply(&mut roster, Change::SetRoot { root: Some("relative".into()) }, 3).is_err());
+        let mut pinned = kit.clone();
+        pinned.default_cwd = Some("/work/repo".into());
+        assert_eq!(pinned.workspace(&roster.root()), PathBuf::from("/work/repo"), "a chosen workspace wins");
     }
 
     #[test]

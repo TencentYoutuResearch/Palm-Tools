@@ -472,15 +472,22 @@ async fn bot_sessions_carry_persona_scope_and_ceiling() {
     wait_for_in(&s, &token, "session.input_result", &format!("&session={kit_session}")).await;
     assert_eq!(recorded.lock().inputs, ["Review src/lib.rs"], "a system prompt persona is not repeated as a message");
 
-    let missing_cwd = create(&token, json!({"bot":rex_id,"idempotency_key":"rex-0"})).await.unwrap();
-    assert_eq!(missing_cwd.status(), 400, "Rex has no default workspace");
+    // Rex has no workspace of its own choosing: it gets a folder under the bots root.
+    let root = tempfile::tempdir().unwrap();
+    bots(&s, json!({"action":"set_root","root":root.path()})).await;
+    let own: Value = create(&token, json!({"bot":rex_id,"idempotency_key":"rex-0"})).await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let home = root.path().join(&rex_id);
+    assert_eq!(recorded.lock().creates[1]["cwd"].as_str(), home.to_str());
+    assert!(home.is_dir(), "the bot's folder is created on first use");
+    wait_for_in(&s, &token, "session.input_result", &format!("&session={}", own["session"]["id"])).await;
     let rex_created: Value = create(&token, json!({"bot":rex_id,"cwd":"/var","initial_input":"Add tests","idempotency_key":"rex-1"}))
         .await.unwrap().error_for_status().unwrap().json().await.unwrap();
-    assert_eq!(recorded.lock().creates[1]["permission_mode"], "plan");
+    assert_eq!(recorded.lock().creates[2]["permission_mode"], "plan");
     let rex_session = rex_created["session"]["id"].as_u64().unwrap();
     wait_for_in(&s, &token, "session.input_result", &format!("&session={rex_session}")).await;
     let inputs = recorded.lock().inputs.clone();
-    assert!(inputs[1].starts_with("<kode-agent-persona") && inputs[1].ends_with("\n\nAdd tests"), "Codex gets its persona in the first message: {}", inputs[1]);
+    let last = inputs.last().unwrap();
+    assert!(last.starts_with("<kode-agent-persona") && last.ends_with("\n\nAdd tests"), "Codex gets its persona in the first message: {last}");
 
     bots(&s, json!({"action":"delete","id":kit_id})).await;
     assert_eq!(create(&token, json!({"bot":"default","idempotency_key":"after-delete"})).await.unwrap().status(), 404);

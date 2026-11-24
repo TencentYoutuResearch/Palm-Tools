@@ -446,14 +446,16 @@ fn launch(hub: &Hub, caller: &Caller, req: &CreateRequest) -> Result<Launch> {
         return Ok(Launch { backend_key, cwd, model: req.model.clone(), permission_mode: req.permission_mode.clone(), persona: None, labels });
     };
     caller.require("bots.read")?;
-    let bot = super::bots::resolve(hub, bot).map_err(|e| Error(StatusCode::NOT_FOUND, e.to_string()))?;
+    let (bot, root) = super::bots::resolve(hub, bot).map_err(|e| Error(StatusCode::NOT_FOUND, e.to_string()))?;
     if req.backend_key.as_ref().is_some_and(|key| *key != bot.backend_key) {
         return Err(Error(StatusCode::BAD_REQUEST, "a bot runs its own Agent; omit backend_key".into()));
     }
     let permission = super::bots::effective_permission(req.permission_mode.as_deref(), &bot.permission_ceiling)
         .map_err(|e| Error(StatusCode::FORBIDDEN, e.to_string()))?;
-    let cwd = req.cwd.clone().or_else(|| bot.default_cwd.clone())
-        .ok_or_else(|| Error(StatusCode::BAD_REQUEST, "cwd is required: this bot has no default workspace".into()))?;
+    let cwd = match req.cwd.clone() {
+        Some(cwd) => cwd,
+        None => bot.ensure_workspace(&root)?.to_string_lossy().into_owned(),
+    };
     let label = format!("bot:{}", bot.id);
     if !labels.contains(&label) {
         labels.push(label);
