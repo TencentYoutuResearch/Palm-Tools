@@ -801,7 +801,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
     }, host)
     const value = await parseHostJson(response)
-    if (!response.ok) throw new Error(value.error || '操作失败，请重试。')
+    if (!response.ok) {
+      if (body?.action === 'handoff-skill' && value.error === 'Unknown operation') throw new Error('更新此主机的 Kode 插件后即可执行技能交接。')
+      throw new Error(value.error || '操作失败，请重试。')
+    }
     return value
   }
   function PowerSettings({ host }) {
@@ -1544,18 +1547,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h(React.Fragment, null,
       h(Button, { variant: 'outline', className: 'kode-handoff-trigger', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: () => { setOpen(true); setTarget(''); setError(''); requestId.current = null } }, h(IconPaperPlaneOutlineRegular, { size: 15 }), h('span', null, '交接')),
       h(Modal, { open, title: '用其他 Agent 继续', className: 'kode-handoff-dialog', closeLabel: '关闭', onClose: () => { if (!busy) setOpen(false) },
-        description: '将文字历史带入目标 Agent 的新会话，并继续最近的请求。原会话保留；工具状态、审批和附件不会转移。长历史最多带入最近 48,000 字符。',
+        description: '当前 Agent 会用交接技能整理目标、进度和待办，目标 Agent 将在同一工作区根据交接稿继续。',
         footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: () => setOpen(false) }, '取消'), h(Button, { disabled: busy || !target, variant: 'primary', onClick: async () => {
           setBusy(true); setError('')
           try {
             requestId.current ??= crypto.randomUUID()
-            const result = await hubCall({ action: 'handoff', sessionId, profileId: target, requestId: requestId.current }, transport?.current ?? 'local')
+            const host = transport?.current ?? 'local'
+            const result = await hubCall({ action: 'handoff-skill', sessionId, profileId: target, requestId: requestId.current }, host)
+            if ((transport?.current ?? 'local') !== host) throw new Error('交接已完成，请切回原主机查看目标会话。')
             await sessions.refresh(); showShared(null); await avatarContext.get('uiWorkspace').openSession(result.sessionId); setOpen(false)
           } catch (error) { setError(error.message) } finally { setBusy(false) }
         } }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
         h('div', { className: 'kode-handoff-body', 'aria-busy': busy },
           h(SelectField, { label: '目标 Agent', value: target, disabled: busy, options: [{ value: '', label: profiles.length ? '选择 Agent' : '暂无可交接的 Agent' }, ...profiles.map(profile => ({ value: profile.id, label: profile.name }))], onChange: value => { setTarget(value); requestId.current = null } }),
-          h('p', { className: 'kode-config-note' }, '目标 Agent 会收到一份新的文字上下文，不会修改当前会话。'), h(Failure, { text: error }))))
+          h(Failure, { text: error }))))
   }
 
   function InterfaceSettingsBody() {

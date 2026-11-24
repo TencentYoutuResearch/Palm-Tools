@@ -864,16 +864,14 @@ adapter and holds no independent extension configuration.
   Outside Kode, the portable skill directories and installed Codex plugins are
   available normally; the other native plugin launch arguments apply in Kode.
   Existing processes may require a new session to discover changed packages.
-- **换 Agent 续接** in the conversation header creates a new conversation on the
-  same Host/workspace using the selected Agent and continues the latest user
-  request with its readable transcript as context. The original stays intact.
-  It transfers at most the latest 48,000 characters of user/assistant text,
-  excluding hidden reasoning, tool lifecycles, peer messages and attachments.
-  Backend-owned request identities and frozen source snapshots make network retries reuse the
-  same target instead of sending work twice. This is a context handoff, not a
-  conversion of proprietary native thread files. Existing shared directories,
-  native session imports and `kode_sessions_*` messaging remain the unified
-  discovery and collaboration paths across Agents and SSH Hosts.
+- **交接** in the DSH conversation panel runs the bundled `kode-handoff` skill
+  in the current Agent, inspired by [Matt Pocock's handoff](https://github.com/mattpocock/skills/blob/main/skills/productivity/handoff/SKILL.md).
+  The source Agent drafts a Markdown brief covering the task, decisions, progress
+  and next actions. Once the brief is ready, the backend sends it as the first
+  message of a new conversation with the chosen Agent on the same Host and workspace.
+  The brief is capped at 12,000 UTF-8 bytes. The source must be idle to start.
+  Retrying reuses the same source brief and target delivery. GUI and older callers
+  still use the bounded readable transcript route.
 
 Extension releases are kept while older runtime processes may still reference
 those snapshots. Native plugin packages must provide manifests compatible with

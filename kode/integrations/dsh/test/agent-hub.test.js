@@ -43,9 +43,26 @@ test('publications retain provenance for backend filtering and exclude hidden re
 test('HTTP adapter authenticates owners and delegates shared operations to the backend after publishing history', async t => {
   const calls = [], events = [{ type: 'plugin:kode/goal-state', data: { goal: { objective: 'durable', status: 'paused' } } }]
   let handler, resumed = 0, closed = 0, published = false; const controlled = []
-  const backend = { call: async (path, input) => { calls.push({ path, input }); if (path.endsWith('/handoff')) { assert.equal(published, true); return { sessionId: 'target' } } return { sources: [], keepAwake: false, power: { active: false } } }, asset: async path => { calls.push({ path }); return { contentType: 'image/png', body: Buffer.from([0x89, 0x50, 0x4e, 0x47]) } } }
+  const backend = { call: async (path, input) => { calls.push({ path, input }); if (path.includes('/workbench/handoff')) { assert.equal(published, true); return { sessionId: 'target' } } return { sources: [], keepAwake: false, power: { active: false } } }, asset: async path => { calls.push({ path }); return { contentType: 'image/png', body: Buffer.from([0x89, 0x50, 0x4e, 0x47]) } } }
   const hub = new ExtensionHub(backend)
-  const agent = { id: 'source', status: 'idle', session: { snapshotEvents: () => events }, ctx: { sessionProjections: { stateOf: () => ({ lastUsed: { model: 'fixture' } }) } } }
+  const brief = '# Goal\nResume verification on the current branch.'
+  let generations = 0, activity = Promise.resolve(), reply = brief
+  const agent = {
+    id: 'source', status: 'idle', session: { snapshotEvents: () => events },
+    ctx: { sessionProjections: { stateOf: () => ({ lastUsed: { model: 'fixture' } }) }, sessions: { flush: async () => {} } },
+    followup(message) {
+      assert.match(message.content[0].text, /name: kode-handoff/)
+      const turn = ++generations
+      events.push({ type: 'agent/inbox/spliced', data: { inserted: [message] } })
+      activity = new Promise(resolve => setImmediate(() => {
+        events.push({ type: 'turn/start', data: { turn } }, { type: 'user/message', data: message },
+          { type: 'assistant/message', data: { message: { content: [{ type: 'reasoning', text: 'private' }, { type: 'text', text: reply ? 'BEGIN_KODE_HANDOFF\n' + reply + '\nEND_KODE_HANDOFF' : 'Unstructured reply' }] } } },
+          { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+        resolve()
+      }))
+    },
+    whenIdle: () => activity,
+  }
   const ctx = {
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : { rejection: 401 } },
@@ -55,7 +72,7 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
       kodeRuntimeBridge: { publish: async () => { published = true } },
     })[name],
   }
-  const service = { profiles: { binding: () => ({ profile: { type: 'codex' } }) }, adapter: { catalogs: new Map(), live: new Map([['source', { goal() {} }]]), controlGoal: async (_agent, input) => { controlled.push(input) } } }
+  const service = { hasRuntime: () => true, profiles: { binding: () => ({ profile: { type: 'codex' } }), list: () => [{ id: 'target-agent', type: 'claude' }] }, adapter: { catalogs: new Map(), live: new Map([['source', { goal() {} }]]), controlGoal: async (_agent, input) => { controlled.push(input) } } }
   registerAgentHubApi(ctx, { hub, backend, service })
   let carrierPeer
   const server = http.createServer((req, res) => void handler(req, res, carrierPeer)); server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -86,6 +103,26 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   carrierPeer = { principal: { kind: 'owner' } }
   assert.equal((await request({ action: 'sync-source', id: 'admitted' }, '', 'guest')).status, 200)
   assert.deepEqual(calls.at(-1), { path: HUB_PATH, input: { action: 'sync-source', id: 'admitted' } })
+
+  const skill = { action: 'handoff-skill', sessionId: 'source', profileId: 'target-agent', requestId: 'fixture-skill' }
+  carrierPeer = { principal: { kind: 'guest' } }
+  assert.equal((await request(skill)).status, 403)
+  assert.equal(generations, 0)
+  carrierPeer = { principal: { kind: 'owner' } }
+  agent.status = 'running'
+  assert.equal((await request(skill)).status, 400)
+  assert.equal(generations, 0)
+  agent.status = 'idle'
+  const simultaneous = await Promise.all([request(skill), request(skill)])
+  assert.ok(simultaneous.every(response => response.status === 200))
+  assert.equal((await request(skill)).status, 200)
+  assert.equal(generations, 1)
+  const last = calls.at(-1)
+  assert.equal(last.path, '/api/v1/messaging/workbench/handoff/skill')
+  assert.equal(last.input.brief, brief)
+  reply = ''
+  assert.equal((await request({ ...skill, requestId: 'invalid-brief' })).status, 400)
+  assert.equal(calls.at(-1), last)
 })
 
 test('native launch uses only the synced destination and skips a changed CLI home', () => {
@@ -117,7 +154,7 @@ test('real backend owns native plugin snapshots, installer updates, and removal 
   assert.equal((await independent.call(HUB_PATH)).sources.find(row => row.id === id).nativeStatus.codex, 'installed')
 })
 
-test('real backend dispatches an idempotent handoff through the existing dsh runtime bridge', { skip: !process.env.KODE_TEST_BACKEND_URL }, async t => {
+test('real backend dispatches only the skill brief once through the existing dsh runtime bridge', { skip: !process.env.KODE_TEST_BACKEND_URL }, async t => {
   const { BackendClient } = await import('../src/backend-client.js'), { BackendAgentProfiles } = await import('../src/backend-state.js'), { RuntimeBridge } = await import('../src/runtime-bridge.js')
   const { mkdtemp, readFile, rm } = await import('node:fs/promises'), { join } = await import('node:path'), { randomUUID } = await import('node:crypto')
   const root = await mkdtemp(join(tmpdir(), 'kode-handoff-backend-')); t.after(() => rm(root, { recursive: true, force: true }))
@@ -137,14 +174,14 @@ test('real backend dispatches an idempotent handoff through the existing dsh run
     list: async () => ({ items: rows() }), inspect: async id => ({ events: events.get(id) }),
     create: async ({ sessionId }) => { created++; events.set(sessionId, []); live.set(sessionId, { id: sessionId, session: { header: { cwd: root }, snapshotEvents: () => events.get(sessionId), requestHeader: () => ({ config: { model: 'fixture' } }) }, ctx: { sessions: { flush: async () => {} } }, }); return { sessionId } },
     resolveAgent: async id => ({ agent: live.get(id) }),
-    prompt: async input => { submitted++; const text = input.content[0].text; assert.match(text, /Original fixture task/); assert.match(text, /Original fixture answer/); assert.doesNotMatch(text, /PRIVATE REASONING|PRIVATE PEER/); return { accepted: true } },
+    prompt: async input => { submitted++; const text = input.content[0].text; assert.match(text, /Only the prepared Markdown brief/); assert.doesNotMatch(text, /Original fixture|PRIVATE REASONING|PRIVATE PEER/); return { accepted: true } },
   }
   const services = { sessionController: controller, kodeNativeFactory: { promote: async agent => { agent.selectModel = () => {}; return agent } }, agents: { get: id => live.get(id) }, kodeAgents: { profiles, hasRuntime: () => true, adapter: { listModels: async () => [{ id: 'fixture', isDefault: true }] }, recordBinding() {} }, workspaceRegistry: { resolveByPath: async () => ({ id: 'fixture-workspace' }) } }
   const bridge = new RuntimeBridge({ get: key => services[key], logger: { warn() {} } }, backend, { intervalMs: 10 })
   await bridge.publish(); bridge.start(); t.after(() => bridge.close())
-  const request = { source_session_id: sourceId, source_runtime: 'dsh', profile_id: profile.id, target_runtime: 'dsh', request_id: 'handoff-' + randomUUID() }
-  const first = await backend.call('/api/v1/messaging/workbench/handoff', request)
-  const repeated = await backend.call('/api/v1/messaging/workbench/handoff', request)
+  const request = { source_session_id: sourceId, source_runtime: 'dsh', profile_id: profile.id, target_runtime: 'dsh', request_id: 'handoff-' + randomUUID(), brief: 'Only the prepared Markdown brief' }
+  const first = await backend.call('/api/v1/messaging/workbench/handoff/skill', request)
+  const repeated = await backend.call('/api/v1/messaging/workbench/handoff/skill', request)
   assert.deepEqual(repeated, first); assert.equal(created, 1); assert.equal(submitted, 1); assert.notEqual(first.sessionId, sourceId)
 })
 

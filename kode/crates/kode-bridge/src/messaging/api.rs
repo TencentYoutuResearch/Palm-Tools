@@ -77,6 +77,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/workbench/agent-versions", post(agent_versions))
         .route("/api/v1/messaging/workbench/agent-hub", get(agent_hub).post(change_agent_hub))
         .route("/api/v1/messaging/workbench/handoff", post(handoff))
+        .route("/api/v1/messaging/workbench/handoff/skill", post(handoff_skill))
         .route("/api/v1/messaging/model-usage", get(model_usage))
         .route("/api/v1/messaging/integrations", get(integration_status).post(integration_configure))
         .route("/api/v1/messaging/memory/tool", post(memory_tool))
@@ -915,9 +916,28 @@ async fn change_agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):J
     admin(&hub,&h)?;
     Ok(Json(tokio::task::spawn_blocking(move||hub.extensions.change(&hub,input)).await.map_err(anyhow::Error::from)??))
 }
-async fn handoff(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):Json<super::handoff::Request>)->Result<Json<serde_json::Value>>{
-    admin(&hub,&h)?;
-    Ok(Json(super::handoff::execute(hub,input).await?))
+async fn handoff(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Json(input): Json<super::handoff::Request>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    if input.brief.is_some() {
+        return Err(Error(StatusCode::BAD_REQUEST, "use the skill handoff endpoint for a brief".into()));
+    }
+    Ok(Json(super::handoff::execute(hub, input).await?))
+}
+
+async fn handoff_skill(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Json(input): Json<super::handoff::Request>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    if input.brief.is_none() {
+        return Err(Error(StatusCode::BAD_REQUEST, "handoff brief required".into()));
+    }
+    Ok(Json(super::handoff::execute(hub, input).await?))
 }
 
 async fn delivery(
