@@ -1076,13 +1076,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const glyph = (d, size = 15) => h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
   const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
   // Use the same Kode wordmark in the standalone and embedded clients.
-  // Adapted from Solar Code Square Bold Duotone by 480 Design (CC BY 4.0).
-  // https://icon-sets.iconify.design/solar/code-square-bold-duotone/ — terminal prompt, cursor and colors.
+  // A folded strip keeps its continuity through a change of direction.
   function KodeBrandMark({ size = 24 }) {
     return h('svg', { width: size, height: size, viewBox: '0 0 24 24', className: 'kode-brand-mark-svg', 'aria-hidden': true },
-      h('path', { d: 'M2 12C2 7.28595 2 4.92893 3.46447 3.46447C4.92893 2 7.28595 2 12 2C16.714 2 19.0711 2 20.5355 3.46447C22 4.92893 22 7.28595 22 12C22 16.714 22 19.0711 20.5355 20.5355C19.0711 22 16.714 22 12 22C7.28595 22 4.92893 22 3.46447 20.5355C2 19.0711 2 16.714 2 12Z', fill: '#101010', stroke: '#fff', strokeOpacity: .6 }),
-      h('path', { d: 'M6.8 8.3l4 3.7-4 3.7', fill: 'none', stroke: '#fff', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-      h('rect', { x: 12.5, y: 14.5, width: 5.5, height: 2.2, rx: .65, fill: '#ff4048' }))
+      h('path', { fill: 'currentColor', d: 'M3 8.5 12 3h9l-9 5.5z M6 15.5l9-5.5 6 3.5-12 7.3H3l6-3.6z' }),
+      h('path', { fill: '#ed3845', d: 'M3 8.5h9l4.5 2.7-5.4 3.3z' }))
   }
   function KodeBrandName() {
     return h('span', { className: 'kode-brand-name' }, h('span', { className: 'kode-brand-title' }, 'Kode Harness'), h('span', { className: 'kode-brand-subtitle' }, 'Powered by dsh'))
