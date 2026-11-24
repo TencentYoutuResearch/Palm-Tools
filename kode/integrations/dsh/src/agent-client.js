@@ -14,8 +14,8 @@ function groupProjectWorkspaces(items, parents = {}) {
 // Keep complete host directories for explicit resume/search; scope only the sidebar.
 function remoteSidebarSessions(host) {
   const visible = new Set([...(host.workspaces ?? []).flatMap(row => row.sessionIds ?? []), ...(host.pinnedSessionIds ?? [])])
-  // Archiving closes a conversation, as closing a Kode tab does.
-  const hidden = new Set([...(host.hiddenSessionIds ?? []), ...(host.archivedSessionIds ?? [])])
+  for (const id of host.archivedSessionIds ?? []) visible.add(id)
+  const hidden = new Set(host.hiddenSessionIds ?? [])
   return (host.sessions ?? []).filter(row => visible.has(row.id) && !hidden.has(row.id))
 }
 function resumeCandidates(hosts, target, query = '', nativeSessions = []) {
@@ -648,7 +648,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           h(ServiceRecovery, { host, settings, onBusyChange })),
         h(Failure, { text: settings.error })))
   }
-  function IntegrationSettingsBody({ host, slots }) {
+  function IntegrationSettingsBody({ host, hubHost, hosts, slots, sessions }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
     return h(React.Fragment, null,
       h('div', { className: 'kode-settings-group', 'aria-label': '内置能力' },
@@ -656,7 +656,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
         data && h('div', { className: 'kode-settings-card' }, [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) })))),
         h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots })),
-      h(HubSettings, { key: host, host }))
+      h(HubSettings, { key: hubHost, host: hubHost, hosts, sessions }))
   }
   function SessionBehaviorSettings({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
@@ -746,57 +746,137 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           h('p', { className: 'kode-config-note', role: 'status' }, data.power.error || (data.power.active ? '主机正在保持唤醒。' : data.power.supported ? '主机使用系统默认休眠设置。' : '此主机暂不支持保持唤醒。'))),
         h(Failure, { text: error })))
   }
-  function HubSettings({ host }) {
+  const hubTargetNames = { dsh: 'DeepSeek Harness', codex: 'Codex', claude: 'Claude Code', codebuddy: 'CodeBuddy', cursor: 'Cursor', tcodex: 'TCodex', tclaude: 'TClaude' }
+  function sourceProfileTarget(profile, data) {
+    if (!profile) return
+    if (data?.profileTargets) return data.profileTargets[profile.id] ?? (profile.type === 'dsh' ? 'dsh' : undefined)
+    // Older services only accept their original fixed targets.
+    const override = { claude: 'CLAUDE_CONFIG_DIR', codebuddy: 'CODEBUDDY_CONFIG_DIR', codex: 'CODEX_HOME' }[profile.type]
+    if (profile.env?.KODE_SKILLS_DIR || profile.env?.[override] || /(?:^|\/)(?:tclaude|tcodex)(?:\.exe)?$/.test(profile.executable ?? '')) return
+    if (Object.hasOwn(data?.targets ?? {}, profile.type)) return profile.type
+  }
+  function sourceTargetOptions(profiles, data) {
+    const options = new Map(), unavailable = []
+    for (const profile of profiles) {
+      const target = sourceProfileTarget(profile, data)
+      if (!target) { unavailable.push(profile.name); continue }
+      if (!options.has(target)) options.set(target, { id: target, names: [], path: data.targets[target] })
+      const names = options.get(target).names
+      if (!names.includes(profile.name)) names.push(profile.name)
+    }
+    return { options, unavailable }
+  }
+  function sourceTargetLabel(target, options) {
+    return options?.get(target)?.names.join(' / ') ?? hubTargetNames[target] ?? '已变更的技能目录'
+  }
+  function HubSettings({ host, hosts = [], sessions }) {
     const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
-    const [draft, setDraft] = useState({ id: '', kind: 'git', location: '', subdir: '.', targets: ['dsh', 'codex', 'claude', 'codebuddy', 'cursor'] }), [editing, setEditing] = useState(false)
+    const [draft, setDraft] = useState(null)
     const [previewId, setPreviewId] = useState(null), [previewPackagePath, setPreviewPackagePath] = useState(null)
+    const store = directory(undefined, host, true)
+    const { data: agents, error: agentError } = useSyncExternalStore(store.subscribe, store.getSnapshot)
+    const listed = useSyncExternalStore(sessions.list.subscribe, sessions.list.getSnapshot)
+    useEffect(() => { void store.load() }, [store])
     useEffect(() => {
+      if (busy) return
       const stop = new AbortController()
-      setData(null); setError(''); setEditing(false); setPreviewId(null)
-      void hubCall(undefined, host, undefined, stop.signal).then(setData).catch(error => { if (!stop.signal.aborted) setError(error.message) })
-      const timer = setInterval(() => { if (!document.hidden) void hubCall(undefined, host, undefined, stop.signal).then(setData).catch(error => { if (!stop.signal.aborted) setError(error.message) }) }, 5000)
+      const read = async () => {
+        try { const next = await hubCall(undefined, host, undefined, stop.signal); if (!stop.signal.aborted) setData(next) }
+        catch (error) { if (!stop.signal.aborted) setError(error.message) }
+      }
+      void read()
+      const timer = setInterval(() => { if (!document.hidden) void read() }, 5000)
       return () => { stop.abort(); clearInterval(timer) }
-    }, [host])
+    }, [host, busy])
+    const choices = agents?.profiles ?? []
+    const current = (transport?.current ?? 'local') === host
+      ? Object.values(listed.byId).find(row => row.retainedBy?.mainView > 0)?.projectionValues : undefined
+    const model = current?.modelSelection
+    const provider = (model?.pending ?? model?.next ?? model?.lastUsed)?.provider
+    const activeId = current?.kodeAgent?.profileId ?? choices.find(profile => provider === 'kode-agent-' + profile.id)?.id
+    const { options, unavailable } = sourceTargetOptions(choices, data)
+    const preferred = [activeId, agents?.configuredDefaultProfileId, agents?.selectedProfileId]
+      .map(id => sourceProfileTarget(choices.find(profile => profile.id === id), data)).find(Boolean)
+    const sources = data?.sources ?? []
     const operate = async body => {
       setBusy(true); setError('')
       try { setData(await hubCall(body, host)); return true }
       catch (error) { setError(error.message); return false }
       finally { setBusy(false) }
     }
-    const field = (label, key, placeholder) => h('label', { className: `kode-field kode-source-field-${key}` }, label, h('input', { required: key !== 'subdir', value: draft[key], placeholder, onChange: event => setDraft({ ...draft, [key]: event.target.value }) }))
-    const previewSource = data?.sources.find(source => source.id === previewId) ?? null
+    const field = (label, key, placeholder) => h('label', { className: `kode-field kode-source-field-${key}` }, label,
+      h('input', { required: key !== 'subdir', readOnly: key === 'id' && draft.editing, value: draft[key], placeholder,
+        onChange: event => setDraft({ ...draft, [key]: event.target.value }) }))
+    const previewSource = sources.find(source => source.id === previewId)
     const openPreview = id => { setPreviewPackagePath(null); setPreviewId(id) }
+    const edit = source => setDraft({ id: source.id, kind: source.kind, location: source.location, subdir: source.subdir ?? '.',
+      targets: source.targets, expectedTargets: source.targets, editing: true })
+    const add = () => setDraft({ id: '', kind: 'git', location: '', subdir: '.', targets: preferred ? [preferred] : options.size === 1 ? [...options.keys()] : [] })
+    const toggle = target => setDraft(value => ({ ...value, targets: value.targets.includes(target)
+      ? value.targets.filter(row => row !== target) : [...value.targets, target] }))
+    const save = event => {
+      event.preventDefault()
+      const { editing, expectedTargets, ...source } = draft
+      if (!source.targets.length) { setError('请选择至少一个同步目标。'); return }
+      if (!editing && sources.some(row => row.id === source.id.trim())) { setError('此来源标识已在使用，请更换标识。'); return }
+      void operate({ action: 'save-source', intent: editing ? 'edit' : 'create', ...(editing ? { expectedTargets } : {}), source }).then(ok => { if (ok) setDraft(null) })
+    }
+    const editorTargets = draft ? [...new Set([...options.keys(), ...draft.targets])] : []
+    const targetHelp = data?.profileTargets
+      ? '在 Agent 设置中用 KODE_SKILLS_DIR 指定 CLI 读取技能的绝对路径。'
+      : '更新此主机的 Kode 服务后可识别更多 CLI 配置。'
     return h('div', { className: 'kode-settings-group kode-hub-settings' },
       h('h3', { className: 'kode-settings-group-title' }, 'Plugin / Skills 来源'),
-      h(Failure, { text: error }),
-      !data && !error && h('p', { role: 'status' }, '正在读取主机配置…'),
-      data && h('div', { className: 'kode-settings-card kode-settings-card-padded kode-hub-sources-card' },
-        h('p', { className: 'kode-config-note' }, '统一管理 Git 仓库或本地技能包。更新会将 SKILL.md 和引用资源同步到所选 Agent。有对应原生插件清单时保留其 hooks 和 MCP：Claude、CodeBuddy、Cursor 在下次启动 Kode 会话时加载，Codex 调用原生安装器。缺少原生清单时仅同步标准技能。'),
-        h('ul', { className: 'kode-agent-rows' }, ...data.sources.map(source => {
+      h(Failure, { text: error || agentError }),
+      (!data || !agents) && !error && !agentError && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取 Agent 和来源…'),
+      data && agents && h('div', { className: 'kode-settings-card kode-settings-card-padded kode-hub-sources-card' },
+        h('div', { className: 'kode-source-toolbar' },
+          host !== 'local' && h('span', { className: 'kode-config-note' }, '配置主机 · ' + (hosts.find(row => row.id === host)?.name ?? host)),
+          !draft && h(Button, { variant: 'outline', disabled: busy || !options.size, onClick: add }, h(IconPlusOutlineRegular, { size: 16 }), '添加来源')),
+        sources.length > 0 && h('ul', { className: 'kode-agent-rows' }, ...sources.map(source => {
           const presentation = sourcePresentation(source)
+          const needsSync = !source.updatedAt || (Array.isArray(source.syncedTargets) &&
+            (source.syncedTargets.length !== source.targets.length || source.targets.some(target => !source.syncedTargets.includes(target))))
+          const failed = Object.values(source.nativeStatus ?? {}).some(status => typeof status === 'string' && status.startsWith('failed:'))
           return h('li', { className: 'kode-agent-row kode-source-card', key: source.id },
             h('button', { type: 'button', className: 'kode-source-summary', 'aria-label': '查看 ' + presentation.name + ' 详情', 'aria-haspopup': 'dialog', 'aria-expanded': previewId === source.id, onClick: () => openPreview(source.id) },
-              h(SourceLogo, { source, packageIndex: 0, host, name: presentation.name }),
+              h(SourceLogo, { source, host, name: presentation.name }),
               h('span', { className: 'kode-source-copy' }, h('strong', null, presentation.name), h('span', { className: 'kode-source-description' }, presentation.description)),
               h(IconChevronDownOutlineRegular, { size: 16, className: 'kode-source-chevron', 'aria-hidden': true })),
+            h('p', { className: 'kode-config-note kode-source-target-summary' },
+              source.targets.map(target => sourceTargetLabel(target, options)).join('、'), needsSync ? ' · 待同步' : failed ? ' · 原生插件同步失败' : null),
             h(Failure, { text: source.error }),
             h('div', { className: 'kode-source-actions' },
-              h(Button, { disabled: busy, onClick: () => { setDraft({ id: source.id, kind: source.kind, location: source.location, subdir: source.subdir, targets: source.targets }); setEditing(true) } }, '编辑'),
-              h(Button, { disabled: busy, onClick: () => void operate({ action: 'sync-source', id: source.id }) }, busy ? '处理中…' : '更新并同步'),
-              h(Button, { className: 'kode-source-remove', disabled: busy, onClick: () => void operate({ action: 'remove-source', id: source.id }).then(ok => { if (ok) { if (draft.id === source.id) setEditing(false); if (previewId === source.id) setPreviewId(null) } }) }, '移除')))
+              h(Button, { disabled: busy || Boolean(draft), onClick: () => edit(source) }, '编辑'),
+              h(Button, { disabled: busy || Boolean(draft), onClick: () => void operate({ action: 'sync-source', id: source.id }) }, '更新并同步'),
+              h(Button, { className: 'kode-source-remove', disabled: busy || Boolean(draft),
+                onClick: () => void operate({ action: 'remove-source', id: source.id }).then(ok => { if (ok && previewId === source.id) setPreviewId(null) }) },
+              '移除')))
         })),
-        !data.sources.length && h('p', { className: 'kode-config-note' }, '尚未添加来源，可添加多个远程 Git 仓库或本地目录。'),
-        h(Button, { variant: 'outline', disabled: busy, onClick: () => { setDraft({ id: '', kind: 'git', location: '', subdir: '.', targets: Object.keys(data.targets) }); setEditing(true) } }, h(IconPlusOutlineRegular, { size: 16 }), '添加来源'),
-        editing && h('form', { className: 'kode-agent-editor kode-source-editor', onSubmit: event => { event.preventDefault(); void operate({ action: 'save-source', source: draft }).then(ok => { if (ok) { setDraft({ id: '', kind: 'git', location: '', subdir: '.', targets: Object.keys(data.targets) }); setEditing(false) } }) } },
+        !sources.length && !draft && h('p', { className: 'kode-config-note' }, options.size
+          ? '尚未添加来源。可添加 Git 仓库或本地目录。' : '此主机暂无可同步的 Agent。'),
+        !draft && !options.size && unavailable.length > 0 && h('p', { className: 'kode-config-note' }, targetHelp),
+        draft && h('form', { className: 'kode-agent-editor kode-source-editor', onSubmit: save },
           field('来源标识', 'id', 'team-skills'),
           h(SelectField, { label: '来源类型', value: draft.kind, options: [{ value: 'git', label: 'Git 仓库' }, { value: 'local', label: '本地目录' }], onChange: kind => setDraft({ ...draft, kind }) }),
           field(draft.kind === 'git' ? 'Git 地址' : '绝对路径', 'location', draft.kind === 'git' ? 'https://example.com/team/skills.git' : '/path/to/skills'),
           field('子目录', 'subdir', '.'),
-          h('fieldset', { className: 'kode-hub-targets' }, h('legend', null, '同步到'), ...Object.keys(data.targets).map(target => h('label', { key: target },
-            h('input', { type: 'checkbox', checked: draft.targets.includes(target), onChange: event => setDraft({ ...draft, targets: event.target.checked ? [...draft.targets, target] : draft.targets.filter(key => key !== target) }) }), target))),
-          h('div', { className: 'kode-source-editor-actions' }, h(Button, { variant: 'outline', disabled: busy, onClick: () => setEditing(false) }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy }, draft.id ? '保存修改' : '添加来源')))),
+          h('fieldset', { className: 'kode-source-target-picker', disabled: busy },
+            h('legend', null, '同步到'),
+            h('div', { className: 'kode-source-target-options' }, ...editorTargets.map(target => {
+              const selected = draft.targets.includes(target), option = options.get(target)
+              return h('button', { type: 'button', key: target, className: 'kode-source-target-option', 'aria-pressed': selected,
+                title: option?.path, onClick: () => toggle(target) },
+              h(selected ? IconCheckOutlineRegular : IconPlusOutlineRegular, { size: 14, 'aria-hidden': true }),
+              sourceTargetLabel(target, options))
+            })),
+            unavailable.length > 0 && h('p', { className: 'kode-config-note' },
+              `${unavailable.join('、')} 暂不可选。${targetHelp}`)),
+          h('div', { className: 'kode-source-editor-actions' },
+            h(Button, { variant: 'outline', disabled: busy, onClick: () => setDraft(null) }, '取消'),
+            h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.targets.length }, busy ? '保存中…' : draft.editing ? '保存修改' : '添加来源')))),
       h(Modal, { open: Boolean(previewSource), title: previewSource ? sourcePresentation(previewSource).name : '插件详情', className: 'kode-source-dialog', closeLabel: '关闭', onClose: () => setPreviewId(null) },
-        previewSource && h(SourcePreview, { source: previewSource, packagePath: previewPackagePath, onPackageChange: setPreviewPackagePath, host })))
+        previewSource && h(SourcePreview, { source: previewSource, packagePath: previewPackagePath, onPackageChange: setPreviewPackagePath, host, targetOptions: options })))
   }
   function sourcePresentation(source) {
     const packages = Array.isArray(source.packages) ? source.packages : []
@@ -823,17 +903,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         (item.description || item.type) && h('p', null, item.description || item.type))))
         : h('p', { className: 'kode-config-note' }, empty))
   }
-  function SourcePreview({ source, packagePath, onPackageChange, host }) {
+  function SourcePreview({ source, packagePath, onPackageChange, host, targetOptions }) {
     const packages = Array.isArray(source.packages) ? source.packages : []
     const selectedIndex = Math.max(0, packages.findIndex(row => row.path === packagePath))
     const current = packages[selectedIndex] ?? {
       name: source.id, displayName: source.id,
       skills: (source.skills ?? []).map(name => ({ name })), agents: [], commands: [], mcp: [],
     }
-    const targetNames = { dsh: 'DeepSeek Harness', codex: 'Codex', claude: 'Claude Code', codebuddy: 'CodeBuddy', cursor: 'Cursor' }
     const sync = (source.targets ?? []).map(target => {
       const status = source.nativeStatus?.[target]
-      return { name: targetNames[target] ?? target, pending: !status, description: ({ ready: '已同步，下次启动会话时加载', installed: '已安装并完成同步', 'skills-only': 'Skills 已同步' }[status] ?? '等待更新并同步') }
+      const failed = status?.startsWith('failed:')
+      return { name: sourceTargetLabel(target, targetOptions), pending: !status || failed,
+        description: failed ? '原生插件安装失败，可重新更新并同步' : ({ ready: '已同步，下次启动会话时加载', installed: '已安装并完成同步', 'skills-only': 'Skills 已同步' }[status] ?? '等待更新并同步') }
     })
     const about = [
       ['版本', current.version], ['作者', current.author], ['分类', current.category],
@@ -1040,7 +1121,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
             h(SelectField, { label: '配置主机', showLabel: false, value: agentHost, options, onChange: setAgentHost }))),
         h(Failure, { text: error }),
         h(AgentSettingsBody, { key: agentHost, sessions, slots, settingsHost: agentHost })),
-      integrations: () => h(IntegrationSettingsBody, { host: 'local', slots }),
+      integrations: () => h(IntegrationSettingsBody, { host: 'local', hubHost: agentHost, hosts: hosts.hosts, slots, sessions }),
       general: () => h('div', { className: 'kode-settings-general' },
         h('div', { className: 'kode-settings-group' }, h(SessionBehaviorSettings, { host: 'local', slots })),
         h('div', { className: 'kode-settings-group' }, h(NotificationSettingsBody))),
@@ -1081,17 +1162,90 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       !data && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取此 Agent 的模型…'),
       h(Failure, { text: error || data?.modelError }))
   }
+  function useAgentVersions(profiles, host) {
+    const cliProfiles = profiles.filter(profile => profile.type !== 'dsh')
+    const profileIds = cliProfiles.map(profile => profile.id)
+    const profileKey = JSON.stringify(cliProfiles.map(profile => [profile.id, profile.executable, profile.env?.PATH]))
+    const [versions, setVersions] = useState(null), [dshVersion, setDshVersion] = useState()
+    const [error, setError] = useState(''), [pending, setPending] = useState()
+    const desktopUpdates = host === 'local' ? window.dshDesktop?.updates : undefined
+    const [desktopStatus, setDesktopStatus] = useState()
+    useEffect(() => {
+      if (!desktopUpdates) return
+      let active = true
+      const receive = status => { if (active) setDesktopStatus(status) }
+      const dispose = desktopUpdates.subscribe?.(receive)
+      desktopUpdates.status?.().then(receive).catch(() => {})
+      return () => { active = false; dispose?.() }
+    }, [desktopUpdates])
+    const receive = value => {
+      setVersions(value.versions ?? {})
+      setError(value.versionError ?? '')
+      if (value.dshVersion) setDshVersion(value.dshVersion)
+    }
+    useEffect(() => {
+      if (!profiles.length) return
+      setVersions(null)
+      setError('')
+      const stop = new AbortController()
+      void hubCall({ action: 'agent-versions', profileIds }, host, undefined, stop.signal)
+        .then(value => { if (!stop.signal.aborted) receive(value) })
+        .catch(error => { if (!stop.signal.aborted) { setVersions({}); setError(error.message || '暂时无法检查 Agent 版本。') } })
+      return () => stop.abort()
+    }, [host, profileKey, Boolean(profiles.length)])
+    const operate = async (id, update) => {
+      setPending(id); setError('')
+      try {
+        if (update) await hubCall({ action: 'update-agent', profileId: id }, host)
+        receive(await hubCall({ action: 'agent-versions', profileIds, refresh: !update }, host))
+      } catch (error) { setError(error.message) }
+      finally { setPending(undefined) }
+    }
+    return { versions, dshVersion, desktopStatus, desktopUpdates, error, pending, operate,
+      openDesktop: () => Promise.resolve(desktopUpdates.open()).catch(error => setError(error.message)) }
+  }
+  function AgentVersionIdentity({ profile, state, type }) {
+    const desktop = profile.type === 'dsh'
+    const status = state.versions?.[profile.id]
+    const current = desktop ? state.dshVersion : status?.current
+    const latest = desktop && ['available', 'downloading', 'ready'].includes(state.desktopStatus?.phase)
+      ? state.desktopStatus.version : status?.updateAvailable ? status.latest : undefined
+    const issue = { missing: '未安装', version: '无法读取版本', manual: '由安装工具管理', registry: '无法检查更新' }[status?.issue]
+    const detail = latest ? `可更新到 ${latest}` : issue
+    return h('span', { className: 'kode-agent-version-identity' },
+      h('span', { className: 'kode-agent-name' }, profile.name),
+      h('span', { className: 'kode-agent-version-line' },
+        type && h('span', { className: 'kode-agent-version-type' }, type),
+        h('span', { className: current ? 'kode-agent-installed-version' : '' }, current ?? (state.versions ? issue ?? '版本未知' : '正在读取版本…')),
+        detail && (current || latest) && h('span', { className: 'kode-agent-version-detail', 'data-available': Boolean(latest) }, detail)))
+  }
+  function AgentUpdateButton({ profile, state }) {
+    const desktop = profile.type === 'dsh', status = state.versions?.[profile.id]
+    const available = desktop ? ['available', 'downloading', 'ready'].includes(state.desktopStatus?.phase) : status?.updateAvailable
+    const retry = !desktop && Boolean(state.versions) && (!status || status.issue === 'registry' || status.issue === 'version' || status.issue === 'missing')
+    const runnable = desktop ? Boolean(state.desktopUpdates?.open) : available || retry
+    const action = desktop ? '更新' : retry ? '检查更新' : '更新'
+    return h(Button, { size: 'sm', variant: available ? 'primary' : 'outline',
+      disabled: !runnable || Boolean(state.pending) && !desktop, 'aria-label': `${action} ${profile.name}`,
+      title: !runnable && (desktop || status?.issue === 'manual') ? '请通过此 Agent 的安装工具更新' : undefined,
+      onClick: () => desktop ? state.openDesktop() : state.operate(profile.id, available) },
+    state.pending === profile.id ? (available ? '更新中…' : '检查中…') : action)
+  }
   function AgentSettingsBody({ sessions, slots, settingsHost }) {
     const store = directory(undefined, settingsHost, true)
     const { data, busy, error } = useSyncExternalStore(store.subscribe, store.getSnapshot)
     useEffect(() => { void store.load() }, [store])
     const [draft, setDraft] = useState(() => newDraft()), [saved, setSaved] = useState(false), [formError, setFormError] = useState(''), [deleting, setDeleting] = useState(false), [editing, setEditing] = useState(false)
     const [defaultBusy, setDefaultBusy] = useState(false), [modelProfileId, setModelProfileId] = useState()
-    const customProfiles = (data?.profiles ?? []).filter(p => p.origin !== 'builtin')
+    const versionState = useAgentVersions(data?.profiles ?? [], settingsHost)
+    const harness = data?.profiles?.find(profile => profile.type === 'dsh')
+    const customProfiles = (data?.profiles ?? []).filter(p => p.origin !== 'builtin' && p.type !== 'dsh')
+    const identity = (profile, type) => h(AgentVersionIdentity, { profile, state: versionState, type })
+    const updateButton = profile => h(AgentUpdateButton, { profile, state: versionState })
     const edit = profile => { setEditing(true); setSaved(false); setFormError(''); setDraft({ ...profile, argsText: JSON.stringify(profile.args ?? []), envText: JSON.stringify(profile.env ?? {}, null, 2) }) }
     const change = patch => { setSaved(false); setDraft(value => ({ ...value, ...patch })) }
     const field = (label, key, props = {}) => h('label', { className: 'kode-field' }, h('span', null, label), h('input', { value: draft[key] ?? '', onChange: e => change({ [key]: e.target.value }), ...props }))
-    const modelButton = profile => h(Button, { variant: 'outline', className: 'kode-agent-edit kode-agent-model-default', 'aria-label': `设置 ${profile.name} 默认模型`, 'aria-expanded': modelProfileId === profile.id, onClick: () => setModelProfileId(value => value === profile.id ? undefined : profile.id) }, '默认模型')
+    const modelButton = profile => h(Button, { size: 'sm', variant: 'outline', 'aria-label': `设置 ${profile.name} 默认模型`, 'aria-expanded': modelProfileId === profile.id, onClick: () => setModelProfileId(value => value === profile.id ? undefined : profile.id) }, '默认模型')
     const modelEditor = profile => modelProfileId === profile.id && h(AgentModelDefaults, { key: profile.id, profile, settingsHost })
     useEffect(() => { if (requestedProfile && data) { const profile = data.profiles.find(p => p.id === requestedProfile); if (profile) setDraft({ ...profile, argsText: JSON.stringify(profile.args ?? []), envText: JSON.stringify(profile.env ?? {}, null, 2) }); requestedProfile = undefined } }, [data])
     const editor = h(React.Fragment, null, h('form', { id: 'kode-agent-form', className: 'kode-config-form', onSubmit: e => {
@@ -1121,18 +1275,26 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       !data && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在连接并读取 Agent 配置…'),
       error && h(Button, { onClick: () => store.load(), disabled: busy }, '重试连接'),
       saved && h('p', { className: 'kode-config-note', role: 'status' }, '已保存'),
-      h(Failure, { text: !editing ? formError || error : '' }),
+      h(Failure, { text: !editing ? formError || error || versionState.error : '' }),
       h('div', { className: 'kode-settings-group' }, h('h3', { className: 'kode-settings-group-title' }, '内置 Agent'),
         data && h('div', { className: 'kode-settings-card kode-agent-list-card' }, h('ul', { className: 'kode-agent-rows' },
         ...(data?.profiles ?? []).filter(profile => profile.origin === 'builtin' && profile.type !== 'dsh').map(profile => h('li', { className: 'kode-agent-row', key: profile.id },
-          h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${profile.name} 默认头像`, onClick: () => openAvatarDialog({ profile, host: settingsHost }) }, h(EditableAgentAvatar, { profile, host: settingsHost })), h('span', { className: 'kode-agent-name' }, profile.name), modelButton(profile)), modelEditor(profile))),
-        data?.types?.dsh && h('li', { className: 'kode-agent-row' },
-          h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置 DeepSeek Harness 默认头像', onClick: () => openAvatarDialog({ profile: data.profiles.find(profile => profile.type === 'dsh'), host: settingsHost }) }, h(EditableAgentAvatar, { profile: data.profiles.find(profile => profile.type === 'dsh'), host: settingsHost })), h('span', { className: 'kode-agent-name' }, 'DeepSeek Harness'), modelButton(data.profiles.find(profile => profile.type === 'dsh')), settingsHost === (transport?.current ?? 'local') && h(Button, { variant: 'outline', className: 'kode-agent-edit', 'aria-label': '编辑 DeepSeek Harness', onClick: () => openSettings(slots, 'models') }, '模型设置')), modelEditor(data.profiles.find(profile => profile.type === 'dsh'))),
+          h('div', { className: 'kode-agent-row-head' },
+            h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${profile.name} 默认头像`, onClick: () => openAvatarDialog({ profile, host: settingsHost }) }, h(EditableAgentAvatar, { profile, host: settingsHost })),
+            identity(profile), h('div', { className: 'kode-agent-row-actions' }, modelButton(profile), updateButton(profile))), modelEditor(profile))),
+        harness && h('li', { className: 'kode-agent-row' },
+          h('div', { className: 'kode-agent-row-head' },
+            h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置 DeepSeek Harness 默认头像', onClick: () => openAvatarDialog({ profile: harness, host: settingsHost }) }, h(EditableAgentAvatar, { profile: harness, host: settingsHost })),
+            identity(harness), h('div', { className: 'kode-agent-row-actions' },
+              modelButton(harness), settingsHost === (transport?.current ?? 'local') && h(Button, { size: 'sm', variant: 'outline', 'aria-label': '编辑 DeepSeek Harness', onClick: () => openSettings(slots, 'models') }, '模型设置'), updateButton(harness))), modelEditor(harness)),
       ))),
       h('div', { className: 'kode-settings-group' }, h('h3', { className: 'kode-settings-group-title' }, '自定义 Agent'),
         customProfiles.length > 0 && h('div', { className: 'kode-settings-card kode-agent-list-card' }, h('ul', { className: 'kode-agent-rows' },
         ...customProfiles.map(p => h('li', { className: 'kode-agent-row', key: p.id },
-          h('div', { className: 'kode-agent-row-head' }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${p.name} 默认头像`, onClick: () => openAvatarDialog({ profile: p, host: settingsHost }) }, h(EditableAgentAvatar, { profile: p, host: settingsHost })), h('span', { className: 'kode-agent-name' }, p.name), h('span', { className: 'kode-agent-tag' }, data.types[p.type]?.name), modelButton(p), h(Button, { variant: 'outline', className: 'kode-agent-edit', disabled: busy, 'aria-label': `编辑 ${p.name}`, 'aria-expanded': editing && draft.id === p.id, onClick: () => editing && draft.id === p.id ? setEditing(false) : edit(p) }, editing && draft.id === p.id ? '收起' : '编辑')),
+          h('div', { className: 'kode-agent-row-head' },
+            h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': `设置 ${p.name} 默认头像`, onClick: () => openAvatarDialog({ profile: p, host: settingsHost }) }, h(EditableAgentAvatar, { profile: p, host: settingsHost })),
+            identity(p, data.types[p.type]?.name), h('div', { className: 'kode-agent-row-actions' }, modelButton(p),
+              h(Button, { size: 'sm', variant: 'outline', disabled: busy, 'aria-label': `编辑 ${p.name}`, 'aria-expanded': editing && draft.id === p.id, onClick: () => editing && draft.id === p.id ? setEditing(false) : edit(p) }, editing && draft.id === p.id ? '收起' : '编辑'), updateButton(p))),
           modelEditor(p), editing && draft.id === p.id && h('div', { className: 'kode-agent-editor' }, editor))),
       ))),
       h(Button, { variant: 'outline', className: 'kode-agent-add', disabled: busy || !data, onClick: () => edit(newDraft(data?.types)) }, h(IconPlusOutlineRegular, { size: 16 }), '添加 Agent'),
@@ -1455,11 +1617,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       return () => { dispose?.(); workspaceSource = undefined; publish() }
     }, 'kode.global-activity-workspaces'))
   }
-  function SessionStatusAvatars({ root, rows, workspaces = [], statuses = new Map() }) {
+  function SessionStatusAvatars({ root, rows, workspaces = [], statuses = new Map(), archivedSessionIds = [] }) {
     const [targets, setTargets] = useState([]), [workspaceTargets, setWorkspaceTargets] = useState([])
     const profileKey = Object.entries(rows).filter(([, row]) => row.agent).map(([id, row]) => `${id}:${row.agent.type}:${row.agent.avatar?.id}:${row.agent.avatar?.url}`).sort().join('|')
     const workspaceKey = workspaces.map(item => `${item.workspaceId}:${item.sessionIds.join(',')}`).join('|')
-    const statusKey = Object.entries(rows).map(([id, row]) => { const status = statuses.get(id); return `${id}:${status?.running}:${status?.completionUnread}:${Boolean(status?.pendingInteraction)}:${row.running}:${row.completed}:${Boolean(row.pendingInteraction)}` }).sort().join('|')
+    // The native sidebar hides status dots on archived sessions and drafts.
+    // Children also live outside the workspace tree, in their parent's view.
+    const archived = new Set(archivedSessionIds)
+    const trackedRows = Object.fromEntries(Object.entries(rows).filter(([id, row]) => !archived.has(id) && !row.blank && row.origin !== 'subagent'))
+    const sessionStates = sessionStateMap(trackedRows, statuses)
+    const statusKey = JSON.stringify([...sessionStates].sort())
     useEffect(() => {
       const scope = root.current
       if (!scope || typeof MutationObserver === 'undefined') return
@@ -1467,15 +1634,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       const scan = () => {
         frame = undefined
         if (disposed) return
-        const next = [], sessionStates = sessionStateMap(rows, statuses)
+        const next = []
         for (const row of scope.querySelectorAll('[data-row-key^="session:"]')) {
           const id = row.getAttribute('data-row-key').slice(8), seat = row.firstElementChild
-          const nativeState = seat?.querySelector(':scope > [data-state]')?.getAttribute('data-state')
-          // Native DOM attributes may lag behind the live store during a new turn.
-          const state = statuses.has(id) || rows[id] ? sessionStates.get(id) : nativeState
-          if (state) sessionStates.set(id, state)
-          if (!rows[id]?.agent || !seat) continue
-          if (state) next.push({ id, seat, state })
+          const state = sessionStates.get(id)
+          if (state && rows[id]?.agent && seat) next.push({ id, seat, state })
         }
         for (const seat of decorated) if (!next.some(item => item.seat === seat)) seat.removeAttribute('data-kode-status-avatar')
         decorated = next.map(item => item.seat)
@@ -1498,7 +1661,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         if (records.every(record => record.target.closest?.('.kode-status-avatar-overlay,.kode-workspace-status'))) return
         if (frame === undefined) frame = requestAnimationFrame(scan)
       })
-      observer.observe(scope, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-state', 'data-row-key'] }); scan()
+      observer.observe(scope, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-row-key'] }); scan()
       return () => { disposed = true; observer.disconnect(); if (frame !== undefined) cancelAnimationFrame(frame); for (const seat of decorated) seat.removeAttribute('data-kode-status-avatar'); for (const seat of decoratedWorkspaces) seat.removeAttribute('data-kode-workspace-status') }
     }, [root, profileKey, workspaceKey, statusKey])
     return h(React.Fragment, null,
@@ -1540,35 +1703,57 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const closeResume = () => { resumeRequest.current?.abort(); setResumeTarget(null) }
     useEffect(() => () => resumeRequest.current?.abort(), [])
     const source = props.useSessions(state => state), workspaceSource = props.useWorkspaces(state => state)
+    const archivedFilter = props.useStore?.(state => state.archivedFilter) ?? 'default'
+    useEffect(() => { void refreshWorkspaceDirectory() }, [workspaceSource.archivedSessionIds])
     const sessionStatusSource = avatarContext?.get?.('uiSession')?.sessionStatus
     const sessionStatuses = useSyncExternalStore(sessionStatusSource?.subscribe ?? emptyAvatarSubscribe, sessionStatusSource?.getSnapshot ?? emptyAvatarSnapshot)
     const merged = React.useMemo(() => {
-      // Kode keeps one list of open conversations for its terminals and this
-      // view: archiving here closes a conversation like closing a Kode tab, so
-      // archived ones are gone from the tree, search and every filter; resume
-      // brings one back.
       const own = data.hosts.find(host => host.id === data.current)
-      const hidden = new Set([...(own?.hiddenSessionIds ?? []), ...workspaceSource.archivedSessionIds, ...(own?.archivedSessionIds ?? [])])
+      const hidden = new Set(own?.hiddenSessionIds ?? [])
       const byId = Object.fromEntries(Object.entries(source.byId).filter(([id]) => !hidden.has(id)))
-      for (const row of own?.sessions ?? []) if (byId[row.id] && row.agent) byId[row.id] = { ...byId[row.id], agent: row.agent }
-      const ids = source.ids.filter(id => !hidden.has(id)), items = [], routes = new Map(), remoteRows = []
+      const ids = new Set(source.ids.filter(id => !hidden.has(id)))
+      const items = [], routes = new Map(), remoteRows = []
+      const archivedSessionIds = new Set(own?.archivedSessionIds ?? workspaceSource.archivedSessionIds)
       const pinnedSessionIds = [...workspaceSource.pinnedSessionIds]
+      const addDirectoryRow = (row, hostId, id = row.id) => {
+        ids.add(id)
+        byId[id] = { ...row, id, updatedAt: row.updatedAt ?? 0, displayTitle: row.title, retainedBy: {}, blank: false, projectionValues: {} }
+        routes.set(id, { hostId, id: row.id })
+      }
       for (const host of data.hosts) {
         if (host.id === data.current) {
           pinnedSessionIds.push(...(host.pinnedSessionIds ?? []))
-          const saved = (host.sessions ?? []).filter(row => row.id.startsWith('saved:') && !hidden.has(row.id))
-          for (const row of saved) { ids.push(row.id); byId[row.id] = { ...row, updatedAt: row.updatedAt ?? 0, displayTitle: row.title, retainedBy: {}, blank: false, projectionValues: {} }; routes.set(row.id, { hostId: host.id, id: row.id }) }
-          items.push(...groupProjectWorkspaces(workspaceSource.items, host.worktreeParents).map(workspace => ({ ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...((host.workspaces ?? []).find(row => row.id === workspace.workspaceId)?.sessionIds ?? [])])] })))
+          const memberships = new Map((host.workspaces ?? []).map(workspace => [workspace.id, workspace.sessionIds]))
+          const accounted = new Set([...memberships.values()].flatMap(ids => ids ?? []))
+          const pinned = new Set(pinnedSessionIds)
+          for (const row of host.sessions ?? []) {
+            if (hidden.has(row.id)) continue
+            const listed = row.id.startsWith('saved:') || accounted.has(row.id) || archivedSessionIds.has(row.id) || pinned.has(row.id)
+            const live = byId[row.id]
+            if (live) {
+              if (listed) ids.add(row.id)
+              // A newly retained live row may arrive before its history metadata.
+              byId[row.id] = { ...live, blank: false, displayTitle: live.displayTitle || row.title, ...(row.agent ? { agent: row.agent } : {}) }
+            } else if (listed) {
+              // The saved alias can be retired before the live session feed
+              // publishes its replacement, including during a history reload.
+              addDirectoryRow(row, host.id)
+            }
+          }
+          const workspaces = new Map(workspaceSource.items.map(workspace => [workspace.workspaceId, {
+            ...workspace, sessionIds: [...new Set([...workspace.sessionIds, ...(memberships.get(workspace.workspaceId) ?? [])])],
+          }]))
+          for (const workspace of host.workspaces ?? []) {
+            if (!workspaces.has(workspace.id)) workspaces.set(workspace.id, { ...workspace, workspaceId: workspace.id })
+          }
+          items.push(...groupProjectWorkspaces([...workspaces.values()], host.worktreeParents))
           if (host.id !== 'local') remoteRows.push(...workspaceSource.items.map(w => ({ id: w.workspaceId, name: host.name })))
           continue
         }
         const key = id => foreignId(host.id, id)
         const visibleSessions = remoteSidebarSessions(host)
-        for (const session of visibleSessions) {
-          const id = key(session.id)
-          ids.push(id); byId[id] = { ...session, updatedAt: session.updatedAt ?? 0, id, displayTitle: session.title, retainedBy: {}, blank: false, projectionValues: {} }
-          routes.set(id, { hostId: host.id, id: session.id })
-        }
+        for (const session of visibleSessions) addDirectoryRow(session, host.id, key(session.id))
+        for (const id of host.archivedSessionIds ?? []) archivedSessionIds.add(key(id))
         for (const workspace of host.workspaces ?? []) {
           const id = key(workspace.id)
           items.push({ ...workspace, workspaceId: id, sessionIds: workspace.sessionIds.map(key) })
@@ -1577,7 +1762,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         }
         const accounted = new Set((host.workspaces ?? []).flatMap(workspace => workspace.sessionIds))
         const ungrouped = visibleSessions.filter(session => !accounted.has(session.id))
-        if (!host.workspaces?.length || ungrouped.length) {
+        const archived = new Set(host.archivedSessionIds)
+        const ungroupedVisible = ungrouped.some(session => archivedFilter !== 'default' || !archived.has(session.id))
+        if (!host.workspaces?.length || ungroupedVisible) {
           const id = `kode-host-status:${encodeURIComponent(host.id)}`
           items.push({ workspaceId: id, title: host.name, path: '', sessionIds: ungrouped.map(session => key(session.id)), createdAt: 0, updatedAt: 0 })
           routes.set(id, { hostId: host.id, placeholder: true })
@@ -1588,9 +1775,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       if (!data.hosts.length) items.push(...workspaceSource.items)
       // Sidebar presence follows visible conversations; the complete project
       // catalog remains available in the workspace picker and creation flow.
-      const populated = items.filter(workspace => workspace.sessionIds.some(id => byId[id] && !byId[id].blank))
-      return { sessions: { ...source, ids, byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds: [], pinnedSessionIds }, routes, remoteRows }
-    }, [source, workspaceSource, data])
+      const populated = items.filter(workspace => workspace.sessionIds.some(id => {
+        const row = byId[id]
+        return row && !row.blank && row.origin !== 'subagent' && (archivedFilter !== 'default' || !archivedSessionIds.has(id))
+      }))
+      return { sessions: { ...source, ids: [...ids], byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds: [...archivedSessionIds], pinnedSessionIds }, routes, remoteRows }
+    }, [source, workspaceSource, data, archivedFilter])
     useEffect(() => {
       if (!window.addEventListener) return
       const show = event => { const id = event.detail?.sessionId, profile = merged.sessions.byId[id]?.agent; if (!profile) return; const route = merged.routes.get(id) ?? { id, hostId: data.current }; openAvatarDialog({ profile, sessionId: route.id, host: route.hostId }) }
@@ -1676,10 +1866,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       else props.open(id)
     }
     const resumeRows = resumeCandidates(data.hosts, resumeTarget, resumeQuery, nativePage.rows)
-    // There is no archived view to filter to; keep the browser on its default.
-    useEffect(() => { props.actions?.setArchivedFilter?.('default') }, [props.actions])
-    const viewActions = React.useMemo(() => props.actions && { ...props.actions, setArchivedFilter: () => props.actions.setArchivedFilter('default') }, [props.actions])
-    const useViewStore = React.useCallback(selector => props.useStore(state => selector((state.archivedFilter ?? 'default') === 'default' ? state : { ...state, archivedFilter: 'default' })), [props.useStore])
     const mutate = async (id, operation, args) => {
       const route = merged.routes.get(id)
       await projectCall({ action: 'host-operation', id: route.hostId, operation, args })
@@ -1724,11 +1910,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       return `${selector}{font-size:0;visibility:hidden}${selector}::after{content:"已保存";font-size:12px;visibility:visible}`
     }).join('\n')
     return h('div', { className: 'kode-unified-workspaces', 'aria-busy': busy, ref: treeRoot },
-      h(SessionStatusAvatars, { root: treeRoot, rows: merged.sessions.byId, workspaces: merged.workspaces.items, statuses: sessionStatuses }),
+      h(SessionStatusAvatars, { root: treeRoot, rows: merged.sessions.byId, workspaces: merged.workspaces.items, statuses: sessionStatuses,
+        archivedSessionIds: merged.workspaces.archivedSessionIds }),
       h('style', null, remoteCss + savedCss),
       notice && h(Toast, { key: notice.id, text: notice.text, icon: notice.warning ? h(IconWarningOutlineRegular) : undefined,
         onDone: () => setNotice(current => current?.id === notice.id ? null : current) }),
-      h(native, { ...props, ...(props.useStore ? { useStore: useViewStore } : {}), ...(viewActions ? { actions: viewActions } : {}), useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
+      h(native, { ...props, useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
         startSession: (id, options) => {
           const route = merged.routes.get(id)
           if (route?.placeholder) return void navigate(route.hostId, { create: true })
@@ -2663,7 +2850,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-agent-avatar{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;overflow:hidden;border-radius:6px;color:var(--dsw-alias-label-primary)}.kode-agent-mask{display:block;width:100%;height:100%;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-agent-avatar img{display:block;width:100%;height:100%;object-fit:contain}.kode-agent-identity,.kode-agent-option{display:inline-flex;align-items:center;gap:8px;min-width:0}.kode-agent-identity{max-width:200px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}.kode-agent-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}span:has(>[data-slot="conversation.session.header.lineage"])>span:first-child{max-width:100%;font-size:16px;font-weight:600;line-height:24px}nav[aria-label="会话层级"]{flex:1 1 auto;min-width:0}nav[aria-label="会话层级"]~div:has(>[data-slot="conversation.session.header.actions"]){margin-left:auto;padding-left:16px}.kode-agent-option>.kode-option{flex:1}.kode-settings-group-title{font-size:14px;font-weight:600;line-height:20px;color:var(--dsw-alias-label-primary);margin:4px 0 -4px}.kode-avatar-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100dvh - 48px)}.kode-avatar-dialog>:has(>.kode-avatar-editor){min-height:0;overflow-y:auto;overscroll-behavior:contain}.kode-avatar-editor{padding:12px 0}.kode-avatar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px;max-height:min(360px,50vh);overflow:auto;padding:4px}.kode-avatar-choice{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0;padding:8px;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer}.kode-avatar-choice>span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px}.kode-avatar-choice:hover,.kode-avatar-choice[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover)}.kode-avatar-choice[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary)}.kode-avatar-choice:disabled{opacity:.5;cursor:default}.kode-avatar-choice:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-option{display:flex;align-items:center;justify-content:space-between;gap:24px;min-width:200px}.kode-secondary{color:var(--dsw-alias-label-tertiary);font-size:12px}.kode-menu-note{padding:8px 12px;max-width:260px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .kode-fast-switch{position:relative;box-sizing:border-box;flex:none;width:36px;height:20px;padding:2px;border:0;border-radius:10px;background:var(--dsw-alias-border-l1);color:var(--dsw-alias-label-primary);cursor:pointer;transition:background-color 160ms ease}.kode-fast-switch[aria-checked=true]{background:var(--dsw-alias-state-business-primary)}.kode-fast-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-bg-base);box-shadow:0 1px 3px rgb(0 0 0 / 20%);transform:translateX(0);transition:transform 160ms ease}.kode-fast-switch[aria-checked=true]>.kode-fast-switch-thumb{transform:translateX(16px)}.kode-fast-switch:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-fast-switch:disabled{opacity:.5;cursor:default}.kode-default-models{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) auto;gap:12px 16px;align-items:end;padding:12px;border:.5px solid var(--dsw-alias-settings-card-stroke);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-settings-card-fill)}.kode-default-models>.kode-field{min-width:0;margin:0}.kode-default-models>.kode-config-note{grid-column:1/-1;margin:0}.kode-default-fast{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:40px;font-size:14px}.kode-default-fast>span{white-space:nowrap}@media(max-width:600px){.kode-default-models{grid-template-columns:minmax(0,1fr)}.kode-default-models>.kode-config-note{grid-column:1}}@media(prefers-reduced-motion:reduce){.kode-fast-switch,.kode-fast-switch-thumb{transition:none}}
-.kode-agent-settings{max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}.kode-agent-settings h2{margin:0;font-size:16px;font-weight:500;line-height:24px}.kode-agent-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}.kode-agent-rows{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}.kode-agent-row{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);padding:12px 14px;display:flex;flex-direction:column;gap:12px}.kode-agent-row-head{display:flex;align-items:center;gap:10px;min-width:0}.kode-agent-name{font-size:14px;font-weight:500;line-height:22px;overflow-wrap:anywhere;min-width:0}.kode-agent-tag{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);color:var(--dsw-alias-label-secondary);padding:1px 6px;font-size:11px;line-height:16px;flex-shrink:0}.kode-agent-edit{margin-left:auto;flex-shrink:0!important;height:28px!important;padding:0 10px!important;border-radius:var(--dsw-radius-sm)!important;font-size:12px!important;line-height:18px!important}.kode-agent-row-head .kode-agent-model-default{margin-left:auto}.kode-agent-row-head .kode-agent-model-default~.kode-agent-edit{margin-left:0}.kode-agent-model-editor{min-width:0}.kode-agent-model-editor .kode-default-models{background:var(--dsw-alias-bg-module-platform)}.kode-agent-add{width:100%;min-height:44px!important;border:1px dashed var(--dsw-alias-border-l3)!important;border-radius:var(--dsw-radius-lg)!important;gap:6px!important}.kode-agent-editor{border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);padding:14px 16px;min-width:0}.kode-agent-editor .kode-field{gap:6px;margin-bottom:14px}.kode-agent-editor .kode-field>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-agent-models{min-width:0}.kode-settings-footer{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:14px}
+.kode-agent-settings{max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}.kode-agent-settings h2{margin:0;font-size:16px;font-weight:500;line-height:24px}.kode-agent-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}.kode-agent-rows{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}.kode-agent-row{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);padding:12px 14px;display:flex;flex-direction:column;gap:12px}.kode-agent-row-head{display:flex;align-items:center;gap:10px;min-width:0}.kode-agent-name{font-size:14px;font-weight:500;line-height:22px;overflow-wrap:anywhere;min-width:0}.kode-agent-tag{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);color:var(--dsw-alias-label-secondary);padding:1px 6px;font-size:11px;line-height:16px;flex-shrink:0}.kode-agent-edit{margin-left:auto;flex-shrink:0!important;height:28px!important;padding:0 10px!important;border-radius:var(--dsw-radius-sm)!important;font-size:12px!important;line-height:18px!important}.kode-agent-model-editor{min-width:0}.kode-agent-model-editor .kode-default-models{background:var(--dsw-alias-bg-module-platform)}.kode-agent-add{width:100%;min-height:44px!important;border:1px dashed var(--dsw-alias-border-l3)!important;border-radius:var(--dsw-radius-lg)!important;gap:6px!important}.kode-agent-editor{border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);padding:14px 16px;min-width:0}.kode-agent-editor .kode-field{gap:6px;margin-bottom:14px}.kode-agent-editor .kode-field>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-agent-models{min-width:0}.kode-settings-footer{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:14px}
 .kode-shared-conversation{display:flex;flex-direction:column;min-height:0;height:100%;color:var(--dsw-alias-label-primary)}.kode-shared-conversation>header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:16px 24px;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-shared-conversation>header p{margin:4px 0 0}.kode-shared-messages{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:24px}.kode-shared-composer{padding:16px 24px;border-top:1px solid var(--dsw-alias-border-l2)}.kode-shared-composer .kode-field{margin-bottom:12px}.kode-shared-composer>div:last-child{display:flex;justify-content:flex-end;gap:8px}.kode-service-status{display:flex;align-items:center;gap:6px}.kode-service-connected-icon{flex:none;color:var(--dsw-alias-state-success-primary)}.kode-service-recovery{margin-top:8px}.kode-service-recovery-actions{display:flex;flex-wrap:wrap;gap:8px}.kode-service-recovery [role=status]{margin-top:12px}.kode-mobile-pairing,.kode-host-service{display:flex;flex-direction:column;gap:12px;padding:16px;border:.5px solid var(--dsw-alias-settings-card-stroke);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-settings-card-fill)}.kode-mobile-pairing>.kode-settings-group-title,.kode-mobile-pairing>.kode-config-note,.kode-host-service>.kode-settings-group-title{margin:0}.kode-host-service-body{display:flex;align-items:center;flex-wrap:wrap;gap:12px}.kode-host-service-body>.kode-service-status{flex:1;min-width:180px;margin:0}.kode-host-service-body>.kode-service-recovery{margin:0 0 0 auto}.kode-mobile-pairing-form{display:flex;flex-direction:column;gap:12px}.kode-mobile-pairing-form .kode-field{margin:0}.kode-mobile-pairing-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px}.kode-mobile-pairing-actions>.kode-service-status{margin:0 auto 0 0}.kode-mobile-pairing-actions>button{width:auto;min-width:160px}.kode-pairing-result{display:flex;flex-direction:column;gap:16px;margin:4px 0 0;padding-top:16px;border-top:1px solid var(--dsw-alias-border-l2)}.kode-pairing-result>.kode-field,.kode-pairing-result>.kode-config-note{margin:0}.kode-pairing-qr{display:flex;flex-direction:column;align-items:center;gap:12px;margin:0;text-align:center}.kode-pairing-qr img{display:block;width:280px;max-width:100%;height:auto;aspect-ratio:1;image-rendering:pixelated}.kode-pairing-qr figcaption{margin:0}.kode-integration-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kode-integration-row>span{display:grid;gap:6px;min-width:0}.kode-integration-row .kode-config-note{margin:0}.kode-integration-row input[type="checkbox"][role="switch"]{appearance:none;-webkit-appearance:none;flex:none;position:relative;box-sizing:border-box;width:36px;min-width:36px;height:20px;min-height:20px;margin:0;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;background:var(--dsw-alias-interactive-bg-hover);cursor:pointer}.kode-integration-row input[type="checkbox"][role="switch"]::before{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgb(0 0 0/.25);transition:transform 160ms ease}.kode-integration-row input[type="checkbox"][role="switch"]:checked{background:var(--dsw-alias-state-business-primary);border-color:transparent}.kode-integration-row input[type="checkbox"][role="switch"]:checked::before{transform:translateX(16px)}.kode-integration-row input[type="checkbox"][role="switch"]:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-integration-row input[type="checkbox"][role="switch"]:disabled{opacity:.45;cursor:default}.kode-config-form{min-width:0}.kode-field{display:grid;gap:8px;margin-bottom:18px;color:var(--dsw-alias-label-primary);font-size:13px}.kode-field input,.kode-field select,.kode-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.kode-field :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}.kode-field input::placeholder{color:var(--dsw-alias-label-caption)}.kode-config-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin:0 0 16px}.kode-saved{margin-right:auto;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);margin:4px 0}.kode-model-control{position:relative;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.kode-model-control>.kode-error{position:absolute;bottom:32px;right:0;min-width:240px;padding:8px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-md)}
 .kode-field-select{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:9px 12px;font:inherit;font-size:14px;line-height:20px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}.kode-field-select:hover{border-color:var(--dsw-alias-border-l1)}.kode-mode-control{display:inline-flex;align-items:center;position:relative}.kode-delete{color:var(--dsw-alias-state-error-primary);margin-right:auto}
 .kode-source-summary{display:flex;align-items:center;gap:12px;width:100%;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}.kode-source-summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:4px}.kode-source-avatar{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:none;width:44px;height:44px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}.kode-source-avatar-fallback{font-size:16px;font-weight:600}.kode-source-avatar img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover}.kode-source-copy{display:flex;flex:1;flex-direction:column;gap:4px;min-width:0}.kode-source-copy>strong{font-size:15px;font-weight:600;line-height:22px;overflow-wrap:anywhere}.kode-source-description{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.kode-source-chevron{flex:none;margin-left:auto;color:var(--dsw-alias-label-secondary);transform:rotate(-90deg)}.kode-source-dialog{width:min(680px,calc(100vw - 32px));max-height:min(640px,calc(100dvh - 64px))}.kode-source-dialog>:has(.kode-source-preview){min-height:0;overflow:hidden}.kode-source-dialog :has(>.kode-source-preview){min-height:0;overflow-y:auto;overscroll-behavior:contain}.kode-source-preview{display:flex;flex-direction:column;gap:16px;min-width:0}.kode-source-preview-header{display:flex;align-items:center;gap:12px;min-width:0}.kode-source-preview-header>div{min-width:0}.kode-source-preview-header strong{font-size:15px;font-weight:600}.kode-source-preview-header p{margin:4px 0 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}.kode-source-preview-section>h3{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:14px;font-weight:600;line-height:20px}.kode-source-preview-section>h3>span{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500}.kode-source-preview-list{margin:0;padding:0 12px;list-style:none;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill)}.kode-source-preview-list>li{padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}.kode-source-preview-list>li:last-child{border-bottom:0}.kode-source-preview-list strong{font-size:13px;font-weight:500;line-height:20px;overflow-wrap:anywhere}.kode-source-sync-list strong{display:flex;align-items:center;gap:6px}.kode-source-sync-icon{flex:none;color:var(--dsw-alias-state-success-primary)}.kode-source-sync-icon.is-pending{color:var(--dsw-alias-label-tertiary)}.kode-source-preview-list p{margin:4px 0 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}.kode-source-about dl{margin:0}.kode-source-about dl>div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;padding:9px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}.kode-source-about dl>div:last-child{border-bottom:0}.kode-source-about dt{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.kode-source-about dd{margin:0;font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -2717,8 +2904,11 @@ html[data-kode-embed] .kode-token-notch{display:none}
 html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:block;position:fixed;inset:0 0 auto;height:28px;z-index:2147483000;background:var(--dsw-specific-sidebar-fill);border-bottom:.5px solid var(--dsw-alias-border-l3);user-select:none;-webkit-user-select:none}
 .kode-handoff-trigger{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px!important;padding:0 10px!important;white-space:nowrap}.kode-handoff-dialog{width:min(480px,calc(100vw - 32px))}.kode-handoff-body .kode-field{margin-bottom:12px}.kode-handoff-body>.kode-config-note{margin:0}.kode-model-control{min-width:0;max-width:min(360px,45cqw)}.kode-model-control>.kode-trigger{max-width:100%}[data-slot="conversation.input.right"] [data-composer-stat="activity"]{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;min-width:0;width:24px;max-width:24px;margin-right:-8px;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] button{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;width:24px;min-width:24px;height:24px;min-height:24px;margin:0;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] [class*="label"]{display:none}
 .kode-settings-main{width:100%;min-width:0}.kode-settings-page .kode-settings-section{width:100%}.kode-settings-page .kode-settings-section .kode-agent-settings{width:100%;max-width:none;min-width:0;box-sizing:border-box}.kode-settings-page .kode-agent-rows,.kode-settings-page .kode-agent-row,.kode-settings-page .kode-agent-editor{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-source-summary,.kode-settings-page .kode-source-copy{min-width:0}.kode-settings-page .kode-personalization .kode-avatar-content,.kode-settings-page .kode-personalization .kode-avatar-grid,.kode-settings-page .kode-personalization .kode-avatar-preview{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-personalization .kode-avatar-preview>img{max-width:100%}
-.kode-source-editor{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;align-items:start}.kode-source-editor>.kode-field{min-width:0;margin:0}.kode-source-editor>.kode-field input{box-sizing:border-box;width:100%;min-width:0}.kode-source-field-location,.kode-source-field-subdir,.kode-source-editor>.kode-hub-targets,.kode-source-editor-actions{grid-column:1/-1}.kode-source-editor>.kode-hub-targets{display:flex;flex-wrap:wrap;gap:8px 16px;min-width:0;margin:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md)}.kode-source-editor>.kode-hub-targets>legend{padding:0 4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-source-editor>.kode-hub-targets>label{display:inline-flex;align-items:center;gap:6px;min-height:28px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}.kode-source-editor>.kode-hub-targets input{flex:none;margin:0;accent-color:var(--dsw-alias-state-business-primary)}.kode-source-editor-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}.kode-source-editor-actions>button{width:auto;min-width:88px}
-@media(max-width:600px){.kode-source-editor{grid-template-columns:minmax(0,1fr)}.kode-source-editor-actions>button{flex:1;min-width:0}.kode-source-editor>.kode-hub-targets{gap:4px 12px}}
+.kode-source-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 16px}.kode-source-toolbar>button{margin-inline-start:auto}.kode-source-toolbar:empty{display:none}.kode-source-toolbar .kode-config-note,.kode-source-target-summary{margin:0}
+.kode-agent-version-identity{flex:1 1 120px;min-width:0;display:flex;flex-direction:column;gap:4px}.kode-agent-version-line{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:12px;line-height:16px;color:var(--dsw-alias-label-secondary)}.kode-agent-installed-version{font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}.kode-agent-version-detail[data-available=true]{color:var(--dsw-alias-label-primary)}.kode-agent-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-inline-start:auto;justify-content:flex-end}.kode-agent-row-actions>button{inline-size:72px;max-inline-size:100%;white-space:nowrap}
+@media(max-width:520px){.kode-agent-row-actions{justify-content:flex-start;margin-inline-start:0}}
+.kode-source-editor{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;align-items:start}.kode-source-editor>.kode-field{min-width:0;margin:0}.kode-source-editor>.kode-field input{box-sizing:border-box;width:100%;min-width:0}.kode-source-field-location,.kode-source-field-subdir,.kode-source-editor-actions{grid-column:1/-1}.kode-source-target-picker{grid-column:1/-1;min-width:0;margin:0;padding:0;border:0}.kode-source-target-picker>legend{margin-bottom:8px;padding:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}.kode-source-target-options{display:flex;flex-wrap:wrap;gap:8px}.kode-source-target-option{display:inline-flex;align-items:center;gap:6px;min-height:32px;max-width:100%;padding:4px 11px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;text-align:start;overflow-wrap:anywhere;cursor:pointer}.kode-source-target-option>svg{flex:none;color:var(--dsw-alias-label-secondary)}.kode-source-target-option:hover{background:var(--dsw-alias-interactive-bg-hover)}.kode-source-target-option[aria-pressed=true]{border-color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent)}.kode-source-target-option[aria-pressed=true]>svg{color:var(--dsw-alias-state-business-primary)}.kode-source-target-option:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.kode-source-target-option:disabled{opacity:.6;cursor:default}.kode-source-target-picker .kode-config-note{margin:8px 0 0}.kode-source-editor-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}.kode-source-editor-actions>button{width:auto;min-width:88px}
+@media(max-width:600px){.kode-source-editor{grid-template-columns:minmax(0,1fr)}.kode-source-editor-actions>button{flex:1;min-width:0}}
 @media(max-width:720px){.kode-settings-scope{grid-template-columns:1fr;align-items:start;gap:8px}.kode-settings-layout{display:block;margin-top:16px}.kode-settings-nav{position:static;flex-direction:row;overflow-x:auto;overscroll-behavior-x:contain;padding:0 0 4px;margin:0 0 16px;scrollbar-width:thin}.kode-settings-nav button{flex:0 0 auto;min-height:44px}.kode-handoff-trigger{width:32px;padding:0!important}.kode-handoff-trigger>span{display:none}.kode-model-control{max-width:48cqw}[data-slot="conversation.input.right"] [data-composer-stat="activity"]{max-width:24px}[data-slot="conversation.input.right"] [data-composer-stat="activity"] [class*="label"]{display:none}}
 `
 

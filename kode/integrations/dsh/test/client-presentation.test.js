@@ -21,7 +21,7 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
   }
   const primitives = new Proxy({}, { get: (_object, key) => key })
   vm.runInNewContext(source, { window: { addEventListener() {}, removeEventListener() {}, ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
-    setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } }, ...globals,
+    AbortController, setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } }, ...globals,
   })
   const entries = name => [...(name === 'sidebar.settings' ? [shell] : name === 'sidebar.workspaces' ? [workspaceShell] : name==='conversation.view'?[chatShell]:[]), ...registry.filter(row => row.options.name === name), ...(name === 'conversation.chat.node' ? nodeSeats.values() : [])]
   const ctx = { provide(name, value) { this[name] = value }, get(name) { return this[name] }, sessions: { list: { subscribe: fn => { sessionListeners.add(fn); return () => sessionListeners.delete(fn) }, getSnapshot: () => ({ byId: { 'session-same-id': { title: '错误的本地同 ID 会话' } } }) } }, remote: { $host: { isLoopback: true } }, workspaces: {},
@@ -373,6 +373,26 @@ test('model menu owns model, effort and Fast selection in one trigger', async ()
   assert.match(source, /\.kode-fast-switch\[aria-checked=true\]>\.kode-fast-switch-thumb\{transform:translateX\(16px\)\}/)
 })
 
+test('Agent update controls highlight only a confirmed release and use the correct update action', () => {
+  const scope={h:(type,props,...children)=>({type,props,children}),Button:'button'}
+  vm.runInNewContext(source.slice(source.indexOf('  function AgentVersionIdentity'), source.indexOf('  function AgentSettingsBody')),scope)
+  const profile={id:'configured',name:'Work Codex',type:'codex'}, calls=[]
+  const state={versions:{configured:{current:'1.2.3',latest:'1.3.0',updateAvailable:true}},operate:(...args)=>calls.push(args)}
+  const identity=scope.AgentVersionIdentity({profile,state})
+  assert.match(visibleText(identity),/Work Codex.*1.2.3.*可更新到 1.3.0/)
+  const button=scope.AgentUpdateButton({profile,state})
+  assert.equal(button.props.variant,'primary')
+  button.props.onClick()
+  assert.deepEqual(calls,[['configured',true]])
+  state.versions.configured={current:'1.3.0',latest:'1.3.0',updateAvailable:false}
+  assert.equal(scope.AgentUpdateButton({profile,state}).props.disabled,true)
+  state.versions.configured={current:'1.3.0',issue:'registry'}
+  const retry=scope.AgentUpdateButton({profile,state})
+  assert.equal(retry.props.variant,'outline')
+  retry.props.onClick()
+  assert.deepEqual(calls.at(-1),['configured',undefined])
+})
+
 test('handoff uses a compact action and excludes the current Agent from targets', async () => {
   const agentDirectory = {
     currentProfile: { id: 'codex', name: 'Codex', type: 'codex' }, selectedProfileId: 'codex', supportedTypes: ['codex', 'claude'],
@@ -386,12 +406,21 @@ test('handoff uses a compact action and excludes the current Agent from targets'
   assert.deepEqual(Array.from(select.props.options, option => option.value), ['', 'claude'])
 })
 
-test('Plugin and Skills sources stay a multi-item list with an on-demand editor and detail preview',()=>{
- const slots=[];let index=0
- const scope={React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
- vm.runInNewContext(source.slice(source.indexOf('  function HubSettings'),source.indexOf('  function GoalBar')),scope)
- const render=()=>{index=0;return scope.HubSettings({host:'local'})}
- render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote',subdir:'plugins/remote',targets:['dsh'],nativeStatus:{dsh:'skills-only'},updatedAt:1,release:'r1',packages:[{name:'remote',path:'.',displayName:'Remote Toolkit',description:'Remote summary',longDescription:'Long remote summary',version:'1.2.3',author:'team',category:'Engineering',logo:'assets/logo.png',skills:[{name:'example-skill',description:'Skill summary'}],agents:[{name:'reviewer',description:'Reviews changes'}],hooks:[{name:'PreToolUse',description:'Hook summary'}],commands:[{name:'build',description:'Build summary'}],rules:[{name:'discipline',description:'Rule summary'}],mcp:[{name:'remote-mcp',type:'http'}]}]},{id:'local',kind:'local',location:'/tmp/skills',targets:['dsh'],skills:['skills--local']}],targets:{dsh:{}}}
+test('Plugin and Skills sources stay a multi-item list with an on-demand editor and detail preview',async()=>{
+ const slots=[], requests=[];let index=0
+ const agents={profiles:[
+   {id:'deepseek',name:'DeepSeek Harness',type:'dsh'},
+   {id:'codex',name:'Codex',type:'codex',origin:'builtin'},
+   {id:'codex-alt',name:'Codex Alt',type:'codex',origin:'custom'},
+   {id:'tclaude',name:'TClaude',type:'claude',executable:'tclaude'},
+   {id:'acp-with-skills',name:'Custom ACP',type:'custom'},
+   {id:'acp-unknown',name:'Unconfigured ACP',type:'custom'},
+ ],configuredDefaultProfileId:'codex'}
+ const sessions={list:{getSnapshot:()=>({byId:{active:{retainedBy:{mainView:1},projectionValues:{kodeAgent:{profileId:'deepseek'}}}}})}}
+ const scope={directory:()=>({getSnapshot:()=>({data:agents})}),useSyncExternalStore:(_,get)=>get(),hubCall:async body=>{requests.push(body);return slots[0]},React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
+ vm.runInNewContext(source.slice(source.indexOf('  const hubTargetNames'),source.indexOf('  function GoalBar')),scope)
+ const render=()=>{index=0;return scope.HubSettings({host:'local',sessions})}
+ render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote',subdir:'plugins/remote',targets:['dsh'],nativeStatus:{dsh:'skills-only'},updatedAt:1,release:'r1',packages:[{name:'remote',path:'.',displayName:'Remote Toolkit',description:'Remote summary',longDescription:'Long remote summary',version:'1.2.3',author:'team',category:'Engineering',logo:'assets/logo.png',skills:[{name:'example-skill',description:'Skill summary'}],agents:[{name:'reviewer',description:'Reviews changes'}],hooks:[{name:'PreToolUse',description:'Hook summary'}],commands:[{name:'build',description:'Build summary'}],rules:[{name:'discipline',description:'Rule summary'}],mcp:[{name:'remote-mcp',type:'http'}]}]},{id:'local',kind:'local',location:'/tmp/skills',targets:['dsh'],skills:['skills--local']}],targets:{dsh:'.agents/skills',codex:'.codex/skills',tclaude:'.tclaude/skills','directory-fixture':'/example/custom/skills'},profileTargets:{deepseek:'dsh',codex:'codex','codex-alt':'codex',tclaude:'tclaude','acp-with-skills':'directory-fixture'}}
  const closed=render(),text=JSON.stringify(closed)
  assert.match(text,/Remote Toolkit/);assert.match(text,/Remote summary/);assert.match(text,/local/);assert.match(text,/Plugin \/ Skills 来源/);assert.doesNotMatch(text,/Git 地址/)
  const card=findNode(closed,node=>node.props?.className?.includes('kode-hub-sources-card'));assert.ok(findNode(card,node=>node.type==='ul'))
@@ -416,13 +445,39 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
  assert.ok(findNode(editor,node=>node.props?.className==='kode-field kode-source-field-location'))
  assert.equal(findNode(editor,node=>node.props?.className==='kode-source-editor-actions').children.length,2)
  assert.match(source,/\.kode-source-editor\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
- assert.match(source,/\.kode-source-field-location,\.kode-source-field-subdir,\.kode-source-editor>\.kode-hub-targets,\.kode-source-editor-actions\{grid-column:1\/-1\}/)
+ assert.match(source,/\.kode-source-field-location,\.kode-source-field-subdir,\.kode-source-editor-actions\{grid-column:1\/-1\}/)
  assert.match(source,/@media\(max-width:600px\)\{\.kode-source-editor\{grid-template-columns:minmax\(0,1fr\)\}/)
+ assert.equal(findNode(closed,node=>node.props?.label==='Agent'),undefined)
+ const target = (tree, name) => findNode(tree,node=>node.props?.className==='kode-source-target-option'&&node.children.includes(name))
+ assert.equal(target(editor,'DeepSeek Harness').props['aria-pressed'],true)
+ assert.equal(target(editor,'Codex / Codex Alt').props['aria-pressed'],false)
+ assert.match(visibleText(editor),/Unconfigured ACP.*KODE_SKILLS_DIR/)
+ assert.equal(findNode(editor,node=>node.type==='input'&&node.props.type==='checkbox'),undefined)
+ target(editor,'TClaude').props.onClick()
+ target(render(),'Custom ACP').props.onClick()
+ assert.equal(target(render(),'Custom ACP').props['aria-pressed'],true)
+ findNode(render(),node=>node.props?.className==='kode-field kode-source-field-id').children[1].props.onChange({target:{value:'work-tools'}})
+ findNode(render(),node=>node.type==='form').props.onSubmit({preventDefault(){}})
+ await new Promise(resolve=>setImmediate(resolve))
+ assert.equal(requests.at(-1).intent,'create')
+ assert.deepEqual(Array.from(requests.at(-1).source.targets),['dsh','tclaude','directory-fixture'])
+ const edit=findNode(render(),node=>node.type==='button'&&node.children.includes('编辑'))
+ edit.props.onClick()
+ target(render(),'DeepSeek Harness').props.onClick()
+ const empty=findNode(render(),node=>node.type==='form')
+ assert.equal(findNode(empty,node=>node.props?.type==='submit').props.disabled,true)
+ target(render(),'Codex / Codex Alt').props.onClick()
+ findNode(render(),node=>node.type==='form').props.onSubmit({preventDefault(){}})
+ await new Promise(resolve=>setImmediate(resolve))
+ assert.equal(requests.at(-1).intent,'edit')
+ assert.deepEqual(Array.from(requests.at(-1).expectedTargets),['dsh'])
+ assert.deepEqual(Array.from(requests.at(-1).source.targets),['codex'])
+
 })
 
 test('plugin detail selection follows a stable package path when polling reorders packages',()=>{
  const scope={React:{Fragment:'fragment'},SelectField:'select',transport:null,h:(type,props,...children)=>({type,props,children})}
- vm.runInNewContext(source.slice(source.indexOf('  function sourcePresentation'),source.indexOf('  function GoalSidebar')),scope)
+ vm.runInNewContext(source.slice(source.indexOf('  const hubTargetNames'),source.indexOf('  function GoalSidebar')),scope)
  const multi={id:'multi',skills:[],targets:['codex','claude'],nativeStatus:{codex:'installed',claude:'ready'},packages:[{name:'one',path:'plugins/one',displayName:'One',logo:'one.png',skills:[{name:'one-skill'}]},{name:'two',path:'plugins/two',displayName:'Two',logo:'two.png',skills:[{name:'two-skill'}]}]}
  let tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},host:'local'})
  assert.equal(findNode(tree,node=>node.type==='select').props.value,'plugins/two')
@@ -482,7 +537,7 @@ test('workspace sidebar plus recovers a stale native catalog before starting the
       select: async (host, request) => calls.push([host, { ...request }]),
     },
     workspaces: { list: { getSnapshot: () => ({ items: nativeItems }) } },
-  })
+  }, { setTimeout, clearTimeout })
   const wrapper = c.workspaceShell.component({
     useSessions: select => select({ ids: ['old'], byId: { old: { id: 'old' } } }),
     useWorkspaces: select => select({ items: [workspace], pinnedSessionIds: [], archivedSessionIds: [] }),
@@ -537,13 +592,71 @@ test('saved legacy tab archive controls work without importing or starting the s
  assert.ok(!c.requests.some(row=>row.action==='import-saved'))
 })
 
-test('archiving closes a conversation: it leaves the tree, search and every filter',async()=>{
- const c=client({current:'local',hosts:[{id:'local',sessions:[{id:'saved:closed',title:'Closed tab'}],archivedSessionIds:['saved:closed','live-closed'],workspaces:[]},{id:'ssh',name:'Build host',status:'online',sessions:[{id:'remote-closed',title:'Remote'}],workspaces:[],pinnedSessionIds:['remote-closed'],archivedSessionIds:['remote-closed']}]})
- const wrapper=c.workspaceShell.component({useSessions:select=>select({ids:['live-closed','live-open'],byId:{'live-closed':{id:'live-closed'},'live-open':{id:'live-open'}}}),useWorkspaces:select=>select({items:[],archivedSessionIds:['live-closed'],pinnedSessionIds:[]})})
- wrapper.type(wrapper.props);await new Promise(resolve=>setImmediate(resolve))
- const tree=wrapper.type(wrapper.props),native=tree.children.find(child=>child?.type===c.native)
- assert.deepEqual(Array.from(native.props.useSessions(state=>state.ids)),['live-open'])
- assert.deepEqual(Array.from(native.props.useWorkspaces(state=>state.archivedSessionIds)),[])
+test('native archive filters receive local, saved and remote archive IDs', async () => {
+  const c = client({ current: 'local', hosts: [
+    { id: 'local', sessions: [{ id: 'saved:closed', title: 'Closed tab' }], archivedSessionIds: ['saved:closed', 'live-closed'], workspaces: [] },
+    { id: 'ssh', name: 'Build host', status: 'online', sessions: [{ id: 'remote-closed', title: 'Remote' }], workspaces: [], archivedSessionIds: ['remote-closed'] },
+  ] })
+  let filter = 'default'
+  const useStore = select => select({ archivedFilter: filter })
+  const actions = { setArchivedFilter: value => { filter = value } }
+  const wrapper = c.workspaceShell.component({
+    useStore, actions,
+    useSessions: select => select({ ids: ['live-closed', 'live-open'], byId: { 'live-closed': { id: 'live-closed' }, 'live-open': { id: 'live-open' } } }),
+    useWorkspaces: select => select({ items: [{ workspaceId: 'project', sessionIds: ['live-closed'] }], archivedSessionIds: ['live-closed'], pinnedSessionIds: [] }),
+  })
+  const render = () => findNode(wrapper.type(wrapper.props), node => node.type === c.native).props
+  render()
+  await new Promise(resolve => setImmediate(resolve))
+  const native = render()
+  assert.equal(native.useStore(state => state.archivedFilter), 'default')
+  assert.equal(native.useWorkspaces(state => state.items.some(workspace => workspace.workspaceId === 'project')), false)
+  native.actions.setArchivedFilter('only')
+  const archives = render()
+  assert.equal(archives.useStore(state => state.archivedFilter), 'only')
+  assert.deepEqual(Array.from(archives.useSessions(state => state.ids)), ['live-closed', 'live-open', 'saved:closed', 'kode-host:ssh/remote-closed'])
+  assert.deepEqual(Array.from(archives.useWorkspaces(state => state.archivedSessionIds)), ['saved:closed', 'live-closed', 'kode-host:ssh/remote-closed'])
+  assert.equal(archives.useWorkspaces(state => state.items.some(workspace => workspace.workspaceId === 'project')), true)
+  const badge = findNode(wrapper.type(wrapper.props), node => node.type?.name === 'SessionStatusAvatars')
+  assert.deepEqual(Array.from(badge.props.archivedSessionIds), ['saved:closed', 'live-closed', 'kode-host:ssh/remote-closed'])
+  await archives.unarchiveSession('kode-host:ssh/remote-closed')
+  assert.deepEqual(c.requests.at(-1), { action: 'host-operation', id: 'ssh', operation: 'unarchive-session', args: { sessionId: 'remote-closed' } })
+})
+
+test('a local native session stays grouped as the saved row is replaced and the live feed catches up', async () => {
+  const saved = { id: 'saved:thread', title: 'Restored conversation', nativeThreadId: 'thread' }
+  const imported = { ...saved, id: 'session-imported' }
+  const workspace = { id: 'palm', title: 'Project', path: '/work/project', sessionIds: [saved.id] }
+  const host = { id: 'local', sessions: [saved], workspaces: [workspace], archivedSessionIds: [] }
+  const c = client({ current: 'local', hosts: [host] })
+  let live = { ids: [], byId: {} }
+  const wrapper = c.workspaceShell.component({
+    useSessions: select => select(live),
+    useWorkspaces: select => select({ items: [], archivedSessionIds: [], pinnedSessionIds: [] }),
+  })
+  const render = () => findNode(wrapper.type(wrapper.props), node => node.type === c.native).props
+  render()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(Array.from(render().useSessions(state => state.ids)), [saved.id])
+
+  host.sessions = [imported, { id: 'unassigned', title: 'Not in this project' }]
+  workspace.sessionIds = [imported.id]
+  const during = render()
+  assert.deepEqual(Array.from(during.useSessions(state => state.ids)), [imported.id])
+  assert.deepEqual(Array.from(during.useWorkspaces(state => state.items[0].sessionIds)), [imported.id])
+  assert.equal(during.useSessions(state => state.byId[imported.id].displayTitle), saved.title)
+
+  live = { ids: [], byId: { [imported.id]: { id: imported.id, blank: true, retainedBy: { mainView: 1 } } } }
+  const retained = render()
+  assert.deepEqual(Array.from(retained.useSessions(state => state.ids)), [imported.id])
+  assert.equal(retained.useSessions(state => state.byId[imported.id].blank), false)
+  assert.equal(retained.useSessions(state => state.byId[imported.id].displayTitle), saved.title)
+
+  live = { ids: [imported.id], byId: { [imported.id]: { id: imported.id, displayTitle: 'Live title', retainedBy: { mainView: 1 } } } }
+  const after = render()
+  assert.deepEqual(Array.from(after.useSessions(state => state.ids)), [imported.id])
+  assert.equal(after.useSessions(state => state.byId[imported.id].displayTitle), 'Live title')
+  assert.equal(after.useSessions(state => state.byId[imported.id].retainedBy.mainView), 1)
 })
 
 test('host-qualified session rename opens the DSH dialog and writes only to the owning host', async () => {
@@ -913,6 +1026,40 @@ test('workspace badges ignore stale native completion when a session restarts or
  assert.equal(states.get('live'),'ongoing','catalog-only and remote running sessions ignore old completion flags')
  const activity=scope.globalSessionActivity({current:'local',hosts:[]},{byId:rows},new Map([['live',{running:true,completionUnread:true}]]))
  assert.equal(activity.state,'ongoing');assert.equal(activity.counts.done,0)
+})
+
+test('workspace badges count open conversations even when their rows are collapsed', () => {
+  const seat = { setAttribute() {}, removeAttribute() {}, querySelector: () => ({ getAttribute: () => 'done' }) }
+  const row = key => ({ getAttribute: () => key, firstElementChild: seat })
+  const root = { current: { querySelectorAll: selector => selector.includes('session:')
+    ? [row('session:orphan')]
+    : [row('workspace:project'), row('workspace:')] } }
+  const scope = { React: { Fragment: 'fragment' }, h: () => ({}), createPortal: element => element,
+    MutationObserver: class { observe() {} disconnect() {} }, useEffect: run => run() }
+  vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'), source.indexOf('  function FederatedWorkspaceBrowser')), scope)
+  const rows = {
+    live: {},
+    archived: {},
+    draft: { blank: true },
+    child: { origin: 'subagent' },
+  }
+  const workspaces = [{ workspaceId: 'project', sessionIds: Object.keys(rows) }]
+  const statuses = new Map([['archived', { completionUnread: true }], ['draft', { completionUnread: true }], ['child', { completionUnread: true }]])
+  const projectBadges = (liveStatus, archivedSessionIds = ['archived']) => {
+    statuses.set('live', liveStatus)
+    const values = [[], []]
+    let cursor = 0
+    scope.useState = () => {
+      const index = cursor++
+      return [[], update => { values[index] = update(values[index]) }]
+    }
+    scope.SessionStatusAvatars({ root, rows, workspaces, statuses, archivedSessionIds })
+    return Array.from(values[1], target => [target.id, target.ongoing, target.done, target.awaiting])
+  }
+  assert.deepEqual(projectBadges({ running: true }), [['project', 1, 0, 0]])
+  assert.deepEqual(projectBadges({ running: false }), [])
+  assert.deepEqual(projectBadges({ completionUnread: true }), [['project', 0, 1, 0]])
+  assert.deepEqual(projectBadges({ running: false }, []), [['project', 0, 1, 0]])
 })
 
 test('global activity uses project priority across Hosts and updates without mounting the workspace browser', () => {

@@ -17,6 +17,19 @@ test('directory hides dsh history and blanks, preserves archive metadata, withou
   assert.deepEqual((await hostDirectory(context(true))).sessions.map(s=>s.id),['native','codex','archived'])
 })
 
+test('recorded Agent identity and pending model selection keep a native session visible', async () => {
+  const ctx = context(false)
+  const original = await ctx.sessionController.list({})
+  const nativeProfile = row('recorded', 'deepseek')
+  nativeProfile.projections.values.kodeAgent = { profileId: 'tclaude', name: 'TClaude', type: 'claude' }
+  const pending = row('pending', 'deepseek')
+  pending.projections.values.modelSelection = { pending: { provider: 'kode-agent-builtin-codex' } }
+  ctx.sessionController.list = async () => ({ items: [...original.items, nativeProfile, pending] })
+  const result = await hostDirectory(ctx)
+  assert.deepEqual(result.sessions.map(session => session.id), ['codex', 'archived', 'recorded', 'pending'])
+  assert.equal(result.sessions.find(session => session.id === 'recorded').agent.id, 'tclaude')
+})
+
 test('blank ungrouped runtime placeholders cannot return as saved native conversations',async()=>{
   const ctx=context(),index={native_sessions:[{backend_key:'dsh',session_id:'blank',cwd:'/work/project',transport_kind:'runtime',title:'Old empty placeholder'}]}
   const backendClient={call:async path=>path.endsWith('/node')?{node_id:'fixture-node'}:{revision:1,value:path.endsWith('/session-index')?index:{global:{archivedSessionIds:[],pinnedSessionIds:[]}}}}

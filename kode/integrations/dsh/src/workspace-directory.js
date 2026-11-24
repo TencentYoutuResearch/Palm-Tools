@@ -33,12 +33,13 @@ export async function hostDirectory(ctx, config = {}) {
     const binding = profiles?.binding(item.sessionId)
     const recorded = values.kodeAgent
     const profile = binding?.profile ?? (recorded ? { id: recorded.profileId, name: recorded.name, type: recorded.type } : undefined)
-    const provider = model?.next?.provider ?? model?.lastUsed?.provider
-    const dsh = binding ? binding.profile.type === 'dsh' : !provider?.startsWith('kode-agent-')
-    const type = binding?.profile.type ?? (dsh ? 'dsh' : undefined)
+    const provider = model?.next?.provider ?? model?.lastUsed?.provider ?? model?.pending?.provider
+    const type = profile?.type ?? (provider?.startsWith('kode-agent-') ? undefined : 'dsh')
     if (type && runtime?.hasRuntime && !runtime.hasRuntime(type) && !item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
     if (item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
-    return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running, ...(profile ? { agent: presentation(profile) } : {}), ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
+    return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running,
+      ...(item.origin ? { origin: item.origin, parentSessionId: item.parentSessionId } : {}),
+      ...(profile ? { agent: presentation(profile) } : {}), ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
   })
   const result = { archivedSessionIds: [...registry.archivedSessionIds], pinnedSessionIds: [...(registry.pinnedSessionIds ?? [])], hiddenSessionIds, sessions,
     workspaces: registry.list().map(w => ({ id: w.id, title: w.title, path: w.path, sessionIds: [...w.sessionIds], createdAt: w.createdAt, updatedAt: w.updatedAt })) }

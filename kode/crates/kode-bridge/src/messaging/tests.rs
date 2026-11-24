@@ -1059,7 +1059,8 @@ async fn agent_hub_is_backend_owned_owner_only_and_shared_by_independent_clients
     let source=s._root.path().join("fixtures");std::fs::create_dir_all(source.join("skills/example/references")).unwrap();
     std::fs::write(source.join("skills/example/SKILL.md"),"---\nname: example\ndescription: Fixture\n---\nTest").unwrap();
     std::fs::write(source.join("skills/example/references/guide.md"),"original").unwrap();
-    let saved=first.post(&url).bearer_auth("admin-test").json(&json!({"action":"save-source","source":{"id":"team","kind":"local","location":source,"targets":["dsh","codex","claude","codebuddy","cursor"]}})).send().await.unwrap();assert!(saved.status().is_success(),"{}",saved.text().await.unwrap());
+    let targets = super::extension_files::TARGETS.iter().map(|(id, _)| id).collect::<Vec<_>>();
+    let saved=first.post(&url).bearer_auth("admin-test").json(&json!({"action":"save-source","source":{"id":"team","kind":"local","location":source,"targets":targets}})).send().await.unwrap();assert!(saved.status().is_success(),"{}",saved.text().await.unwrap());
     let synced=second.post(&url).bearer_auth("admin-test").json(&json!({"action":"sync-source","id":"team"})).send().await.unwrap();assert!(synced.status().is_success(),"{}",synced.text().await.unwrap());
     let state:Value=first.get(&url).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();
     assert_eq!(state["sources"][0]["skills"],json!(["skills--example"]));
@@ -1176,11 +1177,66 @@ async fn backend_extension_launch_args_are_available_to_gui_and_match_native_tar
     let ext=&s.hub.extensions;ext.change(&s.hub,json!({"action":"save-source","source":{"id":"native","kind":"local","location":source,"targets":["claude","codebuddy","cursor"]}})).unwrap();
     ext.change(&s.hub,json!({"action":"sync-source","id":"native"})).unwrap();
     let state=ext.view(&s.hub).unwrap();assert_eq!(state["sources"][0]["nativeStatus"]["claude"],"ready");
-    for target in ["claude","codebuddy","cursor"]{let args=super::extensions::launch_args(&s.hub,target).unwrap();assert_eq!(args[0],"--plugin-dir");assert!(std::path::Path::new(&args[1]).join(format!(".{target}-plugin/plugin.json")).is_file());}
+    for target in ["claude","codebuddy","cursor"]{let args=super::extensions::launch_args(&s.hub,&json!({"type":target})).unwrap();assert_eq!(args[0],"--plugin-dir");assert!(std::path::Path::new(&args[1]).join(format!(".{target}-plugin/plugin.json")).is_file());}
     let catalog=super::agents::catalog(&s.hub).unwrap();
     assert!(catalog.extension_args.values().any(|args|args.iter().any(|arg|arg=="--plugin-dir")),"GUI catalog must receive backend-owned native launch arguments");
     for(key,args)in &catalog.extension_args{if !args.is_empty(){assert!(super::agents::resolve(&catalog,key,None).unwrap().args.contains(&"--plugin-dir".into()));assert!(!catalog.backends[key].args.contains(&"--plugin-dir".into()),"managed arguments must not pollute editable launch configuration");}}
 }
+#[cfg(unix)]
+#[tokio::test]
+async fn extension_sources_sync_multiple_configured_cli_directories_and_apply_target_edits() {
+    let mut config = fixture_agent_config(&["claude", "tclaude", "tcodex"]);
+    for (kind, backend) in &mut config.backends {
+        backend.command = format!("/example/bin/{kind}");
+    }
+    let s = server_with_config("extension-targets", vec![], config).await;
+    let ext = &s.hub.extensions;
+    let agents = s.hub.store.document("agents").unwrap();
+    let custom_skills = ext.home.join("custom-config/skills");
+    let mut registry = agents["value"].clone();
+    registry["profiles"].as_array_mut().unwrap().push(json!({
+        "id":"fixture-custom", "name":"Custom ACP", "type":"custom", "origin":"custom",
+        "executable":"fixture-acp", "args":[], "env":{"KODE_SKILLS_DIR":custom_skills}
+    }));
+    super::agents::save(&s.hub, agents["revision"].as_u64().unwrap(), registry).unwrap();
+    let catalog = ext.view(&s.hub).unwrap();
+    let targets = &catalog["profileTargets"];
+    assert_eq!(targets["kode-tclaude"], "tclaude");
+    assert_eq!(targets["kode-tcodex"], "tcodex");
+    let custom = &targets["fixture-custom"];
+    assert_eq!(catalog["targets"][custom.as_str().unwrap()], json!(custom_skills));
+    let origin = s._root.path().join("source");
+    std::fs::create_dir_all(origin.join("fixture")).unwrap();
+    std::fs::write(origin.join("fixture/SKILL.md"), "fixture").unwrap();
+    std::fs::create_dir_all(origin.join(".claude-plugin")).unwrap();
+    std::fs::write(origin.join(".claude-plugin/plugin.json"), r#"{"name":"fixture","version":"0.0.1"}"#).unwrap();
+    let request = |targets: Value| json!({"id":"multi","kind":"local","location":origin,"targets":targets});
+    let initial = json!(["tclaude", "tcodex", custom]);
+    ext.change(&s.hub, json!({"action":"save-source","intent":"create","source":request(initial.clone())})).unwrap();
+    let synced = ext.change(&s.hub, json!({"action":"sync-source","id":"multi"})).unwrap();
+    let installed = &synced["sources"][0];
+    assert_eq!(installed["nativeStatus"]["tclaude"], "ready");
+    assert_eq!(installed["nativeStatus"][custom.as_str().unwrap()], "skills-only");
+    assert!(custom_skills.join("multi--fixture").is_symlink());
+    assert!(ext.home.join(".tcodex/skills/multi--fixture").is_symlink());
+    assert!(ext.home.join(".tclaude/skills/multi--fixture").is_symlink());
+    assert!(!ext.home.join(".claude/skills/multi--fixture").exists());
+    let profile = json!({"type":"claude","executable":"tclaude"});
+    assert_eq!(super::extensions::launch_args(&s.hub, &profile).unwrap()[0], "--plugin-dir");
+    assert!(super::extensions::launch_args(&s.hub, &json!({"type":"claude","executable":"claude"})).unwrap().is_empty());
+    let edit = |previous: Value| json!({"action":"save-source","intent":"edit","expectedTargets":previous,"source":request(json!(["claude", custom]))});
+    assert!(ext.change(&s.hub, edit(json!(["tcodex"]))).is_err());
+    let edited = ext.change(&s.hub, edit(initial.clone())).unwrap();
+    assert_eq!(edited["sources"][0]["syncedTargets"], initial);
+    assert!(!super::extensions::launch_args(&s.hub, &profile).unwrap().is_empty());
+    ext.change(&s.hub, json!({"action":"sync-source","id":"multi"})).unwrap();
+    assert!(ext.home.join(".claude/skills/multi--fixture").is_symlink());
+    assert!(!ext.home.join(".tclaude/skills/multi--fixture").exists());
+    assert!(!ext.home.join(".tcodex/skills/multi--fixture").exists());
+    assert!(custom_skills.join("multi--fixture").is_symlink());
+    assert!(super::extensions::launch_args(&s.hub, &profile).unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn backend_extension_validation_rejects_escaping_paths_and_links(){
     let s=server("extension-paths",vec![]).await;let ext=&s.hub.extensions;

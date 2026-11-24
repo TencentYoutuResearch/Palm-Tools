@@ -14,13 +14,9 @@ pub const TARGETS: &[(&str, &str)] = &[
     ("claude", ".claude/skills"),
     ("codebuddy", ".codebuddy/skills"),
     ("cursor", ".cursor/skills"),
+    ("tcodex", ".tcodex/skills"),
+    ("tclaude", ".tclaude/skills"),
 ];
-pub fn targets() -> Value {
-    TARGETS
-        .iter()
-        .map(|(key, path)| (key.to_string(), json!(path)))
-        .collect()
-}
 pub fn id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -28,7 +24,11 @@ pub fn id(value: &str) -> bool {
             c.is_ascii_lowercase() || c.is_ascii_digit() || i > 0 && matches!(c, b'-' | b'_')
         })
 }
-pub fn validate(source: &Value) -> Result<Value> {
+pub fn validate(
+    source: &Value,
+    targets: &BTreeMap<String, String>,
+    prior_targets: &Value,
+) -> Result<Value> {
     let name = source["id"].as_str().context("source id required")?;
     if !id(name) {
         bail!("来源标识需要 1–64 个小写字母、数字、短横线或下划线")
@@ -66,12 +66,15 @@ pub fn validate(source: &Value) -> Result<Value> {
     let wanted = source
         .get("targets")
         .cloned()
-        .unwrap_or_else(|| json!(TARGETS.iter().map(|(key, _)| key).collect::<Vec<_>>()));
+        .unwrap_or_else(|| json!(["dsh", "codex", "claude", "codebuddy", "cursor"]));
     let rows = wanted.as_array().context("targets must be an array")?;
     if rows.is_empty()
-        || rows
-            .iter()
-            .any(|row| !TARGETS.iter().any(|(key, _)| row.as_str() == Some(key)))
+        || rows.iter().any(|row| {
+            !row.as_str().is_some_and(|key| targets.contains_key(key))
+                && !prior_targets
+                    .as_array()
+                    .is_some_and(|rows| rows.contains(row))
+        })
     {
         bail!("请选择有效的同步目标")
     }
@@ -84,6 +87,15 @@ pub fn validate(source: &Value) -> Result<Value> {
     Ok(json!({"id":name,"kind":kind,"location":location,"subdir":subdir,"targets":rows}))
 }
 pub fn run(root: &Path, executable: &str, args: &[String], seconds: u64) -> Result<String> {
+    run_with_path(root, executable, args, seconds, None)
+}
+pub(super) fn run_with_path(
+    root: &Path,
+    executable: &str,
+    args: &[String],
+    seconds: u64,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<String> {
     fs::create_dir_all(root)?;
     let log = root.join(format!("command-{}.log", uuid::Uuid::new_v4()));
     let mut options = fs::OpenOptions::new();
@@ -101,6 +113,9 @@ pub fn run(root: &Path, executable: &str, args: &[String], seconds: u64) -> Resu
         .stdout(output.try_clone()?)
         .stderr(output)
         .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(path) = path {
+        command.env("PATH", path).current_dir(root);
+    }
     for key in [
         "KODE_BRIDGE_TOKEN",
         "KODE_MESSAGING_ADMIN_TOKEN_FILE",
@@ -745,6 +760,7 @@ pub fn plan_links(
     home: &Path,
     source: &Value,
     skills: &[Value],
+    targets: &BTreeMap<String, String>,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
     let source_id = source["id"].as_str().context("source id missing")?;
     let releases = fs::canonicalize(root.join("sources").join(source_id).join("releases"))?;
@@ -752,11 +768,9 @@ pub fn plan_links(
     let mut links = vec![];
     let mut seen = HashSet::new();
     for target in source["targets"].as_array().context("targets missing")? {
-        let directory = TARGETS
-            .iter()
-            .find(|(key, _)| target.as_str() == Some(key))
-            .context("invalid target")?
-            .1;
+        let directory = targets
+            .get(target.as_str().context("invalid target")?)
+            .context("Agent 的技能目录已变更，请编辑此来源的同步目标。")?;
         let directory = home.join(directory);
         fs::create_dir_all(&directory)?;
         let directory = fs::canonicalize(directory)?;
@@ -848,7 +862,11 @@ pub fn replace(
     }
     operation
 }
-pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
+pub fn native_sync(
+    root: &Path,
+    source: &mut Value,
+    native_launch: &BTreeMap<String, &str>,
+) -> Result<()> {
     let name = source["id"]
         .as_str()
         .context("source id missing")?
@@ -860,23 +878,50 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
     source["nativeStatus"] = json!({});
     for target in &targets {
         let target = target.as_str().unwrap();
-        let native = source["plugins"][target]
-            .as_array()
-            .is_some_and(|rows| !rows.is_empty());
+        let native_kind =
+            native_launch
+                .get(target)
+                .copied()
+                .or(matches!(target, "codex" | "tcodex").then_some("codex"));
+        let native = native_kind.is_some_and(|kind| {
+            source["plugins"][kind]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+        });
         source["nativeStatus"][target] = json!(if native { "ready" } else { "skills-only" });
     }
-    let plugins = if targets.contains(&json!("codex")) {
-        source["plugins"]["codex"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
-    if plugins.is_empty() {
-        native_remove(root, source)?;
-        return Ok(());
+    let plugins = source["plugins"]["codex"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for cli in ["codex", "tcodex"] {
+        let selected = targets.iter().any(|target| target.as_str() == Some(cli));
+        let installer = if cli == "codex" {
+            &mut *source
+        } else {
+            &mut source["tcodexNative"]
+        };
+        let result = if selected && !plugins.is_empty() {
+            install_codex_plugins(root, cli, &name, &plugins, installer)
+        } else {
+            remove_codex_plugins(root, cli, installer)
+        };
+        if let Err(error) = result {
+            source["nativeStatus"][cli] = json!(format!("failed: {error}"));
+        } else if selected && !plugins.is_empty() {
+            source["nativeStatus"][cli] = json!("installed");
+        }
     }
+    Ok(())
+}
+
+fn install_codex_plugins(
+    root: &Path,
+    cli: &str,
+    name: &str,
+    plugins: &[Value],
+    source: &mut Value,
+) -> Result<()> {
     let selectors = plugins
         .iter()
         .map(|plugin| json!(format!("{}@kode-{name}", plugin["name"].as_str().unwrap())))
@@ -889,7 +934,7 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
         if !selectors.contains(&selector) {
             run(
                 root,
-                "codex",
+                cli,
                 &[
                     "plugin".into(),
                     "remove".into(),
@@ -903,11 +948,11 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
                 .retain(|v| v != &selector);
         }
     }
-    let marketplace_root = root.join("sources").join(&name);
+    let marketplace_root = root.join("sources").join(name);
     let canonical = fs::canonicalize(&marketplace_root)?;
     let mut entries = vec![];
     let mut names = HashSet::new();
-    for plugin in &plugins {
+    for plugin in plugins {
         let plugin_name = plugin["name"].as_str().unwrap();
         if !names.insert(plugin_name) {
             bail!("duplicate native plugin name")
@@ -922,7 +967,7 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
     )?;
     run(
         root,
-        "codex",
+        cli,
         &[
             "plugin".into(),
             "marketplace".into(),
@@ -936,7 +981,7 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
     for selector in &selectors {
         run(
             root,
-            "codex",
+            cli,
             &[
                 "plugin".into(),
                 "add".into(),
@@ -953,10 +998,17 @@ pub fn native_sync(root: &Path, source: &mut Value) -> Result<()> {
             installed.push(selector.clone());
         }
     }
-    source["nativeStatus"]["codex"] = json!("installed");
     Ok(())
 }
 pub fn native_remove(root: &Path, source: &mut Value) -> Result<()> {
+    remove_codex_plugins(root, "codex", source)?;
+    if let Some(installer) = source.get_mut("tcodexNative") {
+        remove_codex_plugins(root, "tcodex", installer)?;
+    }
+    Ok(())
+}
+
+fn remove_codex_plugins(root: &Path, cli: &str, source: &mut Value) -> Result<()> {
     let installed = source["codexInstalled"]
         .as_array()
         .cloned()
@@ -964,7 +1016,7 @@ pub fn native_remove(root: &Path, source: &mut Value) -> Result<()> {
     for selector in installed {
         run(
             root,
-            "codex",
+            cli,
             &[
                 "plugin".into(),
                 "remove".into(),
@@ -980,7 +1032,7 @@ pub fn native_remove(root: &Path, source: &mut Value) -> Result<()> {
     if let Some(name) = source["codexMarketplace"].as_str() {
         run(
             root,
-            "codex",
+            cli,
             &[
                 "plugin".into(),
                 "marketplace".into(),
