@@ -713,15 +713,41 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots })),
       h(HubSettings, { key: hubHost, host: hubHost, hosts, sessions }))
   }
+  function SessionNamingSettings({ prompt, busy, update }) {
+    const [draft, setDraft] = useState(null), [saved, setSaved] = useState(false)
+    const value = draft ?? prompt, dirty = value.trim() !== prompt
+    const save = async next => {
+      setSaved(false)
+      if (await update({ action: 'configure', settings: { session_naming_prompt: next } })) {
+        setDraft(null)
+        setSaved(true)
+      }
+    }
+    const reset = () => { if (prompt) void save(''); else setDraft(null) }
+    return h('form', { className: 'kode-session-naming', onSubmit: event => { event.preventDefault(); if (dirty && !busy) void save(value.trim()) } },
+      h('label', { className: 'kode-field' },
+        h('strong', null, 'Agent 会话命名'),
+        h('span', { className: 'kode-config-note' }, '用自然语言描述命名偏好。标题最多 4 个词，意图前缀也计入。'),
+        h('textarea', { rows: 3, value, maxLength: 2000, disabled: busy,
+          placeholder: '留空使用默认规则，例如 Feat-Session Panel、Bug-SSH Workspace、MR-Review Sync',
+          onChange: event => { setDraft(event.target.value); setSaved(false) } })),
+      h('div', { className: 'kode-session-naming-actions' },
+        saved && h('span', { className: 'kode-saved', role: 'status' }, '已保存'),
+        (prompt || draft) && h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: reset }, '恢复默认'),
+        h(Button, { type: 'submit', variant: 'primary', disabled: busy || !dirty }, '保存提示词')))
+  }
   function SessionBehaviorSettings({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
+    const namingPrompt = data?.settings.session_naming_prompt
     return h(React.Fragment, null,
-      h('h3', { className: 'kode-settings-group-title' }, '会话恢复'),
+      h('h3', { className: 'kode-settings-group-title' }, '会话行为'),
       h('p', { className: 'kode-config-note' }, '此计算机的会话行为；远端主机保留各自的配置。'),
       !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取会话配置…'),
-      data && h('div', { className: 'kode-settings-card' }, h('label', { className: 'kode-integration-row' },
-        h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
-        h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) }))),
+      data && h('div', { className: 'kode-settings-card' },
+        h('label', { className: 'kode-integration-row' },
+          h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
+          h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) })),
+        typeof namingPrompt === 'string' && h(SessionNamingSettings, { prompt: namingPrompt, busy, update })),
       h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
   }
   function MobileSettingsBody({ host, slots }) {
@@ -2993,6 +3019,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-settings-card>.kode-integration-row+.kode-integration-row{border-top:.5px solid var(--dsw-alias-border-l2)}
 .kode-settings-card>.kode-config-note{margin:0 0 14px}
 .kode-settings-card>.kode-config-note:only-child{margin:14px 0}
+.kode-session-naming{display:grid;gap:12px;padding:14px 0;border-top:.5px solid var(--dsw-alias-border-l2)}
+.kode-session-naming>.kode-field,.kode-session-naming .kode-config-note{margin:0}
+.kode-session-naming>.kode-field strong{font-size:14px;font-weight:500}
+.kode-session-naming textarea{resize:vertical}
+.kode-session-naming-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}
 .kode-settings-page .kode-notification-permission{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}
 .kode-settings-page .kode-notification-permission>button{flex:none;margin-left:auto}
 .kode-settings-page .kode-settings-select-row{flex-wrap:wrap;gap:10px 20px}

@@ -1186,6 +1186,41 @@ test('settings group small preferences by task, preserve deep links, and keep de
  assert.match(integrations, /messaging_enabled/); assert.match(integrations, /memory_enabled/)
 })
 
+test('session naming settings save a semantic prompt and restore the default', async () => {
+  const state = [], writes = []
+  let cursor = 0, prompt = ''
+  const scope = {
+    h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: initial => {
+      const index = cursor++
+      if (!(index in state)) state[index] = initial
+      return [state[index], next => { state[index] = next }]
+    },
+    Button: 'button',
+  }
+  vm.runInNewContext(source.slice(source.indexOf('  function SessionNamingSettings('), source.indexOf('  function SessionBehaviorSettings(')), scope)
+  const update = async input => {
+    writes.push(JSON.parse(JSON.stringify(input)))
+    prompt = input.settings.session_naming_prompt
+    return { settings: input.settings }
+  }
+  const render = () => { cursor = 0; return scope.SessionNamingSettings({ prompt, busy: false, update }) }
+  const saveButton = tree => findNode(tree, node => node.type === 'button' && node.props.type === 'submit')
+  assert.equal(saveButton(render()).props.disabled, true)
+  const custom = '评审时以 Review- 开头，使用中文细节'
+  findNode(render(), node => node.type === 'textarea').props.onChange({ target: { value: custom } })
+  const form = render()
+  assert.equal(saveButton(form).props.disabled, false)
+  form.props.onSubmit({ preventDefault() {} })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(writes, [{ action: 'configure', settings: { session_naming_prompt: custom } }])
+  assert.match(visibleText(render()), /已保存/)
+  findNode(render(), node => node.type === 'button' && node.children.includes('恢复默认')).props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(writes.at(-1).settings.session_naming_prompt, '')
+  assert.equal(findNode(render(), node => node.type === 'textarea').props.value, '')
+})
+
 test('global activity follows native subscriptions without any mounted shell or React component', () => {
  const deferred = [], nativeListeners = new Set()
  const workspaceListeners = new Set()

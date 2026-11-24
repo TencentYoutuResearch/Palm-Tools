@@ -13,6 +13,8 @@ pub struct Settings {
     pub memory_enabled: bool,
     #[serde(default = "enabled_by_default")]
     pub auto_resume_interrupted: bool,
+    #[serde(default)]
+    pub session_naming_prompt: String,
 }
 fn enabled_by_default() -> bool {
     true
@@ -23,6 +25,7 @@ impl Default for Settings {
             messaging_enabled: true,
             memory_enabled: true,
             auto_resume_interrupted: true,
+            session_naming_prompt: String::new(),
         }
     }
 }
@@ -33,6 +36,7 @@ pub struct Change {
     pub messaging_enabled: Option<bool>,
     pub memory_enabled: Option<bool>,
     pub auto_resume_interrupted: Option<bool>,
+    pub session_naming_prompt: Option<String>,
 }
 pub fn change(hub: &Hub, patch: Change) -> Result<Settings> {
     let _gate = hub.gate.lock();
@@ -45,6 +49,13 @@ pub fn change(hub: &Hub, patch: Change) -> Result<Settings> {
     }
     if let Some(enabled) = patch.auto_resume_interrupted {
         value.auto_resume_interrupted = enabled;
+    }
+    if let Some(prompt) = patch.session_naming_prompt {
+        let prompt = prompt.trim();
+        if prompt.contains('\0') || prompt.chars().count() > 2000 {
+            bail!("会话命名提示词须在 2000 字以内");
+        }
+        value.session_naming_prompt = prompt.to_owned();
     }
     let row = hub.store.document("integrations")?;
     hub.store.save_document(
@@ -220,9 +231,8 @@ mod tests {
         configure(
             &hub,
             Settings {
-                messaging_enabled: true,
                 memory_enabled: false,
-                auto_resume_interrupted: true,
+                ..Settings::default()
             },
         )
         .unwrap();
@@ -248,8 +258,8 @@ mod tests {
             &reopened,
             Change {
                 messaging_enabled: Some(false),
-                memory_enabled: None,
                 auto_resume_interrupted: Some(false),
+                ..Change::default()
             },
         )
         .unwrap();
@@ -259,9 +269,8 @@ mod tests {
         let patched = change(
             &reopened,
             Change {
-                messaging_enabled: None,
                 memory_enabled: Some(true),
-                auto_resume_interrupted: None,
+                ..Change::default()
             },
         )
         .unwrap();
