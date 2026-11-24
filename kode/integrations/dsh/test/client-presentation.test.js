@@ -453,6 +453,34 @@ test('Kode settings keep the native settings section and an entry in the sidebar
   assert.equal(c.shell.component, c.native)
 })
 
+test('Kode sidebar brand registers celestial orbit mark and styled name inside desktop embed', () => {
+  const c = client(undefined, { kodeHost: { request() {} } }, {}, {
+    document: {
+      createElement: () => ({ remove() {} }),
+      head: { append() {} },
+      documentElement: { hasAttribute: name => name === 'data-kode-embed' },
+    },
+  })
+  const markEntry = c.ctx.slots.entries('sidebar.brand.mark').find(row => row.options.name === 'sidebar.brand.mark')
+  assert.ok(markEntry, 'sidebar.brand.mark must be registered when embedded in Kode')
+  const markEl = markEntry.component({ size: 24 })
+  assert.equal(markEl.type, 'svg')
+  assert.equal(markEl.props.width, 24)
+  assert.equal(markEl.props.viewBox, '0 0 24 24')
+  assert.ok(markEl.props.className.includes('kode-brand-mark-svg'))
+  assert.match(JSON.stringify(markEl), /kode-brand-core-grad/)
+  assert.match(JSON.stringify(markEl), /kode-brand-ring-grad/)
+
+  const nameEntry = c.ctx.slots.entries('sidebar.brand.name').find(row => row.options.name === 'sidebar.brand.name')
+  assert.ok(nameEntry, 'sidebar.brand.name must be registered when embedded in Kode')
+  const nameEl = nameEntry.component()
+  assert.equal(nameEl.type, 'span')
+  assert.ok(nameEl.props.className.includes('kode-brand-name'))
+  assert.match(JSON.stringify(nameEl), /Kode/)
+  assert.match(JSON.stringify(nameEl), /Harness/)
+  assert.match(JSON.stringify(nameEl), /Powered by dsh/)
+})
+
 test('cross-host arrival waits for both catalogs and binds subscriptions before cancelling draft restoration', () => {
   const events = [], location = { hash: '#kode-open-session=remote-target', pathname: '/', search: '' }
   const c = client(undefined, { location, history: { replaceState: () => { events.push('clear-link'); location.hash = '' } } })

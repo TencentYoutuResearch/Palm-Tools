@@ -2,8 +2,7 @@
 import { writeFile, mkdtemp, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { dump } from 'js-yaml'
-import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
+import { stringifyEntryYaml } from '@deepseek-ai/cordis-plugin-include'
 
 export const name = 'kode-dsh-conversation'
 export const inject = ['kodeAgents', 'agentPresets', 'loader', 'llm', 'sessionProjections', 'agentDefaultModel']
@@ -32,7 +31,7 @@ export async function apply(ctx, config = {}) {
         { id: 'sandbox-policy', config: { mode: policy?.mode ?? 'read-only', workspaceRoot: agent?.session.header.cwd ?? process.cwd() } },
         { id: 'approval', config: { policy: approval ?? 'ask' } })
       const path = join(root, `${++counter}.yml`)
-      await writeFile(path, dump(patch, { schema: entryListSchema }), { mode: 0o600 })
+      await writeFile(path, stringifyEntryYaml(patch), { mode: 0o600 })
       return { ...profile, type: 'custom', protocol: 'acp', executable: config.executable ?? process.execPath,
         args: [...(config.args ?? [process.argv[1]]), '--profile', config.profile ?? 'acp', '--patch', path],
         env: { ...profile.env }, startupTimeoutMs: 60000, policyManagedByHost: true, fixedPolicy: { mode: policy?.mode ?? 'read-only', approval: approval ?? 'ask' } }

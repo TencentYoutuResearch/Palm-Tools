@@ -124,7 +124,7 @@ function changedFileSummary({ path, paths, changes, patch }) {
   return files.length > 1 ? `${files[0]} 等 ${files.length} 个文件` : files[0] ?? '文件'
 }
 /** Native dsh menus and modal; Agent occupies the preset seat, model stays in the composer. */
-window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
+window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const React = require('react'), h = React.createElement
   const { createPortal } = require('react-dom')
   const { useState, useEffect, useMemo, useRef, useSyncExternalStore } = React
@@ -311,7 +311,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         await store.load()
         let value = store.getSnapshot().data
         if (alive && id && catalogBlank(sessions, id) && value?.defaultProfileId && !value.binding && value.canChangeAgent) {
-          const fallback = value.profiles.find(p => p.id === value.configuredDefaultProfileId) ?? value.currentProfile ?? value.profiles.find(p => p.id === value.defaultProfileId)
+          const fallback = value.profiles.find(p => p.id === value.configuredDefaultProfileId) ?? value.profiles.find(p => selected?.provider === 'kode-agent-' + p.id) ?? value.profiles.find(p => p.id === value.defaultProfileId)
           if (fallback) { await store.operate({ action: 'select', sessionId: id, profileId: fallback.id }); value = store.getSnapshot().data }
         }
         const staged = stagedAgent
@@ -497,7 +497,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const label = p => p?.name ?? names[p?.id] ?? p?.id ?? '选择模式'
     return h('span', { className: 'kode-mode-control' }, h(Menu, { open, onClose: () => setOpen(false), portal: true, selectedId: current,
       items: roster.filter(p => p.id !== 'kode-native').map(p => ({ id: p.id, label: label(p), disabled: Boolean(p.broken) || !canChange || busy })),
-      footer: !canChange ? h('div', { className: 'kode-menu-note' }, '当前会话已开始，新建会话后可切换模式') : undefined,
+      footer: !canChange ? [{ id: 'session-started', disabled: true, label: '当前会话已开始，新建会话后可切换模式' }] : undefined,
       onSelect: preset => { setOpen(false); setBusy(true); setError(''); remote.agentPresets.select(id, preset).then(result => { if (!result.ok) setError(result.error.message) }, error => setError(error.message)).finally(() => setBusy(false)) },
       anchor: h('button', { type: 'button', className: 'kode-trigger', disabled: !id || !roster.length || busy, 'aria-label': `dsh 模式：${label(roster.find(p => p.id === current))}`, 'aria-haspopup': 'menu', 'aria-expanded': open, onClick: () => setOpen(!open) }, h('span', { className: 'kode-control-label' }, label(roster.find(p => p.id === current))), h(IconChevronDownOutlineRegular, { size: 12 })),
     }), h(Failure, { text: error }))
@@ -526,7 +526,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     items.push({ type: 'separator' }, { id: 'configure', label: '自定义 Agent…' })
     return h(React.Fragment, null,
       h(Menu, { open, onClose: () => setOpen(false), selectedId: current?.id, items, side: 'bottom', portal: true,
-        footer: !data?.canChangeAgent && current ? h('div', { className: 'kode-menu-note' }, '新建会话后可切换 Agent') : undefined,
+        footer: !data?.canChangeAgent && current ? [{ id: 'session-started', disabled: true, label: '新建会话后可切换 Agent' }] : undefined,
         onSelect: profileId => { setOpen(false); if (profileId === 'configure') { requestedProfile = current?.origin !== 'builtin' ? current?.id : undefined; try { openSettings(slots) } catch (e) { setNavigationError(e.message) } } else void store.operate({ action: 'select', profileId, sessionId: id }).catch(() => {}) },
         anchor: h(Trigger, { agent: true, profile: current, label: current?.name ?? (error ? '重试加载 Agent' : '正在加载 Agent…'), open: data ? open : undefined, disabled: busy || (!data && !error), onClick: () => data ? setOpen(!open) : void store.load() }),
       }),
@@ -891,11 +891,84 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   // Embedded in Kode desktop (kode.extension/v1 view): Kode hides its own
   // chrome, so the way back to its terminals ("Kode 终端") lives in dsh's UI.
   const kodeEmbedded = () => !!globalThis.document?.documentElement?.hasAttribute?.('data-kode-embed') && typeof globalThis.window?.kodeHost?.request === 'function'
-  const glyph = d => h('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
+  const glyph = (d, size = 15) => h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
   const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
-  // Inside Kode the sidebar wordmark names Kode; dsh stays credited below it.
+  // Celestial Orbit brand mark for Kode in dsh sidebar.
+  // Combines the orbital planetary trajectory design (orbit ring + satellite node)
+  // with Kode's signature electric green (#9FE870).
+  function KodeBrandMark({ size = 24 }) {
+    return h('svg', {
+      width: size,
+      height: size,
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      xmlns: 'http://www.w3.org/2000/svg',
+      className: 'kode-brand-mark-svg',
+      'aria-hidden': true,
+    },
+      h('defs', null,
+        h('linearGradient', { id: 'kode-brand-core-grad', x1: '6', y1: '6', x2: '18', y2: '18', gradientUnits: 'userSpaceOnUse' },
+          h('stop', { offset: '0%', stopColor: '#C2F992' }),
+          h('stop', { offset: '100%', stopColor: '#38D668' })
+        ),
+        h('linearGradient', { id: 'kode-brand-ring-grad', x1: '4', y1: '7', x2: '21', y2: '17', gradientUnits: 'userSpaceOnUse' },
+          h('stop', { offset: '0%', stopColor: '#9FE870', stopOpacity: '0.35' }),
+          h('stop', { offset: '60%', stopColor: '#9FE870' }),
+          h('stop', { offset: '100%', stopColor: '#FFFFFF' })
+        )
+      ),
+      h('path', {
+        d: 'M4.8 10.4C4.1 12.1 4.9 13.8 7.2 15.2',
+        stroke: '#9FE870',
+        strokeWidth: 1.8,
+        strokeLinecap: 'round',
+        strokeOpacity: 0.45,
+      }),
+      h('circle', {
+        cx: 12,
+        cy: 12,
+        r: 4.2,
+        fill: 'url(#kode-brand-core-grad)',
+      }),
+      h('circle', {
+        cx: 10.6,
+        cy: 10.6,
+        r: 1.2,
+        fill: '#FFFFFF',
+        fillOpacity: 0.85,
+      }),
+      h('path', {
+        d: 'M7.2 15.2C10.2 17.5 15.2 17.8 18.2 15.8C20.8 14.1 21.2 11.8 19.5 9.8C18.2 8.3 15.5 7.4 12.2 7.4C10.2 7.4 8.2 8 6.8 9',
+        stroke: 'url(#kode-brand-ring-grad)',
+        strokeWidth: 2.2,
+        strokeLinecap: 'round',
+      }),
+      h('circle', {
+        cx: 19.2,
+        cy: 10.2,
+        r: 2.2,
+        fill: '#FFFFFF',
+      }),
+      h('circle', {
+        cx: 19.2,
+        cy: 10.2,
+        r: 3.2,
+        stroke: '#9FE870',
+        strokeWidth: 0.8,
+        strokeOpacity: 0.6,
+      })
+    )
+  }
+  // Inside Kode the sidebar wordmark names Kode with modern, balanced typography;
+  // dsh stays credited below it.
   function KodeBrandName() {
-    return h('span', { className: 'kode-brand-name' }, h('span', { className: 'kode-brand-title' }, 'Kode Harness'), h('span', { className: 'kode-brand-subtitle' }, 'Powered by dsh'))
+    return h('span', { className: 'kode-brand-name' },
+      h('span', { className: 'kode-brand-title' },
+        'Kode ',
+        h('span', { className: 'kode-brand-title-dim' }, 'Harness')
+      ),
+      h('span', { className: 'kode-brand-subtitle' }, 'Powered by dsh')
+    )
   }
   // The view is only hidden after leaving, so the panel would still be open on
   // the next entry and send Kode straight back; return to the conversation once
@@ -957,25 +1030,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     useEffect(() => { followBotsFreshness(); void refreshBots() }, [])
     return snapshot
   }
-  // lucide "bot": line icon in the same weight as dsh's panel glyphs.
-  function BotIcon({ size = 16 }) {
-    return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
-      h('path', { d: 'M12 8V4H8' }), h('rect', { width: 16, height: 12, x: 4, y: 8, rx: 2 }), h('path', { d: 'M2 14h2' }), h('path', { d: 'M20 14h2' }), h('path', { d: 'M15 13v2' }), h('path', { d: 'M9 13v2' }))
-  }
-  // The 伙伴 row's glyph also hangs the bot list right under that row, like
-  // Cindy's companions: each bot opens its main conversation (or the start
-  // form when it has none). The list lives outside the row's button, and its
-  // clicks stop there so they never select the Bots page by bubbling.
-  function BotsNavGlyph({ size, active, openSession }) {
+  const COMPANION_GLYPH = 'M8 13.5 2.8 8.3a3.2 3.2 0 0 1 4.5-4.5l.7.7.7-.7a3.2 3.2 0 0 1 4.5 4.5z'
+  const TEAM_GLYPH = 'M9.5 13.5v-1a3 3 0 0 0-3-3H4.8a3 3 0 0 0-3 3v1m12.4 0v-1a3 3 0 0 0-2.3-2.9M8 5.2a2.3 2.3 0 1 1-4.6 0 2.3 2.3 0 0 1 4.6 0m2.4-2.2a2.3 2.3 0 0 1 0 4.4'
+  const AUTOMATION_GLYPH = 'M5 3H2.5v11h11V3H11M5 2h6v3H5zM5 9l2 2 4-4'
+  const automationMask = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="black" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="${AUTOMATION_GLYPH}"/></svg>`)
+  // Mount the roster below the whole navigation entry, including its pin control.
+  function BotsNavGlyph({ size, openSession }) {
     const seat = useRef(null), [host, setHost] = useState(null)
     const wide = size === 16
     useEffect(() => {
-      const row = seat.current?.closest('button')
-      if (!wide || !row?.parentNode) return
-      // dsh wraps the row (a tooltip anchor) in an inline box; the list goes
-      // after the outermost wrapper, so it sits below the row, not beside it.
-      let item = row
-      while (item.parentElement && item.parentElement.childElementCount === 1 && item.parentElement.querySelectorAll('button').length === 1) item = item.parentElement
+      if (!wide) return
+      let item = seat.current?.closest('button')
+      const nav = item?.closest('nav')
+      if (!nav) return
+      while (item.parentElement !== nav) item = item.parentElement
       const box = document.createElement('div')
       box.className = 'kode-bots-nest'
       item.after(box)
@@ -983,7 +1051,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       return () => { box.remove(); setHost(null) }
     }, [wide])
     return h(React.Fragment, null,
-      h('span', { ref: seat, className: 'kode-bots-glyph' }, h(BotIcon, { size })),
+      h('span', { ref: seat, className: 'kode-bots-glyph' }, glyph(COMPANION_GLYPH, size)),
       host && createPortal(h(BotsNest, { openSession }), host))
   }
   // A bot wears a Kode avatar (animated by its main conversation's state),
@@ -1859,7 +1927,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       publish(); void refreshWorkspaceDirectory()
       return () => { for (const dispose of disposers) dispose() }
     }, 'kode.global-activity-catalog')
-    ctx.inject(['uiSession'], scope => scope.effect(() => {
+    ctx.inject(['uiSession', 'uiSession.sessionStatus'], scope => scope.effect(() => {
       statusSource = scope.get('uiSession')?.sessionStatus
       const dispose = statusSource?.subscribe(publish)
       publish()
@@ -2805,7 +2873,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     )
   }
 
-  return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets', 'kodeNotifications'], apply(ctx) {
+  return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets', 'kodeNotifications', 'uiSession', 'uiSession.sessionStatus'], apply(ctx) {
     ctx.provide('kodeActivity', globalActivity)
     installGlobalActivitySubscriptions(ctx)
     avatarContext = ctx
@@ -2863,15 +2931,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: 'kode-goal', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, GoalSidebar))
     ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'kode-goal' }, () => h(React.Fragment, null, h(IconGoalOutlineRegular, { size: 16 }), 'Goal')))
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-handoff', order: 100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, HandoffMenu))
-    if (kodeEmbedded()) {
-      // Kode's window buttons sit over the page; keep a titlebar strip for
-      // them that also drags the window. dsh's own desktop layout
-      // (data-platform) needs its Electron bridge, so it is not used here.
-      const titlebar = document.createElement('div')
-      titlebar.setAttribute('data-kode-titlebar', '')
-      document.body.append(titlebar)
-      ctx.effect(() => () => titlebar.remove(), 'kode.embed-titlebar')
-    }
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, AgentIdentity))
     ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({ name: 'sidebar.session.row.hover', id: 'kode-saved-time' }, SavedSessionHover))
     ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'kode-agent-avatar' }, SidebarAgentAvatar))
@@ -3015,14 +3074,43 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 @media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 .kode-panel-host{width:100%;height:100%}
-.kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block;flex:0 0 100%;width:100%;min-width:0}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-avatar-grid{max-height:200px}.kode-bot-scene-preview{position:relative;height:120px;min-height:120px}.kode-bot-scene-preview img{width:100%;height:100%;object-fit:cover}.kode-bot-scene-avatar{position:absolute;left:12px;bottom:10px;display:inline-flex;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 2px 8px rgba(0,0,0,.18)}.kode-bot-card.has-scene{position:relative;overflow:hidden;padding-top:76px}.kode-bot-card.has-scene::before{content:"";position:absolute;inset:0 0 auto 0;height:96px;background:var(--kode-bot-scene) center/cover no-repeat;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}.kode-bot-card.has-scene>*{position:relative}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}.kode-bot-line{display:flex;align-items:center;gap:2px}.kode-bot-line>.kode-bot-row{flex:1;min-width:0}.kode-bot-more{flex:none;min-width:20px;height:20px;padding:0 5px;border:0;border-radius:6px;background:none;color:var(--dsw-alias-label-tertiary);font-size:11px;cursor:pointer}.kode-bot-more:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-session{padding-left:36px;font-size:12px}.kode-bot-release{flex:none;padding:0 4px;color:var(--dsw-alias-label-tertiary)}.kode-bot-release:hover{color:var(--dsw-alias-label-primary)}.kode-bot-session-kind{flex:none;font-size:10px;color:var(--dsw-alias-label-tertiary)}.kode-bot-asset-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.kode-bot-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-accent-primary,#3d6ff5);color:#fff;font-size:10px;font-weight:600;line-height:16px;text-align:center}.kode-bot-busy{width:6px;height:6px;border-radius:3px;background:var(--dsw-alias-accent-primary,#3d6ff5);animation:kode-bot-pulse 1.4s ease-in-out infinite}@keyframes kode-bot-pulse{50%{opacity:.3}}.kode-bot-watches{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}.kode-bot-watches h3{margin:6px 0 0}.kode-watch-list,.kode-run-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.kode-watch-row{display:flex;align-items:center;gap:10px}.kode-watch-row[data-enabled=false] .kode-watch-text{opacity:.55}.kode-watch-text{flex:1;min-width:0;display:flex;flex-direction:column}.kode-watch-text .kode-secondary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-watch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.kode-run-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}.kode-run-head{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}.kode-run-status{font-size:11px;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}.kode-run-row[data-status=completed] .kode-run-status{color:#2f9e5f}.kode-run-row[data-status=failed] .kode-run-status{color:#d1453b}.kode-run-row[data-status=needs_user] .kode-run-status{color:#c98a12}.kode-run-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-run-new{font-size:10px;color:#fff;background:#d1453b;border-radius:6px;padding:0 5px}.kode-run-body{flex-basis:100%;display:flex;flex-direction:column;gap:4px}.kode-run-body p{margin:0;white-space:pre-wrap;word-break:break-word}.kode-run-trigger{font-size:12px}
+button:has(.kode-schedules-marker)>span[aria-hidden="true"]{position:relative}
+button:has(.kode-schedules-marker)>span[aria-hidden="true"]>svg{visibility:hidden}
+button:has(.kode-schedules-marker)>span[aria-hidden="true"]::before{content:"";position:absolute;inset:0;background:currentColor;mask:url("data:image/svg+xml,${automationMask}") center/contain no-repeat}
+.kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block;align-self:stretch;min-width:0}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-avatar-grid{max-height:200px}.kode-bot-scene-preview{position:relative;height:120px;min-height:120px}.kode-bot-scene-preview img{width:100%;height:100%;object-fit:cover}.kode-bot-scene-avatar{position:absolute;left:12px;bottom:10px;display:inline-flex;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 2px 8px rgba(0,0,0,.18)}.kode-bot-card.has-scene{position:relative;overflow:hidden;padding-top:76px}.kode-bot-card.has-scene::before{content:"";position:absolute;inset:0 0 auto 0;height:96px;background:var(--kode-bot-scene) center/cover no-repeat;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}.kode-bot-card.has-scene>*{position:relative}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}.kode-bot-line{display:flex;align-items:center;gap:2px}.kode-bot-line>.kode-bot-row{flex:1;min-width:0}.kode-bot-more{flex:none;min-width:20px;height:20px;padding:0 5px;border:0;border-radius:6px;background:none;color:var(--dsw-alias-label-tertiary);font-size:11px;cursor:pointer}.kode-bot-more:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-session{padding-left:36px;font-size:12px}.kode-bot-release{flex:none;padding:0 4px;color:var(--dsw-alias-label-tertiary)}.kode-bot-release:hover{color:var(--dsw-alias-label-primary)}.kode-bot-session-kind{flex:none;font-size:10px;color:var(--dsw-alias-label-tertiary)}.kode-bot-asset-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.kode-bot-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-accent-primary,#3d6ff5);color:#fff;font-size:10px;font-weight:600;line-height:16px;text-align:center}.kode-bot-busy{width:6px;height:6px;border-radius:3px;background:var(--dsw-alias-accent-primary,#3d6ff5);animation:kode-bot-pulse 1.4s ease-in-out infinite}@keyframes kode-bot-pulse{50%{opacity:.3}}.kode-bot-watches{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}.kode-bot-watches h3{margin:6px 0 0}.kode-watch-list,.kode-run-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.kode-watch-row{display:flex;align-items:center;gap:10px}.kode-watch-row[data-enabled=false] .kode-watch-text{opacity:.55}.kode-watch-text{flex:1;min-width:0;display:flex;flex-direction:column}.kode-watch-text .kode-secondary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-watch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.kode-run-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}.kode-run-head{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}.kode-run-status{font-size:11px;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}.kode-run-row[data-status=completed] .kode-run-status{color:#2f9e5f}.kode-run-row[data-status=failed] .kode-run-status{color:#d1453b}.kode-run-row[data-status=needs_user] .kode-run-status{color:#c98a12}.kode-run-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-run-new{font-size:10px;color:#fff;background:#d1453b;border-radius:6px;padding:0 5px}.kode-run-body{flex-basis:100%;display:flex;flex-direction:column;gap:4px}.kode-run-body p{margin:0;white-space:pre-wrap;word-break:break-word}.kode-run-trigger{font-size:12px}
 .kode-bots-page{padding:24px;box-sizing:border-box;width:100%;margin:0 auto;height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}.kode-bot-avatar{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600;flex-shrink:0}.kode-bot-persona{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}.kode-bot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-bot-actions>.kode-secondary{margin-right:auto;font-family:ui-monospace,monospace}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
-.kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}
-html[data-kode-embed][data-kode-platform=macos] #root{box-sizing:border-box;height:100%;padding-top:28px}
-[data-kode-titlebar]{display:none}
+.kode-brand-mark-svg{flex:none;display:block;filter:drop-shadow(0 0 6px rgba(159,232,112,0.22))}
+.kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1.5px;height:24px;white-space:nowrap;user-select:none}
+.kode-brand-title{font-size:13.5px;font-weight:650;line-height:14px;letter-spacing:-0.015em;color:var(--dsw-alias-label-primary,#EDEFEB);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Avenir Next",system-ui,sans-serif}
+.kode-brand-title-dim{font-weight:400;color:var(--dsw-alias-label-secondary,#A8AEA7);letter-spacing:-0.01em}
+.kode-brand-subtitle{font-size:9.5px;font-weight:500;line-height:11px;letter-spacing:0.06em;color:var(--dsw-alias-label-tertiary,#8A928C);opacity:.85}
+/* Kode hosts the web layout. Reserve the traffic lights inside the existing chrome. */
+html[data-kode-platform=macos] [data-slot=sidebar] [data-window-drag] {
+  box-sizing:border-box;
+  padding-inline-start:var(--kode-traffic-lights-inset,78px);
+}
+html[data-kode-platform=macos] :has(> [data-shell-overlay]):is([data-sidebar-collapsed],[data-sidebar-drawer]) {
+  --dsh-frame-leading-clearance:calc(var(--kode-traffic-lights-inset,78px) + 48px);
+}
+html[data-kode-platform=macos] :is([data-sidebar-collapsed],[data-sidebar-drawer]) > [data-shell-leading] {
+  left:var(--kode-traffic-lights-inset,78px);
+}
+html[data-kode-platform=macos] :has(> [data-shell-overlay]) {
+  background:var(--dsw-specific-sidebar-fill);
+}
+html[data-kode-platform=macos] :has(> [data-shell-overlay]):not([data-sidebar-collapsed]):not([data-sidebar-drawer]) {
+  & > [class$="_sidebarCol"] { border-right:0; }
+  & > [class$="_centerCol"] {
+    box-sizing:border-box;
+    background:var(--dsw-alias-bg-base);
+    border:1px solid var(--dsw-alias-border-l3);
+    border-right:0;
+    border-radius:16px 0 0 16px;
+    overflow:hidden;
+  }
+}
 html[data-kode-embed] .kode-token-notch{display:none}
-html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:block;position:fixed;inset:0 0 auto;height:28px;z-index:2147483000;background:var(--dsw-specific-sidebar-fill);border-bottom:.5px solid var(--dsw-alias-border-l3);user-select:none;-webkit-user-select:none}
 .kode-handoff-trigger{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px!important;padding:0 10px!important;white-space:nowrap}.kode-handoff-dialog{width:min(480px,calc(100vw - 32px))}.kode-handoff-body .kode-field{margin-bottom:12px}.kode-handoff-body>.kode-config-note{margin:0}.kode-model-control{min-width:0;max-width:min(360px,45cqw)}.kode-model-control>.kode-trigger{max-width:100%}[data-slot="conversation.input.right"] [data-composer-stat="activity"]{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;min-width:0;width:24px;max-width:24px;margin-right:-8px;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] button{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;gap:0;width:24px;min-width:24px;height:24px;min-height:24px;margin:0;padding:0}[data-slot="conversation.input.right"] [data-composer-stat="activity"] [class*="label"]{display:none}
 .kode-settings-main{width:100%;min-width:0}.kode-settings-page .kode-settings-section{width:100%}.kode-settings-page .kode-settings-section .kode-agent-settings{width:100%;max-width:none;min-width:0;box-sizing:border-box}.kode-settings-page .kode-agent-rows,.kode-settings-page .kode-agent-row,.kode-settings-page .kode-agent-editor{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-source-summary,.kode-settings-page .kode-source-copy{min-width:0}.kode-settings-page .kode-personalization .kode-avatar-content,.kode-settings-page .kode-personalization .kode-avatar-grid,.kode-settings-page .kode-personalization .kode-avatar-preview{width:100%;min-width:0;box-sizing:border-box}.kode-settings-page .kode-personalization .kode-avatar-preview>img{max-width:100%}
 .kode-source-editor{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;align-items:start}.kode-source-editor>.kode-field{min-width:0;margin:0}.kode-source-editor>.kode-field input{box-sizing:border-box;width:100%;min-width:0}.kode-source-field-location,.kode-source-field-subdir,.kode-source-editor>.kode-hub-targets,.kode-source-editor-actions{grid-column:1/-1}.kode-source-editor>.kode-hub-targets{display:flex;flex-wrap:wrap;gap:8px 16px;min-width:0;margin:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md)}.kode-source-editor>.kode-hub-targets>legend{padding:0 4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-source-editor>.kode-hub-targets>label{display:inline-flex;align-items:center;gap:6px;min-height:28px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}.kode-source-editor>.kode-hub-targets input{flex:none;margin:0;accent-color:var(--dsw-alias-state-business-primary)}.kode-source-editor-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}.kode-source-editor-actions>button{width:auto;min-width:88px}
@@ -3033,7 +3121,10 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
     document.head.append(style)
     ctx.effect(() => () => style.remove(), 'kode.agent-styles')
     ctx.slots.inject('conversation.hero.agentPreset', () => ctx.slots.register({ name: 'conversation.hero.agentPreset', id: 'kode-agent', inject: sessionId => ({ sessionId, sessions: ctx.sessions, remote: ctx.remote, slots: ctx.slots }) }, AgentControl))
-    if (kodeEmbedded()) ctx.slots.inject('sidebar.brand.name', () => ctx.slots.register({ name: 'sidebar.brand.name' }, KodeBrandName))
+    if (kodeEmbedded()) {
+      ctx.slots.inject('sidebar.brand.mark', () => ctx.slots.register({ name: 'sidebar.brand.mark' }, KodeBrandMark))
+      ctx.slots.inject('sidebar.brand.name', () => ctx.slots.register({ name: 'sidebar.brand.name' }, KodeBrandName))
+    }
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'agent-presets', order: 5, label: () => 'Kode', inject: () => ({ sessions: ctx.sessions, slots: ctx.slots }) }, KodeSettings))
     ctx.inject(['layout'], scope => {
       if (!scope.layout?.selectPanel) return
@@ -3048,6 +3139,7 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
       scope.slots.inject('sidebar.panellist.actions', () => scope.slots.register({ name: 'sidebar.panellist.actions', id: 'kode-entries', order: -10 }, KodeMoreItems))
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-bots' }, () => h(KodeBotsPage, { ui: () => scope.get('uiWorkspace') })))
       const openBotSession = async id => { scope.layout.selectPanel(null); await scope.get('uiWorkspace')?.openSession(id) }
+      scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'schedules' }, () => h('span', { className: 'kode-schedules-marker', hidden: true })))
       scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-bots', order: 5, label: '伙伴' }, props => h(BotsNavGlyph, { ...props, openSession: openBotSession })))
       if (kodeEmbedded()) {
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
@@ -3061,7 +3153,7 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
             const label = panel.badge > 0 ? `${panel.title} (${panel.badge > 99 ? '99+' : panel.badge})` : panel.title
             return [
               scope.slots.register({ name: 'main', key }, () => h(KodePanelPage, { panel })),
-              scope.slots.register({ name: 'sidebar.panellist', id: key, order: 20 + index, label }, () => glyph(PANEL_GLYPH)),
+              scope.slots.register({ name: 'sidebar.panellist', id: key, order: 20 + index, label }, ({ size } = {}) => glyph(panel.extension === 'kode.team' && panel.id === 'team' ? TEAM_GLYPH : PANEL_GLYPH, size)),
             ]
           })
         }

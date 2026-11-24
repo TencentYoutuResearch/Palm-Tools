@@ -179,8 +179,8 @@ export class SessionAppearance {
   }
 }
 export function registerAvatarApi(ctx, appearance) {
-  return ctx.webServer.register({ kind: 'prefix', path: '/api/kode/avatars', handler: async (req, res) => {
-    const admitted = ctx.connection.admit(req), send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
+  return ctx.webServer.register({ kind: 'prefix', path: '/api/kode/avatars', handler: async (req, res, peer) => {
+    const admitted = peer ? { peer } : ctx.connection.admit(req), send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
       const url = new URL(req.url, 'http://localhost')

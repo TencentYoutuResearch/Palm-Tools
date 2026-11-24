@@ -259,9 +259,9 @@ export class SidebarBrowserHost {
 
 export function registerBrowserApi(ctx, config = {}) {
   const host = new SidebarBrowserHost(config), responses = new Set()
-  const dispose = ctx.webServer.register({ kind: 'exact', path: '/api/kode/browser', handler: async (req, res) => {
+  const dispose = ctx.webServer.register({ kind: 'exact', path: '/api/kode/browser', handler: async (req, res, peer) => {
     const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
-    const admitted = ctx.connection.admit(req)
+    const admitted = peer ? { peer } : ctx.connection.admit(req)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
       if (req.method === 'GET') {

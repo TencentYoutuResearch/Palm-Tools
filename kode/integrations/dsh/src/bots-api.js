@@ -145,8 +145,8 @@ export function registerBotsApi(ctx, backend) {
     await backend.call(BOTS, { action: 'set_main_session', id: bot.id, session: { runtime: 'dsh', session_id: sessionId } })
     return { sessionId }
   }
-  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/bots', handler: async (req, res) => {
-    const admitted = ctx.connection.admit(req)
+  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/bots', handler: async (req, res, peer) => {
+    const admitted = peer ? { peer } : ctx.connection.admit(req)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(res, 403, { error: 'Host owner required' })
     try {
       if (req.method === 'GET') {

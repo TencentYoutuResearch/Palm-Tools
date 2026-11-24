@@ -1,6 +1,6 @@
 {
   "name": "kode-new-ui",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "private": true,
   "description": "Kode extension: dsh conversation UI for Kode sessions",
   "type": "module",
@@ -8,6 +8,7 @@
     "node": ">=24.9.0"
   },
   "kodeNewUi": {
-    "dsh": "0.2.2-rc.5"
+    "dsh": "0.2.3-alpha.2",
+    "fallbackNode": "24.22.3"
   }
 }

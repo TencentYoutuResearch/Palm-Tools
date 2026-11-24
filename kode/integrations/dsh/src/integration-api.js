@@ -2,9 +2,9 @@ import QRCode from 'qrcode'
 
 /** Host-owner UI proxy. Browser clients never receive backend credentials. */
 export function registerIntegrationApi(ctx, backend) {
-  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/integrations', handler: async (req, res) => {
+  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/integrations', handler: async (req, res, peer) => {
     const send = (status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
-    const admitted = ctx.connection.admit(req)
+    const admitted = peer ? { peer } : ctx.connection.admit(req)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
       if (req.method === 'GET') return send(200, { settings: await backend.call('/api/v1/messaging/integrations'), cloud: await backend.call('/api/v1/messaging/cloud/status') })

@@ -1,9 +1,9 @@
 /** Owner-only access to conversations owned by another runtime on this Host. */
 import { randomUUID } from 'node:crypto'
 export function registerSharedSessionApi(ctx, backend) {
-  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/shared-session', handler: async (req, res) => {
+  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/shared-session', handler: async (req, res, peer) => {
     const send = (status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
-    const admitted = ctx.connection.admit(req)
+    const admitted = peer ? { peer } : ctx.connection.admit(req)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
       if (req.method === 'GET') {

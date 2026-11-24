@@ -3,10 +3,14 @@ import { createRequire } from 'node:module'
 import { readFile, writeFile, copyFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 const resolve = createRequire(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-web-app/package.json')).resolve
-const upstream = resolve('@deepseek-ai/dsh-client-ui-chat/client')
+const upstream = process.env.KODE_CHAT_UPSTREAM_CLIENT ?? resolve('@deepseek-ai/dsh-client-ui-chat/client')
 let source = await readFile(upstream, 'utf8')
 function replace(from, to) { if (!source.includes(from)) throw new Error(`Pinned Chat contract changed: ${from}`); source = source.replace(from, to) }
 replace('id: "@deepseek-ai/dsh-client-ui-chat",','id: "@kode/dsh-chat",')
+// Newer dsh hosts register the Session panel in this session-scoped Chat seat.
+replace('children: { "conversation.chat.flow": {', 'children: { "conversation.chat.aside": { kind: "single", scope: "session" }, "conversation.chat.flow": {')
+const chatContent = '(0, react_jsx_runtime.jsx)("div", {\n\t\t\t\t\t\tclassName: ChatView_module_css_default.root,'
+replace(chatContent, '(0, react_jsx_runtime.jsx)("div", { "data-chat-aside": "", children: renderSlot("conversation.chat.aside", {}) }),\n\t\t\t\t\t' + chatContent)
 // Imported relay messages have no live inbox claim, so remain Context nodes.
 replace('node.kind !== "context" || node.data.content.some', 'node.kind !== "context" || (node.data.source?.kind === "agent-message" && node.data.source?.form === "relay") || node.data.content.some')
 // Stable user-bubble seat for scene-aware appearance without matching generated classes.
@@ -162,6 +166,85 @@ ${mark}:focus-visible:after{content:"";position:absolute;inset:1px 0;border:1px 
 @media (prefers-reduced-motion:reduce){.eGxaPq_frame,.eGxaPq_scroller,${mark}:before,.eGxaPq_markBusy:before,.eGxaPq_preview{scroll-behavior:auto;transition:none;animation:none}}`.trim().replace(/\n/g, '')
   source = source.slice(0, start) + 'const css$17 = ' + JSON.stringify(turnRailCss) + source.slice(end + 1)
 }
+// Keep adapter styles independent of the upstream plugin's style lifecycle.
+source = source.replace(/(const tagId(?:\$\d+)? = "|tag\.dataset\.plugin = ")@deepseek-ai\/dsh-client-ui-chat(?=[/"])/g, '$1@kode/dsh-chat')
+const layoutStyle = /(?<=const css\$16 = )"[^\n]+(?=;\n)/.exec(source)
+if (!layoutStyle) throw new Error('Pinned Chat stylesheet contract changed')
+const layoutStyles = JSON.parse(layoutStyle[0])
+  .replace('padding:16px calc(var(--dsh-composer-side-clearance) + 16px)', 'padding:12px calc(var(--dsh-composer-side-clearance,16px) + 16px)')
+  .replace('max-width:var(--dsh-chat-content-width);', 'max-width:var(--dsh-chat-content-width,880px);')
+  .replaceAll('--dsh-chat-flow-gap:16px', '--dsh-chat-flow-gap:10px')
+const layoutOverrides = `
+[data-message-attachments] img {
+  max-inline-size: 100%;
+  max-block-size: 260px;
+  object-fit: contain;
+}
+[data-chat-aside] {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 9;
+  height: 0;
+  pointer-events: none;
+  margin-inline-end: calc(-1 * var(--dsh-chat-end-inset, 0px));
+  --dsh-chat-aside-gutter: calc(
+    var(--dsh-chat-end-inset, 0px) +
+    max(0px, (100% - var(--dsh-chat-end-inset, 0px) - var(--dsh-chat-content-width, 100%)) / 2)
+  );
+}
+[data-conversation-scroll] [data-chat-aside] { position: sticky; }
+`
+source = source.slice(0, layoutStyle.index) + JSON.stringify(layoutStyles + layoutOverrides)
+  + source.slice(layoutStyle.index + layoutStyle[0].length)
+// A replacement factory may run while its previous stylesheet is still attached.
+const layoutStyleMount = `if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$16) + "]") === null) {
+			const tag = document.createElement("style");
+			tag.dataset.plugin = "@kode/dsh-chat";
+			tag.dataset.pluginCss = tagId$16;
+			tag.textContent = css$16;
+			document.head.appendChild(tag);
+		}`
+replace(layoutStyleMount, `if (typeof document !== "undefined") {
+			const tag = document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$16) + "]") ?? document.createElement("style");
+			tag.dataset.plugin = "@kode/dsh-chat";
+			tag.dataset.pluginCss = tagId$16;
+			tag.textContent = css$16;
+			if (!tag.isConnected) document.head.appendChild(tag);
+		}`)
+// The adapted rc.5 dialog uses a positioning hook the current runtime no longer exports.
+replace('dimensions (the `useAnchoredPosition` measure pass).', 'dimensions before positioning.')
+replace(`const pos = (0, _deepseek_ai_dsh_client_ui_primitives.useAnchoredPosition)({
+				open,
+				anchorRef: rootRef,
+				panelRef,
+				side: "top",
+				gap: PANEL_GAP,
+				margin: PANEL_MARGIN
+			});`, `const [pos, setPos] = (0, react.useState)(null);
+			(0, react.useLayoutEffect)(() => {
+				if (!open || !rootRef.current || !panelRef.current) return;
+				const anchor = rootRef.current;
+				const panel = panelRef.current;
+				const update = () => {
+					const trigger = anchor.getBoundingClientRect();
+					const { width, height } = panel.getBoundingClientRect();
+					const top = Math.max(PANEL_MARGIN, trigger.top - PANEL_GAP - height);
+					const left = Math.max(PANEL_MARGIN, Math.min(trigger.left, window.innerWidth - width - PANEL_MARGIN));
+					setPos(previous => previous?.top === top && previous.left === left ? previous : { top, left });
+				};
+				update();
+				const resize = new ResizeObserver(update);
+				resize.observe(anchor);
+				resize.observe(panel);
+				window.addEventListener("resize", update);
+				window.addEventListener("scroll", update, true);
+				return () => {
+					resize.disconnect();
+					window.removeEventListener("resize", update);
+					window.removeEventListener("scroll", update, true);
+				};
+			}, [open]);`)
+replace('className: ChatView_module_css_default.runningWhaleStill,\n\t\t\t\t\twidth: "100%",\n\t\t\t\t\theight: "100%",', 'className: ChatView_module_css_default.runningWhaleStill,\n\t\t\t\t\twidth: 14,\n\t\t\t\t\theight: 14,')
 source = source.replace(/\/\/# sourceMappingURL=.*$/m, '').replace(/^[ \t]+$/gm, '').trimEnd() + '\n'
 await writeFile(new URL('../packages/chat/client.js', import.meta.url), '// Generated from dsh-client-ui-chat 0.2.1-rc.5 (MIT); run npm run build:chat.\n' + source)
 await copyFile(join(dirname(dirname(upstream)), 'LICENSE'), new URL('../packages/chat/LICENSE.upstream', import.meta.url))

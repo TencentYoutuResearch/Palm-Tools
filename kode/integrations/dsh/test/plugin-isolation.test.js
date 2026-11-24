@@ -11,7 +11,7 @@ test('Kode leaves official execution plugins, presets and defaults intact', asyn
   const ids = ['agent-loop','system-prompt','harness-dev-context','tool-working-directory','subagent','subagent-spawn-in-process','subagent-fork-in-process','preset-standard','preset-minimal','preset-ptc','preset-cordis','agent-preset-registry']
   const base = ids.map(id => ({id, name:id, config:{default:'standard'}}))
   const patches = yaml.load((await readFile(new URL('../cordis.patch.yml',import.meta.url),'utf8')).replaceAll('!!js ',''))
-  const result = applyEntryPatches(base,patches,()=>{})
+  const { data: result } = applyEntryPatches(base,patches,()=>{})
   for (const entry of base) assert.deepEqual(result.find(row=>row.id===entry.id),entry)
 })
 test('Kode defaults persist in its own Agent registry', async () => {

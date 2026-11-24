@@ -7,8 +7,8 @@ export function goalSnapshot(session) {
 }
 export function registerAgentHubApi(ctx, { hub, backend, service }) {
   const send = (res, code, value) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
-  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/agent-hub', handler: async (req, res) => {
-    const admitted = ctx.connection.admit(req)
+  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/agent-hub', handler: async (req, res, peer) => {
+    const admitted = peer ? { peer } : ctx.connection.admit(req)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(res, 403, { error: 'Host owner required' })
     try {
       const query = new URL(req.url, 'http://localhost').searchParams

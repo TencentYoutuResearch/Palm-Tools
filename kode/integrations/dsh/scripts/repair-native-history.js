@@ -6,8 +6,9 @@ import {join} from 'node:path'
 import {createRequire} from 'node:module'
 import {pathToFileURL} from 'node:url'
 import {zstdDecompressSync} from 'node:zlib'
-import {buildHistorySeed,renumberNativeTurns,encodeHistoryArtifact} from '../src/native-history.js'
+import {buildHistorySeed,renumberNativeTurns,assertHistoryReaderSupport,encodeHistoryArtifact} from '../src/native-history.js'
 import {BackendClient} from '../src/backend-client.js'
+assertHistoryReaderSupport()
 const args=process.argv.slice(2),option=name=>args[args.indexOf(name)+1]
 for(const name of ['--home','--url','--token-file','--runtime-modules'])if(!args.includes(name))throw new Error(`Missing ${name}`)
 const home=option('--home'),modules=option('--runtime-modules'),apply=args.includes('--apply')
