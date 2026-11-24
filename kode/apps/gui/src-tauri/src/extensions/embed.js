@@ -13,6 +13,8 @@
 //     panel, rect} and "panel-hide" {extension, panel}.
 //     Panels: "badge" {count}, "notify" {title, body, severity},
 //     "open-session" {session_uuid}, "close";
+//   <html data-kode-theme="dark|light"> following Kode's appearance (sent
+//     as a "theme" message, also delivered as an event);
 //   window "kode-host" CustomEvent: messages from Kode. Kode draws its own
 //     notifications on top of the view, so views need not handle "toast".
 (() => {
@@ -78,6 +80,11 @@
   Object.defineProperty(window, '__kodeHostReceive', {
     value: message => {
       if (message?.type === 'toast') showToast(message)
+      // Kode's own appearance, which can differ from the system's.
+      if (message?.type === 'theme' && (message.theme === 'dark' || message.theme === 'light')) {
+        root.setAttribute('data-kode-theme', message.theme)
+        root.style.colorScheme = message.theme
+      }
       window.dispatchEvent(new CustomEvent('kode-host', { detail: message }))
     },
   })

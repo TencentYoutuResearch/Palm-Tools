@@ -1491,13 +1491,25 @@
     const key = panelKey(current.target)
     const restack = !restackedPanels.has(key)
     restackedPanels.add(key)
-    void extensionIpc.showViewIn(current.target.extension, current.target.view.id, current.host, current.rect, restack).catch((e) =>
+    void extensionIpc.showViewIn(current.target.extension, current.target.view.id, current.host, current.rect, restack).then(() => postTheme([current.target])).catch((e) =>
       pushToast({ severity: 'error', title: current.target.view.title, detail: e instanceof Error ? e.message : String(e), durationMs: 6000 }),
     )
   })
   // The host view was rebuilt (restart, new page): panels must stack above it again.
   $effect(() => {
     if (!extImmersive) restackedPanels = new Set()
+  })
+  /// Panels follow Kode's appearance, not the system's: tell every open
+  /// panel page whenever it changes or a page (re)appears.
+  function postTheme(targets: PanelTarget[]) {
+    const dark = theme === 'dark' || (theme === 'system' && systemPrefersDark)
+    for (const target of targets) void extensionIpc.postToView(target.extension, target.view.id, { type: 'theme', theme: dark ? 'dark' : 'light' }).catch(() => {})
+  }
+  $effect(() => {
+    void theme
+    void systemPrefersDark
+    void panelPhase
+    untrack(() => postTheme($panels))
   })
   /// Requests from a panel page (`kodeHost.request`). Panels only ever ask
   /// Kode to show something; they never drive sessions from here.
