@@ -96,6 +96,12 @@ impl Bot {
         self.default_cwd.as_deref().map(PathBuf::from).unwrap_or_else(|| root.join(&self.id))
     }
 
+    /// The bot's own folder, whatever its workspace: generated assets and
+    /// other side sessions live here, apart from every other bot.
+    pub fn home(&self, root: &std::path::Path) -> PathBuf {
+        root.join(&self.id)
+    }
+
     pub fn ensure_workspace(&self, root: &std::path::Path) -> Result<PathBuf> {
         let path = self.workspace(root);
         std::fs::create_dir_all(&path).with_context(|| format!("cannot create {}", path.display()))?;

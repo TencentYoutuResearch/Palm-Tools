@@ -390,10 +390,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const url = source && (transport ? transport.path(source, 'local') : source)
     return h('span', { ref: element, className: 'kode-agent-avatar', style: { width: size, height: size }, 'data-avatar-state': status, 'aria-hidden': true }, source && !failed ? !profile?.avatar?.id && profile?.type === 'cursor' ? h('span', { className: 'kode-agent-mask', style: { maskImage: `url("${url}")`, WebkitMaskImage: `url("${url}")` } }) : h('img', { src: url, alt: '', loading: 'lazy', onError: () => setFailed(true) }) : h(profile?.type === 'dsh' ? FishLogo : IconAgentPresetOutlineRegular, { size }))
   }
-  async function stageAvatarPrompt(sessionId, host, backgroundOnly, avatarId) {
+  async function stageAvatarPrompt(sessionId, host, backgroundOnly, avatarId, forBot) {
     if ((host ?? transport?.current ?? 'local') !== 'local' || (transport?.current ?? 'local') !== 'local') throw new Error('请先切换到此计算机的会话；头像和背景保存在此计算机的共享素材库。')
     const sessions = avatarContext.sessions
     const sourceId = sessionId ?? Object.values(sessions.list.getSnapshot().byId).find(row => (row.retainedBy?.mainView ?? 0) > 0)?.id
+    // A bot's artwork is made in the bot's own folder, with its Agent, and
+    // the session is listed under the bot rather than in a project.
+    const bot = forBot ?? botOfSession(botsSnapshot.data, sourceId)
+    if (bot) return stageBotAvatarPrompt(bot, backgroundOnly, avatarId)
     if (!sourceId || sourceId.startsWith('saved:')) throw new Error('请先打开此计算机的工作区，再创建素材生成会话。')
     const ui = avatarContext.get('uiWorkspace')
     if (!ui) throw new Error('工作区尚未就绪，请稍后重试。')
@@ -418,10 +422,31 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     await refreshWorkspaceDirectory()
     input.for(binding.ctx).focus()
   }
+  async function stageBotAvatarPrompt(bot, backgroundOnly, avatarId) {
+    if (!bot.agent_id) throw new Error(`伙伴使用的 Agent（${bot.backend_key}）在这台电脑的 dsh 里不可用`)
+    const sessions = avatarContext.sessions, ui = avatarContext.get('uiWorkspace')
+    if (!ui) throw new Error('工作区尚未就绪，请稍后重试。')
+    const response = await fetchHost(`/api/kode/avatars/generation-prompt${backgroundOnly ? `?mode=background&avatar=${encodeURIComponent(avatarId)}` : ''}`, { credentials: 'same-origin', cache: 'no-store' }, 'local')
+    const value = await parseHostJson(response); if (!response.ok) throw new Error(value.error ?? '无法读取头像生成提示词。')
+    const home = await botsCall({ action: 'home', id: bot.id })
+    await refreshWorkspaceDirectory()
+    const id = await sessions.create({ ...(home.workspace_id ? { workspaceId: home.workspace_id } : { cwd: home.path }), agentPreset: 'kode-native' })
+    await call({ action: 'select', sessionId: id, profileId: bot.agent_id, ...(bot.model ? { model: bot.model } : {}) }, id, false, 'local')
+    await projectCall({ action: 'host-operation', id: 'local', operation: 'rename-session', args: { sessionId: id, title: `${bot.name} · ${backgroundOnly ? '生成头像背景' : '生成头像与背景'}` } })
+    await ui.openSession(id)
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const binding = sessions.binding(id), input = binding?.ctx.get('conversation')?.input
+    if (!input) throw new Error('素材会话已创建，输入框尚未就绪，请稍后重试。')
+    const result = input.requestDraftInitialization(binding, { prompt: value.prompt, clearPreviousDraft: false })
+    if (result !== 'applied') throw new Error('素材会话已创建，但暂时无法填入提示词，请稍后重试。')
+    await refreshWorkspaceDirectory()
+    void refreshBots()
+    input.for(binding.ctx).focus()
+  }
   function ConversationBackground({ sessionId, sessions }) {
     const { data } = useDirectory(sessionId, sessions), library = useAvatarLibrary(), [enabled] = useBackgroundPreference(), anchor = React.useRef(null), directory = useWorkspaceDirectory()
     const row = directory.hosts.find(host => host.id === directory.current)?.sessions?.find(row => row.id === sessionId)
-    const bot = useBots().data?.bots.find(bot => bot.main_session_id === sessionId)
+    const bot = botOfSession(useBotsData(), sessionId)
     const avatarId = bot?.avatar ?? (row?.agent?.avatar ?? data?.currentProfile?.avatar)?.id, background = enabled && library.avatars.find(row => row.id === avatarId || row.aliases?.includes(avatarId))?.background
     useEffect(() => {
       const root = anchor.current?.closest('[data-conversation-content]')
@@ -490,7 +515,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (!actions?.openSection) throw new Error('设置尚未就绪，请稍后重试。')
     actions.openSection(section)
   }
-  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, requestedBotStart, requestedBotWatches
+  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, requestedBotStart, requestedBotWatches, requestedBotEdit
   function AgentControl({ sessionId, sessions, remote, slots }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions)
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')
@@ -924,6 +949,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const bots = botsSnapshot.data?.bots ?? []
     if (avatarSnapshot.loaded && !avatarPending && bots.some(bot => bot.avatar && !avatarSnapshot.avatars.some(row => row.id === bot.avatar || row.aliases?.includes(bot.avatar)))) void loadAvatars(true)
   })
+  // Rows that only decorate a session read the roster without fetching it;
+  // the sidebar's 伙伴 group keeps it fresh.
+  function useBotsData() { return useSyncExternalStore(botsStore.subscribe, botsStore.getSnapshot).data }
   function useBots() {
     const snapshot = useSyncExternalStore(botsStore.subscribe, botsStore.getSnapshot)
     useEffect(() => { followBotsFreshness(); void refreshBots() }, [])
@@ -958,13 +986,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   // else its Agent's icon.
   function botArtwork(library, bot) { return bot?.avatar ? library.avatars.find(row => row.id === bot.avatar || row.aliases?.includes(bot.avatar)) : undefined }
   function sceneUrl(path) { return path && (transport ? transport.path(path, 'local') : path) }
+  function botOfSession(data, sessionId) { return sessionId ? data?.bots.find(bot => bot.main_session_id === sessionId || bot.sessions?.some(row => row.id === sessionId)) : undefined }
   function botProfile(bot) { return { type: bot.agent_type ?? 'custom', avatar: bot.avatar ? { id: bot.avatar } : null } }
   function BotAvatar({ bot, size = 20, preview = false }) {
     const status = useAvatarStatus(bot.main_session_id ?? '__none__')
     return h(AgentAvatar, { profile: botProfile(bot), host: 'local', size, status: status ?? 'idle', preview })
   }
-  function BotAvatarPicker({ draft, busy, onChange }) {
-    const library = useAvatarLibrary(), [showBackground, setShowBackground] = useBackgroundPreference()
+  function BotAvatarPicker({ draft, bot, busy, onChange }) {
+    const library = useAvatarLibrary(), [showBackground, setShowBackground] = useBackgroundPreference(), [assetError, setAssetError] = useState('')
     const profile = botProfile(draft), background = botArtwork(library, draft)?.background
     return h('div', { className: 'kode-field' }, h('span', null, '头像与背景'),
       h('div', { className: 'kode-avatar-preview kode-bot-scene-preview', 'data-has-background': Boolean(background && showBackground) },
@@ -973,24 +1002,36 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('div', { className: 'kode-avatar-grid kode-bot-avatar-grid', 'aria-label': '伙伴头像' },
         h('button', { type: 'button', className: 'kode-avatar-choice', 'aria-pressed': !draft.avatar, disabled: busy, onClick: () => onChange({ ...draft, avatar: null }) }, h(AgentAvatar, { profile: { ...profile, avatar: null }, host: 'local', size: 36 }), h('span', { className: 'kode-avatar-caption' }, 'Agent 图标')),
         ...library.avatars.map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': draft.avatar === avatar.id, disabled: busy, title: avatar.name, onClick: () => onChange({ ...draft, avatar: avatar.id }) }, h(AgentAvatar, { profile: { ...profile, avatar }, host: 'local', size: 36, preview: true }), h('span', { className: 'kode-avatar-caption' }, h('span', null, avatar.name))))),
+      bot && h('div', { className: 'kode-bot-asset-actions' },
+        h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => void stageAvatarPrompt(undefined, 'local', false, null, bot).catch(error => setAssetError(error.message)) }, '为这个伙伴生成头像与背景'),
+        draft.avatar && h(Button, { type: 'button', variant: 'text', disabled: busy, onClick: () => void stageAvatarPrompt(undefined, 'local', true, draft.avatar, bot).catch(error => setAssetError(error.message)) }, '只生成背景'),
+        h('span', { className: 'kode-config-note' }, `在伙伴自己的文件夹里开一个会话来画，完成后回来选`)),
+      h(Failure, { text: assetError }),
       h('label', { className: 'kode-avatar-background-toggle' }, h('input', { type: 'checkbox', checked: showBackground, onChange: event => setShowBackground(event.target.checked) }), '在对话里显示背景（所有会话共用这个开关）'),
       !library.avatars.length && h('span', { className: 'kode-config-note' }, library.loaded ? '还没有自定义头像。可以在 Kode 设置 → 个性化 里创建头像、动画和背景，回来就能选。' : '正在读取头像…'),
       h(Failure, { text: library.error }))
   }
   function BotsNest({ openSession }) {
-    const { data } = useBots(), watches = useWatches().data
+    const { data } = useBots(), watches = useWatches().data, [expanded, setExpanded] = useState({})
     if (!data) return null
     const start = bot => { requestedBotStart = bot?.id ?? null; openBotsPage?.() }
     return h('div', { className: 'kode-bots-list', onClick: event => event.stopPropagation() },
-      ...data.bots.map(bot => {
+      ...data.bots.flatMap(bot => {
         const main = bot.main_session_id
-        return h('button', { key: bot.id, type: 'button', className: 'kode-bot-row', title: bot.persona || bot.name, onClick: () => main ? openSession(main) : start(bot) },
+        // The bot's other sessions (assets, side tasks, watch runs) sit under it.
+        const others = (bot.sessions ?? []).filter(row => row.id !== main)
+        const open = expanded[bot.id] ?? false
+        return [h('div', { key: bot.id, className: 'kode-bot-line' }, h('button', { type: 'button', className: 'kode-bot-row', title: bot.persona || bot.name, onClick: () => main ? openSession(main) : start(bot) },
           h(BotAvatar, { bot, size: 20 }),
           h('span', { className: 'kode-bot-name' }, bot.name),
           data.default_bot === bot.id && h('span', { className: 'kode-bot-tag' }, '默认'),
           watches?.unseen?.[bot.id] > 0 && h('span', { className: 'kode-bot-badge', title: '有新的关注动态', onClick: event => { event.stopPropagation(); requestedBotWatches = bot.id; openBotsPage?.(); window.dispatchEvent(new CustomEvent('kode-bot-watches')) } }, watches.unseen[bot.id]),
           watches?.runs.some(run => run.bot === bot.id && ['starting', 'running', 'needs_user'].includes(run.status)) && h('span', { className: 'kode-bot-busy', title: '正在处理关注的事' }),
-          !main && h('span', { className: 'kode-bot-hint' }, '开始'))
+          !main && h('span', { className: 'kode-bot-hint' }, '开始')),
+          others.length > 0 && h('button', { type: 'button', className: 'kode-bot-more', 'aria-expanded': open, title: open ? '收起其他会话' : `其他会话 ${others.length} 个`, onClick: () => setExpanded({ ...expanded, [bot.id]: !open }) }, open ? '−' : others.length)),
+          ...(open ? others.slice(0, 8).map(row => h('button', { key: `${bot.id}:${row.id}`, type: 'button', className: 'kode-bot-row kode-bot-session', title: row.title, onClick: () => openSession(row.id) },
+            h('span', { className: 'kode-bot-session-kind' }, row.kind === 'watch' ? '关注' : '会话'),
+            h('span', { className: 'kode-bot-name' }, row.title))) : [])]
       }),
       h('button', { type: 'button', className: 'kode-bot-row kode-bot-new', onClick: () => start(null) }, h('span', { className: 'kode-bot-avatar' }, h(IconPlusOutlineRegular, { size: 12 })), h('span', { className: 'kode-bot-name' }, data.bots.length ? '新建伙伴' : '创建第一个伙伴')))
   }
@@ -1003,7 +1044,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const field = (label, key, props = {}) => h('label', { className: 'kode-field' }, h('span', null, label), h(props.rows ? 'textarea' : 'input', { value: draft[key] ?? '', disabled: busy, onChange: event => onChange({ ...draft, [key]: event.target.value }), ...props }))
     return h('form', { className: 'kode-agent-editor', onSubmit: event => { event.preventDefault(); onSave() } },
       field('名字', 'name', { maxLength: 80, required: true }),
-      h(BotAvatarPicker, { draft: { ...draft, agent_type: data.agents.find(agent => agent.backend_key === draft.backend_key)?.type ?? draft.agent_type }, busy, onChange: next => onChange({ ...draft, avatar: next.avatar }) }),
+      h(BotAvatarPicker, { bot: draft.id ? data.bots.find(row => row.id === draft.id) : null, draft: { ...draft, agent_type: data.agents.find(agent => agent.backend_key === draft.backend_key)?.type ?? draft.agent_type }, busy, onChange: next => onChange({ ...draft, avatar: next.avatar }) }),
       h(SelectField, { label: 'Agent', value: draft.backend_key, options: agents, disabled: busy, onChange: value => onChange({ ...draft, backend_key: value }) }),
       field('模型（可选）', 'model', { placeholder: 'Agent 默认模型' }),
       h(SelectField, { label: '权限上限', value: draft.permission_ceiling, options: BOT_CEILINGS, disabled: busy, onChange: value => onChange({ ...draft, permission_ceiling: value }) }),
@@ -1188,6 +1229,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       } catch (failure) { setError(failure.message) } finally { setBusy(false) }
     }
     useEffect(() => { void act() }, [])
+    // A bot session's header avatar opens that bot's editor here.
+    useEffect(() => {
+      if (!data) return
+      const take = () => { const bot = requestedBotEdit && data.bots.find(row => row.id === requestedBotEdit); requestedBotEdit = undefined; if (bot) setDraft({ ...bot }) }
+      take()
+      window.addEventListener('kode-bot-edit', take)
+      return () => window.removeEventListener('kode-bot-edit', take)
+    }, [data])
     // A bot's new-activity badge in the sidebar opens its 关注 here.
     useEffect(() => {
       const take = () => { if (requestedBotWatches) { setWatching(requestedBotWatches); requestedBotWatches = undefined } }
@@ -1216,7 +1265,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       await ui()?.openSession(result.sessionId)
     }
     const save = async () => {
-      const { agent, agent_type, main_session_id, workspace, ...bot } = draft
+      const { agent, agent_type, agent_id, main_session_id, workspace, home, sessions, ...bot } = draft
       if (await act({ action: 'upsert', bot: { ...bot, model: bot.model?.trim() || null } })) setDraft(null)
     }
     const fresh = () => setDraft({ name: '', persona: '', backend_key: data.agents[0]?.backend_key ?? '', permission_ceiling: 'default', model: null, default_cwd: null })
@@ -1574,8 +1623,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   function AgentIdentity({ sessionId, sessions, useSessionStatus }) {
     const { data } = useDirectory(sessionId, sessions), status = useAvatarStatus(sessionId, useSessionStatus)
     const workspaceDirectory = useWorkspaceDirectory(), currentSession = workspaceDirectory.hosts.find(host => host.id === workspaceDirectory.current)?.sessions?.find(row => row.id === sessionId)
-    const profile = data?.currentProfile && { ...data.currentProfile, avatar: currentSession?.agent?.avatar ?? data.currentProfile.avatar }
-    return profile && !catalogBlank(sessions, sessionId) ? h('span', { className: 'kode-agent-identity', title: `${profile.name} · ${data.types[profile.type]?.name ?? profile.type}` }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': '设置会话头像与背景', onClick: () => openAvatarDialog({ sessionId, host: workspaceDirectory.current, profile }) }, h(AgentAvatar, { profile, size: 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })), h('span', null, profile.name)) : null
+    // A bot's sessions wear the bot: its name and avatar, edited on the 伙伴 page.
+    const roster = useBotsData(), bot = workspaceDirectory.current === 'local' ? botOfSession(roster, sessionId) : undefined
+    const base = data?.currentProfile && { ...data.currentProfile, avatar: currentSession?.agent?.avatar ?? data.currentProfile.avatar }
+    const profile = base && bot ? { ...base, name: bot.name, avatar: bot.avatar ? { id: bot.avatar } : base.avatar } : base
+    const choose = () => bot ? (requestedBotEdit = bot.id, openBotsPage?.(), window.dispatchEvent(new CustomEvent('kode-bot-edit'))) : openAvatarDialog({ sessionId, host: workspaceDirectory.current, profile })
+    return profile && !catalogBlank(sessions, sessionId) ? h('span', { className: 'kode-agent-identity', title: bot ? `${bot.name} · 伙伴（${base.name}）` : `${profile.name} · ${data.types[profile.type]?.name ?? profile.type}` }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': bot ? '编辑伙伴' : '设置会话头像与背景', onClick: choose }, h(AgentAvatar, { profile, size: 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })), h('span', null, profile.name)) : null
   }
   function SessionAvatarMenuItem({ sessionId, useMenuOpenState }) {
     const [, setOpen] = useMenuOpenState()
@@ -1588,6 +1641,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   }
   function SidebarAgentAvatar({ sessionId, useSessionStatus }) {
     const data = useWorkspaceDirectory(), status = useAvatarStatus(sessionId, useSessionStatus)
+    const roster = useBotsData(), bot = data.current === 'local' ? botOfSession(roster, sessionId) : undefined
+    if (bot) return h(AgentAvatar, { profile: botProfile(bot), host: 'local', size: 20, status: status ?? 'idle' })
     for (const host of data.hosts) {
       const row = host.sessions?.find(row => (host.id === data.current ? row.id : foreignId(host.id, row.id)) === sessionId)
       if (row?.agent) return h(AgentAvatar, { profile: row.agent, host: host.id, size: 20, status: status ?? (row.running ? 'running' : 'idle') })
@@ -1938,8 +1993,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       // Sidebar presence follows visible conversations; the complete project
       // catalog remains available in the workspace picker and creation flow.
       // Bot conversations live in the 伙伴 group, not under projects.
-      const botSessions = new Set((bots.data?.bots ?? []).map(bot => bot.main_session_id).filter(Boolean))
-      const botFolders = new Set((bots.data?.bots ?? []).filter(bot => !bot.default_cwd && bot.workspace).map(bot => bot.workspace))
+      const botSessions = new Set((bots.data?.bots ?? []).flatMap(bot => [bot.main_session_id, ...(bot.sessions ?? []).map(row => row.id)]).filter(Boolean))
+      const botFolders = new Set((bots.data?.bots ?? []).flatMap(bot => [bot.home, !bot.default_cwd && bot.workspace]).filter(Boolean))
       const populated = items
         .filter(workspace => !botFolders.has(workspace.path))
         .map(workspace => botSessions.size ? { ...workspace, sessionIds: workspace.sessionIds.filter(id => !botSessions.has(id)) } : workspace)
@@ -2953,7 +3008,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 @media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 .kode-panel-host{width:100%;height:100%}
-.kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-avatar-grid{max-height:200px}.kode-bot-scene-preview{position:relative;height:120px;min-height:120px}.kode-bot-scene-preview img{width:100%;height:100%;object-fit:cover}.kode-bot-scene-avatar{position:absolute;left:12px;bottom:10px;display:inline-flex;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 2px 8px rgba(0,0,0,.18)}.kode-bot-card.has-scene{position:relative;overflow:hidden;padding-top:76px}.kode-bot-card.has-scene::before{content:"";position:absolute;inset:0 0 auto 0;height:96px;background:var(--kode-bot-scene) center/cover no-repeat;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}.kode-bot-card.has-scene>*{position:relative}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}.kode-bot-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-accent-primary,#3d6ff5);color:#fff;font-size:10px;font-weight:600;line-height:16px;text-align:center}.kode-bot-busy{width:6px;height:6px;border-radius:3px;background:var(--dsw-alias-accent-primary,#3d6ff5);animation:kode-bot-pulse 1.4s ease-in-out infinite}@keyframes kode-bot-pulse{50%{opacity:.3}}.kode-bot-watches{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}.kode-bot-watches h3{margin:6px 0 0}.kode-watch-list,.kode-run-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.kode-watch-row{display:flex;align-items:center;gap:10px}.kode-watch-row[data-enabled=false] .kode-watch-text{opacity:.55}.kode-watch-text{flex:1;min-width:0;display:flex;flex-direction:column}.kode-watch-text .kode-secondary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-watch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.kode-run-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}.kode-run-head{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}.kode-run-status{font-size:11px;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}.kode-run-row[data-status=completed] .kode-run-status{color:#2f9e5f}.kode-run-row[data-status=failed] .kode-run-status{color:#d1453b}.kode-run-row[data-status=needs_user] .kode-run-status{color:#c98a12}.kode-run-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-run-new{font-size:10px;color:#fff;background:#d1453b;border-radius:6px;padding:0 5px}.kode-run-body{flex-basis:100%;display:flex;flex-direction:column;gap:4px}.kode-run-body p{margin:0;white-space:pre-wrap;word-break:break-word}.kode-run-trigger{font-size:12px}
+.kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-avatar-grid{max-height:200px}.kode-bot-scene-preview{position:relative;height:120px;min-height:120px}.kode-bot-scene-preview img{width:100%;height:100%;object-fit:cover}.kode-bot-scene-avatar{position:absolute;left:12px;bottom:10px;display:inline-flex;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 2px 8px rgba(0,0,0,.18)}.kode-bot-card.has-scene{position:relative;overflow:hidden;padding-top:76px}.kode-bot-card.has-scene::before{content:"";position:absolute;inset:0 0 auto 0;height:96px;background:var(--kode-bot-scene) center/cover no-repeat;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}.kode-bot-card.has-scene>*{position:relative}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}.kode-bot-line{display:flex;align-items:center;gap:2px}.kode-bot-line>.kode-bot-row{flex:1;min-width:0}.kode-bot-more{flex:none;min-width:20px;height:20px;padding:0 5px;border:0;border-radius:6px;background:none;color:var(--dsw-alias-label-tertiary);font-size:11px;cursor:pointer}.kode-bot-more:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-session{padding-left:36px;font-size:12px}.kode-bot-session-kind{flex:none;font-size:10px;color:var(--dsw-alias-label-tertiary)}.kode-bot-asset-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.kode-bot-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-accent-primary,#3d6ff5);color:#fff;font-size:10px;font-weight:600;line-height:16px;text-align:center}.kode-bot-busy{width:6px;height:6px;border-radius:3px;background:var(--dsw-alias-accent-primary,#3d6ff5);animation:kode-bot-pulse 1.4s ease-in-out infinite}@keyframes kode-bot-pulse{50%{opacity:.3}}.kode-bot-watches{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}.kode-bot-watches h3{margin:6px 0 0}.kode-watch-list,.kode-run-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.kode-watch-row{display:flex;align-items:center;gap:10px}.kode-watch-row[data-enabled=false] .kode-watch-text{opacity:.55}.kode-watch-text{flex:1;min-width:0;display:flex;flex-direction:column}.kode-watch-text .kode-secondary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-watch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.kode-run-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}.kode-run-head{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}.kode-run-status{font-size:11px;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}.kode-run-row[data-status=completed] .kode-run-status{color:#2f9e5f}.kode-run-row[data-status=failed] .kode-run-status{color:#d1453b}.kode-run-row[data-status=needs_user] .kode-run-status{color:#c98a12}.kode-run-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-run-new{font-size:10px;color:#fff;background:#d1453b;border-radius:6px;padding:0 5px}.kode-run-body{flex-basis:100%;display:flex;flex-direction:column;gap:4px}.kode-run-body p{margin:0;white-space:pre-wrap;word-break:break-word}.kode-run-trigger{font-size:12px}
 .kode-bots-page{padding:24px;box-sizing:border-box;width:100%;margin:0 auto;height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}.kode-bot-avatar{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600;flex-shrink:0}.kode-bot-persona{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}.kode-bot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-bot-actions>.kode-secondary{margin-right:auto;font-family:ui-monospace,monospace}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}

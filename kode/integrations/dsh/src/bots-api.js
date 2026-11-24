@@ -28,20 +28,45 @@ export function agentFor(runtime, backendKey) {
   return profiles.find(profile => desktop[profile.id] === backendKey) ?? profiles.find(profile => profile.type === backendKey) ?? null
 }
 
-export function botsView(roster, { runtime, sessions, archived, workspaces }) {
+/** A session belongs to a bot when it is the bot's main conversation, runs
+ *  in the bot's own folder (generated assets, side tasks) or is one of its
+ *  watch runs. Each bot sees only its own. */
+function inside(path, folder) { return Boolean(path && folder) && (path === folder || path.startsWith(`${folder.replace(/\/$/, '')}/`)) }
+export function botsView(roster, { runtime, sessions, archived, workspaces, runs = [] }) {
   const live = new Set(sessions.map(row => row.sessionId))
+  // One owner per session: a main conversation, then a folder, then a run.
+  const owner = new Map()
+  for (const bot of roster.bots) if (bot.main_session?.runtime === 'dsh') owner.set(bot.main_session.session_id, bot.id)
+  for (const row of sessions) for (const bot of roster.bots) if (!owner.has(row.sessionId) && inside(row.cwd, roster.homes?.[bot.id])) owner.set(row.sessionId, bot.id)
+  for (const run of runs) if (run.session_uuid && !owner.has(run.session_uuid)) owner.set(run.session_uuid, run.bot)
   return {
     default_bot: roster.default_bot ?? null,
     bots: roster.bots.map(bot => {
       const main = bot.main_session?.runtime === 'dsh' ? bot.main_session.session_id : null
       const agent = agentFor(runtime, bot.backend_key)
-      return { ...bot, workspace: roster.workspaces?.[bot.id] ?? bot.default_cwd ?? null, agent: agent?.name ?? null, agent_type: agent?.type ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null }
+      const home = roster.homes?.[bot.id] ?? null
+      const ran = new Set(runs.filter(run => run.bot === bot.id && run.session_uuid).map(run => run.session_uuid))
+      const owned = sessions
+        .filter(row => !archived.has(row.sessionId) && !row.blank && owner.get(row.sessionId) === bot.id)
+        .map(row => ({ id: row.sessionId, title: row.projections?.values?.title ?? row.title ?? '未命名会话', updated_at: row.updatedAt ?? row.updated_at ?? 0, kind: row.sessionId === main ? 'main' : ran.has(row.sessionId) ? 'watch' : 'side' }))
+        .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
+      return { ...bot, workspace: roster.workspaces?.[bot.id] ?? bot.default_cwd ?? null, home, agent: agent?.name ?? null, agent_type: agent?.type ?? null, agent_id: agent?.id ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null, sessions: owned }
     }),
     root: roster.root ?? null,
     default_root: roster.default_root ?? null,
     agents: offered(runtime).map(profile => ({ name: profile.name, type: profile.type, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
     workspaces: workspaces.map(row => ({ id: row.id, title: row.title, path: row.path })),
   }
+}
+
+/** The bot's own folder, created and registered in dsh under its name. */
+export async function ensureBotHome(ctx, roster, bot) {
+  const home = roster.homes?.[bot.id]
+  if (!home) throw new Error('Kode 服务版本较旧，需要更新后才能给伙伴单独的文件夹')
+  await mkdir(home, { recursive: true })
+  const registry = ctx.get('workspaceRegistry')
+  const workspace = await registry?.resolveByPath?.(home) ?? await registry?.create?.(home, bot.name)
+  return { path: home, workspace_id: workspace?.id ?? null }
 }
 
 /** Start a dsh session as `bot` with `task`, in `workspace` (registered in
@@ -93,7 +118,14 @@ export function registerBotsApi(ctx, backend) {
   const view = async roster => {
     const registry = ctx.get('workspaceRegistry')
     const sessions = (await ctx.get('sessionController')?.list({}))?.items ?? []
-    return botsView(roster ?? await backend.call(BOTS), { runtime: ctx.get('kodeAgents'), sessions, archived: new Set(registry?.archivedSessionIds ?? []), workspaces: registry?.list() ?? [] })
+    // Older Kode has no watches; bots still list their other sessions.
+    const runs = (await backend.call(WATCHES).catch(() => null))?.runs ?? []
+    return botsView(roster ?? await backend.call(BOTS), { runtime: ctx.get('kodeAgents'), sessions, archived: new Set(registry?.archivedSessionIds ?? []), workspaces: registry?.list() ?? [], runs })
+  }
+  const homes = async (only) => {
+    const roster = await backend.call(BOTS)
+    for (const bot of roster.bots) if (!only || bot.id === only) await ensureBotHome(ctx, roster, bot).catch(() => {})
+    return roster
   }
   const start = async input => {
     const roster = await backend.call(BOTS)
@@ -127,7 +159,14 @@ export function registerBotsApi(ctx, backend) {
       const input = JSON.parse(body)
       if (ROSTER_ACTIONS.includes(input?.action)) {
         await backend.call(BOTS, input)
+        // Every bot has its own folder from the start.
+        if (input.action === 'upsert') await homes()
         return send(res, 200, await view())
+      }
+      if (input?.action === 'home') {
+        const roster = await backend.call(BOTS), bot = roster.bots.find(row => row.id === input.id)
+        if (!bot) throw new Error('这个伙伴已不存在')
+        return send(res, 200, await ensureBotHome(ctx, roster, bot))
       }
       if (input?.action === 'start') return send(res, 200, await start(input))
       if (WATCH_ACTIONS.includes(input?.action)) return send(res, 200, await backend.call(WATCHES, { ...input, action: input.action.slice('watch_'.length) }))

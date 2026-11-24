@@ -136,3 +136,24 @@ test('watch actions pass through to Kode as its own actions', async () => {
   await handler({ method: 'GET', url: '/api/kode/bots?watches=1&after=x' }, res())
   assert.deepEqual(calls.at(-1), ['/api/v1/messaging/workbench/watches', undefined])
 })
+
+test("each bot lists only its own sessions: main, ones in its folder and its watch runs", () => {
+  const roster = {
+    bots: [{ id: 'b1', name: 'Kit', backend_key: 'claude', main_session: { runtime: 'dsh', session_id: 'main' } }, { id: 'b2', name: 'Rex', backend_key: 'claude' }],
+    homes: { b1: '/bots/b1', b2: '/bots/b2' },
+  }
+  const sessions = [
+    { sessionId: 'main', cwd: '/repo', title: 'Kit', updatedAt: 3 },
+    { sessionId: 'art', cwd: '/bots/b1', title: 'Kit · 生成头像与背景', updatedAt: 5 },
+    { sessionId: 'deep', cwd: '/bots/b1/sub', title: 'x', updatedAt: 1 },
+    { sessionId: 'run', cwd: '/repo', title: 'Kit · Docs', updatedAt: 4 },
+    { sessionId: 'rex', cwd: '/bots/b2', title: 'Rex side', updatedAt: 2 },
+    { sessionId: 'b10', cwd: '/bots/b10', title: 'not b1', updatedAt: 9 },
+    { sessionId: 'gone', cwd: '/bots/b1', title: 'archived', updatedAt: 9 },
+  ]
+  const view = botsView(roster, { runtime, sessions, archived: new Set(['gone']), workspaces: [], runs: [{ bot: 'b1', session_uuid: 'run' }, { bot: 'b2', session_uuid: 'main' }] })
+  assert.deepEqual(view.bots[0].sessions.map(row => [row.id, row.kind]), [['art', 'side'], ['run', 'watch'], ['main', 'main'], ['deep', 'side']])
+  assert.deepEqual(view.bots[1].sessions.map(row => row.id), ['rex'], 'another bot never sees them')
+  assert.equal(view.bots[0].home, '/bots/b1')
+  assert.equal(view.bots[0].agent_id, 'p-claude')
+})
