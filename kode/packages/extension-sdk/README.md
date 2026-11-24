@@ -21,6 +21,7 @@ for await (const event of kode.events({ after: event_cursor, kinds: ['session.tu
 | `sessions.read` | list and read sessions it does not own; `owner: 'any'` |
 | `events.subscribe` | the event stream |
 | `ui.notify` | `badge(panel, count)` and `notify({ title, body, panel })` without a page open |
+| `events.publish` | `publish(name, payload)`: an event `<extension-id>/<name>` the user's bots can watch (关注) |
 | `tools.provide` | answer `contributes.agentTools` with `serveTools(handlers)`; the tools appear in the MCP of sessions this extension starts (optionally only those with given labels) |
 | `bots.read` | list bots and start sessions as one (`createSession({ bot: 'default', ... })`) |
 

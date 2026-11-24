@@ -94,8 +94,14 @@ export async function startExtensionWatch(onViewAction: (action: ExtensionViewAc
 }
 
 /** Badges go to the rail (and dsh's sidebar); notifications become toasts
- *  named after the extension, and only for enabled extensions. */
+ *  named after the extension, and only for enabled extensions. Extension id
+ *  `kode` is reserved for Kode's own notices. */
 function onUiMessage(message: ExtensionUiMessage) {
+  // Kode's own notices (a bot's watch run finished or needs you).
+  if (message.extension === 'kode') {
+    if (message.type === 'notify') pushToast({ severity: message.severity, title: message.title, detail: message.body || undefined, durationMs: 8000 })
+    return
+  }
   const ext = get(extensions).find((e) => e.id === message.extension && e.enabled)
   if (!ext) return
   if (message.type === 'badge') {

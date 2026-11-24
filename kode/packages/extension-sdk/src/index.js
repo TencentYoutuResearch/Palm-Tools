@@ -60,6 +60,9 @@ export class KodeExtension {
   /** A Kode notification; `panel` names the panel it is about. Needs `ui.notify`. */
   notify({ title, body = '', severity = 'info', panel } = {}) { return this.request('POST', '/ui/notify', { title, body, severity, panel }) }
 
+  /** Publish `<extension-id>/<name>` for the user's bots to watch. Needs `events.publish`. */
+  publish(name, payload = {}) { return this.request('POST', '/events/publish', { name, payload }) }
+
   /**
    * Answer this extension's agent tools (`contributes.agentTools`, needs
    * `tools.provide`). `handlers[name](arguments, session)` returns the text
