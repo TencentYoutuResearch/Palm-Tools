@@ -65,6 +65,7 @@ export class KodeExtension {
   hello(): Promise<{ api_version: number; extension_id: string; capabilities: string[]; features: string[]; node_id: string; event_cursor: number; runtimes: { gui: boolean } }>
   listSessions(options?: { owner?: 'self' | 'any'; label?: string }): Promise<Session[]>
   getSession(id: number): Promise<Session>
+  serveTools(handlers: Record<string, (args: Record<string, unknown>, session: { id: number; labels: string[]; meta: unknown; parent: number | null }) => unknown>, options?: { signal?: AbortSignal }): Promise<void>
   listBots(): Promise<{ bots: Bot[]; default_bot: string | null }>
   badge(panel: string, count: number): Promise<{ ok: true }>
   notify(notification: { title: string; body?: string; severity?: 'info' | 'success' | 'warning' | 'error'; panel?: string }): Promise<{ ok: true }>

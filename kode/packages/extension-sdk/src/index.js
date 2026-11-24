@@ -60,6 +60,33 @@ export class KodeExtension {
   /** A Kode notification; `panel` names the panel it is about. Needs `ui.notify`. */
   notify({ title, body = '', severity = 'info', panel } = {}) { return this.request('POST', '/ui/notify', { title, body, severity, panel }) }
 
+  /**
+   * Answer this extension's agent tools (`contributes.agentTools`, needs
+   * `tools.provide`). `handlers[name](arguments, session)` returns the text
+   * for the model or throws; runs until `signal` aborts.
+   */
+  async serveTools(handlers, { signal } = {}) {
+    while (!signal?.aborted) {
+      let calls
+      try {
+        calls = (await this.request('GET', '/tools/next?wait=25')).calls ?? []
+      } catch (error) {
+        if (error instanceof KodeApiError && (error.status === 401 || error.status === 403)) throw error
+        await sleep(2000, signal)
+        continue
+      }
+      await Promise.all(calls.map(async call => {
+        let content, isError = false
+        try {
+          const handler = handlers[call.name]
+          if (!handler) throw new Error(`No handler for ${call.name}`)
+          content = await handler(call.arguments ?? {}, call.session)
+        } catch (error) { content = error.message; isError = true }
+        await this.request('POST', `/tools/${encodeURIComponent(call.id)}/result`, { content: typeof content === 'string' ? content : JSON.stringify(content ?? ''), is_error: isError }).catch(() => {})
+      }))
+    }
+  }
+
   /** The user's bots: identity and limits, never their personas. */
   listBots() { return this.request('GET', '/bots') }
 

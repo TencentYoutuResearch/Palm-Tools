@@ -349,4 +349,11 @@ dsh 全屏时 Kode 的导航栏是隐藏的，面板改由 dsh 承载：
 - 后台把它们放进一条只给 Kode 主进程看的 SSE（`/api/v1/messaging/extensions/ui/stream`，admin），新订阅先补发当前角标；Kode GUI 转成导航栏角标和提示，dsh 全屏时角标随面板列表推给 dsh，提示由已有的转发画在 dsh 上。
 - SDK 增加 `badge()`、`notify()`；示例插件改由后台计数，打开面板时清零。
 
+### P0-b 第四步：插件给 agent 加工具
+
+- manifest `contributes.agentTools`：`name`、`description`、`inputSchema`、`labels`（可选），需要 `tools.provide`。Kode 签发 token 时把定义一起交给后台（随授权持久化，后台重启也在）；名字不能用 `kode_`、`memory_` 开头。
+- 每个 CLI 的 session MCP 在 `tools/list` 时向后台要"这个会话能用的扩展工具"：只有该扩展自己建的会话（且带指定标签时）才看得到。刚建的会话可能比归属记录先注册，后台会对 30 秒内新建的会话稍等片刻，其他会话立即返回。
+- 调用时 MCP 把参数交给后台，扩展用长轮询 `GET /api/ext/v1/tools/next` 取调用、`POST /api/ext/v1/tools/:id/result` 回结果（最长 120 秒）；扩展后台地址不对外暴露。别的扩展回不了不属于自己的调用。
+- SDK 增加 `serveTools(handlers)`。
+
 尚未做：`sidebarSections`、`sessionActions`、`cards`、插件经扩展 API 推角标（目前只能由面板页面上报）。

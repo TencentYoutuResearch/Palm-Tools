@@ -381,10 +381,11 @@ impl ExtensionHost {
             }
         });
         let capabilities = manifest.api_capabilities();
+        let tools = manifest.contributes.agent_tools.clone();
         let grant_for = id.to_string();
         let spawn_env = (!capabilities.is_empty()).then(|| {
             Box::new(move || {
-                tauri::async_runtime::block_on(api_grant(&grant_for, &capabilities))
+                tauri::async_runtime::block_on(api_grant(&grant_for, &capabilities, &tools))
             }) as Box<dyn FnOnce() -> Result<Vec<(String, String)>, String>>
         });
         self.backends.ensure(backend::Launch {
@@ -406,10 +407,10 @@ impl ExtensionHost {
 /// `KODE_BUNDLED_EXTENSIONS_DIR` overrides it for development.
 /// Mint the extension's scoped token (revoking its previous one) and tell the
 /// backend where the extension API lives. The admin token stays in Kode.
-async fn api_grant(id: &str, capabilities: &[String]) -> Result<Vec<(String, String)>, String> {
+async fn api_grant(id: &str, capabilities: &[String], tools: &[serde_json::Value]) -> Result<Vec<(String, String)>, String> {
     let granted = crate::backend_runtime::call(
         "/extensions/grants",
-        Some(serde_json::json!({"extension_id": id, "capabilities": capabilities})),
+        Some(serde_json::json!({"extension_id": id, "capabilities": capabilities, "agent_tools": tools})),
     )
     .await
     .map_err(|e| format!("extension API unavailable: {e}"))?;

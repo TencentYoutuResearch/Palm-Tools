@@ -115,10 +115,14 @@ fn host(ctx: Arc<crate::Ctx>, recorded: Arc<Mutex<Recorded>>) -> tokio::task::Jo
 }
 
 async fn grant(s: &Server, extension: &str, capabilities: &[&str]) -> String {
+    grant_with_tools(s, extension, capabilities, json!([])).await
+}
+
+async fn grant_with_tools(s: &Server, extension: &str, capabilities: &[&str], tools: Value) -> String {
     let response: Value = reqwest::Client::new()
         .post(format!("{}/api/v1/messaging/extensions/grants", s.url))
         .bearer_auth(ADMIN)
-        .json(&json!({"extension_id":extension,"capabilities":capabilities}))
+        .json(&json!({"extension_id":extension,"capabilities":capabilities,"agent_tools":tools}))
         .send()
         .await
         .unwrap()
@@ -513,4 +517,60 @@ async fn badges_and_notifications_reach_the_host_feed_with_badge_replay() {
     tokio::time::timeout(std::time::Duration::from_secs(5), read).await.expect("feed delivered");
     assert_eq!(messages[0], json!({"type":"badge","extension":"team","panel":"team","count":3}), "a new follower gets the current badge first");
     assert_eq!((messages[1]["type"].as_str(), messages[1]["extension"].as_str(), messages[1]["panel"].as_str()), (Some("notify"), Some("team"), Some("team")));
+}
+
+
+/// A CLI's session MCP for `native`, as Kode registers it.
+fn session_token(s: &Server, native: &str, id: u64) -> String {
+    let registration = s.hub.store.register(crate::messaging::model::RegisterRequest { session_id: native.into(), title: "t".into(), runtime: "dsh".into(), owner_token: None }).unwrap();
+    s.hub.native.lock().insert(native.into(), id);
+    registration.owner_token
+}
+
+#[tokio::test]
+async fn extension_tools_reach_only_their_sessions_and_round_trip_through_the_extension() {
+    let s = server().await;
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    let _host = host(s.ctx.clone(), recorded.clone());
+    let client = reqwest::Client::new();
+    let grants = format!("{}/api/v1/messaging/extensions/grants", s.url);
+    let tool = json!([{"name":"team_channel_post","description":"Post to the call's channel","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}},"labels":["team:call"]}]);
+    let without = client.post(&grants).bearer_auth(ADMIN).json(&json!({"extension_id":"team","capabilities":["sessions.create"],"agent_tools":tool})).send().await.unwrap();
+    assert_eq!(without.status(), 400, "tools need tools.provide");
+    let reserved = client.post(&grants).bearer_auth(ADMIN).json(&json!({"extension_id":"team","capabilities":["tools.provide"],"agent_tools":[{"name":"kode_sessions_send","description":"x"}]})).send().await.unwrap();
+    assert_eq!(reserved.status(), 400, "Kode's own tool names are reserved");
+    let token = grant_with_tools(&s, "team", &["sessions.create", "tools.provide"], tool).await;
+
+    let created: Value = client.post(format!("{}/api/ext/v1/sessions", s.url)).bearer_auth(&token)
+        .json(&json!({"backend_key":"claude","cwd":"/tmp","labels":["team:call"],"idempotency_key":"t1"}))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let owned = session_token(&s, "gui:1:1", created["session"]["id"].as_u64().unwrap());
+    let stranger = session_token(&s, "gui:9:9", 999_999);
+
+    let listed: Value = client.get(format!("{}/api/v1/messaging/extensions/tools", s.url)).bearer_auth(&owned).send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed["tools"][0]["name"], "team_channel_post");
+    let started = std::time::Instant::now();
+    let none: Value = client.get(format!("{}/api/v1/messaging/extensions/tools", s.url)).bearer_auth(&stranger).send().await.unwrap().json().await.unwrap();
+    assert!(none["tools"].as_array().unwrap().is_empty());
+    assert!(started.elapsed() < std::time::Duration::from_millis(500), "sessions nobody owns answer at once");
+
+    let worker = {
+        let (url, token) = (s.url.clone(), token.clone());
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let batch: Value = client.get(format!("{url}/api/ext/v1/tools/next?wait=10")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+            let call = &batch["calls"][0];
+            assert_eq!(call["name"], "team_channel_post");
+            assert_eq!(call["session"]["labels"], json!(["team:call"]));
+            let text = format!("posted: {}", call["arguments"]["text"].as_str().unwrap());
+            client.post(format!("{url}/api/ext/v1/tools/{}/result", call["id"].as_str().unwrap())).bearer_auth(&token).json(&json!({"content":text})).send().await.unwrap().error_for_status().unwrap();
+        })
+    };
+    let result: Value = client.post(format!("{}/api/v1/messaging/extensions/tools/call", s.url)).bearer_auth(&owned)
+        .json(&json!({"name":"team_channel_post","arguments":{"text":"hello channel"}})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(result, json!({"text":"posted: hello channel","is_error":false}));
+    worker.await.unwrap();
+    let foreign = client.post(format!("{}/api/v1/messaging/extensions/tools/call", s.url)).bearer_auth(&stranger)
+        .json(&json!({"name":"team_channel_post","arguments":{}})).send().await.unwrap();
+    assert_eq!(foreign.status(), 404, "a session the extension does not own cannot call its tools");
 }

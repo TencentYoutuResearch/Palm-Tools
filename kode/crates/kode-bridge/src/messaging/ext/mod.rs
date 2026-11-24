@@ -5,6 +5,7 @@
 //! pushed over SSE, so no extension polls.
 mod projector;
 mod store;
+mod tools;
 mod ui;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,7 @@ pub const CAPABILITIES: &[&str] = &[
     "events.subscribe",
     "bots.read",
     "ui.notify",
+    "tools.provide",
 ];
 
 const FEATURES: &[&str] = &[
@@ -54,6 +56,7 @@ const FEATURES: &[&str] = &[
     "events.stream",
     "bots",
     "ui.notify",
+    "agent_tools",
 ];
 const MAX_LABELS: usize = 16;
 const MAX_META_BYTES: usize = 16 * 1024;
@@ -67,6 +70,7 @@ pub struct Gateway {
     wake: tokio::sync::Notify,
     grace: Duration,
     ui: ui::Feed,
+    tools: tools::Tools,
 }
 
 impl Gateway {
@@ -79,6 +83,12 @@ impl Gateway {
 
     fn with_store(store: store::Store, grace: Duration) -> Self {
         let (latest, _) = tokio::sync::watch::channel(store.latest_seq());
+        let tools = tools::Tools::default();
+        for (key, value) in store.states_with_prefix("tools:").unwrap_or_default() {
+            if let Ok(defs) = serde_json::from_value(value) {
+                tools.set(&key["tools:".len()..], defs);
+            }
+        }
         Self {
             store,
             latest,
@@ -86,6 +96,7 @@ impl Gateway {
             wake: Default::default(),
             grace,
             ui: Default::default(),
+            tools,
         }
     }
 
@@ -202,6 +213,10 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/ext/v1/ui/badge", post(ui::badge))
         .route("/api/ext/v1/ui/notify", post(ui::notify))
         .route("/api/v1/messaging/extensions/ui/stream", get(ui::stream))
+        .route("/api/v1/messaging/extensions/tools", get(tools::list))
+        .route("/api/v1/messaging/extensions/tools/call", post(tools::call))
+        .route("/api/ext/v1/tools/next", get(tools::next))
+        .route("/api/ext/v1/tools/:id/result", post(tools::result))
         .route("/api/ext/v1/events", get(events))
         .route("/api/ext/v1/events/stream", get(stream))
         .with_state(hub)
@@ -212,6 +227,9 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
 struct GrantRequest {
     extension_id: String,
     capabilities: Vec<String>,
+    /// Agent tools from the manifest (`contributes.agentTools`).
+    #[serde(default)]
+    agent_tools: Vec<tools::ToolDef>,
 }
 async fn grant(
     State(hub): State<Arc<Hub>>,
@@ -235,7 +253,14 @@ async fn grant(
             format!("unknown capability {unknown}"),
         ));
     }
+    tools::validate(&req.agent_tools)?;
+    if !req.agent_tools.is_empty() && !req.capabilities.iter().any(|c| c == "tools.provide") {
+        return Err(Error(StatusCode::BAD_REQUEST, "agent tools need the tools.provide capability".into()));
+    }
     let token = hub.ext.store.grant(&req.extension_id, &req.capabilities)?;
+    // Kept with the grant so a backend restart still knows them.
+    hub.ext.store.set_state(&format!("tools:{}", req.extension_id), &serde_json::to_value(&req.agent_tools).map_err(anyhow::Error::from)?)?;
+    hub.ext.tools.set(&req.extension_id, req.agent_tools);
     Ok(Json(json!({"token":token,"api_version":API_VERSION})))
 }
 async fn revoke(
@@ -245,6 +270,8 @@ async fn revoke(
 ) -> Result<Json<Value>> {
     admin(&hub, &h)?;
     hub.ext.store.revoke(&extension)?;
+    hub.ext.store.set_state(&format!("tools:{extension}"), &json!([]))?;
+    hub.ext.tools.clear(&extension);
     Ok(Json(json!({"revoked":true})))
 }
 

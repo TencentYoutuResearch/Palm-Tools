@@ -101,7 +101,16 @@ impl Client {
     async fn tools(&self) -> Result<Vec<Value>> {
         let settings = self.call("integrations", None).await?;
         let capabilities = self.call("node", None).await?;
-        Ok(tool_definitions()
+        // Tools extensions contribute to this session; an older backend has none.
+        let contributed: Vec<Value> = self
+            .call("extensions/tools", None)
+            .await
+            .map(|value| value["tools"].as_array().cloned().unwrap_or_default())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tool| json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["inputSchema"],"x-kode-extension":true}))
+            .collect();
+        let builtin: Vec<Value> = tool_definitions()
             .into_iter()
             .filter(|tool| {
                 if matches!(tool["name"].as_str(), Some("kode_sessions_cancel_input" | "kode_sessions_cancellation_status")) && capabilities["input_cancellation"] != true { return false; }
@@ -116,11 +125,22 @@ impl Client {
                     settings["messaging_enabled"] == true
                 }
             })
-            .collect())
+            .collect();
+        Ok(builtin.into_iter().chain(contributed).collect())
     }
     async fn execute(&self, name: &str, args: Value) -> Result<Value> {
-        if !self.tools().await?.iter().any(|tool| tool["name"] == name) {
+        let tools = self.tools().await?;
+        let Some(tool) = tools.iter().find(|tool| tool["name"] == name) else {
             bail!("This capability is disabled in Kode settings")
+        };
+        if tool["x-kode-extension"] == true {
+            let result = self.call("extensions/tools/call", Some(json!({"name":name,"arguments":args}))).await?;
+            let text = result["text"].as_str().unwrap_or_default().to_owned();
+            if result["is_error"] == true {
+                bail!("{text}")
+            }
+            // Extension results are already text for the model.
+            return Ok(Value::String(text));
         }
         if name.starts_with("memory_") {
             return self
@@ -204,10 +224,10 @@ pub async fn run() -> Result<()> {
             if !active {return if method=="tools/list"{Ok(json!({"tools":[]}))}else{bail!("Session tools require a Kode-owned GUI session")}}
             if client.is_none(){client=Some(Client::bootstrap().await?)}
             let client=client.as_ref().context("Session client unavailable")?;
-            if method=="tools/list"{return Ok(json!({"tools":client.tools().await?}))}
+            if method=="tools/list"{return Ok(json!({"tools":client.tools().await?.into_iter().map(|mut tool|{ if let Some(map)=tool.as_object_mut(){map.remove("x-kode-extension");} tool }).collect::<Vec<_>>()}))}
             if method=="tools/call"{
                 let result=client.execute(request["params"]["name"].as_str().unwrap_or_default(),request["params"]["arguments"].clone()).await;
-                return Ok(match result{Ok(value)=>json!({"content":[{"type":"text","text":value.to_string()}]}),Err(error)=>json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]})})
+                return Ok(match result{Ok(value)=>json!({"content":[{"type":"text","text":match value { Value::String(text)=>text, value=>value.to_string() }}]}),Err(error)=>json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]})})
             }
             bail!("Method not found")
         }.await;

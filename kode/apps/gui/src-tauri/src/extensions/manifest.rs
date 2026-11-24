@@ -84,6 +84,10 @@ pub struct Contributes {
     pub session_views: Vec<SessionView>,
     #[serde(default)]
     pub panels: Vec<Panel>,
+    /// MCP tools for the sessions this extension starts. Kode's backend
+    /// validates them when it grants the extension's token.
+    #[serde(default, rename = "agentTools")]
+    pub agent_tools: Vec<serde_json::Value>,
 }
 
 /// A page in Kode's main area (beside the session sidebar, not over the
@@ -221,6 +225,9 @@ impl Manifest {
             if panel.icon.as_ref().is_some_and(|icon| icon.len() > 40 || !icon.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')) {
                 bail!("panel `{}` icon must be a Kode icon name", panel.id);
             }
+        }
+        if !self.contributes.agent_tools.is_empty() && (!self.has("tools.provide") || self.backend.is_none()) {
+            bail!("agentTools need the tools.provide capability and a backend to answer them");
         }
         if !self.contributes.panels.is_empty() && (!self.has("ui.panels") || self.backend.is_none()) {
             bail!("panels need the ui.panels capability and a backend to serve them");

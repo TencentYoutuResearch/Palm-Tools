@@ -333,6 +333,17 @@ impl Store {
             .transpose()
     }
 
+    pub fn states_with_prefix(&self, prefix: &str) -> Result<Vec<(String, Value)>> {
+        let db = self.db.lock();
+        let mut stmt = db.prepare("SELECT key,value FROM ext_state WHERE substr(key,1,length(?1))=?1")?;
+        let rows = stmt.query_map([prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.map(|row| {
+            let (key, raw) = row?;
+            Ok((key, serde_json::from_str(&raw)?))
+        })
+        .collect()
+    }
+
     pub fn set_state(&self, key: &str, value: &Value) -> Result<()> {
         self.db.lock().execute(
             "INSERT INTO ext_state VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
