@@ -18,8 +18,10 @@ pub trait HideConsole: Sized {
     fn hide_console(self) -> Self;
 }
 
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 
 #[cfg(windows)]
 impl HideConsole for StdCommand {
@@ -30,12 +32,14 @@ impl HideConsole for StdCommand {
     }
 }
 
+
 #[cfg(not(windows))]
 impl HideConsole for StdCommand {
     fn hide_console(self) -> Self {
         self
     }
 }
+
 
 #[cfg(windows)]
 impl HideConsole for TokioCommand {
@@ -45,12 +49,14 @@ impl HideConsole for TokioCommand {
     }
 }
 
+
 #[cfg(not(windows))]
 impl HideConsole for TokioCommand {
     fn hide_console(self) -> Self {
         self
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -73,6 +79,8 @@ mod tests {
     }
 
     #[cfg(windows)]
+    // Use a real console-subsystem child so this test covers the Win32 result,
+    // not only our internal construction flags.
     fn console_probe_script() -> &'static str {
         r#"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class KodeConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; if ([KodeConsoleProbe]::GetConsoleWindow() -eq [IntPtr]::Zero) { [Console]::Out.Write("NO_CONSOLE") } else { [Console]::Out.Write("HAS_CONSOLE") }"#
     }
