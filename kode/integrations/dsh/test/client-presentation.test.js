@@ -429,16 +429,18 @@ test('plugin detail selection follows a stable package path when polling reorder
  assert.match(logo.props.src,/logo=multi&package=0/)
 })
 
-test('Kode settings keep both the native settings section and sidebar panel entries', () => {
+test('Kode settings keep the native settings section and an entry in the sidebar More menu', () => {
   const selected = [], c = client(undefined, {}, { layout: { selectPanel: id => selected.push(id) } })
   const settings = c.ctx.slots.entries('settings.section').find(row => row.options.id === 'agent-presets')
   assert.ok(settings, JSON.stringify(c.ctx.slots.entries('settings.section').map(row => row.options)))
   assert.equal(settings.options.name, 'settings.section'); assert.equal(settings.options.label(), 'Kode')
   assert.equal(c.ctx.slots.entries('settings.trigger').length, 0)
-  const sidebar = c.ctx.slots.entries('sidebar.panellist').find(row => row.options.id === 'kode-settings')
-  assert.ok(sidebar, JSON.stringify(c.ctx.slots.entries('sidebar.panellist').map(row => row.options)))
-  assert.equal(sidebar.options.name, 'sidebar.panellist'); assert.equal(sidebar.options.label, 'Kode')
-  assert.equal(sidebar.component, 'IconAgentPresetOutlineRegular')
+  assert.ok(!c.ctx.slots.entries('sidebar.panellist').some(row => ['kode-settings', 'kode-leave', 'kode-resume'].includes(row.options.id)), 'Kode entries are not sidebar rows')
+  const more = c.ctx.slots.entries('sidebar.panellist.actions').find(row => row.options.id === 'kode-entries')
+  assert.ok(more, JSON.stringify(c.ctx.slots.entries('sidebar.panellist.actions').map(row => row.options)))
+  const items = more.component({ onDismiss: () => {} })
+  const settingsItem = items.children.find(item => item && item.children?.includes('Kode 设置'))
+  settingsItem.props.onSelect(); assert.equal(selected.at(-1), 'kode-settings')
   const main = c.entry('main', 'kode-settings'), wrapper = main(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /插件与集成/); assert.doesNotMatch(JSON.stringify(tree), /Agent 共享/)
   assert.match(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/)
@@ -447,7 +449,7 @@ test('Kode settings keep both the native settings section and sidebar panel entr
   assert.match(source,/\.kode-settings-brand-avatar\{[^}]*width:32px;height:32px/)
   assert.match(source,/\.kode-settings-brand p\{[^}]*font-size:12px;line-height:18px/)
   c.ctx.layout.selectPanel('kode-settings')
-  assert.deepEqual(selected, ['kode-settings'])
+  assert.deepEqual(selected, ['kode-settings', 'kode-settings'])
   assert.equal(c.shell.component, c.native)
 })
 
