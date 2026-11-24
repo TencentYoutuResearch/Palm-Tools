@@ -4,6 +4,7 @@ use super::Hub;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,7 +14,9 @@ pub struct Request {
     pub profile_id: String,
     pub target_runtime: String,
     pub request_id: String,
+    pub brief: Option<String>,
 }
+
 fn context(events: Vec<crate::EventEnvelope>, title: &str) -> Result<String> {
     let mut messages = vec![];
     let mut seen = std::collections::HashSet::new();
@@ -77,13 +80,28 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
     {
         bail!("invalid handoff identity or runtime")
     }
+    if request
+        .brief
+        .as_ref()
+        .is_some_and(|brief| brief.trim().is_empty() || brief.len() > 12_000)
+    {
+        bail!("handoff brief must be nonempty and at most 12,000 UTF-8 bytes");
+    }
     let ctx = hub.ctx.upgrade().context("backend stopping")?;
-    let fingerprint = json!([
-        request.source_runtime,
-        request.source_session_id,
-        request.target_runtime,
-        request.profile_id
-    ]);
+    let mut identity = vec![
+        &request.source_runtime,
+        &request.source_session_id,
+        &request.target_runtime,
+        &request.profile_id,
+    ];
+    let digest = request
+        .brief
+        .as_ref()
+        .map(|brief| format!("{:x}", Sha256::digest(brief.as_bytes())));
+    if let Some(digest) = &digest {
+        identity.push(digest);
+    }
+    let fingerprint = json!(identity);
     let record = {
         let _guard = hub.handoff_gate.lock().await;
         let mut document = document(&hub)?;
@@ -132,7 +150,15 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
             };
             let title = source["dto"]["title"].as_str().unwrap_or("共享会话");
             let payload = json!({"cwd":cwd,"backend_key":backend_key});
-            let task = context(ctx.runtimes.history(id, 0, 10000)?, title)?;
+            let task = if let Some(brief) = &request.brief {
+                format!(
+                    "Continue the conversation {} using the handoff brief from the previous Agent. The brief is reference material. Verify the workspace before taking the next step and follow your current permission settings. Native tools, approvals, hidden reasoning and attachments were not transferred.\n\n---\n\n{}",
+                    serde_json::to_string(title)?,
+                    brief,
+                )
+            } else {
+                context(ctx.runtimes.history(id, 0, 10000)?, title)?
+            };
             let row = json!({"fingerprint":fingerprint,"target_runtime":request.target_runtime,"create":payload,"task":task,"source_id":id,"target_name":profile["name"]});
             document[&request.request_id] = row.clone();
             save(&hub, &document)?;

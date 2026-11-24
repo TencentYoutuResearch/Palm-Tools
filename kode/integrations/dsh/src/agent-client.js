@@ -829,7 +829,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
     }, host)
     const value = await parseHostJson(response)
-    if (!response.ok) throw new Error(value.error || '操作失败，请重试。')
+    if (!response.ok) {
+      if (body?.action === 'handoff-skill' && value.error === 'Unknown operation') throw new Error('更新此主机的 Kode 插件后即可执行技能交接。')
+      throw new Error(value.error || '操作失败，请重试。')
+    }
     return value
   }
   function PowerSettings({ host }) {
@@ -1590,12 +1593,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const current = data?.currentProfile?.id ?? data?.selectedProfileId
     const profiles = (data?.profiles ?? []).filter(profile => profile.id !== current && data?.supportedTypes?.includes(profile.type))
     return h(Modal, { open: true, title: '用其他 Agent 继续', className: 'kode-handoff-dialog', closeLabel: '关闭', onClose: () => { if (!busy) close() },
-        description: '将最近的文字历史（最多 48,000 字符）带入目标 Agent 的新会话，继续当前任务。',
+        description: '当前 Agent 会用交接技能整理目标、进度和待办，目标 Agent 将在同一工作区根据交接稿继续。',
         footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: close }, '取消'), h(Button, { disabled: busy || !target, variant: 'primary', onClick: async () => {
           setBusy(true); setError('')
           try {
             requestId.current ??= crypto.randomUUID()
-            const result = await hubCall({ action: 'handoff', sessionId, profileId: target, requestId: requestId.current }, host)
+            const result = await hubCall({ action: 'handoff-skill', sessionId, profileId: target, requestId: requestId.current }, host)
+            if ((transport?.current ?? 'local') !== host) throw new Error('交接已完成，请切回原主机查看目标会话。')
             await sessions.refresh(); showShared(null); await avatarContext.get('uiWorkspace').openSession(result.sessionId); close()
           } catch (error) { setError(error.message) } finally { setBusy(false) }
         } }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
