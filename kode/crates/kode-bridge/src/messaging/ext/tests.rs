@@ -624,6 +624,9 @@ async fn published_events_wake_a_bot_into_its_own_run_session() {
     let work = tempfile::tempdir().unwrap();
     let kit = bots(&s, json!({"action":"upsert","bot":{"name":"Kit","persona":"You triage.","backend_key":"claude","permission_ceiling":"default","default_cwd":work.path()}})).await;
     let kit_id = kit["default_bot"].as_str().unwrap().to_owned();
+    // Kit's main conversation, where run results are posted.
+    publish_as(&s.ctx, "gui:main", "claude", "idle", json!([]));
+    bots(&s, json!({"action":"set_main_session","id":kit_id,"session":{"runtime":"gui","session_id":"gui:main"}})).await;
 
     let bad = client
         .post(format!("{}/api/v1/messaging/workbench/watches", s.url))
@@ -685,6 +688,30 @@ async fn published_events_wake_a_bot_into_its_own_run_session() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let view = until(&s, "settled runs", |_| true).await;
     assert_eq!(view["runs"].as_array().unwrap().len(), 1, "a run's own turn never triggers a watch");
+
+    for _ in 0..100 {
+        if recorded.lock().inputs.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let posted = recorded.lock().inputs.get(1).cloned().unwrap_or_default();
+    assert!(posted.contains("【关注 · Mentions】") && posted.contains("Build is green"), "the conclusion reaches the main conversation: {posted}");
+    // The main conversation answering that is no reason to wake Kit again.
+    publish_as(
+        &s.ctx,
+        "gui:main",
+        "claude",
+        "idle",
+        json!([
+            {"key":"m1","kind":"session.status","payload":{"status":"busy"}},
+            {"key":"m2","kind":"message","payload":{"id":"m2","role":"assistant","text":"Noted."}},
+            {"key":"m3","kind":"session.status","payload":{"status":"idle"}},
+        ]),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let view = until(&s, "settled runs", |_| true).await;
+    assert_eq!(view["runs"].as_array().unwrap().len(), 1, "a bot's main conversation never triggers its own watches");
 
     let seen = watches(&s, json!({"action":"seen","bot":kit_id})).await;
     assert!(seen["unseen"].get(&kit_id).is_none());

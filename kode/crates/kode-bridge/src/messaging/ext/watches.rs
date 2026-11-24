@@ -221,9 +221,12 @@ fn observe(hub: &Hub, state: &mut Dispatcher, session: u64, topic: &str, payload
         enrich(hub, session, payload)
     };
     let workspace = payload["workspace"].as_str().map(str::to_owned);
+    // A bot's own main conversation never wakes that bot: run results are
+    // posted there, and its replies must not start another run.
+    let own_bot = if session == 0 { None } else { main_owner(hub, session) };
     for index in 0..state.watches.len() {
         let watch = &state.watches[index];
-        if !watch.spec.matches(topic, &payload) {
+        if !watch.spec.matches(topic, &payload) || own_bot.as_deref() == Some(watch.bot.as_str()) {
             continue;
         }
         let (id, bot, coalesce) = (watch.id.clone(), watch.bot.clone(), watch.spec.policy.coalesce_secs);
@@ -237,6 +240,12 @@ fn observe(hub: &Hub, state: &mut Dispatcher, session: u64, topic: &str, payload
         }
         batch.events.push((topic.to_owned(), payload.clone()));
     }
+}
+
+fn main_owner(hub: &Hub, session: u64) -> Option<String> {
+    let ctx = hub.ctx.upgrade()?;
+    let (_, roster) = crate::messaging::bots::roster(hub).ok()?;
+    roster.bots.into_iter().find(|bot| bot.main_session.as_ref().is_some_and(|m| ctx.runtimes.find(&m.runtime, &m.session_id) == Some(session))).map(|bot| bot.id)
 }
 
 /// Session events carry who and where, so watches can filter on them.
@@ -269,11 +278,16 @@ fn follow_run(hub: &Hub, state: &mut Dispatcher, run: &RunRecord, topic: &str, p
         return;
     }
     let store = &hub.ext.store;
-    let policy = state.watches.iter().find(|w| w.id == run.watch_id).map(|w| w.spec.policy.notify.clone()).unwrap_or_else(|| "attention".into());
+    let watch = state.watches.iter().find(|w| w.id == run.watch_id);
+    let policy = watch.map(|w| w.spec.policy.notify.clone()).unwrap_or_else(|| "attention".into());
+    let report = watch.filter(|w| w.spec.policy.report_to_main).map(|w| w.spec.name.clone());
     let outcome = match topic {
         "session.turn_completed" if payload["outcome"] == "idle" => {
             let summary: String = payload["final_message"]["text"].as_str().unwrap_or_default().chars().take(SUMMARY_CHARS).collect();
             let _ = store.finish_run(&run.id, "completed", &summary, None);
+            if let Some(name) = report.filter(|_| !summary.trim().is_empty()) {
+                report_to_main(hub, run, &name, &summary);
+            }
             Some(("completed", summary))
         }
         "session.turn_completed" | "session.exited" => {
@@ -302,6 +316,26 @@ fn follow_run(hub: &Hub, state: &mut Dispatcher, run: &RunRecord, topic: &str, p
             batch.due = batch.due.min(Instant::now());
         }
     }
+}
+
+/// The conclusion goes to the bot's main conversation as a queued message,
+/// so the conversation the user keeps with the bot knows what it did.
+fn report_to_main(hub: &Hub, run: &RunRecord, watch: &str, summary: &str) {
+    let Some(ctx) = hub.ctx.upgrade() else { return };
+    let Ok((_, roster)) = crate::messaging::bots::roster(hub) else { return };
+    let Some(main) = roster.bots.iter().find(|b| b.id == run.bot).and_then(|b| b.main_session.clone()) else { return };
+    // The run itself never reports into itself.
+    let Some(id) = ctx.runtimes.find(&main.runtime, &main.session_id).filter(|id| Some(*id) != run.session_id) else { return };
+    let text = format!(
+        "【关注 · {watch}】这是你在独立会话里完成的一次关注任务，结论如下，记下即可，不用再做别的：\n\n{}",
+        summary.chars().take(SUMMARY_CHARS).collect::<String>()
+    );
+    let rid = format!("watch.{}.main", run.id);
+    tokio::spawn(async move {
+        if let Err(e) = ctx.runtimes.command(id, "input", json!({"text":text}), &rid).await {
+            tracing::warn!(error=%e, "watch result not posted to the bot's main conversation");
+        }
+    });
 }
 
 fn notify(hub: &Hub, run: &RunRecord, status: &str, text: &str, policy: &str) {

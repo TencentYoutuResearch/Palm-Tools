@@ -1125,7 +1125,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   async function watchAct(body) { const data = await watchesCall(body); publishWatches({ data, error: '' }); return data }
   function watchSource(topic) { return WATCH_SOURCES.find(row => row.topic === topic) ?? WATCH_SOURCES.at(-1) }
   function watchDraft(watch) {
-    if (!watch) return { name: '', topic: 'session.turn_completed', custom: '', where: '', paths: '', branch: '', room: '', do: '', coalesce_secs: 30, max_runs_per_hour: 6, permission: 'plan', notify: 'attention', enabled: true }
+    if (!watch) return { name: '', topic: 'session.turn_completed', custom: '', where: '', paths: '', branch: '', room: '', do: '', coalesce_secs: 30, max_runs_per_hour: 6, permission: 'plan', notify: 'attention', report_to_main: true, enabled: true }
     const { spec } = watch, match = spec.on.match ?? {}, source = watchSource(spec.on.topic)
     return { id: watch.id, enabled: watch.enabled, name: spec.name, topic: source.topic, custom: source.custom ? spec.on.topic : '', where: match.workspace ?? match.cwd ?? '', paths: match.paths ?? '', branch: match.branch ?? '', room: match.room ?? '', do: spec.do, ...spec.policy }
   }
@@ -1135,7 +1135,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (source.paths && draft.paths.trim()) match.paths = draft.paths.trim()
     if (source.branch && draft.branch.trim()) match.branch = draft.branch.trim()
     if (source.room && draft.room.trim()) match.room = draft.room.trim()
-    return { name: draft.name.trim(), on: { topic: source.custom ? draft.custom.trim() : source.topic, match }, do: draft.do, policy: { coalesce_secs: Number(draft.coalesce_secs) || 0, max_runs_per_hour: Number(draft.max_runs_per_hour) || 1, permission: draft.permission, workspace: null, carry_last_summary: true, notify: draft.notify } }
+    return { name: draft.name.trim(), on: { topic: source.custom ? draft.custom.trim() : source.topic, match }, do: draft.do, policy: { coalesce_secs: Number(draft.coalesce_secs) || 0, max_runs_per_hour: Number(draft.max_runs_per_hour) || 1, permission: draft.permission, workspace: null, carry_last_summary: true, notify: draft.notify, report_to_main: draft.report_to_main !== false } }
   }
   function watchSummary(spec) {
     const source = watchSource(spec.on.topic), match = spec.on.match ?? {}
@@ -1166,6 +1166,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
         input('每小时最多运行', 'max_runs_per_hour', { type: 'number', min: 1, max: 60 })),
       h(SelectField, { label: '运行时的权限（不超过伙伴的上限）', value: draft.permission, options: WATCH_PERMISSIONS, disabled: busy, onChange: value => set('permission', value) }),
       h(SelectField, { label: '通知', value: draft.notify, options: WATCH_NOTIFY, disabled: busy, onChange: value => set('notify', value) }),
+      h('label', { className: 'kode-avatar-background-toggle' }, h('input', { type: 'checkbox', checked: draft.report_to_main !== false, disabled: busy, onChange: event => set('report_to_main', event.target.checked) }), '完成后把结论发到伙伴的主对话里'),
       h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: busy, onClick: onCancel }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.name.trim() || !draft.do.trim() }, '保存')))
   }
   function RunRow({ run, watch, ui }) {

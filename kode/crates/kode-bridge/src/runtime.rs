@@ -525,6 +525,12 @@ impl Registry {
         }
     }
 
+    /// The routing id of a runtime's own session id (a dsh session id).
+    pub fn find(&self, runtime: &str, native: &str) -> Option<u64> {
+        let guard = self.db.lock();
+        guard.as_ref()?.query_row("SELECT id FROM runtime_sessions WHERE runtime=?1 AND native_id=?2", [runtime, native], |r| r.get(0)).optional().ok().flatten()
+    }
+
     pub async fn command(
         &self,
         id: u64,

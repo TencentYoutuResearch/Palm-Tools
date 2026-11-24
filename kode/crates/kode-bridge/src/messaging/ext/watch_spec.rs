@@ -41,11 +41,13 @@ pub struct Policy {
     pub carry_last_summary: bool,
     /// `always`, `attention` (default: only when the run asks for you or fails) or `never`.
     pub notify: String,
+    /// Also post the conclusion into the bot's main conversation.
+    pub report_to_main: bool,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { coalesce_secs: 30, max_runs_per_hour: 6, permission: "plan".into(), workspace: None, carry_last_summary: true, notify: "attention".into() }
+        Self { coalesce_secs: 30, max_runs_per_hour: 6, permission: "plan".into(), workspace: None, carry_last_summary: true, notify: "attention".into(), report_to_main: true }
     }
 }
 
