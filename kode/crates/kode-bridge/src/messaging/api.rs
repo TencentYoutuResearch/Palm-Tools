@@ -222,7 +222,7 @@ async fn bot_roster(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<se
     let root = roster.root();
     let workspaces: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.workspace(&root)))).collect();
     let homes: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.home(&root)))).collect();
-    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot,"persona_prompts":personas,"workspaces":workspaces,"homes":homes,"root":root,"default_root":super::bots::default_root()})))
+    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot,"persona_prompts":personas,"workspaces":workspaces,"homes":homes,"adopted":roster.adopted,"root":root,"default_root":super::bots::default_root()})))
 }
 async fn change_bots(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(change): Json<super::bots::Change>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;

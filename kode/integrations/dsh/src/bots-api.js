@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 
 const BOTS = '/api/v1/messaging/workbench/bots'
 const WATCHES = '/api/v1/messaging/workbench/watches'
-const ROSTER_ACTIONS = ['upsert', 'delete', 'set_default', 'set_root']
+const ROSTER_ACTIONS = ['upsert', 'delete', 'set_default', 'set_root', 'adopt']
 // 关注 (bot watches): `watch_<action>` is Kode's watch action.
 const WATCH_ACTIONS = ['watch_upsert', 'watch_toggle', 'watch_delete', 'watch_run', 'watch_seen']
 // dsh sandbox modes. New dsh sessions never start above workspace-write.
@@ -34,9 +34,12 @@ export function agentFor(runtime, backendKey) {
 function inside(path, folder) { return Boolean(path && folder) && (path === folder || path.startsWith(`${folder.replace(/\/$/, '')}/`)) }
 export function botsView(roster, { runtime, sessions, archived, workspaces, runs = [] }) {
   const live = new Set(sessions.map(row => row.sessionId))
-  // One owner per session: a main conversation, then a folder, then a run.
+  // One owner per session: a main conversation, one filed under a bot, then
+  // a folder, then a run.
   const owner = new Map()
   for (const bot of roster.bots) if (bot.main_session?.runtime === 'dsh') owner.set(bot.main_session.session_id, bot.id)
+  const known = new Set(roster.bots.map(bot => bot.id))
+  for (const [session, bot] of Object.entries(roster.adopted ?? {})) if (known.has(bot) && !owner.has(session)) owner.set(session, bot)
   for (const row of sessions) for (const bot of roster.bots) if (!owner.has(row.sessionId) && inside(row.cwd, roster.homes?.[bot.id])) owner.set(row.sessionId, bot.id)
   for (const run of runs) if (run.session_uuid && !owner.has(run.session_uuid)) owner.set(run.session_uuid, run.bot)
   return {
@@ -48,7 +51,7 @@ export function botsView(roster, { runtime, sessions, archived, workspaces, runs
       const ran = new Set(runs.filter(run => run.bot === bot.id && run.session_uuid).map(run => run.session_uuid))
       const owned = sessions
         .filter(row => !archived.has(row.sessionId) && !row.blank && owner.get(row.sessionId) === bot.id)
-        .map(row => ({ id: row.sessionId, title: row.projections?.values?.title ?? row.title ?? '未命名会话', updated_at: row.updatedAt ?? row.updated_at ?? 0, kind: row.sessionId === main ? 'main' : ran.has(row.sessionId) ? 'watch' : 'side' }))
+        .map(row => ({ id: row.sessionId, title: row.projections?.values?.title ?? row.title ?? '未命名会话', updated_at: row.updatedAt ?? row.updated_at ?? 0, kind: row.sessionId === main ? 'main' : ran.has(row.sessionId) ? 'watch' : 'side', adopted: roster.adopted?.[row.sessionId] === bot.id }))
         .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
       return { ...bot, workspace: roster.workspaces?.[bot.id] ?? bot.default_cwd ?? null, home, agent: agent?.name ?? null, agent_type: agent?.type ?? null, agent_id: agent?.id ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null, sessions: owned }
     }),

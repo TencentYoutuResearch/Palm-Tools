@@ -141,6 +141,7 @@ test("each bot lists only its own sessions: main, ones in its folder and its wat
   const roster = {
     bots: [{ id: 'b1', name: 'Kit', backend_key: 'claude', main_session: { runtime: 'dsh', session_id: 'main' } }, { id: 'b2', name: 'Rex', backend_key: 'claude' }],
     homes: { b1: '/bots/b1', b2: '/bots/b2' },
+    adopted: { old: 'b2', stray: 'gone-bot' },
   }
   const sessions = [
     { sessionId: 'main', cwd: '/repo', title: 'Kit', updatedAt: 3 },
@@ -150,10 +151,12 @@ test("each bot lists only its own sessions: main, ones in its folder and its wat
     { sessionId: 'rex', cwd: '/bots/b2', title: 'Rex side', updatedAt: 2 },
     { sessionId: 'b10', cwd: '/bots/b10', title: 'not b1', updatedAt: 9 },
     { sessionId: 'gone', cwd: '/bots/b1', title: 'archived', updatedAt: 9 },
+    { sessionId: 'old', cwd: '/repo', title: 'made before the folder', updatedAt: 0 },
+    { sessionId: 'stray', cwd: '/repo', title: 'its bot was deleted', updatedAt: 0 },
   ]
   const view = botsView(roster, { runtime, sessions, archived: new Set(['gone']), workspaces: [], runs: [{ bot: 'b1', session_uuid: 'run' }, { bot: 'b2', session_uuid: 'main' }] })
   assert.deepEqual(view.bots[0].sessions.map(row => [row.id, row.kind]), [['art', 'side'], ['run', 'watch'], ['main', 'main'], ['deep', 'side']])
-  assert.deepEqual(view.bots[1].sessions.map(row => row.id), ['rex'], 'another bot never sees them')
+  assert.deepEqual(view.bots[1].sessions.map(row => [row.id, row.adopted]), [['rex', false], ['old', true]], 'another bot never sees them; filed sessions join their bot')
   assert.equal(view.bots[0].home, '/bots/b1')
   assert.equal(view.bots[0].agent_id, 'p-claude')
 })

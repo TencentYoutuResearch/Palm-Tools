@@ -65,6 +65,11 @@ pub struct Roster {
     /// `~/.kode/plugins/bots`.
     #[serde(default)]
     pub root: Option<String>,
+    /// dsh sessions that belong to a bot although they run elsewhere (made
+    /// before the bot had its own folder, or moved to it by the user):
+    /// session id → bot id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub adopted: std::collections::BTreeMap<String, String>,
 }
 
 impl Roster {
@@ -87,6 +92,8 @@ pub enum Change {
     SetMainSession { id: String, session: Option<MainSession> },
     /// Move the folder that holds bots' own workspaces (`None` = default).
     SetRoot { root: Option<String> },
+    /// File a dsh session under a bot (`id: None` releases it).
+    Adopt { session: String, id: Option<String> },
 }
 
 impl Bot {
@@ -225,6 +232,7 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
             if roster.default_bot.as_deref() == Some(id.as_str()) {
                 roster.default_bot = None;
             }
+            roster.adopted.retain(|_, bot| *bot != id);
         }
         Change::SetMainSession { id, session } => {
             if session.as_ref().is_some_and(|s| !valid_id(&s.runtime) || s.session_id.is_empty() || s.session_id.len() > 160) {
@@ -239,6 +247,20 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
                 bail!("bots folder must be an absolute path")
             }
             roster.root = root.filter(|r| !r.trim().is_empty());
+        }
+        Change::Adopt { session, id } => {
+            if session.is_empty() || session.len() > 160 || !session.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b)) {
+                bail!("invalid session")
+            }
+            match id {
+                Some(id) if roster.bots.iter().any(|b| b.id == id) => {
+                    roster.adopted.insert(session, id);
+                }
+                Some(_) => bail!("unknown bot"),
+                None => {
+                    roster.adopted.remove(&session);
+                }
+            }
         }
         Change::SetDefault { id } => {
             if id.as_ref().is_some_and(|id| !roster.bots.iter().any(|b| &b.id == id)) {
@@ -327,6 +349,19 @@ mod tests {
         let mut pinned = kit.clone();
         pinned.default_cwd = Some("/work/repo".into());
         assert_eq!(pinned.workspace(&roster.root()), PathBuf::from("/work/repo"), "a chosen workspace wins");
+    }
+
+    #[test]
+    fn sessions_are_adopted_by_existing_bots_and_released_with_them() {
+        let mut roster = Roster::default();
+        apply(&mut roster, Change::Upsert { bot: serde_json::from_value(json!({"name":"Kit","backend_key":"claude"})).unwrap() }, 1).unwrap();
+        let kit = roster.bots[0].id.clone();
+        apply(&mut roster, Change::Adopt { session: "session-1".into(), id: Some(kit.clone()) }, 2).unwrap();
+        assert_eq!(roster.adopted.get("session-1"), Some(&kit));
+        assert!(apply(&mut roster, Change::Adopt { session: "session-2".into(), id: Some("nobody".into()) }, 3).is_err());
+        assert!(apply(&mut roster, Change::Adopt { session: "../x y".into(), id: Some(kit.clone()) }, 3).is_err());
+        apply(&mut roster, Change::Delete { id: kit }, 4).unwrap();
+        assert!(roster.adopted.is_empty(), "a deleted bot leaves its sessions unfiled");
     }
 
     #[test]
