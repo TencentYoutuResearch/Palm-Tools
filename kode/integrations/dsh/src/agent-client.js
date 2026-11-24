@@ -1049,6 +1049,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const glyph = d => h('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
   const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
   // Use the same Kode wordmark in the standalone and embedded clients.
+  // A folded strip keeps its continuity through a change of direction.
+  function KodeBrandMark({ size = 24 }) {
+    return h('svg', { width: size, height: size, viewBox: '0 0 24 24', className: 'kode-brand-mark-svg', 'aria-hidden': true },
+      h('path', { fill: 'currentColor', d: 'M3 8.5 12 3h9l-9 5.5z M6 15.5l9-5.5 6 3.5-12 7.3H3l6-3.6z' }),
+      h('path', { fill: '#ed3845', d: 'M3 8.5h9l4.5 2.7-5.4 3.3z' }))
+  }
   function KodeBrandName() {
     return h('span', { className: 'kode-brand-name' }, h('span', { className: 'kode-brand-title' }, 'Kode Harness'), h('span', { className: 'kode-brand-subtitle' }, 'Powered by dsh'))
   }
@@ -3025,6 +3031,7 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
     document.head.append(style)
     ctx.effect(() => () => style.remove(), 'kode.agent-styles')
     ctx.slots.inject('conversation.hero.agentPreset', () => ctx.slots.register({ name: 'conversation.hero.agentPreset', id: 'kode-agent', inject: sessionId => ({ sessionId, sessions: ctx.sessions, remote: ctx.remote, slots: ctx.slots }) }, AgentControl))
+    ctx.slots.inject('sidebar.brand.mark', () => ctx.slots.register({ name: 'sidebar.brand.mark' }, KodeBrandMark))
     ctx.slots.inject('sidebar.brand.name', () => ctx.slots.register({ name: 'sidebar.brand.name' }, KodeBrandName))
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'agent-presets', order: 5, label: () => 'Kode', inject: () => ({ sessions: ctx.sessions, slots: ctx.slots }) }, KodeSettings))
     ctx.inject(['layout'], scope => {
