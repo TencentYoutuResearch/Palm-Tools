@@ -1,5 +1,5 @@
 // Generated from the public dsh Connection API; run npm run build:transport.
-window.__ModuleLoader__.load({id:'@kode/dsh-transport/client',factory(require){const module={exports:{}};const exports=module.exports;
+window.__ModuleLoader__.load({id:'@kode/dsh-transport',factory(require){const module={exports:{}};const exports=module.exports;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;

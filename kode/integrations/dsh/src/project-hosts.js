@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 import { openTabKey, savedSessionTime } from './saved-session-state.js'
 import { hasTranscript } from './workspace-directory.js'
 /** Kode owns SSH; the remote dsh Host owns all workspace and execution services. */
@@ -383,14 +384,14 @@ export async function registerProjectHosts(ctx, config) {
   ctx.effect(() => registerHostDirectory(ctx, config), 'kode.host-directory')
   ctx.effect(() => registerNativeSessionDirectory(ctx, config.backendClient), 'kode.native-session-directory')
   ctx.effect(() => () => manager.close(), 'kode.project-hosts')
-  const owner = req => { const admitted = ctx.connection.admit(req); return !('rejection' in admitted) && admitted.peer.principal.kind === 'owner' }
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-import', handler: async (req, res) => {
-    if (!owner(req)) return json(res, 403, { error: 'Host owner required' })
+  const owner = (req, peer) => { const admitted = admitHostRequest(ctx, req, peer); return !('rejection' in admitted) && admitted.peer.principal.kind === 'owner' }
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-import', handler: async (req, res, peer) => {
+    if (!owner(req, peer)) return json(res, 403, { error: 'Host owner required' })
     if (req.method !== 'POST' || !(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 405, { error: 'JSON POST required' })
     try { let body = ''; for await (const part of req) { body += part; if (Buffer.byteLength(body) > 16384) throw new Error('Request too large') }; json(res, 200, await importSavedSession(ctx, config.backendClient, JSON.parse(body))) } catch (error) { json(res, 400, { error: error.message }) }
   } }), 'kode.session-import-api')
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-create', handler: async (req, res) => {
-    if (!owner(req)) return json(res, 403, { error: 'Host owner required' })
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-create', handler: async (req, res, peer) => {
+    if (!owner(req, peer)) return json(res, 403, { error: 'Host owner required' })
     if (req.method !== 'POST' || !(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 405, { error: 'JSON POST required' })
     try {
       let body = ''; for await (const part of req) { body += part; if (Buffer.byteLength(body) > 65536) throw new Error('Request too large') }
@@ -398,27 +399,27 @@ export async function registerProjectHosts(ctx, config) {
       json(res, 200, await creator.create(JSON.parse(body)))
     } catch (error) { json(res, 400, { error: error.message }) }
   } }), 'kode.session-create-api')
-  ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/api/kode/transport', handler: async (req, res) => {
-    if (!owner(req)) return json(res, 403, { error: 'Host owner required' })
+  ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/api/kode/transport', handler: async (req, res, peer) => {
+    if (!owner(req, peer)) return json(res, 403, { error: 'Host owner required' })
     const match = /^\/api\/kode\/transport\/([^/]+)(\/api(?:\/|\?|$).*)$/.exec(req.url ?? '')
     if (!match) return json(res, 400, { error: 'Invalid Host API path' })
     try { const portal = await manager.connect(decodeURIComponent(match[1])); portal.forward(req, res, match[2]) } catch (error) { json(res, 502, { error: error.message }) }
   } }), 'kode.transport-http')
-  ctx.effect(() => ctx.webServer.registerUpgrade({ path: '/api/kode/transport-ws', handler: async (req, socket, head) => {
-    if (!owner(req)) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return }
+  ctx.effect(() => ctx.webServer.registerUpgrade({ path: '/api/kode/transport-ws', handler: async (req, socket, head, peer) => {
+    if (!owner(req, peer)) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return }
     const url = new URL(req.url, 'http://localhost'), path = url.searchParams.get('path'), host = url.searchParams.get('host')
     if (!path || !/^\/api(?:\/|\?|$)/.test(path) || !host) { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); return }
     try { const portal = await manager.connect(host); portal.upgrade(req, socket, head, path) } catch { socket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n') }
   } }), 'kode.transport-ws')
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/terminal-font.ttf', handler: async (req, res) => {
-    const admitted = ctx.connection.admit(req)
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/terminal-font.ttf', handler: async (req, res, peer) => {
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) { res.writeHead(admitted.rejection); res.end(); return }
     if (req.method !== 'GET') { res.writeHead(405); res.end(); return }
     const bytes = await readFile(new URL('../assets/fonts/SymbolsNerdFontMono-Regular.ttf', import.meta.url))
     res.writeHead(200, { 'content-type': 'font/ttf', 'cache-control': 'private, max-age=86400', 'content-length': bytes.length }); res.end(bytes)
   } }), 'kode.terminal-font')
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: PATH, handler: async (req, res) => {
-    const admitted = ctx.connection.admit(req)
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: PATH, handler: async (req, res, peer) => {
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) return json(res, admitted.rejection, { error: 'authentication required' })
     if (admitted.peer.principal.kind !== 'owner') return json(res, 403, { error: 'Host owner required' })
     const requested = new URL(req.url, 'http://localhost').searchParams.get('current')

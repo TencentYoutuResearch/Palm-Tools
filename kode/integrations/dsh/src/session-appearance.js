@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** Frontend avatar resources and canonical, per-session appearance metadata. */
 import { readdir, readFile, stat, realpath, lstat, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -175,8 +176,8 @@ export class SessionAppearance {
   }
 }
 export function registerAvatarApi(ctx, appearance) {
-  return ctx.webServer.register({ kind: 'prefix', path: '/api/kode/avatars', handler: async (req, res) => {
-    const admitted = ctx.connection.admit(req), send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
+  return ctx.webServer.register({ kind: 'prefix', path: '/api/kode/avatars', handler: async (req, res, peer) => {
+    const admitted = admitHostRequest(ctx, req, peer), send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
       const url = new URL(req.url, 'http://localhost')

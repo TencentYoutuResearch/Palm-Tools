@@ -3,17 +3,61 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
-test('jobs move to the composer with native injections, locale, output and kill handlers intact and restore on disposal', () => {
-  const slots = [], cleanups = [], native = () => {}, inject = () => ({ hooks: { jobs: 'state' }, killJob: 'kill', observe: 'output' })
-  const entry = { options: { id: 'job-list', name: 'conversation.session.header.actions', order: 20 }, locale: 'job', inject, component: native }
-  let subscriber
-  const ctx = { slots: { inject(seat, fn) { cleanups.push(fn()) }, entries: () => [entry], subscribe(seat, fn) { subscriber = fn; return () => {} }, register(options, component) { const row = { options, component, disposed: false }; slots.push(row); return () => { row.disposed = true } } } }
-  const relocate = vm.runInNewContext(source + '\nrelocateWorkbenchJobs', { react: { createElement: (type, props, child) => ({ type, props, child }) } })
-  relocate(ctx); subscriber(); assert.equal(slots.length, 1); assert.equal(entry.component(), null)
-  assert.equal(slots[0].options.name, 'conversation.input.dock'); assert.equal(slots[0].options.inject, inject); assert.equal(slots[0].options.locale, 'job')
-  const node = slots[0].component({ sessionId: 'session' }); assert.equal(node.child.type, native); assert.equal(node.child.props.sessionId, 'session')
-  cleanups[0](); assert.equal(entry.component, native); assert.equal(slots[0].disposed, true)
-})
+const headerActions = 'conversation.session.header.actions'
+for (const [seat, id] of [[headerActions, 'job-list'], ['conversation.session.header.utilities', 'session-panel']]) {
+  test(`${id} mounts to the left of the Agent avatar with its native slot bindings`, () => {
+    const entries = new Map(), subscribers = new Map(), cleanups = [], registrations = []
+    const slots = {
+      inject(name, setup) { cleanups.push(setup()) },
+      entries(name) { return entries.get(name) ?? [] },
+      subscribe(name, listener) {
+        subscribers.set(name, listener)
+        return () => subscribers.delete(name)
+      },
+      register(options, component) {
+        const row = { options, component }
+        registrations.push(row)
+        return () => registrations.splice(registrations.indexOf(row), 1)
+      },
+    }
+    const place = vm.runInNewContext(source + '\nplaceWorkbenchJobs', {
+      react: {
+        createElement: (type, props) => ({ type, props }),
+        useCallback: callback => callback,
+        useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+      },
+      react_dom: { createPortal: (child, target) => ({ child, target }) },
+    })
+    place({ slots })
+    const [anchor] = registrations
+    assert.equal(registrations.length, 1)
+    assert.equal(anchor.options.name, headerActions)
+    assert.ok(anchor.options.order > -110 && anchor.options.order < -100)
+
+    const native = () => {}, entry = { options: { id }, component: native }
+    const bindings = { sessionId: 'one', useJobs: () => {}, renderSlot: () => {} }
+    entries.set(seat, [entry])
+    subscribers.get(seat)()
+    const wrapper = entry.component
+    subscribers.get(seat)()
+    assert.equal(entry.component, wrapper)
+
+    const target = {}, { ref } = anchor.component(bindings).props
+    assert.equal(wrapper(bindings).type, native)
+    ref(target)
+    const portal = wrapper(bindings)
+    assert.equal(portal.child.type, native)
+    assert.equal(portal.child.props, bindings)
+    assert.equal(portal.target, target)
+    assert.equal(wrapper({ sessionId: 'two' }).type, native)
+    ref(null)
+    assert.equal(wrapper(bindings).type, native)
+
+    for (const cleanup of cleanups.reverse()) cleanup()
+    assert.equal(entry.component, native)
+    assert.equal(registrations.length, 0)
+  })
+}
 test('worktree search lives inside the dropdown and preserves selection while filtering local and remote branches', async () => {
   const client = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
   let cursor = 0, value = 'refs/heads/main'
@@ -171,7 +215,7 @@ test('token island is registered once on the application overlay rather than ins
   const document = { createElement: () => ({ dataset: {}, remove() {} }), head: { append() {} } }
   const install = vm.runInNewContext(source + '\ninstallWorkbenchUi', { document })
   install({ inject(names, fn) { fn(this) }, get: () => null, effect: fn => fn(), slots: { inject: (seat, fn) => { seats.push(seat); if (seat === 'shell.overlay') fn() }, register: (options, component) => { entries.push({ options, component }); return () => {} } } })
-  assert.deepEqual(seats, ['conversation.session.header.actions', 'shell.overlay'])
+  assert.equal(seats.filter(seat => seat === 'shell.overlay').length, 1)
   assert.equal(entries.length, 1); assert.equal(entries[0].options.id, 'kode-token-island')
   const build = await readFile(new URL('../scripts/build-chat.js', import.meta.url), 'utf8')
   assert.doesNotMatch(build, /react\.createElement\(KodeTokenIsland/)

@@ -124,7 +124,7 @@ function changedFileSummary({ path, paths, changes, patch }) {
   return files.length > 1 ? `${files[0]} 等 ${files.length} 个文件` : files[0] ?? '文件'
 }
 /** Native dsh menus and modal; Agent occupies the preset seat, model stays in the composer. */
-window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
+window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const React = require('react'), h = React.createElement
   const { createPortal } = require('react-dom')
   const { useState, useEffect, useMemo, useRef, useSyncExternalStore } = React
@@ -516,7 +516,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const label = p => p?.name ?? names[p?.id] ?? p?.id ?? '选择模式'
     return h('span', { className: 'kode-mode-control' }, h(Menu, { open, onClose: () => setOpen(false), portal: true, selectedId: current,
       items: roster.filter(p => p.id !== 'kode-native').map(p => ({ id: p.id, label: label(p), disabled: Boolean(p.broken) || !canChange || busy })),
-      footer: !canChange ? h('div', { className: 'kode-menu-note' }, '当前会话已开始，新建会话后可切换模式') : undefined,
+      footer: !canChange ? [{ id: 'mode-selection-note', disabled: true, label: '当前会话已开始，新建会话后可切换模式' }] : undefined,
       onSelect: preset => { setOpen(false); setBusy(true); setError(''); remote.agentPresets.select(id, preset).then(result => { if (!result.ok) setError(result.error.message) }, error => setError(error.message)).finally(() => setBusy(false)) },
       anchor: h('button', { type: 'button', className: 'kode-trigger', disabled: !id || !roster.length || busy, 'aria-label': `dsh 模式：${label(roster.find(p => p.id === current))}`, 'aria-haspopup': 'menu', 'aria-expanded': open, onClick: () => setOpen(!open) }, h('span', { className: 'kode-control-label' }, label(roster.find(p => p.id === current))), h(IconChevronDownOutlineRegular, { size: 12 })),
     }), h(Failure, { text: error }))
@@ -545,7 +545,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     items.push({ type: 'separator' }, { id: 'configure', label: '自定义 Agent…' })
     return h(React.Fragment, null,
       h(Menu, { open, onClose: () => setOpen(false), selectedId: current?.id, items, side: 'bottom', portal: true,
-        footer: !data?.canChangeAgent && current ? h('div', { className: 'kode-menu-note' }, '新建会话后可切换 Agent') : undefined,
+        footer: !data?.canChangeAgent && current ? [{ id: 'agent-selection-note', disabled: true, label: '新建会话后可切换 Agent' }] : undefined,
         onSelect: profileId => { setOpen(false); if (profileId === 'configure') { requestedProfile = current?.origin !== 'builtin' ? current?.id : undefined; try { openSettings(slots) } catch (e) { setNavigationError(e.message) } } else void store.operate({ action: 'select', profileId, sessionId: id }).catch(() => {}) },
         anchor: h(Trigger, { agent: true, profile: current, label: current?.name ?? (error ? '重试加载 Agent' : '正在加载 Agent…'), open: data ? open : undefined, disabled: busy || (!data && !error), onClick: () => data ? setOpen(!open) : void store.load() }),
       }),
@@ -1604,7 +1604,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       publish(); void refreshWorkspaceDirectory()
       return () => { for (const dispose of disposers) dispose() }
     }, 'kode.global-activity-catalog')
-    ctx.inject(['uiSession'], scope => scope.effect(() => {
+    ctx.inject(['uiSession', 'uiSession.sessionStatus'], scope => scope.effect(() => {
       statusSource = scope.get('uiSession')?.sessionStatus
       const dispose = statusSource?.subscribe(publish)
       publish()
@@ -2665,7 +2665,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     )
   }
 
-  return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets', 'kodeNotifications'], apply(ctx) {
+  return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets', 'kodeNotifications', 'uiSession', 'uiSession.sessionStatus'], apply(ctx) {
     ctx.provide('kodeActivity', globalActivity)
     installGlobalActivitySubscriptions(ctx)
     avatarContext = ctx

@@ -57,7 +57,8 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   }
   const service = { profiles: { binding: () => ({ profile: { type: 'codex' } }) }, adapter: { catalogs: new Map(), live: new Map([['source', { goal() {} }]]), controlGoal: async (_agent, input) => { controlled.push(input) } } }
   registerAgentHubApi(ctx, { hub, backend, service })
-  const server = http.createServer((req, res) => void handler(req, res)); server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  let carrierPeer
+  const server = http.createServer((req, res) => void handler(req, res, carrierPeer)); server.listen(0, '127.0.0.1'); await once(server, 'listening')
   t.after(() => { server.closeAllConnections(); server.close() })
   const url = 'http://127.0.0.1:' + server.address().port + '/api/kode/agent-hub'
   const request = (body, suffix = '', role = 'owner') => fetch(url + suffix, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json', 'x-role': role }, ...(body ? { body: JSON.stringify(body) } : {}) })
@@ -77,6 +78,14 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   assert.equal(logo.headers.get('content-type'), 'image/png'); assert.equal(logo.headers.get('x-content-type-options'), 'nosniff')
   assert.deepEqual([...new Uint8Array(await logo.arrayBuffer())], [0x89, 0x50, 0x4e, 0x47])
   assert.equal(calls.at(-1).path, HUB_PATH + '?logo=team&package=0')
+
+  const before = calls.length
+  carrierPeer = { principal: { kind: 'guest' } }
+  assert.equal((await request({ action: 'power', enabled: true })).status, 403)
+  assert.equal(calls.length, before)
+  carrierPeer = { principal: { kind: 'owner' } }
+  assert.equal((await request({ action: 'sync-source', id: 'admitted' }, '', 'guest')).status, 200)
+  assert.deepEqual(calls.at(-1), { path: HUB_PATH, input: { action: 'sync-source', id: 'admitted' } })
 })
 
 test('native launch uses only the synced destination and skips a changed CLI home', () => {

@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
 import { BackendDocument } from './backend-state.js'
 import { classifyEmptySessions } from './empty-session.js'
@@ -93,9 +94,9 @@ export async function hostOperation(ctx, input, config = {}) {
   return controller[allowed[input.operation]](request)
 }
 export function registerHostDirectory(ctx, config) {
-  return ctx.webServer.register({ kind: 'exact', path: DIRECTORY_PATH, handler: async (req, res) => {
+  return ctx.webServer.register({ kind: 'exact', path: DIRECTORY_PATH, handler: async (req, res, peer) => {
     const send = (status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)) }
-    const admitted = ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) return send(admitted.rejection, { error: 'authentication required' })
     if (admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     if (!['GET', 'POST'].includes(req.method)) return send(405, { error: 'GET or POST required' })
