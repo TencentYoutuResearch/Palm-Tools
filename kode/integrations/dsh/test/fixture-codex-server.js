@@ -39,6 +39,10 @@ async function receive(message) {
     return result(id, { data: [{ id: threadId, name: 'Native title', preview: 'Old preview', cwd: '/srv/project', updatedAt: 1767225600 }],
       nextCursor: !params.archived && !params.cursor ? 'next-page' : null })
   }
+  const historyEdit = process.env.KODE_FIXTURE_HISTORY_REVERT
+  if (method === 'thread/revert' && historyEdit === 'current') return result(id, { thread: { id: params.threadId, turns: [] } })
+  if (method === 'thread/read' && historyEdit === 'legacy') return result(id, { thread: { id: params.threadId, turns: ['prior', 'original-turn', 'future'].map(id => ({ id })) } })
+  if (method === 'thread/rollback' && historyEdit === 'legacy') return result(id, { thread: { id: params.threadId, turns: [{ id: 'prior' }] } })
   if (method === 'thread/start' || method === 'thread/resume') return result(id, { thread: { id: params.threadId ?? (process.env.KODE_FIXTURE_UNIQUE_THREAD === '1' ? `fixture-${process.pid}` : 'same-native-id') } })
   if (method === 'turn/steer') {
     const turnId = `turn-${turn}`, threadId = params.threadId

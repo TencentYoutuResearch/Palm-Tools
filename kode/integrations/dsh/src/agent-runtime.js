@@ -12,7 +12,7 @@ import { mountNativeCommands } from './native-commands.js'
 import { humanInput, terminalOnlyCommands } from './native-commands.js'
 import { pendingShellContext } from './native-shell.js'
 import { classifyCommands } from './command-skills.js'
-import { branchHistoryInput } from './history-edit.js'
+import { branchHistoryInput, claudeHistoryBoundary, editedHistoryInput, latestHistoryEdit, nativeHistoryBoundary } from './history-edit.js'
 import { nativeInput } from './native-input.js'
 import { SessionAppearance } from './session-appearance.js'
 import { fastPreference, withModelVariantFast } from './model-fast.js'
@@ -167,7 +167,7 @@ export class AgentRuntimeAdapter {
   logResult(agent, callId, content, isError = false) {
     agent.session.append('tool/result', { ...this.boundary(agent), message: { id: randomUUID(), role: 'tool', source: { kind: 'tool', callId }, toolCallId: callId, content, isError } }, { surfaceOp: 'append' })
   }
-  async createRuntime(agent, binding, tools, signal) {
+  async createRuntime(agent, binding, tools, signal, edit) {
     const nativeCalls = new Set()
     const epoch = randomUUID()
     const callIdentity = (turnId, itemId) => `kode:${epoch}:${turnId}:${itemId}`
@@ -180,7 +180,9 @@ export class AgentRuntimeAdapter {
       try { await sessionStore.flush(agent.session) }
       catch (error) { this.ctx.logger?.warn('Native child persistence failed: %s', error.message) }
     }
-    const runtime = await createNativeSession({ ...resolved, ...(autoCompact ? { autoCompactEnabled: autoCompact.data.enabled } : {}) }, agent.session.header.cwd ?? process.cwd(), {
+    const cwd = agent.session.header.cwd ?? process.cwd()
+    const profile = { ...resolved, ...(autoCompact ? { autoCompactEnabled: autoCompact.data.enabled } : {}) }
+    const handlers = {
       subagent: update => {
         const data = nativeSubagentRecord(update)
         if (!data) return
@@ -245,26 +247,58 @@ export class AgentRuntimeAdapter {
         const response = await questions.ask({ agent, signal, questions: request.questions.map(q => ({ id: q.id, question: q.question, ...(q.header ? { header: q.header } : {}), ...(q.multiSelect ? { multiSelect: true } : {}), ...(q.options ? { options: q.options.map(o => ({ label: o.label, ...(o.description ? { description: o.description } : {}) })) } : {}) })) })
         return { answers: Object.fromEntries(response.answers.map(a => [a.id, { answers: [...a.selected, ...(a.custom ? [a.custom] : [])], ...(request.structured ? { selected: a.selected, ...(a.custom ? { custom: a.custom } : {}) } : {}) }])) }
       },
-    })
-    const closeNative = runtime.close.bind(runtime)
-    runtime.close = async () => {
-      try { await closeNative() }
-      finally {
-        if (childFlush) {
-          clearTimeout(childFlush); childFlush = undefined
-          await persistChildren()
+    }
+    let runtime = await createNativeSession(profile, cwd, handlers)
+    try {
+      let openedId, resumeId = binding.threadId, bootstrap = false
+      if (edit) {
+        const events = agent.session.snapshotEvents()
+        resumeId = undefined
+        if (runtime.revertHistory) {
+          const before = nativeHistoryBoundary(events, edit, binding.threadId)
+          if (before) {
+            openedId = await runtime.open(binding, tools, signal)
+            if (openedId === binding.threadId && await runtime.revertHistory(before, signal)) resumeId = openedId
+            else {
+              await runtime.close()
+              runtime = await createNativeSession(profile, cwd, handlers)
+              openedId = undefined
+            }
+          }
+        } else if (binding.profile.type === 'claude' && binding.threadId) {
+          const boundary = claudeHistoryBoundary(agent.session, events, edit)
+          if (boundary) resumeId = await runtime.forkHistory(binding.threadId, boundary, signal)
+        }
+        bootstrap = !resumeId
+      }
+      const threadId = openedId ?? await runtime.open({ ...binding, threadId: resumeId }, tools, signal)
+      const priorThreads = binding.supersededThreads ?? []
+      const supersededThreads = binding.threadId && threadId !== binding.threadId
+        ? [...new Set([...priorThreads, binding.threadId])] : priorThreads
+      await this.profiles.patchBinding(agent.id, {
+        threadId, ...(!resumeId ? { nativeToolNames: tools.map(tool => tool.name) } : {}),
+        ...(edit ? { historyEditId: edit.data.id, historyEditBootstrap: bootstrap, supersededThreads } : {}),
+      })
+      await this.onThread(agent)
+      const closeNative = runtime.close.bind(runtime)
+      runtime.close = async () => {
+        try { await closeNative() }
+        finally {
+          if (childFlush) {
+            clearTimeout(childFlush); childFlush = undefined
+            await persistChildren()
+          }
         }
       }
-    }
-    runtime.nativeCalls = nativeCalls
-    runtime.autoCompactRevision = autoCompact?.seq ?? -1
-    runtime.callIdentity = callIdentity
-    try {
-      const threadId = await runtime.open(binding, tools, signal)
-      await this.profiles.patchBinding(agent.id, { threadId, ...(binding.threadId ? {} : { nativeToolNames: tools.map(tool => tool.name) }) })
-      await this.onThread(agent)
+      runtime.nativeCalls = nativeCalls
+      runtime.autoCompactRevision = autoCompact?.seq ?? -1
+      runtime.callIdentity = callIdentity
       return runtime
-    } catch (error) { await runtime.close(); throw error }
+    } catch (error) {
+      await runtime.close()
+      if (childFlush) { clearTimeout(childFlush); await persistChildren() }
+      throw error
+    }
   }
   async *stream(options) {
     this.stop.signal.throwIfAborted()
@@ -280,34 +314,51 @@ export class AgentRuntimeAdapter {
     try {
       const profile = this.profile(options.provider)
       options = await this.compatibleEffort(profile, options)
-      const binding = await this.profiles.bind(agent.id, profile.id)
+      let binding = await this.profiles.bind(agent.id, profile.id)
       const seen = new Set(binding.seenInputs)
       const messages = options.messages.filter(m => m.role === 'user' && m.id && !seen.has(m.id))
       if (!messages.length && !options.nativeContinuation) throw new Error('No new user input; refusing to replay a native Agent turn')
       const human = messages.length === 1 ? humanInput(messages[0]) : undefined
       const match = human && /^\/([a-z][a-z0-9_:-]*)(?:\s|$)/.exec(human)
-      const command = match ? { name: match[1], input: human.slice(match[0].length).trim() } : undefined
-      const context = command || options.nativeContinuation ? [] : pendingShellContext(agent.session)
-      const attachments = (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments)
-      const history = await branchHistoryInput(agent.session, binding, attachments, profile.type === 'codex' || profile.protocol === 'codex', signal)
-      const input = [...history, ...await nativeInput([...context, ...messages], { attachments, codex: profile.type === 'codex' || profile.protocol === 'codex', signal })]
+      let command = match ? { name: match[1], input: human.slice(match[0].length).trim() } : undefined
+      if (command?.name === 'resume') throw new Error('请在 dsh 的 /resume 菜单中选择要恢复的原生会话。')
+      if (command && terminalOnlyCommands.has(command.name)) throw new Error('/' + command.name + ' 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。')
+      const editState = agent.ctx.sessionProjections?.stateOf(agent.session, 'kodeHistoryEdits')
+      const edit = editState ? editState.lastEditSeq === null ? undefined : agent.session.eventAt(editState.lastEditSeq)
+        : latestHistoryEdit(agent.session.snapshotEvents?.() ?? [])
+      const rewind = edit && binding.historyEditId !== edit.data.id ? edit : undefined
+      if (rewind) {
+        // The visible edit must survive a restart before the CLI is rewound.
+        await agent.ctx.sessions.flush(agent.session)
+        await this.closeSession(agent.id)
+      }
       const tools = options.tools ?? []
       runtime = this.live.get(agent.id)
       const autoCompactRevision = profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact')?.seq ?? -1 : -1
       if (runtime && runtime.autoCompactRevision !== autoCompactRevision) { await runtime.close(); this.live.delete(agent.id); runtime = undefined }
       if (runtime?.rpc.closed) { this.live.delete(agent.id); runtime = undefined }
       if (!runtime && options.nativeContinuation) throw new Error('原生目标连接已关闭，不能重放继续事件。')
-      if (!runtime) { runtime = await this.createRuntime(agent, binding, tools, signal); this.live.set(agent.id, runtime) }
+      if (!runtime) {
+        runtime = await this.createRuntime(agent, binding, tools, signal, rewind)
+        this.live.set(agent.id, runtime)
+        binding = this.profiles.binding(agent.id) ?? binding
+      }
+      const history = edit ? binding.historyEditBootstrap ? editedHistoryInput(agent.session, edit) : [] : branchHistoryInput(agent.session, binding)
+      // Slash commands can replace the entire native prompt, including the
+      // retained prefix. Deliver edits requiring a bootstrap as plain input.
+      if (history.length) command = undefined
+      const context = command || options.nativeContinuation || binding.historyEditBootstrap
+        ? [] : pendingShellContext(agent.session, editState?.ranges)
+      const attachments = (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments)
+      const input = [...history, ...await nativeInput([...context, ...messages], { attachments, codex: profile.type === 'codex' || profile.protocol === 'codex', signal })]
       const explicitFast = options.fast ?? fastPreference(this.ctx.sessionProjections?.stateOf(agent.session, 'kodeFast'), options)
       const codex = profile.type === 'codex' || profile.protocol === 'codex'
       const fast = codex ? undefined : explicitFast
       const serviceTier = codex && explicitFast !== undefined ? explicitFast ? options.fastTier ?? 'fast' : 'default' : undefined
       const skillNames = messages.flatMap(message => [...(['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1]))
-      if (command?.name === 'resume') throw new Error('请在 dsh 的 /resume 菜单中选择要恢复的原生会话。')
-      if (command && terminalOnlyCommands.has(command.name)) throw new Error(`/${command.name} 需要原生 CLI 窗口或切换会话，请使用侧栏的新建会话和 Agent 设置。`)
       // Commit admission before sending. A crash cannot automatically repeat a
       // native turn with potentially irreversible tools; the user may follow up.
-      await this.profiles.patchBinding(agent.id, { ...(history.length ? { historyBootstrapped: true } : {}), seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
+      await this.profiles.patchBinding(agent.id, { ...(binding.historyEditBootstrap ? { historyEditBootstrap: false } : {}), ...(!edit && history.length ? { historyBootstrapped: true } : {}), seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
       if (context.length) appendPluginRecord(agent.session, 'plugin:kode/shell-context-consumed', { ids: context.map(row => row.id) })
       await agent.ctx.parallel('session/flush', agent.session)
       let text = '', reasoning = '', textIndex, reasoningIndex, textItemId, nextIndex = 0

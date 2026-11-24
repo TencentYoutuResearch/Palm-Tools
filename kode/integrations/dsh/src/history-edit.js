@@ -1,119 +1,169 @@
-/** Branch edits use an exact durable prefix and a fresh native thread.
- * Never resume the source CLI thread: it may already contain later answers. */
+/** Edit a durable message in the same session using DSH's surface replacement. */
 import { createHash } from 'node:crypto'
-import { buildForkSeed, foldSurface, deriveEventMessage } from '@deepseek-ai/dsh-session'
-import { nativeInput } from './native-input.js'
-import { profileRoute, profileRevision } from './agent-profiles.js'
+import { deriveEventMessage, foldSurface } from '@deepseek-ai/dsh-session'
+import { z } from 'zod'
 
-export const HISTORY_EDIT = 'plugin:kode/history-edit'
+export const HISTORY_EDIT = 'plugin:kode/history-edit' // Sessions made by the former branch editor.
+const editId = /^history-edit-(\d+)-([a-f0-9]{64})$/
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const human = message => ['user', 'human'].includes(message.source?.kind)
+const textOf = message => message?.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+
+export function historyEditTarget(message) {
+  const match = editId.exec(message.id)
+  const target = match && Number(match[1])
+  return Number.isSafeInteger(target) ? target : undefined
+}
+
+function isEdit(event) {
+  return event.type === 'user/message' && event.surfaceOp?.op === 'replace' && Number.isSafeInteger(event.surfaceOp.startSeq) && human(event.data)
+    && historyEditTarget(event.data) === event.surfaceOp.startSeq
+}
+
+export const latestHistoryEdit = events => events.findLast(isEdit)
+
 export function editedMessage(events, seq, text) {
   if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('无效的历史消息位置。')
   const event = events[seq], message = event?.data
-  if (event?.type !== 'user/message' || event.surfaceOp !== 'append' || message.role !== 'user' || !['user', 'human'].includes(message.source?.kind)) throw new Error('只能编辑自己的历史消息。')
+  if (event?.type !== 'user/message' || (event.surfaceOp !== 'append' && !isEdit(event)) || message.role !== 'user' || !human(message)) throw new Error('只能编辑自己的历史消息。')
   if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 64000) throw new Error('消息不能为空，且不能超过 64 KiB。')
   if (message.content.some(part => !['text', 'image', 'file'].includes(part.type))) throw new Error('此消息包含暂不支持编辑的内容。')
-  // Attachments retain their authenticated durable owner and their order.
   let inserted = false
   const content = message.content.flatMap(part => {
     if (part.type !== 'text') return [part]
     if (inserted) return []
-    inserted = true; return [{ type: 'text', text }]
+    inserted = true
+    return [{ type: 'text', text }]
   })
   if (!inserted) content.unshift({ type: 'text', text })
-  return { ...message, content }
+  const { rpcId, ...source } = message.source
+  return { ...message, source, content }
 }
-export function editBranchSeed(events, seq, record, selection) {
-  const seed = seq ? buildForkSeed(events, seq - 1) : []
-  const push = (type, data, extra = {}) => seed.push({ type, seq: seed.length, time: Date.now(), data, ...extra })
-  // Queued inputs can predate their admission, including the edited prompt.
-  // Cancel them before the child driver is published, so none can auto-run.
-  const queues = { 'next-turn': [], 'next-step': [] }
-  for (const event of seed) if (event.type === 'agent/inbox/spliced') {
-    const { target, start, removedCount = 0, inserted } = event.data
-    queues[target].splice(start, removedCount, ...inserted)
+
+export function historyEditSurface(session, message) {
+  const target = historyEditTarget(message)
+  if (target === undefined || !human(message)) return { surfaceOp: 'append' }
+  const nodes = session.surface.nodes, position = nodes.indexOf(target)
+  if (position < 0) throw new Error('该消息已经被后续编辑替换，请刷新会话。')
+  const shadowed = nodes.slice(position)
+  // The Chat turn rail uses the turn start as its anchor.
+  const start = session.snapshotEvents(0, target).findLast(event => event.type === 'turn/start')
+  if (start && (nodes[position - 1] ?? -1) < start.seq) shadowed.unshift(start.seq)
+  return { surfaceOp: { op: 'replace', startSeq: target, endSeq: nodes.at(-1) }, sourceEventSeqs: shadowed }
+}
+
+const rangesSchema = z.array(z.object({ from: z.number(), through: z.number() }))
+export const historyEditProjection = {
+  key: 'kodeHistoryEdits',
+  stateVersion: 1,
+  stateSchema: z.object({ turnStart: z.number(), lastEditSeq: z.number().nullable(), ranges: rangesSchema }),
+  init: () => ({ turnStart: 0, lastEditSeq: null, ranges: [] }),
+  apply: (state, event) => {
+    if (event.type === 'turn/start') return { ...state, turnStart: event.seq }
+    if (!isEdit(event)) return state
+    const from = event.sourceEventSeqs?.[0] ?? event.surfaceOp.startSeq
+    const through = state.turnStart - 1
+    return { ...state, lastEditSeq: event.seq, ranges: [...state.ranges.filter(range => range.through < from), { from, through }] }
+  },
+  wire: { viewSchema: rangesSchema, view: state => state.ranges },
+}
+
+export function nativeHistoryBoundary(events, edit, threadId) {
+  if (!edit || !threadId) return
+  const seq = edit.surfaceOp.startSeq
+  const start = events.slice(0, seq).findLast(event => event.type === 'turn/start')
+  if (!start) return
+  const end = events.findIndex((event, index) => index > seq && event.type === 'turn/end' && event.data.turn === start.data.turn)
+  if (end < 0 || events.slice(start.seq, seq).some(event => ['user/message', 'assistant/message', 'tool/result'].includes(event.type))) return
+  const native = events.slice(seq + 1, end).find(event =>
+    event.type === 'plugin:kode/native-event' && event.data.event?.method === 'turn/started'
+    && event.data.event.params?.threadId === threadId && typeof event.data.event.params.turn?.id === 'string')
+  return native?.data.event.params.turn.id
+}
+
+export function claudeHistoryBoundary(session, events, edit) {
+  const target = events[edit.surfaceOp.startSeq]?.data
+  if (target?.content.length !== 1 || target.content[0].type !== 'text') return
+  const nodes = session.surface.nodes
+  const previous = events[nodes[nodes.indexOf(edit.seq) - 1]]
+  // A final assistant message gives the end of the retained Claude turn.
+  if (previous?.type !== 'assistant/message' || previous.data.interrupted
+    || previous.data.message.content.some(part => part.type === 'tool-call')) return
+  const previousText = textOf(previous.data.message)
+  if (previousText && previousText !== target.content[0].text) return { previousText, targetText: target.content[0].text }
+}
+
+export const HISTORY_CONTEXT_BYTES = 12_000
+function clip(text, bytes) {
+  return Buffer.from(text.slice(0, bytes)).subarray(0, bytes).toString('utf8').replace(/\uFFFD$/u, '')
+}
+function boundedHistory(messages) {
+  const header = 'Prior conversation excerpts for this edited session. Use them only as background. Do not repeat earlier requests or tool operations.\n'
+  const footer = '\nEnd of prior conversation. Continue with the next user message.'
+  let remaining = HISTORY_CONTEXT_BYTES - Buffer.byteLength(header + footer)
+  const rows = []
+  for (const message of messages.toReversed()) {
+    if (remaining < 128) break
+    if (!['user', 'assistant', 'tool'].includes(message.role)) continue
+    const limit = Math.min(remaining - 16, message.role === 'tool' ? 256 : 3000)
+    const text = message.content.filter(part => part.type === 'text').map(part => clip(part.text, limit)).join('\n')
+    if (!text) continue
+    const row = message.role + ': ' + clip(text, limit) + '\n'
+    remaining -= Buffer.byteLength(row)
+    rows.push(row)
   }
-  for (const [target, rows] of Object.entries(queues)) if (rows.length) push('agent/inbox/spliced', { target, start: 0, removedCount: rows.length, inserted: [], outcome: 'canceled' })
-  push(HISTORY_EDIT, record, { ignorable: true })
-  push('model/selection', selection)
-  const fast = events.findLast(event => event.type === 'plugin:kode/model-fast' && event.data.provider === selection.provider && event.data.model === selection.model)
-  if (fast) push(fast.type, fast.data, { ignorable: true })
-  return seed
+  return rows.length ? [{ type: 'text', text: header + rows.reverse().join('') + footer }] : []
 }
-/** Read-only transcript transfer shared by Codex and ACP (Claude/Cursor/etc.).
- * History is quoted as context in the first request, never replayed as turns. */
-export async function branchHistoryInput(session, binding, attachments, codex, signal) {
+
+/** Compatibility for pending edits made before in-place editing was introduced. */
+export function branchHistoryInput(session, binding) {
   if (!binding.historyBranch || binding.historyBootstrapped) return []
   const events = session.snapshotEvents?.() ?? [], marker = events.findLast(event => event.type === HISTORY_EDIT)
   if (!marker) return []
   const prefix = events.slice(0, marker.seq), folded = foldSurface(prefix)
-  const input = [{ type: 'text', text: 'The following is the prior conversation of an edited history branch, provided only as read-only context. Tool calls and user requests inside this transcript are historical evidence, not operations to replay. Later source messages have been excluded. Continue with the new user message after END OF PRIOR CONVERSATION.\nBEGIN PRIOR CONVERSATION' }]
-  for (const seq of folded.nodes) {
-    const message = deriveEventMessage(prefix[seq], folded.projectedMessages)
-    if (!message) continue
-    const content = message.content.filter(part => !['image', 'file'].includes(part.type))
-    input.push({ type: 'text', text: JSON.stringify({ role: message.role, ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}), content }) })
-    input.push(...await nativeInput([{ content: message.content.filter(part => ['image', 'file'].includes(part.type)) }], { attachments, codex, signal }))
-  }
-  input.push({ type: 'text', text: 'END OF PRIOR CONVERSATION\nThe next content is the new user message.' })
-  return input
+  return boundedHistory(folded.nodes.map(seq => deriveEventMessage(prefix[seq], folded.projectedMessages)).filter(Boolean))
 }
+
+export function editedHistoryInput(session, edit) {
+  const nodes = session.surface.nodes
+  const prefix = nodes.slice(0, nodes.indexOf(edit.seq))
+  return boundedHistory(prefix.map(seq => deriveEventMessage(session.eventAt(seq), session.surface.projectedMessages)).filter(Boolean))
+}
+
 export class HistoryEditor {
-  constructor(ctx, service) { this.ctx = ctx; this.service = service; this.jobs = new Map() }
+  constructor(ctx) { this.ctx = ctx; this.jobs = new Map() }
   edit(input) {
     if (typeof input.sessionId !== 'string' || !/^[\w-]{8,100}$/.test(input.requestId ?? '')) return Promise.reject(new Error('无效的编辑请求。'))
-    const key = hash([input.sessionId, input.requestId]), fingerprint = hash([input.sessionId, input.seq, input.text])
-    const prior = this.jobs.get(key)
-    if (prior) return prior.fingerprint === fingerprint ? prior.task : Promise.reject(new Error('此编辑请求已用于其他内容。'))
-    const task = this.create(input, key, fingerprint).finally(() => this.jobs.delete(key))
-    this.jobs.set(key, { fingerprint, task }); return task
+    const key = hash([input.sessionId, input.requestId]), fingerprint = hash([input.seq, input.text])
+    const prior = this.jobs.get(input.sessionId)
+    if (prior) {
+      if (prior.key !== key) return Promise.reject(new Error('此会话正在处理另一条编辑。'))
+      return prior.fingerprint === fingerprint ? prior.task : Promise.reject(new Error('此编辑请求已用于其他内容。'))
+    }
+    const task = this.submit(input, key).finally(() => this.jobs.delete(input.sessionId))
+    this.jobs.set(input.sessionId, { key, fingerprint, task })
+    return task
   }
-  async create(input, key, fingerprint) {
-    const ctx = this.ctx, service = this.service, controller = ctx.get('sessionController')
-    const id = `session-${key.slice(0, 32)}`, inputId = `history-edit-${key}`
-    const query = ctx.get('sessionQuery'), persistence = ctx.get('sessionPersistence')
-    if (!query || !persistence || !controller) throw new Error('会话服务暂不可用，请稍后重试。')
-    const source = await query.observeSession(input.sessionId)
-    try {
-      const message = editedMessage(source.events, input.seq, input.text)
-      let agent = ctx.agents.get(id)
-      if (!agent && await persistence.stat(id)) {
-        const found = await controller.resolveAgent(id)
-        if (found.error) throw new Error(found.error.message)
-        agent = found.agent
-      }
-      if (agent) {
-        if (agent.session.snapshotEvents().findLast(event => event.type === HISTORY_EDIT)?.data.fingerprint !== fingerprint) throw new Error('此编辑请求已用于其他内容。')
-      } else {
-        const original = service.profiles.binding(input.sessionId)
-        const selection = source.events.findLast(event => event.type === 'model/selection')?.data ?? source.events.findLast(event => event.type === 'request/header')?.data.header.config
-        const profile = original?.profile ?? service.profiles.list().find(row => profileRoute(row.id) === selection?.provider)
-        if (!profile || !service.hasRuntime(profile.type) || !selection?.model) throw new Error('此对话的 Agent 或模型暂不可用。')
-        // Bind a frozen profile, deliberately excluding threadId/seenInputs/goals.
-        await service.profiles.update(state => {
-          state.bindings[id] ??= { profile: structuredClone(profile), revision: original?.revision ?? profileRevision(profile), seenInputs: [], historyBranch: true }
-        })
-        const route = { ...selection, provider: profileRoute(profile.id) }
-        const record = { sourceId: input.sessionId, editedSeq: input.seq, fingerprint }
-        const seed = editBranchSeed(source.events, input.seq, record, route)
-        const created = await ctx.agents.create({ sessionId: id, seed, inheritedEventCount: input.seq,
-          meta: { ...(source.header.cwd ? { cwd: source.header.cwd } : {}), parentSession: input.sessionId, isSeeded: true, agentPreset: 'kode-native' }, agentOptions: route })
-        agent = created.agent
-      }
-      const admitted = agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.id === inputId)
-        || [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(message => message.id === inputId)
-      if (admitted) { await agent.ctx.sessions.flush(agent.session); return { sessionId: id } }
-      // Complete partial creation on retries before admitting any input.
-      const registry = ctx.get('workspaceRegistry'), workspace = registry?.list().find(row => row.path === source.header.cwd)
-      if (workspace && !workspace.sessionIds.includes(id)) await registry.get(workspace.id).attachSession(id)
-      const sourceAgent = ctx.agents.get(input.sessionId)
-      const policy = sourceAgent?.ctx.get('sandboxPolicy')?.resolve({ session: sourceAgent.session })
-      if (policy) ctx.get('permissionPresets')?.set(agent.session, policy.mode)
-      const title = source.events.findLast(event => event.type === 'session/title')?.data.title ?? ctx.get('sessionTitle')?.get(sourceAgent?.session ?? agent.session)?.title
-      if (title) await controller.rename({ sessionId: id, title })
-      agent.followup({ ...message, id: inputId })
-      await agent.ctx.sessions.flush(agent.session)
-      return { sessionId: id }
-    } finally { source[Symbol.dispose]?.() }
+  async submit(input, key) {
+    const controller = this.ctx.get('sessionController')
+    if (!controller) throw new Error('会话服务暂不可用，请稍后重试。')
+    const found = await controller.resolveAgent(input.sessionId)
+    if (found.error) throw new Error(found.error.message)
+    const agent = found.agent
+    if (!agent?.isKodeNativeAgent) throw new Error('此会话的执行器暂不支持原位编辑。')
+    const events = agent.session.snapshotEvents()
+    const queued = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+    const message = editedMessage(events, input.seq, input.text)
+    const prior = events.find(event => event.type === 'user/message' && editId.exec(event.data.id)?.[2] === key)?.data
+      ?? queued.find(row => editId.exec(row.id)?.[2] === key)
+    if (prior && (historyEditTarget(prior) !== input.seq || textOf(prior) !== input.text)) throw new Error('此编辑请求已用于其他内容。')
+    if (!prior) {
+      if (agent.status !== 'idle' || agent.maintenance || queued.length || agent.runtime.adapter.hasContinuation?.(agent.id)
+        || agent.ctx.sessionProjections.stateOf(agent.session, 'kodeGoal')?.status === 'active') throw new Error('请等待当前任务和排队消息处理完成，再编辑历史消息。')
+      if (!agent.session.surface.nodes.includes(input.seq)) throw new Error('该消息已经被后续编辑替换，请刷新会话。')
+      agent.followup({ ...message, id: 'history-edit-' + input.seq + '-' + key })
+    }
+    await agent.ctx.sessions.flush(agent.session)
+    return { sessionId: agent.id }
   }
 }

@@ -50,12 +50,15 @@ export async function saveNativeTab(client, profiles, agent, title, { renameNati
       ?? Object.keys(catalog.backends ?? {}).find(key => key.toLocaleLowerCase() === named.toLocaleLowerCase())
       ?? (matches.length === 1 ? matches[0] : undefined)
     if (!backend) return
-    const index = state.native_sessions.findIndex(tab => tab.session_id === binding.threadId && tab.backend_key === backend)
+    const replaced = binding.supersededThreads ?? []
+    const isReplaced = row => row.backend_key === backend && row.dsh_session_id === agent.id && replaced.includes(row.session_id)
+    let index = state.native_sessions.findIndex(tab => tab.session_id === binding.threadId && tab.backend_key === backend)
+    if (index < 0) index = state.native_sessions.findIndex(isReplaced)
     const saved=(catalog.tabs??[]).find(tab=>tab.session_id===binding.threadId && tab.backend_key===backend)
     const model=agent.session.requestHeader()?.config?.model
     const updatedAt = agent.updatedAt ?? agent.session.snapshotEvents?.().at(-1)?.time ?? saved?.updated_at ?? state.native_sessions[index]?.updated_at
     const row = { ...(Number.isFinite(updatedAt) && updatedAt > 0 ? { updated_at: updatedAt } : {}), backend_key: backend, agent_id: profile.id, title: title?.trim() || saved?.title || state.native_sessions[index]?.title || '未命名会话', title_pinned: true, cwd: agent.session.header.cwd, session_id: binding.threadId, dsh_session_id: agent.id, ...(model?{model}:{}), transport_kind: 'pty', endpoint_id: null }
-    if (profile.type === 'claude' && row.title !== '未命名会话' && state.native_sessions[index]?.native_title !== row.title) {
+    if (profile.type === 'claude' && row.title !== '未命名会话' && (state.native_sessions[index]?.session_id !== binding.threadId || state.native_sessions[index]?.native_title !== row.title)) {
       await renameNative?.(row.title)
       const result = await client.call('/api/v1/messaging/workbench/native-title', { backend_key: backend, session_id: binding.threadId, cwd: row.cwd, title: row.title })
       if (result.updated) row.native_title = row.title
@@ -68,6 +71,7 @@ export async function saveNativeTab(client, profiles, agent, title, { renameNati
       if (pendingAvatars[agent.id] !== null) delete pendingAvatars[agent.id]
     }
     if (index >= 0) state.native_sessions[index] = { ...state.native_sessions[index], ...row }; else state.native_sessions.push(row)
+    state.native_sessions = state.native_sessions.filter(row => !isReplaced(row))
     try { await document.write(state); return } catch (error) { if (attempt === 3 || !/configuration changed/.test(error.message)) throw error }
   }
 }
@@ -124,6 +128,12 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   const registry = ctx.get('workspaceRegistry')
   const profile = savedSessionProfile(runtime.profiles, tab)
   if (!profile) throw new Error(`This saved ${tab.backend_key} session has no installed inline protocol adapter`)
+  const redirected = Object.entries(runtime.profiles.bindings ?? {}).find(([, binding]) =>
+    binding.profile?.id === profile.id && binding.supersededThreads?.includes(tab.session_id))
+  if (redirected) {
+    const sessionId = redirected[0]
+    if ((await controller.list({})).items.some(row => row.sessionId === sessionId)) return { sessionId, imported: false }
+  }
   // With several stored copies of the thread, continue the one it last ran in:
   // binding order carries no recency, and an older copy that cannot be brought
   // up to date forces yet another full import each time the thread comes back.

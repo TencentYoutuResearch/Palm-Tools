@@ -133,6 +133,47 @@ export class AcpSession {
       return { available: true, timeline: messages, history_window: { count: messages.length, truncated } }
     } finally { this.replay = undefined }
   }
+  async forkHistory(threadId, boundary, signal) {
+    await this.initialize(signal)
+    const capabilities = this.info.agentCapabilities
+    if (!capabilities?.loadSession || !capabilities.sessionCapabilities?.fork) return
+    const { previousText, targetText } = boundary
+    let row, previous, found, matches = 0
+    const settle = () => {
+      if (row?.role === 'user' && row.text === targetText && previous?.role === 'agent' && previous.text === previousText) {
+        found = previous.id
+        matches++
+      }
+      previous = row
+      row = undefined
+    }
+    this.replay = { threadId, add: update => {
+      const role = update.sessionUpdate === 'user_message_chunk' ? 'user' : update.sessionUpdate === 'agent_message_chunk' ? 'agent' : undefined
+      if (!role) {
+        if (['tool_call', 'tool_call_update', 'plan'].includes(update.sessionUpdate)) { settle(); previous = undefined }
+        return
+      }
+      const id = update.messageId
+      if (!id) { settle(); previous = undefined; return }
+      if (id !== row?.id || role !== row.role) { settle(); row = { id, role, text: '' } }
+      const limit = (role === 'user' ? targetText : previousText).length
+      if (update.content?.type !== 'text' || row.text === null || row.text.length + update.content.text.length > limit) row.text = null
+      else row.text += update.content.text
+    } }
+    try {
+      await this.request('session/load', { sessionId: threadId, cwd: this.cwd, mcpServers: [] }, signal)
+      settle()
+      if (matches !== 1 || !found) return
+      // The pinned Claude adapter resolves this ACP message ID to an
+      // inclusive native checkpoint. Generic ACP fork copies the entire log.
+      const { sessionId } = await this.request('session/fork', { sessionId: threadId, cwd: this.cwd, mcpServers: [],
+        _meta: { jetbrains: { air: { fork: { version: 1, messageId: found } } } } }, signal)
+      if (typeof sessionId === 'string' && sessionId && sessionId !== threadId) return sessionId
+    } catch (error) {
+      signal?.throwIfAborted()
+      if (this.rpc.closed) throw error
+    } finally { this.replay = undefined }
+  }
   async open(binding, tools, signal = this.lifetime.signal) {
     signal.throwIfAborted()
     await this.initialize(signal)

@@ -7,10 +7,6 @@ const upstream = process.env.KODE_CHAT_UPSTREAM_CLIENT ?? resolve('@deepseek-ai/
 let source = await readFile(upstream, 'utf8')
 function replace(from, to) { if (!source.includes(from)) throw new Error(`Pinned Chat contract changed: ${from}`); source = source.replace(from, to) }
 replace('id: "@deepseek-ai/dsh-client-ui-chat",','id: "@kode/dsh-chat",')
-// Newer dsh hosts register the Session panel in this session-scoped Chat seat.
-replace('children: { "conversation.chat.flow": {', 'children: { "conversation.chat.aside": { kind: "single", scope: "session" }, "conversation.chat.flow": {')
-const chatContent = '(0, react_jsx_runtime.jsx)("div", {\n\t\t\t\t\t\tclassName: ChatView_module_css_default.root,'
-replace(chatContent, '(0, react_jsx_runtime.jsx)("div", { "data-chat-aside": "", children: renderSlot("conversation.chat.aside", {}) }),\n\t\t\t\t\t' + chatContent)
 // Imported relay messages have no live inbox claim, so remain Context nodes.
 replace('node.kind !== "context" || node.data.content.some', 'node.kind !== "context" || (node.data.source?.kind === "agent-message" && node.data.source?.form === "relay") || node.data.content.some')
 // Stable user-bubble seat for scene-aware appearance without matching generated classes.
@@ -19,6 +15,40 @@ replace('className: MessageItem_module_css_default.bubble,', 'className: Message
 const historyEdit = await readFile(new URL('../packages/chat/history-edit.js', import.meta.url), 'utf8')
 const workbenchUi = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
 replace('function UserStyleBubble(', historyEdit + '\n' + workbenchUi + '\nfunction UserStyleBubble(')
+// History stays append-only. Render the active transcript and hide replaced
+// ranges from the native turn navigator and process groups.
+replace('return isAppendSurfaceEvent(event) && !isCompactionCheckpoint(event) ? {',
+  'return (isAppendSurfaceEvent(event) || isResentHistoryMessage(event)) && !isCompactionCheckpoint(event) ? {')
+replace('const order = useChat((s) => s.order);', 'const rawOrder = useChat((s) => s.order);')
+replace('const groupedEntries = useConversation((snapshot) => snapshot.views.grouped("chat")?.entries);',
+  'const groupedView = useConversation((snapshot) => snapshot.views.grouped("chat"));')
+replace('const entries = (0, react.useMemo)(() => groupedEntries ?? order.map((key) => ({\n\t\t\t\tkind: "node",\n\t\t\t\tkey\n\t\t\t})), [groupedEntries, order]);\n\t\t\tconst nodeStore = useChat((s) => s.nodes);',
+  `const nodeStore = useChat((s) => s.nodes);
+			const historyEdits = useProjection("kodeHistoryEdits");
+			const visible = (key) => historySeqVisible(historyEdits, nodeStore.get(key)?.anchorSeq);
+			const order = (0, react.useMemo)(() => historyEdits?.length ? rawOrder.filter(visible) : rawOrder, [rawOrder, historyEdits, nodeStore]);
+			const entries = (0, react.useMemo)(() => {
+				if (!groupedView) return order.map(key => ({ kind: "node", key }));
+				if (!historyEdits?.length) return groupedView.entries;
+				return groupedView.entries.filter(entry => entry.kind === "node" ? visible(entry.key) :
+					groupedView.groupSource(entry.key)?.getSnapshot()?.members.some(member => visible(member.key)));
+			}, [groupedView, order, historyEdits, nodeStore]);`)
+replace('const turnNavigationItems = useChat((s) => s.navigation.items());\n\t\t\tconst turnOutline = useProjection("turnOutline");',
+  `const navigation = useChat((s) => s.navigation.items());
+			const turnNavigationItems = (0, react.useMemo)(() => historyEdits?.length ?
+				navigation.filter(item => visible(item.anchorKey)) : navigation, [navigation, historyEdits, nodeStore]);
+			const turnOutline = useProjection("turnOutline");`)
+replace('const railItems = (0, react.useMemo)(() => mergeTurnRailItems(turnNavigationItems, turnOutline), [turnNavigationItems, turnOutline]);',
+  'const railItems = (0, react.useMemo)(() => mergeTurnRailItems(turnNavigationItems, historyEdits?.length ? outlineEntries(turnOutline).filter(item => historySeqVisible(historyEdits, item?.seq)) : turnOutline), [turnNavigationItems, turnOutline, historyEdits]);')
+replace('entries,\n\t\t\t\t\t\t\t\t\t\t\tpendingInputs,', 'entries,\n\t\t\t\t\t\t\t\t\t\t\thistoryEdits,\n\t\t\t\t\t\t\t\t\t\t\tpendingInputs,')
+replace('function ChatFlow({ entries, pendingInputs,', 'function ChatFlow({ entries, historyEdits, pendingInputs,')
+replace('const seatProps = {\n\t\t\t\tnodeStore,', 'const seatProps = {\n\t\t\t\tnodeStore,\n\t\t\t\thistoryEdits,')
+replace('function ChatGroupSeat({ groupKey, useChatGroup, useGroupHeaderAction, ...props }) {\n\t\t\tconst members = useChatGroup(groupKey, (group) => group?.members);',
+  `function ChatGroupSeat({ groupKey, useChatGroup, useGroupHeaderAction, historyEdits, ...props }) {
+			const groupMembers = useChatGroup(groupKey, (group) => group?.members);
+			const members = (0, react.useMemo)(() => historyEdits?.length ? groupMembers?.filter(member =>
+				historySeqVisible(historyEdits, props.nodeStore.get(member.key)?.anchorSeq)) : groupMembers,
+				[groupMembers, historyEdits, props.nodeStore]);`)
 // Keep the newer DSH session panel mountable in the pinned Chat renderer.
 replace('children: { "conversation.chat.flow": {', `children: {
 						"conversation.chat.aside": { kind: "single", scope: "session" },
@@ -244,39 +274,6 @@ replace(layoutStyleMount, `if (typeof document !== "undefined") {
 			tag.textContent = css$16;
 			if (!tag.isConnected) document.head.appendChild(tag);
 		}`)
-// The adapted rc.5 dialog uses a positioning hook the current runtime no longer exports.
-replace('dimensions (the `useAnchoredPosition` measure pass).', 'dimensions before positioning.')
-replace(`const pos = (0, _deepseek_ai_dsh_client_ui_primitives.useAnchoredPosition)({
-				open,
-				anchorRef: rootRef,
-				panelRef,
-				side: "top",
-				gap: PANEL_GAP,
-				margin: PANEL_MARGIN
-			});`, `const [pos, setPos] = (0, react.useState)(null);
-			(0, react.useLayoutEffect)(() => {
-				if (!open || !rootRef.current || !panelRef.current) return;
-				const anchor = rootRef.current;
-				const panel = panelRef.current;
-				const update = () => {
-					const trigger = anchor.getBoundingClientRect();
-					const { width, height } = panel.getBoundingClientRect();
-					const top = Math.max(PANEL_MARGIN, trigger.top - PANEL_GAP - height);
-					const left = Math.max(PANEL_MARGIN, Math.min(trigger.left, window.innerWidth - width - PANEL_MARGIN));
-					setPos(previous => previous?.top === top && previous.left === left ? previous : { top, left });
-				};
-				update();
-				const resize = new ResizeObserver(update);
-				resize.observe(anchor);
-				resize.observe(panel);
-				window.addEventListener("resize", update);
-				window.addEventListener("scroll", update, true);
-				return () => {
-					resize.disconnect();
-					window.removeEventListener("resize", update);
-					window.removeEventListener("scroll", update, true);
-				};
-			}, [open]);`)
 replace('className: ChatView_module_css_default.runningWhaleStill,\n\t\t\t\t\twidth: "100%",\n\t\t\t\t\theight: "100%",', 'className: ChatView_module_css_default.runningWhaleStill,\n\t\t\t\t\twidth: 14,\n\t\t\t\t\theight: 14,')
 source = source.replace(/\/\/# sourceMappingURL=.*$/m, '').replace(/^[ \t]+$/gm, '').trimEnd() + '\n'
 await writeFile(new URL('../packages/chat/client.js', import.meta.url), '// Generated from dsh-client-ui-chat 0.2.1-rc.5 (MIT); run npm run build:chat.\n' + source)

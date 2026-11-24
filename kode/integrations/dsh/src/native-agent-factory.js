@@ -2,6 +2,7 @@ import { symbols } from '@deepseek-ai/cordis'
 import { contextUsageProjection } from './context-usage.js'
 import { nativeSubagentsProjection } from './native-subagents.js'
 import { fastProjection } from './model-fast.js'
+import { historyEditProjection } from './history-edit.js'
 /** Cordis-owned Agent factory. Storage and lifecycle are independent of dsh's LLM loop. */
 import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import { NativeAgentDriver, boundaryProjection, inboxProjection } from './native-agent-driver.js'
@@ -273,6 +274,7 @@ export async function apply(ctx) {
   ctx.effect(function* () {
     yield ctx.sessionProjections.register(boundaryProjection)
     yield ctx.sessionProjections.register(inboxProjection)
+    yield ctx.sessionProjections.register(historyEditProjection)
     yield ctx.sessionProjections.register(contextUsageProjection)
     yield ctx.sessionProjections.register(fastProjection)
     yield ctx.sessionProjections.register(nativeSubagentsProjection)

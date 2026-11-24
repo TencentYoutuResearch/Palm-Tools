@@ -5,13 +5,13 @@ function historyEditBinding(ctx, sessionId) {
     const transport = ctx.get('kodeTransport'), host = sourceHost ?? transport?.current ?? 'local'
     if ((transport?.current ?? 'local') !== host) throw new Error('执行主机已切换，请返回原主机后重新编辑。')
     const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'edit-message', sessionId, seq, text, requestId }) }
+      body: JSON.stringify({ action: 'edit-message-in-place', sessionId, seq, text, requestId }) }
     const response = await (transport ? transport.fetch('/api/kode/agents', init, host) : fetch('/api/kode/agents', init))
     if (response.status === 404) throw new Error('请更新此主机的 Kode 服务以支持历史消息编辑。')
     const result = await response.json()
+    if (result.error === 'unknown Agent operation') throw new Error('请更新此主机的 Kode 服务以使用原位编辑。')
     if (!response.ok) throw new Error(result.error ?? '编辑重发失败，请重试。')
-    if ((transport?.current ?? 'local') !== host) throw new Error('主机已切换，编辑分支保留在原主机，请返回查看。')
-    await ctx.get('uiWorkspace').openSession(result.sessionId)
+    if (result.sessionId !== sessionId) throw new Error('主机返回了不同的会话，请更新 Kode 服务。')
   } }
 }
 function HistoryEditableMessage({ native, editHistory, ...props }) {
@@ -56,10 +56,18 @@ function HistoryEditableMessage({ native, editHistory, ...props }) {
           else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send() }
         } }),
       h('div', { className: 'kode-history-edit-footer' },
-        h('span', { className: 'kode-history-edit-note' }, '从此处创建新分支，后续消息不参与上下文'),
+        h('span', { className: 'kode-history-edit-note' }, '在当前会话从此处继续，替换这条消息和之后的对话'),
         h(Button, { type: 'button', onClick: close, disabled: busy }, '取消'),
         h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.trim() }, busy ? '发送中…' : '重新发送')),
       error && h('p', { role: 'alert', className: 'kode-history-edit-error' }, error)))
+}
+
+function historySeqVisible(ranges, seq) {
+  return !ranges?.some(({ from, through }) => seq >= from && seq <= through)
+}
+function isResentHistoryMessage(event) {
+  return event.surfaceOp?.op === 'replace' && /^history-edit-\d+-[a-f0-9]{64}$/.test(event.data.id)
+    && ['user', 'human'].includes(event.data.source?.kind)
 }
 
 function installHistoryEditStyle(ctx) {

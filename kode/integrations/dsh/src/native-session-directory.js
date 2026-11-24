@@ -37,10 +37,12 @@ export class NativeSessionDirectory {
     const page = await this.runtime().adapter.listSessions(profile, cursor, signal)
     for (const [key, row] of this.selections) if (row.expires <= Date.now()) this.selections.delete(key)
     const seen = new Set()
+    const replaced = new Set(Object.values(this.runtime().profiles.bindings ?? {})
+      .filter(binding => binding.profile.id === profile.id).flatMap(binding => binding.supersededThreads ?? []))
     const sessions = page.sessions.flatMap(row => {
       const { sessionId, cwd } = row
       if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId)
-        || typeof cwd !== 'string' || cwd.length > 4096 || cwd.includes('\0') || !isAbsolute(cwd) || seen.has(sessionId)) return []
+        || typeof cwd !== 'string' || cwd.length > 4096 || cwd.includes('\0') || !isAbsolute(cwd) || seen.has(sessionId) || replaced.has(sessionId)) return []
       seen.add(sessionId)
       const title = typeof row.title === 'string' ? row.title.trim().slice(0, 512) : ''
       const selection = randomUUID()

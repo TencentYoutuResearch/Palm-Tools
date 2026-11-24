@@ -17,11 +17,12 @@ if (process.argv.includes('--input-format')) {
   process.exit(0)
 }
 const app = agent({ name: 'kode-acp-fixture' })
-const sessionId = 'same-native-session', clients = new Map(), pending = new Map()
+let sessionId = 'same-native-session'
+const clients = new Map(), pending = new Map()
 const modes = { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'plan', name: 'Plan' }] }
 const configOptions = [{ id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: 'fixture-fast', options: [{ value: 'fixture-fast', name: 'Fast fixture' }, { value: 'fixture-large', name: 'Large fixture' }] }, { id: 'effort', category: 'thought_level', name: 'Effort', type: 'select', currentValue: 'medium', options: [{ value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }] }, { id: 'fast', category: 'model_config', name: 'Fast', type: 'select', currentValue: 'off', options: [{ value: 'off', name: 'Off' }, { value: 'on', name: 'On' }] }]
 const record = async (method, params) => { if (process.env.KODE_ACP_FIXTURE_LOG) await appendFile(process.env.KODE_ACP_FIXTURE_LOG, JSON.stringify({ method, params, label: process.env.KODE_ACP_FIXTURE_LABEL }) + '\n') }
-app.onRequest('initialize', async ({ params }) => { await record('initialize', params); return { protocolVersion: 1, _meta: { steering: { supported: process.env.KODE_ACP_STEERING === '1' } }, agentCapabilities: { ...(process.env.KODE_ACP_LIST === '1' ? { sessionCapabilities: { list: {} } } : {}), loadSession: process.env.KODE_ACP_NO_RESUME !== '1', promptCapabilities: { image: process.env.KODE_ACP_IMAGES === '1' } }, agentInfo: { name: 'Fixture', version: '1' }, authMethods: [] } })
+app.onRequest('initialize', async ({ params }) => { await record('initialize', params); return { protocolVersion: 1, _meta: { steering: { supported: process.env.KODE_ACP_STEERING === '1' } }, agentCapabilities: { ...(process.env.KODE_ACP_FORK_AT === '1' ? { sessionCapabilities: { fork: {} } } : process.env.KODE_ACP_LIST === '1' ? { sessionCapabilities: { list: {} } } : {}), loadSession: process.env.KODE_ACP_NO_RESUME !== '1', promptCapabilities: { image: process.env.KODE_ACP_IMAGES === '1' } }, agentInfo: { name: 'Fixture', version: '1' }, authMethods: [] } })
 app.onRequest('session/list', async ({ params }) => {
   await record('session/list', params)
   return params.cursor ? { sessions: [{ sessionId: 'older-thread', cwd: '/srv/older', title: 'Older work' }] }
@@ -40,9 +41,20 @@ const announceCommands = client => client.notify('session/update', { sessionId, 
 app.onRequest('session/new', async ({ params, client }) => { await record('session/new', params); await configureServers(params); if(process.env.KODE_ACP_LATE_COMMANDS==='1')setTimeout(()=>void announceCommands(client),20);else await announceCommands(client); return { sessionId, modes, configOptions } })
 app.onRequest('session/load', async ({ params, client }) => {
   await record('session/load', params); await configureServers(params)
+  sessionId = params.sessionId
+  if (process.env.KODE_ACP_FORK_AT === '1' && sessionId === 'original-thread') {
+    for (const [role, id, text] of [
+      ['user', 'prior-user', 'EARLIER_QUESTION'], ['agent', 'prior-assistant', 'EARLIER_ANSWER'],
+      ['user', 'target-user', 'ORIGINAL_TO_EDIT'], ['agent', 'target-assistant', 'EXCLUDED_ANSWER'],
+    ]) await client.notify('session/update', { sessionId, update: { sessionUpdate: role + '_message_chunk', messageId: id, content: { type: 'text', text } } })
+  }
   await client.notify('session/update', { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAY MUST NOT REAPPEAR' } } })
   await announceCommands(client)
   return { modes, configOptions }
+})
+app.onRequest('session/fork', { parse: value => value }, async ({ params }) => {
+  await record('session/fork', params)
+  return { sessionId: 'fixture-checkpoint-thread' }
 })
 app.onRequest('_session/rename', { parse: value => value }, async ({ params }) => { await record('_session/rename', params); return {} })
 app.onRequest('session/set_mode', async ({ params }) => { await record('session/set_mode', params); modes.currentModeId = params.modeId; return {} })
