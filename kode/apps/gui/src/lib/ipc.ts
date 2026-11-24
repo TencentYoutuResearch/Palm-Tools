@@ -1712,7 +1712,10 @@ export const extensionIpc = {
   logs: (id: string) => invoke<string[]>('extension_logs', { id }),
   showView: (extension: string, view: string, rect: ExtensionRect, fragment: string | null) =>
     invoke<void>('extension_view_show', { extension, view, rect, fragment }),
-  hideViews: (extension: string | null = null) => invoke<void>('extension_view_hide', { extension }),
+  hideViews: (extension: string | null = null, view: string | null = null) => invoke<void>('extension_view_hide', { extension, view }),
+  /** Place a panel inside another view's page area (dsh lends its main area). */
+  showViewIn: (extension: string, view: string, host: { extension: string; view: string }, rect: ExtensionRect, restack: boolean) =>
+    invoke<void>('extension_view_show_in', { extension, view, hostExtension: host.extension, hostView: host.view, rect, restack }),
   postToView: (extension: string, view: string, message: Record<string, unknown>) =>
     invoke<boolean>('extension_view_post', { extension, view, message }),
   onChanged: (cb: () => void) => listen('extensions-changed', () => cb()),

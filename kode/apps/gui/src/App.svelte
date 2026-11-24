@@ -103,7 +103,7 @@
     type ScreenshotSettings,
   } from './lib/screenshot_settings'
   import { pushToast } from './lib/toast'
-  import { extensionIpc, type ExtensionViewAction } from './lib/ipc'
+  import { extensionIpc, type ExtensionRect, type ExtensionViewAction } from './lib/ipc'
   import ExtensionViewPort from './lib/ExtensionViewPort.svelte'
   import { autostartRuntimeHosts, panelBadges, panelKey, panels, sessionViews, startExtensionWatch, viewForRuntime, type PanelTarget } from './lib/extensions'
   import { alignSharedTabs, alignWhenOnline, loadUiMode, migrationFailures, openInView, prepareViewRestore, movableToTui, movableToView, nativeKey, retryMigration, setUiMode, startModeWatch, switchProgress, uiMode, type UiMode } from './lib/runtime_switch'
@@ -1421,6 +1421,8 @@
     const panel = $panels.find((p) => p.extension === event.extension && p.view.id === event.view)
     if (panel) return onPanelAction(panel, event)
     if (!$sessionViews.some((v) => v.extension === event.extension && v.view.id === event.view)) return
+    if (event.action === 'panels') return postPanels()
+    if (event.action === 'panel-show' || event.action === 'panel-hide') return onEmbeddedPanel(event)
     // The view's way back to Kode's terminals switches the whole mode.
     if (event.action === 'leave') return switchMode('tui')
     if (event.action === 'switch-view' && event.params.to === 'tui') {
@@ -1446,12 +1448,68 @@
       }
     }
   }
+  /// In the view mode the view owns the window, so it lists Kode's panels in
+  /// its own sidebar and lends its main area; Kode places the panel's webview
+  /// over that area. The panel page is the same one the activity rail opens.
+  let embeddedPanel = $state<{ target: PanelTarget; host: { extension: string; view: string }; rect: ExtensionRect } | null>(null)
+  let restackedPanels = new Set<string>()
+  function postToHost(message: Record<string, unknown>) {
+    if (dshView) void extensionIpc.postToView(dshView.extension, dshView.view.id, message).catch(() => {})
+  }
+  function postPanels() {
+    const host = dshView
+    if (!host) return
+    const list = $panels.map((p) => ({ extension: p.extension, id: p.view.id, title: p.view.title, icon: p.view.icon, badge: $panelBadges[panelKey(p)] ?? 0 }))
+    void extensionIpc.postToView(host.extension, host.view.id, { type: 'kode-panels', panels: list }).catch(() => {})
+  }
+  $effect(() => {
+    void $panels
+    void $panelBadges
+    untrack(postPanels)
+  })
+  function onEmbeddedPanel(event: ExtensionViewAction) {
+    const params = event.params ?? {}
+    const target = $panels.find((p) => p.extension === params.extension && p.view.id === params.panel)
+    if (!target) return
+    if (event.action === 'panel-hide') {
+      if (embeddedPanel && panelKey(embeddedPanel.target) === panelKey(target)) embeddedPanel = null
+      void extensionIpc.hideViews(target.extension, target.view.id).catch(() => {})
+      return
+    }
+    const box = params.rect as Partial<ExtensionRect> | undefined
+    if (![box?.x, box?.y, box?.width, box?.height].every((n) => Number.isFinite(n))) return
+    embeddedPanel = { target, host: { extension: event.extension, view: event.view }, rect: box as ExtensionRect }
+  }
+  // Show while the view is in front and nothing covers it; otherwise hide.
+  $effect(() => {
+    const current = embeddedPanel
+    if (!current) return
+    if (!extImmersive || overlayBlocked) {
+      void extensionIpc.hideViews(current.target.extension, current.target.view.id).catch(() => {})
+      return
+    }
+    const key = panelKey(current.target)
+    const restack = !restackedPanels.has(key)
+    restackedPanels.add(key)
+    void extensionIpc.showViewIn(current.target.extension, current.target.view.id, current.host, current.rect, restack).catch((e) =>
+      pushToast({ severity: 'error', title: current.target.view.title, detail: e instanceof Error ? e.message : String(e), durationMs: 6000 }),
+    )
+  })
+  // The host view was rebuilt (restart, new page): panels must stack above it again.
+  $effect(() => {
+    if (!extImmersive) restackedPanels = new Set()
+  })
   /// Requests from a panel page (`kodeHost.request`). Panels only ever ask
   /// Kode to show something; they never drive sessions from here.
   function onPanelAction(panel: PanelTarget, event: ExtensionViewAction) {
     const params = event.params ?? {}
     if (event.action === 'close') {
       if (panelView && panelKey(panelView) === panelKey(panel)) panelView = null
+      if (embeddedPanel && panelKey(embeddedPanel.target) === panelKey(panel)) {
+        embeddedPanel = null
+        void extensionIpc.hideViews(panel.extension, panel.view.id).catch(() => {})
+        postToHost({ type: 'kode-panel-closed', extension: panel.extension, id: panel.view.id })
+      }
     } else if (event.action === 'badge') {
       const count = Math.max(0, Math.min(9999, Math.trunc(Number(params.count) || 0)))
       panelBadges.update((all) => ({ ...all, [panelKey(panel)]: count }))

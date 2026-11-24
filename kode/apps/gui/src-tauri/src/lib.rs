@@ -377,6 +377,7 @@ pub fn run() {
             extensions::view::extension_view_hide,
             extensions::view::extension_view_eval,
             extensions::view::extension_view_post,
+            extensions::view::extension_view_show_in,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -332,4 +332,15 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
 | 页面经 `kodeHost.request` 请求：`badge {count}`、`notify {title, body, severity}`、`open-session {session_uuid}`、`close` | `App.svelte` `onPanelAction` |
 | 示例扩展加了一个实时面板（事件列表、角标、完成提示） | `integrations/ext-sample` |
 
-尚未做：dsh 桥（dsh 全屏时面板入口在 dsh 侧栏里）、`sidebarSections`、`sessionActions`、`cards`、插件经扩展 API 推角标（目前只能由面板页面上报）。
+### P0-b 第二步：dsh 里的面板
+
+dsh 全屏时 Kode 的导航栏是隐藏的，面板改由 dsh 承载：
+
+1. dsh 页面经 `kodeHost.request('panels')` 向 Kode 要面板列表；Kode 回 `kode-panels` 消息，扩展装卸、角标变化时再推一次。
+2. `@kode/dsh` 把每个面板注册成 dsh 侧栏 `sidebar.panellist` 的一项（角标写在名字里）和一个 `main` 页面。
+3. 这个 `main` 页面只占位，用 `panel-show {rect}` 报告自己的位置（尺寸变化才报）；Kode 把面板自己的原生 webview 放到 dsh webview 上的这块区域（`extension_view_show_in`），卸载时 `panel-hide`。
+4. 有弹窗遮挡或离开 dsh 全屏时，Kode 先隐藏面板；面板第一次嵌入时重建一次 webview，保证叠在 dsh 之上。
+
+所以面板页面在 Kode GUI 和 dsh 里是同一个页面、同一套 `kodeHost` 请求，不用 iframe，也不需要 dsh 认识具体扩展。
+
+尚未做：`sidebarSections`、`sessionActions`、`cards`、插件经扩展 API 推角标（目前只能由面板页面上报）。

@@ -6,9 +6,13 @@
 //     plus the `htmlAttributes` its manifest declares for this platform;
 //   CSS --kode-traffic-lights-inset: room the macOS window buttons need at
 //     the top-left, because the view covers Kode's titlebar;
-//   window.kodeHost.request(action, params): ask Kode to do something
-//     ("switch-view" {to: "tui", session}, "open-session" {session, tab},
-//     "leave");
+//   window.kodeHost.request(action, params): ask Kode to do something.
+//     Session views: "switch-view" {to: "tui", session}, "open-session"
+//     {session, tab}, "leave", and for hosting Kode's panels "panels" (Kode
+//     answers with a "kode-panels" message), "panel-show" {extension,
+//     panel, rect} and "panel-hide" {extension, panel}.
+//     Panels: "badge" {count}, "notify" {title, body, severity},
+//     "open-session" {session_uuid}, "close";
 //   window "kode-host" CustomEvent: messages from Kode. Kode draws its own
 //     notifications on top of the view, so views need not handle "toast".
 (() => {

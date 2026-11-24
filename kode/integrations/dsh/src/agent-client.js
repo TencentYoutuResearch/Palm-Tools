@@ -884,6 +884,38 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }, [])
     return null
   }
+  const PANEL_GLYPH = 'M2.5 2.5h4.5v4.5h-4.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5h-4.5zM9 9h4.5v4.5H9z'
+  // A Kode extension panel (team channels, …). Kode draws the panel's own
+  // page over this area; dsh only lends the space and reports where it is.
+  function KodePanelPage({ panel }) {
+    const area = useRef(null)
+    useEffect(() => {
+      const node = area.current
+      let frame = 0, last = ''
+      const report = () => {
+        cancelAnimationFrame(frame)
+        frame = requestAnimationFrame(() => {
+          const box = node.getBoundingClientRect()
+          const rect = { x: box.left, y: box.top, width: box.width, height: box.height }
+          const key = JSON.stringify(rect)
+          if (key === last) return
+          last = key
+          window.kodeHost.request('panel-show', { extension: panel.extension, panel: panel.id, rect })
+        })
+      }
+      report()
+      const observer = new ResizeObserver(report)
+      observer.observe(node)
+      window.addEventListener('resize', report)
+      return () => {
+        cancelAnimationFrame(frame)
+        observer.disconnect()
+        window.removeEventListener('resize', report)
+        window.kodeHost.request('panel-hide', { extension: panel.extension, panel: panel.id })
+      }
+    }, [panel.extension, panel.id])
+    return h('div', { ref: area, className: 'kode-panel-host', 'aria-label': panel.title })
+  }
   function KodeLeavePage({ layout }) {
     useEffect(() => {
       window.kodeHost.request('leave')
@@ -2545,6 +2577,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 .kode-ssh-hosts-card>.kode-agent-add{margin-top:12px}
 @media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
+.kode-panel-host{width:100%;height:100%}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}
 html[data-kode-embed][data-kode-platform=macos] #root{box-sizing:border-box;height:100%;padding-top:28px}
@@ -2573,6 +2606,30 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
         scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-leave', order: 7, label: 'Kode 终端' }, () => glyph(TERMINAL_GLYPH)))
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-resume' }, () => h(KodeResumePage, { layout: scope.layout })))
         scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-resume', order: 8, label: '恢复会话' }, () => glyph(HISTORY_GLYPH)))
+        // Kode's extension panels follow the installed extensions and their badges.
+        let panelSlots = []
+        const showPanels = panels => {
+          for (const dispose of panelSlots) dispose()
+          panelSlots = panels.flatMap((panel, index) => {
+            const key = `kode-panel:${panel.extension}:${panel.id}`
+            const label = panel.badge > 0 ? `${panel.title} (${panel.badge > 99 ? '99+' : panel.badge})` : panel.title
+            return [
+              scope.slots.register({ name: 'main', key }, () => h(KodePanelPage, { panel })),
+              scope.slots.register({ name: 'sidebar.panellist', id: key, order: 20 + index, label }, () => glyph(PANEL_GLYPH)),
+            ]
+          })
+        }
+        const onHost = event => {
+          const message = event.detail
+          if (message?.type === 'kode-panels' && Array.isArray(message.panels)) showPanels(message.panels)
+          if (message?.type === 'kode-panel-closed') scope.layout.selectPanel(null)
+        }
+        window.addEventListener('kode-host', onHost)
+        window.kodeHost.request('panels')
+        scope.effect(() => () => {
+          window.removeEventListener('kode-host', onHost)
+          for (const dispose of panelSlots) dispose()
+        }, 'kode.extension-panels')
       }
       openKodeSettings = section => {
         requestedSettingsSection = section
