@@ -66,6 +66,8 @@ export class KodeExtension {
   listSessions(options?: { owner?: 'self' | 'any'; label?: string }): Promise<Session[]>
   getSession(id: number): Promise<Session>
   listBots(): Promise<{ bots: Bot[]; default_bot: string | null }>
+  badge(panel: string, count: number): Promise<{ ok: true }>
+  notify(notification: { title: string; body?: string; severity?: 'info' | 'success' | 'warning' | 'error'; panel?: string }): Promise<{ ok: true }>
   createSession(options: CreateSessionOptions): Promise<{ session: Session; initial_input: 'pending' | null }>
   sendInput(id: number, text: string, options?: { idempotencyKey?: string }): Promise<{ accepted: true }>
   interrupt(id: number, options?: { idempotencyKey?: string }): Promise<{ accepted: true }>

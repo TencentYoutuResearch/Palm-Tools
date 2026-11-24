@@ -18,6 +18,7 @@
 
 mod backend;
 pub mod manifest;
+pub mod ui_feed;
 pub mod view;
 
 use std::collections::{BTreeMap, BTreeSet};

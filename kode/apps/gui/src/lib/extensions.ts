@@ -7,7 +7,8 @@
  * backends can be switched into the runtime and back (see runtime_switch.ts).
  */
 import { derived, get, writable } from 'svelte/store'
-import { extensionIpc, type ExtensionInfo, type ExtensionPanel, type ExtensionProgress, type ExtensionSessionView, type ExtensionViewAction, type PersistedTab } from './ipc'
+import { pushToast } from './toast'
+import { extensionIpc, type ExtensionInfo, type ExtensionPanel, type ExtensionUiMessage, type ExtensionProgress, type ExtensionSessionView, type ExtensionViewAction, type PersistedTab } from './ipc'
 
 export const extensions = writable<ExtensionInfo[]>([])
 /** Latest startup progress per extension, cleared once its backend runs. */
@@ -88,7 +89,21 @@ export async function startExtensionWatch(onViewAction: (action: ExtensionViewAc
   })
   await extensionIpc.onProgress((progress) => extensionProgress.update((all) => ({ ...all, [progress.id]: progress })))
   await extensionIpc.onViewAction(onViewAction)
+  await extensionIpc.onUi(onUiMessage)
   await refreshExtensions().catch((error) => console.warn('extensions unavailable:', error))
+}
+
+/** Badges go to the rail (and dsh's sidebar); notifications become toasts
+ *  named after the extension, and only for enabled extensions. */
+function onUiMessage(message: ExtensionUiMessage) {
+  const ext = get(extensions).find((e) => e.id === message.extension && e.enabled)
+  if (!ext) return
+  if (message.type === 'badge') {
+    if (!(ext.manifest?.contributes.panels ?? []).some((p) => p.id === message.panel)) return
+    panelBadges.update((all) => ({ ...all, [`${message.extension}:${message.panel}`]: message.count }))
+  } else {
+    pushToast({ severity: message.severity, title: `${ext.manifest?.name ?? ext.id} · ${message.title}`, detail: message.body || undefined, durationMs: 6000 })
+  }
 }
 
 /**

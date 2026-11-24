@@ -4,8 +4,9 @@
  * because the manifest asks for API capabilities; it never sees the admin
  * token. It follows the pushed events of the sessions it owns, logs them
  * (Settings → Extensions → logs) and serves the "API sample" panel, which
- * shows them live and reports a badge and a toast to Kode for each finished
- * turn. The page is read-only: starting work goes through the API.
+ * shows them live. Each finished turn raises a badge and a notification
+ * through the API, so they appear even while the panel is closed. Starting
+ * work goes through the API; the page only marks turns as seen.
  */
 import { createServer } from 'node:http'
 import { KodeExtension } from '../../../packages/extension-sdk/src/index.js'
@@ -16,6 +17,7 @@ const hello = await kode.hello()
 log('connected', JSON.stringify({ api: hello.api_version, capabilities: hello.capabilities, gui: hello.runtimes.gui }))
 
 const recent = []
+let finished = 0
 const pages = new Set()
 const controller = new AbortController()
 ;(async () => {
@@ -24,6 +26,12 @@ const controller = new AbortController()
     if (recent.length > 100) recent.shift()
     log(event.kind, `session=${event.session_id}`, JSON.stringify(event.payload).slice(0, 300))
     for (const page of pages) page.write(`data: ${JSON.stringify(event)}\n\n`)
+    // Raised by the backend, so they show even while the panel is closed.
+    if (event.kind === 'session.turn_completed') {
+      finished += 1
+      await kode.badge('sample', finished).catch(error => log('badge failed:', error.message))
+      await kode.notify({ title: 'Turn finished', body: event.payload.final_message?.text ?? '', panel: 'sample' }).catch(error => log('notify failed:', error.message))
+    }
   }
 })().catch(error => { if (!controller.signal.aborted) { log('event stream ended:', error.message); process.exit(1) } })
 
@@ -33,22 +41,24 @@ li{margin:4px 0;font-family:ui-monospace,monospace;font-size:12px}h1{font-size:1
 <h1>kode.api/v1 sample</h1><p>Turns of sessions this extension started (run <code>bin/demo.mjs</code>).</p><ul id="events"></ul>
 <script>
 const list = document.getElementById('events')
-let finished = 0
-function show(event, live) {
+function show(event) {
   const item = document.createElement('li')
   item.textContent = event.kind + ' · session ' + event.session_id + ' · ' + JSON.stringify(event.payload).slice(0, 160)
   list.prepend(item)
-  if (live && event.kind === 'session.turn_completed') {
-    finished += 1
-    window.kodeHost?.request('badge', { count: finished })
-    window.kodeHost?.request('notify', { title: 'Turn finished', body: event.payload.final_message?.text ?? '' })
-  }
 }
-fetch('/state').then(r => r.json()).then(state => state.recent.forEach(e => show(e, false)))
-new EventSource('/stream').onmessage = message => show(JSON.parse(message.data), true)
+// Opening the panel reads everything: the backend clears its badge.
+fetch('/seen', { method: 'POST' })
+fetch('/state').then(r => r.json()).then(state => state.recent.forEach(show))
+new EventSource('/stream').onmessage = message => show(JSON.parse(message.data))
 </script>`
 
 const server = createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/seen') {
+    finished = 0
+    kode.badge('sample', 0).catch(error => log('badge failed:', error.message))
+    res.writeHead(204).end()
+    return
+  }
   if (req.method !== 'GET') { res.writeHead(405).end(); return }
   if (req.url === '/state') {
     res.writeHead(200, { 'content-type': 'application/json' })

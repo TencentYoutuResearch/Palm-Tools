@@ -343,4 +343,10 @@ dsh 全屏时 Kode 的导航栏是隐藏的，面板改由 dsh 承载：
 
 所以面板页面在 Kode GUI 和 dsh 里是同一个页面、同一套 `kodeHost` 请求，不用 iframe，也不需要 dsh 认识具体扩展。
 
+### P0-b 第三步：插件后台直接推角标和通知
+
+- 扩展 API `POST /api/ext/v1/ui/badge {panel, count}`、`POST /api/ext/v1/ui/notify {title, body, severity, panel}`，需要 `ui.notify`。面板没打开时也能提醒（例如频道里有人 @ 你）。
+- 后台把它们放进一条只给 Kode 主进程看的 SSE（`/api/v1/messaging/extensions/ui/stream`，admin），新订阅先补发当前角标；Kode GUI 转成导航栏角标和提示，dsh 全屏时角标随面板列表推给 dsh，提示由已有的转发画在 dsh 上。
+- SDK 增加 `badge()`、`notify()`；示例插件改由后台计数，打开面板时清零。
+
 尚未做：`sidebarSections`、`sessionActions`、`cards`、插件经扩展 API 推角标（目前只能由面板页面上报）。

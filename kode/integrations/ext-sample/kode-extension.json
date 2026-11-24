@@ -13,6 +13,7 @@
     "sessions.input",
     "sessions.interrupt",
     "events.subscribe",
+    "ui.notify",
     "ui.panels"
   ],
   "backend": {

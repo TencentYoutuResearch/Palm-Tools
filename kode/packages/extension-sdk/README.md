@@ -20,6 +20,7 @@ for await (const event of kode.events({ after: event_cursor, kinds: ['session.tu
 | `sessions.input` / `sessions.interrupt` | write to / stop owned sessions |
 | `sessions.read` | list and read sessions it does not own; `owner: 'any'` |
 | `events.subscribe` | the event stream |
+| `ui.notify` | `badge(panel, count)` and `notify({ title, body, panel })` without a page open |
 | `bots.read` | list bots and start sessions as one (`createSession({ bot: 'default', ... })`) |
 
 Events: `session.created`, `session.input_result`, `session.turn_started`,

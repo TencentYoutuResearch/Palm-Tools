@@ -481,3 +481,36 @@ async fn bot_sessions_carry_persona_scope_and_ceiling() {
     bots(&s, json!({"action":"delete","id":kit_id})).await;
     assert_eq!(create(&token, json!({"bot":"default","idempotency_key":"after-delete"})).await.unwrap().status(), 404);
 }
+
+#[tokio::test]
+async fn badges_and_notifications_reach_the_host_feed_with_badge_replay() {
+    let s = server().await;
+    let client = reqwest::Client::new();
+    let token = grant(&s, "team", &["ui.notify"]).await;
+    let silent = grant(&s, "silent", &["events.subscribe"]).await;
+    let post = |token: &str, path: &str, body: Value| client.post(format!("{}/api/ext/v1/ui/{path}", s.url)).bearer_auth(token.to_owned()).json(&body).send();
+    assert_eq!(post(&silent, "badge", json!({"panel":"team","count":1})).await.unwrap().status(), 403);
+    post(&token, "badge", json!({"panel":"team","count":3})).await.unwrap().error_for_status().unwrap();
+    let not_admin = client.get(format!("{}/api/v1/messaging/extensions/ui/stream", s.url)).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(not_admin.status(), 403, "only the host follows the feed");
+    let mut feed = client.get(format!("{}/api/v1/messaging/extensions/ui/stream", s.url)).bearer_auth(ADMIN).send().await.unwrap().error_for_status().unwrap();
+    post(&token, "notify", json!({"title":"@you in #general","body":"please review","panel":"team"})).await.unwrap().error_for_status().unwrap();
+    assert_eq!(post(&token, "notify", json!({"title":" "})).await.unwrap().status(), 400);
+    let mut text = String::new();
+    let mut messages: Vec<Value> = vec![];
+    let read = async {
+        while messages.len() < 2 {
+            let Some(chunk) = feed.chunk().await.unwrap() else { break };
+            text.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = text.find("\n\n") {
+                let frame: String = text.drain(..end + 2).collect();
+                if let Some(data) = frame.lines().find_map(|l| l.strip_prefix("data: ")) {
+                    messages.push(serde_json::from_str(data).unwrap());
+                }
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), read).await.expect("feed delivered");
+    assert_eq!(messages[0], json!({"type":"badge","extension":"team","panel":"team","count":3}), "a new follower gets the current badge first");
+    assert_eq!((messages[1]["type"].as_str(), messages[1]["extension"].as_str(), messages[1]["panel"].as_str()), (Some("notify"), Some("team"), Some("team")));
+}

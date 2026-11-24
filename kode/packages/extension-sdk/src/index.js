@@ -54,6 +54,12 @@ export class KodeExtension {
 
   getSession(id) { return this.request('GET', `/sessions/${id}`) }
 
+  /** Badge on one of this extension's panels (0 clears it). Needs `ui.notify`. */
+  badge(panel, count) { return this.request('POST', '/ui/badge', { panel, count }) }
+
+  /** A Kode notification; `panel` names the panel it is about. Needs `ui.notify`. */
+  notify({ title, body = '', severity = 'info', panel } = {}) { return this.request('POST', '/ui/notify', { title, body, severity, panel }) }
+
   /** The user's bots: identity and limits, never their personas. */
   listBots() { return this.request('GET', '/bots') }
 

@@ -1673,6 +1673,9 @@ export interface ExtensionInfo {
 }
 export type ExtensionRect = { x: number; y: number; width: number; height: number }
 export type ExtensionProgress = { id: string; message: string; step: number | null; total: number | null }
+export type ExtensionUiMessage =
+  | { type: 'badge'; extension: string; panel: string; count: number }
+  | { type: 'notify'; extension: string; title: string; body: string; severity: 'info' | 'success' | 'warning' | 'error'; panel: string | null }
 export type ExtensionViewAction = { extension: string; view: string; action: string; params: Record<string, unknown> }
 export const extensionIpc = {
   list: () => invoke<ExtensionInfo[]>('extension_list'),
@@ -1693,6 +1696,8 @@ export const extensionIpc = {
   onChanged: (cb: () => void) => listen('extensions-changed', () => cb()),
   onProgress: (cb: (progress: ExtensionProgress) => void) => listen<ExtensionProgress>('extension-progress', (e) => cb(e.payload)),
   onViewAction: (cb: (action: ExtensionViewAction) => void) => listen<ExtensionViewAction>('extension-view-action', (e) => cb(e.payload)),
+  /** Badges and notifications raised by extension backends (no page needed). */
+  onUi: (cb: (message: ExtensionUiMessage) => void) => listen<ExtensionUiMessage>('extension-ui', (e) => cb(e.payload)),
   /** Ask a workbench runtime (dsh) to take over a native session. */
   runtimeImport: (runtime: string, payload: { backend_key: string; session_id: string; cwd: string; title?: string; model?: string }) =>
     invoke<{ id: number | null; runtime_session_id: string }>('shared_runtime_request', { runtime, kind: 'import_session', payload }),

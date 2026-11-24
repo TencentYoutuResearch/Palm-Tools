@@ -147,6 +147,7 @@ pub fn run() {
                     host.attach(handle.clone());
                     app.manage(host);
                     extensions::seed_bundled_in_background(handle.clone());
+                    extensions::ui_feed::start(handle.clone());
                 }
                 Err(error) => tracing::warn!(%error, "extension host unavailable"),
             }

@@ -5,6 +5,7 @@
 //! pushed over SSE, so no extension polls.
 mod projector;
 mod store;
+mod ui;
 #[cfg(test)]
 mod tests;
 
@@ -43,6 +44,7 @@ pub const CAPABILITIES: &[&str] = &[
     "sessions.interrupt",
     "events.subscribe",
     "bots.read",
+    "ui.notify",
 ];
 
 const FEATURES: &[&str] = &[
@@ -50,6 +52,8 @@ const FEATURES: &[&str] = &[
     "initial_input",
     "turn_lifecycle",
     "events.stream",
+    "bots",
+    "ui.notify",
 ];
 const MAX_LABELS: usize = 16;
 const MAX_META_BYTES: usize = 16 * 1024;
@@ -62,6 +66,7 @@ pub struct Gateway {
     stopped: AtomicBool,
     wake: tokio::sync::Notify,
     grace: Duration,
+    ui: ui::Feed,
 }
 
 impl Gateway {
@@ -80,6 +85,7 @@ impl Gateway {
             stopped: AtomicBool::new(false),
             wake: Default::default(),
             grace,
+            ui: Default::default(),
         }
     }
 
@@ -193,6 +199,9 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/ext/v1/sessions/:id/interrupt", post(interrupt))
         .route("/api/ext/v1/sessions/:id/meta", post(update_meta))
         .route("/api/ext/v1/bots", get(list_bots))
+        .route("/api/ext/v1/ui/badge", post(ui::badge))
+        .route("/api/ext/v1/ui/notify", post(ui::notify))
+        .route("/api/v1/messaging/extensions/ui/stream", get(ui::stream))
         .route("/api/ext/v1/events", get(events))
         .route("/api/ext/v1/events/stream", get(stream))
         .with_state(hub)
