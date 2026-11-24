@@ -32,10 +32,22 @@ pub struct Bot {
     pub permission_ceiling: String,
     #[serde(default)]
     pub default_cwd: Option<String>,
+    /// The bot's long-lived conversation ("main session"): the one its
+    /// contact entry opens. Set by the front end that runs it.
+    #[serde(default)]
+    pub main_session: Option<MainSession>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MainSession {
+    /// Front end that runs it, such as `dsh`.
+    pub runtime: String,
+    pub session_id: String,
 }
 
 fn default_ceiling() -> String {
@@ -56,6 +68,8 @@ pub enum Change {
     Upsert { bot: Bot },
     Delete { id: String },
     SetDefault { id: Option<String> },
+    /// Point a bot at its main session, or clear it with `None`.
+    SetMainSession { id: String, session: Option<MainSession> },
 }
 
 impl Bot {
@@ -74,6 +88,7 @@ impl Bot {
             "id": self.id, "name": self.name, "avatar": self.avatar,
             "backend_key": self.backend_key, "model": self.model,
             "permission_ceiling": self.permission_ceiling, "memory_scope": self.memory_scope(),
+            "main_session": self.main_session,
             "default": default,
         })
     }
@@ -147,6 +162,8 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
             bot.updated_at = now;
             if let Some(existing) = roster.bots.iter_mut().find(|b| !bot.id.is_empty() && b.id == bot.id) {
                 bot.created_at = existing.created_at;
+                // Editing the profile keeps the conversation; only SetMainSession moves it.
+                bot.main_session = existing.main_session.clone();
                 *existing = bot;
             } else {
                 if !bot.id.is_empty() {
@@ -173,6 +190,14 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
             if roster.default_bot.as_deref() == Some(id.as_str()) {
                 roster.default_bot = None;
             }
+        }
+        Change::SetMainSession { id, session } => {
+            if session.as_ref().is_some_and(|s| !valid_id(&s.runtime) || s.session_id.is_empty() || s.session_id.len() > 160) {
+                bail!("invalid main session")
+            }
+            let bot = roster.bots.iter_mut().find(|b| b.id == id).context("unknown bot")?;
+            bot.main_session = session;
+            bot.updated_at = now;
         }
         Change::SetDefault { id } => {
             if id.as_ref().is_some_and(|id| !roster.bots.iter().any(|b| &b.id == id)) {
@@ -219,6 +244,15 @@ mod tests {
         apply(&mut roster, Change::Delete { id: kit.id.clone() }, 4).unwrap();
         assert_eq!(roster.default_bot, None);
         assert!(apply(&mut roster, Change::SetDefault { id: Some(kit.id) }, 5).is_err());
+        let rex = roster.bots[0].id.clone();
+        let session = MainSession { runtime: "dsh".into(), session_id: "session-1".into() };
+        apply(&mut roster, Change::SetMainSession { id: rex.clone(), session: Some(session.clone()) }, 6).unwrap();
+        let mut edited = roster.bots[0].clone();
+        edited.persona = "New persona".into();
+        edited.main_session = None;
+        apply(&mut roster, Change::Upsert { bot: edited }, 7).unwrap();
+        assert_eq!(roster.bots[0].main_session, Some(session), "editing a profile keeps its conversation");
+        assert!(apply(&mut roster, Change::SetMainSession { id: rex, session: Some(MainSession { runtime: "a b".into(), session_id: "x".into() }) }, 8).is_err());
         let mut forged = bot("Ghost");
         forged.id = "bot_forged".into();
         assert!(apply(&mut roster, Change::Upsert { bot: forged }, 6).is_err(), "callers cannot choose ids");

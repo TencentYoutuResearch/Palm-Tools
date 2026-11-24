@@ -216,7 +216,10 @@ async fn agent_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json
 async fn bot_roster(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;
     let (revision, roster) = super::bots::roster(&hub)?;
-    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot})))
+    // Front ends that run a bot outside the GUI runtime (dsh) send this text
+    // themselves; one formatter keeps every runtime's persona identical.
+    let personas: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.persona_prompt()))).collect();
+    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot,"persona_prompts":personas})))
 }
 async fn change_bots(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(change): Json<super::bots::Change>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;

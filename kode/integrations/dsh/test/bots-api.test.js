@@ -1,0 +1,69 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { agentFor, botsView, registerBotsApi } from '../src/bots-api.js'
+
+const runtime = {
+  hasRuntime: type => type !== 'missing',
+  profiles: {
+    list: () => [{ id: 'p-claude', name: 'Claude Code', type: 'claude' }, { id: 'p-tclaude', name: 'TClaude', type: 'claude' }, { id: 'p-x', name: 'Gone', type: 'missing' }],
+    sharedState: { desktop_ids: { 'p-claude': 'claude', 'p-tclaude': 'tclaude' } },
+  },
+}
+
+test('bots map to the dsh Agent that runs their backend and only keep live main sessions', () => {
+  assert.equal(agentFor(runtime, 'tclaude').id, 'p-tclaude', 'the desktop key wins over the Agent family')
+  assert.equal(agentFor(runtime, 'codex'), null)
+  const roster = { default_bot: 'b1', bots: [
+    { id: 'b1', name: 'Kit', backend_key: 'tclaude', main_session: { runtime: 'dsh', session_id: 'live' } },
+    { id: 'b2', name: 'Rex', backend_key: 'codex', main_session: { runtime: 'dsh', session_id: 'archived' } },
+    { id: 'b3', name: 'Ann', backend_key: 'claude', main_session: { runtime: 'gui', session_id: 'live' } },
+  ] }
+  const view = botsView(roster, { runtime, sessions: [{ sessionId: 'live' }, { sessionId: 'archived' }], archived: new Set(['archived']), workspaces: [{ id: 'w', title: 'kode', path: '/p/kode', extra: 1 }] })
+  assert.deepEqual(view.bots.map(bot => [bot.agent, bot.main_session_id]), [['TClaude', 'live'], [null, null], ['Claude Code', null]])
+  assert.deepEqual(view.agents.map(agent => agent.backend_key), ['claude', 'tclaude'])
+  assert.deepEqual(view.workspaces, [{ id: 'w', title: 'kode', path: '/p/kode' }])
+})
+
+function harness({ owner = true } = {}) {
+  const calls = [], created = []
+  let handler
+  const roster = { default_bot: 'b1', bots: [{ id: 'b1', name: 'Kit', backend_key: 'claude', permission_ceiling: 'plan', default_cwd: '/p/kode', model: null }], persona_prompts: { b1: '<kode-agent-persona name="Kit">…</kode-agent-persona>' } }
+  const services = {
+    kodeAgents: runtime,
+    kodeSessionCreator: { create: async input => { created.push(input); return { address: { session_id: 'session-new' } } } },
+    sessionController: { list: async () => ({ items: [] }) },
+    workspaceRegistry: { list: () => [], archivedSessionIds: [] },
+  }
+  const ctx = {
+    get: name => services[name],
+    connection: { admit: () => ({ peer: { principal: { kind: owner ? 'owner' : 'guest' } } }) },
+    webServer: { register: route => { handler = route.handler; return () => {} } },
+  }
+  registerBotsApi(ctx, { call: async (path, body) => { calls.push(body); return roster } })
+  const request = async (method, body) => {
+    const req = { method, headers: { 'content-type': 'application/json' }, async *[Symbol.asyncIterator]() { if (body) yield JSON.stringify(body) } }
+    const res = { headers: {}, setHeader(k, v) { this.headers[k] = v }, end(text) { this.body = JSON.parse(text) } }
+    await handler(req, res)
+    return res
+  }
+  return { request, calls, created }
+}
+
+test('starting a bot conversation sends the persona first, caps permissions and records the main session', async () => {
+  const { request, calls, created } = harness()
+  const res = await request('POST', { action: 'start', id: 'b1', message: 'Review src/lib.rs', idempotency_key: 'k1' })
+  assert.deepEqual(res.body, { sessionId: 'session-new' })
+  assert.equal(created[0].agent, 'p-claude')
+  assert.equal(created[0].workspace, '/p/kode')
+  assert.equal(created[0].permission, 'read-only', 'a plan-only bot starts read-only')
+  assert.ok(created[0].task.startsWith('<kode-agent-persona') && created[0].task.endsWith('\n\nReview src/lib.rs'))
+  assert.deepEqual(calls.at(-1), { action: 'set_main_session', id: 'b1', session: { runtime: 'dsh', session_id: 'session-new' } })
+  assert.equal((await request('POST', { action: 'start', id: 'b1', message: '  ' })).statusCode, 400)
+  assert.equal((await request('POST', { action: 'start', id: 'nope', message: 'hi' })).body.error, '这个伙伴已不存在')
+  assert.equal((await request('POST', { action: 'drop_tables' })).statusCode, 400)
+})
+
+test('only the Host owner reaches bots', async () => {
+  const { request } = harness({ owner: false })
+  assert.equal((await request('GET')).statusCode, 403)
+})

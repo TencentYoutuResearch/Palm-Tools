@@ -80,6 +80,8 @@ export async function apply(ctx, config = {}) {
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
     const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
+    const { registerBotsApi } = await import('./bots-api.js')
+    webCtx.effect(() => registerBotsApi(webCtx, admin), 'kode.bots-api')
     const { registerProjectHosts } = await import('./project-hosts.js')
     await registerProjectHosts(webCtx, { ...runtimeConfig, backendClient: admin })
     const { registerMessagingApi, syncSessionTitles } = await import('./messaging-api.js')

@@ -884,6 +884,83 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     }, [])
     return null
   }
+  // Bots ("伙伴"): named agents shared with Kode. A bot's contact opens its
+  // main conversation; the first message starts it with the bot's persona.
+  const BOT_CEILINGS = [{ value: 'plan', label: '只做计划' }, { value: 'default', label: '改动前询问' }, { value: 'acceptEdits', label: '可以改文件' }, { value: 'bypassPermissions', label: '完全访问' }]
+  const BOT_GLYPH = 'M4 5.5h8a1.5 1.5 0 0 1 1.5 1.5v4.5A1.5 1.5 0 0 1 12 13H4a1.5 1.5 0 0 1-1.5-1.5V7A1.5 1.5 0 0 1 4 5.5zM8 3v2.5M6 9h.01M10 9h.01'
+  async function botsCall(body) {
+    const response = await fetchHost('/api/kode/bots', body ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { credentials: 'same-origin', cache: 'no-store' })
+    const value = await parseHostJson(response)
+    if (!response.ok) throw new Error(value.error ?? '伙伴暂不可用')
+    return value
+  }
+  function BotEditor({ draft, data, busy, onChange, onSave, onCancel }) {
+    const agents = data.agents.map(agent => ({ value: agent.backend_key, label: agent.name }))
+    if (draft.backend_key && !agents.some(agent => agent.value === draft.backend_key)) agents.push({ value: draft.backend_key, label: `${draft.backend_key}（此电脑不可用）` })
+    const workspaces = [{ value: '', label: '每次对话时选择' }, ...data.workspaces.map(row => ({ value: row.path, label: row.title }))]
+    const field = (label, key, props = {}) => h('label', { className: 'kode-field' }, h('span', null, label), h(props.rows ? 'textarea' : 'input', { value: draft[key] ?? '', disabled: busy, onChange: event => onChange({ ...draft, [key]: event.target.value }), ...props }))
+    return h('form', { className: 'kode-agent-editor', onSubmit: event => { event.preventDefault(); onSave() } },
+      field('名字', 'name', { maxLength: 80, required: true }),
+      h(SelectField, { label: 'Agent', value: draft.backend_key, options: agents, disabled: busy, onChange: value => onChange({ ...draft, backend_key: value }) }),
+      field('模型（可选）', 'model', { placeholder: 'Agent 默认模型' }),
+      h(SelectField, { label: '权限上限', value: draft.permission_ceiling, options: BOT_CEILINGS, disabled: busy, onChange: value => onChange({ ...draft, permission_ceiling: value }) }),
+      h(SelectField, { label: '默认工作区', value: draft.default_cwd ?? '', options: workspaces, disabled: busy, onChange: value => onChange({ ...draft, default_cwd: value || null }) }),
+      field('角色说明', 'persona', { rows: 6, placeholder: '这个伙伴负责什么、按什么标准做事、什么时候问你' }),
+      h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: busy, onClick: onCancel }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.name?.trim() || !draft.backend_key }, '保存')))
+  }
+  function KodeBotsPage({ ui }) {
+    const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
+    const [draft, setDraft] = useState(null), [starting, setStarting] = useState(null)
+    const act = async body => {
+      setBusy(true); setError('')
+      try { const value = await botsCall(body); setData(value); return value } catch (failure) { setError(failure.message) } finally { setBusy(false) }
+    }
+    useEffect(() => { void act() }, [])
+    if (!data) return h('div', { className: 'kode-agent-settings kode-bots-page' }, h('h2', null, '伙伴'), h(Failure, { text: error }))
+    const open = async bot => {
+      if (bot.main_session_id) { await ui()?.openSession(bot.main_session_id); return }
+      setStarting({ bot, message: '', workspace: bot.default_cwd ?? data.workspaces[0]?.path ?? '', key: `bot-${bot.id}-${Date.now()}` })
+    }
+    const start = async () => {
+      const result = await act({ action: 'start', id: starting.bot.id, message: starting.message, workspace: starting.workspace, idempotency_key: starting.key })
+      if (!result?.sessionId) return
+      setStarting(null)
+      await ui()?.openSession(result.sessionId)
+    }
+    const save = async () => {
+      const { agent, main_session_id, ...bot } = draft
+      if (await act({ action: 'upsert', bot: { ...bot, model: bot.model?.trim() || null } })) setDraft(null)
+    }
+    const fresh = () => setDraft({ name: '', persona: '', backend_key: data.agents[0]?.backend_key ?? '', permission_ceiling: 'default', model: null, default_cwd: null })
+    return h('div', { className: 'kode-agent-settings kode-bots-page' },
+      h('h2', null, '伙伴'),
+      h('p', { className: 'kode-agent-intro' }, '有名字、有角色说明、有自己记忆范围和权限上限的长期 Agent。默认伙伴就是团队频道和扩展里的「我的助手」。'),
+      h('ul', { className: 'kode-agent-rows' }, ...data.bots.map(bot => draft?.id === bot.id
+        ? h('li', { key: bot.id }, h(BotEditor, { draft, data, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) }))
+        : h('li', { key: bot.id, className: 'kode-agent-row' },
+          h('div', { className: 'kode-agent-row-head' },
+            h('span', { className: 'kode-bot-avatar', 'aria-hidden': true }, bot.name.slice(0, 1).toUpperCase()),
+            h('span', { className: 'kode-agent-name' }, bot.name),
+            data.default_bot === bot.id && h('span', { className: 'kode-agent-tag' }, '默认'),
+            h('span', { className: 'kode-agent-tag' }, bot.agent ?? `${bot.backend_key} 不可用`),
+            h('span', { className: 'kode-agent-tag' }, BOT_CEILINGS.find(row => row.value === bot.permission_ceiling)?.label ?? bot.permission_ceiling),
+            h(Button, { className: 'kode-agent-edit', variant: 'primary', disabled: busy || !bot.agent, onClick: () => void open(bot) }, bot.main_session_id ? '继续对话' : '开始对话')),
+          bot.persona && h('span', { className: 'kode-secondary kode-bot-persona' }, bot.persona),
+          starting?.bot.id === bot.id && h('form', { className: 'kode-agent-editor', onSubmit: event => { event.preventDefault(); void start() } },
+            !bot.default_cwd && h(SelectField, { label: '工作区', value: starting.workspace, options: data.workspaces.map(row => ({ value: row.path, label: row.title })), disabled: busy, onChange: value => setStarting({ ...starting, workspace: value }) }),
+            h('label', { className: 'kode-field' }, h('span', null, `对 ${bot.name} 说`), h('textarea', { rows: 3, required: true, autoFocus: true, value: starting.message, disabled: busy, onChange: event => setStarting({ ...starting, message: event.target.value }) })),
+            h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: busy, onClick: () => setStarting(null) }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !starting.message.trim() || !starting.workspace }, '发送'))),
+          h('div', { className: 'kode-bot-actions' },
+            h('span', { className: 'kode-secondary' }, `记忆范围 bot:${bot.id}`),
+            data.default_bot !== bot.id && h(Button, { disabled: busy, onClick: () => void act({ action: 'set_default', id: bot.id }) }, '设为默认'),
+            bot.main_session_id && h(Button, { disabled: busy, onClick: () => void act({ action: 'forget', id: bot.id }) }, '新对话'),
+            h(Button, { disabled: busy || !!draft, onClick: () => setDraft({ ...bot }) }, '编辑'),
+            h(Button, { disabled: busy, onClick: () => { if (confirm(`删除「${bot.name}」？它的会话和 bot:${bot.id} 里的记忆都会保留。`)) void act({ action: 'delete', id: bot.id }) } }, '删除'))))),
+      draft && !draft.id ? h(BotEditor, { draft, data, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) })
+        : h(Button, { className: 'kode-agent-add', disabled: busy || !data.agents.length, onClick: fresh }, h(IconPlusOutlineRegular, { size: 16 }), data.bots.length ? '新建伙伴' : '创建第一个伙伴'),
+      !data.agents.length && h('p', { className: 'kode-config-note' }, '这台电脑的 dsh 里还没有可用的 Agent。'),
+      h(Failure, { text: error }))
+  }
   const PANEL_GLYPH = 'M2.5 2.5h4.5v4.5h-4.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5h-4.5zM9 9h4.5v4.5H9z'
   // A Kode extension panel (team channels, …). Kode draws the panel's own
   // page over this area; dsh only lends the space and reports where it is.
@@ -2578,6 +2655,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 @media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 .kode-panel-host{width:100%;height:100%}
+.kode-bots-page{padding:24px;box-sizing:border-box;width:100%;margin:0 auto}.kode-bot-avatar{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600;flex-shrink:0}.kode-bot-persona{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}.kode-bot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-bot-actions>.kode-secondary{margin-right:auto;font-family:ui-monospace,monospace}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}
 html[data-kode-embed][data-kode-platform=macos] #root{box-sizing:border-box;height:100%;padding-top:28px}
@@ -2601,6 +2679,8 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
       const KodeMainPage = () => h('div', { className: 'kode-settings-main' }, h(KodeSettings, { sessions: scope.sessions, slots: scope.slots, close: () => {} }))
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-settings' }, KodeMainPage))
       scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode' }, IconAgentPresetOutlineRegular))
+      scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-bots' }, () => h(KodeBotsPage, { ui: () => scope.get('uiWorkspace') })))
+      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-bots', order: 5, label: '伙伴' }, () => glyph(BOT_GLYPH)))
       if (kodeEmbedded()) {
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
         scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-leave', order: 7, label: 'Kode 终端' }, () => glyph(TERMINAL_GLYPH)))
