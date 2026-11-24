@@ -153,8 +153,8 @@ impl Extensions {
                 let before = value["sources"][index].clone();
                 let operation = (|| -> Result<()> {
                     let (skills, plugins, revision, release, packages) = files::snapshot(&self.root, &before)?;
-                    let next = files::desired(&self.home, &before, &skills)?;
-                    let previous = before["links"].as_array().cloned().unwrap_or_default();
+                    let (previous, next) =
+                        files::plan_links(&self.root, &self.home, &before, &skills)?;
                     value["sources"][index]["links"] = json!(next);
                     value["sources"][index]["skills"] =
                         json!(skills.iter().map(|s| &s["name"]).collect::<Vec<_>>());

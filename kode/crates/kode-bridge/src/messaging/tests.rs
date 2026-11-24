@@ -1112,6 +1112,51 @@ async fn backend_extension_preview_catalog_and_logo_are_safe_and_owner_only(){
     let response=client.get(&logo).bearer_auth("admin-test").send().await.unwrap();assert_eq!(response.status(),200);
     assert_eq!(response.headers().get("content-type").unwrap(),"image/png");assert_eq!(response.bytes().await.unwrap().as_ref(),png);
 }
+#[cfg(unix)]
+#[tokio::test]
+async fn backend_extension_sync_reclaims_old_links_after_source_state_is_lost() {
+    let server = server("extension-recovery", vec![]).await;
+    let extension = &server.hub.extensions;
+    let source = server._root.path().join("source");
+    std::fs::create_dir_all(source.join("sample")).unwrap();
+    std::fs::write(source.join("sample/SKILL.md"), "new release").unwrap();
+    extension.change(&server.hub, json!({"action":"save-source","source":{
+        "id":"team", "kind":"local", "location":source, "targets":["claude","dsh"],
+    }})).unwrap();
+
+    let retired = extension.root.canonicalize().unwrap()
+        .join("sources/team/releases")
+        .join(uuid::Uuid::new_v4().to_string())
+        .join("package/sample");
+    let local = extension.home.join(".claude/skills/team--sample");
+    let other = extension.home.join(".agents/skills/team--sample");
+    for link in [&local, &other] {
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&retired, link).unwrap();
+        assert!(!link.exists());
+    }
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/messaging/workbench/agent-hub", server.url);
+    let sync = || client.post(&url).bearer_auth("admin-test").json(&json!({"action":"sync-source","id":"team"}));
+    let response = sync().send().await.unwrap();
+    let status = response.status();
+    let state: Value = response.json().await.unwrap();
+    assert_eq!(status, 200, "{state}");
+    assert_eq!(state["sources"][0]["links"].as_array().unwrap().len(), 2);
+    for link in [&local, &other] {
+        assert_ne!(std::fs::read_link(link).unwrap(), retired);
+        assert_eq!(std::fs::read_to_string(link.join("SKILL.md")).unwrap(), "new release");
+    }
+
+    let local_release = std::fs::read_link(&local).unwrap();
+    std::fs::remove_file(&other).unwrap();
+    std::os::unix::fs::symlink(source.join("sample"), &other).unwrap();
+    assert_eq!(sync().send().await.unwrap().status(), 400);
+    assert_eq!(std::fs::read_link(&local).unwrap(), local_release);
+    assert_eq!(std::fs::read_link(&other).unwrap(), source.join("sample"));
+}
+
 #[cfg(not(windows))]
 #[tokio::test]
 async fn backend_extension_conflicts_preserve_every_previous_target_and_foreign_files(){

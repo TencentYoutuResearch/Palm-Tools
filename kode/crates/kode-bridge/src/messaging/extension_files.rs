@@ -727,7 +727,28 @@ fn link_path(link: &Value, key: &str) -> Result<PathBuf> {
         link[key].as_str().context("invalid managed link")?,
     ))
 }
-pub fn desired(home: &Path, source: &Value, skills: &[Value]) -> Result<Vec<Value>> {
+fn is_source_release_target(target: &Path, releases: &Path) -> bool {
+    let Ok(relative) = target.strip_prefix(releases) else {
+        return false;
+    };
+    let mut parts = relative.components();
+    let Some(Component::Normal(release)) = parts.next() else {
+        return false;
+    };
+    release.to_str().is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        && parts.next() == Some(Component::Normal(std::ffi::OsStr::new("package")))
+        && parts.all(|part| matches!(part, Component::Normal(_)))
+}
+
+pub fn plan_links(
+    root: &Path,
+    home: &Path,
+    source: &Value,
+    skills: &[Value],
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    let source_id = source["id"].as_str().context("source id missing")?;
+    let releases = fs::canonicalize(root.join("sources").join(source_id).join("releases"))?;
+    let mut previous = source["links"].as_array().cloned().unwrap_or_default();
     let mut links = vec![];
     let mut seen = HashSet::new();
     for target in source["targets"].as_array().context("targets missing")? {
@@ -740,34 +761,35 @@ pub fn desired(home: &Path, source: &Value, skills: &[Value]) -> Result<Vec<Valu
         fs::create_dir_all(&directory)?;
         let directory = fs::canonicalize(directory)?;
         for skill in skills {
-            let path = directory.join(format!(
-                "{}--{}",
-                source["id"].as_str().unwrap(),
-                skill["name"].as_str().unwrap()
-            ));
+            let name = skill["name"].as_str().context("skill name missing")?;
+            let path = directory.join(format!("{source_id}--{name}"));
             if !seen.insert(path.clone()) {
                 continue;
             }
-            let prior = source["links"].as_array().and_then(|rows| {
-                rows.iter()
-                    .find(|link| link["path"].as_str() == path.to_str())
-            });
             match fs::symlink_metadata(&path) {
-                Ok(meta) => {
-                    if !meta.file_type().is_symlink()
-                        || prior.is_none()
-                        || fs::read_link(&path)? != link_path(prior.unwrap(), "to")?
-                    {
-                        bail!("同步冲突，已有文件已保留：{}", path.display())
+                Ok(meta) if meta.is_symlink() => {
+                    let to = fs::read_link(&path)?;
+                    let existing = json!({"path":path,"to":to});
+                    let recorded = previous.iter().any(|link| {
+                        link["path"] == existing["path"] && link["to"] == existing["to"]
+                    });
+                    if !recorded {
+                        if !is_source_release_target(&to, &releases) {
+                            bail!("同步冲突，已有文件已保留：{}", path.display())
+                        }
+                        // A restored source may have lost its inventory. Keep the exact
+                        // target, even when missing, so replace can restore it on failure.
+                        previous.push(existing);
                     }
                 }
+                Ok(_) => bail!("同步冲突，已有文件已保留：{}", path.display()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
             links.push(json!({"path":path,"to":skill["path"]}));
         }
     }
-    Ok(links)
+    Ok((previous, links))
 }
 fn owned(link: &Value) -> Result<bool> {
     let path = link_path(link, "path")?;
