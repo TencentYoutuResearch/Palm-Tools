@@ -28,7 +28,7 @@ test('bots map to the dsh Agent that runs their backend and only keep live main 
     { id: 'b3', name: 'Ann', backend_key: 'claude', main_session: { runtime: 'gui', session_id: 'live' } },
   ] }
   const view = botsView(roster, { runtime, sessions: [{ sessionId: 'live' }, { sessionId: 'archived' }], archived: new Set(['archived']), workspaces: [{ id: 'w', title: 'kode', path: '/p/kode', extra: 1 }] })
-  assert.deepEqual(view.bots.map(bot => [bot.agent, bot.main_session_id]), [['TClaude', 'live'], [null, null], ['Claude Code', null]])
+  assert.deepEqual(view.bots.map(bot => [bot.agent, bot.agent_type, bot.main_session_id]), [['TClaude', 'claude', 'live'], [null, null, null], ['Claude Code', 'claude', null]])
   assert.deepEqual(view.agents.map(agent => agent.backend_key), ['claude', 'tclaude'])
   assert.deepEqual(view.workspaces, [{ id: 'w', title: 'kode', path: '/p/kode' }])
 })

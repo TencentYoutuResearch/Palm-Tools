@@ -30,11 +30,12 @@ export function botsView(roster, { runtime, sessions, archived, workspaces }) {
     default_bot: roster.default_bot ?? null,
     bots: roster.bots.map(bot => {
       const main = bot.main_session?.runtime === 'dsh' ? bot.main_session.session_id : null
-      return { ...bot, workspace: roster.workspaces?.[bot.id] ?? bot.default_cwd ?? null, agent: agentFor(runtime, bot.backend_key)?.name ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null }
+      const agent = agentFor(runtime, bot.backend_key)
+      return { ...bot, workspace: roster.workspaces?.[bot.id] ?? bot.default_cwd ?? null, agent: agent?.name ?? null, agent_type: agent?.type ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null }
     }),
     root: roster.root ?? null,
     default_root: roster.default_root ?? null,
-    agents: offered(runtime).map(profile => ({ name: profile.name, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
+    agents: offered(runtime).map(profile => ({ name: profile.name, type: profile.type, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
     workspaces: workspaces.map(row => ({ id: row.id, title: row.title, path: row.path })),
   }
 }
