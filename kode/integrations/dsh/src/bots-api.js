@@ -10,8 +10,14 @@ const ROSTER_ACTIONS = ['upsert', 'delete', 'set_default']
 const MODES = { plan: 'read-only', default: 'workspace-write', acceptEdits: 'workspace-write', bypassPermissions: 'workspace-write' }
 
 /** The dsh Agent profile that runs `backendKey`, if this Host has one. */
+// The Agents dsh offers: shadowed built-in twins of a desktop-configured
+// Agent are hidden there, and session creation only accepts what is offered.
+function offered(runtime) {
+  return (runtime?.appearance?.profilesView() ?? runtime?.profiles.list() ?? []).filter(profile => runtime.hasRuntime(profile.type))
+}
+
 export function agentFor(runtime, backendKey) {
-  const profiles = runtime?.profiles.list().filter(profile => runtime.hasRuntime(profile.type)) ?? []
+  const profiles = offered(runtime)
   const desktop = runtime?.profiles.sharedState?.desktop_ids ?? {}
   return profiles.find(profile => desktop[profile.id] === backendKey) ?? profiles.find(profile => profile.type === backendKey) ?? null
 }
@@ -24,7 +30,7 @@ export function botsView(roster, { runtime, sessions, archived, workspaces }) {
       const main = bot.main_session?.runtime === 'dsh' ? bot.main_session.session_id : null
       return { ...bot, agent: agentFor(runtime, bot.backend_key)?.name ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null }
     }),
-    agents: (runtime?.profiles.list().filter(profile => runtime.hasRuntime(profile.type)) ?? []).map(profile => ({ name: profile.name, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
+    agents: offered(runtime).map(profile => ({ name: profile.name, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
     workspaces: workspaces.map(row => ({ id: row.id, title: row.title, path: row.path })),
   }
 }

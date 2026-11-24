@@ -10,6 +10,15 @@ const runtime = {
   },
 }
 
+test('a bot never picks a built-in Agent that dsh hides behind its desktop twin', () => {
+  const twins = {
+    hasRuntime: () => true,
+    appearance: { profilesView: () => [{ id: 'p-desk', name: 'Cursor', type: 'cursor' }] },
+    profiles: { list: () => [{ id: 'builtin-cursor', name: 'Cursor', type: 'cursor', origin: 'builtin' }, { id: 'p-desk', name: 'Cursor', type: 'cursor' }], sharedState: { desktop_ids: {} } },
+  }
+  assert.equal(agentFor(twins, 'cursor').id, 'p-desk')
+})
+
 test('bots map to the dsh Agent that runs their backend and only keep live main sessions', () => {
   assert.equal(agentFor(runtime, 'tclaude').id, 'p-tclaude', 'the desktop key wins over the Agent family')
   assert.equal(agentFor(runtime, 'codex'), null)
