@@ -489,7 +489,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (!actions?.openSection) throw new Error('设置尚未就绪，请稍后重试。')
     actions.openSection(section)
   }
-  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings
+  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, requestedBotStart
   function AgentControl({ sessionId, sessions, remote, slots }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions)
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')
@@ -894,6 +894,44 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (!response.ok) throw new Error(value.error ?? '伙伴暂不可用')
     return value
   }
+  // One roster for the sidebar section and the Bots page.
+  let botsSnapshot = { data: null, error: '' }, botsPending
+  const botsListeners = new Set()
+  const botsStore = { subscribe: fn => { botsListeners.add(fn); return () => botsListeners.delete(fn) }, getSnapshot: () => botsSnapshot }
+  function publishBots(next) { botsSnapshot = next; for (const listener of botsListeners) listener() }
+  async function refreshBots() {
+    if (botsPending) return botsPending
+    botsPending = botsCall().then(data => publishBots({ data, error: '' }), error => publishBots({ ...botsSnapshot, error: error.message })).finally(() => { botsPending = undefined })
+    return botsPending
+  }
+  function useBots() {
+    const snapshot = useSyncExternalStore(botsStore.subscribe, botsStore.getSnapshot)
+    useEffect(() => { void refreshBots() }, [])
+    return snapshot
+  }
+  // Cindy-style "伙伴" group above the projects: each bot is a contact whose
+  // row opens its main conversation. Bot conversations do not appear under
+  // projects.
+  function BotsSection({ open, statuses, activeId }) {
+    const { data } = useBots()
+    const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem('kode.bots.collapsed') === '1' } catch { return false } })
+    if (!data) return null
+    const toggle = () => { const next = !collapsed; setCollapsed(next); try { localStorage.setItem('kode.bots.collapsed', next ? '1' : '0') } catch {} }
+    const start = bot => { requestedBotStart = bot?.id; openBotsPage?.() }
+    return h('div', { className: 'kode-bots-section' },
+      h('div', { className: 'kode-bots-head' },
+        h('button', { type: 'button', className: 'kode-bots-title', 'aria-expanded': !collapsed, onClick: toggle }, h(IconChevronDownOutlineRegular, { size: 12, style: collapsed ? { transform: 'rotate(-90deg)' } : undefined }), '伙伴'),
+        h('button', { type: 'button', className: 'kode-bots-add', title: '新建伙伴', 'aria-label': '新建伙伴', onClick: () => start(null) }, h(IconPlusOutlineRegular, { size: 14 }))),
+      !collapsed && (data.bots.length ? data.bots.map(bot => {
+        const main = bot.main_session_id, status = main && statuses?.[main]
+        const busy = status === 'running' || status === 'ongoing' || status?.state === 'running'
+        return h('button', { key: bot.id, type: 'button', className: `kode-bot-row${main && main === activeId ? ' active' : ''}`, title: bot.persona || bot.name, onClick: () => main ? open(main) : start(bot) },
+          h('span', { className: 'kode-bot-avatar' }, bot.name.slice(0, 1).toUpperCase(), busy && h('span', { className: 'kode-bot-busy', 'aria-label': '正在工作' })),
+          h('span', { className: 'kode-bot-name' }, bot.name),
+          data.default_bot === bot.id && h('span', { className: 'kode-bot-tag' }, '默认'),
+          !main && h('span', { className: 'kode-bot-hint' }, '开始对话'))
+      }) : h('button', { type: 'button', className: 'kode-bot-row kode-bot-empty', onClick: () => start(null) }, '创建第一个伙伴')))
+  }
   function BotEditor({ draft, data, busy, onChange, onSave, onCancel }) {
     const agents = data.agents.map(agent => ({ value: agent.backend_key, label: agent.name }))
     if (draft.backend_key && !agents.some(agent => agent.value === draft.backend_key)) agents.push({ value: draft.backend_key, label: `${draft.backend_key}（此电脑不可用）` })
@@ -931,9 +969,23 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const [draft, setDraft] = useState(null), [starting, setStarting] = useState(null)
     const act = async body => {
       setBusy(true); setError('')
-      try { const value = await botsCall(body); setData(value); return value } catch (failure) { setError(failure.message) } finally { setBusy(false) }
+      try {
+        const value = await botsCall(body)
+        // Roster actions answer with the roster; starting answers with the session.
+        if (Array.isArray(value.bots)) { setData(value); publishBots({ data: value, error: '' }) } else void refreshBots()
+        return value
+      } catch (failure) { setError(failure.message) } finally { setBusy(false) }
     }
     useEffect(() => { void act() }, [])
+    // Arrived from the sidebar section: start (or create) that bot right away.
+    useEffect(() => {
+      if (!data || requestedBotStart === undefined) return
+      const wanted = requestedBotStart
+      requestedBotStart = undefined
+      const bot = wanted && data.bots.find(row => row.id === wanted)
+      if (bot) void open(bot)
+      else if (!wanted && !draft) fresh()
+    }, [data])
     if (!data) return h('div', { className: 'kode-agent-settings kode-bots-page' }, h('h2', null, '伙伴'), h(Failure, { text: error }))
     const open = async bot => {
       if (bot.main_session_id) { await ui()?.openSession(bot.main_session_id); return }
@@ -1616,6 +1668,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const closeResume = () => { resumeRequest.current?.abort(); setResumeTarget(null) }
     useEffect(() => () => resumeRequest.current?.abort(), [])
     const source = props.useSessions(state => state), workspaceSource = props.useWorkspaces(state => state)
+    const bots = useBots()
     const sessionStatusSource = avatarContext?.get?.('uiSession')?.sessionStatus
     const sessionStatuses = useSyncExternalStore(sessionStatusSource?.subscribe ?? emptyAvatarSubscribe, sessionStatusSource?.getSnapshot ?? emptyAvatarSnapshot)
     const merged = React.useMemo(() => {
@@ -1664,9 +1717,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       if (!data.hosts.length) items.push(...workspaceSource.items)
       // Sidebar presence follows visible conversations; the complete project
       // catalog remains available in the workspace picker and creation flow.
-      const populated = items.filter(workspace => workspace.sessionIds.some(id => byId[id] && !byId[id].blank))
-      return { sessions: { ...source, ids, byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds: [], pinnedSessionIds }, routes, remoteRows }
-    }, [source, workspaceSource, data])
+      // Bot conversations live in the 伙伴 group, not under projects.
+      const botSessions = new Set((bots.data?.bots ?? []).map(bot => bot.main_session_id).filter(Boolean))
+      const botFolders = new Set((bots.data?.bots ?? []).filter(bot => !bot.default_cwd && bot.workspace).map(bot => bot.workspace))
+      const populated = items
+        .filter(workspace => !botFolders.has(workspace.path))
+        .map(workspace => botSessions.size ? { ...workspace, sessionIds: workspace.sessionIds.filter(id => !botSessions.has(id)) } : workspace)
+        .filter(workspace => workspace.sessionIds.some(id => byId[id] && !byId[id].blank))
+      return { sessions: { ...source, ids: ids.filter(id => !botSessions.has(id)), byId }, workspaces: { ...workspaceSource, items: populated, archivedSessionIds: [], pinnedSessionIds }, routes, remoteRows }
+    }, [source, workspaceSource, data, bots.data])
     useEffect(() => {
       if (!window.addEventListener) return
       const show = event => { const id = event.detail?.sessionId, profile = merged.sessions.byId[id]?.agent; if (!profile) return; const route = merged.routes.get(id) ?? { id, hostId: data.current }; openAvatarDialog({ profile, sessionId: route.id, host: route.hostId }) }
@@ -1786,6 +1845,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('style', null, remoteCss + savedCss), h(Failure, { text: error || data.error }),
       busy && h('div', { className: 'kode-host-progress', role: 'status', 'aria-live': 'polite' }, '正在打开会话…'),
       notice && h('div', { className: 'kode-host-progress', role: 'status' }, notice),
+      data.current === 'local' && h(BotsSection, { open, statuses: sessionStatuses, activeId: props.activeSessionId ?? props.selectedSessionId }),
       h(native, { ...props, ...(props.useStore ? { useStore: useViewStore } : {}), ...(viewActions ? { actions: viewActions } : {}), useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
         startSession: (id, options) => { const route = merged.routes.get(id); if (route) void navigate(route.hostId, route.placeholder ? { create: true } : { workspaceId: route.id }); else props.startSession(id, options) },
         renameWorkspace: (id, title) => merged.routes.has(id) ? mutate(id, 'rename-workspace', { workspaceId: merged.routes.get(id).id, title }) : props.renameWorkspace(id, title),
@@ -2674,6 +2734,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 @media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 .kode-panel-host{width:100%;height:100%}
+.kode-bots-section{padding:4px 0 8px}.kode-bots-head{display:flex;align-items:center;justify-content:space-between;padding:4px 8px 2px}.kode-bots-title{display:inline-flex;align-items:center;gap:4px;border:0;background:none;padding:2px 0;color:var(--dsw-alias-label-tertiary);font-size:12px;cursor:pointer}.kode-bots-add{border:0;background:none;color:var(--dsw-alias-label-tertiary);padding:2px;border-radius:6px;cursor:pointer;display:inline-flex}.kode-bots-add:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:5px 8px;border-radius:8px;color:var(--dsw-alias-label-primary);font-size:13px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform)}.kode-bot-row.active{background:var(--dsw-alias-bg-module-platform);font-weight:500}.kode-bot-row .kode-bot-avatar{width:22px;height:22px;font-size:11px;position:relative}.kode-bot-busy{position:absolute;right:-1px;bottom:-1px;width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-business-primary);box-shadow:0 0 0 2px var(--dsw-specific-sidebar-fill)}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-empty{color:var(--dsw-alias-label-tertiary)}
 .kode-bots-page{padding:24px;box-sizing:border-box;width:100%;margin:0 auto}.kode-bot-avatar{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600;flex-shrink:0}.kode-bot-persona{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}.kode-bot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-bot-actions>.kode-secondary{margin-right:auto;font-family:ui-monospace,monospace}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}
@@ -2730,6 +2791,7 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
           for (const dispose of panelSlots) dispose()
         }, 'kode.extension-panels')
       }
+      openBotsPage = () => { scope.layout.selectPanel('kode-bots') }
       openKodeSettings = section => {
         requestedSettingsSection = section
         scope.layout.selectPanel('kode-settings')
