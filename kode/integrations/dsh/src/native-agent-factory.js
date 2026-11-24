@@ -1,6 +1,7 @@
 import { symbols } from '@deepseek-ai/cordis'
 import { contextUsageProjection } from './context-usage.js'
 import { nativeSubagentsProjection } from './native-subagents.js'
+import { sessionPanelProjection } from './session-panel-data.js'
 import { fastProjection } from './model-fast.js'
 /** Cordis-owned Agent factory. Storage and lifecycle are independent of dsh's LLM loop. */
 import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
@@ -276,6 +277,7 @@ export async function apply(ctx) {
     yield ctx.sessionProjections.register(contextUsageProjection)
     yield ctx.sessionProjections.register(fastProjection)
     yield ctx.sessionProjections.register(nativeSubagentsProjection)
+    yield ctx.sessionProjections.register(sessionPanelProjection)
     yield () => factory.close()
     readiness.resolve()
   }, 'kode.native-factory')

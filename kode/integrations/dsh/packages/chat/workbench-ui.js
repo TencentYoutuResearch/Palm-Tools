@@ -1,4 +1,4 @@
-/** Workbench status: the application-wide token island and native jobs in the session header. */
+/** Workbench status: the application-wide token island and legacy header jobs. */
 const defaultIslandAppearance = { tokenIsland: true, tokenPeriod: 'today' }
 const idleIslandActivity = { state: 'idle', label: '全局：所有会话空闲' }
 
@@ -21,7 +21,6 @@ html[data-kode-menu-camera=true] .kode-token-notch>svg{position:absolute;right:8
 
 function placeWorkbenchJobs(ctx) {
   const actions = 'conversation.session.header.actions'
-  const utilities = 'conversation.session.header.utilities'
   const targets = new Map()
   const listeners = new Set()
   const subscribe = listener => {
@@ -36,33 +35,31 @@ function placeWorkbenchJobs(ctx) {
     }, [sessionId])
     return react.createElement('div', { ref, 'data-kode-header-jobs': '' })
   }
-  // Place between the subagents (-110) and the Agent avatar (-100).
+  // Older hosts only have the job-list header seat. The modern DSH session
+  // panel owns its toggle, indicator, roster, and output streaming.
   ctx.slots.inject(actions, () => ctx.slots.register({ name: actions, id: 'kode-header-jobs', order: -105 }, JobsAnchor))
 
-  // Keep the original slot bindings, including the newer toggle's indicator child slot.
-  for (const [seat, id] of [[actions, 'job-list'], [utilities, 'session-panel']]) {
-    ctx.slots.inject(seat, () => {
-      let entry, original, wrapper
-      const restore = () => { if (entry && entry.component === wrapper) entry.component = original }
-      const install = () => {
-        const next = ctx.slots.entries(seat).find(candidate => candidate.options.id === id)
-        if (next === entry) return
-        restore()
-        entry = next
-        if (!entry) return
-        const native = original = entry.component
-        wrapper = props => {
-          const target = react.useSyncExternalStore(subscribe, () => targets.get(props.sessionId))
-          const control = react.createElement(native, props)
-          return target ? react_dom.createPortal(control, target) : control
-        }
-        entry.component = wrapper
+  ctx.slots.inject(actions, () => {
+    let entry, original, wrapper
+    const restore = () => { if (entry && entry.component === wrapper) entry.component = original }
+    const install = () => {
+      const next = ctx.slots.entries(actions).find(candidate => candidate.options.id === 'job-list')
+      if (next === entry) return
+      restore()
+      entry = next
+      if (!entry) return
+      const native = original = entry.component
+      wrapper = props => {
+        const target = react.useSyncExternalStore(subscribe, () => targets.get(props.sessionId))
+        const control = react.createElement(native, props)
+        return target ? react_dom.createPortal(control, target) : control
       }
-      const unsubscribe = ctx.slots.subscribe(seat, install)
-      install()
-      return () => { unsubscribe(); restore() }
-    })
-  }
+      entry.component = wrapper
+    }
+    const unsubscribe = ctx.slots.subscribe(actions, install)
+    install()
+    return () => { unsubscribe(); restore() }
+  })
 }
 function usageNumber(value) {
   if (!Number.isFinite(value)) return '—'
