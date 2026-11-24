@@ -4,7 +4,7 @@ import { fetchWithLocalAppearance } from './preferences.js'
 import { showConnectionProgress } from './connection-progress.js'
 import { installInterfacePreferences } from './interface.js'
 import { installSessionNotifications } from './notifications.js'
-import { openSessionTarget } from './navigation.js'
+import { openSessionTarget, openWorkspaceTarget } from './navigation.js'
 export const inject = []
 export async function apply(ctx) {
   installInterfacePreferences(ctx)
@@ -83,7 +83,7 @@ export async function apply(ctx) {
       }
       signal.throwIfAborted()
       if (target.sessionId) await openSessionTarget(ctx, target, signal)
-      else if (target.workspaceId) await ctx.get('uiWorkspace').openWorkspace(target.workspaceId)
+      else if (target.workspaceId) await openWorkspaceTarget(ctx, target, signal)
       else if (target.create) window.dispatchEvent(new CustomEvent('kode-create-project', { detail: { name: target.name ?? '' } }))
       else {
         const workspace = ctx.get('workspaces').list.getSnapshot().items[0]

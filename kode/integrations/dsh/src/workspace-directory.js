@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** Cold, owner-only workspace metadata. Reading the sidebar never resumes an Agent. */
 import { BackendDocument } from './backend-state.js'
 import { classifyEmptySessions } from './empty-session.js'
@@ -33,12 +34,13 @@ export async function hostDirectory(ctx, config = {}) {
     const binding = profiles?.binding(item.sessionId)
     const recorded = values.kodeAgent
     const profile = binding?.profile ?? (recorded ? { id: recorded.profileId, name: recorded.name, type: recorded.type } : undefined)
-    const provider = model?.next?.provider ?? model?.lastUsed?.provider
-    const dsh = binding ? binding.profile.type === 'dsh' : !provider?.startsWith('kode-agent-')
-    const type = binding?.profile.type ?? (dsh ? 'dsh' : undefined)
+    const provider = model?.next?.provider ?? model?.lastUsed?.provider ?? model?.pending?.provider
+    const type = profile?.type ?? (provider?.startsWith('kode-agent-') ? undefined : 'dsh')
     if (type && runtime?.hasRuntime && !runtime.hasRuntime(type) && !item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
     if (item.blank) { hiddenSessionIds.push(item.sessionId); return [] }
-    return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running, ...(profile ? { agent: presentation(profile) } : {}), ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
+    return [{ id: item.sessionId, title: values.title || '未命名会话', cwd: item.cwd, updatedAt: item.updatedAt, running: item.running,
+      ...(item.origin ? { origin: item.origin, parentSessionId: item.parentSessionId } : {}),
+      ...(profile ? { agent: presentation(profile) } : {}), ...(binding?.threadId ? { nativeThreadId: binding.threadId } : {}) }]
   })
   const result = { archivedSessionIds: [...registry.archivedSessionIds], pinnedSessionIds: [...(registry.pinnedSessionIds ?? [])], hiddenSessionIds, sessions,
     workspaces: registry.list().map(w => ({ id: w.id, title: w.title, path: w.path, sessionIds: [...w.sessionIds], createdAt: w.createdAt, updatedAt: w.updatedAt })) }
@@ -92,9 +94,9 @@ export async function hostOperation(ctx, input, config = {}) {
   return controller[allowed[input.operation]](request)
 }
 export function registerHostDirectory(ctx, config) {
-  return ctx.webServer.register({ kind: 'exact', path: DIRECTORY_PATH, handler: async (req, res) => {
+  return ctx.webServer.register({ kind: 'exact', path: DIRECTORY_PATH, handler: async (req, res, peer) => {
     const send = (status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)) }
-    const admitted = ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) return send(admitted.rejection, { error: 'authentication required' })
     if (admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     if (!['GET', 'POST'].includes(req.method)) return send(405, { error: 'GET or POST required' })

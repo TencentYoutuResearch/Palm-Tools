@@ -2,10 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { load } from 'js-yaml'
-import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
+import * as include from '@deepseek-ai/cordis-plugin-include'
 
 test('default composition exposes built-in dsh and preserves official settings and trajectory', async () => {
-  const patch = load(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8'), { schema: entryListSchema })
+  const source = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  const patch = include.parseEntryYaml ? include.parseEntryYaml(source) : load(source, { schema: include.entryListSchema })
   const builtin = patch.flatMap(row => row.insert ?? []).find(row => row.id === 'kode-dsh-conversation')
   assert.ok(builtin)
   assert.notEqual(builtin.disabled, true)

@@ -1,6 +1,6 @@
 /** ACP v1 native conversations using the official SDK, shared by Cursor, Claude and custom Agents. */
 import { z } from 'zod'
-import { acpSubagents } from './native-subagents.js'
+import { acpSubagents, isActiveSubagent, subagentStatus } from './native-subagents.js'
 import { client, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { Readable, Writable } from 'node:stream'
 import { randomUUID } from 'node:crypto'
@@ -56,8 +56,9 @@ export class AcpSession {
     // Preserve native extension updates alongside the standard ACP updates.
     app.onNotification('session/update', ({ params }) => this.update(params))
     app.onNotification('cursor/task', z.object({ toolCallId: z.string() }).passthrough(), ({ params }) => {
-      this.observeSubagent({ id: params.agentId ?? params.toolCallId, name: params.description, task: params.prompt, model: params.model,
-        ...(Number.isFinite(params.durationMs) ? { status: 'completed' } : {}) })
+      const id = params.agentId ?? params.toolCallId
+      const status = params.status ? subagentStatus(params.status) : Number.isFinite(params.durationMs) ? 'completed' : this.children.has(id) ? undefined : 'running'
+      this.observeSubagent({ id, name: params.description, task: params.prompt, model: params.model, ...(status ? { status } : {}) })
     })
     app.onRequest('session/request_permission', ({ params, signal }) => this.permission(params, signal))
     app.onRequest('elicitation/create', ({ params, signal }) => {
@@ -80,7 +81,7 @@ export class AcpSession {
     connection.closed.then(() => {
       if (this.connection !== connection) return
       this.rpc.closed = true
-      for (const child of this.children.values()) if (child.status === 'running') this.observeSubagent({ id: child.id, status: 'disconnected' })
+      for (const child of this.children.values()) if (isActiveSubagent(child.status)) this.observeSubagent({ id: child.id, status: 'disconnected' })
       if (!this.active?.restarting) this.active?.end(agentProcess.error ?? new Error('ACP connection closed'))
     })
     agentProcess.child.on('error', error => connection.close(error))

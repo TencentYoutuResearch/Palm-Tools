@@ -12,7 +12,8 @@ test('Kode leaves official execution plugins, presets and defaults intact', asyn
   const base = ids.map(id => ({id, name:id, config:{default:'standard'}}))
   const patches = yaml.load((await readFile(new URL('../cordis.patch.yml',import.meta.url),'utf8')).replaceAll('!!js ',''))
   const result = applyEntryPatches(base,patches,()=>{})
-  for (const entry of base) assert.deepEqual(result.find(row=>row.id===entry.id),entry)
+  const entries = result.data ?? result
+  for (const entry of base) assert.deepEqual(entries.find(row=>row.id===entry.id),entry)
 })
 test('Kode defaults persist in its own Agent registry', async () => {
   const root=await mkdtemp(join(tmpdir(),'kode-isolated-default-'))

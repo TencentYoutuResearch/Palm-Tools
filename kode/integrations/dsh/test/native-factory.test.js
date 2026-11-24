@@ -902,7 +902,7 @@ test('queue cancellation cannot acknowledge failed persistence and retries from 
   } finally { await h.fiber.dispose() }
 })
 
-test('native child observations use the shipped external catalog and balanced read-only tool cards', async () => {
+test('native child observations persist balanced read-only cards without fake DSH sessions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-native-children-'))
   const h = await host({ closeSession: async () => {} })
   const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))] }])
@@ -912,8 +912,8 @@ test('native child observations use the shipped external catalog and balanced re
     const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
     agent.followup(message('children', 'NATIVE_SUBAGENTS')); await agent.whenIdle()
     const events = h.stored.get(agent.id).events
-    assert.equal(events.filter(event => event.type === 'subagent/catalog').length, 1)
-    assert.equal(events.find(event => event.type === 'subagent/catalog').data.mode, 'external')
+    assert.ok(!events.some(event => event.type === 'subagent/catalog'))
+    assert.ok(events.some(event => event.type === 'plugin:kode/subagent-update' && event.data.id === 'codex-child'))
     assert.equal(h.ctx.sessionProjections.stateOf(agent.session, 'kodeNativeSubagents')['codex-child'].status, 'completed')
     assert.ok(events.some(event => event.type === 'tool/call' && event.data.name === 'subagent_native'))
     assert.equal(events.at(-1).data.reason.kind, 'completed')

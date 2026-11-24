@@ -1,5 +1,5 @@
 //! Single backend owner of plugin configuration, synchronization and idle inhibition.
-use super::{extension_files as files, Hub};
+use super::{extension_files as files, extension_targets, Hub};
 use anyhow::{bail, Context, Result};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -114,7 +114,9 @@ impl Extensions {
         let mut value = state(hub)?;
         value.as_object_mut().unwrap().remove("handoffs");
         value["revision"] = hub.store.document("agent-hub")?["revision"].clone();
-        value["targets"] = files::targets();
+        let catalog = extension_targets::catalog(hub)?;
+        value["targets"] = json!(catalog.paths);
+        value["profileTargets"] = json!(catalog.profiles);
         value["power"] = self.power.lock().status();
         Ok(value)
     }
@@ -131,14 +133,37 @@ impl Extensions {
                 self.power.lock().set(enabled);
             }
             "save-source" => {
-                let source = files::validate(&input["source"])?;
+                let catalog = extension_targets::catalog(hub)?;
                 let sources = value["sources"].as_array_mut().unwrap();
-                if let Some(prior) = sources.iter_mut().find(|row| row["id"] == source["id"]) {
+                let intent = input["intent"].as_str();
+                let prior = sources
+                    .iter_mut()
+                    .find(|row| row["id"] == input["source"]["id"]);
+                let prior_targets = prior
+                    .as_deref()
+                    .map(|row| &row["targets"])
+                    .unwrap_or(&Value::Null);
+                let source = files::validate(&input["source"], &catalog.paths, prior_targets)?;
+                if let Some(prior) = prior {
+                    if intent == Some("create") {
+                        bail!("此来源标识已在使用，请更换标识。");
+                    }
+                    // Older editors send the unchanged target list as their revision check.
+                    let expected = input.get("expectedTargets").unwrap_or(&source["targets"]);
+                    if intent == Some("edit") && &prior["targets"] != expected {
+                        bail!("来源已变更，请刷新后重试。");
+                    }
+                    if prior["targets"] != source["targets"] && !prior["syncedTargets"].is_array() {
+                        prior["syncedTargets"] = prior["targets"].clone();
+                    }
                     for (key, val) in source.as_object().unwrap() {
                         prior[key] = val.clone();
                     }
                 } else {
-                    sources.push(source)
+                    if intent == Some("edit") {
+                        bail!("来源已被移除，请刷新后重试。");
+                    }
+                    sources.push(source);
                 }
                 save(hub, &value)?;
             }
@@ -152,9 +177,12 @@ impl Extensions {
                     .context("source not found")?;
                 let before = value["sources"][index].clone();
                 let operation = (|| -> Result<()> {
-                    let (skills, plugins, revision, release, packages) = files::snapshot(&self.root, &before)?;
-                    let next = files::desired(&self.home, &before, &skills)?;
-                    let previous = before["links"].as_array().cloned().unwrap_or_default();
+                    let catalog = extension_targets::catalog(hub)?;
+                    let (skills, plugins, revision, release, packages) =
+                        files::snapshot(&self.root, &before)?;
+                    let (previous, next) =
+                        files::plan_links(&self.root, &self.home, &before, &skills, &catalog.paths)?;
+                    value["sources"][index]["syncedTargets"] = before["targets"].clone();
                     value["sources"][index]["links"] = json!(next);
                     value["sources"][index]["skills"] =
                         json!(skills.iter().map(|s| &s["name"]).collect::<Vec<_>>());
@@ -171,11 +199,11 @@ impl Extensions {
                         value["sources"][index] = before.clone();
                         return Err(error);
                     }
-                    if let Err(error) = files::native_sync(&self.root, &mut value["sources"][index])
-                    {
-                        value["sources"][index]["nativeStatus"]["codex"] =
-                            json!(format!("failed: {error}"));
-                    }
+                    files::native_sync(
+                        &self.root,
+                        &mut value["sources"][index],
+                        &catalog.native_launch,
+                    )?;
                     save(hub, &value)?;
                     Ok(())
                 })();
@@ -230,17 +258,21 @@ pub fn save(hub: &Hub, value: &Value) -> Result<()> {
     )?;
     Ok(())
 }
-pub fn launch_args(hub: &Hub, kind: &str) -> Result<Vec<String>> {
-    if !matches!(kind, "claude" | "codebuddy" | "cursor") {
+pub fn launch_args(hub: &Hub, profile: &Value) -> Result<Vec<String>> {
+    let Some(kind) = extension_targets::launch_kind_for_profile(profile) else {
         return Ok(vec![]);
-    }
+    };
+    let Some((target, _)) = extension_targets::for_profile(profile) else {
+        return Ok(vec![]);
+    };
     let value = state(hub)?;
     let mut paths = std::collections::HashSet::new();
     let mut args = vec![];
     for source in value["sources"].as_array().unwrap() {
-        if !source["targets"]
+        if !source["syncedTargets"]
             .as_array()
-            .is_some_and(|rows| rows.contains(&json!(kind)))
+            .or_else(|| source["targets"].as_array())
+            .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(&target)))
         {
             continue;
         }

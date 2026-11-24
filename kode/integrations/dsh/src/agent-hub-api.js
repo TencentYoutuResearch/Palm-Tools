@@ -1,14 +1,34 @@
+import { admitHostRequest } from './host-admission.js'
 /** Authenticated Host-local controls for power, extensions, goals and handoff. */
+import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { enqueueCommand } from './native-commands.js'
 import { selectedModel } from './native-commands.js'
 import { parseGoalInput } from './codex-goal.js'
+async function harnessVersion() {
+  const paths = []
+  if (process.resourcesPath) paths.push(join(process.resourcesPath, 'app.asar', 'package.json'))
+  const argv = process.argv[1]
+  if (argv) {
+    paths.push(join(dirname(argv), '..', 'package.json'))
+    try { paths.push(createRequire(argv).resolve('@deepseek-ai/dsh/package.json')) } catch { /* Try the installed runtime manifest. */ }
+  }
+  for (const path of paths) {
+    try {
+      const value = JSON.parse(await readFile(path, 'utf8'))
+      if (['@deepseek-ai/dsh', '@deepseek-ai/dsh-desktop', '@deepseek-ai/dsh-desktop-host'].includes(value.name)) return value.version
+    } catch { /* Try the next installed manifest. */ }
+  }
+}
+
 export function goalSnapshot(session) {
   return session.snapshotEvents().findLast(event => event.type === 'plugin:kode/goal-state')?.data.goal ?? null
 }
 export function registerAgentHubApi(ctx, { hub, backend, service }) {
   const send = (res, code, value) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
-  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/agent-hub', handler: async (req, res) => {
-    const admitted = ctx.connection.admit(req)
+  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/agent-hub', handler: async (req, res, peer) => {
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(res, 403, { error: 'Host owner required' })
     try {
       const query = new URL(req.url, 'http://localhost').searchParams
@@ -28,7 +48,23 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
         let body = ''
         for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) return send(res, 413, { error: 'Request too large' }) }
         input = JSON.parse(body)
-        if (!input || typeof input !== 'object' || Array.isArray(input) || !['power', 'save-source', 'sync-source', 'remove-source', 'goal', 'handoff'].includes(input.action)) throw new Error('Unknown operation')
+        if (!input || typeof input !== 'object' || Array.isArray(input) || !['power', 'save-source', 'sync-source', 'remove-source', 'goal', 'handoff', 'agent-versions', 'update-agent'].includes(input.action)) throw new Error('Unknown operation')
+        if (input.action === 'agent-versions' || input.action === 'update-agent') {
+          if (input.action === 'update-agent' && typeof input.profileId !== 'string') throw new Error('请选择要更新的 Agent。')
+          const command = input.action === 'update-agent'
+            ? { update_profile: input.profileId }
+            : { profile_ids: input.profileIds, refresh: input.refresh === true }
+          const [versionInfo, dshVersion] = await Promise.all([
+            backend.call('/api/v1/messaging/workbench/agent-versions', command)
+              .then(versions => ({ versions }))
+              .catch(error => {
+                if (error.status !== 404 || input.action === 'update-agent') throw error
+                return { versions: {}, versionError: '更新此主机的 Kode 服务后即可检查 CLI 版本。' }
+              }),
+            harnessVersion(),
+          ])
+          return send(res, 200, { ...versionInfo, dshVersion })
+        }
         if (['power', 'save-source', 'sync-source', 'remove-source'].includes(input.action)) {
           const value = await hub.change(input)
           if (['sync-source', 'remove-source'].includes(input.action)) service.adapter.catalogs.clear()

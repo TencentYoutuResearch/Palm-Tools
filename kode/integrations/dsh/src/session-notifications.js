@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** Live owner-only attention events. Never replay historical turns as new notifications. */
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -5,9 +6,9 @@ import { promisify } from 'node:util'
 
 /** This endpoint always operates on the local Desktop Host, independent of the viewed SSH Host. */
 export function registerNotificationSettings(ctx, { platform = process.platform, open = promisify(execFile) } = {}) {
-  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/notification-settings', async handler(req, res) {
+  return ctx.webServer.register({ kind: 'exact', path: '/api/kode/notification-settings', async handler(req, res, peer) {
     const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
-    const admission = ctx.connection.admit(req)
+    const admission = admitHostRequest(ctx, req, peer)
     if ('rejection' in admission || admission.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     if (req.method !== 'POST') return send(405, { error: 'POST required' })
     if (platform !== 'darwin') return send(400, { error: '请在当前设备的系统设置中管理通知权限。' })
@@ -66,8 +67,8 @@ export function registerSessionNotifications(ctx, { waitMs = 250 } = {}) {
       try { return await next() } finally { finish() }
     }, { prepend: true }))
   }
-  const route = ctx.webServer.register({ kind: 'exact', path: '/api/kode/notifications', handler(req, res) {
-    const admission = ctx.connection.admit(req)
+  const route = ctx.webServer.register({ kind: 'exact', path: '/api/kode/notifications', handler(req, res, peer) {
+    const admission = admitHostRequest(ctx, req, peer)
     if ('rejection' in admission || admission.peer.principal.kind !== 'owner') { res.writeHead(403); res.end(); return }
     if (req.method !== 'GET') { res.writeHead(405); res.end(); return }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' })
