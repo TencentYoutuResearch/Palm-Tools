@@ -52,9 +52,13 @@ export class SessionAppearance {
       if (hidden.includes(id)) continue
       if (await this.imagePath(id, 'idle')) {
         const prefix = `/api/kode/avatars/media?avatar=${encodeURIComponent(id)}`
-        const animations = Object.fromEntries(await Promise.all([...states].map(async state => [state, (await this.animationPaths(id, state)).map((_path, index) => `${prefix}&state=${state}&frame=${index + 1}`)])))
+        // Each frame URL carries its file's revision: redrawn artwork gets a
+        // new URL, so no view keeps showing a cached old picture.
+        const version = async path => { try { const info = await stat(path); return `${Math.trunc(info.mtimeMs)}-${info.size}` } catch { return '0' } }
+        const animations = Object.fromEntries(await Promise.all([...states].map(async state => [state, await Promise.all((await this.animationPaths(id, state)).map(async (path, index) => `${prefix}&state=${state}&frame=${index + 1}&v=${await version(path)}`))])))
+        const idle = await this.imagePath(id, 'idle')
         const background = await this.backgroundPath(id), revision = background && await stat(background)
-        result.push({ id, name: entry.name.replace(/^\d+-/, ''), aliases: Object.keys(catalog.renamed ?? {}).filter(alias => resolveGalleryId(alias, catalog) === id), url: `${prefix}&state=idle`, animations, ...(background ? { background: `/api/kode/avatars/background?avatar=${encodeURIComponent(id)}&v=${revision.mtimeMs}-${revision.size}` } : {}) })
+        result.push({ id, name: entry.name.replace(/^\d+-/, ''), aliases: Object.keys(catalog.renamed ?? {}).filter(alias => resolveGalleryId(alias, catalog) === id), url: `${prefix}&state=idle&v=${await version(idle)}`, animations, ...(background ? { background: `/api/kode/avatars/background?avatar=${encodeURIComponent(id)}&v=${revision.mtimeMs}-${revision.size}` } : {}) })
       }
     }
     return result

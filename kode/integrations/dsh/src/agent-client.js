@@ -904,9 +904,29 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     botsPending = botsCall().then(data => publishBots({ data, error: '' }), error => publishBots({ ...botsSnapshot, error: error.message })).finally(() => { botsPending = undefined })
     return botsPending
   }
+  // Avatars change outside this view (Kode settings, a generation session,
+  // another window): a bot wearing one the library has not seen reloads it,
+  // and coming back to the window rereads both the roster and the library.
+  let botsWatchingFocus = false, botsFocusAt = 0
+  function followBotsFreshness() {
+    if (botsWatchingFocus) return
+    botsWatchingFocus = true
+    const reread = () => {
+      if (document.hidden || Date.now() - botsFocusAt < 5000) return
+      botsFocusAt = Date.now()
+      void refreshBots()
+      void loadAvatars(true)
+    }
+    window.addEventListener?.('focus', reread)
+    document.addEventListener?.('visibilitychange', reread)
+  }
+  botsListeners.add(() => {
+    const bots = botsSnapshot.data?.bots ?? []
+    if (avatarSnapshot.loaded && !avatarPending && bots.some(bot => bot.avatar && !avatarSnapshot.avatars.some(row => row.id === bot.avatar || row.aliases?.includes(bot.avatar)))) void loadAvatars(true)
+  })
   function useBots() {
     const snapshot = useSyncExternalStore(botsStore.subscribe, botsStore.getSnapshot)
-    useEffect(() => { void refreshBots() }, [])
+    useEffect(() => { followBotsFreshness(); void refreshBots() }, [])
     return snapshot
   }
   // lucide "bot": line icon in the same weight as dsh's panel glyphs.
