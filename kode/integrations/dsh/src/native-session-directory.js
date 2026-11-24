@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** Owner-scoped discovery and selection of Agent-native sessions on this Host. */
 import { randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
@@ -91,7 +92,7 @@ export function registerNativeSessionDirectory(ctx, backend) {
     res.end(JSON.stringify(value))
   }
   return ctx.webServer.register({ kind: 'exact', path: NATIVE_SESSIONS_PATH, handler: async (req, res, peer) => {
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return json(res, 403, { error: 'Host owner required' })
     if (!backend) return json(res, 503, { error: 'Kode backend is unavailable' })
     try {

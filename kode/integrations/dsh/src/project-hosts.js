@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 import { openTabKey, savedSessionTime } from './saved-session-state.js'
 import { hasTranscript } from './workspace-directory.js'
 /** Kode owns SSH; the remote dsh Host owns all workspace and execution services. */
@@ -383,7 +384,7 @@ export async function registerProjectHosts(ctx, config) {
   ctx.effect(() => registerHostDirectory(ctx, config), 'kode.host-directory')
   ctx.effect(() => registerNativeSessionDirectory(ctx, config.backendClient), 'kode.native-session-directory')
   ctx.effect(() => () => manager.close(), 'kode.project-hosts')
-  const owner = (req, peer) => { const admitted = peer ? { peer } : ctx.connection.admit(req); return !('rejection' in admitted) && admitted.peer.principal.kind === 'owner' }
+  const owner = (req, peer) => { const admitted = admitHostRequest(ctx, req, peer); return !('rejection' in admitted) && admitted.peer.principal.kind === 'owner' }
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/session-import', handler: async (req, res, peer) => {
     if (!owner(req, peer)) return json(res, 403, { error: 'Host owner required' })
     if (req.method !== 'POST' || !(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 405, { error: 'JSON POST required' })
@@ -411,14 +412,14 @@ export async function registerProjectHosts(ctx, config) {
     try { const portal = await manager.connect(host); portal.upgrade(req, socket, head, path) } catch { socket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n') }
   } }), 'kode.transport-ws')
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/kode/terminal-font.ttf', handler: async (req, res, peer) => {
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) { res.writeHead(admitted.rejection); res.end(); return }
     if (req.method !== 'GET') { res.writeHead(405); res.end(); return }
     const bytes = await readFile(new URL('../assets/fonts/SymbolsNerdFontMono-Regular.ttf', import.meta.url))
     res.writeHead(200, { 'content-type': 'font/ttf', 'cache-control': 'private, max-age=86400', 'content-length': bytes.length }); res.end(bytes)
   } }), 'kode.terminal-font')
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: PATH, handler: async (req, res, peer) => {
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) return json(res, admitted.rejection, { error: 'authentication required' })
     if (admitted.peer.principal.kind !== 'owner') return json(res, 403, { error: 'Host owner required' })
     const requested = new URL(req.url, 'http://localhost').searchParams.get('current')

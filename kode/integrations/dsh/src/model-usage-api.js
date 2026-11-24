@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 import { collectDeviceUsage } from './model-usage-devices.js'
 
 /** Owner-only access to CLI history on this host or across connected devices.
@@ -6,7 +7,7 @@ export function registerModelUsageApi(ctx, backend) {
   const cache = new Map()
   return ctx.webServer.register({ kind: 'exact', path: '/api/kode/model-usage', handler: async (req, res, peer) => {
     const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
-    const admission = peer ? { peer } : ctx.connection.admit(req)
+    const admission = admitHostRequest(ctx, req, peer)
     if ('rejection' in admission || admission.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     if (req.method !== 'GET') return send(405, { error: 'GET required' })
     const url = new URL(req.url, 'http://localhost'), period = url.searchParams.get('period') ?? 'today'

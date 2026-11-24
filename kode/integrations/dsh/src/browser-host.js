@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** A private, sandboxed Chromium instance renders top-level pages for the sidebar. No framing headers are rewritten. */
 import { spawn } from 'node:child_process'
 import { access, mkdir, readFile, rm } from 'node:fs/promises'
@@ -261,7 +262,7 @@ export function registerBrowserApi(ctx, config = {}) {
   const host = new SidebarBrowserHost(config), responses = new Set()
   const dispose = ctx.webServer.register({ kind: 'exact', path: '/api/kode/browser', handler: async (req, res, peer) => {
     const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
       if (req.method === 'GET') {

@@ -1,5 +1,5 @@
 /** One persistent Codex app-server connection per dsh Session and profile snapshot. */
-import { codexSubagents } from './native-subagents.js'
+import { codexSubagents, isActiveSubagent, subagentStatus } from './native-subagents.js'
 import { deduplicateSkillCopies } from './codex-skills.js'
 import { RpcProcess } from './rpc-process.js'
 import { createToolProxy } from './tool-proxy.js'
@@ -30,7 +30,11 @@ export class CodexSession {
         const id = message.params.threadId
         if (!this.children.has(id)) return
         if (message.method === 'item/agentMessage/delta') this.observeSubagent({ id, delta: message.params.delta })
-        if (message.method === 'turn/completed') this.observeSubagent({ id, status: message.params.turn?.status === 'completed' ? 'completed' : message.params.turn?.status === 'interrupted' ? 'cancelled' : 'failed' })
+        if (message.method === 'turn/started') this.observeSubagent({ id, status: 'running' })
+        if (message.method === 'turn/completed') this.observeSubagent({ id, status: subagentStatus(message.params.turn?.status) })
+        if (message.method === 'thread/closed') {
+          if (isActiveSubagent(this.children.get(id).status)) this.observeSubagent({ id, status: 'cancelled' })
+        }
         return
       }
       for (const child of codexSubagents(message.params?.item)) this.observeSubagent(child)
@@ -46,7 +50,7 @@ export class CodexSession {
     })
     this.rpc.on('closed', error => {
       for (const child of this.children.values()) {
-        if (child.status === 'running') this.observeSubagent({ id: child.id, status: 'disconnected' })
+        if (isActiveSubagent(child.status)) this.observeSubagent({ id: child.id, status: 'disconnected' })
       }
       this.active?.end(error)
       for (const resolve of this.readerWaiters.splice(0)) resolve()

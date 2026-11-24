@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { ExtensionHub, HUB_PATH } from '../src/extension-hub.js'
+import { withNativePlugins } from '../src/native-extensions.js'
 import { goalSnapshot, registerAgentHubApi } from '../src/agent-hub-api.js'
 import { CodexSession } from '../src/codex-session.js'
 import { projectSessionEvent } from '../src/runtime-bridge.js'
@@ -56,7 +57,8 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   }
   const service = { profiles: { binding: () => ({ profile: { type: 'codex' } }) }, adapter: { catalogs: new Map(), live: new Map([['source', { goal() {} }]]), controlGoal: async (_agent, input) => { controlled.push(input) } } }
   registerAgentHubApi(ctx, { hub, backend, service })
-  const server = http.createServer((req, res) => void handler(req, res)); server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  let carrierPeer
+  const server = http.createServer((req, res) => void handler(req, res, carrierPeer)); server.listen(0, '127.0.0.1'); await once(server, 'listening')
   t.after(() => { server.closeAllConnections(); server.close() })
   const url = 'http://127.0.0.1:' + server.address().port + '/api/kode/agent-hub'
   const request = (body, suffix = '', role = 'owner') => fetch(url + suffix, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json', 'x-role': role }, ...(body ? { body: JSON.stringify(body) } : {}) })
@@ -76,6 +78,26 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   assert.equal(logo.headers.get('content-type'), 'image/png'); assert.equal(logo.headers.get('x-content-type-options'), 'nosniff')
   assert.deepEqual([...new Uint8Array(await logo.arrayBuffer())], [0x89, 0x50, 0x4e, 0x47])
   assert.equal(calls.at(-1).path, HUB_PATH + '?logo=team&package=0')
+
+  const before = calls.length
+  carrierPeer = { principal: { kind: 'guest' } }
+  assert.equal((await request({ action: 'power', enabled: true })).status, 403)
+  assert.equal(calls.length, before)
+  carrierPeer = { principal: { kind: 'owner' } }
+  assert.equal((await request({ action: 'sync-source', id: 'admitted' }, '', 'guest')).status, 200)
+  assert.deepEqual(calls.at(-1), { path: HUB_PATH, input: { action: 'sync-source', id: 'admitted' } })
+})
+
+test('native launch uses only the synced destination and skips a changed CLI home', () => {
+  const profile = { id: 'fixture', type: 'claude', args: ['--print'], env: { CLAUDE_CONFIG_DIR: '/example/config' } }
+  const sources = [{ targets: ['claude'], syncedTargets: ['directory-fixture'], plugins: { claude: [{ path: '/example/plugin' }] } }]
+  const profileTargets = { fixture: 'directory-fixture', tclaude: 'tclaude', other: 'claude' }
+  const destinations = { 'directory-fixture': '/example/config/skills' }
+  assert.deepEqual(withNativePlugins(profile, sources, profileTargets, destinations).args, ['--print', '--plugin-dir', '/example/plugin'])
+  assert.equal(withNativePlugins(profile, sources, profileTargets, { 'directory-fixture': '/example/changed/skills' }), profile)
+  assert.deepEqual(withNativePlugins({ id: 'other', type: 'claude' }, sources, profileTargets, destinations), { id: 'other', type: 'claude' })
+  assert.deepEqual(withNativePlugins({ id: 'tclaude', type: 'claude' }, [{ ...sources[0], syncedTargets: ['tclaude'] }], profileTargets, destinations).args,
+    ['--plugin-dir', '/example/plugin'])
 })
 
 test('real backend owns native plugin snapshots, installer updates, and removal without a running dsh Host', { skip: !process.env.KODE_TEST_BACKEND_URL || process.env.KODE_TEST_NATIVE_PLUGIN_CLI !== '1' }, async t => {

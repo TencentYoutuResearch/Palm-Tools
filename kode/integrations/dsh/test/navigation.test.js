@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { openSessionTarget } from '../packages/transport/navigation.js'
+import { openSessionTarget, openWorkspaceTarget } from '../packages/transport/navigation.js'
 
 test('resume unarchives the original session before navigation, so archive reconciliation cannot clear it', async () => {
   let archived = true, selected = 'current', refreshed = false, oldDraftCancelled = false
@@ -31,4 +31,47 @@ test('a failed or superseded resume does not open a new or wrong conversation', 
   services.workspaces.unarchiveSession = async () => { controller.abort(new Error('superseded')) }
   await assert.rejects(openSessionTarget({ get: name => services[name] }, { sessionId: 'original', resume: true }, controller.signal), /superseded/)
   assert.equal(opened, false)
+})
+
+test('a directory-only workspace is admitted before the native Agent picker starts', async () => {
+  const actions = [], items = [], options = { agentPreset: 'example-agent' }
+  const workspace = { workspaceId: 'existing-project', path: '/project/example' }
+  const services = {
+    workspaces: {
+      list: { getSnapshot: () => ({ items }) },
+      async create(input) {
+        actions.push(['admit', input])
+        items.push(workspace)
+        return workspace
+      },
+    },
+    uiWorkspace: {
+      startSession(id, draft) {
+        assert.ok(items.some(row => row.workspaceId === id))
+        actions.push(['start', id, draft])
+      },
+      openWorkspace(id) { actions.push(['open', id]) },
+    },
+  }
+  const ctx = { get: name => services[name] }, signal = new AbortController().signal
+  await openWorkspaceTarget(ctx, { workspaceId: 'directory-id', workspacePath: workspace.path, startSession: true, options }, signal)
+  await openWorkspaceTarget(ctx, { workspaceId: workspace.workspaceId, workspacePath: workspace.path }, signal)
+  assert.deepEqual(actions, [['admit', { path: workspace.path }], ['start', workspace.workspaceId, options], ['open', workspace.workspaceId]])
+})
+
+test('a superseded workspace lookup cannot start a session on the new Host', async () => {
+  const controller = new AbortController()
+  const services = {
+    workspaces: {
+      list: { getSnapshot: () => ({ items: [] }) },
+      async create() {
+        controller.abort(new Error('superseded'))
+        return { workspaceId: 'original' }
+      },
+    },
+    uiWorkspace: { startSession() { assert.fail('opened a workspace after navigation was superseded') } },
+  }
+  await assert.rejects(openWorkspaceTarget({ get: name => services[name] }, {
+    workspaceId: 'original', workspacePath: '/project/example', startSession: true,
+  }, controller.signal), /superseded/)
 })

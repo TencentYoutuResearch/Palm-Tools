@@ -6,6 +6,7 @@
  */
 import { mkdir } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { admitHostRequest } from './host-admission.js'
 
 const BOTS = '/api/v1/messaging/workbench/bots'
 const WATCHES = '/api/v1/messaging/workbench/watches'
@@ -146,7 +147,7 @@ export function registerBotsApi(ctx, backend) {
     return { sessionId }
   }
   return ctx.webServer.register({ kind: 'exact', path: '/api/kode/bots', handler: async (req, res, peer) => {
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(res, 403, { error: 'Host owner required' })
     try {
       if (req.method === 'GET') {

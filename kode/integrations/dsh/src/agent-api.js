@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** Owner-only Agent configuration API over dsh's existing authenticated Web carrier. */
 import { HistoryEditor } from './history-edit.js'
 import { AGENT_TYPES } from './agent-profiles.js'
@@ -21,7 +22,7 @@ export function registerAgentApi(ctx, service) {
     ? (adapter.listModels ? await adapter.listModels(profileRoute(profile.id), profile, modelHint) : catalog.groups.find(g => g.id === profileRoute(profile.id))?.models ?? []).filter(m => m.id !== 'default' || m.fastCapability)
     : catalog.groups.filter(g => !g.id.startsWith('kode-agent-')).flatMap(g => g.models.map(m => ({ ...m, provider: g.id })))
   const disposeUpdates = ctx.webServer.register({ kind: 'exact', path: `${PATH}/runtimes`, handler: (req, res, peer) => {
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') { json(res, 403, { error: 'Host owner required' }); return }
     if (req.method !== 'GET') { json(res, 405, { error: 'GET required' }); return }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' })
@@ -33,7 +34,7 @@ export function registerAgentApi(ctx, service) {
     publish()
   } })
   const disposeApi = ctx.webServer.register({ kind: 'exact', path: PATH, handler: async (req, res, peer) => {
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) { json(res, admitted.rejection, { error: 'authentication required' }); return }
     if (admitted.peer.principal.kind !== 'owner') { json(res, 403, { error: 'only the Host owner may configure executable Agents' }); return }
     try {

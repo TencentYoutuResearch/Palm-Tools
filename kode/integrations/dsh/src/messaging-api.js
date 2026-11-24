@@ -1,8 +1,9 @@
+import { admitHostRequest } from './host-admission.js'
 /** Read-only, owner-authenticated name directory; backend credentials stay on the Host. */
 export function registerMessagingApi(ctx, client, nodeId) {
   return ctx.webServer.register({ kind: 'exact', path: '/api/kode/sessions', handler: async (req, res, peer) => {
     const json = (status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
-    const admitted = peer ? { peer } : ctx.connection.admit(req)
+    const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted) return json(admitted.rejection, { error: 'authentication required' })
     if (admitted.peer.principal.kind !== 'owner') return json(403, { error: 'Host owner required' })
     if (req.method !== 'GET') return json(405, { error: 'GET required' })

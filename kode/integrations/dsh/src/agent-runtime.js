@@ -173,28 +173,31 @@ export class AgentRuntimeAdapter {
     const callIdentity = (turnId, itemId) => `kode:${epoch}:${turnId}:${itemId}`
     const autoCompact = binding.profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact') : undefined
     const resolved = await this.resolveProfile(binding.profile, agent)
-    const knownChildren = new Set((agent.session.snapshotEvents?.() ?? []).filter(event => event.type === 'subagent/catalog').map(event => event.data.childId))
+    const knownChildren = new Set((agent.session.snapshotEvents?.() ?? []).filter(event => event.type === 'plugin:kode/subagent-update').map(event => event.data.id))
     let childFlush
     const sessionStore = agent.ctx.sessions
+    const persistChildren = async () => {
+      try { await sessionStore.flush(agent.session) }
+      catch (error) { this.ctx.logger?.warn('Native child persistence failed: %s', error.message) }
+    }
     const runtime = await createNativeSession({ ...resolved, ...(autoCompact ? { autoCompactEnabled: autoCompact.data.enabled } : {}) }, agent.session.header.cwd ?? process.cwd(), {
       subagent: update => {
         const data = nativeSubagentRecord(update)
         if (!data) return
-        const childId = `kode-native:${agent.id}:${update.id}`
-        const known = knownChildren.has(childId)
-        if (!(known && update.replay)) appendPluginRecord(agent.session, 'plugin:kode/subagent-update', data)
+        const known = knownChildren.has(data.id)
+        if (known && update.replay) return
+        appendPluginRecord(agent.session, 'plugin:kode/subagent-update', data)
         if (!known) {
-          knownChildren.add(childId)
-          agent.session.append('subagent/catalog', { version: 2, childId, childCreatedAt: Date.now(), mode: 'external', label: data.name || data.task?.slice(0, 120) || data.id })
+          knownChildren.add(data.id)
           if (this.busy.has(agent.id) && !update.replay) {
             const callId = `kode:${epoch}:subagent:${update.id}`
-            this.logCall(agent, callId, 'subagent_native', { id: data.id, title: data.name || data.task?.slice(0, 120) || data.id, task: data.task, model: data.model })
+            this.logCall(agent, callId, 'subagent_native', { id: data.id, title: data.name || data.task?.slice(0, 120) || '子 Agent', task: data.task, model: data.model })
             this.logResult(agent, callId, [{ type: 'text', text: '原生子 Agent 已登记。' }])
           }
         }
         if (!childFlush) childFlush = setTimeout(() => {
           childFlush = undefined
-          void Promise.resolve().then(() => sessionStore.flush(agent.session)).catch(error => this.ctx.logger?.warn('Native child persistence failed: %s', error.message))
+          void persistChildren()
         }, 100).unref()
       },
       policy: () => agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session }) ?? { mode: 'read-only' },
@@ -246,7 +249,12 @@ export class AgentRuntimeAdapter {
     const closeNative = runtime.close.bind(runtime)
     runtime.close = async () => {
       try { await closeNative() }
-      finally { clearTimeout(childFlush); childFlush = undefined }
+      finally {
+        if (childFlush) {
+          clearTimeout(childFlush); childFlush = undefined
+          await persistChildren()
+        }
+      }
     }
     runtime.nativeCalls = nativeCalls
     runtime.autoCompactRevision = autoCompact?.seq ?? -1

@@ -240,10 +240,8 @@ pub(super) fn catalog(hub: &Hub) -> Result<Catalog> {
     let value=hub.store.document("agents")?["value"].clone();
     let mut catalog=catalog_value(&value)?;
     for profile in value["profiles"].as_array().into_iter().flatten(){
-        if let (Some(id),Some(kind))=(profile["id"].as_str(),profile["type"].as_str()){
-            if let Some(key)=catalog.ids.get(id){
-                catalog.extension_args.insert(key.clone(),super::extensions::launch_args(hub,kind)?);
-            }
+        if let Some(key) = profile["id"].as_str().and_then(|id| catalog.ids.get(id)) {
+            catalog.extension_args.insert(key.clone(), super::extensions::launch_args(hub, profile)?);
         }
     }
     Ok(catalog)

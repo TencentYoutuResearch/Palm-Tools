@@ -1,3 +1,4 @@
+import { admitHostRequest } from './host-admission.js'
 /** Owner-only creation of a fresh checkout; existing worktrees and uncommitted files are never moved. */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -74,7 +75,7 @@ export function registerWorktreeApi(ctx, config = {}) {
   const creator = new WorktreeCreator(config.worktreeDirectory)
   const dispose = ctx.webServer.register({ kind: 'exact', path: '/api/kode/worktrees', handler: async (req, res, peer) => {
     const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)) }
-    const admission = peer ? { peer } : ctx.connection.admit(req)
+    const admission = admitHostRequest(ctx, req, peer)
     if ('rejection' in admission || admission.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
       let input

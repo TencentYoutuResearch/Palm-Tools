@@ -74,6 +74,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/messages/:id/cancellation/result", post(report_cancellation))
         .route("/api/v1/messaging/sessions/:id/cancellations", get(pending_cancellations))
 
+        .route("/api/v1/messaging/workbench/agent-versions", post(agent_versions))
         .route("/api/v1/messaging/workbench/agent-hub", get(agent_hub).post(change_agent_hub))
         .route("/api/v1/messaging/workbench/handoff", post(handoff))
         .route("/api/v1/messaging/model-usage", get(model_usage))
@@ -875,6 +876,15 @@ async fn resolve_native(State(hub):State<Arc<Hub>>,h:HeaderMap,Json(input):Json<
 async fn runtime_release(State(hub):State<Arc<Hub>>,h:HeaderMap,Json(input):Json<RuntimeClaim>)->Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     ctx.runtimes.release(&input.runtime,&input.boot_id)?;Ok(Json(json!({"ok":true})))
+}
+
+async fn agent_versions(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Json(request): Json<super::agent_updates::Request>,
+) -> Result<Json<std::collections::HashMap<String, super::agent_updates::Status>>> {
+    admin(&hub, &headers)?;
+    Ok(Json(hub.agent_updates.execute(&hub, request).await?))
 }
 
 #[derive(Deserialize)]

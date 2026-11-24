@@ -19,6 +19,39 @@ replace('className: MessageItem_module_css_default.bubble,', 'className: Message
 const historyEdit = await readFile(new URL('../packages/chat/history-edit.js', import.meta.url), 'utf8')
 const workbenchUi = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
 replace('function UserStyleBubble(', historyEdit + '\n' + workbenchUi + '\nfunction UserStyleBubble(')
+// Keep the newer DSH session panel mountable in the pinned Chat renderer.
+replace('children: { "conversation.chat.flow": {', `children: {
+						"conversation.chat.aside": { kind: "single", scope: "session" },
+						"conversation.chat.flow": {`)
+replace('(0, react_jsx_runtime.jsx)("div", {\n\t\t\t\t\t\tclassName: ChatView_module_css_default.root,', `(0, react_jsx_runtime.jsx)("div", {
+						"data-chat-aside": "",
+						children: renderSlot("conversation.chat.aside", {})
+					}),
+					(0, react_jsx_runtime.jsx)("div", {
+						className: ChatView_module_css_default.root,`)
+// Newer primitives use CSS anchors for these dialogs and omit the measurement hook.
+replace('function useStatDialog() {', `const legacyStatPosition = _deepseek_ai_dsh_client_ui_primitives.useAnchoredPosition;
+		const useStatPosition = legacyStatPosition ?? (() => undefined);
+		function useStatDialog() {`)
+replace('const pos = (0, _deepseek_ai_dsh_client_ui_primitives.useAnchoredPosition)({', `const anchorName = "--kode-stat-" + (0, react.useId)().replaceAll(":", "");
+			const anchorStyle = legacyStatPosition ? undefined : { anchorName };
+			const pos = useStatPosition({`)
+replace('margin: PANEL_MARGIN\n\t\t\t});', `margin: PANEL_MARGIN
+			}) ?? (anchorStyle && {
+				positionAnchor: anchorName,
+				positionArea: "top span-left",
+				positionTryFallbacks: "flip-inline, flip-block",
+				margin: "0 12px 8px",
+				maxHeight: "calc(100dvh - 24px)",
+				overflowY: "auto"
+			});`)
+replace('panelRef,\n\t\t\t\tpos\n', 'panelRef,\n\t\t\t\tpos, anchorStyle\n')
+const statDialogRead = 'const { open, setOpen, rootRef, panelRef, pos } = useStatDialog();'
+if (source.split(statDialogRead).length !== 3) throw new Error('Pinned statistics dialog contract changed')
+source = source.replaceAll(statDialogRead, 'const { open, setOpen, rootRef, panelRef, pos, anchorStyle } = useStatDialog();')
+for (const root of ['TurnUsagePanel_module_css_default.root', 'StatsPills_module_css_default.anchor']) {
+  replace(`ref: rootRef,\n\t\t\t\tclassName: ${root},`, `ref: rootRef,\n\t\t\t\tstyle: anchorStyle,\n\t\t\t\tclassName: ${root},`)
+}
 replace('const UserMessageNodeView = (0, react.memo)(function UserMessageNodeView(', 'const OriginalUserMessageNodeView = (0, react.memo)(function UserMessageNodeView(')
 replace('function UserMessageNodeView({ node, renderFactorySlot, loadImage, t })', 'function UserMessageNodeView({ node, renderFactorySlot, loadImage, t, historyEditAction })')
 replace('text,\n\t\t\t\t\ttime: data.time,', 'text,\n\t\t\t\t\textraActions: historyEditAction,\n\t\t\t\t\ttime: data.time,')

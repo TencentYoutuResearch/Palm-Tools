@@ -9,5 +9,8 @@ export class ExtensionHub {
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source ?? '') || !/^\d+$/.test(index ?? '')) throw new Error('Invalid plugin logo request')
     return this.backend.asset(`${HUB_PATH}?logo=${encodeURIComponent(source)}&package=${index}`)
   }
-  async nativeProfile(profile) { return withNativePlugins(profile, (await this.read()).sources) }
+  async nativeProfile(profile) {
+    const { sources, profileTargets, targets } = await this.read()
+    return withNativePlugins(profile, sources, profileTargets, targets)
+  }
 }

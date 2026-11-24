@@ -8,7 +8,9 @@ mod wire;
 mod extensions;
 pub mod ext;
 pub mod bots;
+mod agent_updates;
 mod extension_files;
+mod extension_targets;
 mod handoff;
 mod integrations;
 pub mod agents;
@@ -67,6 +69,7 @@ pub struct Peer {
 pub struct Hub {
     ext: ext::Gateway,
     extensions: extensions::Extensions,
+    agent_updates: agent_updates::AgentUpdates,
     handoff_gate: tokio::sync::Mutex<()>,
     memory: Mutex<Option<Arc<crate::MemoryHandle>>>,
     store: Arc<Store>,
@@ -114,6 +117,7 @@ impl Hub {
         let hub = Arc::new(Self {
             ext: ext::Gateway::open(&config.database.with_extension("ext.sqlite"))?,
             extensions: extensions::Extensions::new(config.database.with_extension("agent-hub"), home),
+            agent_updates: Default::default(),
             handoff_gate: tokio::sync::Mutex::new(()),
             memory: Mutex::new(ctx.memory.clone()),
             store,
