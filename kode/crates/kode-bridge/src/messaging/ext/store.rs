@@ -481,6 +481,20 @@ impl Store {
         Ok(self.db.lock().query_row("SELECT COUNT(*) FROM bot_watch_runs WHERE watch_id=?1 AND started>=?2", params![watch, since], |r| r.get(0))?)
     }
 
+    /// The final answer of a session's latest finished turn.
+    pub fn last_final_message(&self, session: u64) -> Result<Option<Value>> {
+        let raw: Option<String> = self
+            .db
+            .lock()
+            .query_row(
+                "SELECT payload FROM ext_events WHERE session_id=?1 AND kind='session.turn_completed' AND json_extract(payload,'$.final_message') IS NOT NULL ORDER BY seq DESC LIMIT 1",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).map(|p| p["final_message"].clone()).filter(|m| !m.is_null()))
+    }
+
     pub fn set_run_status(&self, id: &str, status: &str) -> Result<()> {
         self.db.lock().execute("UPDATE bot_watch_runs SET status=?2 WHERE id=?1 AND finished IS NULL", params![id, status])?;
         Ok(())

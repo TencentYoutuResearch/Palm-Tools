@@ -34,6 +34,8 @@ const SELF_QUIET: Duration = Duration::from_secs(10);
 const RETRY: Duration = Duration::from_secs(15);
 const SUMMARY_CHARS: usize = 4000;
 const MAX_PUBLISH_BYTES: usize = 16 * 1024;
+/// Extra 30 s waits for a run session to start (about three minutes in all).
+const START_PATIENCE: usize = 5;
 
 /// Shared between the dispatcher and the API.
 pub struct Signals {
@@ -252,6 +254,13 @@ fn enrich(hub: &Hub, session: u64, payload: &Value) -> Value {
         payload["labels"] = json!(owner.labels);
         payload["extension"] = json!(owner.extension);
     }
+    // An exit or a question carries what the session last concluded, so the
+    // bot has something to work from.
+    if payload["final_message"].is_null() {
+        if let Ok(Some(last)) = hub.ext.store.last_final_message(session) {
+            payload["final_message"] = last;
+        }
+    }
     payload
 }
 
@@ -430,7 +439,7 @@ async fn launch(hub: &Arc<Hub>, bot: &crate::messaging::bots::Bot, workspace: &P
     let cwd = workspace.to_string_lossy();
     if ctx.runtimes.available("dsh") {
         let payload = json!({"bot_id":bot.id,"task":text,"workspace":cwd,"permission":permission,"title":title});
-        let value = ctx.runtimes.request("dsh", None, "bot_run", payload, &rid).await?;
+        let value = request_patiently(&ctx, "dsh", "bot_run", payload, &rid).await?;
         let id = value["id"].as_u64().ok_or_else(|| anyhow::anyhow!("dsh did not return the run session"))?;
         return Ok((id, value["runtime_session_id"].as_str().map(str::to_owned)));
     }
@@ -440,11 +449,24 @@ async fn launch(hub: &Arc<Hub>, bot: &crate::messaging::bots::Bot, workspace: &P
     std::fs::create_dir_all(workspace)?;
     let persona = bot.persona_prompt();
     let payload = json!({"backend_key":bot.backend_key,"cwd":cwd,"model":bot.model,"permission_mode":permission,"system_prompt":persona});
-    let dto = ctx.runtimes.request("gui", None, "create_session", payload, &rid).await?;
+    let dto = request_patiently(&ctx, "gui", "create_session", payload, &rid).await?;
     let id = dto["id"].as_u64().ok_or_else(|| anyhow::anyhow!("runtime did not return a session"))?;
     let text = if dto["system_prompt"] == "applied" { text } else { format!("{persona}\n\n{text}") };
     tokio::spawn(deliver_initial(hub.clone(), ctx.clone(), id, text, format!("{rid}.in")));
     Ok((id, None))
+}
+
+/// Starting an Agent can outlast one runtime request (30 s). The same request
+/// id is idempotent, so asking again picks up the outcome instead of
+/// starting a second session.
+async fn request_patiently(ctx: &crate::Ctx, runtime: &str, kind: &str, payload: Value, rid: &str) -> anyhow::Result<Value> {
+    let mut attempt = 0;
+    loop {
+        match ctx.runtimes.request(runtime, None, kind, payload.clone(), rid).await {
+            Err(e) if attempt < START_PATIENCE && e.to_string().contains("outcome unconfirmed") => attempt += 1,
+            other => return other,
+        }
+    }
 }
 
 // ---- API ------------------------------------------------------------------

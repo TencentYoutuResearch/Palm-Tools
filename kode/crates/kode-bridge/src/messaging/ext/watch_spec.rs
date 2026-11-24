@@ -130,7 +130,10 @@ pub fn describe(topic: &str, payload: &Value) -> String {
     let text = match topic {
         "session.turn_completed" => format!("会话「{}」完成了一轮（{}）：{}", field("title"), field("cwd"), payload["final_message"]["text"].as_str().unwrap_or("").chars().take(600).collect::<String>()),
         "session.awaiting" => format!("会话「{}」在等人处理：{}", field("title"), field("summary")),
-        "session.exited" => format!("会话「{}」结束了（{}）", field("title"), field("cwd")),
+        "session.exited" => match payload["final_message"]["text"].as_str().filter(|t| !t.trim().is_empty()) {
+            Some(last) => format!("会话「{}」结束了（{}），它最后说：{}", field("title"), field("cwd"), last.chars().take(600).collect::<String>()),
+            None => format!("会话「{}」结束了（{}），没有留下文字结论", field("title"), field("cwd")),
+        },
         "fs.changed" => format!("{} 有文件变化：{}", field("workspace"), payload["paths"].as_array().map(|p| p.iter().filter_map(Value::as_str).take(20).collect::<Vec<_>>().join(", ")).unwrap_or_default()),
         "git.commit" => format!("{} 的 {} 分支有新提交 {}", field("workspace"), field("branch"), field("head")),
         "git.branch" => format!("{} 切换到分支 {}", field("workspace"), field("branch")),
@@ -170,6 +173,13 @@ mod tests {
         assert!(!s.matches("session.turn_completed", &json!({"cwd":"/w/repository","labels":["crew:lead"]})), "a workspace is not a string prefix");
         let any = spec(json!({"topic":"kode.team/mention"}));
         assert!(any.matches("kode.team/mention", &json!({})));
+    }
+
+    #[test]
+    fn exits_tell_what_the_session_last_said() {
+        let said = describe("session.exited", &json!({"title":"Commit Code","cwd":"/w","final_message":{"text":"Pushed 3 commits."}}));
+        assert!(said.contains("Pushed 3 commits."), "{said}");
+        assert!(describe("session.exited", &json!({"title":"t","cwd":"/w"})).contains("没有留下文字结论"));
     }
 
     #[test]
