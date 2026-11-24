@@ -5,8 +5,10 @@ The smallest consumer of `kode.api/v1` (see `docs/arch/extension-platform.md`).
 - `kode-extension.json` asks only for API capabilities, so Kode starts the
   backend with a scoped `KODE_EXT_TOKEN` and `KODE_EXT_API` — never the admin
   token.
-- `bin/start.mjs` follows the pushed events of the sessions it owns and logs
-  them (Settings → Extensions → logs). Its page is read-only.
+- `bin/start.mjs` follows the pushed events of the sessions it owns, logs
+  them (Settings → Extensions → logs) and serves the "API sample" panel in
+  the activity rail: a live event list that reports a badge and a toast to
+  Kode for every finished turn. The page is read-only.
 - `bin/demo.mjs` is a development check against a running Kode: it mints the
   sample's grant with the local admin connection, starts a session with an
   initial prompt and waits for `session.turn_completed`.

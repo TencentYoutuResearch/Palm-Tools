@@ -26,7 +26,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl};
 use tokio::sync::Notify;
 
-use super::manifest::SessionView;
+use super::manifest::ViewSpec;
 use super::{app_version, host};
 
 /// `{ extension, view, action, params }` from `kodeHost.request`.
@@ -132,11 +132,7 @@ pub async fn extension_view_show(
             let version = app_version(&worker);
             let (manifest, _) = host.active(&extension, &version).map_err(|e| format!("{e:#}"))?;
             let contribution = manifest
-                .contributes
-                .session_views
-                .iter()
-                .find(|v| v.id == view)
-                .cloned()
+                .view(&view)
                 .ok_or_else(|| format!("{extension} has no view {view}"))?;
             let running = host.ensure_backend(&extension, &version)?;
             Ok((contribution, running))
@@ -289,7 +285,7 @@ fn platform() -> &'static str {
     }
 }
 
-fn embed_script(view: &SessionView) -> String {
+fn embed_script(view: &ViewSpec) -> String {
     let platform = platform();
     let mut attributes = serde_json::Map::new();
     for key in ["*", platform] {

@@ -105,7 +105,7 @@
   import { pushToast } from './lib/toast'
   import { extensionIpc, type ExtensionViewAction } from './lib/ipc'
   import ExtensionViewPort from './lib/ExtensionViewPort.svelte'
-  import { autostartRuntimeHosts, sessionViews, startExtensionWatch, viewForRuntime } from './lib/extensions'
+  import { autostartRuntimeHosts, panelBadges, panelKey, panels, sessionViews, startExtensionWatch, viewForRuntime, type PanelTarget } from './lib/extensions'
   import { alignSharedTabs, alignWhenOnline, loadUiMode, migrationFailures, openInView, prepareViewRestore, movableToTui, movableToView, nativeKey, retryMigration, setUiMode, startModeWatch, switchProgress, uiMode, type UiMode } from './lib/runtime_switch'
   import SwitchProgressOverlay from './lib/SwitchProgressOverlay.svelte'
   import { toasts } from './lib/toast'
@@ -220,7 +220,28 @@
   })
   function activateTab(id: number) {
     deviceView = null
+    panelView = null
     selectTab(id)
+  }
+  /// An extension panel (team channels, …) in the main area, beside the
+  /// session sidebar. Picking any session leaves it.
+  let panelView = $state<PanelTarget | null>(null)
+  let panelPhase = $state<'starting' | 'ready' | 'error'>('starting')
+  let panelViewTab: number | null = null
+  $effect(() => {
+    const id = $activeId
+    if (id !== panelViewTab) panelView = null
+    panelViewTab = id
+  })
+  function openPanel(target: PanelTarget) {
+    if (panelView && panelKey(panelView) === panelKey(target)) {
+      panelView = null
+      return
+    }
+    deviceView = null
+    chooserOpen = false
+    panelPhase = 'starting'
+    panelView = target
   }
   /** Read-only Worker inventory, shown in the right inspector column. */
   let workersOpen = $state(false)
@@ -1343,7 +1364,7 @@
   /// The view's own home: in view mode whenever no runtime-hosted
   /// conversation or peeked terminal is in front.
   let viewHome = $derived(
-    $uiMode === 'view' && !!dshView && !chooserOpen && !deviceView &&
+    $uiMode === 'view' && !!dshView && !chooserOpen && !deviceView && !panelView &&
       !$activeTab?.sharedRuntime && !(terminalPeek != null && terminalPeek === $activeId),
   )
   /// Phase of the extension view. Kode's chrome stays until the page is up,
@@ -1397,6 +1418,8 @@
     pushToast({ severity: 'error', title: tr('extensions.switch.moveFailed', { title: tab.title || tab.backendKey }), detail: message, durationMs: 8000 })
   }
   function onExtensionViewAction(event: ExtensionViewAction) {
+    const panel = $panels.find((p) => p.extension === event.extension && p.view.id === event.view)
+    if (panel) return onPanelAction(panel, event)
     if (!$sessionViews.some((v) => v.extension === event.extension && v.view.id === event.view)) return
     // The view's way back to Kode's terminals switches the whole mode.
     if (event.action === 'leave') return switchMode('tui')
@@ -1421,6 +1444,30 @@
       if (dshView && movableToView(tab, dshView) && tab.status !== 'idle') {
         pushToast({ severity: 'info', title: tr('extensions.switch.pendingView', { name: dshView.view.title }), durationMs: 5000 })
       }
+    }
+  }
+  /// Requests from a panel page (`kodeHost.request`). Panels only ever ask
+  /// Kode to show something; they never drive sessions from here.
+  function onPanelAction(panel: PanelTarget, event: ExtensionViewAction) {
+    const params = event.params ?? {}
+    if (event.action === 'close') {
+      if (panelView && panelKey(panelView) === panelKey(panel)) panelView = null
+    } else if (event.action === 'badge') {
+      const count = Math.max(0, Math.min(9999, Math.trunc(Number(params.count) || 0)))
+      panelBadges.update((all) => ({ ...all, [panelKey(panel)]: count }))
+    } else if (event.action === 'notify') {
+      const severity = ['info', 'success', 'warning', 'error'].includes(String(params.severity)) ? String(params.severity) : 'info'
+      pushToast({
+        severity: severity as 'info' | 'success' | 'warning' | 'error',
+        title: `${panel.view.title} · ${String(params.title ?? '').slice(0, 120)}`,
+        detail: String(params.body ?? '').slice(0, 500) || undefined,
+        durationMs: 6000,
+      })
+    } else if (event.action === 'open-session') {
+      const uuid = String(params.session_uuid ?? '')
+      const tab = uuid ? $tabs.find((t) => t.sessionId === uuid || t.dshSessionId === uuid) : undefined
+      if (tab) activateTab(tab.id)
+      else pushToast({ severity: 'warning', title: tr('extensions.panel.sessionMissing'), durationMs: 5000 })
     }
   }
   /// Kode toasts are DOM and would sit under the native view; the view's
@@ -2440,14 +2487,18 @@
   {#if isWindows}<WindowsWindowControls />{/if}
   <ActivityRail
     sessionsVisible={sidebarMode !== 'hidden'}
-    onToggleSessions={() => ($uiMode === 'view' ? switchMode('tui') : (sidebarMode = sidebarMode === 'hidden' ? 'full' : 'hidden'))}
+    onToggleSessions={() => (panelView ? (panelView = null) : $uiMode === 'view' ? switchMode('tui') : (sidebarMode = sidebarMode === 'hidden' ? 'full' : 'hidden'))}
     memoryPending={totalMemoryPendingCount}
     onOpenMemory={() => (totalMemoryPendingCount > 0 ? (memoryPanelOpen = true) : (memoryBrowseOpen = true))}
     onOpenPlugins={() => (pluginPanelOpen = true)}
     views={$sessionViews}
     activeView={$uiMode === 'view' && dshView ? dshView.extension : null}
     switching={!!$switchProgress}
-    onOpenView={() => switchMode($uiMode === 'view' ? 'tui' : 'view')}
+    onOpenView={() => { panelView = null; switchMode($uiMode === 'view' ? 'tui' : 'view') }}
+    panels={$panels}
+    activePanel={panelView ? panelKey(panelView) : null}
+    panelBadges={$panelBadges}
+    onOpenPanel={openPanel}
     onManageExtensions={() => openSettings('extensions')}
     {accountStatus}
     onAccountOpen={() => void refreshAccountStatus()}
@@ -2753,7 +2804,7 @@
         <button class="btn-ghost" onclick={() => (bootError = null)}>关闭提示</button>
       </div>
     {/if}
-    {#if $tabs.length === 0 || chooserOpen}
+    {#if ($tabs.length === 0 && !panelView) || chooserOpen}
       {#key chooserWorkspace}
       <BackendChooser
         {backends}
@@ -2782,7 +2833,7 @@
       {/key}
     {/if}
     {#each $mountedIds as id (id)}
-      {@const isActive = id === $activeId && !chooserOpen && !deviceView}
+      {@const isActive = id === $activeId && !chooserOpen && !deviceView && !panelView}
       {@const tab = $tabs.find((t) => t.id === id)}
       <!-- inert 兜底:visibility:hidden 仍可能被 Tab 键焦点穿透,inert 完全屏蔽
            子树的焦点 / 辅助技术,确保隐藏 tab 的 xterm textarea 不会误吃键盘输入。 -->
@@ -2824,6 +2875,13 @@
     {#if viewHome && dshView}
       <div class="term-wrapper visible">
         <ExtensionViewPort target={dshView} sessionRef={undefined} visible={true} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} />
+      </div>
+    {/if}
+    {#if panelView}
+      <div class="term-wrapper visible">
+        {#key panelKey(panelView)}
+          <ExtensionViewPort target={panelView} sessionRef={undefined} visible={true} blocked={overlayBlocked || !!$switchProgress} bind:phase={panelPhase} />
+        {/key}
       </div>
     {/if}
     {#if $switchProgress && !modeTarget}

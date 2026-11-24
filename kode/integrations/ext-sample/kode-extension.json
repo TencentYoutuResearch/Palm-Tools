@@ -4,7 +4,7 @@
   "name": "Extension API sample",
   "version": "0.1.0",
   "publisher": "kode",
-  "description": "Smallest kode.api/v1 consumer: logs this extension's session turns as Kode pushes them.",
+  "description": "Smallest kode.api/v1 consumer: shows this extension's session turns as Kode pushes them.",
   "engines": {
     "kode": ">=0.2.2"
   },
@@ -12,11 +12,24 @@
     "sessions.create",
     "sessions.input",
     "sessions.interrupt",
-    "events.subscribe"
+    "events.subscribe",
+    "ui.panels"
   ],
   "backend": {
     "command": "node",
-    "args": ["./bin/start.mjs"],
+    "args": [
+      "./bin/start.mjs"
+    ],
     "ready_timeout_secs": 30
+  },
+  "contributes": {
+    "panels": [
+      {
+        "id": "sample",
+        "title": "API sample",
+        "icon": "zap",
+        "path": "/"
+      }
+    ]
   }
 }

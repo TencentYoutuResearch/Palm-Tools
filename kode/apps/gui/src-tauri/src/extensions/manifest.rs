@@ -24,6 +24,8 @@ pub const CAPABILITIES: &[&str] = &[
     "session.views",
     // Switch a session between the PTY runtime and the extension's runtime.
     "session.runtime",
+    // Contribute pages to Kode's main area, opened from the activity rail.
+    "ui.panels",
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -80,6 +82,22 @@ fn default_ready_timeout() -> u64 {
 pub struct Contributes {
     #[serde(default, rename = "sessionViews")]
     pub session_views: Vec<SessionView>,
+    #[serde(default)]
+    pub panels: Vec<Panel>,
+}
+
+/// A page in Kode's main area (beside the session sidebar, not over the
+/// whole window), served by the backend and opened from the activity rail.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Panel {
+    pub id: String,
+    pub title: String,
+    /// Name of a Kode icon for the rail; unknown names fall back to a generic one.
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default = "default_view_path")]
+    pub path: String,
 }
 
 /// An alternative presentation for a session tab, served by the backend.
@@ -117,6 +135,12 @@ pub struct DragRegion {
     /// Descendants that stay clickable; form controls always do.
     #[serde(default)]
     pub exclude: Option<String>,
+}
+
+pub struct ViewSpec {
+    pub path: String,
+    pub html_attributes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    pub drag_region: Option<DragRegion>,
 }
 
 fn default_view_path() -> String {
@@ -187,6 +211,20 @@ impl Manifest {
                 }
             }
         }
+        for panel in &self.contributes.panels {
+            if !valid_id(&panel.id) || !seen.insert(panel.id.as_str()) {
+                bail!("invalid or duplicate view id `{}`", panel.id);
+            }
+            if !panel.path.starts_with('/') {
+                bail!("panel `{}` path must start with /", panel.id);
+            }
+            if panel.icon.as_ref().is_some_and(|icon| icon.len() > 40 || !icon.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')) {
+                bail!("panel `{}` icon must be a Kode icon name", panel.id);
+            }
+        }
+        if !self.contributes.panels.is_empty() && (!self.has("ui.panels") || self.backend.is_none()) {
+            bail!("panels need the ui.panels capability and a backend to serve them");
+        }
         if !self.contributes.session_views.is_empty() {
             if !self.has("session.views") {
                 bail!("sessionViews requires the session.views capability");
@@ -196,6 +234,22 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+
+    /// Where a session view or panel is served, plus its embed hints.
+    pub fn view(&self, id: &str) -> Option<ViewSpec> {
+        if let Some(view) = self.contributes.session_views.iter().find(|v| v.id == id) {
+            return Some(ViewSpec {
+                path: view.path.clone(),
+                html_attributes: view.html_attributes.clone(),
+                drag_region: view.drag_region.clone(),
+            });
+        }
+        self.contributes.panels.iter().find(|p| p.id == id).map(|panel| ViewSpec {
+            path: panel.path.clone(),
+            html_attributes: Default::default(),
+            drag_region: None,
+        })
     }
 
     pub fn has(&self, capability: &str) -> bool {
@@ -290,6 +344,22 @@ mod tests {
         .unwrap();
         manifest.validate().unwrap();
         assert_eq!(manifest.id, "kode.new-ui");
+    }
+
+    #[test]
+    fn panels_need_capability_backend_and_unique_ids() {
+        let mut manifest = sample();
+        manifest.contributes.panels = serde_json::from_value(serde_json::json!([{ "id": "team", "title": "Team", "icon": "users" }])).unwrap();
+        assert!(manifest.validate().is_err(), "ui.panels is required");
+        manifest.capabilities.push("ui.panels".into());
+        manifest.validate().unwrap();
+        assert_eq!(manifest.view("team").unwrap().path, "/");
+        assert!(manifest.view("dsh").is_some() && manifest.view("missing").is_none());
+        manifest.contributes.panels[0].id = "dsh".into();
+        assert!(manifest.validate().is_err(), "panel ids share the namespace of session views");
+        manifest.contributes.panels[0].id = "team".into();
+        manifest.contributes.panels[0].icon = Some("<svg>".into());
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

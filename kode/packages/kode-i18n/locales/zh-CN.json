@@ -1132,5 +1132,6 @@
   "bots.persona": { "message": "角色说明" },
   "bots.personaHint": { "message": "这个伙伴怎么工作：负责什么、按什么标准、什么时候问你。" },
   "bots.memoryScope": { "message": "记忆范围 {scope}" },
-  "bots.confirmDelete": { "message": "删除「{name}」？它的会话和 {scope} 里的记忆都会保留。" }
+  "bots.confirmDelete": { "message": "删除「{name}」？它的会话和 {scope} 里的记忆都会保留。" },
+  "extensions.panel.sessionMissing": { "message": "这个会话没有在本机的 Kode 里打开。" }
 }

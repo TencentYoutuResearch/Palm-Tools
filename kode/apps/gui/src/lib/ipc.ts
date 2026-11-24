@@ -1642,6 +1642,13 @@ export interface ExtensionSessionView {
   backends: string[]
   path: string
 }
+/** A page in Kode's main area, opened from the activity rail. */
+export interface ExtensionPanel {
+  id: string
+  title: string
+  icon: string | null
+  path: string
+}
 export interface ExtensionManifest {
   schema: string
   id: string
@@ -1652,7 +1659,7 @@ export interface ExtensionManifest {
   engines: { kode?: string | null }
   capabilities: string[]
   backend: { command: string; args: string[] } | null
-  contributes: { sessionViews: ExtensionSessionView[] }
+  contributes: { sessionViews: ExtensionSessionView[]; panels?: ExtensionPanel[] }
 }
 export interface ExtensionInfo {
   id: string

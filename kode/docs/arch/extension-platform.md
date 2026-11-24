@@ -224,7 +224,8 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
 
 - 每个伙伴有一条**主会话**（canonical session），这就是它在 IM、频道、手机上的"对话入口"。
 - **伙伴以 dsh 为默认界面**：伙伴是聊天型的使用方式，主会话默认在 dsh 里打开；dsh 侧栏列出伙伴（头像 + 名字 + 状态），新建对话时可在 `conversation.hero.agentPreset` 里选伙伴。需要终端时随时切回 TUI，靠的还是现有的会话占用和 `import_session`。
-- 底层原生会话会轮换：上下文接近上限或用户手动"重新开始"时，先生成摘要，再开一个新的原生会话，把摘要和角色说明一起注入。伙伴 id、历史入口、头像都不变。
+- **上下文快满时调用 CLI 自己的压缩**（如 `/compact`），原生会话不变，伙伴 id、历史、头像都不变。是否支持、用哪条命令按 backend 数据驱动配置（`compact_command`），不写死。
+- 只有 backend 不支持压缩、压缩失败或用户手动"重新开始"时，才轮换原生会话：先生成摘要，再开新的原生会话，把摘要和角色说明一起注入。
 - 原生会话之间用 `bot_session_links(bot_id, seq, node_id, session_id, summary_ref, started_at, ended_at)` 串起来，历史可以一路往前翻。
 - 伙伴也可以被临时派出新的普通会话（例如 Crew 里当 Worker），这些会话用 `labels: ["bot:<id>"]` 标记归属，但不算主会话。
 
@@ -319,4 +320,16 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
 | 记忆范围：会话标签 `bot:<id>`，角色说明里写明记忆范围 `bot:<id>` | 同上 |
 | GUI 设置页「伙伴」：新建、编辑、删除、设为默认 | `apps/gui/src/lib/BotsSettings.svelte` |
 
-尚未做：主会话与轮换（P1）、技能引用、来源权限上限（P2，`kode-bots`）、dsh 侧栏伙伴列表（P0-b 的 dsh 桥）。
+尚未做：主会话与上下文压缩（P1，先 `/compact`，不支持时再轮换）、技能引用、来源权限上限（P2，`kode-bots`）、dsh 侧栏伙伴列表（P0-b 的 dsh 桥）。
+
+### P0-b 第一步：面板
+
+| 内容 | 位置 |
+|---|---|
+| manifest `contributes.panels`（`id`、`title`、`icon`=Kode 图标名、`path`），需要 `ui.panels` 能力和后台；与 sessionViews 共用 id 命名空间 | `apps/gui/src-tauri/src/extensions/manifest.rs` |
+| 面板复用原生子 webview：只占主区域，Kode 侧栏和导航栏保留；选任意会话即离开面板 | `extensions/view.rs`、`App.svelte` |
+| 左侧导航栏显示面板入口和角标 | `ActivityRail.svelte` |
+| 页面经 `kodeHost.request` 请求：`badge {count}`、`notify {title, body, severity}`、`open-session {session_uuid}`、`close` | `App.svelte` `onPanelAction` |
+| 示例扩展加了一个实时面板（事件列表、角标、完成提示） | `integrations/ext-sample` |
+
+尚未做：dsh 桥（dsh 全屏时面板入口在 dsh 侧栏里）、`sidebarSections`、`sessionActions`、`cards`、插件经扩展 API 推角标（目前只能由面板页面上报）。

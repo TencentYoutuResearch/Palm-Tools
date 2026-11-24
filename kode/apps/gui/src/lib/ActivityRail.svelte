@@ -7,7 +7,8 @@
    * only lists conversations.
    */
   import type { CloudSyncStatus } from './ipc'
-  import type { SessionViewTarget } from './extensions'
+  import { panelKey, type PanelTarget, type SessionViewTarget } from './extensions'
+  import { ICON_NAMES, type IconName } from './Icon.svelte'
   import AccountMenu from './AccountMenu.svelte'
   import UpdateButton from './UpdateButton.svelte'
   import Icon from './Icon.svelte'
@@ -24,6 +25,11 @@
     activeView: string | null
     switching: boolean
     onOpenView: (target: SessionViewTarget) => void
+    panels: PanelTarget[]
+    /** `panelKey` of the panel in front, null when none is. */
+    activePanel: string | null
+    panelBadges: Record<string, number>
+    onOpenPanel: (target: PanelTarget) => void
     onManageExtensions: () => void
     accountStatus: CloudSyncStatus | null
     onAccountOpen: () => void
@@ -45,6 +51,10 @@
     activeView,
     switching,
     onOpenView,
+    panels,
+    activePanel,
+    panelBadges,
+    onOpenPanel,
     onManageExtensions,
     accountStatus,
     onAccountOpen,
@@ -76,6 +86,7 @@
             ? tr('pairing.account.standby')
             : tr('pairing.offline'),
   )
+  const panelIcon = (name: string | null): IconName => (name && (ICON_NAMES as string[]).includes(name) ? (name as IconName) : 'puzzle')
   function toggleAccount() {
     accountOpen = !accountOpen
     if (accountOpen) onAccountOpen()
@@ -124,6 +135,20 @@
         onclick={() => onOpenView(target)}
       >
         <Icon name="message-square" size={18} />
+      </button>
+    {/each}
+    {#each panels as target (panelKey(target))}
+      {@const badge = panelBadges[panelKey(target)] ?? 0}
+      <button
+        class="rail-btn"
+        class:active={activePanel === panelKey(target)}
+        aria-pressed={activePanel === panelKey(target)}
+        title={target.view.title}
+        aria-label={target.view.title}
+        onclick={() => onOpenPanel(target)}
+      >
+        <Icon name={panelIcon(target.view.icon)} size={18} />
+        {#if badge > 0}<span class="rail-badge">{badge > 99 ? '99+' : badge}</span>{/if}
       </button>
     {/each}
     <button class="rail-btn" title={tr('extensions.title')} aria-label={tr('extensions.title')} onclick={onManageExtensions}>

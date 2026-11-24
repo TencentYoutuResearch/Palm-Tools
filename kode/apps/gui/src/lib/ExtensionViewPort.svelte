@@ -8,7 +8,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte'
   import { extensionIpc } from './ipc'
-  import { extensionProgress, type SessionViewTarget } from './extensions'
+  import { extensionProgress, type ViewTarget } from './extensions'
   import { currentLocale, t } from './i18n'
 
   let {
@@ -18,7 +18,7 @@
     blocked,
     phase = $bindable('starting'),
   }: {
-    target: SessionViewTarget
+    target: ViewTarget
     /** Runtime session id the view should open (dsh session id). */
     sessionRef: string | undefined
     visible: boolean

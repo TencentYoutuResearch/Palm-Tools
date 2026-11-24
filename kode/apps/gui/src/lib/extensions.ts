@@ -7,7 +7,7 @@
  * backends can be switched into the runtime and back (see runtime_switch.ts).
  */
 import { derived, get, writable } from 'svelte/store'
-import { extensionIpc, type ExtensionInfo, type ExtensionProgress, type ExtensionSessionView, type ExtensionViewAction, type PersistedTab } from './ipc'
+import { extensionIpc, type ExtensionInfo, type ExtensionPanel, type ExtensionProgress, type ExtensionSessionView, type ExtensionViewAction, type PersistedTab } from './ipc'
 
 export const extensions = writable<ExtensionInfo[]>([])
 /** Latest startup progress per extension, cleared once its backend runs. */
@@ -30,6 +30,36 @@ export const sessionViews = derived(extensions, (list): SessionViewTarget[] =>
       })),
     ),
 )
+
+/** Anything Kode hosts in a native extension webview. */
+export type ViewTarget = {
+  extension: string
+  extensionName: string
+  view: { id: string; title: string }
+}
+
+export type PanelTarget = {
+  extension: string
+  extensionName: string
+  view: ExtensionPanel
+}
+
+export const panels = derived(extensions, (list): PanelTarget[] =>
+  list
+    .filter((ext) => ext.enabled && !ext.error && ext.manifest)
+    .flatMap((ext) =>
+      (ext.manifest!.contributes.panels ?? []).map((view) => ({
+        extension: ext.id,
+        extensionName: ext.manifest!.name,
+        view,
+      })),
+    ),
+)
+
+export const panelKey = (target: { extension: string; view: { id: string } }) => `${target.extension}:${target.view.id}`
+
+/** Unread-style counts a panel page reports through `kodeHost.request('badge')`. */
+export const panelBadges = writable<Record<string, number>>({})
 
 export function viewForRuntime(views: SessionViewTarget[], runtime: string | undefined): SessionViewTarget | null {
   if (!runtime) return null

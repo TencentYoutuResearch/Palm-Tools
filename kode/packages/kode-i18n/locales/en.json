@@ -2268,5 +2268,6 @@
   "bots.persona": { "message": "Role and instructions" },
   "bots.personaHint": { "message": "How this bot works: its role, standards and when to ask you." },
   "bots.memoryScope": { "message": "Memory scope {scope}" },
-  "bots.confirmDelete": { "message": "Delete {name}? Its sessions and its memories in {scope} stay." }
+  "bots.confirmDelete": { "message": "Delete {name}? Its sessions and its memories in {scope} stay." },
+  "extensions.panel.sessionMissing": { "message": "That session is not open in Kode on this computer." }
 }
