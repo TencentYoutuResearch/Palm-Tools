@@ -393,17 +393,73 @@ test('Agent update controls highlight only a confirmed release and use the corre
   assert.deepEqual(calls.at(-1),['configured',undefined])
 })
 
-test('handoff uses a compact action and excludes the current Agent from targets', async () => {
+test('handoff excludes the current Agent and keeps the dialog outside the session panel', async () => {
   const agentDirectory = {
     currentProfile: { id: 'codex', name: 'Codex', type: 'codex' }, selectedProfileId: 'codex', supportedTypes: ['codex', 'claude'],
     profiles: [{ id: 'codex', name: 'Codex', type: 'codex' }, { id: 'claude', name: 'Claude', type: 'claude' }], selection: { provider: 'kode-agent-codex', model: 'fixture' }, models: [],
   }
-  const c = client(undefined, { agentDirectory }), render = c.entryById('kode-handoff')
-  render({ sessionId: 'native', sessions: c.ctx.sessions }); await new Promise(resolve => setImmediate(resolve))
-  const tree = render({ sessionId: 'native', sessions: c.ctx.sessions })
-  assert.match(visibleText(tree), /交接/); assert.doesNotMatch(visibleText(tree), /换 Agent 续接/)
+  const c = client(undefined, { agentDirectory }, {}, {}, {
+    useState: value => [value === null ? { sessionId: 'native', host: 'local' } : value, () => {}],
+  })
+  const props = { sessionId: 'native', sessions: c.ctx.sessions, slots: c.ctx.slots }
+  const render = () => c.entryById('kode-handoff-dialog')(props)
+  const first = render()
+  first.type(first.props)
+  await new Promise(resolve => setImmediate(resolve))
+  const dialog = render()
+  const tree = dialog.type(dialog.props)
   const select = findNode(tree, node => node.props?.label === '目标 Agent')
   assert.deepEqual(Array.from(select.props.options, option => option.value), ['', 'claude'])
+  const legacy = c.entryById('kode-handoff')
+  assert.match(visibleText(legacy(props)), /交接/)
+  c.addSlot('conversation.session.header.utilities', 'session-panel', c.native)
+  assert.equal(legacy(props), null)
+  assert.match(visibleText(c.entryById('kode-agent-handoff')(props)), /交接给其他 Agent/)
+})
+
+test('the details card uses the same profile and selected model as the composer across Agents', async () => {
+  for (const [type, name] of [['dsh', 'DSH'], ['codex', 'Codex'], ['claude', 'TClaude'], ['codebuddy', 'CodeBuddy'], ['cursor', 'Cursor'], ['custom', 'Custom ACP']]) {
+    const currentProfile = { id: type, name, type }
+    const models = [{ id: 'other', name: 'Other model' }, { id: 'fixture', name: 'Fixture model', isDefault: true }]
+    const agentDirectory = { currentProfile, profiles: [currentProfile], selection: { model: 'default' }, models, types: {} }
+    const c = client(undefined, { agentDirectory })
+    const props = { sessionId: 'fixture-session', sessions: c.ctx.sessions, slots: c.ctx.slots }
+    const legacy = c.entryById('kode-agent-identity')
+    assert.equal(legacy(props).type.name, 'AgentIdentity')
+    c.addSlot('conversation.session.header.utilities', 'session-panel', c.native)
+    assert.equal(legacy(props), null)
+    const card = c.ctx.slots.entries('conversation.session.panel.environment.row').find(entry => entry.options.id === 'kode-agent-profile')
+    assert.equal(card.options.inject(props.sessionId).sessionId, props.sessionId)
+    const render = () => { const row = card.component(props); return row.type(row.props) }
+    render()
+    await new Promise(resolve => setImmediate(resolve))
+    const row = render()
+    assert.equal(row.props.label, name)
+    assert.equal(row.props.detail, 'Fixture model')
+    assert.equal(row.props.actionLabel, '设置 ' + name + ' 的头像与背景')
+    const model = c.ctx.slots.entries('conversation.input.model')[0].component
+    assert.match(model(props).children[0].props.anchor.props.label, /Fixture model/)
+  }
+})
+
+test('the native details card reuses DSH subagents and Forge without duplicate review links', () => {
+  const c = client(), section = 'conversation.session.panel.section'
+  const child = { id: 'native-child', name: 'Verifier', status: 'running', output: '' }
+  const tracked = { url: 'https://example.com/team/project/pull/1', repo: 'team/project', number: '1', kind: 'PR' }
+  const untracked = { url: 'https://example.com/team/project/-/merge_requests/2', repo: 'team/project', number: '2', kind: 'MR' }
+  const projections = { kodeNativeSubagents: { [child.id]: child }, kodeSessionPanel: { reviews: [tracked, untracked] } }
+  const props = { sessionId: 'native', slots: c.ctx.slots, useProjection: (key, selector = value => value) => selector(projections[key]) }
+  assert.match(visibleText(c.entryById('kode-review-links')(props)), /MR #2.*PR #1/)
+  assert.match(visibleText(c.entryById('kode-child-agents')(props)), /Verifier.*运行中/)
+  c.addSlot(section, 'subagents', () => 'DSH child')
+  c.addSlot(section, 'change-requests', () => 'DSH Forge')
+  assert.equal(visibleText(c.entryById('kode-child-agents')(props)), '')
+  assert.equal(visibleText(c.entryById('kode-review-links')(props)), '')
+  const render = id => c.ctx.slots.entries(section).find(entry => entry.options.id === id).component
+  const merged = visibleText(render('change-requests')({ ...props, usePanel: select => select({ state: { changeRequests: [tracked] } }) }))
+  assert.match(merged, /DSH Forge.*MR #2/)
+  assert.doesNotMatch(merged, /PR #1/)
+  assert.match(visibleText(render('subagents')({ ...props, useSessions: select => select({}) })), /DSH child.*Verifier/)
 })
 
 test('Plugin and Skills sources stay a multi-item list with an on-demand editor and detail preview',async()=>{
@@ -980,6 +1036,28 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.equal(worn.children[1].children[0],'柚子 PM','a bot session shows the bot, not its Agent')
  assert.equal(worn.children[0].children[0].props.profile.avatar.id,'gallery/yuzu')
  assert.equal(worn.children[0].props['aria-label'],'编辑伙伴')
+ const clicks = []
+ Object.assign(scope, {
+   SessionPanelRow: 'panel-row', selectedCatalogModel: () => undefined, IconEditOutlineRegular: 'edit',
+   openBotsPage: () => clicks.push('companions'), requestedBotEdit: null,
+   window: { dispatchEvent: event => clicks.push(event.type) }, CustomEvent: class { constructor(type) { this.type = type } },
+   openAvatarDialog: target => clicks.push(target),
+ })
+ const panelProps = { ...props, panel: true, dismissOverlay: () => clicks.push('close panel') }
+ const companionRow = scope.AgentIdentity(panelProps).props
+ assert.equal(companionRow.actionLabel, '编辑伙伴 柚子 PM')
+ assert.equal(companionRow.icon.props.profile.avatar.id, 'gallery/yuzu')
+ companionRow.onClick()
+ assert.equal(scope.requestedBotEdit, 'b1')
+ assert.deepEqual(clicks, ['close panel', 'companions', 'kode-bot-edit'])
+
+ scope.useWorkspaceDirectory = () => ({ current: 'remote-fixture', hosts: [{ id: 'remote-fixture', sessions: [{ id: 'saved-session', running: true, agent: { avatar: { id: 'gallery/remote' } } }] }] })
+ const avatarRow = scope.AgentIdentity(panelProps).props
+ assert.equal(avatarRow.icon.props.status, 'running')
+ avatarRow.onClick()
+ assert.equal(clicks.at(-2), 'close panel')
+ assert.equal(clicks.at(-1).host, 'remote-fixture')
+ assert.equal(clicks.at(-1).profile.avatar.id, 'gallery/remote')
 })
 
 test('goal dock reuses the queued composer width and panel presentation',()=>{
@@ -1260,7 +1338,7 @@ test('goal pencil edits inline and saves the existing session goal', async () =>
     IconPauseOutlineRegular: 'pause', IconPlayOutlineRegular: 'play',
     IconCloseOutlineRegular: 'close', IconEditOutlineRegular: 'edit',
   }
-  vm.runInNewContext(source.slice(source.indexOf('  function GoalBar('), source.indexOf('  function HandoffMenu(')), scope)
+  vm.runInNewContext(source.slice(source.indexOf('  function GoalBar('), source.indexOf('  function HandoffAction(')), scope)
   const render = () => { index = 0; return scope.GoalBar({ sessionId: 'goal-edit-fixture', useProjection: () => ({ objective: 'Original objective', status: 'active' }) }) }
   const walk = node => Array.isArray(node) ? node.flatMap(walk) : node && typeof node === 'object' ? [node, ...walk(node.children ?? [])] : []
   walk(render()).find(node => node.props['aria-label'] === '编辑目标').props.onClick()
@@ -1300,7 +1378,11 @@ test('the child header activity menu opens recorded output and removes settled c
   })
   const render = c.entryById('kode-native-subagents')
   const child = { id: 'child', status: 'awaiting', name: 'Verifier', output: 'Recorded result' }
-  const view = () => { index = 0; return render({ sessionId: 'parent', useProjection: () => ({ child }) }) }
+  const view = () => {
+    index = 0
+    const control = render({ sessionId: 'parent', slots: c.ctx.slots, useProjection: () => ({ child }) })
+    return control.type(control.props)
+  }
   const menu = findNode(view(), node => node.type === 'Menu')
   assert.equal(menu.props.items[0].icon.props.state, 'awaiting')
   menu.props.onSelect(child.id)

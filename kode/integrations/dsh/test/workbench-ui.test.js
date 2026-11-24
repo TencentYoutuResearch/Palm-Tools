@@ -4,60 +4,63 @@ import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
 const headerActions = 'conversation.session.header.actions'
-for (const [seat, id] of [[headerActions, 'job-list'], ['conversation.session.header.utilities', 'session-panel']]) {
-  test(`${id} mounts to the left of the Agent avatar with its native slot bindings`, () => {
-    const entries = new Map(), subscribers = new Map(), cleanups = [], registrations = []
-    const slots = {
-      inject(name, setup) { cleanups.push(setup()) },
-      entries(name) { return entries.get(name) ?? [] },
-      subscribe(name, listener) {
-        subscribers.set(name, listener)
-        return () => subscribers.delete(name)
-      },
-      register(options, component) {
-        const row = { options, component }
-        registrations.push(row)
-        return () => registrations.splice(registrations.indexOf(row), 1)
-      },
-    }
-    const place = vm.runInNewContext(source + '\nplaceWorkbenchJobs', {
-      react: {
-        createElement: (type, props) => ({ type, props }),
-        useCallback: callback => callback,
-        useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
-      },
-      react_dom: { createPortal: (child, target) => ({ child, target }) },
-    })
-    place({ slots })
-    const [anchor] = registrations
-    assert.equal(registrations.length, 1)
-    assert.equal(anchor.options.name, headerActions)
-    assert.ok(anchor.options.order > -110 && anchor.options.order < -100)
-
-    const native = () => {}, entry = { options: { id }, component: native }
-    const bindings = { sessionId: 'one', useJobs: () => {}, renderSlot: () => {} }
-    entries.set(seat, [entry])
-    subscribers.get(seat)()
-    const wrapper = entry.component
-    subscribers.get(seat)()
-    assert.equal(entry.component, wrapper)
-
-    const target = {}, { ref } = anchor.component(bindings).props
-    assert.equal(wrapper(bindings).type, native)
-    ref(target)
-    const portal = wrapper(bindings)
-    assert.equal(portal.child.type, native)
-    assert.equal(portal.child.props, bindings)
-    assert.equal(portal.target, target)
-    assert.equal(wrapper({ sessionId: 'two' }).type, native)
-    ref(null)
-    assert.equal(wrapper(bindings).type, native)
-
-    for (const cleanup of cleanups.reverse()) cleanup()
-    assert.equal(entry.component, native)
-    assert.equal(registrations.length, 0)
+test('legacy jobs keep their bindings by the avatar while the native session panel keeps its own toggle', () => {
+  const entries = new Map(), subscribers = new Map(), cleanups = [], registrations = []
+  const slots = {
+    inject(name, setup) { cleanups.push(setup()) },
+    entries(name) { return entries.get(name) ?? [] },
+    subscribe(name, listener) {
+      subscribers.set(name, listener)
+      return () => subscribers.delete(name)
+    },
+    register(options, component) {
+      const row = { options, component }
+      registrations.push(row)
+      return () => registrations.splice(registrations.indexOf(row), 1)
+    },
+  }
+  const place = vm.runInNewContext(source + '\nplaceWorkbenchJobs', {
+    react: {
+      createElement: (type, props) => ({ type, props }),
+      useCallback: callback => callback,
+      useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+    },
+    react_dom: { createPortal: (child, target) => ({ child, target }) },
   })
-}
+  const utilities = 'conversation.session.header.utilities'
+  const nativePanel = () => {}, panel = { options: { id: 'session-panel' }, component: nativePanel }
+  entries.set(utilities, [panel])
+  place({ slots })
+  assert.equal(subscribers.has(utilities), false)
+  assert.equal(panel.component, nativePanel)
+  const [anchor] = registrations
+  assert.equal(registrations.length, 1)
+  assert.equal(anchor.options.name, headerActions)
+  assert.ok(anchor.options.order > -110 && anchor.options.order < -100)
+
+  const native = () => {}, entry = { options: { id: 'job-list' }, component: native }
+  const bindings = { sessionId: 'one', useJobs: () => {}, renderSlot: () => {} }
+  entries.set(headerActions, [entry])
+  subscribers.get(headerActions)()
+  const wrapper = entry.component
+  subscribers.get(headerActions)()
+  assert.equal(entry.component, wrapper)
+
+  const target = {}, { ref } = anchor.component(bindings).props
+  assert.equal(wrapper(bindings).type, native)
+  ref(target)
+  const portal = wrapper(bindings)
+  assert.equal(portal.child.type, native)
+  assert.equal(portal.child.props, bindings)
+  assert.equal(portal.target, target)
+  assert.equal(wrapper({ sessionId: 'two' }).type, native)
+  ref(null)
+  assert.equal(wrapper(bindings).type, native)
+
+  for (const cleanup of cleanups.reverse()) cleanup()
+  assert.equal(entry.component, native)
+  assert.equal(registrations.length, 0)
+})
 test('worktree search lives inside the dropdown and preserves selection while filtering local and remote branches', async () => {
   const client = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
   let cursor = 0, value = 'refs/heads/main'
