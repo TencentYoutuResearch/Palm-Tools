@@ -3,6 +3,29 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 const source = readFileSync(new URL('../packages/chat/client.js', import.meta.url), 'utf8')
+
+test('a replacement Chat module refreshes the layout stylesheet in the open document', () => {
+  const mount = source.slice(
+    source.indexOf('const css$16 = '),
+    source.indexOf('var ChatView_module_css_default ='),
+  )
+  assert.ok(mount)
+  const tags = []
+  const document = {
+    createElement: () => ({ dataset: {} }),
+    querySelector: () => tags[0] ?? null,
+    head: { appendChild: tag => { tag.isConnected = true; tags.push(tag) } },
+  }
+  vm.runInNewContext(mount, { document })
+  assert.equal(tags.length, 1)
+  const stylesheet = tags[0].textContent
+  tags[0].textContent = '/* obsolete layout */'
+  vm.runInNewContext(mount, { document })
+  assert.equal(tags.length, 1)
+  assert.equal(tags[0].textContent, stylesheet)
+  assert.match(stylesheet, /\.EvIC1a_column\{max-width:var\(--dsh-chat-content-width,880px\)/)
+})
+
 const region = name => { const start=source.indexOf(`//#region lib/types/client/${name}.js`); assert.ok(start>=0); return source.slice(source.indexOf('\n',start),source.indexOf('//#endregion',start)) }
 function context() {
  const scope=vm.createContext({brandString:x=>x,isVisibleChatNode:n=>n.visibility!=='hidden',isAtOrOutside:(n)=>['exchange','input','turn','process'].includes(n.groupTree),hasAssistantReplyContent:blocks=>blocks.some(b=>b.kind==='text'),isRunningTool:t=>t.kind!=='tool-result',liveToolDetail:(_name,args)=>args.command??'',liveReasoningDetail:()=>''})

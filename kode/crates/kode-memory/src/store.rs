@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::fact::{Fact, FactMeta, Kind, Scope};
+use crate::fact::{render_obsidian_links, Fact, FactMeta, Kind, Scope};
 use crate::metrics::{EventKind, MetricsEvent, MetricsLog};
 
 /// 可复用的检索 / 列表结果。
@@ -429,7 +429,7 @@ impl MemoryStore {
                 needs_rewrite = true;
             }
             if needs_rewrite {
-                if let Ok(md) = fact.to_markdown() {
+                if let Ok(md) = self.fact_markdown(&fact) {
                     let _ = std::fs::write(&path, md);
                 }
             }
@@ -819,10 +819,47 @@ impl MemoryStore {
         }
     }
 
+    /// Regenerate Obsidian links for existing approved notes without reserializing their metadata.
+    pub fn refresh_obsidian_links(&self) -> Result<usize> {
+        let mut notes = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(facts_dir(&self.root))? {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md")
+                || !std::fs::symlink_metadata(&path)?.is_file()
+            {
+                continue;
+            }
+            let markdown = std::fs::read_to_string(&path)?;
+            if let Ok(fact) = Fact::from_markdown(&markdown) {
+                notes.insert(fact.meta.id.clone(), (path, markdown, fact.meta));
+            }
+        }
+        let mut updated = 0;
+        for (path, markdown, meta) in notes.values() {
+            let rendered = render_obsidian_links(markdown, meta, |peer| {
+                obsidian_note_name(&notes.get(peer)?.0)
+            });
+            if rendered != *markdown && std::fs::read_to_string(path)? == *markdown {
+                let temporary_id = ulid::Ulid::new().to_string();
+                atomic_write(&tmp_path(&self.root, &temporary_id), path, &rendered)?;
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
+    fn fact_markdown(&self, fact: &Fact) -> Result<String> {
+        Ok(render_obsidian_links(
+            &fact.to_markdown()?,
+            &fact.meta,
+            |id| obsidian_note_name(&self.resolve_fact_path(id)?),
+        ))
+    }
+
     /// 内部:把一条 fact 落入 facts/ + SQLite。原子 + 处理 supersedes。
     fn commit_to_facts(&mut self, fact: &Fact) -> Result<()> {
         // 1. 文件原子写
-        let md = fact.to_markdown()?;
+        let md = self.fact_markdown(fact)?;
         let tmp = tmp_path(&self.root, &fact.meta.id);
         let final_path = fact_path(&self.root, &fact.meta.id, fact.meta.title.as_deref());
         atomic_write(&tmp, &final_path, &md)?;
@@ -915,7 +952,7 @@ impl MemoryStore {
         fact.meta.deprecated = true;
         fact.body
             .push_str(&format!("\n\n<!-- deprecated: {} -->", reason));
-        let md = fact.to_markdown()?;
+        let md = self.fact_markdown(&fact)?;
         self.remove_old_fact_file(id)?;
         let path = fact_path(&self.root, id, fact.meta.title.as_deref());
         std::fs::write(&path, md)?;
@@ -938,7 +975,7 @@ impl MemoryStore {
         )?;
         let mut fact = self.read(id)?;
         fact.meta.scope = scope_str.clone();
-        let md = fact.to_markdown()?;
+        let md = self.fact_markdown(&fact)?;
         self.remove_old_fact_file(id)?;
         let path = fact_path(&self.root, id, fact.meta.title.as_deref());
         std::fs::write(&path, md)?;
@@ -984,7 +1021,7 @@ impl MemoryStore {
             fact.meta.deprecated = true;
             fact.body
                 .push_str(&format!("\n\n<!-- deprecated: {} -->", reason));
-            if let Ok(md) = fact.to_markdown() {
+            if let Ok(md) = self.fact_markdown(&fact) {
                 let _ = self.remove_old_fact_file(id);
                 let path = fact_path(&self.root, id, fact.meta.title.as_deref());
                 let _ = std::fs::write(&path, md);
@@ -1621,6 +1658,11 @@ pub(crate) fn facts_dir(root: &Path) -> PathBuf {
 
 pub(crate) fn pending_dir(root: &Path) -> PathBuf {
     vault_dir(root).join("pending")
+}
+
+fn obsidian_note_name(path: &Path) -> Option<String> {
+    let name = path.file_stem()?.to_str()?;
+    (!name.contains(['[', ']', '|', '#', '^', '\n', '\r'])).then(|| name.to_owned())
 }
 
 pub(crate) fn fact_path(root: &Path, id: &str, title: Option<&str>) -> PathBuf {
@@ -2913,6 +2955,41 @@ mod tests {
             "expected related backlink after migration, got {:?}",
             bls
         );
+    }
+
+    #[test]
+    fn obsidian_refresh_uses_existing_note_names_and_preserves_markdown() {
+        let root = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(root.path()).unwrap();
+        let dir = facts_dir(root.path());
+        let source = dir.join("source.md");
+        let target = dir.join("renamed target.md");
+        let original = "---\nid: source\nauthor: user\nscope: shared\ncreated: 2026-01-01T00:00:00Z\nconfidence: 1.0\nrelated: [target]\n---\nOriginal text";
+        std::fs::write(&source, original).unwrap();
+        std::fs::write(
+            &target,
+            original
+                .replace("id: source", "id: target")
+                .replace("related: [target]\n", ""),
+        )
+        .unwrap();
+
+        assert_eq!(store.refresh_obsidian_links().unwrap(), 1);
+        let rendered = std::fs::read_to_string(&source).unwrap();
+        assert!(rendered.contains("[[renamed target]]"));
+        assert_eq!(
+            Fact::from_markdown(&rendered).unwrap().body,
+            "Original text"
+        );
+        assert_eq!(store.refresh_obsidian_links().unwrap(), 0);
+        std::fs::rename(target, dir.join("other.md")).unwrap();
+        assert_eq!(store.refresh_obsidian_links().unwrap(), 1);
+        assert!(std::fs::read_to_string(&source)
+            .unwrap()
+            .contains("[[other]]"));
+        std::fs::write(dir.join("other.md"), "# Unrelated note").unwrap();
+        assert_eq!(store.refresh_obsidian_links().unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
     }
 
     #[test]

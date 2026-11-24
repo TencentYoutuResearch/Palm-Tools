@@ -338,6 +338,7 @@ async fn mobile_text_input_submits_with_a_separate_carriage_return() {
             prompt: None,
             headless: false,
             term_theme: None,
+            system_prompt: None,
         }),
     )
     .await
@@ -677,6 +678,7 @@ async fn create_session_emits_session_created_on_bus() {
         prompt: Some("test specops prompt".to_string()),
         headless: false,
         term_theme: None,
+        system_prompt: None,
     };
 
     let response = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
@@ -725,6 +727,7 @@ async fn focus_session_emits_focus_requested_on_bus() {
         prompt: Some("test focus prompt".to_string()),
         headless: false,
         term_theme: None,
+        system_prompt: None,
     };
     let response = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
         .await
@@ -933,6 +936,7 @@ async fn pty_permission_snapshot_lists_native_modes() {
             prompt: None,
             headless: false,
             term_theme: None,
+            system_prompt: None,
         };
         let id = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
             .await
@@ -1022,6 +1026,7 @@ async fn restore_matrix_spawns_representative_backends_with_correct_resume_args(
             prompt: None,
             headless: false,
             term_theme: None,
+            system_prompt: None,
         };
         let id = create_session(axum::Extension(Arc::clone(&ctx)), axum::Json(req))
             .await

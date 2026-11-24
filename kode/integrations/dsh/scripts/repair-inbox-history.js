@@ -6,11 +6,10 @@ import { zstdDecompressSync } from 'node:zlib'
 import { repairNativeInboxSplices } from '../src/repair-inbox-splices.js'
 import { repairOptionalPluginRecords } from '../src/repair-plugin-records.js'
 import { repairNativeSystemHeads } from '../src/repair-system-heads.js'
-import { encodeHistoryArtifact } from '../src/native-history.js'
+import { assertHistoryReaderSupport, encodeHistoryArtifact } from '../src/native-history.js'
 const [path, modules, output] = process.argv.slice(2)
 if (!path || !modules) throw new Error('Expected artifact and released runtime modules paths')
-const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number)
-if (nodeMajor < 24 || nodeMajor === 24 && nodeMinor < 22) throw new Error('Node 24.22+ is required to read concatenated Zstandard frames')
+assertHistoryReaderSupport()
 const { Session, KNOWN_SESSION_EVENT_TYPES } = await import(pathToFileURL(join(modules, '@deepseek-ai/dsh-session/lib/index.js')))
 const { validateStoredEvents } = await import(pathToFileURL(join(modules, '@deepseek-ai/dsh-session-persistence/lib/index.js')))
 const { restoreReleasedV4Artifact } = await import(pathToFileURL(join(modules, '@deepseek-ai/dsh-session-format-v3-to-v4/lib/index.js')))

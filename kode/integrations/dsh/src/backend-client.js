@@ -12,6 +12,7 @@ export class BackendClient {
     const timeoutMs = path === '/api/v1/messaging/workbench/agent-hub' ? 600000
       : path === '/api/v1/messaging/workbench/handoff' ? 75000
       : path === '/api/v1/messaging/workbench/agent-versions' ? (body?.update_profile ? 240000 : 45000)
+      : path.startsWith('/api/v1/messaging/workbench/watches?after=') ? 40000
       : 15000
     const response = await this.fetch(`${this.url}${path}`, {
       method: body === undefined ? 'GET' : 'POST',

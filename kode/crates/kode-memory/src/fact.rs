@@ -164,6 +164,50 @@ pub struct Fact {
     pub body: String,
 }
 
+const OBSIDIAN_LINKS_START: &str = "<!-- kode-memory:obsidian-links -->";
+const OBSIDIAN_LINKS_END: &str = "<!-- /kode-memory:obsidian-links -->";
+
+pub(crate) fn strip_obsidian_links(markdown: &str) -> &str {
+    let trimmed = markdown.trim_end();
+    if let Some(block) = trimmed.strip_suffix(OBSIDIAN_LINKS_END) {
+        let separator = concat!("\n\n", "<!-- kode-memory:obsidian-links -->", "\n");
+        if let Some((original, links)) = block.rsplit_once(separator) {
+            if links.lines().all(|line| {
+                line.starts_with("- Related: [[")
+                    || line.starts_with("- Contradicts: [[")
+                    || line.starts_with("- Supersedes: [[")
+            }) {
+                return original;
+            }
+        }
+    }
+    markdown
+}
+
+pub(crate) fn render_obsidian_links(
+    markdown: &str,
+    meta: &FactMeta,
+    mut target: impl FnMut(&str) -> Option<String>,
+) -> String {
+    let original = strip_obsidian_links(markdown);
+    let mut links = String::new();
+    for (label, ids) in [
+        ("Related", meta.related.as_slice()),
+        ("Contradicts", meta.contradicts.as_slice()),
+        ("Supersedes", meta.supersedes.as_slice()),
+    ] {
+        for id in ids {
+            if let Some(name) = target(id) {
+                links.push_str(&format!("- {label}: [[{name}]]\n"));
+            }
+        }
+    }
+    if links.is_empty() {
+        return original.to_owned();
+    }
+    format!("{original}\n\n{OBSIDIAN_LINKS_START}\n{links}{OBSIDIAN_LINKS_END}\n")
+}
+
 impl Fact {
     /// 序列化成 markdown 文件内容。
     pub fn to_markdown(&self) -> Result<String> {
@@ -184,7 +228,7 @@ impl Fact {
         let meta: FactMeta = serde_yaml::from_str(yaml_str).context("parse frontmatter yaml")?;
         Ok(Self {
             meta,
-            body: body_str.trim().to_string(),
+            body: strip_obsidian_links(body_str).trim().to_string(),
         })
     }
 }

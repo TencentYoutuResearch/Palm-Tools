@@ -28,7 +28,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl};
 use tokio::sync::Notify;
 
-use super::manifest::SessionView;
+use super::manifest::ViewSpec;
 use super::{app_version, host};
 
 /// `{ extension, view, action, params }` from `kodeHost.request`.
@@ -134,11 +134,7 @@ pub async fn extension_view_show(
             let version = app_version(&worker);
             let (manifest, _) = host.active(&extension, &version).map_err(|e| format!("{e:#}"))?;
             let contribution = manifest
-                .contributes
-                .session_views
-                .iter()
-                .find(|v| v.id == view)
-                .cloned()
+                .view(&view)
                 .ok_or_else(|| format!("{extension} has no view {view}"))?;
             let running = host.ensure_backend(&extension, &version)?;
             Ok((contribution, running))
@@ -214,9 +210,40 @@ pub async fn extension_view_show(
     Ok(())
 }
 
+/// Show an extension panel inside another extension's view: the host view
+/// (dsh) lends an area of its page by reporting its rect, and Kode places
+/// the panel's own webview there. `restack` recreates a panel webview made
+/// before the host view, since native child views stack by creation order.
 #[tauri::command]
-pub fn extension_view_hide(app: AppHandle, extension: Option<String>) -> Result<(), String> {
+pub async fn extension_view_show_in(
+    app: AppHandle,
+    extension: String,
+    view: String,
+    host_extension: String,
+    host_view: String,
+    rect: Rect,
+    restack: bool,
+) -> Result<(), String> {
+    let container = app
+        .get_webview(&label(&host_extension, &host_view))
+        .ok_or("host view is not open")?;
+    let scale = container.window().scale_factor().map_err(|e| e.to_string())?;
+    let origin = container.position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+    if restack {
+        let own = label(&extension, &view);
+        if let Some(existing) = app.get_webview(&own) {
+            app.state::<super::ExtensionHost>().views.labels.lock().remove(&own);
+            let _ = existing.close();
+        }
+    }
+    let rect = Rect { x: origin.x + rect.x, y: origin.y + rect.y, width: rect.width, height: rect.height };
+    extension_view_show(app, extension, view, rect, None).await
+}
+
+#[tauri::command]
+pub fn extension_view_hide(app: AppHandle, extension: Option<String>, view: Option<String>) -> Result<(), String> {
     let host = host(&app)?;
+    let only = extension.as_deref().zip(view.as_deref()).map(|(e, v)| label(e, v));
     let labels: Vec<_> = host
         .views
         .labels
@@ -224,6 +251,7 @@ pub fn extension_view_hide(app: AppHandle, extension: Option<String>) -> Result<
         .iter()
         .filter(|(_, owner)| extension.as_deref().is_none_or(|id| id == owner.as_str()))
         .map(|(label, _)| label.clone())
+        .filter(|label| only.as_ref().is_none_or(|only| only == label))
         .collect();
     for label in labels {
         if let Some(webview) = app.get_webview(&label) {
@@ -235,9 +263,12 @@ pub fn extension_view_hide(app: AppHandle, extension: Option<String>) -> Result<
         }
     }
     // A hidden view can still be the window's first responder (e.g. after its
-    // TUI button), which would swallow typing meant for Kode's terminal.
-    if let Some(main) = app.get_webview("main") {
-        let _ = main.set_focus();
+    // TUI button), which would swallow typing meant for Kode's terminal. A
+    // single panel closes inside another view, which keeps the focus.
+    if only.is_none() {
+        if let Some(main) = app.get_webview("main") {
+            let _ = main.set_focus();
+        }
     }
     Ok(())
 }
@@ -291,7 +322,7 @@ fn platform() -> &'static str {
     }
 }
 
-fn embed_script(view: &SessionView) -> String {
+fn embed_script(view: &ViewSpec) -> String {
     let platform = platform();
     let mut attributes = serde_json::Map::new();
     for key in ["*", platform] {

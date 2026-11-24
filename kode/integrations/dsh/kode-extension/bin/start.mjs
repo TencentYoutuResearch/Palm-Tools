@@ -21,9 +21,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { copyFile, mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { withInstallLock } from './install-lock.mjs'
 
 const PROFILE = 'kode'
 const here = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -35,7 +36,7 @@ const log = (...parts) => console.error('[kode-new-ui]', ...parts)
 const STEPS = 4
 const progress = (step, message) => process.stdout.write(JSON.stringify({ type: 'kode.extension.progress', step, total: STEPS, message }) + '\n')
 
-const [major, minor] = process.versions.node.split('.').map(Number)
+const [major, minor, patch] = process.versions.node.split('.').map(Number)
 if (major < 24 || (major === 24 && minor < 9)) fail(`dsh needs Node.js >= 24.9, found ${process.version}`)
 if (!process.env.KODE_WORKBENCH_CONNECTION) fail('Kode did not pass KODE_WORKBENCH_CONNECTION')
 
@@ -47,38 +48,69 @@ const env = { ...process.env, DSH_HOME: dshHome, CI: '1' }
 delete env.KODE_DSH_HOME
 delete env.KODE_BRIDGE_TOKEN
 
-await mkdir(runtime, { recursive: true })
-const dsh = await ensureDsh()
-await ensureProfile()
-await ensurePlugin()
-await serve()
+const dsh = await withInstallLock(data, async () => {
+  await ensureNode()
+  await mkdir(runtime, { recursive: true })
+  const bin = await ensureDsh()
+  await ensureProfile(bin)
+  await ensurePlugin(bin)
+  return bin
+}, { onWait: () => progress(1, '正在等待另一个 Kode 进程完成 dsh 安装') })
+serve()
+
+async function ensureNode() {
+  // The launcher can run on an older Node than the pinned dsh runtime.
+  const fallbackNode = pkg.kodeNewUi.fallbackNode
+  const supportsDshNode = (major === 24 && (minor > 22 || (minor === 22 && patch >= 3)))
+    || (major === 26 && (minor > 13 || (minor === 13 && patch >= 1))) || major > 26
+  if (fallbackNode && !supportsDshNode) {
+    const nodeHome = join(data, 'node-24')
+    const nodeBin = join(nodeHome, 'node_modules', 'node', 'bin')
+    const nodeManifest = join(nodeHome, 'node_modules', 'node', 'package.json')
+    const executable = process.platform === 'win32' ? 'node.exe' : 'node'
+    if (!existsSync(join(nodeBin, executable)) || !existsSync(nodeManifest)
+        || JSON.parse(await readFile(nodeManifest, 'utf8')).version !== fallbackNode) {
+      progress(1, `正在安装 dsh 专用 Node.js ${fallbackNode}`)
+      run('npm', ['install', '--no-audit', '--no-fund', '--prefix', nodeHome, `node@${fallbackNode}`])
+    }
+    env.PATH = [nodeBin, env.PATH].filter(Boolean).join(delimiter)
+  } else {
+    env.PATH = [dirname(process.execPath), env.PATH].filter(Boolean).join(delimiter)
+  }
+}
 
 async function ensureDsh() {
   const bin = join(runtime, 'node_modules/.bin/dsh')
   const installed = join(runtime, 'node_modules/@deepseek-ai/dsh/package.json')
   const current = existsSync(installed) ? JSON.parse(await readFile(installed, 'utf8')).version : null
-  if (current !== dshVersion) {
+  if (current !== dshVersion || !existsSync(bin) || !existsSync(join(runtime, 'install.complete'))) {
+    await rm(join(runtime, 'install.complete'), { force: true })
+    await rm(join(data, 'plugin.stamp'), { force: true })
     progress(1, `正在安装 dsh ${dshVersion} 运行环境（仅首次，约 1–3 分钟）`)
     log(`installing @deepseek-ai/dsh@${dshVersion} (first start can take a few minutes)`)
     if (!existsSync(join(runtime, 'package.json'))) await writeFile(join(runtime, 'package.json'), '{"private":true}\n')
     run('npm', ['install', '--no-audit', '--no-fund', '--prefix', runtime, `@deepseek-ai/dsh@${dshVersion}`])
+    await writeFile(join(runtime, 'install.complete'), dshVersion + '\n')
   }
   return bin
 }
 
-async function ensureProfile() {
+async function ensureProfile(dsh) {
   if (existsSync(join(dshHome, 'profiles', PROFILE, 'cordis.yml'))) return
   progress(2, '正在创建 dsh 配置')
   log(`creating dsh profile ${PROFILE}`)
   run(dsh, ['--profile', PROFILE, '--from-default-profile', 'web', '--dump-config'], { quiet: true })
 }
 
-async function ensurePlugin() {
+async function ensurePlugin(dsh) {
   const tgz = join(here, 'vendor/kode-dsh.tgz')
   if (!existsSync(tgz)) fail('vendor/kode-dsh.tgz is missing; run `npm run build:kode-extension (in integrations/dsh)`')
   const stamp = createHash('sha256').update(await readFile(tgz)).digest('hex')
   const stampFile = join(data, 'plugin.stamp')
-  if (existsSync(stampFile) && (await readFile(stampFile, 'utf8')).trim() === stamp) return
+  const installStamp = `${dshVersion}:${stamp}`
+  const pluginManifest = join(dshHome, 'profiles', PROFILE, 'node_modules', '@kode', 'dsh', 'package.json')
+  if (existsSync(pluginManifest) && existsSync(stampFile) && (await readFile(stampFile, 'utf8')).trim() === installStamp) return
+  await rm(stampFile, { force: true })
   progress(3, '正在安装 Kode 会话整合')
   log('installing the vendored @kode/dsh integration')
   // A new file name per build: pnpm does not reliably re-resolve a changed
@@ -87,8 +119,17 @@ async function ensurePlugin() {
   await mkdir(packages, { recursive: true })
   const copy = join(packages, `kode-dsh-${stamp.slice(0, 12)}.tgz`)
   await copyFile(tgz, copy)
-  run(dsh, ['plugin', '--profile', PROFILE, 'add', copy])
-  await writeFile(stampFile, stamp + '\n')
+  try {
+    run(dsh, ['plugin', '--profile', PROFILE, 'add', copy])
+  } catch (error) {
+    const profileLock = join(dshHome, 'profiles', PROFILE, 'package.json.lock')
+    if (existsSync(profileLock)) {
+      log(`dsh profile 仍有写锁：${profileLock}。请确认其他 dsh 或 pnpm 安装已结束后重试。`)
+    }
+    throw error
+  }
+  await writeFile(stampFile + '.tmp', installStamp + '\n')
+  await rename(stampFile + '.tmp', stampFile)
 }
 
 function serve() {
@@ -121,6 +162,7 @@ function serve() {
   process.stdin.on('close', stop)
   process.stdin.resume()
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, stop)
+  child.on('error', error => { log(`dsh 启动失败：${error.message}`); process.exit(1) })
   child.on('exit', (code, signal) => {
     if (!stopping) log(`dsh exited (${signal ?? code})`)
     process.exit(stopping ? 0 : code ?? 1)
@@ -129,8 +171,8 @@ function serve() {
 
 function run(command, args, { quiet = false } = {}) {
   const result = spawnSync(command, args, { env, stdio: ['ignore', quiet ? 'ignore' : process.stderr, process.stderr] })
-  if (result.error) fail(`${command}: ${result.error.message}`)
-  if (result.status !== 0) fail(`${command} ${args.join(' ')} exited ${result.status}`)
+  if (result.error) throw result.error
+  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited ${result.signal ?? result.status}`)
 }
 
 function fail(message) {

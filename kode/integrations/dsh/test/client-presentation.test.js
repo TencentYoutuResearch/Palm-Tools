@@ -490,16 +490,18 @@ test('plugin detail selection follows a stable package path when polling reorder
  assert.match(logo.props.src,/logo=multi&package=0/)
 })
 
-test('Kode settings keep both the native settings section and sidebar panel entries', () => {
+test('Kode settings keep the native settings section and an entry in the sidebar More menu', () => {
   const selected = [], c = client(undefined, {}, { layout: { selectPanel: id => selected.push(id) } })
   const settings = c.ctx.slots.entries('settings.section').find(row => row.options.id === 'agent-presets')
   assert.ok(settings, JSON.stringify(c.ctx.slots.entries('settings.section').map(row => row.options)))
   assert.equal(settings.options.name, 'settings.section'); assert.equal(settings.options.label(), 'Kode')
   assert.equal(c.ctx.slots.entries('settings.trigger').length, 0)
-  const sidebar = c.ctx.slots.entries('sidebar.panellist').find(row => row.options.id === 'kode-settings')
-  assert.ok(sidebar, JSON.stringify(c.ctx.slots.entries('sidebar.panellist').map(row => row.options)))
-  assert.equal(sidebar.options.name, 'sidebar.panellist'); assert.equal(sidebar.options.label, 'Kode')
-  assert.equal(sidebar.component, 'IconAgentPresetOutlineRegular')
+  assert.ok(!c.ctx.slots.entries('sidebar.panellist').some(row => ['kode-settings', 'kode-leave', 'kode-resume'].includes(row.options.id)), 'Kode entries are not sidebar rows')
+  const more = c.ctx.slots.entries('sidebar.panellist.actions').find(row => row.options.id === 'kode-entries')
+  assert.ok(more, JSON.stringify(c.ctx.slots.entries('sidebar.panellist.actions').map(row => row.options)))
+  const items = more.component({ onDismiss: () => {} })
+  const settingsItem = items.children.find(item => item && item.children?.includes('Kode 设置'))
+  settingsItem.props.onSelect(); assert.equal(selected.at(-1), 'kode-settings')
   const main = c.entry('main', 'kode-settings'), wrapper = main(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /插件与集成/); assert.doesNotMatch(JSON.stringify(tree), /Agent 共享/)
   assert.match(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/)
@@ -508,8 +510,35 @@ test('Kode settings keep both the native settings section and sidebar panel entr
   assert.match(source,/\.kode-settings-brand-avatar\{[^}]*width:32px;height:32px/)
   assert.match(source,/\.kode-settings-brand p\{[^}]*font-size:12px;line-height:18px/)
   c.ctx.layout.selectPanel('kode-settings')
-  assert.deepEqual(selected, ['kode-settings'])
+  assert.deepEqual(selected, ['kode-settings', 'kode-settings'])
   assert.equal(c.shell.component, c.native)
+})
+
+test('Kode sidebar brand registers the Kode mark and name inside desktop embed', () => {
+  const c = client(undefined, { kodeHost: { request() {} } }, {}, {
+    document: {
+      createElement: () => ({ remove() {}, setAttribute() {} }),
+      head: { append() {} },
+      body: { append() {} },
+      documentElement: { hasAttribute: name => name === 'data-kode-embed' },
+    },
+  })
+  const markEntry = c.ctx.slots.entries('sidebar.brand.mark').find(row => row.options.name === 'sidebar.brand.mark')
+  assert.ok(markEntry, 'sidebar.brand.mark must be registered when embedded in Kode')
+  const markEl = markEntry.component({ size: 24 })
+  assert.equal(markEl.type, 'svg')
+  assert.equal(markEl.props.width, 24)
+  assert.equal(markEl.props.viewBox, '0 0 24 24')
+  assert.ok(markEl.props.className.includes('kode-brand-mark-svg'))
+
+  const nameEntry = c.ctx.slots.entries('sidebar.brand.name').find(row => row.options.name === 'sidebar.brand.name')
+  assert.ok(nameEntry, 'sidebar.brand.name must be registered when embedded in Kode')
+  const nameEl = nameEntry.component()
+  assert.equal(nameEl.type, 'span')
+  assert.ok(nameEl.props.className.includes('kode-brand-name'))
+  assert.match(JSON.stringify(nameEl), /Kode/)
+  assert.match(JSON.stringify(nameEl), /Harness/)
+  assert.match(JSON.stringify(nameEl), /Powered by dsh/)
 })
 
 test('cross-host arrival waits for both catalogs and binds subscriptions before cancelling draft restoration', () => {
@@ -855,6 +884,7 @@ test('avatar and background generation each open a dedicated named session witho
  const input={requestDraftInitialization(binding,options){drafts.set(binding.id,options.prompt);return'applied'},for:ctx=>({focus:()=>focused.push(ctx.id)})}
  const sessions={list:{getSnapshot:()=>({byId:{source:{id:'source',cwd:'/project',retainedBy:{mainView:1}}}})},create:async options=>{created.push(options);return`artwork-${++next}`},binding:id=>({id,ctx:{id,get:()=>({input})}})}
  const scope={avatarContext:{sessions,get:name=>name==='uiWorkspace'?{openSession:async id=>opened.push(id)}:name==='workspaces'?{list:{getSnapshot:()=>({items:[{workspaceId:'project-workspace',sessionIds:['source']}]})}}:undefined},transport:{current:'local'},directory:()=>({getSnapshot:()=>({data:sourceData})}),fetchHost:async url=>{requests.push(url);return{ok:true,json:async()=>({prompt:url.includes('mode=background')?'background prompt':'avatar and background prompt'})}},parseHostJson:response=>response.json(),call:async body=>selected.push(body),projectCall:async body=>renamed.push(body),refreshWorkspaceDirectory:async()=>{},requestAnimationFrame:fn=>fn()}
+ Object.assign(scope,{botOfSession:()=>undefined,botsSnapshot:{data:null}})
  vm.runInNewContext(source.slice(source.indexOf('  async function stageAvatarPrompt'),source.indexOf('  function ConversationBackground')),scope)
  await scope.stageAvatarPrompt('source','local',false)
  await scope.stageAvatarPrompt('source','local',true,'gallery/person')
@@ -934,7 +964,7 @@ test('background video pauses when hidden or reduced motion is enabled', () => {
 })
 
 test('existing session identity remains visible when its runtime is idle or unloaded',()=>{
- const h=(type,props,...children)=>({type,props,children}),scope=vm.createContext({h,AgentAvatar:'avatar',useDirectory:()=>({data:{currentProfile:{name:'Codex',type:'codex'},types:{codex:{name:'Codex'}},canChangeAgent:true}}),useAvatarStatus:()=>undefined,useWorkspaceDirectory:()=>({current:'local',hosts:[]}),catalogBlank:()=>false})
+ const h=(type,props,...children)=>({type,props,children}),scope=vm.createContext({h,AgentAvatar:'avatar',useDirectory:()=>({data:{currentProfile:{name:'Codex',type:'codex'},types:{codex:{name:'Codex'}},canChangeAgent:true}}),useAvatarStatus:()=>undefined,useWorkspaceDirectory:()=>({current:'local',hosts:[]}),catalogBlank:()=>false,useBotsData:()=>undefined,botOfSession:()=>undefined})
  const start=source.indexOf('  function AgentIdentity('),end=source.indexOf('  function SessionAvatarMenuItem(',start)
  vm.runInContext(source.slice(start,end),scope)
  const props={sessionId:'saved-session',sessions:{}}
@@ -944,6 +974,12 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.equal(tree.children[1].children[0],'Codex')
  scope.catalogBlank=()=>true;assert.equal(scope.AgentIdentity(props),null,'draft identity belongs to the Agent picker')
  scope.catalogBlank=()=>false;scope.useDirectory=()=>({data:null});assert.equal(scope.AgentIdentity(props),null,'wait for actual identity instead of guessing')
+ scope.useDirectory=()=>({data:{currentProfile:{name:'Codex',type:'codex'},types:{codex:{name:'Codex'}}}})
+ scope.botOfSession=()=>({id:'b1',name:'柚子 PM',avatar:'gallery/yuzu'})
+ const worn=scope.AgentIdentity(props)
+ assert.equal(worn.children[1].children[0],'柚子 PM','a bot session shows the bot, not its Agent')
+ assert.equal(worn.children[0].children[0].props.profile.avatar.id,'gallery/yuzu')
+ assert.equal(worn.children[0].props['aria-label'],'编辑伙伴')
 })
 
 test('goal dock reuses the queued composer width and panel presentation',()=>{

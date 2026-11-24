@@ -1642,6 +1642,13 @@ export interface ExtensionSessionView {
   backends: string[]
   path: string
 }
+/** A page in Kode's main area, opened from the activity rail. */
+export interface ExtensionPanel {
+  id: string
+  title: string
+  icon: string | null
+  path: string
+}
 export interface ExtensionManifest {
   schema: string
   id: string
@@ -1652,7 +1659,7 @@ export interface ExtensionManifest {
   engines: { kode?: string | null }
   capabilities: string[]
   backend: { command: string; args: string[] } | null
-  contributes: { sessionViews: ExtensionSessionView[] }
+  contributes: { sessionViews: ExtensionSessionView[]; panels?: ExtensionPanel[] }
 }
 export interface ExtensionInfo {
   id: string
@@ -1666,6 +1673,9 @@ export interface ExtensionInfo {
 }
 export type ExtensionRect = { x: number; y: number; width: number; height: number }
 export type ExtensionProgress = { id: string; message: string; step: number | null; total: number | null }
+export type ExtensionUiMessage =
+  | { type: 'badge'; extension: string; panel: string; count: number }
+  | { type: 'notify'; extension: string; title: string; body: string; severity: 'info' | 'success' | 'warning' | 'error'; panel: string | null }
 export type ExtensionViewAction = { extension: string; view: string; action: string; params: Record<string, unknown> }
 export const extensionIpc = {
   list: () => invoke<ExtensionInfo[]>('extension_list'),
@@ -1677,12 +1687,17 @@ export const extensionIpc = {
   logs: (id: string) => invoke<string[]>('extension_logs', { id }),
   showView: (extension: string, view: string, rect: ExtensionRect, fragment: string | null) =>
     invoke<void>('extension_view_show', { extension, view, rect, fragment }),
-  hideViews: (extension: string | null = null) => invoke<void>('extension_view_hide', { extension }),
+  hideViews: (extension: string | null = null, view: string | null = null) => invoke<void>('extension_view_hide', { extension, view }),
+  /** Place a panel inside another view's page area (dsh lends its main area). */
+  showViewIn: (extension: string, view: string, host: { extension: string; view: string }, rect: ExtensionRect, restack: boolean) =>
+    invoke<void>('extension_view_show_in', { extension, view, hostExtension: host.extension, hostView: host.view, rect, restack }),
   postToView: (extension: string, view: string, message: Record<string, unknown>) =>
     invoke<boolean>('extension_view_post', { extension, view, message }),
   onChanged: (cb: () => void) => listen('extensions-changed', () => cb()),
   onProgress: (cb: (progress: ExtensionProgress) => void) => listen<ExtensionProgress>('extension-progress', (e) => cb(e.payload)),
   onViewAction: (cb: (action: ExtensionViewAction) => void) => listen<ExtensionViewAction>('extension-view-action', (e) => cb(e.payload)),
+  /** Badges and notifications raised by extension backends (no page needed). */
+  onUi: (cb: (message: ExtensionUiMessage) => void) => listen<ExtensionUiMessage>('extension-ui', (e) => cb(e.payload)),
   /** Ask a workbench runtime (dsh) to take over a native session. */
   runtimeImport: (runtime: string, payload: { backend_key: string; session_id: string; cwd: string; title?: string; model?: string }) =>
     invoke<{ id: number | null; runtime_session_id: string }>('shared_runtime_request', { runtime, kind: 'import_session', payload }),

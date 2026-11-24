@@ -13,6 +13,11 @@ import { join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
+// Refuse mixed-version artifacts: all custom browser bundles must be rebuilt
+// against the runtime shipped by the extension before packaging.
+const expected = JSON.parse(await readFile(join(root, 'kode-extension/package.json'), 'utf8')).kodeNewUi.dsh
+const actual = JSON.parse(await readFile(join(root, 'node_modules/@deepseek-ai/dsh-client-connection/package.json'), 'utf8')).version
+if (actual !== expected) throw new Error(`Build dependencies are ${actual}; install dsh ${expected} dependencies before packaging`)
 const output = join(root, 'dist/kode-extension')
 const staging = await mkdtemp(join(tmpdir(), 'kode-extension-'))
 const packageRoot = join(staging, 'package')

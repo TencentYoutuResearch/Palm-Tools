@@ -7,7 +7,8 @@
  * backends can be switched into the runtime and back (see runtime_switch.ts).
  */
 import { derived, get, writable } from 'svelte/store'
-import { extensionIpc, type ExtensionInfo, type ExtensionProgress, type ExtensionSessionView, type ExtensionViewAction, type PersistedTab } from './ipc'
+import { pushToast } from './toast'
+import { extensionIpc, type ExtensionInfo, type ExtensionPanel, type ExtensionUiMessage, type ExtensionProgress, type ExtensionSessionView, type ExtensionViewAction, type PersistedTab } from './ipc'
 
 export const extensions = writable<ExtensionInfo[]>([])
 /** Latest startup progress per extension, cleared once its backend runs. */
@@ -30,6 +31,36 @@ export const sessionViews = derived(extensions, (list): SessionViewTarget[] =>
       })),
     ),
 )
+
+/** Anything Kode hosts in a native extension webview. */
+export type ViewTarget = {
+  extension: string
+  extensionName: string
+  view: { id: string; title: string }
+}
+
+export type PanelTarget = {
+  extension: string
+  extensionName: string
+  view: ExtensionPanel
+}
+
+export const panels = derived(extensions, (list): PanelTarget[] =>
+  list
+    .filter((ext) => ext.enabled && !ext.error && ext.manifest)
+    .flatMap((ext) =>
+      (ext.manifest!.contributes.panels ?? []).map((view) => ({
+        extension: ext.id,
+        extensionName: ext.manifest!.name,
+        view,
+      })),
+    ),
+)
+
+export const panelKey = (target: { extension: string; view: { id: string } }) => `${target.extension}:${target.view.id}`
+
+/** Unread-style counts a panel page reports through `kodeHost.request('badge')`. */
+export const panelBadges = writable<Record<string, number>>({})
 
 export function viewForRuntime(views: SessionViewTarget[], runtime: string | undefined): SessionViewTarget | null {
   if (!runtime) return null
@@ -58,7 +89,27 @@ export async function startExtensionWatch(onViewAction: (action: ExtensionViewAc
   })
   await extensionIpc.onProgress((progress) => extensionProgress.update((all) => ({ ...all, [progress.id]: progress })))
   await extensionIpc.onViewAction(onViewAction)
+  await extensionIpc.onUi(onUiMessage)
   await refreshExtensions().catch((error) => console.warn('extensions unavailable:', error))
+}
+
+/** Badges go to the rail (and dsh's sidebar); notifications become toasts
+ *  named after the extension, and only for enabled extensions. Extension id
+ *  `kode` is reserved for Kode's own notices. */
+function onUiMessage(message: ExtensionUiMessage) {
+  // Kode's own notices (a bot's watch run finished or needs you).
+  if (message.extension === 'kode') {
+    if (message.type === 'notify') pushToast({ severity: message.severity, title: message.title, detail: message.body || undefined, durationMs: 8000 })
+    return
+  }
+  const ext = get(extensions).find((e) => e.id === message.extension && e.enabled)
+  if (!ext) return
+  if (message.type === 'badge') {
+    if (!(ext.manifest?.contributes.panels ?? []).some((p) => p.id === message.panel)) return
+    panelBadges.update((all) => ({ ...all, [`${message.extension}:${message.panel}`]: message.count }))
+  } else {
+    pushToast({ severity: message.severity, title: `${ext.manifest?.name ?? ext.id} · ${message.title}`, detail: message.body || undefined, durationMs: 6000 })
+  }
 }
 
 /**

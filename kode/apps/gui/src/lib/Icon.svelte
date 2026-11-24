@@ -65,6 +65,7 @@
     | 'puzzle'
     | 'house'
     | 'layout-grid'
+    | 'users'
 
   /// 24×24 viewBox 下的 stroke path 片段。新增图标在这里加。
   /// 内容不包括 <svg> 外层 —— 由组件统一加。
@@ -273,7 +274,16 @@
       '<rect width="7" height="7" x="14" y="3" rx="1"/>' +
       '<rect width="7" height="7" x="14" y="14" rx="1"/>' +
       '<rect width="7" height="7" x="3" y="14" rx="1"/>',
+    // lucide:users
+    users:
+      '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>' +
+      '<circle cx="9" cy="7" r="4"/>' +
+      '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>' +
+      '<path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
   }
+
+  /** Every icon name, for validating names that come from extension manifests. */
+  export const ICON_NAMES = Object.keys(PATHS) as IconName[]
 
   export function pathOf(name: IconName): string {
     return PATHS[name]

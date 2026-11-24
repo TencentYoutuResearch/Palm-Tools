@@ -1044,9 +1044,14 @@ pub fn inject_kode_memory_prompt(
     if !backend::profile_for_key(backend_key).is_some_and(|p| p.supports_append_system_prompt()) {
         return args.to_vec();
     }
-    if args.iter().any(|a| {
-        a == "--append-system-prompt" || a == "--system-prompt" || a == "--system-prompt-file"
-    }) {
+    // A Kode agent persona already holds the flag: extend it. Any other
+    // system prompt flag is the user's own and wins.
+    let persona = persona_flag_value(args);
+    if persona.is_none()
+        && args.iter().any(|a| {
+            a == "--append-system-prompt" || a == "--system-prompt" || a == "--system-prompt-file"
+        })
+    {
         return args.to_vec();
     }
     let prompt = kode_memory::prompt::build(cwd, backend_key);
@@ -1063,8 +1068,12 @@ pub fn inject_kode_memory_prompt(
         }
     }
     let mut new_args = args.to_vec();
-    new_args.push("--append-system-prompt".into());
-    new_args.push(full);
+    if let Some(index) = persona {
+        new_args[index] = format!("{}\n\n{full}", new_args[index]);
+    } else {
+        new_args.push("--append-system-prompt".into());
+        new_args.push(full);
+    }
     if backend_key == "codebuddy"
         && !args
             .iter()
@@ -1074,6 +1083,43 @@ pub fn inject_kode_memory_prompt(
         new_args.push(kode_memory::hook_setup::session_settings_json());
     }
     new_args
+}
+
+/// Opening tag of a Kode agent persona inside `--append-system-prompt`.
+pub const KODE_PERSONA_TAG: &str = "<kode-agent-persona";
+
+/// Index of the `--append-system-prompt` value that carries a Kode persona.
+fn persona_flag_value(args: &[String]) -> Option<usize> {
+    args.windows(2)
+        .position(|pair| pair[0] == "--append-system-prompt" && pair[1].starts_with(KODE_PERSONA_TAG))
+        .map(|flag| flag + 1)
+}
+
+/// Instructions that make a session act as a named Kode agent (a "bot").
+pub fn persona_prompt(name: &str, persona: &str, memory_scope: &str) -> String {
+    let name = name.replace(['"', '<', '>'], "");
+    format!(
+        "{KODE_PERSONA_TAG} name=\"{name}\">\nYou are {name}, a long-lived agent the user set up in Kode.\n{}\n\nYour own working knowledge belongs to the Kode memory scope `{memory_scope}`: search it and propose facts about how you work there; keep project facts in the project scope.\n</kode-agent-persona>",
+        persona.trim()
+    )
+}
+
+/// Put a persona on the backend's system prompt. `None` when the backend has
+/// no system prompt flag or the user already set their own; the caller then
+/// sends the persona as the first message instead.
+pub fn inject_persona(args: &[String], protocol_key: &str, persona: &str) -> Option<Vec<String>> {
+    if !backend::profile_for_key(protocol_key).is_some_and(|p| p.supports_append_system_prompt()) {
+        return None;
+    }
+    if args.iter().any(|a| {
+        a == "--append-system-prompt" || a == "--system-prompt" || a == "--system-prompt-file"
+    }) {
+        return None;
+    }
+    let mut out = args.to_vec();
+    out.push("--append-system-prompt".into());
+    out.push(persona.into());
+    Some(out)
 }
 
 fn looks_like_turn_submit(bytes: &[u8]) -> bool {
@@ -1618,6 +1664,27 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0], "--append-system-prompt");
         assert!(!out.contains(&"--settings".to_string()));
+    }
+
+    #[test]
+    fn persona_shares_the_system_prompt_flag_with_memory() {
+        let cwd = std::path::PathBuf::from("/tmp");
+        let persona = persona_prompt("Kit \"<x>\"", "Review code carefully.", "bot:kit");
+        assert!(persona.starts_with(KODE_PERSONA_TAG) && persona.contains("name=\"Kit x\""));
+        let args = inject_persona(&[], "tclaude", &persona).expect("tclaude takes a system prompt");
+        let out = inject_kode_memory_prompt(&args, "tclaude", &cwd, true, None);
+        assert_eq!(out.iter().filter(|a| *a == "--append-system-prompt").count(), 1);
+        assert!(out[1].starts_with(KODE_PERSONA_TAG) && out[1].contains("Review code carefully.") && out[1].contains("<kode-memory>"));
+    }
+
+    #[test]
+    fn persona_yields_to_user_flags_and_unsupported_backends() {
+        let user = vec!["--system-prompt".to_string(), "mine".to_string()];
+        assert!(inject_persona(&user, "tclaude", "<kode-agent-persona>").is_none());
+        assert!(inject_persona(&[], "codex", "<kode-agent-persona>").is_none());
+        let cwd = std::path::PathBuf::from("/tmp");
+        let mine = vec!["--append-system-prompt".to_string(), "mine".to_string()];
+        assert_eq!(inject_kode_memory_prompt(&mine, "tclaude", &cwd, true, None), mine, "a user prompt still short-circuits memory");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { assertHistoryReaderSupport } from '../src/native-history.js'
 /** Read-only compatibility audit. Enumerate current artifacts on every run; never use a saved file list. */
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -6,8 +7,7 @@ import { zstdDecompressSync } from 'node:zlib'
 import { repairNativeInboxSplices } from '../src/repair-inbox-splices.js'
 const args = process.argv.slice(2), value = name => args[args.indexOf(name) + 1]
 if (!args.includes('--home') || !args.includes('--runtime-modules')) throw new Error('Expected --home <dsh-home> --runtime-modules <released-node_modules>')
-const [major, minor] = process.versions.node.split('.').map(Number)
-if (major < 24 || major === 24 && minor < 22) throw new Error('Node 24.22+ is required to read concatenated Zstandard frames')
+assertHistoryReaderSupport()
 const home = resolve(value('--home')), modules = resolve(value('--runtime-modules'))
 const { Session, KNOWN_SESSION_EVENT_TYPES } = await import(pathToFileURL(join(modules, '@deepseek-ai/dsh-session/lib/index.js')))
 const { validateStoredEvents } = await import(pathToFileURL(join(modules, '@deepseek-ai/dsh-session-persistence/lib/index.js')))

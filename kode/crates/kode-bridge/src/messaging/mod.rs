@@ -6,6 +6,8 @@ mod delivery;
 mod cancellation;
 mod wire;
 mod extensions;
+pub mod ext;
+pub mod bots;
 mod agent_updates;
 mod extension_files;
 mod extension_targets;
@@ -65,6 +67,7 @@ pub struct Peer {
 }
 
 pub struct Hub {
+    ext: ext::Gateway,
     extensions: extensions::Extensions,
     agent_updates: agent_updates::AgentUpdates,
     handoff_gate: tokio::sync::Mutex<()>,
@@ -79,6 +82,8 @@ pub struct Hub {
     workspace_pending: Mutex<HashMap<String, (String, workspaces::Command, tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>)>>,
     boot: String,
     stopped: AtomicBool,
+    /// Wakes peer links when a workspace request is queued for them.
+    link_wake: tokio::sync::Notify,
 }
 impl Hub {
     pub fn open(config: Config, ctx: &Arc<crate::Ctx>) -> Result<Arc<Self>> {
@@ -110,6 +115,7 @@ impl Hub {
         ctx.runtimes.open(&config.database.with_extension("runtime.sqlite"))?;
         let peers = peers::load(&store, &config)?;
         let hub = Arc::new(Self {
+            ext: ext::Gateway::open(&config.database.with_extension("ext.sqlite"))?,
             extensions: extensions::Extensions::new(config.database.with_extension("agent-hub"), home),
             agent_updates: Default::default(),
             handoff_gate: tokio::sync::Mutex::new(()),
@@ -124,12 +130,15 @@ impl Hub {
             workspace_pending: Mutex::new(HashMap::new()),
             boot: uuid::Uuid::new_v4().to_string(),
             stopped: AtomicBool::new(false),
+            link_wake: tokio::sync::Notify::new(),
         });
         agents::initialize(&hub)?;
         hub.extensions.restore(&hub)?;
         Ok(hub)
     }
     pub fn start(self: &Arc<Self>) {
+        ext::spawn_projector(self.clone());
+        ext::spawn_watches(self.clone());
         let hub = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -166,13 +175,16 @@ impl Hub {
     }
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+        // Links otherwise notice the stop only at their fallback tick.
+        self.link_wake.notify_waiters();
+        self.ext.stop();
         self.extensions.close();
     }
     pub fn node_id(&self) -> &str {
         &self.config.node_id
     }
     pub fn router(self: &Arc<Self>) -> axum::Router {
-        api::router(self.clone())
+        api::router(self.clone()).merge(ext::router(self.clone()))
     }
     async fn workspace(self: &Arc<Self>, node: &str, command: workspaces::Command) -> Result<serde_json::Value> {
         if node == self.node_id() || node.is_empty() { return workspaces::execute(self.clone(), command).await }
@@ -180,6 +192,7 @@ impl Hub {
         let id = uuid::Uuid::new_v4().to_string();
         let (send, receive) = tokio::sync::oneshot::channel();
         { let mut pending = self.workspace_pending.lock(); if pending.len() >= 32 { bail!("too many workspace requests") }; pending.insert(id.clone(), (node.into(), command, send)); }
+        self.link_wake.notify_waiters();
         struct Cleanup<'a>(&'a Hub, String);
         impl Drop for Cleanup<'_> { fn drop(&mut self) { self.0.workspace_pending.lock().remove(&self.1); } }
         let _cleanup = Cleanup(self,id.clone());

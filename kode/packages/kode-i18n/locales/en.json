@@ -2244,5 +2244,6 @@
   "devices.tool.failed": { "message": "Call failed" },
   "devices.tool.running": { "message": "In progress" },
   "devices.tool.delivery": { "message": "At send: {status}" },
-  "devices.tool.returned": { "message": "Returned" }
+  "devices.tool.returned": { "message": "Returned" },
+  "extensions.panel.sessionMissing": { "message": "That session is not open in Kode on this computer." }
 }

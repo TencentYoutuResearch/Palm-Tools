@@ -2,7 +2,15 @@
  * Source timestamps and tool lifecycles are retained; nothing is executed. */
 import { restoredRelaySource } from './message-pages.js'
 import { createHash } from 'node:crypto'
-import { constants,zstdCompressSync } from 'node:zlib'
+import { constants,zstdCompressSync,zstdDecompressSync } from 'node:zlib'
+
+// Older Node releases silently return only the first frame of a session log.
+export function assertHistoryReaderSupport() {
+  const frame = zstdCompressSync(Buffer.from('x'))
+  if (zstdDecompressSync(Buffer.concat([frame, frame])).toString() !== 'xx') {
+    throw new Error('Reading session history requires multi-frame Zstandard support. Use the dsh Node runtime (24.22.3).')
+  }
+}
 
 export function encodeHistoryArtifact(header,events) {
   const options={params:{[constants.ZSTD_c_checksumFlag]:1}}

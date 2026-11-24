@@ -1,0 +1,17 @@
+{
+  "name": "@kode/extension-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Client for the Kode extension API (kode.api/v1): sessions and pushed turn events",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "types": "./src/index.d.ts",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

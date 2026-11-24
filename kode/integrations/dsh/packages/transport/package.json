@@ -2,7 +2,19 @@
   "name": "@kode/dsh-transport",
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./host.js", "./client": "./client.js", "./package.json": "./package.json" },
-  "dsh": { "client": { "platform": "web", "inject": [], "immediately": true } },
-  "peerDependencies": { "@deepseek-ai/dsh-client-connection": "*" }
+  "exports": {
+    ".": "./host.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [],
+      "immediately": true
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-connection": "0.2.3-alpha.2"
+  }
 }

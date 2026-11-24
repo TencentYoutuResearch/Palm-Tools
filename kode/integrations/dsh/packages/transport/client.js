@@ -892,6 +892,11 @@ defineMethod("transform", [
   "preserve"
 ], ({ inner }, isInner) => inner.toString(isInner));
 
+// node_modules/@deepseek-ai/dsh-brand/lib/index.js
+function brandString(value) {
+  return value;
+}
+
 // node_modules/@deepseek-ai/dsh-client-connection/lib/client.node.js
 var MAX_TIMER_MS = 2147483647;
 var ConnectionRecoveryConfigSchema = Schema.object({
@@ -1139,9 +1144,6 @@ function waitForReady(ready, config, signal) {
     });
   });
 }
-function RpcId(id) {
-  return id;
-}
 function randomUuid() {
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -1157,7 +1159,7 @@ function createWebConnectionRpc(doFetch, openStream) {
   return {
     async call(channel, endpoint, payload, signal) {
       assertTarget(channel, endpoint);
-      const rpcId = RpcId(randomUuid());
+      const rpcId = brandString(randomUuid());
       const message = {
         type: "client-request",
         rpcId,
@@ -1236,7 +1238,7 @@ function parseConnectionResponse(value) {
   const result = value.result;
   if (!isRecord(result)) throw new TypeError("connection: invalid server-response result");
   if (result.ok === true) return {
-    rpcId: RpcId(value.rpcId),
+    rpcId: brandString(value.rpcId),
     result: {
       ok: true,
       value: result.value
@@ -1246,7 +1248,7 @@ function parseConnectionResponse(value) {
   const error = result.error;
   if (typeof error.code !== "string" || typeof error.message !== "string" || !isRecord(error.details)) throw new TypeError("connection: invalid server-response failure");
   return {
-    rpcId: RpcId(value.rpcId),
+    rpcId: brandString(value.rpcId),
     result: {
       ok: false,
       error: {

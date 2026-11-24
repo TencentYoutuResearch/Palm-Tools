@@ -100,6 +100,9 @@ pub struct Launch<'a> {
     pub dir: &'a Path,
     pub data_dir: &'a Path,
     pub env: Vec<(String, String)>,
+    /// Environment that is only worth producing for a new child, such as a
+    /// freshly minted token (which revokes the previous one).
+    pub spawn_env: Option<Box<dyn FnOnce() -> Result<Vec<(String, String)>, String> + 'a>>,
     pub on_progress: Box<dyn Fn(Progress) + Send + 'static>,
 }
 
@@ -137,6 +140,10 @@ impl Backends {
             .as_ref()
             .ok_or_else(|| format!("extension {id} has no backend"))?;
         std::fs::create_dir_all(launch.data_dir).map_err(|e| e.to_string())?;
+        let spawn_env = match launch.spawn_env {
+            Some(produce) => produce()?,
+            None => vec![],
+        };
 
         let program = resolve_command(&backend.command, launch.dir);
         let mut command = Command::new(&program).hide_console();
@@ -145,6 +152,7 @@ impl Backends {
             .current_dir(launch.dir)
             .envs(&backend.env)
             .envs(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .envs(spawn_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

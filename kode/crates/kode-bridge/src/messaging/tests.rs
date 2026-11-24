@@ -1330,3 +1330,25 @@ async fn native_title_requires_admin_and_valid_native_identity() {
         assert_eq!(client.post(&url).bearer_auth("admin-test").json(&body).send().await.unwrap().status(), 400);
     }
 }
+
+#[tokio::test]
+async fn event_wait_is_held_open_until_a_message_arrives() {
+    let s = server("local", vec![]).await;
+    let alice = register(&s, "alice").await;
+    let bob = register(&s, "bob").await;
+    let client = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let empty: Value = client.get(format!("{}/api/v1/messaging/events?after=0&wait=1", s.url)).bearer_auth(&bob.owner_token).send().await.unwrap().json().await.unwrap();
+    assert!(empty["events"].as_array().unwrap().is_empty());
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900), "an empty wait is held for its duration");
+    let waiting = {
+        let (url, token) = (format!("{}/api/v1/messaging/events?after=0&wait=20", s.url), bob.owner_token.clone());
+        tokio::spawn(async move { reqwest::Client::new().get(url).bearer_auth(token).send().await.unwrap().json::<Value>().await.unwrap() })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let sent_at = std::time::Instant::now();
+    send(&s, &alice.owner_token, &request("local", "bob", "wake")).await.error_for_status().unwrap();
+    let woke = tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await.expect("woken by the commit").unwrap();
+    assert!(!woke["events"].as_array().unwrap().is_empty());
+    assert!(sent_at.elapsed() < std::time::Duration::from_secs(2), "the waiter wakes on the commit, not a poll");
+}

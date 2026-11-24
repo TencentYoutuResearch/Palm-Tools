@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 pub const FILE_NAME: &str = "kode-extension.json";
 pub const SCHEMA: &str = "kode.extension/v1";
 
-/// Capabilities an extension may request. Unknown names are rejected so a
-/// typo never silently grants nothing (or, later, something else).
+/// Host capabilities an extension may request, besides the extension API's
+/// own (`kode_bridge::messaging::ext::CAPABILITIES`). Unknown names are
+/// rejected so a typo never silently grants nothing (or something else).
 pub const CAPABILITIES: &[&str] = &[
     // Pass the shared workbench service connection (URL + admin token file)
     // to the backend. This is the session catalog, runtime registry and
@@ -23,6 +24,8 @@ pub const CAPABILITIES: &[&str] = &[
     "session.views",
     // Switch a session between the PTY runtime and the extension's runtime.
     "session.runtime",
+    // Contribute pages to Kode's main area, opened from the activity rail.
+    "ui.panels",
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -79,6 +82,26 @@ fn default_ready_timeout() -> u64 {
 pub struct Contributes {
     #[serde(default, rename = "sessionViews")]
     pub session_views: Vec<SessionView>,
+    #[serde(default)]
+    pub panels: Vec<Panel>,
+    /// MCP tools for the sessions this extension starts. Kode's backend
+    /// validates them when it grants the extension's token.
+    #[serde(default, rename = "agentTools")]
+    pub agent_tools: Vec<serde_json::Value>,
+}
+
+/// A page in Kode's main area (beside the session sidebar, not over the
+/// whole window), served by the backend and opened from the activity rail.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Panel {
+    pub id: String,
+    pub title: String,
+    /// Name of a Kode icon for the rail; unknown names fall back to a generic one.
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default = "default_view_path")]
+    pub path: String,
 }
 
 /// An alternative presentation for a session tab, served by the backend.
@@ -118,6 +141,12 @@ pub struct DragRegion {
     pub exclude: Option<String>,
 }
 
+pub struct ViewSpec {
+    pub path: String,
+    pub html_attributes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    pub drag_region: Option<DragRegion>,
+}
+
 fn default_view_path() -> String {
     "/".into()
 }
@@ -139,6 +168,10 @@ impl Manifest {
         if !valid_id(&self.id) {
             bail!("invalid extension id `{}`", self.id);
         }
+        // Kode's own notices use this name on the UI feed.
+        if self.id == "kode" {
+            bail!("extension id `kode` is reserved");
+        }
         if self.name.trim().is_empty() {
             bail!("extension name is empty");
         }
@@ -149,7 +182,9 @@ impl Manifest {
                 .with_context(|| format!("invalid engines.kode `{requirement}`"))?;
         }
         for capability in &self.capabilities {
-            if !CAPABILITIES.contains(&capability.as_str()) {
+            if !CAPABILITIES.contains(&capability.as_str())
+                && !kode_bridge::messaging::ext::CAPABILITIES.contains(&capability.as_str())
+            {
                 bail!("unknown capability `{capability}`");
             }
         }
@@ -184,6 +219,23 @@ impl Manifest {
                 }
             }
         }
+        for panel in &self.contributes.panels {
+            if !valid_id(&panel.id) || !seen.insert(panel.id.as_str()) {
+                bail!("invalid or duplicate view id `{}`", panel.id);
+            }
+            if !panel.path.starts_with('/') {
+                bail!("panel `{}` path must start with /", panel.id);
+            }
+            if panel.icon.as_ref().is_some_and(|icon| icon.len() > 40 || !icon.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')) {
+                bail!("panel `{}` icon must be a Kode icon name", panel.id);
+            }
+        }
+        if !self.contributes.agent_tools.is_empty() && (!self.has("tools.provide") || self.backend.is_none()) {
+            bail!("agentTools need the tools.provide capability and a backend to answer them");
+        }
+        if !self.contributes.panels.is_empty() && (!self.has("ui.panels") || self.backend.is_none()) {
+            bail!("panels need the ui.panels capability and a backend to serve them");
+        }
         if !self.contributes.session_views.is_empty() {
             if !self.has("session.views") {
                 bail!("sessionViews requires the session.views capability");
@@ -195,8 +247,34 @@ impl Manifest {
         Ok(())
     }
 
+    /// Where a session view or panel is served, plus its embed hints.
+    pub fn view(&self, id: &str) -> Option<ViewSpec> {
+        if let Some(view) = self.contributes.session_views.iter().find(|v| v.id == id) {
+            return Some(ViewSpec {
+                path: view.path.clone(),
+                html_attributes: view.html_attributes.clone(),
+                drag_region: view.drag_region.clone(),
+            });
+        }
+        self.contributes.panels.iter().find(|p| p.id == id).map(|panel| ViewSpec {
+            path: panel.path.clone(),
+            html_attributes: Default::default(),
+            drag_region: None,
+        })
+    }
+
     pub fn has(&self, capability: &str) -> bool {
         self.capabilities.iter().any(|c| c == capability)
+    }
+
+    /// Capabilities served by the extension API (`kode.api/v1`). A backend
+    /// that requests any gets its own scoped token instead of the admin one.
+    pub fn api_capabilities(&self) -> Vec<String> {
+        self.capabilities
+            .iter()
+            .filter(|c| kode_bridge::messaging::ext::CAPABILITIES.contains(&c.as_str()))
+            .cloned()
+            .collect()
     }
 
     /// `None` when the manifest does not constrain the version.
@@ -280,8 +358,39 @@ mod tests {
     }
 
     #[test]
+    fn panels_need_capability_backend_and_unique_ids() {
+        let mut manifest = sample();
+        manifest.contributes.panels = serde_json::from_value(serde_json::json!([{ "id": "team", "title": "Team", "icon": "users" }])).unwrap();
+        assert!(manifest.validate().is_err(), "ui.panels is required");
+        manifest.capabilities.push("ui.panels".into());
+        manifest.validate().unwrap();
+        assert_eq!(manifest.view("team").unwrap().path, "/");
+        assert!(manifest.view("dsh").is_some() && manifest.view("missing").is_none());
+        manifest.contributes.panels[0].id = "dsh".into();
+        assert!(manifest.validate().is_err(), "panel ids share the namespace of session views");
+        manifest.contributes.panels[0].id = "team".into();
+        manifest.contributes.panels[0].icon = Some("<svg>".into());
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
     fn accepts_valid_manifest() {
         sample().validate().unwrap();
+    }
+
+    #[test]
+    fn extension_api_capabilities_are_accepted_and_separated() {
+        let example: Manifest = serde_json::from_str(include_str!(
+            "../../../../../integrations/ext-sample/kode-extension.json"
+        ))
+        .unwrap();
+        example.validate().unwrap();
+        assert!(!example.has("workbench"), "the sample proves the API needs no admin access");
+        let mut manifest = sample();
+        manifest.capabilities.extend(["sessions.create".into(), "events.subscribe".into()]);
+        manifest.validate().unwrap();
+        assert_eq!(manifest.api_capabilities(), ["sessions.create", "events.subscribe"]);
+        assert!(sample().api_capabilities().is_empty(), "host-only manifests get no API token");
     }
 
     #[test]

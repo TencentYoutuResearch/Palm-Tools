@@ -147,6 +147,7 @@ pub fn run() {
                     host.attach(handle.clone());
                     app.manage(host);
                     extensions::seed_bundled_in_background(handle.clone());
+                    extensions::ui_feed::start(handle.clone());
                 }
                 Err(error) => tracing::warn!(%error, "extension host unavailable"),
             }
@@ -376,6 +377,7 @@ pub fn run() {
             extensions::view::extension_view_hide,
             extensions::view::extension_view_eval,
             extensions::view::extension_view_post,
+            extensions::view::extension_view_show_in,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

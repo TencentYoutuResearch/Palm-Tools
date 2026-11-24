@@ -115,6 +115,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/workbench/peers/remove", post(remove_peer))
         .route("/api/v1/messaging/workbench/catalog", get(workbench_catalog))
         .route("/api/v1/messaging/workbench/agents", get(agent_catalog).post(change_agent))
+        .route("/api/v1/messaging/workbench/bots", get(bot_roster).post(change_bots))
         .route("/api/v1/messaging/workbench/sessions", get(workbench_sessions))
         .route("/api/v1/messaging/workbench/workspaces", get(workspaces).post(change_workspace))
         .route("/api/v1/messaging/workbench/workspaces/hosts", get(workspace_hosts))
@@ -212,6 +213,22 @@ async fn save_workbench_document(State(hub): State<Arc<Hub>>, h: HeaderMap, Path
 async fn agent_catalog(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<super::agents::Catalog>> {
     admin(&hub,&h)?;
     Ok(Json(tokio::task::spawn_blocking(move ||super::agents::catalog(&hub)).await.map_err(anyhow::Error::from)??))
+}
+async fn bot_roster(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;
+    let (revision, roster) = super::bots::roster(&hub)?;
+    // Front ends that run a bot outside the GUI runtime (dsh) send this text
+    // themselves; one formatter keeps every runtime's persona identical.
+    let personas: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.persona_prompt()))).collect();
+    let root = roster.root();
+    let workspaces: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.workspace(&root)))).collect();
+    let homes: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.home(&root)))).collect();
+    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot,"persona_prompts":personas,"workspaces":workspaces,"homes":homes,"adopted":roster.adopted,"root":root,"default_root":super::bots::default_root()})))
+}
+async fn change_bots(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(change): Json<super::bots::Change>) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;
+    let roster = super::bots::change(&hub, change)?;
+    Ok(Json(json!({"bots":roster.bots,"default_bot":roster.default_bot})))
 }
 async fn change_agent(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(command): Json<super::agents::Change>) -> Result<Json<super::agents::Catalog>> {
     admin(&hub,&h)?;
@@ -552,6 +569,9 @@ async fn settle(
 struct Cursor {
     #[serde(default)]
     after: u64,
+    /// Seconds to hold the request open when nothing is newer than `after`.
+    #[serde(default)]
+    wait: u64,
 }
 async fn events(
     State(hub): State<Arc<Hub>>,
@@ -562,11 +582,19 @@ async fn events(
         Principal::Admin => None,
         Principal::Session(s) => Some(s),
     };
-    let events = hub.store.events(q.after, session.as_deref())?;
-    let cursor = events.last().map_or(q.after, |e| e.seq);
-    Ok(Json(json!({"events":events,"cursor":cursor})))
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(q.wait.min(30));
+    loop {
+        // Subscribe before reading so a commit in between still wakes us.
+        let mut changed = hub.store.changed.subscribe();
+        let events = hub.store.events(q.after, session.as_deref())?;
+        let now = tokio::time::Instant::now();
+        if !events.is_empty() || now >= deadline {
+            let cursor = events.last().map_or(q.after, |e| e.seq);
+            return Ok(Json(json!({"events":events,"cursor":cursor})));
+        }
+        let _ = tokio::time::timeout(deadline - now, changed.changed()).await;
+    }
 }
-
 async fn runtime_publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(mut input): Json<crate::runtime::Publication>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     let workspace_document = hub.store.document("workspaces")?;
@@ -626,10 +654,11 @@ mod archive_visibility_tests {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeClaim { runtime:String, boot_id:String }
+struct RuntimeClaim { runtime:String, boot_id:String, #[serde(default)] wait_ms:u64 }
+/// With `wait_ms` the claim is held open until a command arrives (long poll).
 async fn runtime_claim(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Json<RuntimeClaim>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?; let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
-    Ok(Json(ctx.runtimes.claim(&input.runtime,&input.boot_id)?))
+    Ok(Json(ctx.runtimes.claim_wait(&input.runtime,&input.boot_id,std::time::Duration::from_millis(input.wait_ms)).await?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

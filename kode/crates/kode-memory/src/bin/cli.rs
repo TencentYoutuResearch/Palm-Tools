@@ -120,6 +120,8 @@ enum Cmd {
     },
     /// 看一条完整 fact
     Read { id: String },
+    /// Refresh Obsidian links in approved memory notes.
+    RefreshObsidianLinks,
     /// 列最近 N 小时新增 facts
     Recent {
         #[arg(long, default_value_t = 24)]
@@ -245,6 +247,11 @@ fn main() -> Result<()> {
             json,
         } => cmd_search(&root, &query, scope.as_deref(), top_k, json),
         Cmd::Read { id } => cmd_read(&root, &id),
+        Cmd::RefreshObsidianLinks => {
+            let store = MemoryStore::open(&root)?;
+            println!("Refreshed {} notes", store.refresh_obsidian_links()?);
+            Ok(())
+        }
         Cmd::Recent { hours, scope } => cmd_recent(&root, hours, scope.as_deref()),
         Cmd::Deprecate { id, reason } => cmd_deprecate(&root, &id, &reason),
         Cmd::Budget { author } => cmd_budget(&root, author.as_deref()),

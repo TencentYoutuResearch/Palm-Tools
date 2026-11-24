@@ -1108,5 +1108,6 @@
   "devices.tool.failed": { "message": "调用失败" },
   "devices.tool.running": { "message": "进行中" },
   "devices.tool.delivery": { "message": "发送时：{status}" },
-  "devices.tool.returned": { "message": "已返回" }
+  "devices.tool.returned": { "message": "已返回" },
+  "extensions.panel.sessionMissing": { "message": "这个会话没有在本机的 Kode 里打开。" }
 }

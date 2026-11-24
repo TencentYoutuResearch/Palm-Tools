@@ -30,7 +30,15 @@ pub const EVENT_KINDS: &[&str] = &[
 pub struct Registry {
     db: Mutex<Option<Connection>>,
     pub(crate) workbench_store: Mutex<std::sync::Weak<crate::messaging::Store>>,
+    /// Wakes hosts long-polling `claim_wait` when a command is queued.
+    queued: tokio::sync::Notify,
+    /// Wakes requesters waiting for a host's receipt.
+    settled: tokio::sync::Notify,
 }
+
+/// Longest a host may hold one claim open.
+pub const MAX_CLAIM_WAIT: Duration = Duration::from_secs(25);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +248,78 @@ impl Registry {
         .collect()
     }
 
+    /// Durable events of every session after `after` (the `ts` cursor), oldest
+    /// first. Readers that must not miss an event follow this cursor instead of
+    /// the lossy broadcast bus.
+    pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<EventEnvelope>> {
+        let guard = self.db.lock();
+        let Some(db) = guard.as_ref() else {
+            return Ok(vec![]);
+        };
+        let mut stmt = db.prepare(
+            "SELECT session_id,ts,kind,payload FROM runtime_events WHERE ts>?1 ORDER BY ts LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after, limit.min(10000)], |r| {
+            Ok((
+                r.get::<_, u64>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, ts, kind, payload) = row?;
+            let mut event = EventEnvelope::new(id, kind, serde_json::from_str(&payload)?);
+            event.ts = ts;
+            Ok(event)
+        })
+        .collect()
+    }
+
+    /// Newest event cursor, so a new follower can start at "now".
+    pub fn latest_event(&self) -> u64 {
+        let guard = self.db.lock();
+        guard
+            .as_ref()
+            .and_then(|db| {
+                db.query_row("SELECT COALESCE(MAX(ts),0) FROM runtime_events", [], |r| r.get(0))
+                    .ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// One published session DTO, without scanning the whole directory.
+    pub fn snapshot(&self, id: u64) -> Option<Value> {
+        let guard = self.db.lock();
+        let db = guard.as_ref()?;
+        let encoded: String = db
+            .query_row(
+                "SELECT dto FROM runtime_sessions WHERE id=?1 AND runtime!='_reserved'",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()??;
+        let mut dto: Value = serde_json::from_str(&encoded).ok()?;
+        let seen: Option<u64> = dto["runtime"].as_str().and_then(|runtime| {
+            db.query_row("SELECT seen FROM runtime_hosts WHERE runtime=?1", [runtime], |r| r.get(0))
+                .optional()
+                .ok()
+                .flatten()
+        });
+        let online = seen.is_some_and(|seen| crate::now_ms().saturating_sub(seen) < 15000);
+        let mut alive = online;
+        if dto["runtime"] == "gui" {
+            alive = online
+                && dto["native_process_id"]
+                    .as_u64()
+                    .is_some_and(|pid| alive_pids(&[pid]).contains(&pid));
+        }
+        dto["runtime_online"] = json!(online);
+        dto["owner_alive"] = json!(alive);
+        Some(dto)
+    }
+
     pub fn publish(&self, ctx: &Ctx, input: Publication) -> Result<Value> {
         if !crate::messaging::model::valid_id(&input.runtime)
             || input.boot_id.is_empty()
@@ -413,7 +493,14 @@ impl Registry {
                 )?;
             }
         }
-        for _ in 0..300 {
+        self.queued.notify_waiters();
+        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+        loop {
+            // Register before reading so a receipt between the read and the
+            // wait still wakes us.
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
             {
                 let guard = self.db.lock();
                 let db = guard.as_ref().context("runtime unavailable")?;
@@ -428,9 +515,20 @@ impl Registry {
                     return Ok(value);
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                bail!("runtime operation outcome unconfirmed; do not replay with a new request id")
+            }
+            // Receipts written by another process sharing this database never
+            // notify; the bounded wait still observes them.
+            let _ = tokio::time::timeout((deadline - now).min(Duration::from_secs(1)), settled).await;
         }
-        bail!("runtime operation outcome unconfirmed; do not replay with a new request id")
+    }
+
+    /// The routing id of a runtime's own session id (a dsh session id).
+    pub fn find(&self, runtime: &str, native: &str) -> Option<u64> {
+        let guard = self.db.lock();
+        guard.as_ref()?.query_row("SELECT id FROM runtime_sessions WHERE runtime=?1 AND native_id=?2", [runtime, native], |r| r.get(0)).optional().ok().flatten()
     }
 
     pub async fn command(
@@ -519,7 +617,25 @@ impl Registry {
             return Ok(());
         }
         if db.execute("UPDATE runtime_commands SET status='done',result=?4 WHERE id=?1 AND runtime=?2 AND boot=?3 AND status='claimed'",params![id,runtime,boot,encoded])?!=1 {bail!("unknown or unclaimed runtime command")};
+        self.settled.notify_waiters();
         Ok(())
+    }
+
+    /// `claim`, held open up to `wait` until a command is queued. Hosts use
+    /// this instead of polling; an empty wait behaves exactly like `claim`.
+    pub async fn claim_wait(&self, runtime: &str, boot: &str, wait: Duration) -> Result<Value> {
+        let deadline = tokio::time::Instant::now() + wait.min(MAX_CLAIM_WAIT);
+        loop {
+            let queued = self.queued.notified();
+            tokio::pin!(queued);
+            queued.as_mut().enable();
+            let batch = self.claim(runtime, boot)?;
+            let now = tokio::time::Instant::now();
+            if batch["commands"].as_array().is_some_and(|c| !c.is_empty()) || now >= deadline {
+                return Ok(batch);
+            }
+            let _ = tokio::time::timeout(deadline - now, queued).await;
+        }
     }
 }
 fn invalid_dsh_creation(runtime: &str, kind: &str, value: &Value) -> bool {
@@ -571,6 +687,32 @@ mod tests {
         assert_eq!(ctx.runtimes.history(id, 0, 10).unwrap().len(), 1);
         ctx.runtimes.retire_archived(&ctx, &archived).unwrap();
         assert!(bus.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn requests_wake_a_long_polling_host_and_receipts_wake_the_requester() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::build_test_ctx(Default::default(), "test".into());
+        ctx.runtimes.open(&dir.path().join("runtime.sqlite")).unwrap();
+        ctx.runtimes.publish(&ctx, publication("boot")).unwrap();
+        let started = std::time::Instant::now();
+        let idle = ctx.runtimes.claim_wait("dsh", "boot", Duration::from_millis(300)).await.unwrap();
+        assert!(idle["commands"].as_array().unwrap().is_empty());
+        assert!(started.elapsed() >= Duration::from_millis(250), "an idle claim is held open");
+        let host = {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                let batch = ctx.runtimes.claim_wait("dsh", "boot", Duration::from_secs(10)).await.unwrap();
+                let id = batch["commands"][0]["id"].as_str().unwrap().to_owned();
+                ctx.runtimes.settle("dsh", "boot", &id, json!({"value":{"ok":true}})).unwrap();
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let asked = std::time::Instant::now();
+        let value = ctx.runtimes.request("dsh", None, "models", json!({}), "wake-1").await.unwrap();
+        assert_eq!(value["ok"], true);
+        assert!(asked.elapsed() < Duration::from_millis(500), "no 100 ms polling on either side");
+        host.await.unwrap();
     }
 
     fn publication(boot: &str) -> Publication {

@@ -10,6 +10,8 @@ struct MobileCreate {
     model: Option<String>,
     #[serde(default)]
     permission_mode: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 pub async fn execute(ctx: Arc<Ctx>, kind: &str, payload: Value) -> (u16, Value) {
@@ -175,6 +177,10 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
                         .into(),
                 ));
             }
+            // Tell the caller whether it still has to send the persona itself.
+            let persona = req.system_prompt.as_deref().map(|persona| {
+                kode_core::session::inject_persona(&cfg.args, cfg.protocol_key(&req.backend_key), persona).is_some()
+            });
             let Json(dto) = create_session(
                 Extension(ctx),
                 Json(CreateSessionReq {
@@ -191,10 +197,15 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
                     prompt: None,
                     headless: false,
                     term_theme: None,
+                    system_prompt: req.system_prompt,
                 }),
             )
             .await?;
-            serde_json::to_value(dto).map_err(|e| ApiError::Internal(e.to_string()))
+            let mut value = serde_json::to_value(dto).map_err(|e| ApiError::Internal(e.to_string()))?;
+            if let Some(applied) = persona {
+                value["system_prompt"] = json!(if applied { "applied" } else { "unsupported" });
+            }
+            Ok(value)
         }
         _ => Err(ApiError::BadRequest(
             "Unsupported mobile setup operation".into(),

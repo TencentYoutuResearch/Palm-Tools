@@ -18,6 +18,7 @@
 
 mod backend;
 pub mod manifest;
+pub mod ui_feed;
 pub mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -379,11 +380,20 @@ impl ExtensionHost {
                 );
             }
         });
+        let capabilities = manifest.api_capabilities();
+        let tools = manifest.contributes.agent_tools.clone();
+        let grant_for = id.to_string();
+        let spawn_env = (!capabilities.is_empty()).then(|| {
+            Box::new(move || {
+                tauri::async_runtime::block_on(api_grant(&grant_for, &capabilities, &tools))
+            }) as Box<dyn FnOnce() -> Result<Vec<(String, String)>, String>>
+        });
         self.backends.ensure(backend::Launch {
             manifest: &manifest,
             dir: &dir,
             data_dir: &data_dir,
             env,
+            spawn_env,
             on_progress,
         })
     }
@@ -395,6 +405,40 @@ impl ExtensionHost {
 
 /// `Contents/Resources/resources/extensions` in the app bundle;
 /// `KODE_BUNDLED_EXTENSIONS_DIR` overrides it for development.
+/// Mint the extension's scoped token (revoking its previous one) and tell the
+/// backend where the extension API lives. The admin token stays in Kode.
+async fn api_grant(id: &str, capabilities: &[String], tools: &[serde_json::Value]) -> Result<Vec<(String, String)>, String> {
+    let granted = crate::backend_runtime::call(
+        "/extensions/grants",
+        Some(serde_json::json!({"extension_id": id, "capabilities": capabilities, "agent_tools": tools})),
+    )
+    .await
+    .map_err(|e| format!("extension API unavailable: {e}"))?;
+    let token = granted["token"].as_str().ok_or("extension API returned no token")?;
+    let (_, document, _) = crate::workbench_state::connection().await.map_err(|e| e.to_string())?;
+    let origin = document
+        .strip_suffix("/api/v1/messaging/workbench/documents/session-index")
+        .ok_or("unexpected Kode backend address")?;
+    Ok(vec![
+        ("KODE_EXT_API".into(), format!("{origin}/api/ext/v1")),
+        ("KODE_EXT_TOKEN".into(), token.into()),
+    ])
+}
+
+/// Best effort: a stopped or removed extension keeps no live token.
+async fn revoke_grant(id: &str) {
+    let Ok((client, document, token)) = crate::workbench_state::connection().await else { return };
+    let Some(base) = document.strip_suffix("/workbench/documents/session-index") else { return };
+    if let Err(error) = client
+        .delete(format!("{base}/extensions/grants/{id}"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+    {
+        tracing::debug!(%error, extension = id, "extension grant not revoked");
+    }
+}
+
 pub fn bundled_dir(app: &AppHandle) -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("KODE_BUNDLED_EXTENSIONS_DIR") {
         return Some(PathBuf::from(dir));
@@ -527,6 +571,7 @@ pub async fn extension_uninstall(app: AppHandle, id: String) -> Result<(), Strin
     let notify = app.clone();
     let views = id.clone();
     blocking(app, move |host, _| host.uninstall(&id).map_err(|e| format!("{e:#}"))).await?;
+    revoke_grant(&views).await;
     view::close_extension(&notify, &views);
     changed(&notify);
     Ok(())
@@ -541,6 +586,7 @@ pub async fn extension_set_enabled(app: AppHandle, id: String, enabled: bool) ->
     })
     .await?;
     if !enabled {
+        revoke_grant(&views).await;
         view::close_extension(&notify, &views);
     }
     changed(&notify);
