@@ -887,7 +887,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
   // Bots ("伙伴"): named agents shared with Kode. A bot's contact opens its
   // main conversation; the first message starts it with the bot's persona.
   const BOT_CEILINGS = [{ value: 'plan', label: '只做计划' }, { value: 'default', label: '改动前询问' }, { value: 'acceptEdits', label: '可以改文件' }, { value: 'bypassPermissions', label: '完全访问' }]
-  const BOT_GLYPH = 'M4 5.5h8a1.5 1.5 0 0 1 1.5 1.5v4.5A1.5 1.5 0 0 1 12 13H4a1.5 1.5 0 0 1-1.5-1.5V7A1.5 1.5 0 0 1 4 5.5zM8 3v2.5M6 9h.01M10 9h.01'
   async function botsCall(body) {
     const response = await fetchHost('/api/kode/bots', body ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { credentials: 'same-origin', cache: 'no-store' })
     const value = await parseHostJson(response)
@@ -909,28 +908,45 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     useEffect(() => { void refreshBots() }, [])
     return snapshot
   }
-  // Cindy-style "伙伴" group above the projects: each bot is a contact whose
-  // row opens its main conversation. Bot conversations do not appear under
-  // projects.
-  function BotsSection({ open, statuses, activeId }) {
+  // lucide "bot": line icon in the same weight as dsh's panel glyphs.
+  function BotIcon({ size = 16 }) {
+    return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
+      h('path', { d: 'M12 8V4H8' }), h('rect', { width: 16, height: 12, x: 4, y: 8, rx: 2 }), h('path', { d: 'M2 14h2' }), h('path', { d: 'M20 14h2' }), h('path', { d: 'M15 13v2' }), h('path', { d: 'M9 13v2' }))
+  }
+  // The 伙伴 row's glyph also hangs the bot list right under that row, like
+  // Cindy's companions: each bot opens its main conversation (or the start
+  // form when it has none). The list lives outside the row's button, and its
+  // clicks stop there so they never select the Bots page by bubbling.
+  function BotsNavGlyph({ size, active, openSession }) {
+    const seat = useRef(null), [host, setHost] = useState(null)
+    const wide = size === 16
+    useEffect(() => {
+      const row = seat.current?.closest('button')
+      if (!wide || !row?.parentNode) return
+      const box = document.createElement('div')
+      box.className = 'kode-bots-nest'
+      row.after(box)
+      setHost(box)
+      return () => { box.remove(); setHost(null) }
+    }, [wide])
+    return h(React.Fragment, null,
+      h('span', { ref: seat, className: 'kode-bots-glyph' }, h(BotIcon, { size })),
+      host && createPortal(h(BotsNest, { openSession }), host))
+  }
+  function BotsNest({ openSession }) {
     const { data } = useBots()
-    const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem('kode.bots.collapsed') === '1' } catch { return false } })
     if (!data) return null
-    const toggle = () => { const next = !collapsed; setCollapsed(next); try { localStorage.setItem('kode.bots.collapsed', next ? '1' : '0') } catch {} }
-    const start = bot => { requestedBotStart = bot?.id; openBotsPage?.() }
-    return h('div', { className: 'kode-bots-section' },
-      h('div', { className: 'kode-bots-head' },
-        h('button', { type: 'button', className: 'kode-bots-title', 'aria-expanded': !collapsed, onClick: toggle }, h(IconChevronDownOutlineRegular, { size: 12, style: collapsed ? { transform: 'rotate(-90deg)' } : undefined }), '伙伴'),
-        h('button', { type: 'button', className: 'kode-bots-add', title: '新建伙伴', 'aria-label': '新建伙伴', onClick: () => start(null) }, h(IconPlusOutlineRegular, { size: 14 }))),
-      !collapsed && (data.bots.length ? data.bots.map(bot => {
-        const main = bot.main_session_id, status = main && statuses?.[main]
-        const busy = status === 'running' || status === 'ongoing' || status?.state === 'running'
-        return h('button', { key: bot.id, type: 'button', className: `kode-bot-row${main && main === activeId ? ' active' : ''}`, title: bot.persona || bot.name, onClick: () => main ? open(main) : start(bot) },
-          h('span', { className: 'kode-bot-avatar' }, bot.name.slice(0, 1).toUpperCase(), busy && h('span', { className: 'kode-bot-busy', 'aria-label': '正在工作' })),
+    const start = bot => { requestedBotStart = bot?.id ?? null; openBotsPage?.() }
+    return h('div', { className: 'kode-bots-list', onClick: event => event.stopPropagation() },
+      ...data.bots.map(bot => {
+        const main = bot.main_session_id
+        return h('button', { key: bot.id, type: 'button', className: 'kode-bot-row', title: bot.persona || bot.name, onClick: () => main ? openSession(main) : start(bot) },
+          h('span', { className: 'kode-bot-avatar' }, bot.name.slice(0, 1).toUpperCase()),
           h('span', { className: 'kode-bot-name' }, bot.name),
           data.default_bot === bot.id && h('span', { className: 'kode-bot-tag' }, '默认'),
-          !main && h('span', { className: 'kode-bot-hint' }, '开始对话'))
-      }) : h('button', { type: 'button', className: 'kode-bot-row kode-bot-empty', onClick: () => start(null) }, '创建第一个伙伴')))
+          !main && h('span', { className: 'kode-bot-hint' }, '开始'))
+      }),
+      h('button', { type: 'button', className: 'kode-bot-row kode-bot-new', onClick: () => start(null) }, h('span', { className: 'kode-bot-avatar' }, h(IconPlusOutlineRegular, { size: 12 })), h('span', { className: 'kode-bot-name' }, data.bots.length ? '新建伙伴' : '创建第一个伙伴')))
   }
   function BotEditor({ draft, data, busy, onChange, onSave, onCancel }) {
     const agents = data.agents.map(agent => ({ value: agent.backend_key, label: agent.name }))
@@ -1845,7 +1861,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h('style', null, remoteCss + savedCss), h(Failure, { text: error || data.error }),
       busy && h('div', { className: 'kode-host-progress', role: 'status', 'aria-live': 'polite' }, '正在打开会话…'),
       notice && h('div', { className: 'kode-host-progress', role: 'status' }, notice),
-      data.current === 'local' && h(BotsSection, { open, statuses: sessionStatuses, activeId: props.activeSessionId ?? props.selectedSessionId }),
       h(native, { ...props, ...(props.useStore ? { useStore: useViewStore } : {}), ...(viewActions ? { actions: viewActions } : {}), useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
         startSession: (id, options) => { const route = merged.routes.get(id); if (route) void navigate(route.hostId, route.placeholder ? { create: true } : { workspaceId: route.id }); else props.startSession(id, options) },
         renameWorkspace: (id, title) => merged.routes.has(id) ? mutate(id, 'rename-workspace', { workspaceId: merged.routes.get(id).id, title }) : props.renameWorkspace(id, title),
@@ -2734,7 +2749,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 @media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 .kode-panel-host{width:100%;height:100%}
-.kode-bots-section{padding:4px 0 8px}.kode-bots-head{display:flex;align-items:center;justify-content:space-between;padding:4px 8px 2px}.kode-bots-title{display:inline-flex;align-items:center;gap:4px;border:0;background:none;padding:2px 0;color:var(--dsw-alias-label-tertiary);font-size:12px;cursor:pointer}.kode-bots-add{border:0;background:none;color:var(--dsw-alias-label-tertiary);padding:2px;border-radius:6px;cursor:pointer;display:inline-flex}.kode-bots-add:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:5px 8px;border-radius:8px;color:var(--dsw-alias-label-primary);font-size:13px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform)}.kode-bot-row.active{background:var(--dsw-alias-bg-module-platform);font-weight:500}.kode-bot-row .kode-bot-avatar{width:22px;height:22px;font-size:11px;position:relative}.kode-bot-busy{position:absolute;right:-1px;bottom:-1px;width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-business-primary);box-shadow:0 0 0 2px var(--dsw-specific-sidebar-fill)}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-empty{color:var(--dsw-alias-label-tertiary)}
+.kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}
 .kode-bots-page{padding:24px;box-sizing:border-box;width:100%;margin:0 auto}.kode-bot-avatar{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600;flex-shrink:0}.kode-bot-persona{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}.kode-bot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-bot-actions>.kode-secondary{margin-right:auto;font-family:ui-monospace,monospace}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}
@@ -2760,7 +2775,8 @@ html[data-kode-embed][data-kode-platform=macos] [data-kode-titlebar]{display:blo
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-settings' }, KodeMainPage))
       scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode' }, IconAgentPresetOutlineRegular))
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-bots' }, () => h(KodeBotsPage, { ui: () => scope.get('uiWorkspace') })))
-      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-bots', order: 5, label: '伙伴' }, () => glyph(BOT_GLYPH)))
+      const openBotSession = async id => { scope.layout.selectPanel(null); await scope.get('uiWorkspace')?.openSession(id) }
+      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-bots', order: 5, label: '伙伴' }, props => h(BotsNavGlyph, { ...props, openSession: openBotSession })))
       if (kodeEmbedded()) {
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
         scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-leave', order: 7, label: 'Kode 终端' }, () => glyph(TERMINAL_GLYPH)))
