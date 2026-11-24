@@ -19,6 +19,7 @@ use axum::{
 use base64::Engine;
 use kode_core::{
     config::{BackendConfig, Config},
+    process::HideConsole,
     session::{state::Status as CoreStatus, Session},
     CoreEvent, SessionId,
 };
@@ -1536,7 +1537,15 @@ struct InputReq {
     bytes_b64: Option<String>,
 }
 
+#[cfg(not(windows))]
 const TEXT_INPUT_SUBMIT_DELAY: Duration = Duration::from_millis(50);
+
+// ConPTY and Windows TUI renderers can consume the text after the bridge has
+// already written it. Keep Enter separate, but leave enough time for the
+// composer to become ready so a later mobile message cannot append to it.
+#[cfg(windows)]
+const TEXT_INPUT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+
 
 /// REST `text` 表示一条要提交的消息，不是原始 PTY 字节。
 ///
@@ -3487,6 +3496,7 @@ fn resolve_diff_target(root: &std::path::Path, rel: &str) -> (PathBuf, String) {
 /// shell-out `git -C <path> <args>`,成功返回 trimmed stdout。失败返 None。
 fn run_git(path: &std::path::Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
+        .hide_console()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -3500,6 +3510,7 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> Option<String> {
 
 fn run_git_raw(path: &std::path::Path, args: &[&str]) -> Result<String, ApiError> {
     let output = std::process::Command::new("git")
+        .hide_console()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -3515,6 +3526,7 @@ fn run_git_raw(path: &std::path::Path, args: &[&str]) -> Result<String, ApiError
 
 fn run_diff_no_index(path: &std::path::Path) -> Result<String, ApiError> {
     let output = std::process::Command::new("git")
+        .hide_console()
         .args(["--no-pager", "diff", "--no-index", "--"])
         .arg("/dev/null")
         .arg(path)

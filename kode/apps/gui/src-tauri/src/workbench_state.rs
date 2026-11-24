@@ -2,6 +2,7 @@
 //! native registrations are independent of GUI's opened-tabs snapshot.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use kode_core::process::HideConsole;
 use crate::persistence::PersistedState;
 #[derive(Deserialize,Serialize)]
 struct Connection { url: String, token_file: std::path::PathBuf, server_command: Option<std::path::PathBuf>, server_config: Option<std::path::PathBuf>, #[serde(default)] server_args: Vec<String> }
@@ -49,7 +50,7 @@ pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, Str
     if client.get(&node).bearer_auth(token.trim()).send().await.is_err() {
         let command=config.server_command.as_ref().ok_or_else(||anyhow::anyhow!("Kode backend is not running; start its configured service"))?;
         let args=config.server_config.as_ref().ok_or_else(||anyhow::anyhow!("Kode backend service config is missing"))?;
-        std::process::Command::new(command).args(&config.server_args).args(["--config",&args.to_string_lossy(),"--token-file",&config.token_file.to_string_lossy(),"--bind",&format!("{}:{}",url.host_str().unwrap(),url.port().unwrap_or(80))]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+        std::process::Command::new(command).hide_console().args(&config.server_args).args(["--config",&args.to_string_lossy(),"--token-file",&config.token_file.to_string_lossy(),"--bind",&format!("{}:{}",url.host_str().unwrap(),url.port().unwrap_or(80))]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
         let mut ready=false;
         for _ in 0..30 {if client.get(format!("{}/api/v1/messaging/node",config.url.trim_end_matches('/'))).bearer_auth(token.trim()).send().await.is_ok_and(|response|response.status().is_success()){ready=true;break};tokio::time::sleep(std::time::Duration::from_millis(100)).await;}
         if !ready {anyhow::bail!("Kode backend could not start")}

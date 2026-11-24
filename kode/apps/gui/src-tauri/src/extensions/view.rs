@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+use kode_core::process::HideConsole;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use tauri::webview::PageLoadEvent;
@@ -343,7 +345,7 @@ fn open_external(url: &str) -> std::io::Result<()> {
     let mut command = std::process::Command::new("open");
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut c = std::process::Command::new("cmd");
+        let mut c = std::process::Command::new("cmd").hide_console();
         c.args(["/C", "start", ""]);
         c
     };

@@ -5,7 +5,7 @@ edition.workspace = true
 description = "UI-agnostic core for kode (kill la kode): PTY, sessions, jsonl tail, config"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "process"] }
 portable-pty = "0.9"
 vt100 = { package = "vt100-ctt", version = "0.17" }
 serde = { version = "1", features = ["derive"] }

@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use kode_core::process::HideConsole;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::endpoints::{register_transport, EndpointAddReq, EndpointSummary};
@@ -315,7 +316,7 @@ pub(crate) fn run_scp(
     local: &str,
     remote: &str,
 ) -> Result<String, String> {
-    let mut cmd = Command::new("scp");
+    let mut cmd = Command::new("scp").hide_console();
     if ssh_port != 0 && ssh_port != 22 {
         cmd.arg("-P").arg(ssh_port.to_string());
     }
@@ -327,7 +328,7 @@ pub(crate) fn run_scp(
 
 /// `ssh -p <port> -o BatchMode=yes <host> <cmd>`
 pub(crate) fn run_ssh(ssh_host: &str, ssh_port: u16, cmd_str: &str) -> Result<String, String> {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = Command::new("ssh").hide_console();
     if ssh_port != 0 && ssh_port != 22 {
         cmd.arg("-p").arg(ssh_port.to_string());
     }

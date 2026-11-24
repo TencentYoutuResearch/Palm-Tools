@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use kode_core::process::HideConsole;
 
 use serde::{Deserialize, Serialize};
 
@@ -1037,6 +1038,7 @@ fn resolve_diff_target(root: &Path, rel: &str) -> (PathBuf, String) {
 
 fn run_git(path: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
+        .hide_console()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -1050,6 +1052,7 @@ fn run_git(path: &Path, args: &[&str]) -> Option<String> {
 
 fn run_git_raw(path: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
+        .hide_console()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -1063,6 +1066,7 @@ fn run_git_raw(path: &Path, args: &[&str]) -> Result<String, String> {
 
 fn run_diff_no_index(path: &Path) -> Result<String, String> {
     let output = Command::new("git")
+        .hide_console()
         .args(["--no-pager", "diff", "--no-index", "--"])
         .arg("/dev/null")
         .arg(path)
@@ -1292,6 +1296,7 @@ mod tests {
         let root = repo.path();
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
+                .hide_console()
                 .args([
                     "-c",
                     "user.name=Test",

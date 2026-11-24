@@ -16,6 +16,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+use kode_core::process::HideConsole;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -138,7 +139,7 @@ impl Backends {
         std::fs::create_dir_all(launch.data_dir).map_err(|e| e.to_string())?;
 
         let program = resolve_command(&backend.command, launch.dir);
-        let mut command = Command::new(&program);
+        let mut command = Command::new(&program).hide_console();
         command
             .args(&backend.args)
             .current_dir(launch.dir)

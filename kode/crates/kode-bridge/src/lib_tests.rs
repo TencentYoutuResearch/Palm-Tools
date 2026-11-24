@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use std::path::PathBuf;
 
 use super::*;
@@ -260,6 +261,18 @@ fn mobile_text_input_strips_only_trailing_line_endings() {
     assert_eq!(text_input_body("first\nsecond\n"), "first\nsecond");
     assert_eq!(text_input_body("\n"), "");
     assert_eq!(text_input_body("plain text"), "plain text");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn non_windows_mobile_text_input_keeps_immediate_submit_delay() {
+    assert_eq!(TEXT_INPUT_SUBMIT_DELAY, Duration::from_millis(50));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_mobile_text_input_waits_for_conpty_render() {
+    assert_eq!(TEXT_INPUT_SUBMIT_DELAY, Duration::from_millis(300));
 }
 
 #[cfg(not(windows))]

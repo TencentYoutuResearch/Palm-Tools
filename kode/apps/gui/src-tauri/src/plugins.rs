@@ -1,6 +1,7 @@
 //! Cross-platform plugin inventory and Git-backed skill deployment.
 
 use anyhow::{bail, Context, Result};
+use kode_core::process::HideConsole;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -262,6 +263,7 @@ fn parse_native_plugins(value: serde_json::Value) -> Vec<NativePlugin> {
 
 fn run_json_command(program: &str, args: &[&str]) -> Result<serde_json::Value> {
     let mut child = Command::new(program)
+        .hide_console()
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -357,6 +359,7 @@ fn cursor_backend() -> NativeBackendInventory {
     }
     plugins.sort_by(|a, b| a.name.cmp(&b.name));
     let cli_available = Command::new("cursor-agent")
+        .hide_console()
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -479,6 +482,7 @@ pub fn plugin_config_set(args: PluginConfigArgs) -> Result<(), String> {
 
 fn git(repo: &Path, args: &[&str]) -> Result<bool> {
     let output = Command::new("git")
+        .hide_console()
         .current_dir(repo)
         .args(args)
         .output()
@@ -495,6 +499,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<bool> {
 
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
     Command::new("git")
+        .hide_console()
         .current_dir(repo)
         .args(args)
         .output()
@@ -616,6 +621,7 @@ pub async fn plugin_sync_now() -> Result<PluginSyncReport, String> {
         if cfg.auto_push && cfg.remote.is_some() {
             git(&repo, &["add", "plugins"])?;
             if Command::new("git")
+                .hide_console()
                 .current_dir(&repo)
                 .args(["diff", "--cached", "--quiet"])
                 .status()?

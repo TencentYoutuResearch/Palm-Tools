@@ -36,7 +36,6 @@
 //!    (见 [`session_settings_json`])。
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// kode 管理的 Stop hook prompt（"守门员"）。
 ///
@@ -938,7 +937,7 @@ fn raw_hook_relay_command() -> String {
 }
 
 fn supports_subcommand(bin: &Path, subcommand: &str) -> bool {
-    Command::new(bin)
+    crate::process::command(bin)
         .args([subcommand, "--help"])
         .output()
         .map(|output| output.status.success())

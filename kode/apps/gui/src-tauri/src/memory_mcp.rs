@@ -41,6 +41,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use kode_core::config::{BackendConfig, McpSetupSpec};
+use kode_core::process::HideConsole;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use toml_edit::{value, Array, DocumentMut, Item, Table};
@@ -199,6 +200,7 @@ fn run_codebuddy_style(cli: &str, bin: &Path, root: &Path) -> Result<(), String>
     }
     let env_arg = format!("KODE_MEMORY_ROOT={}", root.display());
     let output = Command::new(cli)
+        .hide_console()
         .args([
             "mcp",
             "add",
@@ -231,9 +233,11 @@ fn run_claude_style(cli: &str, bin: &Path, root: &Path) -> Result<(), String> {
     // claude 系 `mcp add` 遇到同名条目会拒绝("already exists")而不是覆盖;
     // 走到这里说明现有条目缺失或指向旧 kode-memory-mcp,先移除再添加。
     let _ = Command::new(cli)
+        .hide_console()
         .args(["mcp", "remove", "-s", "user", MCP_SERVER_NAME])
         .output();
     let output = Command::new(cli)
+        .hide_console()
         .args([
             "mcp",
             "add",
@@ -270,6 +274,7 @@ fn run_codex_style(cli: &str, bin: &Path, root: &Path) -> Result<(), String> {
     if !toml_has_memory_server(&config_path, Some(bin)) {
         let env_arg = format!("KODE_MEMORY_ROOT={}", root.display());
         let output = Command::new(cli)
+            .hide_console()
             .args([
                 "mcp",
                 "add",

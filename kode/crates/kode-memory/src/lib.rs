@@ -19,6 +19,7 @@ pub mod fact;
 pub mod git_sync;
 pub mod hook_setup;
 pub mod metrics;
+mod process;
 pub mod prompt;
 pub mod runtime_context;
 pub mod store;

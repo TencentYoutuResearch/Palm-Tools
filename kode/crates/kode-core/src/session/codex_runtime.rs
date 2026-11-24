@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use crate::process::HideConsole;
 
 pub(super) fn isolated_args(command: &str, args: &[String]) -> Result<Vec<String>> {
     // A remote server cannot inherit this PTY's KODE_SESSION_ID either.
@@ -44,6 +45,7 @@ fn with_isolation_flag(args: &[String], supported: bool) -> Vec<String> {
 
 fn supports_no_daemon(command: &str) -> Result<bool> {
     let mut child = Command::new(command)
+        .hide_console()
         .arg("--help")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

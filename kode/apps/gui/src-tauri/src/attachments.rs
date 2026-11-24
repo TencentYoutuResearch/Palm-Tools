@@ -10,6 +10,7 @@ use crate::{
     persistence::{self, PersistedEndpoint},
 };
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
+use kode_core::process::HideConsole;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -163,7 +164,7 @@ fn validate_source(path: &Path) -> Result<bool, String> {
 }
 
 fn ssh_command(ep: &PersistedEndpoint, script: &str) -> Command {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = Command::new("ssh").hide_console();
     if ep.ssh_port != 0 && ep.ssh_port != 22 {
         cmd.args(["-p", &ep.ssh_port.to_string()]);
     }
@@ -184,7 +185,7 @@ fn ssh_command(ep: &PersistedEndpoint, script: &str) -> Command {
 }
 
 fn scp_command(ep: &PersistedEndpoint, path: &Path, destination: &str, directory: bool) -> Command {
-    let mut cmd = Command::new("scp");
+    let mut cmd = Command::new("scp").hide_console();
     // Force legacy SCP so shell quoting has one well-defined interpretation.
     cmd.arg("-O");
     if directory {
