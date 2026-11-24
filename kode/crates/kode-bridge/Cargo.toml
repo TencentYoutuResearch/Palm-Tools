@@ -33,6 +33,7 @@ url = "2"
 libc = "0.2"
 sysinfo = "0.33"
 ruzstd = "0.8"
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]
 kode-relay = { path = "../kode-relay" }

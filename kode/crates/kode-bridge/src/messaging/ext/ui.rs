@@ -27,6 +27,13 @@ impl Default for Feed {
     }
 }
 
+impl Feed {
+    /// Kode's own notifications (bot runs) ride the same feed as extension `kode`.
+    pub(super) fn send(&self, message: Value) {
+        let _ = self.sender.send(message);
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Badge {

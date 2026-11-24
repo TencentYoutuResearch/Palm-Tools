@@ -168,6 +168,10 @@ impl Manifest {
         if !valid_id(&self.id) {
             bail!("invalid extension id `{}`", self.id);
         }
+        // Kode's own notices use this name on the UI feed.
+        if self.id == "kode" {
+            bail!("extension id `kode` is reserved");
+        }
         if self.name.trim().is_empty() {
             bail!("extension name is empty");
         }

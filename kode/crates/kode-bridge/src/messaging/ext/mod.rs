@@ -6,7 +6,10 @@
 mod projector;
 mod store;
 mod tools;
+mod fswatch;
 mod ui;
+mod watch_spec;
+mod watches;
 #[cfg(test)]
 mod tests;
 
@@ -47,6 +50,7 @@ pub const CAPABILITIES: &[&str] = &[
     "bots.read",
     "ui.notify",
     "tools.provide",
+    "events.publish",
 ];
 
 const FEATURES: &[&str] = &[
@@ -57,6 +61,8 @@ const FEATURES: &[&str] = &[
     "bots",
     "ui.notify",
     "agent_tools",
+    "events.publish",
+    "bot_watches",
 ];
 const MAX_LABELS: usize = 16;
 const MAX_META_BYTES: usize = 16 * 1024;
@@ -71,6 +77,7 @@ pub struct Gateway {
     grace: Duration,
     ui: ui::Feed,
     tools: tools::Tools,
+    watches: watches::Signals,
 }
 
 impl Gateway {
@@ -97,12 +104,14 @@ impl Gateway {
             grace,
             ui: Default::default(),
             tools,
+            watches: Default::default(),
         }
     }
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
         self.wake.notify_waiters();
+        self.watches.wake.notify_waiters();
     }
 
     fn append(&self, session: u64, kind: &str, payload: Value) -> anyhow::Result<()> {
@@ -219,6 +228,8 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/ext/v1/tools/:id/result", post(tools::result))
         .route("/api/ext/v1/events", get(events))
         .route("/api/ext/v1/events/stream", get(stream))
+        .route("/api/ext/v1/events/publish", post(watches::publish))
+        .route("/api/v1/messaging/workbench/watches", get(watches::list).post(watches::change))
         .with_state(hub)
 }
 
@@ -237,7 +248,8 @@ async fn grant(
     Json(req): Json<GrantRequest>,
 ) -> Result<Json<Value>> {
     admin(&hub, &h)?;
-    if !valid_id(&req.extension_id) {
+    // `kode` names Kode's own notices on the UI feed.
+    if !valid_id(&req.extension_id) || req.extension_id == "kode" {
         return Err(Error(
             StatusCode::BAD_REQUEST,
             "invalid extension id".into(),
@@ -804,6 +816,8 @@ async fn stream(
 
 /// Follow the durable runtime log and append derived turn events. The cursor
 /// is persisted, so a restart neither replays old turns nor skips new ones.
+pub(super) use watches::spawn as spawn_watches;
+
 pub(super) fn spawn_projector(hub: Arc<Hub>) {
     tokio::spawn(async move {
         let Some(ctx) = hub.ctx.upgrade() else { return };

@@ -581,3 +581,136 @@ async fn extension_tools_reach_only_their_sessions_and_round_trip_through_the_ex
         .json(&json!({"name":"team_channel_post","arguments":{}})).send().await.unwrap();
     assert_eq!(foreign.status(), 404, "a session the extension does not own cannot call its tools");
 }
+
+async fn watches(s: &Server, change: Value) -> Value {
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v1/messaging/workbench/watches", s.url))
+        .bearer_auth(ADMIN)
+        .json(&change)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert!(status.is_success(), "{body}");
+    body
+}
+
+async fn until<F: Fn(&Value) -> bool>(s: &Server, what: &str, ok: F) -> Value {
+    for _ in 0..200 {
+        let view: Value = reqwest::Client::new()
+            .get(format!("{}/api/v1/messaging/workbench/watches", s.url))
+            .bearer_auth(ADMIN)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if ok(&view) {
+            return view;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn published_events_wake_a_bot_into_its_own_run_session() {
+    let s = server().await;
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    let _host = host(s.ctx.clone(), recorded.clone());
+    let client = reqwest::Client::new();
+    let work = tempfile::tempdir().unwrap();
+    let kit = bots(&s, json!({"action":"upsert","bot":{"name":"Kit","persona":"You triage.","backend_key":"claude","permission_ceiling":"default","default_cwd":work.path()}})).await;
+    let kit_id = kit["default_bot"].as_str().unwrap().to_owned();
+
+    let bad = client
+        .post(format!("{}/api/v1/messaging/workbench/watches", s.url))
+        .bearer_auth(ADMIN)
+        .json(&json!({"action":"upsert","bot":kit_id,"spec":{"name":"x","on":{"topic":"fs.changed"},"do":"look"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400, "file watches need a workspace");
+
+    watches(&s, json!({"action":"upsert","bot":kit_id,"spec":{"name":"Mentions","on":{"topic":"kode.team/mention","match":{"room":"general"}},"do":"Answer the mention.","policy":{"coalesce_secs":0,"permission":"acceptEdits"}}})).await;
+    // Watches any finished turn: the run's own turn must not trigger it.
+    watches(&s, json!({"action":"upsert","bot":kit_id,"spec":{"name":"Turns","on":{"topic":"session.turn_completed"},"do":"Summarize.","policy":{"coalesce_secs":0}}})).await;
+
+    let silent = grant(&s, "kode.team", &["events.subscribe"]).await;
+    let refused = client.post(format!("{}/api/ext/v1/events/publish", s.url)).bearer_auth(&silent).json(&json!({"name":"mention","payload":{}})).send().await.unwrap();
+    assert_eq!(refused.status(), 403);
+    let team = grant(&s, "kode.team", &["events.publish"]).await;
+    let publish_event = |payload: Value| client.post(format!("{}/api/ext/v1/events/publish", s.url)).bearer_auth(team.clone()).json(&json!({"name":"mention","payload":payload})).send();
+    let other_room: Value = publish_event(json!({"room":"random","text":"hi"})).await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(other_room["topic"], "kode.team/mention");
+    publish_event(json!({"room":"general","text":"@Kit can you check the build?"})).await.unwrap().error_for_status().unwrap();
+
+    let view = until(&s, "the run to start", |v| v["runs"].as_array().unwrap().iter().any(|r| r["status"] == "running")).await;
+    assert_eq!(view["runs"].as_array().unwrap().len(), 1, "the other room's mention does not match");
+    let run = view["runs"][0].clone();
+    let session = run["session_id"].as_u64().unwrap();
+    {
+        let recorded = recorded.lock();
+        let payload = &recorded.creates[0];
+        assert_eq!(payload["permission_mode"], "default", "the bot ceiling caps the watch");
+        assert_eq!(payload["cwd"].as_str(), work.path().to_str(), "a run with no event workspace works in the bot's folder");
+        assert!(payload["system_prompt"].as_str().unwrap().contains("You triage."));
+    }
+    for _ in 0..100 {
+        if !recorded.lock().inputs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let task = recorded.lock().inputs[0].clone();
+    assert!(task.contains("@Kit can you check the build?") && task.contains("Answer the mention."), "{task}");
+
+    publish_as(
+        &s.ctx,
+        "gui:1:1",
+        "claude",
+        "idle",
+        json!([
+            {"key":"r1","kind":"session.status","payload":{"status":"busy"}},
+            {"key":"r2","kind":"message","payload":{"id":"r2","role":"assistant","text":"Build is green; replied in #general."}},
+            {"key":"r3","kind":"session.status","payload":{"status":"idle"}},
+        ]),
+    );
+    let view = until(&s, "the run to finish", |v| v["runs"][0]["status"] == "completed").await;
+    assert_eq!(view["runs"][0]["summary"], "Build is green; replied in #general.");
+    assert_eq!(view["runs"][0]["session_id"], session);
+    assert_eq!(view["unseen"][&kit_id], 1);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let view = until(&s, "settled runs", |_| true).await;
+    assert_eq!(view["runs"].as_array().unwrap().len(), 1, "a run's own turn never triggers a watch");
+
+    let seen = watches(&s, json!({"action":"seen","bot":kit_id})).await;
+    assert!(seen["unseen"].get(&kit_id).is_none());
+}
+
+#[tokio::test]
+async fn file_changes_wake_a_bot_but_its_own_edits_do_not() {
+    let s = server().await;
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    let _host = host(s.ctx.clone(), recorded.clone());
+    let repo = tempfile::tempdir().unwrap();
+    let kit = bots(&s, json!({"action":"upsert","bot":{"name":"Kit","persona":"p","backend_key":"claude","permission_ceiling":"default","default_cwd":"/tmp"}})).await;
+    let kit_id = kit["default_bot"].as_str().unwrap().to_owned();
+    watches(&s, json!({"action":"upsert","bot":kit_id,"spec":{"name":"Docs","on":{"topic":"fs.changed","match":{"workspace":repo.path(),"paths":"docs/**"}},"do":"Check the docs.","policy":{"coalesce_secs":1}}})).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::write(repo.path().join("docs/a.md"), "a").unwrap();
+    std::fs::write(repo.path().join("docs/b.md"), "b").unwrap();
+
+    let view = until(&s, "a file-triggered run", |v| v["runs"].as_array().unwrap().iter().any(|r| r["status"] == "running")).await;
+    let real = repo.path().canonicalize().unwrap();
+    assert_eq!(view["runs"][0]["workspace"].as_str(), real.to_str(), "the run works where the files changed");
+    assert_eq!(recorded.lock().creates[0]["cwd"].as_str(), real.to_str());
+    // The run edits docs itself: that must not queue another run.
+    std::fs::write(repo.path().join("docs/c.md"), "c").unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    let view = until(&s, "runs", |_| true).await;
+    assert_eq!(view["runs"].as_array().unwrap().len(), 1, "{}", view["runs"]);
+}

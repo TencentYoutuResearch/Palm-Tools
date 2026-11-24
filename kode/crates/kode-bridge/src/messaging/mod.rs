@@ -134,6 +134,7 @@ impl Hub {
     }
     pub fn start(self: &Arc<Self>) {
         ext::spawn_projector(self.clone());
+        ext::spawn_watches(self.clone());
         let hub = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));

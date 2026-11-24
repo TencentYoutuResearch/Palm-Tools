@@ -244,6 +244,30 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
 | `POST bots/:id/spawn` `{node_id?, cwd?, worktree?, labels, parent?}` | 用伙伴的配置开一个临时会话 |
 | 事件 `bot.session_rotated` / `bot.turn_completed` | 主会话轮换、回合结束 |
 
+### 9.6 关注：事件唤醒伙伴（不用定时任务）
+
+伙伴自己开始做事，靠的是**关注**（watch）：「当某件事发生时，伙伴开一个独立会话去处理」。没有定时器，也不轮询会话。
+
+```jsonc
+{
+  "name": "提交后看一眼",
+  "on": { "topic": "git.commit", "match": { "workspace": "/Users/me/repo", "branch": "main" } },
+  "do": "看这次提交有没有明显问题，有就列出来。",
+  "policy": { "coalesce_secs": 30, "max_runs_per_hour": 6, "permission": "plan", "notify": "attention", "carry_last_summary": true }
+}
+```
+
+- **事件来源**：都进同一条持久事件日志（第 5 节），一个分发器按游标跟随。
+  - 会话：`session.turn_completed`、`session.awaiting`、`session.exited`，补上 `title`、`cwd`、`backend_key`、`labels`，可以按工作区（含子目录）和标签过滤。
+  - 文件与 Git：`fs.changed {workspace, paths}`、`git.commit`、`git.branch`。用系统文件通知（macOS FSEvents），只监听有关注的工作区，一阵改动静默 2 秒后合成一条；Git 只在 HEAD 真的移动时才发。
+  - 扩展：`POST /api/ext/v1/events/publish {name, payload}`（capability `events.publish`），主题是 `<扩展 id>/<name>`。kode-team 发 `kode.team/mention`、`message`、`call_finished`、`crew_awaiting`。
+- **匹配**：字段相等、`*`/`**` 路径通配、数组任一命中、工作区前缀（按路径段，不是字符串前缀）。
+- **运行**：命中的事件在窗口内合并成一次运行；同一个关注同时只跑一个，每小时有上限。运行是伙伴的**独立会话**（不进主会话），dsh 在就在 dsh 里开（runtime 命令 `bot_run`），否则在 GUI 里开；工作区依次取关注指定的、事件发生的地方、伙伴自己的文件夹。任务里写明触发事件、上次结论和要做的事。
+- **权限**：默认只读（`plan`），最高「可以改文件」，并且不超过伙伴上限（9.4 第 2 条）。
+- **防循环**：运行会话自己的事件不触发任何关注；伙伴运行期间（及结束后 10 秒）它在该工作区的文件改动不唤醒它自己；每小时上限兜底。
+- **结果**：运行的第一轮结束即完成，结论记入「动态」；需要人处理或失败时通知（可改成每次都通知或不通知）。动态有未读数，dsh 侧栏伙伴名后显示。
+- **接口**：`GET /api/v1/messaging/workbench/watches?after=<revision>`（长轮询）、`POST …/watches {action: upsert|toggle|delete|run|seen}`，admin。dsh 的 `/api/kode/bots` 用 `watch_<action>` 代理。
+
 ## 10. 语言与 SDK 策略
 
 - **统一在协议层，不强制统一语言**。`kode.api/v1` 的 JSON Schema 是唯一事实来源，各语言 SDK 由它生成。
@@ -357,3 +381,9 @@ dsh 全屏时 Kode 的导航栏是隐藏的，面板改由 dsh 承载：
 - SDK 增加 `serveTools(handlers)`。
 
 尚未做：`sidebarSections`、`sessionActions`、`cards`、插件经扩展 API 推角标（目前只能由面板页面上报）。
+
+### P0-d 伙伴（第二步）：关注
+
+见 9.6。已做：分发器、文件与 Git 事件、`events.publish`、dsh `bot_run`、伙伴页的「关注」与「动态」、侧栏未读数和进行中提示、GUI 通知（扩展 id `kode` 保留给 Kode 自己）、kode-team 发布团队事件、SDK `publish()`。
+
+尚未做：IM/邮件等外部来源、关注里直接引用"上一次运行的会话"继续对话、手机上的关注管理。
