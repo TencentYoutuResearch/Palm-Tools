@@ -42,10 +42,15 @@ jobs:
       - name: Build SpecOps node bundle
         run: pnpm install --frozen-lockfile && pnpm build
         working-directory: kode/apps/specops
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - name: Build bundled dsh extension
         # run.sh app ships this in the app; build it on every change so a
         # broken integration fails here rather than in the release job.
-        run: node scripts/build-kode-extension.js
+        run: |
+          npm ci --ignore-scripts --omit=optional
+          node scripts/build-kode-extension.js
         working-directory: kode/integrations/dsh
       - run: cargo test -- --test-threads=1
 
