@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { agentFor, botsView, registerBotsApi } from '../src/bots-api.js'
+import { agentFor, botsView, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
 
 const runtime = {
   hasRuntime: type => type !== 'missing',
@@ -98,4 +98,41 @@ test("a bot without a chosen workspace starts in its own folder, created and reg
   assert.ok((await stat(own)).isDirectory())
   assert.deepEqual(registered, [{ path: own, title: 'Kit' }])
   assert.equal(created[0].workspace, own)
+})
+
+test('a watch run starts the bot in the watched folder at the capped mode, keyed by the Kode request', async () => {
+  const registered = [], created = []
+  const roster = { bots: [{ id: 'b1', name: 'Kit', backend_key: 'claude', permission_ceiling: 'acceptEdits', model: 'm' }], workspaces: { b1: '/bots/b1' }, persona_prompts: { b1: 'P' } }
+  const services = {
+    kodeAgents: runtime,
+    kodeSessionCreator: { create: async input => { created.push(input); return { address: { session_id: `s${created.length}` } } } },
+    workspaceRegistry: { list: () => registered, resolveByPath: async path => registered.find(row => row.path === path), create: async (path, title) => { registered.push({ path, title }) } },
+  }
+  const ctx = { get: name => services[name] }
+  const backend = { call: async () => roster }
+  const id = await runBotForWatch(ctx, backend, { bot_id: 'b1', task: 'Check docs', workspace: '/repo', permission: 'plan', title: 'Kit · Docs' }, 'watch.run-1')
+  assert.equal(id, 's1')
+  assert.deepEqual(registered, [{ path: '/repo', title: undefined }], 'a watched folder joins dsh as itself')
+  assert.equal(created[0].permission, 'read-only')
+  assert.equal(created[0].title, 'Kit · Docs')
+  assert.equal(created[0].model, 'm')
+  assert.equal(created[0].task, 'P\n\nCheck docs')
+  await runBotForWatch(ctx, backend, { bot_id: 'b1', task: 'again', workspace: '/repo', permission: 'acceptEdits' }, 'watch.run-1')
+  assert.equal(created[1].idempotency_key, created[0].idempotency_key, 'a retried Kode request reuses its creation')
+  assert.equal(created[1].permission, 'workspace-write')
+  await assert.rejects(runBotForWatch(ctx, backend, { bot_id: 'gone', task: 'x' }, 'r'), /不存在/)
+})
+
+test('watch actions pass through to Kode as its own actions', async () => {
+  let handler
+  const calls = []
+  registerBotsApi({ get: () => undefined, connection: { admit: () => ({ peer: { principal: { kind: 'owner' } } }) }, webServer: { register: route => { handler = route.handler } } }, { call: async (path, body) => { calls.push([path, body]); return { revision: 3 } } })
+  const res = () => ({ setHeader() {}, end(text) { this.body = JSON.parse(text) } })
+  const post = res()
+  await handler({ method: 'POST', async *[Symbol.asyncIterator]() { yield JSON.stringify({ action: 'watch_toggle', id: 'w1', enabled: false }) } }, post)
+  assert.deepEqual(calls.at(-1), ['/api/v1/messaging/workbench/watches', { action: 'toggle', id: 'w1', enabled: false }])
+  await handler({ method: 'GET', url: '/api/kode/bots?watches=1&after=2' }, res())
+  assert.deepEqual(calls.at(-1), ['/api/v1/messaging/workbench/watches?after=2', undefined])
+  await handler({ method: 'GET', url: '/api/kode/bots?watches=1&after=x' }, res())
+  assert.deepEqual(calls.at(-1), ['/api/v1/messaging/workbench/watches', undefined])
 })

@@ -219,6 +219,18 @@ export class RuntimeBridge {
       }
       return { id: publicId, runtime_session_id: created.sessionId }
     }
+    if (kind === 'bot_run') {
+      const { runBotForWatch } = await import('./bots-api.js')
+      const sessionId = await runBotForWatch(this.ctx, this.backend, payload, id)
+      // Kode follows the run by its routing id; wait for the first publication.
+      for (let attempt = 0; attempt < 40 && !this.ids.get(sessionId); attempt++) {
+        await this.publish()
+        if (!this.ids.get(sessionId)) await new Promise(resolve => setTimeout(resolve, 250))
+      }
+      const publicId = this.ids.get(sessionId)
+      if (!Number.isSafeInteger(publicId) || publicId <= 0) throw new Error('Run session was not published')
+      return { id: publicId, runtime_session_id: sessionId }
+    }
     if (kind === 'import_session') {
       // Kode GUI hands over a native session it has just stopped running in a
       // PTY; it waits until its own projection is gone before asking.

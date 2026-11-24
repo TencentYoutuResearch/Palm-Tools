@@ -490,7 +490,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     if (!actions?.openSection) throw new Error('设置尚未就绪，请稍后重试。')
     actions.openSection(section)
   }
-  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, requestedBotStart
+  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, requestedBotStart, requestedBotWatches
   function AgentControl({ sessionId, sessions, remote, slots }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions)
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')
@@ -958,7 +958,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       h(Failure, { text: library.error }))
   }
   function BotsNest({ openSession }) {
-    const { data } = useBots()
+    const { data } = useBots(), watches = useWatches().data
     if (!data) return null
     const start = bot => { requestedBotStart = bot?.id ?? null; openBotsPage?.() }
     return h('div', { className: 'kode-bots-list', onClick: event => event.stopPropagation() },
@@ -968,6 +968,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
           h(BotAvatar, { bot, size: 20 }),
           h('span', { className: 'kode-bot-name' }, bot.name),
           data.default_bot === bot.id && h('span', { className: 'kode-bot-tag' }, '默认'),
+          watches?.unseen?.[bot.id] > 0 && h('span', { className: 'kode-bot-badge', title: '有新的关注动态', onClick: event => { event.stopPropagation(); requestedBotWatches = bot.id; openBotsPage?.(); window.dispatchEvent(new CustomEvent('kode-bot-watches')) } }, watches.unseen[bot.id]),
+          watches?.runs.some(run => run.bot === bot.id && ['starting', 'running', 'needs_user'].includes(run.status)) && h('span', { className: 'kode-bot-busy', title: '正在处理关注的事' }),
           !main && h('span', { className: 'kode-bot-hint' }, '开始'))
       }),
       h('button', { type: 'button', className: 'kode-bot-row kode-bot-new', onClick: () => start(null) }, h('span', { className: 'kode-bot-avatar' }, h(IconPlusOutlineRegular, { size: 12 })), h('span', { className: 'kode-bot-name' }, data.bots.length ? '新建伙伴' : '创建第一个伙伴')))
@@ -1011,9 +1013,151 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
     const background = enabled && botArtwork(library, bot)?.background
     return h('li', { className: `kode-agent-row kode-bot-card${background ? ' has-scene' : ''}`, style: background ? { '--kode-bot-scene': `url(${JSON.stringify(sceneUrl(background))})` } : undefined }, ...React.Children.toArray(children))
   }
+  // 关注: events that wake a bot into its own run (no timers). Kode matches
+  // events and starts the runs; this is where they are set up and reviewed.
+  const WATCH_SOURCES = [
+    { topic: 'session.turn_completed', label: '会话完成一轮', scope: 'cwd' },
+    { topic: 'session.awaiting', label: '会话在等人处理', scope: 'cwd' },
+    { topic: 'session.exited', label: '会话结束', scope: 'cwd' },
+    { topic: 'fs.changed', label: '文件变化', scope: 'workspace', paths: true },
+    { topic: 'git.commit', label: 'Git 新提交', scope: 'workspace', branch: true },
+    { topic: 'git.branch', label: 'Git 切换分支', scope: 'workspace' },
+    { topic: 'kode.team/mention', label: '团队里有人 @ 我', room: true },
+    { topic: 'kode.team/message', label: '团队频道有新消息', room: true },
+    { topic: 'kode.team/call_finished', label: '团队请求有了答复' },
+    { topic: 'kode.team/crew_awaiting', label: 'Crew 计划等待确认' },
+    { topic: '*', label: '其他插件事件', custom: true },
+  ]
+  const WATCH_PERMISSIONS = [{ value: 'plan', label: '只读，给出结论' }, { value: 'default', label: '改动前询问' }, { value: 'acceptEdits', label: '可以改文件' }]
+  const WATCH_NOTIFY = [{ value: 'attention', label: '需要我处理或失败时通知' }, { value: 'always', label: '每次完成都通知' }, { value: 'never', label: '不通知，只记在动态里' }]
+  const RUN_STATUS = { starting: '启动中', running: '进行中', needs_user: '等你处理', completed: '完成', failed: '没完成' }
+  async function watchesCall(body, query = '') {
+    const response = await fetchHost(`/api/kode/bots?watches=1${query}`, body ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { credentials: 'same-origin', cache: 'no-store' })
+    const value = await parseHostJson(response)
+    if (!response.ok) throw new Error(value.error ?? '关注暂不可用')
+    return value
+  }
+  // One long poll per window feeds every view of watches and runs.
+  let watchesSnapshot = { data: null, error: '' }, watchesFollowing = false
+  const watchesListeners = new Set()
+  function publishWatches(next) { watchesSnapshot = next; for (const listener of watchesListeners) listener() }
+  async function followWatches() {
+    if (watchesFollowing) return
+    watchesFollowing = true
+    try {
+      while (watchesListeners.size) {
+        try {
+          const revision = watchesSnapshot.data?.revision
+          const data = await watchesCall(undefined, revision === undefined ? '' : `&after=${revision}`)
+          publishWatches({ data, error: '' })
+        } catch (error) {
+          publishWatches({ ...watchesSnapshot, error: error.message })
+          await new Promise(resolve => setTimeout(resolve, 5000))
+        }
+      }
+    } finally { watchesFollowing = false }
+  }
+  const watchesStore = { subscribe: fn => { watchesListeners.add(fn); void followWatches(); return () => watchesListeners.delete(fn) }, getSnapshot: () => watchesSnapshot }
+  function useWatches() { return useSyncExternalStore(watchesStore.subscribe, watchesStore.getSnapshot) }
+  async function watchAct(body) { const data = await watchesCall(body); publishWatches({ data, error: '' }); return data }
+  function watchSource(topic) { return WATCH_SOURCES.find(row => row.topic === topic) ?? WATCH_SOURCES.at(-1) }
+  function watchDraft(watch) {
+    if (!watch) return { name: '', topic: 'session.turn_completed', custom: '', where: '', paths: '', branch: '', room: '', do: '', coalesce_secs: 30, max_runs_per_hour: 6, permission: 'plan', notify: 'attention', enabled: true }
+    const { spec } = watch, match = spec.on.match ?? {}, source = watchSource(spec.on.topic)
+    return { id: watch.id, enabled: watch.enabled, name: spec.name, topic: source.topic, custom: source.custom ? spec.on.topic : '', where: match.workspace ?? match.cwd ?? '', paths: match.paths ?? '', branch: match.branch ?? '', room: match.room ?? '', do: spec.do, ...spec.policy }
+  }
+  function watchSpec(draft) {
+    const source = watchSource(draft.topic), match = {}
+    if (source.scope && draft.where.trim()) match[source.scope] = draft.where.trim()
+    if (source.paths && draft.paths.trim()) match.paths = draft.paths.trim()
+    if (source.branch && draft.branch.trim()) match.branch = draft.branch.trim()
+    if (source.room && draft.room.trim()) match.room = draft.room.trim()
+    return { name: draft.name.trim(), on: { topic: source.custom ? draft.custom.trim() : source.topic, match }, do: draft.do, policy: { coalesce_secs: Number(draft.coalesce_secs) || 0, max_runs_per_hour: Number(draft.max_runs_per_hour) || 1, permission: draft.permission, workspace: null, carry_last_summary: true, notify: draft.notify } }
+  }
+  function watchSummary(spec) {
+    const source = watchSource(spec.on.topic), match = spec.on.match ?? {}
+    const parts = [source.custom ? spec.on.topic : source.label]
+    if (match.workspace || match.cwd) parts.push(`在 ${match.workspace ?? match.cwd}`)
+    if (match.paths) parts.push(`文件 ${match.paths}`)
+    if (match.branch) parts.push(`分支 ${match.branch}`)
+    if (match.room) parts.push(`频道 ${match.room}`)
+    return parts.join(' · ')
+  }
+  function WatchEditor({ draft, workspaces, busy, onChange, onSave, onCancel }) {
+    const source = watchSource(draft.topic), set = (key, value) => onChange({ ...draft, [key]: value })
+    const input = (label, key, props = {}) => h('label', { className: 'kode-field' }, h('span', null, label), h(props.rows ? 'textarea' : 'input', { value: draft[key] ?? '', disabled: busy, onChange: event => set(key, event.target.value), ...props }))
+    const places = [...(source.scope === 'cwd' ? [{ value: '', label: '任何工作区' }] : []), ...workspaces.map(row => ({ value: row.path, label: `${row.title}（${row.path}）` }))]
+    if (draft.where && !places.some(row => row.value === draft.where)) places.push({ value: draft.where, label: draft.where })
+    return h('form', { className: 'kode-agent-editor kode-watch-editor', onSubmit: event => { event.preventDefault(); onSave() } },
+      input('名字', 'name', { maxLength: 80, required: true, placeholder: '例如：提交后做代码审查' }),
+      h(SelectField, { label: '当这件事发生', value: draft.topic, options: WATCH_SOURCES.map(row => ({ value: row.topic, label: row.label })), disabled: busy, onChange: value => onChange({ ...draft, topic: value, where: watchSource(value).scope === 'workspace' && !draft.where ? workspaces[0]?.path ?? '' : draft.where }) }),
+      source.custom && input('事件名（插件 id/事件）', 'custom', { required: true, placeholder: 'some.extension/event' }),
+      source.scope && h(SelectField, { label: source.scope === 'cwd' ? '哪里的会话' : '关注哪个工作区', value: draft.where, options: places, disabled: busy, onChange: value => set('where', value) }),
+      source.scope && input('或者填写路径', 'where', { placeholder: '/绝对路径' }),
+      source.paths && input('只看这些文件（可选）', 'paths', { placeholder: 'src/**  或  docs/*.md' }),
+      source.branch && input('只看这个分支（可选）', 'branch', { placeholder: 'main' }),
+      source.room && input('只看这个频道（可选）', 'room', { placeholder: 'general' }),
+      input('伙伴每次要做什么', 'do', { rows: 4, required: true, placeholder: '看一下这次改动有没有明显问题，有的话列出来；没有就说“没问题”。' }),
+      h('div', { className: 'kode-watch-grid' },
+        input('合并多少秒内的事件', 'coalesce_secs', { type: 'number', min: 0, max: 3600 }),
+        input('每小时最多运行', 'max_runs_per_hour', { type: 'number', min: 1, max: 60 })),
+      h(SelectField, { label: '运行时的权限（不超过伙伴的上限）', value: draft.permission, options: WATCH_PERMISSIONS, disabled: busy, onChange: value => set('permission', value) }),
+      h(SelectField, { label: '通知', value: draft.notify, options: WATCH_NOTIFY, disabled: busy, onChange: value => set('notify', value) }),
+      h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: busy, onClick: onCancel }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.name.trim() || !draft.do.trim() }, '保存')))
+  }
+  function RunRow({ run, watch, ui }) {
+    const [open, setOpen] = useState(false)
+    const when = new Date(run.started).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    const trigger = (run.trigger?.events ?? []).map(event => event.summary).join('\n')
+    return h('li', { className: 'kode-run-row', 'data-status': run.status },
+      h('button', { type: 'button', className: 'kode-run-head', onClick: () => setOpen(!open) },
+        h('span', { className: 'kode-run-status' }, RUN_STATUS[run.status] ?? run.status),
+        h('span', { className: 'kode-run-name' }, watch?.spec.name ?? '已删除的关注'),
+        !run.seen && run.finished && h('span', { className: 'kode-run-new' }, '新'),
+        h('span', { className: 'kode-secondary' }, when)),
+      (open || run.status === 'needs_user') && h('div', { className: 'kode-run-body' },
+        trigger && h('p', { className: 'kode-secondary kode-run-trigger' }, trigger),
+        run.summary && h('p', { className: 'kode-run-summary' }, run.summary),
+        run.error && h(Failure, { text: run.error })),
+      run.session_uuid && h(Button, { className: 'kode-run-open', onClick: () => void ui()?.openSession(run.session_uuid) }, '打开会话'))
+  }
+  function BotWatches({ bot, workspaces, ui }) {
+    const { data, error: loadError } = useWatches()
+    const [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('')
+    const act = async body => {
+      setBusy(true); setError('')
+      try { await watchAct(body); return true } catch (failure) { setError(failure.message); return false } finally { setBusy(false) }
+    }
+    const unseen = data?.unseen?.[bot.id] ?? 0
+    useEffect(() => { if (unseen) void watchAct({ action: 'watch_seen', bot: bot.id }).catch(() => {}) }, [unseen, bot.id])
+    if (!data) return h('div', { className: 'kode-bot-watches' }, h('p', { className: 'kode-secondary' }, '正在读取关注…'), h(Failure, { text: loadError }))
+    const watches = data.watches.filter(row => row.bot === bot.id), runs = data.runs.filter(row => row.bot === bot.id).slice(0, 12)
+    const save = async () => { if (await act({ action: 'watch_upsert', id: draft.id, bot: bot.id, enabled: draft.enabled, spec: watchSpec(draft) })) setDraft(null) }
+    return h('div', { className: 'kode-bot-watches' },
+      h('h3', { className: 'kode-settings-group-title' }, '关注'),
+      h('p', { className: 'kode-secondary' }, '发生这些事时，伙伴会自己开一个会话去处理，结果记在下面的动态里。'),
+      watches.length ? h('ul', { className: 'kode-watch-list' }, ...watches.map(watch => draft?.id === watch.id
+        ? h('li', { key: watch.id }, h(WatchEditor, { draft, workspaces, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) }))
+        : h('li', { key: watch.id, className: 'kode-watch-row', 'data-enabled': watch.enabled },
+          h(FastSwitch, { checked: watch.enabled, disabled: busy, label: watch.enabled ? '暂停' : '启用', onChange: enabled => void act({ action: 'watch_toggle', id: watch.id, enabled }) }),
+          h('div', { className: 'kode-watch-text' }, h('span', { className: 'kode-agent-name' }, watch.spec.name), h('span', { className: 'kode-secondary' }, watchSummary(watch.spec))),
+          h(Button, { disabled: busy, onClick: () => void act({ action: 'watch_run', id: watch.id }) }, '运行一次'),
+          h(Button, { disabled: busy || !!draft, onClick: () => setDraft(watchDraft(watch)) }, '编辑'),
+          h(Button, { disabled: busy, onClick: () => { if (confirm(`删除关注「${watch.spec.name}」？已有的动态会保留。`)) void act({ action: 'watch_delete', id: watch.id }) } }, '删除')))) : null,
+      draft && !draft.id ? h(WatchEditor, { draft, workspaces, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) })
+        : h(Button, { className: 'kode-agent-add', disabled: busy || !!draft, onClick: () => setDraft(watchDraft(null)) }, h(IconPlusOutlineRegular, { size: 16 }), '添加关注'),
+      h(Failure, { text: error }),
+      runs.length > 0 && h('h3', { className: 'kode-settings-group-title' }, '动态'),
+      runs.length > 0 && h('ul', { className: 'kode-run-list' }, ...runs.map(run => h(RunRow, { key: run.id, run, ui, watch: data.watches.find(row => row.id === run.watch_id) }))))
+  }
+  function watchLabel(data, bot) {
+    const count = data?.watches.filter(row => row.bot === bot && row.enabled).length ?? 0, unseen = data?.unseen?.[bot] ?? 0
+    return `关注${count ? ` ${count}` : ''}${unseen ? ` · ${unseen} 条新动态` : ''}`
+  }
   function KodeBotsPage({ ui }) {
     const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
-    const [draft, setDraft] = useState(null), [starting, setStarting] = useState(null)
+    const [draft, setDraft] = useState(null), [starting, setStarting] = useState(null), [watching, setWatching] = useState(null)
+    const watchState = useWatches()
     const act = async body => {
       setBusy(true); setError('')
       try {
@@ -1024,6 +1168,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
       } catch (failure) { setError(failure.message) } finally { setBusy(false) }
     }
     useEffect(() => { void act() }, [])
+    // A bot's new-activity badge in the sidebar opens its 关注 here.
+    useEffect(() => {
+      const take = () => { if (requestedBotWatches) { setWatching(requestedBotWatches); requestedBotWatches = undefined } }
+      take()
+      window.addEventListener('kode-bot-watches', take)
+      return () => window.removeEventListener('kode-bot-watches', take)
+    }, [])
     // Arrived from the sidebar section: start (or create) that bot right away.
     useEffect(() => {
       if (!data || requestedBotStart === undefined) return
@@ -1071,8 +1222,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
             h('span', { className: 'kode-secondary' }, `记忆范围 bot:${bot.id} · ${bot.workspace}`),
             data.default_bot !== bot.id && h(Button, { disabled: busy, onClick: () => void act({ action: 'set_default', id: bot.id }) }, '设为默认'),
             bot.main_session_id && h(Button, { disabled: busy, onClick: () => void act({ action: 'forget', id: bot.id }) }, '新对话'),
+            h(Button, { disabled: busy, onClick: () => setWatching(watching === bot.id ? null : bot.id) }, watchLabel(watchState.data, bot.id)),
             h(Button, { disabled: busy || !!draft, onClick: () => setDraft({ ...bot }) }, '编辑'),
-            h(Button, { disabled: busy, onClick: () => { if (confirm(`删除「${bot.name}」？它的会话和 bot:${bot.id} 里的记忆都会保留。`)) void act({ action: 'delete', id: bot.id }) } }, '删除'))))),
+            h(Button, { disabled: busy, onClick: () => { if (confirm(`删除「${bot.name}」？它的会话和 bot:${bot.id} 里的记忆都会保留。`)) void act({ action: 'delete', id: bot.id }) } }, '删除')),
+          watching === bot.id && h(BotWatches, { bot, workspaces: data.workspaces, ui })))),
       draft && !draft.id ? h(BotEditor, { draft, data, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) })
         : h(Button, { className: 'kode-agent-add', disabled: busy || !data.agents.length, onClick: fresh }, h(IconPlusOutlineRegular, { size: 16 }), data.bots.length ? '新建伙伴' : '创建第一个伙伴'),
       !data.agents.length && h('p', { className: 'kode-config-note' }, '这台电脑的 dsh 里还没有可用的 Agent。'),
@@ -2780,7 +2933,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh/client', factory(require) {
 @media(max-width:600px){.kode-settings-row-control{flex:1 1 100%}}
 .kode-leave-page{display:grid;place-items:center;height:100%;color:var(--dsw-alias-label-secondary)}
 .kode-panel-host{width:100%;height:100%}
-.kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-avatar-grid{max-height:200px}.kode-bot-scene-preview{position:relative;height:120px;min-height:120px}.kode-bot-scene-preview img{width:100%;height:100%;object-fit:cover}.kode-bot-scene-avatar{position:absolute;left:12px;bottom:10px;display:inline-flex;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 2px 8px rgba(0,0,0,.18)}.kode-bot-card.has-scene{position:relative;overflow:hidden;padding-top:76px}.kode-bot-card.has-scene::before{content:"";position:absolute;inset:0 0 auto 0;height:96px;background:var(--kode-bot-scene) center/cover no-repeat;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}.kode-bot-card.has-scene>*{position:relative}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}
+.kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-avatar-grid{max-height:200px}.kode-bot-scene-preview{position:relative;height:120px;min-height:120px}.kode-bot-scene-preview img{width:100%;height:100%;object-fit:cover}.kode-bot-scene-avatar{position:absolute;left:12px;bottom:10px;display:inline-flex;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 2px 8px rgba(0,0,0,.18)}.kode-bot-card.has-scene{position:relative;overflow:hidden;padding-top:76px}.kode-bot-card.has-scene::before{content:"";position:absolute;inset:0 0 auto 0;height:96px;background:var(--kode-bot-scene) center/cover no-repeat;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}.kode-bot-card.has-scene>*{position:relative}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}.kode-bot-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-accent-primary,#3d6ff5);color:#fff;font-size:10px;font-weight:600;line-height:16px;text-align:center}.kode-bot-busy{width:6px;height:6px;border-radius:3px;background:var(--dsw-alias-accent-primary,#3d6ff5);animation:kode-bot-pulse 1.4s ease-in-out infinite}@keyframes kode-bot-pulse{50%{opacity:.3}}.kode-bot-watches{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}.kode-bot-watches h3{margin:6px 0 0}.kode-watch-list,.kode-run-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.kode-watch-row{display:flex;align-items:center;gap:10px}.kode-watch-row[data-enabled=false] .kode-watch-text{opacity:.55}.kode-watch-text{flex:1;min-width:0;display:flex;flex-direction:column}.kode-watch-text .kode-secondary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-watch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.kode-run-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}.kode-run-head{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}.kode-run-status{font-size:11px;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}.kode-run-row[data-status=completed] .kode-run-status{color:#2f9e5f}.kode-run-row[data-status=failed] .kode-run-status{color:#d1453b}.kode-run-row[data-status=needs_user] .kode-run-status{color:#c98a12}.kode-run-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-run-new{font-size:10px;color:#fff;background:#d1453b;border-radius:6px;padding:0 5px}.kode-run-body{flex-basis:100%;display:flex;flex-direction:column;gap:4px}.kode-run-body p{margin:0;white-space:pre-wrap;word-break:break-word}.kode-run-trigger{font-size:12px}
 .kode-bots-page{padding:24px;box-sizing:border-box;width:100%;margin:0 auto}.kode-bot-avatar{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600;flex-shrink:0}.kode-bot-persona{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}.kode-bot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-bot-actions>.kode-secondary{margin-right:auto;font-family:ui-monospace,monospace}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1px;height:24px;white-space:nowrap;letter-spacing:0}.kode-brand-title{font-size:14px;font-weight:600;line-height:14px;color:var(--dsw-alias-label-primary)}.kode-brand-subtitle{font-size:10px;font-weight:400;line-height:10px;color:var(--dsw-alias-label-tertiary)}
