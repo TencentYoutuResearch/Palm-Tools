@@ -483,3 +483,22 @@ test('tick executes consecutive import_session commands concurrently and publish
   // 3 newly imported sessions published once each in the single batch publishSnapshot pass (not 3 full passes).
   assert.equal(publishCalls, 3)
 })
+
+test('bot_report command prompts the bot main session even when it is currently unloaded', async () => {
+  const prompted = []
+  const services = {
+    sessionController: {
+      prompt: async req => { prompted.push(req); return { accepted: true } },
+    },
+  }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, {})
+  const result = await bridge.execute({
+    id: 'report-1',
+    kind: 'bot_report',
+    payload: { session_id: 'bot-main-1', text: '关注「企微群」完成，请汇报给用户。' },
+  })
+  assert.deepEqual(result, { accepted: true })
+  assert.equal(prompted.length, 1)
+  assert.equal(prompted[0].sessionId, 'bot-main-1')
+  assert.equal(prompted[0].content[0].text, '关注「企微群」完成，请汇报给用户。')
+})

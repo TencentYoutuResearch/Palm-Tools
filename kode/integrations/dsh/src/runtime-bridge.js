@@ -248,6 +248,11 @@ export class RuntimeBridge {
       if (!Number.isSafeInteger(publicId) || publicId <= 0) throw new Error('Run session was not published')
       return { id: publicId, runtime_session_id: sessionId }
     }
+    if (kind === 'bot_report') {
+      if (typeof payload.session_id !== 'string' || !payload.session_id.trim()) throw new Error('Bot main session identity required')
+      if (typeof payload.text !== 'string' || !payload.text.trim()) throw new Error('Report text required')
+      return controller.prompt({ sessionId: payload.session_id, requestId: id, mode: 'queue', content: [{ type: 'text', text: payload.text }] }, this.stop.signal)
+    }
     if (kind === 'import_session') {
       // Kode GUI hands over a native session it has just stopped running in a
       // PTY; it waits until its own projection is gone before asking.

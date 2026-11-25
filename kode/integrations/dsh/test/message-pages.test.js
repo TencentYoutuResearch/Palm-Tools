@@ -6,6 +6,7 @@ import {
   messagePreview,
   readRelayEnvelope,
   relayInput,
+  replyMessageTitle,
 } from '../src/message-pages.js'
 const message = (content) => ({
   id: 'fixture',
@@ -145,4 +146,20 @@ test('title is preserved independently of the body and its continuation offsets'
     assert.equal(old.content, content)
     assert.equal(old.title, undefined)
   }
+})
+
+test('subtask assignments require titled summary replies and inbound replies prompt reporting to the user', () => {
+  assert.equal(replyMessageTitle('调研企微接入'), '汇报：调研企微接入')
+  assert.equal(replyMessageTitle('汇报：调研企微接入'), '汇报：调研企微接入')
+  assert.equal(replyMessageTitle(''), undefined)
+
+  const task = relayInput({ ...message('请检查配置'), title: '调研企微接入' }, 'in-1').content[0].text
+  assert.match(task, /in_reply_to=fixture/)
+  assert.match(task, /matching title such as "汇报：调研企微接入"/)
+  assert.match(task, /concise summary/)
+
+  const reply = relayInput({ ...message('已完成，发现 2 处问题'), title: '汇报：调研企微接入', in_reply_to: 'orig-1' }, 'in-2').content[0].text
+  assert.match(reply, /\(reply to orig-1\)/)
+  assert.match(reply, /summarize the conclusion, key changes, and any open questions directly for the user/)
+  assert.match(reply, /Do not send another message/)
 })

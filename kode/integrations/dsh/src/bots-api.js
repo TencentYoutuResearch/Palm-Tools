@@ -52,7 +52,7 @@ export function botsView(roster, { runtime, sessions, archived, workspaces, runs
       const ran = new Set(runs.filter(run => run.bot === bot.id && run.session_uuid).map(run => run.session_uuid))
       const owned = sessions
         .filter(row => !archived.has(row.sessionId) && !row.blank && owner.get(row.sessionId) === bot.id)
-        .map(row => ({ id: row.sessionId, title: row.projections?.values?.title ?? row.title ?? '未命名会话', updated_at: row.updatedAt ?? row.updated_at ?? 0, kind: row.sessionId === main ? 'main' : ran.has(row.sessionId) ? 'watch' : 'side', adopted: roster.adopted?.[row.sessionId] === bot.id }))
+        .map(row => ({ id: row.sessionId, title: row.projections?.values?.title ?? row.title ?? '未命名会话', updated_at: row.updatedAt ?? row.updated_at ?? 0, kind: row.sessionId === main ? 'main' : ran.has(row.sessionId) ? 'watch' : roster.adopted?.[row.sessionId] === bot.id ? 'subtask' : 'side', adopted: roster.adopted?.[row.sessionId] === bot.id }))
         .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
       return { ...bot, workspace: roster.workspaces?.[bot.id] ?? bot.default_cwd ?? null, home, agent: agent?.name ?? null, agent_type: agent?.type ?? null, agent_id: agent?.id ?? null, main_session_id: main && live.has(main) && !archived.has(main) ? main : null, sessions: owned }
     }),

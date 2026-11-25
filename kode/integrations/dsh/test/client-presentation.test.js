@@ -1651,3 +1651,16 @@ test('shared memory approval page registers in sidebar panellist, trailing badge
   const page = mainEntry()
   assert.equal(page.type.name, 'KodeMemoryPage')
 })
+
+test('bots sidebar registers collapsible trailing toggle, larger nameplate styling, and wecom watch source', () => {
+  const c = client(undefined, undefined, { layout: { selectPanel() {} } })
+  const navEntry = c.ctx.slots.entries('sidebar.panellist').find(entry => entry.options.id === 'kode-bots')
+  assert.ok(navEntry)
+  const trailingEntry = c.ctx.slots.entries('sidebar.panellist.trailing').find(entry => entry.options.id === 'kode-bots')
+  assert.ok(trailingEntry, 'bots panellist row should register a collapse toggle in trailing slot')
+  assert.match(source, /botsCollapseStore/)
+  assert.match(source, /kode-bots-collapse/)
+  assert.match(source, /BOT_BANNER_PRESETS/)
+  assert.match(source, /topic: 'wecom\/message'/)
+  assert.match(source, /WeComBridgeCard/)
+})

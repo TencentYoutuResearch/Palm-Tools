@@ -1,6 +1,6 @@
 import { createDeliveryTracker, deliveryInputId, DeliveryEvidenceUnavailable } from './delivery-tracker.js'
 /** Kode Host integration: durable backend messaging and independently owned native Agent execution. */
-import { eventPage, messagePage, messageTitleParameter, relayInput, sessionAssignmentTitle } from './message-pages.js'
+import { eventPage, messagePage, messageTitleParameter, relayInput, replyMessageTitle, sessionAssignmentTitle } from './message-pages.js'
 import { retainClientBatches } from './client-asset-retention.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
@@ -20,6 +20,7 @@ import { installNativeStartupBarrier } from './native-startup.js'
 import { registerSessionNotifications, registerNotificationSettings } from './session-notifications.js'
 import { registerModelUsageApi } from './model-usage-api.js'
 import { installSessionCreator, sessionNamingPolicy } from './session-create.js'
+import { WeComBridge, registerWeComApi, wecomTools, runWeComTool } from './wecom-bridge.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -46,6 +47,11 @@ export async function apply(ctx, config = {}) {
   ctx.provide?.('kodeBackend', admin)
   const backend = await connectBackend(admin, runtimeConfig)
   ctx.effect(() => backend.close, 'kode.backend-lifetime')
+  const wecom = runtimeConfig.wecomBridge === false ? null : new WeComBridge(admin, { logger: ctx.logger })
+  if (wecom) {
+    void wecom.start().catch(error => ctx.logger?.warn?.('WeCom bridge start failed: %s', error.message))
+    ctx.effect(() => () => wecom.stop(), 'kode.wecom-bridge')
+  }
   const node = backend.node
   if (runtimeConfig.publishWorkbenchConnection && runtimeConfig.sharedBackendState) {
     const path = runtimeConfig.workbenchConnectionFile ?? join(homedir(), process.platform === 'darwin' ? 'Library/Application Support/kode/workbench-connection.json' : '.config/kode/workbench-connection.json')
@@ -84,6 +90,7 @@ export async function apply(ctx, config = {}) {
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerBotsApi } = await import('./bots-api.js')
     webCtx.effect(() => registerBotsApi(webCtx, admin), 'kode.bots-api')
+    if (wecom) webCtx.effect(() => registerWeComApi(webCtx, wecom), 'kode.wecom-api')
     const { registerProjectHosts } = await import('./project-hosts.js')
     await registerProjectHosts(webCtx, { ...runtimeConfig, backendClient: admin })
     const { registerMessagingApi, syncSessionTitles } = await import('./messaging-api.js')
@@ -120,7 +127,7 @@ export async function apply(ctx, config = {}) {
       await client.call(`${PREFIX}sessions/${encodeURIComponent(agent.id)}/offline`, {})
       return
     }
-    const entry = { agent, client, registration, stop: new AbortController(), task: undefined, tools: [], receipts: [], readReplies: new Set(), queuedReplies: new Map(), activeWaits: 0, title: registration.session.title, titleRetryAt: 0 }
+    const entry = { agent, client, registration, stop: new AbortController(), task: undefined, tools: [], receipts: [], readReplies: new Set(), queuedReplies: new Map(), unansweredInbound: new Map(), delegatedTo: new Map(), activeWaits: 0, title: registration.session.title, titleRetryAt: 0 }
     if (node.delivery_tracking) entry.delivery = createDeliveryTracker(agent, client)
     entry.inputCancellation = node.input_cancellation === true
     active.set(agent.id, entry)
@@ -168,6 +175,17 @@ export async function apply(ctx, config = {}) {
         idempotency_key: `create:${createHash('sha256').update(args.idempotency_key).digest('hex')}`,
         ...(node.message_titles === true ? { title: sessionAssignmentTitle(created.title) } : {}),
       }, signal)
+      entry.delegatedTo.set(`${created.address.node_id}/${created.address.session_id}`, {
+        assignmentId: assignment.id,
+        title: created.title,
+      })
+      // If a bot's main session dispatched a local subtask, associate it under that bot in the sidebar.
+      if (created.address.node_id === node.node_id) {
+        void admin.call(`${PREFIX}workbench/bots`, undefined, signal).then(roster => {
+          const ownerBot = roster?.bots?.find(bot => bot.main_session?.runtime === 'dsh' && bot.main_session?.session_id === String(agent.id))
+          if (ownerBot) return admin.call(`${PREFIX}workbench/bots`, { action: 'adopt', session: created.address.session_id, id: ownerBot.id }, signal)
+        }).catch(() => {})
+      }
       return { ...created, status: 'assigned', assignment }
     })
     if (entry.inputCancellation) add('kode_sessions_cancel_input', 'Request cancellation of your own message with a runtime input binding. Queue removal is distinct from stopping execution. Active/shared/unsupported execution may remain cancel_unconfirmed. Remote cancellation requires negotiated peer support; queued offline requests remain pending.', {
@@ -185,11 +203,21 @@ export async function apply(ctx, config = {}) {
       in_reply_to: { type: 'string' },
       ...(node.message_titles === true ? { title: messageTitleParameter } : {}),
     }
-    add('kode_sessions_send', (node.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => ({ message: await client.call(`${PREFIX}messages`, {
-      target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
-      idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null,
-      ...(node.message_titles === true && args.title !== undefined ? { title: args.title } : {}),
-    }, signal) }))
+    add('kode_sessions_send', (node.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => {
+      const peerKey = `${args.node_id}/${args.session_id}`
+      const inbound = entry.unansweredInbound.get(peerKey)
+      const inReplyTo = args.in_reply_to ?? inbound?.id ?? null
+      const resolvedTitle = args.title !== undefined
+        ? args.title
+        : (inReplyTo ? replyMessageTitle(inbound?.title || sessionTitle(agent)) : undefined)
+      const message = await client.call(`${PREFIX}messages`, {
+        target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
+        idempotency_key: args.idempotency_key, in_reply_to: inReplyTo,
+        ...(node.message_titles === true && resolvedTitle !== undefined ? { title: resolvedTitle } : {}),
+      }, signal)
+      if (inReplyTo && inbound) entry.unansweredInbound.delete(peerKey)
+      return { message }
+    })
     const readEvents = async (after, signal) => {
       const cursor = Math.max(0, after ?? 0)
       const result = eventPage(await client.call(`${PREFIX}events?after=${cursor}`, undefined, signal), cursor)
@@ -220,6 +248,9 @@ export async function apply(ctx, config = {}) {
       } finally { entry.activeWaits-- }
     })
     for (const tool of memoryTools) add(tool.name, tool.description, tool.parameters, (args, signal) => client.call(`${PREFIX}memory/tool`, { name: tool.name, arguments: args }, signal))
+    if (wecom) {
+      for (const tool of wecomTools) add(tool.name, tool.description, tool.parameters, (args, signal) => runWeComTool(wecom, tool.name, args, signal))
+    }
     entry.task = pump(entry)
     entry.controlTask = entry.inputCancellation ? pumpCancellation(entry) : Promise.resolve()
   }
@@ -283,9 +314,23 @@ export async function apply(ctx, config = {}) {
               continue
             }
             signal.throwIfAborted()
+            const peerKey = `${message.source.node_id}/${message.source.session_id}`
+            let effectiveMessage = message
+            if (!message.in_reply_to) {
+              const delegated = entry.delegatedTo.get(peerKey)
+              if (delegated) {
+                // Subtask forgot in_reply_to: still treat its return message as a reply so the bot reports to the user instead of pinging the subtask again.
+                effectiveMessage = { ...message, in_reply_to: delegated.assignmentId, title: message.title || replyMessageTitle(delegated.title) }
+                entry.delegatedTo.delete(peerKey)
+              } else {
+                entry.unansweredInbound.set(peerKey, { id: message.id, title: message.title || sessionTitle(agent) })
+              }
+            } else {
+              entry.delegatedTo.delete(peerKey)
+            }
             const inputId = entry.delivery ? deliveryInputId(message.id) : randomUUID()
-            if (message.in_reply_to) entry.queuedReplies.set(message.id, inputId)
-            const input = relayInput(message, inputId)
+            if (effectiveMessage.in_reply_to) entry.queuedReplies.set(message.id, inputId)
+            const input = relayInput(effectiveMessage, inputId)
             // An active wait can return the reply itself. Leave its inbox copy
             // removable so an ACP restart cannot interrupt that same wait.
             if (!(message.in_reply_to && entry.activeWaits) && agent.canSteerRelay?.()) agent.steer(input)
