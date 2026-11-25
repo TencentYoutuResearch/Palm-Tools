@@ -58,7 +58,7 @@ export function botsView(roster, { runtime, sessions, archived, workspaces, runs
     }),
     root: roster.root ?? null,
     default_root: roster.default_root ?? null,
-    agents: offered(runtime).map(profile => ({ name: profile.name, type: profile.type, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
+    agents: offered(runtime).map(profile => ({ profile_id: profile.id, name: profile.name, type: profile.type, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
     workspaces: workspaces.map(row => ({ id: row.id, title: row.title, path: row.path })),
   }
 }
