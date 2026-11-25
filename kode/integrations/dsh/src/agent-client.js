@@ -103,12 +103,15 @@ async function recoverHostService(host, { request, readSettings, delay, signal, 
     signal.throwIfAborted()
     progress(job)
     if (['failed', 'cancelled'].includes(job.status)) throw new Error(job.error || '服务恢复未完成，请重试。')
-    if (host === 'local' || job.status === 'done') {
+    if (job.status === 'done' || (host === 'local' && !job.id)) {
       try { return await readSettings() } catch (error) {
         if (error.status === 401 || error.status === 403) throw error
       }
-    } else job = await request(undefined, job.id)
-    await delay(1500, signal)
+      await delay(1500, signal)
+    } else {
+      await delay(1500, signal)
+      job = await request(undefined, job.id)
+    }
   }
   throw new Error('等待服务恢复超时，请检查服务状态后重新连接。')
 }
@@ -672,20 +675,21 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function ServiceRecovery({ host, settings, onBusyChange }) {
     const { data: hosts } = useProjectHosts()
-    const [busy, setBusy] = useState(false), [job, setJob] = useState(null), [error, setError] = useState('')
+    const [busy, setBusy] = useState(false), [job, setJob] = useState(null), [error, setError] = useState(''), [success, setSuccess] = useState(false)
     const task = React.useRef(null)
     useEffect(() => () => task.current?.abort(), [])
     useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false) }, [busy, onBusyChange])
-    const supported = host === 'local' ? hosts.localRecoverySupported !== false : hosts.deploymentSupported !== false
+    const supported = host === 'local' ? hosts.localRecoverySupported === true : hosts.deploymentSupported !== false
+    const hintId = React.useId()
     const recover = async () => {
       if (task.current) return
       const controller = new AbortController(); task.current = controller
-      setBusy(true); setError('')
+      setBusy(true); setError(''); setSuccess(false)
       try {
         await recoverHostService(host, {
           signal: controller.signal, progress: setJob, readSettings: () => settings.request(undefined, controller.signal),
           request: async (body, id) => {
-            const response = await fetch(`/api/kode/project-hosts?current=local${id ? `&deployment=${encodeURIComponent(id)}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) })
+            const response = await fetch(`/api/kode/project-hosts?current=local${id ? `&${host === 'local' ? 'recovery' : 'deployment'}=${encodeURIComponent(id)}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) })
             let value
             try { value = await parseHostJson(response) } catch (error) { if (error.code === 'KODE_SERVICE_UPDATE_REQUIRED') throw new Error('此计算机的 Host 尚不支持自动恢复，请先更新并重启 Web Host 和 Kode 服务。'); throw error }
             if (!response.ok) throw new Error(value.error === '未知项目操作。' ? '此计算机的 Host 尚不支持自动恢复，请先更新并重启 Web Host 和 Kode 服务。' : value.error || '无法恢复服务，请重试。')
@@ -698,16 +702,21 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
             signal.addEventListener('abort', abort, { once: true })
           }),
         })
-        if (!controller.signal.aborted) settings.retry()
+        if (!controller.signal.aborted) { setSuccess(true); settings.retry() }
       } catch (error) { if (!controller.signal.aborted) setError(error.message) }
       finally { if (!controller.signal.aborted) setBusy(false); task.current = null }
     }
-    const hint = supported ? (host === 'local' ? '使用已安装的服务版本重启 Web Host 和 Kode 后端。有运行中或排队会话时会停止操作，请等待任务结束后重试。' : '通过已保存的 SSH 配置更新并重启此主机的服务。有运行中或排队会话时会停止部署，请等待任务结束后重试。') : '此启动方式不支持自动恢复。请更新 Kode 插件和服务，退出并重新打开 Desktop，或手动重启 Web Host 和 Kode 后端。'
+    const hint = host !== 'local' ? '通过 SSH 更新并重启所选主机的服务。'
+      : supported ? '使用已安装的版本重启 Kode 后端。有运行中或排队的会话时不会重启。'
+        : hosts.localRecoverySupported === false ? '此启动方式不支持在这里重启本机服务，请在服务部署处重启后重新连接。' : ''
     return h('div', { className: 'kode-service-recovery', 'aria-busy': busy },
-      h('div', { className: 'kode-service-recovery-actions', title: hint },
-        supported && h(Button, { disabled: busy, onClick: () => void recover() }, busy ? host === 'local' ? '正在重启…' : '正在更新部署…' : host === 'local' ? '重启服务' : '更新并部署服务'),
-        h(Button, { variant: 'outline', disabled: busy, onClick: settings.retry }, '重新连接')),
-      busy && h('p', { className: 'kode-config-note', role: 'status', 'aria-live': 'polite' }, job?.steps?.find(step => step.status === 'running')?.message || (host === 'local' ? '正在等待服务重新启动并检查接口…' : job?.status === 'done' ? '部署完成，正在检查接口…' : '正在准备部署…')),
+      h('div', { className: 'kode-service-recovery-actions' },
+        supported && h(Button, { 'aria-describedby': hintId, disabled: busy, onClick: () => void recover() }, busy ? host === 'local' ? '正在重启…' : '正在更新部署…' : host === 'local' ? '重启服务' : '更新并部署服务'),
+        h(Button, { variant: 'outline', disabled: busy, onClick: () => { setSuccess(false); settings.retry() } }, '重新连接')),
+      hint && h('p', { id: hintId, className: 'kode-config-note kode-service-hint' }, hint),
+      (busy || success) && h('p', { className: 'kode-config-note', role: 'status', 'aria-live': 'polite' },
+        success ? (host === 'local' ? '服务已重启' : '服务已更新并连接')
+          : job?.steps?.find(step => step.status === 'running')?.message || (host === 'local' ? '正在等待服务重新启动…' : job?.status === 'done' ? '部署完成，正在检查接口…' : '正在准备部署…')),
       h(Failure, { text: error }))
   }
   function ServiceRecoveryLink({ host, slots }) {
@@ -734,11 +743,23 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function IntegrationSettingsBody({ host, hubHost, hosts, slots, sessions }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
+    const integration = (key, label, detail) => h('label', { className: 'kode-integration-row' },
+      h('span', null, h('strong', null, label), h('span', { className: 'kode-config-note' }, detail)),
+      h('input', { type: 'checkbox', role: 'switch', checked: data.settings[key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [key]: event.target.checked } }) }))
+    const namingPrompt = data?.settings.session_naming_prompt
     return h(React.Fragment, null,
       h('div', { className: 'kode-settings-group', 'aria-label': '内置能力' },
         h('h3', { className: 'kode-settings-group-title' }, '内置能力'),
         !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
-        data && h('div', { className: 'kode-settings-card' }, [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) })))),
+        data && h('div', { className: 'kode-settings-card' },
+          h('div', { className: 'kode-messaging-settings', role: 'group', 'aria-label': '会话通信' },
+            integration('messaging_enabled', '会话通信', '允许 Agent 发现其他会话、发送任务和接收回复。'),
+            typeof namingPrompt === 'string' ? h(SessionNamingSettings, { prompt: namingPrompt, busy, update })
+              : h('div', { className: 'kode-session-naming' },
+                h('strong', null, 'Agent 会话命名'),
+                h('p', { className: 'kode-config-note' }, '当前 Kode 服务不支持自定义命名。更新服务后即可设置。'),
+                h(ServiceRecoveryLink, { host, slots }))),
+          integration('memory_enabled', '共享记忆', '允许 Agent 搜索已审核的记忆并提交待审核提议。')),
         h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots })),
       h(HubSettings, { key: hubHost, host: hubHost, hosts, sessions }))
   }
@@ -756,7 +777,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h('form', { className: 'kode-session-naming', onSubmit: event => { event.preventDefault(); if (dirty && !busy) void save(value.trim()) } },
       h('label', { className: 'kode-field' },
         h('strong', null, 'Agent 会话命名'),
-        h('span', { className: 'kode-config-note' }, '用自然语言描述命名偏好。标题最多 4 个词，意图前缀也计入。'),
+        h('span', { className: 'kode-config-note' }, '适用于 Agent 通过会话通信创建的会话。用自然语言描述命名偏好，标题最多 4 个词，含意图前缀。'),
         h('textarea', { rows: 3, value, maxLength: 2000, disabled: busy,
           placeholder: '留空使用默认规则，例如 Feat-Session Panel、Bug-SSH Workspace、MR-Review Sync',
           onChange: event => { setDraft(event.target.value); setSaved(false) } })),
@@ -767,7 +788,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function SessionBehaviorSettings({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
-    const namingPrompt = data?.settings.session_naming_prompt
     return h(React.Fragment, null,
       h('h3', { className: 'kode-settings-group-title' }, '会话行为'),
       h('p', { className: 'kode-config-note' }, '此计算机的会话行为；远端主机保留各自的配置。'),
@@ -775,8 +795,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       data && h('div', { className: 'kode-settings-card' },
         h('label', { className: 'kode-integration-row' },
           h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
-          h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) })),
-        typeof namingPrompt === 'string' && h(SessionNamingSettings, { prompt: namingPrompt, busy, update })),
+          h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) }))),
       h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
   }
   function MobileSettingsBody({ host, slots }) {
@@ -3689,9 +3708,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-settings-card>.kode-integration-row+.kode-integration-row{border-top:.5px solid var(--dsw-alias-border-l2)}
 .kode-settings-card>.kode-config-note{margin:0 0 14px}
 .kode-settings-card>.kode-config-note:only-child{margin:14px 0}
-.kode-session-naming{display:grid;gap:12px;padding:14px 0;border-top:.5px solid var(--dsw-alias-border-l2)}
+.kode-messaging-settings{border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.kode-messaging-settings>.kode-integration-row{border:0}
+.kode-session-naming{display:grid;gap:8px;padding:0 0 14px;min-width:0}
 .kode-session-naming>.kode-field,.kode-session-naming .kode-config-note{margin:0}
-.kode-session-naming>.kode-field strong{font-size:14px;font-weight:500}
+.kode-session-naming strong{font-size:14px;font-weight:500}
+.kode-service-recovery .kode-service-hint{margin:8px 0 0;max-width:48ch}
+.kode-service-recovery>[role=status]{margin:8px 0 0}
 .kode-session-naming textarea{resize:vertical}
 .kode-session-naming-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}
 .kode-settings-page .kode-notification-permission{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}

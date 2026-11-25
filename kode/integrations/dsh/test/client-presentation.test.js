@@ -1086,9 +1086,8 @@ test('goal dock reuses the queued composer width and panel presentation',()=>{
  assert.equal(tabs.find(tab => tab.id === 'kode-goal')?.kind, 'kode-goal')
 })
 
-test('connected service uses a success icon and hover details with compact Agent groups',()=>{
+test('connected service uses a success icon with compact Agent groups',()=>{
  assert.match(source,/IconCheckOutlineRegular, \{ size: 14, className: 'kode-service-connected-icon'/)
- assert.match(source,/className: 'kode-service-recovery-actions', title: hint/)
  assert.match(source,/\.kode-settings-group-title\{font-size:14px;font-weight:600;line-height:20px;color:var\(--dsw-alias-label-primary\);margin:4px 0 -4px/)
  assert.match(source,/\.kode-settings-section \.kode-agent-settings>\.kode-field:first-child\{margin-bottom:0\}/)
  assert.match(source,/\.kode-agent-rows\{[^}]*margin:0;padding:0/)
@@ -1299,9 +1298,32 @@ test('settings group small preferences by task, preserve deep links, and keep de
  assert.equal(appearance.children[0].children[0].children[0].type.name, 'InterfaceSettingsBody')
  const avatarCard = findNode(appearance, node => node.props.className === 'kode-settings-card kode-settings-card-padded')
  assert.equal(avatarCard.children[0].type.name, 'PersonalizationSettings')
- const integrations = source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function SessionBehaviorSettings('))
- assert.doesNotMatch(integrations, /auto_resume_interrupted/)
- assert.match(integrations, /messaging_enabled/); assert.match(integrations, /memory_enabled/)
+})
+
+test('Agent naming is grouped under conversation communication and missing support is explained', () => {
+ const shared = { messaging_enabled: false, memory_enabled: true, auto_resume_interrupted: true }
+ let data
+ const scope = {
+  h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+  React: { Fragment: 'fragment' }, Button: 'button', useState: value => [value, () => {}],
+  useIntegrationSettings: () => ({ data, update() {}, busy: false, error: '' }),
+  HubSettings: 'HubSettings', Failure: 'Failure', ServiceRecoveryLink: 'ServiceRecoveryLink',
+ }
+ vm.runInNewContext(source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function MobileSettingsBody(')), scope)
+ const render = settings => { data = { settings }; return scope.IntegrationSettingsBody({ host: 'local' }) }
+ const available = render({ ...shared, session_naming_prompt: 'Example' })
+ const communication = findNode(available, node => node.props?.['aria-label'] === '会话通信')
+ assert.ok(communication)
+ assert.equal(findNode(communication, node => node.props?.role === 'switch').props.checked, false)
+ assert.equal(findNode(communication, node => node.type?.name === 'SessionNamingSettings').props.prompt, 'Example')
+ assert.doesNotMatch(visibleText(communication), /共享记忆/)
+ const unsupported = findNode(render(shared), node => node.props?.['aria-label'] === '会话通信')
+ assert.match(visibleText(unsupported), /Agent 会话命名.*更新服务后即可设置/s)
+ assert.ok(findNode(unsupported, node => node.type === 'ServiceRecoveryLink'))
+ data = { settings: { ...shared, session_naming_prompt: 'Example' } }
+ const general = scope.SessionBehaviorSettings({ host: 'local' })
+ assert.match(visibleText(general), /重启后自动续接/)
+ assert.equal(findNode(general, node => node.type?.name === 'SessionNamingSettings'), undefined)
 })
 
 test('session naming settings save a semantic prompt and restore the default', async () => {

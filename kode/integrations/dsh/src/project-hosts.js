@@ -91,7 +91,7 @@ export class ProjectHosts {
     }
     return Promise.all([view('此计算机', 'local', nodes.local_node_id), ...this.hosts.map(host => view(host.name, 'ssh', nodes.hosts.find(node => normalize(node.ssh_host) === normalize(host.host))?.node_id))])
   }
-  view(current = 'local') { return { current, localRecoverySupported: localRecoverySupported(this.ctx), deploymentSupported: Boolean(this.config.backendClient), hosts: [{ id: 'local', name: '此计算机' }, ...this.hosts.map(({ id, name, host, port }) => ({ id, name, host, port, connected: this.portals.has(id) }))] } }
+  view(current = 'local') { return { current, localRecoverySupported: localRecoverySupported(this.ctx, undefined, this.config), deploymentSupported: Boolean(this.config.backendClient), hosts: [{ id: 'local', name: '此计算机' }, ...this.hosts.map(({ id, name, host, port }) => ({ id, name, host, port, connected: this.portals.has(id) }))] } }
   save() {
     this.saving = this.saving.then(async () => {
       if (this.document) { await this.document.write(this.hosts); return }
@@ -151,9 +151,14 @@ export class ProjectHosts {
   }
   async handle(req, res, current = 'local') {
     try {
+      const query = new URL(req.url, 'http://localhost').searchParams
+      // A local restart must remain observable while the backend is offline.
+      if (req.method === 'GET' && query.has('recovery')) {
+        const job = this.localRecoveryJob
+        return job && job.id === query.get('recovery') ? json(res, 200, job) : json(res, 404, { error: '找不到此次服务重启，请重新连接。' })
+      }
       if (this.document) await this.load()
       if (req.method === 'GET') {
-        const query = new URL(req.url, 'http://localhost').searchParams
         if (query.has('deployment')) return this.deploymentResponse(req, res, query.get('deployment'), query.get('events') === '1')
         return json(res, 200, query.get('view') === 'directory' ? await this.directory(current) : this.view(current))
       }
@@ -172,9 +177,20 @@ export class ProjectHosts {
         this.recovering = true
         try {
           const recovery = await prepareLocalRecovery(this.ctx, this.config)
-          res.once('finish', () => recovery.commit())
-          res.once('close', () => { if (!res.writableFinished) { this.recovering = false; void recovery.cancel() } })
-          return json(res, 202, { status: 'restarting' })
+          const job = recovery.backendOnly ? { id: randomUUID(), status: 'running' } : undefined
+          if (job) this.localRecoveryJob = job
+          res.once('finish', () => {
+            const result = recovery.commit()
+            if (job) void result.then(status => Object.assign(job, status)).finally(() => { this.recovering = false })
+          })
+          res.once('close', () => {
+            if (!res.writableFinished) {
+              this.recovering = false
+              if (job) Object.assign(job, { status: 'failed', error: '请求已取消，服务未重启。' })
+              void recovery.cancel()
+            }
+          })
+          return json(res, 202, job ?? { status: 'restarting' })
         } catch (error) { this.recovering = false; throw error }
       }
       if (input.action === 'deploy') {
