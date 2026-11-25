@@ -23,6 +23,9 @@ pub struct Bot {
     pub name: String,
     #[serde(default)]
     pub avatar: Option<String>,
+    /// Discord-style sidebar/card background style (`auto`, `none`, `preset:<id>`, `color:#rrggbb`, etc.).
+    #[serde(default)]
+    pub banner: Option<String>,
     #[serde(default)]
     pub persona: String,
     /// Agent that runs the bot (a backend key such as `claude`).
@@ -127,7 +130,7 @@ impl Bot {
     /// What extensions may see: identity and limits, not the persona text.
     pub fn public(&self, default: bool) -> Value {
         json!({
-            "id": self.id, "name": self.name, "avatar": self.avatar,
+            "id": self.id, "name": self.name, "avatar": self.avatar, "banner": self.banner,
             "backend_key": self.backend_key, "model": self.model,
             "permission_ceiling": self.permission_ceiling, "memory_scope": self.memory_scope(),
             "main_session": self.main_session,
@@ -152,8 +155,11 @@ impl Bot {
         if self.default_cwd.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) {
             bail!("default_cwd must be an absolute path")
         }
-        if self.avatar.as_ref().is_some_and(|a| a.len() > 256) || self.model.as_ref().is_some_and(|m| m.len() > 160) {
-            bail!("avatar or model is too long")
+        if self.avatar.as_ref().is_some_and(|a| a.len() > 256)
+            || self.banner.as_ref().is_some_and(|b| b.len() > 256 || b.chars().any(|c| c.is_control()))
+            || self.model.as_ref().is_some_and(|m| m.len() > 160)
+        {
+            bail!("avatar, banner, or model is invalid or too long")
         }
         Ok(())
     }
@@ -378,9 +384,26 @@ mod tests {
     fn extensions_see_identity_but_not_the_persona() {
         let mut kit = bot("Kit");
         kit.id = "bot_kit".into();
+        kit.banner = Some("preset:aurora".into());
         let public = kit.public(true);
         assert_eq!(public["memory_scope"], "bot:bot_kit");
+        assert_eq!(public["banner"], "preset:aurora");
         assert!(public.get("persona").is_none());
         assert!(kit.persona_prompt().contains("Reviews code.") && kit.persona_prompt().contains("bot:bot_kit"));
+    }
+
+    #[test]
+    fn banner_is_validated_and_persisted() {
+        let mut roster = Roster::default();
+        let mut kit = bot("Kit");
+        kit.banner = Some("color:#5865f2".into());
+        apply(&mut roster, Change::Upsert { bot: kit }, 1).unwrap();
+        assert_eq!(roster.bots[0].banner.as_deref(), Some("color:#5865f2"));
+        let mut bad = bot("Bad");
+        bad.banner = Some("line1\nline2".into());
+        assert!(apply(&mut roster, Change::Upsert { bot: bad }, 2).is_err());
+        let mut huge = bot("Huge");
+        huge.banner = Some("x".repeat(300));
+        assert!(apply(&mut roster, Change::Upsert { bot: huge }, 3).is_err());
     }
 }

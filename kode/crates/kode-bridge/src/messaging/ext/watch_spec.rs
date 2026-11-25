@@ -139,6 +139,12 @@ pub fn describe(topic: &str, payload: &Value) -> String {
         "fs.changed" => format!("{} 有文件变化：{}", field("workspace"), payload["paths"].as_array().map(|p| p.iter().filter_map(Value::as_str).take(20).collect::<Vec<_>>().join(", ")).unwrap_or_default()),
         "git.commit" => format!("{} 的 {} 分支有新提交 {}", field("workspace"), field("branch"), field("head")),
         "git.branch" => format!("{} 切换到分支 {}", field("workspace"), field("branch")),
+        "wecom/message" => {
+            let chat = payload["chat_name"].as_str().filter(|s| !s.is_empty()).unwrap_or_else(|| payload["chat_id"].as_str().unwrap_or("未知会话"));
+            let sender = payload["sender_name"].as_str().filter(|s| !s.is_empty()).unwrap_or_else(|| payload["sender"].as_str().unwrap_or("成员"));
+            let content: String = payload["content"].as_str().unwrap_or_default().chars().take(600).collect();
+            format!("企业微信「{chat}」（chat_id={}）收到 {sender} 的消息：{content}", field("chat_id"))
+        }
         "manual" => "你在伙伴页里手动运行了这个关注".into(),
         _ => format!("{topic}：{}", payload.to_string().chars().take(800).collect::<String>()),
     };
@@ -192,5 +198,16 @@ mod tests {
         full.policy.permission = "bypassPermissions".into();
         assert!(full.validate().is_err(), "a watch never runs with full access");
         assert!(spec(json!({"topic":"kode.team/mention"})).validate().is_ok());
+        assert!(spec(json!({"topic":"wecom/message"})).validate().is_ok());
+    }
+
+    #[test]
+    fn wecom_message_events_match_chat_id_and_format_human_summary() {
+        let w = spec(json!({"topic":"wecom/message","match":{"chat_id":"group_1"}}));
+        let payload = json!({"chat_id":"group_1","chat_name":"研发群","sender":"alice","sender_name":"Alice","content":"请帮忙查一下构建失败原因"});
+        assert!(w.matches("wecom/message", &payload));
+        assert!(!w.matches("wecom/message", &json!({"chat_id":"group_2","content":"hi"})));
+        let summary = describe("wecom/message", &payload);
+        assert!(summary.contains("研发群") && summary.contains("group_1") && summary.contains("Alice") && summary.contains("构建失败原因"), "{summary}");
     }
 }

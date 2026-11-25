@@ -321,23 +321,38 @@ fn follow_run(hub: &Hub, state: &mut Dispatcher, run: &RunRecord, topic: &str, p
 }
 
 /// The conclusion goes to the bot's main conversation as a queued message,
-/// so the conversation the user keeps with the bot knows what it did.
+/// so the bot summarizes and reports what happened directly to the user.
 fn report_to_main(hub: &Hub, run: &RunRecord, watch: &str, summary: &str) {
     let Some(ctx) = hub.ctx.upgrade() else { return };
     let Ok((_, roster)) = crate::messaging::bots::roster(hub) else { return };
     let Some(main) = roster.bots.iter().find(|b| b.id == run.bot).and_then(|b| b.main_session.clone()) else { return };
-    // The run itself never reports into itself.
-    let Some(id) = ctx.runtimes.find(&main.runtime, &main.session_id).filter(|id| Some(*id) != run.session_id) else { return };
     let text = format!(
-        "【关注 · {watch}】这是你在独立会话里完成的一次关注任务，结论如下，记下即可，不用再做别的：\n\n{}",
+        "【关注 · {watch}】你在独立会话里完成了这次关注任务，原始结论如下。请提炼核心结论、关键改动/发现以及需要用户决定的事项，用简明清晰的话直接汇报给用户（无需重复派发或给子会话发回执）：\n\n{}",
         summary.chars().take(SUMMARY_CHARS).collect::<String>()
     );
     let rid = format!("watch.{}.main", run.id);
-    tokio::spawn(async move {
-        if let Err(e) = ctx.runtimes.command(id, "input", json!({"text":text}), &rid).await {
-            tracing::warn!(error=%e, "watch result not posted to the bot's main conversation");
-        }
-    });
+    // The run itself never reports into itself.
+    if let Some(id) = ctx.runtimes.find(&main.runtime, &main.session_id).filter(|id| Some(*id) != run.session_id) {
+        tokio::spawn(async move {
+            if let Err(e) = ctx.runtimes.command(id, "input", json!({"text":text}), &rid).await {
+                tracing::warn!(error=%e, "watch result not posted to the bot's main conversation");
+            }
+        });
+        return;
+    }
+    // If the bot's dsh main session is currently unloaded, deliver via dsh's bot_report command so it wakes cleanly.
+    if main.runtime == "dsh" && ctx.runtimes.available("dsh") && run.session_uuid.as_deref() != Some(main.session_id.as_str()) {
+        let session_id = main.session_id;
+        tokio::spawn(async move {
+            if let Err(e) = ctx
+                .runtimes
+                .request("dsh", None, "bot_report", json!({"session_id": session_id, "text": text}), &rid)
+                .await
+            {
+                tracing::warn!(error=%e, "watch result fallback delivery to unloaded bot main session failed");
+            }
+        });
+    }
 }
 
 fn notify(hub: &Hub, run: &RunRecord, status: &str, text: &str, policy: &str) {
@@ -562,6 +577,37 @@ pub(super) async fn publish(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(req)
     let topic = format!("{}/{}", caller.extension, req.name);
     hub.ext.append(0, &topic, payload)?;
     Ok(Json(json!({"topic":topic})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkbenchPublish {
+    topic: String,
+    #[serde(default)]
+    payload: Value,
+}
+/// `POST /api/v1/messaging/workbench/events`: host-owner bridge event ingress (e.g. `wecom/message`).
+pub(super) async fn workbench_publish(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Json(req): Json<WorkbenchPublish>,
+) -> Result<Json<Value>> {
+    super::admin(&hub, &h)?;
+    let valid = req.topic.split_once('/').is_some_and(|(ns, name)| {
+        crate::messaging::model::valid_id(ns)
+            && !name.is_empty()
+            && name.len() <= 64
+            && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
+    });
+    if !valid {
+        return Err(Error(StatusCode::BAD_REQUEST, "topic must be <namespace>/<name>".into()));
+    }
+    let payload = if req.payload.is_null() { json!({}) } else { req.payload };
+    if !payload.is_object() || payload.to_string().len() > MAX_PUBLISH_BYTES {
+        return Err(Error(StatusCode::BAD_REQUEST, format!("payload must be an object under {MAX_PUBLISH_BYTES} bytes")));
+    }
+    hub.ext.append(0, &req.topic, payload)?;
+    Ok(Json(json!({"topic": req.topic})))
 }
 
 #[derive(Deserialize)]

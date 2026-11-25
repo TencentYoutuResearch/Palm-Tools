@@ -230,6 +230,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/ext/v1/events/stream", get(stream))
         .route("/api/ext/v1/events/publish", post(watches::publish))
         .route("/api/v1/messaging/workbench/watches", get(watches::list).post(watches::change))
+        .route("/api/v1/messaging/workbench/events", post(watches::workbench_publish))
         .with_state(hub)
 }
 
