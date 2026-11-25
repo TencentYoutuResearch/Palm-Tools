@@ -133,7 +133,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } = React
   const CARD_SECTIONS = 'conversation.session.panel.section'
   const CARD_ENVIRONMENT = 'conversation.session.panel.environment.row'
-  const { Menu, Modal, Button, Toast, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const { Menu, Modal, Button, Toast, Tooltip, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
   const startupRetryDelays = [250, 500, 1000, 2000, 4000, 8000]
@@ -1608,7 +1608,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       window.dispatchEvent(new CustomEvent('kode-handoff-dialog', { detail: { sessionId, host: transport?.current ?? 'local' } }))
     }
     const icon = h(IconPaperPlaneOutlineRegular, { size: 16, 'aria-hidden': true })
-    return panel ? h(SessionPanelRow, { icon, label: '交接', actionLabel: '交接会话到其他 Agent', onClick: open }) :
+    return panel ? h(Button, { className: 'kode-environment-handoff', variant: 'ghost', size: 'sm', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: open }, icon, h('span', { className: 'kode-environment-handoff-label' }, '交接')) :
       h(Button, { variant: 'outline', className: 'kode-handoff-trigger', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: open }, icon, '交接')
   }
   function HandoffOverlay({ sessions }) {
@@ -2046,9 +2046,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }
     const avatar = h(AgentAvatar, { profile, host, size: panel ? 28 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
     if (panel) {
-      return h(SessionPanelRow, { icon: avatar, label: profile.name, detail: profile.name === type ? undefined : type,
-        actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
-        trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose })
+      return h('div', { className: 'kode-environment-identity' },
+        h(SessionPanelRow, { icon: avatar, label: profile.name, detail: profile.name === type ? undefined : type,
+          actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
+          trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose }),
+        h(HandoffAction, { sessionId, sessions, panel: true, dismissOverlay }))
     }
     return h('span', { className: 'kode-agent-identity', title: bot ? `${bot.name} · 伙伴（${base.name}）` : `${profile.name} · ${type}` },
       h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': bot ? '编辑伙伴' : '设置会话头像与背景', onClick: choose }, avatar), h('span', null, profile.name))
@@ -3245,6 +3247,59 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
           h('span', { 'data-row-part': 'body' }, body),
       trailing && h('span', { 'data-row-part': 'trailing' }, trailing))
   }
+  function SessionGitLocation({ git }) {
+    if (!git?.root || !['primary', 'worktree'].includes(git.kind)) return null
+    const branch = git.branch || (git.commit ? `游离 HEAD · ${git.commit.slice(0, 8)}` : '游离 HEAD')
+    const kind = git.kind === 'worktree' ? '独立 worktree' : '主工作区'
+    return h('div', { className: 'kode-environment-git', role: 'group', 'aria-label': 'Git 工作位置' },
+      h(IconBranchOutlineRegular, { size: 14, 'aria-hidden': true }),
+      h('div', { className: 'kode-environment-ref' },
+        h(Tooltip, { label: git.branch ? `当前分支：${git.branch}` : git.commit || branch, side: 'left', delayMs: 400, portal: true },
+          h('code', { tabIndex: 0 }, branch)),
+        h('span', { title: git.root, className: 'kode-environment-kind' }, kind)))
+  }
+  function SessionProjectLocation({ native, ...props }) {
+    const { sessionId, useProjection, useSessions } = props
+    const current = useProjection('workingDirectory'), created = useSessions(snapshot => snapshot.byId[sessionId]?.cwd)
+    const cwd = current ?? created
+    const running = useSessions(snapshot => snapshot.byId[sessionId]?.running === true)
+    const host = useSyncExternalStore(
+      useCallback(listener => transport?.subscribe(listener) ?? (() => {}), []),
+      useCallback(() => transport?.current ?? 'local', []))
+    const key = JSON.stringify([host, sessionId, cwd]), [snapshot, setSnapshot] = useState(null)
+    useEffect(() => {
+      if (!sessionId) return
+      const lifetime = new AbortController()
+      let loading = false
+      const refresh = async () => {
+        if (document.visibilityState === 'hidden' || loading) return
+        loading = true
+        try {
+          const query = new URLSearchParams({ sessionId })
+          const response = await fetchHost(`/api/kode/session-environment?${query}`, {
+            credentials: 'same-origin', cache: 'no-store',
+            signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(6000)]),
+          }, host)
+          const value = response.ok ? await response.json() : null
+          if (!lifetime.signal.aborted) setSnapshot({ key, git: value?.git })
+        } catch {
+          if (!lifetime.signal.aborted) setSnapshot({ key, git: null })
+        } finally { loading = false }
+      }
+      void refresh()
+      window.addEventListener('focus', refresh)
+      document.addEventListener('visibilitychange', refresh)
+      return () => {
+        lifetime.abort()
+        window.removeEventListener('focus', refresh)
+        document.removeEventListener('visibilitychange', refresh)
+      }
+    }, [key, host, sessionId, running])
+    const git = snapshot?.key === key ? snapshot.git : null
+    return h('div', { className: 'kode-environment-project', 'data-git': git ? git.kind : undefined },
+      git && h(SessionGitLocation, { git }),
+      h(native, props))
+  }
   function PanelList({ rows, renderFactorySlot, renderRow }) {
     const [expanded, setExpanded] = useState(false)
     const limit = 4, foldable = rows.length > limit
@@ -3314,8 +3369,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const session = sessionId => ({ sessionId, sessions: ctx.sessions, slots: ctx.slots })
     ctx.slots.inject(CARD_ENVIRONMENT, function* () {
       yield ctx.slots.register({ name: CARD_ENVIRONMENT, id: 'kode-agent-profile', order: -10, inject: session }, props => h(AgentIdentity, { ...props, panel: true }))
-      yield ctx.slots.register({ name: CARD_ENVIRONMENT, id: 'kode-agent-handoff', order: 50, inject: session }, props => h(HandoffAction, { ...props, panel: true }))
     })
+    wrapSlot(ctx, CARD_ENVIRONMENT, entry => entry.options.id === 'project',
+      native => props => h(SessionProjectLocation, { ...props, native }))
     ctx.slots.inject(CARD_SECTIONS, function* () {
       yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-review-links', order: 100, label: () => '代码评审', inject: session },
         props => h(FallbackPanelSection, { ...props, nativeId: 'change-requests', component: SessionReviewLinks }))
@@ -3622,6 +3678,22 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 [data-kode-panel-row] .kode-agent-avatar[data-avatar-state]::after{content:none}
 [data-kode-panel-row] [data-row-part=lines]{min-width:0}
 [data-kode-panel-row] [data-row-part=content],[data-kode-panel-row] [data-row-part=detail]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kode-environment-identity{display:flex;align-items:center;gap:4px;min-width:0;container-type:inline-size}
+.kode-environment-identity>[data-kode-panel-row]{flex:1;min-width:0}
+.kode-environment-identity [data-row-part=content]{font-weight:600}
+.kode-environment-handoff{flex:none}
+@container(max-width:256px){.kode-environment-handoff-label{display:none}}
+.kode-environment-project{min-width:0;margin-top:4px}
+.kode-environment-project[data-git]{padding:6px 2px 2px;background:var(--dsw-alias-interactive-bg-hover);border-radius:var(--dsw-radius-md)}
+.kode-environment-project[data-git] [data-session-panel-project] [data-row-part=content]{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.kode-environment-git{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:start;gap:8px;padding:2px 6px 2px;color:var(--dsw-alias-label-secondary)}
+.kode-environment-git>svg{margin-top:2px}
+.kode-environment-ref{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px;min-width:0}
+.kode-environment-ref code{display:block;flex:1 1 10ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;line-height:18px}
+.kode-environment-ref code:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color);outline-offset:1px}
+.kode-environment-kind{padding:0 4px;border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.kode-environment-project[data-git=worktree] .kode-environment-kind{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 13%,transparent);color:var(--dsw-alias-label-primary)}
+
 .kode-panel-detail p,.kode-panel-detail pre{margin:0;max-block-size:12rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .kode-panel-detail pre{padding:8px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-sm)}
 @media(max-width:520px){.kode-panel-detail{padding-inline-start:8px}.kode-panel-detail p,.kode-panel-detail pre{max-block-size:8rem}}

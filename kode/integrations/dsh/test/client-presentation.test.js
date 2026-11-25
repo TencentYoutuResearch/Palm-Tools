@@ -414,10 +414,7 @@ test('handoff excludes the current Agent and keeps the dialog outside the sessio
   assert.match(visibleText(legacy(props)), /交接/)
   c.addSlot('conversation.session.header.utilities', 'session-panel', c.native)
   assert.equal(legacy(props), null)
-  const handoff = c.entryById('kode-agent-handoff')(props)
-  const row = handoff.type(handoff.props)
-  assert.equal(row.props.label, '交接')
-  assert.equal(row.props.actionLabel, '交接会话到其他 Agent')
+  assert.ok(!c.ctx.slots.entries('conversation.session.panel.environment.row').some(entry => entry.options.id === 'kode-agent-handoff'), 'the card renders handoff beside the Agent')
 })
 
 test('the details card uses the composer profile without repeating its model across Agents', async () => {
@@ -436,14 +433,33 @@ test('the details card uses the composer profile without repeating its model acr
     const render = () => { const row = card.component(props); return row.type(row.props) }
     render()
     await new Promise(resolve => setImmediate(resolve))
-    const row = render()
+    const identity = render()
+    assert.equal(identity.props.className, 'kode-environment-identity')
+    const [row, action] = identity.children
     assert.equal(row.props.label, name)
     assert.equal(row.props.detail, name === type ? undefined : type)
     assert.equal(row.props.icon.props.size, 28)
     assert.equal(row.props.actionLabel, '设置 ' + name + ' 的头像与背景')
+    const handoff = action.type(action.props)
+    assert.equal(handoff.props['aria-label'], '交接会话到其他 Agent')
+    assert.match(visibleText(handoff), /交接/)
     const model = c.ctx.slots.entries('conversation.input.model')[0].component
     assert.match(model(props).children[0].props.anchor.props.label, /Fixture model/)
   }
+})
+
+test('the environment keeps the native project row and labels the actual Git checkout', () => {
+  const c = client(), seat = 'conversation.session.panel.environment.row'
+  c.addSlot(seat, 'project', c.native)
+  const wrap = c.entryById('project')({ sessionId: 'saved', useProjection: () => undefined, useSessions: () => '/project' })
+  assert.equal(wrap.props.native, c.native)
+  const scope = { h: (type, props, ...children) => ({ type, props, children }), IconBranchOutlineRegular: 'branch', Tooltip: 'tooltip' }
+  vm.runInNewContext(source.slice(source.indexOf('  function SessionGitLocation('), source.indexOf('  function SessionProjectLocation(')), scope)
+  const render = git => visibleText(scope.SessionGitLocation({ git }))
+  assert.match(render({ root: '/project', kind: 'primary', branch: 'main' }), /main.*主工作区/s)
+  assert.match(render({ root: '/project-linked', kind: 'worktree', branch: 'feat/review' }), /feat\/review.*独立 worktree/s)
+  assert.match(render({ root: '/project-linked', kind: 'worktree', branch: null, commit: '123abcdef000' }), /游离 HEAD · 123abcde/)
+  assert.equal(render(null), '')
 })
 
 test('the native details card reuses DSH subagents and Forge without duplicate review links', () => {
@@ -1040,13 +1056,13 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.equal(worn.children[0].props['aria-label'],'编辑伙伴')
  const clicks = []
  Object.assign(scope, {
-   SessionPanelRow: 'panel-row', selectedCatalogModel: () => undefined, IconEditOutlineRegular: 'edit',
+   SessionPanelRow: 'panel-row', HandoffAction: 'handoff', selectedCatalogModel: () => undefined, IconEditOutlineRegular: 'edit',
    openBotsPage: () => clicks.push('companions'), requestedBotEdit: null,
    window: { dispatchEvent: event => clicks.push(event.type) }, CustomEvent: class { constructor(type) { this.type = type } },
    openAvatarDialog: target => clicks.push(target),
  })
  const panelProps = { ...props, panel: true, dismissOverlay: () => clicks.push('close panel') }
- const companionRow = scope.AgentIdentity(panelProps).props
+ const companionRow = scope.AgentIdentity(panelProps).children[0].props
  assert.equal(companionRow.actionLabel, '编辑伙伴 柚子 PM')
  assert.equal(companionRow.icon.props.profile.avatar.id, 'gallery/yuzu')
  companionRow.onClick()
@@ -1054,7 +1070,7 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.deepEqual(clicks, ['close panel', 'companions', 'kode-bot-edit'])
 
  scope.useWorkspaceDirectory = () => ({ current: 'remote-fixture', hosts: [{ id: 'remote-fixture', sessions: [{ id: 'saved-session', running: true, agent: { avatar: { id: 'gallery/remote' } } }] }] })
- const avatarRow = scope.AgentIdentity(panelProps).props
+ const avatarRow = scope.AgentIdentity(panelProps).children[0].props
  assert.equal(avatarRow.icon.props.status, 'running')
  avatarRow.onClick()
  assert.equal(clicks.at(-2), 'close panel')
