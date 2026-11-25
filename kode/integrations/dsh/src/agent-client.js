@@ -3793,13 +3793,14 @@ html[data-kode-embed] .kode-token-notch{display:none}
       if (!scope.layout?.selectPanel) return
       const KodeMainPage = () => h('div', { className: 'kode-settings-main' }, h(KodeSettings, { sessions: scope.sessions, slots: scope.slots, close: () => {} }))
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-settings' }, KodeMainPage))
-      // Kode's own entries (settings, back to terminals, resume) sit in the
-      // sidebar's More menu; the list keeps conversations and bots in front.
-      const KodeMoreItems = ({ onDismiss }) => h(React.Fragment, null,
-        h(MenuItemButton, { icon: h(IconAgentPresetOutlineRegular, { size: 16 }), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-settings') } }, 'Kode 设置'),
-        kodeEmbedded() && h(MenuItemButton, { icon: glyph(TERMINAL_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-leave') } }, 'Kode 终端'),
-        kodeEmbedded() && h(MenuItemButton, { icon: glyph(HISTORY_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-resume') } }, '恢复会话'))
-      scope.slots.inject('sidebar.panellist.actions', () => scope.slots.register({ name: 'sidebar.panellist.actions', id: 'kode-entries', order: -10 }, KodeMoreItems))
+      // Native panels can be pinned or moved to More using the sidebar's controls.
+      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode 设置' }, IconAgentPresetOutlineRegular))
+      if (kodeEmbedded()) {
+        const KodeMoreItems = ({ onDismiss }) => h(React.Fragment, null,
+          h(MenuItemButton, { icon: glyph(TERMINAL_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-leave') } }, 'Kode 终端'),
+          h(MenuItemButton, { icon: glyph(HISTORY_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-resume') } }, '恢复会话'))
+        scope.slots.inject('sidebar.panellist.actions', () => scope.slots.register({ name: 'sidebar.panellist.actions', id: 'kode-entries', order: -10 }, KodeMoreItems))
+      }
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-bots' }, () => h(KodeBotsPage, { ui: () => scope.get('uiWorkspace') })))
       const openBotSession = async id => { scope.layout.selectPanel(null); await scope.get('uiWorkspace')?.openSession(id) }
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'schedules' }, () => h('span', { className: 'kode-schedules-marker', hidden: true })))
