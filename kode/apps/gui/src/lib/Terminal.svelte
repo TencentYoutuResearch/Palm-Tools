@@ -42,6 +42,7 @@
   } from './codex_mouse_selection'
   import { isTcodexBackendKey } from './session_exit_guard'
   import { isWindowsUserAgent } from './platform'
+  import { terminalLinkModifierPressed } from './terminal_links'
   import { shouldConfirmTcodexCtrlC } from './terminal_ctrl_c_policy'
   import { stripTerminalMouseReports } from './terminal_mouse_reports'
   import { TerminalMouseTrackingGate } from './terminal_mouse_tracking'
@@ -260,11 +261,11 @@
       // window.confirm("Do you want to navigate to …") —— Tauri WKWebView
       // 不允许 confirm,会抛 "dialog.confirm not allowed. Command not found"。
       // 我们自己的 registerLinkProvider 已经处理了所有链接,这里设一个空
-      // handler 阻断 xterm 默认路径即可。Cmd+Click 由 activate 回调处理。
+      // handler 阻断 xterm 默认路径即可。Cmd+Click(macOS)或 Ctrl+Click
+      // (Windows)由 activate 回调处理。
       linkHandler: {
         activate(_event: MouseEvent, uri: string) {
-          // Cmd+Click 才打开;普通 click 不做任何事
-          if (!_event?.metaKey) return
+          if (!terminalLinkModifierPressed(_event, windowsPlatform)) return
           ipc.openPath(uri).catch((err) => {
             console.warn('[term] linkHandler open failed:', err)
           })
@@ -774,8 +775,9 @@
     //   是无效的(永远空),导致中文 / CJK 行里字符索引被当成 cell col
     //   使用,链接下划线整体偏移 N(N = 行内全宽字符数)。修复方案:用
     //   getCell(x).getWidth() 自己遍历 cell 构建 charIdx ↔ cellCol 映射。
-    // • activate(event, text): event 是真实 MouseEvent,可以读 metaKey。
-    //   直接在这里判断 Cmd 再 openPath,不需要额外 click capture handler。
+    // • activate(event, text): event 是真实 MouseEvent,可以读修饰键。
+    //   直接在这里判断 Cmd(macOS)/Ctrl(Windows)再 openPath,不需要额外
+    //   click capture handler。
     //
     // 识别范围:
     //   a) http:// / https:// / file:// URL
@@ -850,8 +852,7 @@
             },
             activate(event: MouseEvent, _text: string) {
               // xterm 在鼠标抬起时调 activate(mouseEvent, linkText)
-              // 只有 Cmd 按住时才真正打开
-              if (!event?.metaKey) return
+              if (!terminalLinkModifierPressed(event, windowsPlatform)) return
               let path = cleanPath(raw)
               // 相对路径:拼接 session cwd 变绝对路径
               if (!path.startsWith('/') && !path.startsWith('~') && !path.match(/^https?:\/\//)) {
@@ -860,7 +861,7 @@
                   path = tab.cwd.replace(/\/$/, '') + '/' + path
                 }
               }
-              console.debug('[term] cmd+click open:', path)
+              console.debug('[term] modified link click open:', path)
               ipc.openPath(path).catch((err) => {
                 console.warn('[term] open_path failed:', err)
               })
@@ -871,10 +872,11 @@
       },
     })
 
-    // 11) click capture handler — Cmd 按住时落在 LINK_PATTERN 上,preventDefault 阻止文本选中。
+    // 11) click capture handler — 链接修饰键按住时落在 LINK_PATTERN 上,
+    //   preventDefault 阻止文本选中。
     //   xterm activate 回调里已处理打开逻辑,这里只做防选区。
     const onClickCapture = (e: MouseEvent) => {
-      if (!e.metaKey || !term) return
+      if (!terminalLinkModifierPressed(e, windowsPlatform) || !term) return
 
       const termCols = term.cols
       const termRows = term.rows
