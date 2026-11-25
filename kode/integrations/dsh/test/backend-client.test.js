@@ -26,3 +26,18 @@ test('binary backend assets retain authentication, content type and byte payload
   assert.equal(result.contentType, 'image/png'); assert.deepEqual([...result.body], [...bytes])
   await assert.rejects(client(new Response('<html></html>', { headers: { 'content-type': 'text/html' } })).asset(path), /image/)
 })
+
+test('CLI update waits for the installer response and preserves owner authentication', async t => {
+  const { createServer } = await import('node:http')
+  const server = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    const valid = req.method === 'POST' && req.headers.authorization === 'Bearer test-token'
+      && JSON.parse(body).update_profile === 'cursor'
+    res.writeHead(valid ? 200 : 403).end(JSON.stringify({ updated: valid }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const api = new BackendClient('http://127.0.0.1:' + server.address().port, 'test-token')
+  assert.deepEqual(await api.call('/api/v1/messaging/workbench/agent-versions', { update_profile: 'cursor' }), { updated: true })
+})

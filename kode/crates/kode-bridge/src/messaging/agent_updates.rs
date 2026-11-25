@@ -223,7 +223,9 @@ fn newer(current: &Version, latest: &Version, installer: &Installer) -> bool {
     if matches!(installer, Installer::Cursor) {
         // A Cursor build hash is an identity, not an ordered prerelease number.
         let date = |version: &Version| (version.major, version.minor, version.patch);
-        date(latest) > date(current) || date(latest) == date(current) && latest.pre != current.pre
+        date(latest) > date(current)
+            || date(latest) == date(current)
+                && (latest.pre != current.pre || latest.build != current.build)
     } else {
         latest.cmp_precedence(current).is_gt()
     }
@@ -256,11 +258,14 @@ impl Installation {
         let mut path = vec![self.command.parent()?.to_owned()];
         path.extend(std::env::split_paths(&self.path));
         let path = std::env::join_paths(path).ok()?;
-        parse_version(
-            &run(root, &self.command, vec!["--version".into()], &path, 5)
-                .await
-                .ok()?,
-        )
+        let output = run(root, &self.command, vec!["--version".into()], &path, 5)
+            .await
+            .ok()?;
+        if matches!(self.installer, Some(Installer::Cursor)) {
+            output.split_whitespace().find_map(cursor_build)
+        } else {
+            parse_version(&output)
+        }
     }
 
     async fn latest(&self, root: &Path, home: &Path, installer: &Installer) -> Option<Version> {
@@ -402,7 +407,13 @@ impl Installation {
             )
             .chain(std::env::split_paths(&self.path)),
         )?;
-        run(root, command, args, &path, 180)
+        // Cursor downloads the complete CLI archive; a slow but healthy download can take several minutes.
+        let timeout = if matches!(installer, Installer::Cursor) {
+            3600
+        } else {
+            180
+        };
+        run(root, command, args, &path, timeout)
             .await
             .map_err(|_| anyhow::anyhow!("更新失败，请检查安装权限和发布源后重试。"))?;
         Ok(())
@@ -426,6 +437,32 @@ async fn download(url: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+// Cursor uses zero-padded calendar dates, which are not valid semver components.
+fn cursor_build(build: &str) -> Option<Version> {
+    let (date, hash) = build.split_once('-')?;
+    let mut parts = date.split('.');
+    let year = parts.next()?;
+    let month = parts.next()?.parse::<u8>().ok()?;
+    let day = parts.next()?.parse::<u8>().ok()?;
+    if year.len() != 4
+        || parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hash.is_empty()
+        || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    // Build metadata accepts numeric hashes with leading zeroes, unlike semver prereleases.
+    let mut version = Version::new(year.parse().ok()?, month.into(), day.into());
+    if let Ok(pre) = semver::Prerelease::new(hash) {
+        version.pre = pre;
+    } else {
+        version.build = semver::BuildMetadata::new(hash).ok()?;
+    }
+    Some(version)
+}
+
 fn cursor_version(script: &str) -> Option<Version> {
     let prefix = "DOWNLOAD_URL=\"https://downloads.cursor.com/lab/";
     let version = script
@@ -433,7 +470,7 @@ fn cursor_version(script: &str) -> Option<Version> {
         .find_map(|line| line.strip_prefix(prefix))?
         .split('/')
         .next()?;
-    Version::parse(version).ok()
+    cursor_build(version)
 }
 
 impl AgentUpdates {
@@ -554,6 +591,13 @@ mod tests {
         let latest = cursor_version("DOWNLOAD_URL=\"https://downloads.cursor.com/lab/2026.11.21-aaaaaaa/darwin/arm64/agent-cli-package.tar.gz\"").unwrap();
         assert!(newer(&current, &latest, &Installer::Cursor));
         assert!(cursor_version("download=unrecognized").is_none());
+        let previous = cursor_build("2026.09.02-c22c1a3").unwrap();
+        assert!(newer(&previous, &latest, &Installer::Cursor));
+        assert!(newer(
+            &cursor_build("2026.09.02-0000123").unwrap(),
+            &previous,
+            &Installer::Cursor
+        ));
     }
 
     #[cfg(unix)]
