@@ -12,7 +12,7 @@ import { mountNativeCommands } from './native-commands.js'
 import { humanInput, terminalOnlyCommands } from './native-commands.js'
 import { pendingShellContext } from './native-shell.js'
 import { classifyCommands } from './command-skills.js'
-import { branchHistoryInput, claudeHistoryBoundary, editedHistoryInput, latestHistoryEdit, nativeHistoryBoundary } from './history-edit.js'
+import { branchHistoryInput, claudeHistoryBoundary, editedHistoryInput, latestHistoryEdit, nativeHistoryBoundary, rejectedLegacyHistory } from './history-edit.js'
 import { nativeInput } from './native-input.js'
 import { SessionAppearance } from './session-appearance.js'
 import { fastPreference, withModelVariantFast } from './model-fast.js'
@@ -332,6 +332,13 @@ export class AgentRuntimeAdapter {
         await agent.ctx.sessions.flush(agent.session)
         await this.closeSession(agent.id)
       }
+      if (!edit && messages.some(message => ['user', 'human'].includes(message.source?.kind)) && rejectedLegacyHistory(agent.session, binding)) {
+        await this.closeSession(agent.id)
+        binding = await this.profiles.patchBinding(agent.id, {
+          threadId: null, historyBootstrapped: false, historyBranchRecovered: true,
+          supersededThreads: [...new Set([...(binding.supersededThreads ?? []), binding.threadId])],
+        })
+      }
       const tools = options.tools ?? []
       runtime = this.live.get(agent.id)
       const autoCompactRevision = profile.type === 'claude' ? agent.session.snapshotEvents?.().findLast(event => event.type === 'plugin:kode/autocompact')?.seq ?? -1 : -1
@@ -343,11 +350,11 @@ export class AgentRuntimeAdapter {
         this.live.set(agent.id, runtime)
         binding = this.profiles.binding(agent.id) ?? binding
       }
-      const history = edit ? binding.historyEditBootstrap ? editedHistoryInput(agent.session, edit) : [] : branchHistoryInput(agent.session, binding)
+      const history = edit ? binding.historyEditBootstrap ? editedHistoryInput(agent.session, edit) : [] : branchHistoryInput(agent.session, binding, messages.map(message => message.id))
       // Slash commands can replace the entire native prompt, including the
       // retained prefix. Deliver edits requiring a bootstrap as plain input.
       if (history.length) command = undefined
-      const context = command || options.nativeContinuation || binding.historyEditBootstrap
+      const context = command || options.nativeContinuation || binding.historyEditBootstrap || binding.historyBranchRecovered && history.length
         ? [] : pendingShellContext(agent.session, editState?.ranges)
       const attachments = (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments)
       const input = [...history, ...await nativeInput([...context, ...messages], { attachments, codex: profile.type === 'codex' || profile.protocol === 'codex', signal })]

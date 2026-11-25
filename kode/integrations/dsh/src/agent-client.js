@@ -1589,7 +1589,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       window.dispatchEvent(new CustomEvent('kode-handoff-dialog', { detail: { sessionId, host: transport?.current ?? 'local' } }))
     }
     const icon = h(IconPaperPlaneOutlineRegular, { size: 16, 'aria-hidden': true })
-    return panel ? h(SessionPanelRow, { icon, label: '交接给其他 Agent', onClick: open }) :
+    return panel ? h(SessionPanelRow, { icon, label: '交接', actionLabel: '交接会话到其他 Agent', onClick: open }) :
       h(Button, { variant: 'outline', className: 'kode-handoff-trigger', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: open }, icon, '交接')
   }
   function HandoffOverlay({ sessions }) {
@@ -2025,12 +2025,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         openAvatarDialog({ sessionId, host, profile })
       }
     }
-    const avatar = h(AgentAvatar, { profile, host, size: panel ? 20 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
+    const avatar = h(AgentAvatar, { profile, host, size: panel ? 28 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
     if (panel) {
-      const model = selectedCatalogModel(data.models ?? [], data.selection)
-      const modelId = model?.id ?? data.selection?.model
-      const modelName = modelId && modelId !== 'auto' && modelId !== 'default' ? model?.name ?? modelId : null
-      return h(SessionPanelRow, { icon: avatar, label: profile.name, detail: modelName ?? (profile.name === type ? undefined : type),
+      return h(SessionPanelRow, { icon: avatar, label: profile.name, detail: profile.name === type ? undefined : type,
         actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
         trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose })
     }
@@ -3301,7 +3298,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       yield ctx.slots.register({ name: CARD_ENVIRONMENT, id: 'kode-agent-handoff', order: 50, inject: session }, props => h(HandoffAction, { ...props, panel: true }))
     })
     ctx.slots.inject(CARD_SECTIONS, function* () {
-      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-review-links', order: 100, label: () => 'PR / MR', inject: session },
+      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-review-links', order: 100, label: () => '代码评审', inject: session },
         props => h(FallbackPanelSection, { ...props, nativeId: 'change-requests', component: SessionReviewLinks }))
       yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-child-agents', order: 200, label: () => '子 Agent', inject: session },
         props => h(FallbackPanelSection, { ...props, nativeId: 'subagents', component: NativeSubagentRows }))
@@ -3599,9 +3596,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 @media(hover:hover){[data-session-panel-row]:has(>.kode-panel-link):hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .kode-panel-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:var(--dsw-radius-sm)}
 [data-kode-panel-row]:has(>button[aria-expanded=true])>[data-row-part=trailing]{transform:rotate(180deg)}
-.kode-panel-detail{display:grid;gap:6px;padding:4px 6px 8px 30px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12)}
+.kode-panel-detail{display:grid;gap:6px;padding:2px 8px 8px 32px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);min-width:0}
+[data-kode-panel-row] [data-row-part=icon]:has(>.kode-agent-avatar){width:auto;height:auto;flex:none}
+[data-kode-panel-row] .kode-agent-avatar{position:relative;overflow:visible}
+[data-kode-panel-row] .kode-agent-avatar img{border-radius:6px}
+[data-kode-panel-row] .kode-agent-avatar[data-avatar-state]::after{content:none}
+[data-kode-panel-row] [data-row-part=lines]{min-width:0}
+[data-kode-panel-row] [data-row-part=content],[data-kode-panel-row] [data-row-part=detail]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kode-panel-detail p,.kode-panel-detail pre{margin:0;max-block-size:12rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .kode-panel-detail pre{padding:8px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-sm)}
+@media(max-width:520px){.kode-panel-detail{padding-inline-start:8px}.kode-panel-detail p,.kode-panel-detail pre{max-block-size:8rem}}
 .kode-subagent-trigger{gap:5px;padding-inline:6px;font-variant-numeric:tabular-nums}
 .kode-subagent-menu-item{display:flex;flex-direction:column;gap:2px;min-width:0;max-width:220px}
 .kode-subagent-menu-item>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

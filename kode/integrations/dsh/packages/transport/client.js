@@ -1472,6 +1472,31 @@ async function fetchWithLocalAppearance(input, init, { current, send }) {
   return new Response(JSON.stringify(remoteBody), { status: remote.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
+// packages/transport/session-creation.js
+async function fetchWithWorkspaceSessionCreation(input, init, send) {
+  const response = await send(input, init);
+  if (!response.ok || init?.method !== "POST" || typeof init.body !== "string" || new URL(input, "http://localhost/").pathname !== "/api/session/create") return response;
+  let envelope;
+  try {
+    envelope = JSON.parse(init.body);
+  } catch {
+    return response;
+  }
+  const request = envelope?.payload?.args?.request;
+  if (envelope?.type !== "client-request" || envelope.method !== "session/create" || typeof envelope.rpcId !== "string" || typeof request?.workspaceId !== "string" || typeof request.sessionId !== "string" || request.cwd !== void 0) return response;
+  let result;
+  try {
+    result = await response.clone().json();
+  } catch {
+    return response;
+  }
+  const error = result?.result?.error;
+  if (result?.type !== "server-response" || result.rpcId !== envelope.rpcId || result.result?.ok !== false || error?.code !== "session/agent-busy" || error.details?.reason !== "use subagent delivery for this child session") return response;
+  init.signal?.throwIfAborted();
+  delete request.sessionId;
+  return send(input, { ...init, body: JSON.stringify(envelope) });
+}
+
 // packages/transport/connection-progress.js
 var import_react = require("react");
 var import_client = require("react-dom/client");
@@ -1746,7 +1771,10 @@ async function apply(ctx) {
   const carrier = globalThis.__DSH_TRANSPORT__;
   installConnection(ctx, { location: window.location, transport: {
     ...carrier,
-    fetch: (input, init) => fetchWithLocalAppearance(input, init, { current, send: fetchHost }),
+    fetch: (input, init) => {
+      const host = current;
+      return fetchWithWorkspaceSessionCreation(input, init, (path, request) => fetchWithLocalAppearance(path, request, { current: host, send: fetchHost }));
+    },
     createWebSocket: (input) => {
       const base = carrier?.streamBaseUrl ?? window.location.href;
       const original = new URL(input, base);

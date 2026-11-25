@@ -1,5 +1,5 @@
 /** Standards-based ACP fixture using the same released SDK as the client. No inference. */
-import { agent, ndJsonStream } from '@agentclientprotocol/sdk'
+import { agent, ndJsonStream, RequestError } from '@agentclientprotocol/sdk'
 import { Readable, Writable } from 'node:stream'
 import { appendFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -74,6 +74,7 @@ app.onRequest('session/prompt', async ({ params, client, signal }) => {
   const waiting = text.includes('WAIT') ? new Promise(resolve => { pending.set(params.sessionId, resolve); signal.addEventListener('abort', () => resolve(), { once: true }) }) : undefined
   if (process.env.KODE_ACP_PROMPT_LOG_DELAY) await new Promise(resolve => setTimeout(resolve, Number(process.env.KODE_ACP_PROMPT_LOG_DELAY)))
   await record('session/prompt', params)
+  if (params.sessionId === process.env.KODE_ACP_OVERSIZED_HISTORY_SESSION) throw RequestError.internalError({}, 'Prompt is too long')
   if (text.includes('NATIVE_SUBAGENTS')) {
     const notify = update => client.notify('session/update', { sessionId, update })
     await notify({ sessionUpdate: 'subagent_spawned', subagentSessionId: 'claude-child', name: 'Verifier', task: 'Verify behavior' })

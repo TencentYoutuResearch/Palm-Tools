@@ -414,10 +414,13 @@ test('handoff excludes the current Agent and keeps the dialog outside the sessio
   assert.match(visibleText(legacy(props)), /交接/)
   c.addSlot('conversation.session.header.utilities', 'session-panel', c.native)
   assert.equal(legacy(props), null)
-  assert.match(visibleText(c.entryById('kode-agent-handoff')(props)), /交接给其他 Agent/)
+  const handoff = c.entryById('kode-agent-handoff')(props)
+  const row = handoff.type(handoff.props)
+  assert.equal(row.props.label, '交接')
+  assert.equal(row.props.actionLabel, '交接会话到其他 Agent')
 })
 
-test('the details card uses the same profile and selected model as the composer across Agents', async () => {
+test('the details card uses the composer profile without repeating its model across Agents', async () => {
   for (const [type, name] of [['dsh', 'DSH'], ['codex', 'Codex'], ['claude', 'TClaude'], ['codebuddy', 'CodeBuddy'], ['cursor', 'Cursor'], ['custom', 'Custom ACP']]) {
     const currentProfile = { id: type, name, type }
     const models = [{ id: 'other', name: 'Other model' }, { id: 'fixture', name: 'Fixture model', isDefault: true }]
@@ -435,7 +438,8 @@ test('the details card uses the same profile and selected model as the composer 
     await new Promise(resolve => setImmediate(resolve))
     const row = render()
     assert.equal(row.props.label, name)
-    assert.equal(row.props.detail, 'Fixture model')
+    assert.equal(row.props.detail, name === type ? undefined : type)
+    assert.equal(row.props.icon.props.size, 28)
     assert.equal(row.props.actionLabel, '设置 ' + name + ' 的头像与背景')
     const model = c.ctx.slots.entries('conversation.input.model')[0].component
     assert.match(model(props).children[0].props.anchor.props.label, /Fixture model/)
