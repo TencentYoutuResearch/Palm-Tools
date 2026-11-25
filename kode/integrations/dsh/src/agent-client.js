@@ -621,7 +621,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     if (!actions?.openSection) throw new Error('设置尚未就绪，请稍后重试。')
     actions.openSection(section)
   }
-  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, requestedBotStart, requestedBotWatches, requestedBotEdit
+  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, openMemoryPage, requestedBotStart, requestedBotWatches, requestedBotEdit
   function AgentControl({ sessionId, sessions, remote, slots }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions)
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')
@@ -759,7 +759,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
                 h('strong', null, 'Agent 会话命名'),
                 h('p', { className: 'kode-config-note' }, '当前 Kode 服务不支持自定义命名。更新服务后即可设置。'),
                 h(ServiceRecoveryLink, { host, slots }))),
-          integration('memory_enabled', '共享记忆', '允许 Agent 搜索已审核的记忆并提交待审核提议。')),
+          integration('memory_enabled', '共享记忆', '允许 Agent 搜索已审核的记忆并提交待审核提议。'),
+          typeof openMemoryPage === 'function' && h('div', { className: 'kode-memory-settings-link' },
+            h('span', { className: 'kode-config-note' }, 'Agent 提交的记忆需人工审批后才会入库，批准后自动全额返还能量。'),
+            h(Button, { type: 'button', variant: 'outline', onClick: () => openMemoryPage?.() }, '打开记忆审批'))),
         h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots })),
       h(HubSettings, { key: hubHost, host: hubHost, hosts, sessions }))
   }
@@ -878,7 +881,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
           h('p', { className: 'kode-config-note', role: 'status' }, data.power.error || (data.power.active ? '主机正在保持唤醒。' : data.power.supported ? '主机使用系统默认休眠设置。' : '此主机暂不支持保持唤醒。'))),
         h(Failure, { text: error })))
   }
-  const hubTargetNames = { dsh: 'DeepSeek Harness', codex: 'Codex', claude: 'Claude Code', codebuddy: 'CodeBuddy', cursor: 'Cursor', tcodex: 'TCodex', tclaude: 'TClaude' }
+  const hubTargetNames = { dsh: 'DeepSeek Harness', codex: 'Codex', claude: 'Claude Code', codebuddy: 'CodeBuddy', cursor: 'Cursor', antigravity: 'Antigravity', tcodex: 'TCodex', tclaude: 'TClaude' }
   function sourceProfileTarget(profile, data) {
     if (!profile) return
     if (data?.profileTargets) return data.profileTargets[profile.id] ?? (profile.type === 'dsh' ? 'dsh' : undefined)
@@ -1561,6 +1564,409 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       h(BotsRoot, { data, busy, act }),
       h(Failure, { text: error }))
   }
+  // Shared Kode Memory ("共享记忆"): owner approval queue + approved facts browser.
+  const MEMORY_KIND_LABELS = { gotcha: '踩坑', invariant: '硬规则', recipe: '配方', dead_end: '死胡同', preference: '偏好' }
+  async function memoryCall(query = '', body = null, host = 'local') {
+    const response = await fetchHost(
+      `/api/kode/memory${query}`,
+      body
+        ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+        : { credentials: 'same-origin', cache: 'no-store' },
+      host,
+    )
+    const value = await parseHostJson(response)
+    if (!response.ok) throw Object.assign(new Error(value.error ?? '共享记忆暂不可用'), { code: value.code, status: response.status })
+    return value
+  }
+  let memorySnapshot = { data: null, error: '', recoveryNeeded: false, loaded: false }, memoryPendingReq
+  const memoryListeners = new Set()
+  const memoryStore = { subscribe: fn => { memoryListeners.add(fn); return () => memoryListeners.delete(fn) }, getSnapshot: () => memorySnapshot }
+  function publishMemory(next) { memorySnapshot = next; for (const listener of memoryListeners) listener() }
+  async function refreshMemory(host = 'local') {
+    if (host === 'local' && memoryPendingReq) return memoryPendingReq
+    const req = memoryCall('', null, host).then(
+      data => {
+        if (host === 'local') publishMemory({ data, error: '', recoveryNeeded: false, loaded: true })
+        return data
+      },
+      error => {
+        if (host === 'local') publishMemory({ ...memorySnapshot, error: error.message, recoveryNeeded: error.code === 'KODE_SERVICE_UPDATE_REQUIRED', loaded: true })
+        throw error
+      },
+    )
+    if (host === 'local') {
+      memoryPendingReq = req.catch(() => null).finally(() => { memoryPendingReq = undefined })
+      return memoryPendingReq
+    }
+    return req
+  }
+  let memoryWatching = false, memoryFocusAt = 0
+  function followMemoryFreshness() {
+    if (memoryWatching) return
+    memoryWatching = true
+    const reread = () => {
+      if (document.hidden || Date.now() - memoryFocusAt < 5000) return
+      memoryFocusAt = Date.now()
+      void refreshMemory('local')
+    }
+    window.addEventListener?.('focus', reread)
+    document.addEventListener?.('visibilitychange', reread)
+  }
+  function useMemorySummary() {
+    const snapshot = useSyncExternalStore(memoryStore.subscribe, memoryStore.getSnapshot)
+    useEffect(() => {
+      followMemoryFreshness()
+      void refreshMemory('local')
+      const timer = setInterval(() => { if (!document.hidden) void refreshMemory('local') }, 15000)
+      return () => clearInterval(timer)
+    }, [])
+    return snapshot
+  }
+  // Lucide Brain / Bookmark-like glyph rendered at sidebar native icon size.
+  const memoryIcon = size => navIcon(size,
+    h('path', { d: 'M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z' }),
+    h('path', { d: 'M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z' }),
+    h('path', { d: 'M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4' }),
+  )
+  function MemoryNavIcon({ size = 16 } = {}) { return memoryIcon(size) }
+  function MemoryPendingBadge() {
+    const { data } = useMemorySummary()
+    const count = data?.stats?.pending ?? data?.pending?.length ?? 0
+    if (!count) return null
+    return h('span', { className: 'kode-bot-badge kode-memory-badge', 'aria-label': `${count} 条待审批记忆`, title: `${count} 条待审批记忆` }, count > 99 ? '99+' : String(count))
+  }
+  function formatMemoryTime(iso) {
+    if (!iso) return ''
+    try {
+      const date = new Date(iso)
+      if (Number.isNaN(date.getTime())) return iso
+      return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    } catch { return iso }
+  }
+  function KodeMemoryPage({ slots }) {
+    const { data: hostsData } = useProjectHosts()
+    const [host, setHost] = useState(() => transport?.current ?? 'local')
+    const localSummary = useMemorySummary()
+    const [remoteData, setRemoteData] = useState(null)
+    const [remoteError, setRemoteError] = useState('')
+    const [remoteRecovery, setRemoteRecovery] = useState(false)
+    const [tab, setTab] = useState('pending')
+    const [busy, setBusy] = useState(false)
+    const [notice, setNotice] = useState('')
+    const [actionError, setActionError] = useState('')
+    const [selectedIds, setSelectedIds] = useState(() => new Set())
+    const [editingId, setEditingId] = useState(null)
+    const [editDraft, setEditDraft] = useState({ title: '', scope: '', body: '', tags: '', confidence: '0.8' })
+    const [reasonTarget, setReasonTarget] = useState(null) // { id, kind: 'reject'|'blacklist'|'deprecate'|'batch_reject', reason }
+    const [factsData, setFactsData] = useState(null)
+    const [factsQuery, setFactsQuery] = useState('')
+    const [factsScope, setFactsScope] = useState('')
+    const [factsLoading, setFactsLoading] = useState(false)
+    const [factsError, setFactsError] = useState('')
+
+    const data = host === 'local' ? localSummary.data : remoteData
+    const loadError = host === 'local' ? localSummary.error : remoteError
+    const recoveryNeeded = host === 'local' ? localSummary.recoveryNeeded : remoteRecovery
+    const pending = data?.pending ?? []
+    const stats = data?.stats ?? { pending: pending.length, facts: 0, root: '' }
+    const maxEnergy = data?.max_energy ?? 15
+    const energyAuthors = data?.energy_by_author ?? []
+
+    const reloadPending = async (targetHost = host) => {
+      setActionError('')
+      try {
+        if (targetHost === 'local') {
+          await refreshMemory('local')
+        } else {
+          setRemoteError(''); setRemoteRecovery(false)
+          const next = await memoryCall('', null, targetHost)
+          setRemoteData(next)
+        }
+      } catch (error) {
+        if (targetHost !== 'local') {
+          setRemoteError(error.message)
+          setRemoteRecovery(error.code === 'KODE_SERVICE_UPDATE_REQUIRED')
+        }
+      }
+    }
+    const loadFacts = async (q = factsQuery, scope = factsScope, targetHost = host) => {
+      setFactsLoading(true); setFactsError('')
+      try {
+        const qs = new URLSearchParams({ view: 'facts', limit: '60' })
+        if (q.trim()) qs.set('q', q.trim())
+        if (scope.trim()) qs.set('scope', scope.trim())
+        setFactsData(await memoryCall(`?${qs.toString()}`, null, targetHost))
+      } catch (error) {
+        setFactsError(error.message)
+      } finally {
+        setFactsLoading(false)
+      }
+    }
+    useEffect(() => {
+      setSelectedIds(new Set()); setEditingId(null); setReasonTarget(null); setNotice(''); setActionError('')
+      void reloadPending(host)
+      if (tab === 'facts') void loadFacts(factsQuery, factsScope, host)
+    }, [host])
+    useEffect(() => {
+      if (tab === 'facts') void loadFacts(factsQuery, factsScope, host)
+    }, [tab])
+
+    const reviewOne = async (item, verdict, label) => {
+      setBusy(true); setActionError(''); setNotice('')
+      try {
+        const res = await memoryCall('', { action: 'review', id: item.id, verdict }, host)
+        setEditingId(null); setReasonTarget(null)
+        setSelectedIds(prev => { const next = new Set(prev); next.delete(item.id); return next })
+        const energyText = typeof res.author_energy === 'number' ? `，${res.author ?? item.author} 能量 → ${res.author_energy.toFixed(1)} / ${(res.max_energy ?? maxEnergy).toFixed(0)}` : ''
+        setNotice(`${label}${energyText}`)
+        await reloadPending(host)
+        if (tab === 'facts') await loadFacts(factsQuery, factsScope, host)
+      } catch (error) {
+        setActionError(error.message)
+      } finally {
+        setBusy(false)
+      }
+    }
+    const batchReview = async (kind, reason = '') => {
+      const items = pending.filter(item => selectedIds.has(item.id))
+      if (!items.length) return
+      setBusy(true); setActionError(''); setNotice('')
+      let okCount = 0
+      try {
+        for (const item of items) {
+          const verdict = kind === 'approve' ? { kind: 'approve' } : { kind: 'reject', reason: reason || '批量拒绝' }
+          await memoryCall('', { action: 'review', id: item.id, verdict }, host)
+          okCount++
+        }
+        setSelectedIds(new Set()); setReasonTarget(null)
+        setNotice(`已批量${kind === 'approve' ? '批准' : '拒绝'} ${okCount} 条提议`)
+        await reloadPending(host)
+      } catch (error) {
+        setActionError(`已完成 ${okCount}/${items.length} 条：${error.message}`)
+        await reloadPending(host)
+      } finally {
+        setBusy(false)
+      }
+    }
+    const deprecateFact = async (id, reason) => {
+      setBusy(true); setActionError(''); setNotice('')
+      try {
+        await memoryCall('', { action: 'deprecate', id, reason: reason || '由人工废弃' }, host)
+        setReasonTarget(null)
+        setNotice('已废弃该条记忆')
+        await loadFacts(factsQuery, factsScope, host)
+        await reloadPending(host)
+      } catch (error) {
+        setActionError(error.message)
+      } finally {
+        setBusy(false)
+      }
+    }
+    const startEdit = item => {
+      setReasonTarget(null)
+      setEditingId(item.id)
+      setEditDraft({
+        title: item.title ?? '',
+        scope: item.scope ?? 'shared',
+        body: item.body ?? '',
+        tags: Array.isArray(item.tags) ? item.tags.join(', ') : '',
+        confidence: String(item.confidence ?? 0.8),
+      })
+    }
+    const toggleSelect = id => setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+    const allSelected = pending.length > 0 && pending.every(item => selectedIds.has(item.id))
+    const hostOptions = (hostsData?.hosts ?? [{ id: 'local', name: '此计算机' }]).map(row => ({ value: row.id, label: row.name }))
+
+    return h('div', { className: 'kode-agent-settings kode-bots-page kode-memory-page' },
+      h('header', { className: 'kode-memory-header' },
+        h('div', null,
+          h('h2', null, '共享记忆'),
+          h('p', { className: 'kode-agent-intro' }, '审批 Agent 提交的记忆提议、查看能量配额，并检索已入库的团队与项目记忆。')),
+        h('div', { className: 'kode-memory-header-actions' },
+          hostOptions.length > 1 && h('div', { className: 'kode-memory-host-picker' },
+            h(SelectField, { label: '主机', showLabel: false, value: host, options: hostOptions, onChange: setHost })),
+          h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => { void reloadPending(host); if (tab === 'facts') void loadFacts(factsQuery, factsScope, host) } }, '刷新'))),
+
+      h('div', { className: 'kode-memory-stats' },
+        h('span', { className: 'kode-memory-stat' }, h('strong', null, String(stats.pending ?? pending.length)), ' 待审批'),
+        h('span', { className: 'kode-memory-stat' }, h('strong', null, String(stats.facts ?? 0)), ' 已入库'),
+        h('span', { className: 'kode-memory-stat' }, '能量上限 ', h('strong', null, String(maxEnergy)), '（批准全额返还 · 6h 满回血）')),
+
+      energyAuthors.length > 0 && h('div', { className: 'kode-memory-energy-strip', 'aria-label': '作者能量状态' },
+        ...energyAuthors.map(row => {
+          const ratio = Math.max(0, Math.min(1, (row.energy ?? 0) / (row.max || maxEnergy || 15)))
+          return h('span', { key: row.author, className: 'kode-memory-energy-pill', 'data-low': ratio < 0.25 ? 'true' : undefined, title: `${row.author}: ${(row.energy ?? 0).toFixed(1)} / ${(row.max ?? maxEnergy).toFixed(0)}` },
+            h('span', { className: 'kode-memory-energy-author' }, row.author),
+            h('span', { className: 'kode-memory-energy-bar' }, h('span', { style: { width: `${Math.round(ratio * 100)}%` } })),
+            h('span', { className: 'kode-memory-energy-val' }, `${(row.energy ?? 0).toFixed(1)}/${(row.max ?? maxEnergy).toFixed(0)}`))
+        })),
+
+      h('div', { className: 'kode-memory-tabs', role: 'tablist', 'aria-label': '共享记忆视图' },
+        h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'pending', onClick: () => setTab('pending') },
+          '待审批', (stats.pending ?? pending.length) > 0 && h('span', { className: 'kode-bot-badge' }, String(stats.pending ?? pending.length))),
+        h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'facts', onClick: () => setTab('facts') },
+          `已入库 (${stats.facts ?? 0})`)),
+
+      notice && h('p', { role: 'status', className: 'kode-saved kode-memory-notice' }, notice),
+      h(Failure, { text: actionError || loadError }),
+      recoveryNeeded && slots && h(ServiceRecoveryLink, { host, slots }),
+
+      tab === 'pending' && h('div', { className: 'kode-memory-section' },
+        pending.length > 1 && h('div', { className: 'kode-memory-batch-bar' },
+          h('label', { className: 'kode-memory-check' },
+            h('input', { type: 'checkbox', checked: allSelected, onChange: () => setSelectedIds(allSelected ? new Set() : new Set(pending.map(p => p.id))) }),
+            h('span', null, allSelected ? '取消全选' : `全选 (${pending.length})`)),
+          selectedIds.size > 0 && h('div', { className: 'kode-memory-batch-actions' },
+            h(Button, { type: 'button', variant: 'primary', disabled: busy, onClick: () => void batchReview('approve') }, `批量批准 (${selectedIds.size})`),
+            h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => setReasonTarget({ id: '__batch__', kind: 'batch_reject', reason: '' }) }, `批量拒绝 (${selectedIds.size})`))),
+
+        reasonTarget?.kind === 'batch_reject' && h('form', {
+          className: 'kode-agent-row kode-memory-reason-form',
+          onSubmit: event => { event.preventDefault(); void batchReview('reject', reasonTarget.reason.trim()) },
+        },
+          h('label', { className: 'kode-field' },
+            h('span', null, `批量拒绝 ${selectedIds.size} 条提议的理由（可选）`),
+            h('input', { type: 'text', autoFocus: true, value: reasonTarget.reason, placeholder: '例如：内容过时或过于具体', onChange: e => setReasonTarget({ ...reasonTarget, reason: e.target.value }) })),
+          h('div', { className: 'kode-settings-footer' },
+            h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => setReasonTarget(null) }, '取消'),
+            h(Button, { type: 'submit', variant: 'primary', disabled: busy }, '确认批量拒绝'))),
+
+        !pending.length && !loadError && h('div', { className: 'kode-agent-row kode-memory-empty' },
+          h('strong', null, '暂无待审批的记忆提议'),
+          h('p', { className: 'kode-config-note' }, 'Agent 在对话中调用 memory_propose 后，提议会出现在这里；批准后即刻入库供所有会话检索，并全额返还消耗的能量。')),
+
+        h('ul', { className: 'kode-agent-rows' },
+          ...pending.map(item => {
+            const isEditing = editingId === item.id
+            const itemReason = reasonTarget?.id === item.id ? reasonTarget : null
+            const itemMax = item.max_energy ?? maxEnergy
+            return h('li', { key: item.id, className: 'kode-agent-row kode-memory-card' },
+              h('div', { className: 'kode-memory-card-head' },
+                pending.length > 1 && h('input', { type: 'checkbox', 'aria-label': `选择 ${item.title || item.id}`, checked: selectedIds.has(item.id), onChange: () => toggleSelect(item.id) }),
+                h('span', { className: 'kode-agent-tag kode-memory-scope' }, item.scope),
+                item.kind && h('span', { className: 'kode-agent-tag' }, MEMORY_KIND_LABELS[item.kind] ?? item.kind),
+                h('strong', { className: 'kode-memory-title' }, item.title || item.id),
+                h('span', { className: 'kode-memory-meta' },
+                  `${item.author} · 能量 ${(item.author_energy ?? itemMax).toFixed(1)}/${itemMax.toFixed(0)} · 置信度 ${(item.confidence ?? 0.8).toFixed(2)}`,
+                  item.created ? ` · ${formatMemoryTime(item.created)}` : '')),
+
+              item.supersedes && h('p', { className: 'kode-config-note kode-memory-supersedes' }, `将替代旧记忆：${item.supersedes}`),
+
+              !isEditing && h(React.Fragment, null,
+                h('pre', { className: 'kode-memory-body' }, item.body),
+                item.rationale && h('p', { className: 'kode-memory-rationale' }, h('strong', null, '理由：'), item.rationale),
+                Array.isArray(item.tags) && item.tags.length > 0 && h('div', { className: 'kode-memory-tags' },
+                  ...item.tags.map(tag => h('span', { key: tag, className: 'kode-agent-tag' }, `#${tag}`))),
+
+                !itemReason && h('div', { className: 'kode-memory-actions' },
+                  h(Button, { type: 'button', variant: 'primary', disabled: busy, onClick: () => void reviewOne(item, { kind: 'approve' }, '已批准并入库') }, '批准'),
+                  h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => startEdit(item) }, '编辑后批准'),
+                  h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => setReasonTarget({ id: item.id, kind: 'reject', reason: '' }) }, '拒绝'),
+                  h(Button, { type: 'button', variant: 'outline', className: 'kode-delete', disabled: busy, onClick: () => setReasonTarget({ id: item.id, kind: 'blacklist', reason: '' }) }, '拉黑')),
+
+                itemReason && h('form', {
+                  className: 'kode-memory-reason-form',
+                  onSubmit: event => {
+                    event.preventDefault()
+                    const kind = itemReason.kind === 'blacklist' ? 'blacklist' : 'reject'
+                    const defaultReason = kind === 'blacklist' ? '垃圾或无效记忆' : '不需要入库'
+                    void reviewOne(item, { kind, reason: itemReason.reason.trim() || defaultReason }, kind === 'blacklist' ? '已拉黑并归档' : '已拒绝并归档')
+                  },
+                },
+                  h('label', { className: 'kode-field' },
+                    h('span', null, itemReason.kind === 'blacklist' ? '拉黑原因（将额外扣除 2.0 能量）' : '拒绝原因（将额外扣除 0.5 能量）'),
+                    h('input', { type: 'text', autoFocus: true, value: itemReason.reason, placeholder: '可选，记录归档原因', onChange: e => setReasonTarget({ ...itemReason, reason: e.target.value }) })),
+                  h('div', { className: 'kode-settings-footer' },
+                    h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => setReasonTarget(null) }, '取消'),
+                    h(Button, { type: 'submit', variant: 'primary', disabled: busy }, itemReason.kind === 'blacklist' ? '确认拉黑' : '确认拒绝')))),
+
+              isEditing && h('form', {
+                className: 'kode-agent-editor kode-memory-editor',
+                onSubmit: event => {
+                  event.preventDefault()
+                  const tags = editDraft.tags.split(',').map(s => s.trim()).filter(Boolean)
+                  const parsedConfidence = Number.parseFloat(editDraft.confidence)
+                  const confidence = Number.isFinite(parsedConfidence) ? Math.max(0, Math.min(1, parsedConfidence)) : undefined
+                  void reviewOne(item, {
+                    kind: 'edit_then_approve',
+                    title: editDraft.title.trim() || null,
+                    scope: editDraft.scope.trim() || null,
+                    body: editDraft.body,
+                    tags,
+                    confidence,
+                  }, '已编辑并批准入库')
+                },
+              },
+                h('div', { className: 'kode-watch-grid' },
+                  h('label', { className: 'kode-field' },
+                    h('span', null, '标题'),
+                    h('input', { type: 'text', value: editDraft.title, onChange: e => setEditDraft({ ...editDraft, title: e.target.value }) })),
+                  h('label', { className: 'kode-field' },
+                    h('span', null, '作用域（如 shared 或 project:name）'),
+                    h('input', { type: 'text', required: true, value: editDraft.scope, onChange: e => setEditDraft({ ...editDraft, scope: e.target.value }) }))),
+                h('label', { className: 'kode-field' },
+                  h('span', null, '记忆正文'),
+                  h('textarea', { rows: 5, required: true, value: editDraft.body, onChange: e => setEditDraft({ ...editDraft, body: e.target.value }) })),
+                h('div', { className: 'kode-watch-grid' },
+                  h('label', { className: 'kode-field' },
+                    h('span', null, '标签（英文逗号分隔）'),
+                    h('input', { type: 'text', value: editDraft.tags, placeholder: 'uart, deploy, gotcha', onChange: e => setEditDraft({ ...editDraft, tags: e.target.value }) })),
+                  h('label', { className: 'kode-field' },
+                    h('span', null, '置信度（0.0 ~ 1.0）'),
+                    h('input', { type: 'number', min: 0, max: 1, step: 0.05, value: editDraft.confidence, onChange: e => setEditDraft({ ...editDraft, confidence: e.target.value }) }))),
+                h('div', { className: 'kode-settings-footer' },
+                  h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => setEditingId(null) }, '取消'),
+                  h(Button, { type: 'submit', variant: 'primary', disabled: busy || !editDraft.body.trim() }, '保存并批准'))))
+          }))),
+
+      tab === 'facts' && h('div', { className: 'kode-memory-section' },
+        h('form', {
+          className: 'kode-memory-search-bar',
+          onSubmit: event => { event.preventDefault(); void loadFacts(factsQuery, factsScope, host) },
+        },
+          h('input', { type: 'search', value: factsQuery, placeholder: '搜索已入库记忆（关键词、模块、规范…）', onChange: e => setFactsQuery(e.target.value) }),
+          h('select', { 'aria-label': '按作用域筛选', value: factsScope, onChange: e => { setFactsScope(e.target.value); void loadFacts(factsQuery, e.target.value, host) } },
+            h('option', { value: '' }, '全部作用域'),
+            ...(factsData?.scopes ?? []).map(scope => h('option', { key: scope, value: scope }, scope))),
+          h(Button, { type: 'submit', variant: 'outline', disabled: factsLoading }, factsLoading ? '搜索中…' : '搜索')),
+
+        h(Failure, { text: factsError }),
+        !factsLoading && !(factsData?.facts?.length) && h('div', { className: 'kode-agent-row kode-memory-empty' },
+          h('strong', null, factsQuery.trim() ? '没有匹配的记忆' : '记忆库还是空的'),
+          h('p', { className: 'kode-config-note' }, '批准待审批提议后，记忆会出现在这里并可供所有 Agent 搜索。')),
+
+        h('ul', { className: 'kode-agent-rows' },
+          ...(factsData?.facts ?? []).map(fact => {
+            const depTarget = reasonTarget?.id === fact.id && reasonTarget?.kind === 'deprecate' ? reasonTarget : null
+            return h('li', { key: fact.id, className: 'kode-agent-row kode-memory-card' },
+              h('div', { className: 'kode-memory-card-head' },
+                h('span', { className: 'kode-agent-tag kode-memory-scope' }, fact.scope),
+                fact.kind && h('span', { className: 'kode-agent-tag' }, MEMORY_KIND_LABELS[fact.kind] ?? fact.kind),
+                h('strong', { className: 'kode-memory-title' }, fact.title || fact.id),
+                h('span', { className: 'kode-memory-meta' },
+                  `${fact.author ?? 'unknown'} · 命中 ${fact.recall_count ?? 0} 次`,
+                  fact.created ? ` · ${formatMemoryTime(fact.created)}` : '')),
+              h('pre', { className: 'kode-memory-body' }, fact.snippet || fact.body || ''),
+              Array.isArray(fact.tags) && fact.tags.length > 0 && h('div', { className: 'kode-memory-tags' },
+                ...fact.tags.map(tag => h('span', { key: tag, className: 'kode-agent-tag' }, `#${tag}`))),
+              !depTarget && h('div', { className: 'kode-memory-actions' },
+                h(Button, { type: 'button', variant: 'outline', className: 'kode-delete', disabled: busy, onClick: () => setReasonTarget({ id: fact.id, kind: 'deprecate', reason: '' }) }, '废弃')),
+              depTarget && h('form', {
+                className: 'kode-memory-reason-form',
+                onSubmit: event => { event.preventDefault(); void deprecateFact(fact.id, depTarget.reason.trim()) },
+              },
+                h('label', { className: 'kode-field' },
+                  h('span', null, '废弃原因（软删除，不再参与检索）'),
+                  h('input', { type: 'text', autoFocus: true, value: depTarget.reason, placeholder: '例如：已过时或被新规则替代', onChange: e => setReasonTarget({ ...depTarget, reason: e.target.value }) })),
+                h('div', { className: 'kode-settings-footer' },
+                  h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => setReasonTarget(null) }, '取消'),
+                  h(Button, { type: 'submit', variant: 'primary', disabled: busy }, '确认废弃'))))
+          }))))
+  }
   const PANEL_GLYPH = 'M2.5 2.5h4.5v4.5h-4.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5h-4.5zM9 9h4.5v4.5H9z'
   // A Kode extension panel (team channels, …). Kode draws the panel's own
   // page over this area; dsh only lends the space and reports where it is.
@@ -1862,7 +2268,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
           h(SelectField, { label: 'Agent 类型', value: draft.type, options: Object.entries(data?.types ?? {}).map(([value, spec]) => ({ value, label: spec.name })), onChange: type => change({ type, executable: data.types[type].executable ?? '', argsText: '[]', protocol: type === 'custom' ? 'acp' : undefined }) }),
           draft.type !== 'dsh' && field('可执行文件', 'executable', { required: true, placeholder: data?.types[draft.type]?.executable, spellCheck: false }),
           draft.type === 'custom' && h(SelectField, { label: '通信协议', value: draft.protocol ?? 'acp', options: [{ value: 'acp', label: 'ACP' }, { value: 'codex', label: 'Codex app-server' }], onChange: protocol => change({ protocol }) }),
-          h('p', { className: 'kode-config-note' }, '模型从 Agent 自动读取，工作区跟随当前会话。', ['claude', 'codebuddy','cursor', 'custom'].includes(draft.type) && draft.protocol !== 'codex' ? '操作审批已接入；文件隔离范围由 Agent 自身能力决定。' : '访问模式应用于执行沙箱。'),
+          h('p', { className: 'kode-config-note' }, '模型从 Agent 自动读取，工作区跟随当前会话。', ['claude', 'codebuddy', 'cursor', 'antigravity', 'custom'].includes(draft.type) && draft.protocol !== 'codex' ? '操作审批已接入；文件隔离范围由 Agent 自身能力决定。' : '访问模式应用于执行沙箱。'),
           h(AdvancedSection, { title: '高级设置' },
             draft.type !== 'dsh' && field('启动参数（JSON 数组）', 'argsText', { spellCheck: false }),
             draft.type !== 'dsh' && h('label', { className: 'kode-field' }, h('span', null, '环境变量（JSON 对象）'), h('textarea', { rows: 4, spellCheck: false, value: draft.envText, onChange: e => change({ envText: e.target.value }) })),
@@ -3894,6 +4300,15 @@ button:has(.kode-schedules-marker,.kode-plugins-marker)>span[aria-hidden="true"]
 button:has(.kode-plugins-marker)>span[aria-hidden="true"]::before{mask-image:url("data:image/svg+xml,${pluginMask}")}
 .kode-bots-glyph{display:inline-flex}.kode-bots-nest{display:block;align-self:stretch;min-width:0}.kode-bots-list{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 18px}.kode-bot-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 8px;border-radius:8px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:left;cursor:pointer}.kode-bot-row:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-row .kode-bot-avatar{width:20px;height:20px;font-size:11px}.kode-bot-avatar-grid{max-height:200px}.kode-bot-scene-preview{position:relative;height:120px;min-height:120px}.kode-bot-scene-preview img{width:100%;height:100%;object-fit:cover}.kode-bot-scene-avatar{position:absolute;left:12px;bottom:10px;display:inline-flex;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 2px 8px rgba(0,0,0,.18)}.kode-bot-card.has-scene{position:relative;overflow:hidden;padding-top:76px}.kode-bot-card.has-scene::before{content:"";position:absolute;inset:0 0 auto 0;height:96px;background:var(--kode-bot-scene) center/cover no-repeat;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}.kode-bot-card.has-scene>*{position:relative}.kode-bot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-bot-tag,.kode-bot-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}.kode-bot-new{color:var(--dsw-alias-label-tertiary)}.kode-bot-line{display:flex;align-items:center;gap:2px}.kode-bot-line>.kode-bot-row{flex:1;min-width:0}.kode-bot-more{flex:none;min-width:20px;height:20px;padding:0 5px;border:0;border-radius:6px;background:none;color:var(--dsw-alias-label-tertiary);font-size:11px;cursor:pointer}.kode-bot-more:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-session{padding-left:36px;font-size:12px}.kode-bot-release{flex:none;padding:0 4px;color:var(--dsw-alias-label-tertiary)}.kode-bot-release:hover{color:var(--dsw-alias-label-primary)}.kode-bot-session-kind{flex:none;font-size:10px;color:var(--dsw-alias-label-tertiary)}.kode-bot-asset-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.kode-bot-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-accent-primary,#3d6ff5);color:#fff;font-size:10px;font-weight:600;line-height:16px;text-align:center}.kode-bot-busy{width:6px;height:6px;border-radius:3px;background:var(--dsw-alias-accent-primary,#3d6ff5);animation:kode-bot-pulse 1.4s ease-in-out infinite}@keyframes kode-bot-pulse{50%{opacity:.3}}.kode-bot-watches{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}.kode-bot-watches h3{margin:6px 0 0}.kode-watch-list,.kode-run-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.kode-watch-row{display:flex;align-items:center;gap:10px}.kode-watch-row[data-enabled=false] .kode-watch-text{opacity:.55}.kode-watch-text{flex:1;min-width:0;display:flex;flex-direction:column}.kode-watch-text .kode-secondary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-watch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.kode-run-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}.kode-run-head{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}.kode-run-status{font-size:11px;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}.kode-run-row[data-status=completed] .kode-run-status{color:#2f9e5f}.kode-run-row[data-status=failed] .kode-run-status{color:#d1453b}.kode-run-row[data-status=needs_user] .kode-run-status{color:#c98a12}.kode-run-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-run-new{font-size:10px;color:#fff;background:#d1453b;border-radius:6px;padding:0 5px}.kode-run-body{flex-basis:100%;display:flex;flex-direction:column;gap:4px}.kode-run-body p{margin:0;white-space:pre-wrap;word-break:break-word}.kode-run-trigger{font-size:12px}
 .kode-bots-page{padding:24px;box-sizing:border-box;width:100%;margin:0 auto;height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}.kode-bot-avatar{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600;flex-shrink:0}.kode-bot-persona{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}.kode-bot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-bot-actions>.kode-secondary{margin-right:auto;font-family:ui-monospace,monospace}
+.kode-memory-settings-link{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0 0 14px}.kode-memory-settings-link>.kode-config-note{margin:0;flex:1 1 200px}
+.kode-memory-page{max-width:860px}.kode-memory-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}.kode-memory-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-memory-host-picker{min-width:150px}.kode-memory-host-picker .kode-field{margin:0}
+.kode-memory-stats{display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--dsw-alias-label-secondary)}.kode-memory-stat strong{color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}
+.kode-memory-energy-strip{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-memory-energy-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-settings-card-fill);font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-memory-energy-pill[data-low=true]{border-color:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#c98a12) 55%,transparent);color:var(--dsw-alias-state-warning-primary,#c98a12)}.kode-memory-energy-author{max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary)}.kode-memory-energy-bar{width:44px;height:5px;border-radius:999px;background:var(--dsw-alias-border-l2);overflow:hidden;flex:none}.kode-memory-energy-bar>span{display:block;height:100%;border-radius:inherit;background:var(--dsw-alias-state-business-primary,#3d6ff5)}.kode-memory-energy-pill[data-low=true] .kode-memory-energy-bar>span{background:var(--dsw-alias-state-warning-primary,#c98a12)}.kode-memory-energy-val{font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:11px}
+.kode-memory-tabs{display:flex;align-items:center;gap:6px;border-bottom:.5px solid var(--dsw-alias-border-l2);padding-bottom:8px}.kode-memory-tabs>button{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:0;border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;font-weight:500;cursor:pointer}.kode-memory-tabs>button:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.kode-memory-tabs>button[aria-selected=true]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.kode-memory-section{display:flex;flex-direction:column;gap:12px}
+.kode-memory-batch-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 12px;border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill);border:.5px solid var(--dsw-alias-settings-card-stroke)}.kode-memory-check{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}.kode-memory-batch-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.kode-memory-card{gap:10px}.kode-memory-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}.kode-memory-scope{background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6ff5) 12%,transparent);color:var(--dsw-alias-label-primary);border-color:transparent}.kode-memory-title{font-size:14px;font-weight:600;overflow-wrap:anywhere}.kode-memory-meta{margin-left:auto;font-size:12px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.kode-memory-body{margin:0;padding:10px 12px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}.kode-memory-rationale{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-secondary)}.kode-memory-supersedes{margin:0;color:var(--dsw-alias-state-warning-primary,#c98a12)}.kode-memory-tags{display:flex;flex-wrap:wrap;gap:6px}.kode-memory-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:2px}.kode-memory-reason-form{display:flex;flex-direction:column;gap:8px;padding-top:4px}.kode-memory-empty{align-items:flex-start;padding:20px 16px}.kode-memory-notice{margin:0;font-size:13px}
+.kode-memory-search-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-memory-search-bar input{flex:1 1 220px;min-width:0;height:36px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}.kode-memory-search-bar select{height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}
 html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:default}html[data-kode-embed] :is(input,textarea,[contenteditable]:not([contenteditable=false]),[data-chat-flow],pre,code){-webkit-user-select:text;user-select:text;cursor:auto}
 .kode-brand-mark-svg{flex:none;display:block;vertical-align:middle}
 .kode-brand-name{display:inline-flex;flex-direction:column;justify-content:center;gap:1.5px;height:24px;white-space:nowrap;user-select:none}
@@ -3959,10 +4374,13 @@ html[data-kode-embed] .kode-token-notch{display:none}
         scope.slots.inject('sidebar.panellist.actions', () => scope.slots.register({ name: 'sidebar.panellist.actions', id: 'kode-entries', order: -10 }, KodeMoreItems))
       }
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-bots' }, () => h(KodeBotsPage, { ui: () => scope.get('uiWorkspace') })))
+      scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-memory' }, () => h(KodeMemoryPage, { slots: scope.slots })))
       const openBotSession = async id => { scope.layout.selectPanel(null); await scope.get('uiWorkspace')?.openSession(id) }
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'schedules' }, () => h('span', { className: 'kode-schedules-marker', hidden: true })))
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'plugins' }, () => h('span', { className: 'kode-plugins-marker', hidden: true })))
+      scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'kode-memory' }, MemoryPendingBadge))
       scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-bots', order: 5, label: '伙伴' }, props => h(BotsNavGlyph, { ...props, openSession: openBotSession })))
+      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-memory', order: 5.5, label: '共享记忆' }, MemoryNavIcon))
       if (kodeEmbedded()) {
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-resume' }, () => h(KodeResumePage, { layout: scope.layout })))
@@ -3992,12 +4410,24 @@ html[data-kode-embed] .kode-token-notch{display:none}
         }, 'kode.extension-panels')
       }
       openBotsPage = () => { scope.layout.selectPanel('kode-bots') }
+      openMemoryPage = () => { scope.layout.selectPanel('kode-memory') }
       openKodeSettings = section => {
         requestedSettingsSection = section
         scope.layout.selectPanel('kode-settings')
         window.dispatchEvent(new CustomEvent('kode-settings-navigate'))
       }
-      scope.effect(() => () => { openKodeSettings = undefined }, 'kode.settings-panel')
+      const onMemoryShortcut = event => {
+        if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && String(event.key).toLowerCase() === 'm') {
+          event.preventDefault()
+          scope.layout.selectPanel('kode-memory')
+        }
+      }
+      window.addEventListener?.('keydown', onMemoryShortcut)
+      scope.effect(() => () => {
+        openKodeSettings = undefined
+        openMemoryPage = undefined
+        window.removeEventListener?.('keydown', onMemoryShortcut)
+      }, 'kode.settings-panel')
     })
     ctx.slots.inject('conversation.input.model', () => ctx.slots.register({ name: 'conversation.input.model', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, ModelControl))
   } }

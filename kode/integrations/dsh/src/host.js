@@ -75,6 +75,8 @@ export async function apply(ctx, config = {}) {
   }
   if (ctx.inject) ctx.inject(['webServer', 'connection'], async webCtx => {
     webCtx.effect(() => registerIntegrationApi(webCtx, admin), 'kode.integration-api')
+    const { registerMemoryApi } = await import('./memory-api.js')
+    webCtx.effect(() => registerMemoryApi(webCtx, admin), 'kode.memory-api')
     webCtx.effect(() => registerModelUsageApi(webCtx, admin), 'kode.model-usage-api')
     webCtx.effect(() => registerSessionNotifications(webCtx), 'kode.session-notifications')
     webCtx.effect(() => registerNotificationSettings(webCtx), 'kode.notification-settings')

@@ -1636,3 +1636,18 @@ test('sessions_send cards collapse to the two session names and title, with stat
   const expand = node => !node || typeof node !== 'object' ? node : Array.isArray(node) ? node.map(expand) : typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) }
   assert.match(JSON.stringify(expand(card(false, true))), /"role":"img","aria-label":"通信未成功"/)
 })
+
+test('shared memory approval page registers in sidebar panellist, trailing badge, and main slot', () => {
+  const selected = []
+  const c = client(undefined, undefined, { layout: { selectPanel(id) { selected.push(id) } } })
+  const navEntry = c.ctx.slots.entries('sidebar.panellist').find(entry => entry.options.id === 'kode-memory')
+  assert.ok(navEntry)
+  assert.equal(navEntry.options.label, '共享记忆')
+  assert.equal(navEntry.options.order, 5.5)
+  const trailingEntry = c.ctx.slots.entries('sidebar.panellist.trailing').find(entry => entry.options.id === 'kode-memory')
+  assert.ok(trailingEntry)
+  const mainEntry = c.entry('main', 'kode-memory')
+  assert.ok(mainEntry)
+  const page = mainEntry()
+  assert.equal(page.type.name, 'KodeMemoryPage')
+})
