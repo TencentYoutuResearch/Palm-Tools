@@ -147,6 +147,15 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   const live = (published.sessions ?? []).find(row => row.backend_key === tab.backend_key
     && (row.runtime === 'gui' && row.session_uuid === tab.session_id || row.runtime === 'dsh' && row.native_thread_id === tab.session_id)
     && !row.runtime_saved && row.status !== 'exited' && (row.owner_alive ?? row.runtime_online))
+  // The local Agent already owns the writer lease. Open that exact conversation
+  // directly, including during a turn, without replaying or importing its history.
+  if (live?.runtime === 'dsh' && live.status !== 'idle') {
+    const ownerId = live.runtime_session_id ?? live.session_uuid
+    const owner = ctx.get('agents')?.get(ownerId)
+    if (owner && ctx.get('kodeAgents').profiles.binding?.(ownerId)?.threadId === tab.session_id) {
+      return { sessionId: ownerId, imported: false }
+    }
+  }
   if (live?.runtime === 'gui' || live && live.status !== 'idle') return { sharedSession: live, imported: false }
   const runtime = ctx.get('kodeAgents'), controller = ctx.get('sessionController')
   const registry = ctx.get('workspaceRegistry')
