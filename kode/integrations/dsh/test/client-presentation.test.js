@@ -1676,3 +1676,25 @@ test('sessions_send cards collapse to the two session names and title, with stat
   const expand = node => !node || typeof node !== 'object' ? node : Array.isArray(node) ? node.map(expand) : typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) }
   assert.match(JSON.stringify(expand(card(false, true))), /"role":"img","aria-label":"通信未成功"/)
 })
+
+test('settings controls use native Button variants, token focus rings and a fixed dialog action layer', () => {
+ assert.doesNotMatch(source, /variant: 'text'/, 'native Button has no text variant')
+ for (const rule of ['.kode-agent-edit{', '.kode-agent-add{', '.kode-source-actions>button{']) {
+  const at = source.indexOf(rule); assert.ok(at > 0, rule)
+  assert.doesNotMatch(source.slice(at, source.indexOf('}', at)), /!important/, rule)
+ }
+ assert.match(source, /\.kode-settings-nav button:focus-visible\{[^}]*var\(--dsw-focus-ring-width,2px\)/)
+ assert.match(source, /:is\(\.kode-project-dialog,\.kode-handoff-dialog,\.kode-subagent-dialog,\.kode-confirm-dialog\)\{[^}]*max-height:calc\(100dvh - 48px\)/)
+ assert.match(source, /overflow-y:auto;overscroll-behavior:contain/)
+ assert.match(source, /@media\(prefers-reduced-motion:reduce\)\{\.kode-settings-page \*[^{]*\{transition:none/)
+ assert.match(source, /className: 'kode-confirm-dialog'/)
+})
+
+test('subagent titles strip Markdown markers from the first task line', () => {
+ const line = source.match(/  const childTitle = [^\n]+/)[0]
+ const childTitle = vm.runInNewContext(`${line}; childTitle`)
+ assert.equal(childTitle({ task: '走查 **Kode 设置**各 tab：\n1. 字号' }), '走查 Kode 设置各 tab：')
+ assert.equal(childTitle({ task: '## 修复 `quietLine`' }), '修复 quietLine')
+ assert.equal(childTitle({ name: 'reviewer', task: '**x**' }), 'reviewer')
+ assert.equal(childTitle({ task: '**' }), '子 Agent')
+})

@@ -3307,7 +3307,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   const childStatusLabels = { running: '运行中', awaiting: '等待操作', completed: '已完成', failed: '失败', cancelled: '已停止', idle: '空闲', disconnected: '连接中断', unknown: '状态未知' }
   const childDotStates = { running: 'ongoing', awaiting: 'awaiting', completed: 'done', failed: 'error' }
-  const childTitle = child => child.name || child.task?.split('\n')[0]?.slice(0, 120) || '子 Agent'
+  // The task body is Markdown; a title line drops heading/quote prefixes and emphasis/code markers.
+  const childTitle = child => child.name || child.task?.split('\n')[0]?.replace(/^\s*(?:#{1,6}|>|[-*+]|\d+[.)])\s+/, '').replace(/\*\*|~~|`/g, '').trim().slice(0, 120) || '子 Agent'
   const childStatusLabel = child => childStatusLabels[child.status] ?? childStatusLabels.unknown
   const childStateDot = child => h(StateDot, { state: childDotStates[child.status] ?? 'idle', size: 14 })
   const deliveryStatusLabels = { queued: '已入队', received: '已到达目标节点', delivering: '正在投递', accepted: '已交给目标会话', uncertain: '投递结果待确认', rejected: '已拒绝', expired: '已过期' }
