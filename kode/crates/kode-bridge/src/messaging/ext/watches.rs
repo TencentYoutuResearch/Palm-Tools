@@ -2,9 +2,11 @@
 //!
 //! One dispatcher follows the durable extension event log (session turns,
 //! file/Git changes from [`fswatch`], events extensions publish), matches each
-//! event against enabled watches, folds bursts per watch, and starts an
-//! independent run session for the bot - in dsh when it is up, else in the
-//! GUI runtime. The run's first completed turn is its result; the run log is
+//! event against enabled watches, folds bursts per watch, and runs the bot in
+//! the watch's own session - in dsh when it is up, else in the GUI runtime.
+//! Later runs of a watch continue that session while it stays open, so one
+//! kind of event keeps one conversation. The run's first completed turn
+//! after its task is its result; the run log is
 //! the bot's 动态 feed. Loops are cut three ways: run sessions never trigger
 //! watches, a bot's own file edits do not wake it again, and every watch has
 //! an hourly budget.
@@ -449,11 +451,20 @@ async fn start(hub: &Arc<Hub>, watch: &str, bot_id: &str, spec: &Spec, events: V
     };
     run.workspace = Some(workspace.to_string_lossy().into_owned());
     store.insert_run(&run)?;
-    let text = run_text(spec, &events, dropped, store.last_summary(watch)?);
-    // Never above the bot's ceiling: a lower ceiling wins.
-    let permission = crate::messaging::bots::effective_permission(Some(&spec.policy.permission), &bot.permission_ceiling).unwrap_or_else(|_| bot.permission_ceiling.clone());
-    let title = format!("{} · {}", bot.name, spec.name);
-    match launch(hub, &bot, &workspace, &permission, &title, text, &run_id).await {
+    let reuse = reusable(hub, watch, &workspace);
+    // A continued session already remembers the last conclusion.
+    let last = if reuse.is_some() { None } else { store.last_summary(watch)? };
+    let text = run_text(spec, &events, dropped, last);
+    let launched = match reuse {
+        Some(session) => resume(hub, session, text, &run_id).await,
+        None => {
+            // Never above the bot's ceiling: a lower ceiling wins.
+            let permission = crate::messaging::bots::effective_permission(Some(&spec.policy.permission), &bot.permission_ceiling).unwrap_or_else(|_| bot.permission_ceiling.clone());
+            let title = format!("{} · {}", bot.name, spec.name);
+            launch(hub, &bot, &workspace, &permission, &title, text, &run_id).await
+        }
+    };
+    match launched {
         Ok((session, uuid)) => {
             store.run_started(&run_id, session, uuid.as_deref())?;
             Ok(workspace)
@@ -463,6 +474,29 @@ async fn start(hub: &Arc<Hub>, watch: &str, bot_id: &str, spec: &Spec, events: V
             Err(e)
         }
     }
+}
+
+/// One watch keeps one conversation: its earlier session, while it is still
+/// open in the same folder and its runtime is up, takes the next run instead
+/// of a new session.
+fn reusable(hub: &Hub, watch: &str, workspace: &Path) -> Option<(u64, Option<String>)> {
+    let last = hub.ext.store.last_session_run(watch).ok()??;
+    let id = last.session_id?;
+    if last.workspace.as_deref() != Some(&*workspace.to_string_lossy()) {
+        return None;
+    }
+    let ctx = hub.ctx.upgrade()?;
+    let dto = ctx.runtimes.snapshot(id).filter(|dto| dto["status"] != "exited")?;
+    if !dto["runtime"].as_str().is_some_and(|runtime| ctx.runtimes.available(runtime)) {
+        return None;
+    }
+    Some((id, last.session_uuid))
+}
+
+async fn resume(hub: &Arc<Hub>, (id, uuid): (u64, Option<String>), text: String, run: &str) -> anyhow::Result<(u64, Option<String>)> {
+    let ctx = hub.ctx.upgrade().ok_or_else(|| anyhow::anyhow!("Kode is stopping"))?;
+    ctx.runtimes.command(id, "input", json!({"text":text}), &format!("watch.{run}.in")).await?;
+    Ok((id, uuid))
 }
 
 /// A fresh session for the run: dsh when it is running (where bots live),

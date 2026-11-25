@@ -597,8 +597,9 @@ async fn watches(s: &Server, change: Value) -> Value {
 }
 
 async fn until<F: Fn(&Value) -> bool>(s: &Server, what: &str, ok: F) -> Value {
+    let mut view = Value::Null;
     for _ in 0..200 {
-        let view: Value = reqwest::Client::new()
+        view = reqwest::Client::new()
             .get(format!("{}/api/v1/messaging/workbench/watches", s.url))
             .bearer_auth(ADMIN)
             .send()
@@ -612,7 +613,7 @@ async fn until<F: Fn(&Value) -> bool>(s: &Server, what: &str, ok: F) -> Value {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("timed out waiting for {what}");
+    panic!("timed out waiting for {what}: {view}");
 }
 
 #[tokio::test]
@@ -712,6 +713,28 @@ async fn published_events_wake_a_bot_into_its_own_run_session() {
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     let view = until(&s, "settled runs", |_| true).await;
     assert_eq!(view["runs"].as_array().unwrap().len(), 1, "a bot's main conversation never triggers its own watches");
+
+    // The same kind of event again continues the watch's session.
+    publish_event(json!({"room":"general","text":"@Kit is the deploy done?"})).await.unwrap().error_for_status().unwrap();
+    let view = until(&s, "the second run to start", |v| v["runs"].as_array().unwrap().len() == 2 && v["runs"][0]["status"] == "running").await;
+    assert_eq!(view["runs"][0]["session_id"], session, "the second run reuses the first run's session");
+    assert_eq!(recorded.lock().creates.len(), 1, "no new session for the same watch");
+    let task = recorded.lock().inputs.iter().find(|t| t.contains("@Kit is the deploy done?")).cloned().unwrap_or_default();
+    assert!(task.contains("Answer the mention.") && !task.contains("上一次运行的结论"), "{task}");
+    publish_as(
+        &s.ctx,
+        "gui:1:1",
+        "claude",
+        "idle",
+        json!([
+            {"key":"r4","kind":"session.status","payload":{"status":"busy"}},
+            {"key":"r5","kind":"message","payload":{"id":"r5","role":"assistant","text":"Deploy finished."}},
+            {"key":"r6","kind":"session.status","payload":{"status":"idle"}},
+        ]),
+    );
+    let view = until(&s, "the second run to finish", |v| v["runs"][0]["status"] == "completed").await;
+    assert_eq!(view["runs"][0]["summary"], "Deploy finished.");
+    assert_eq!(view["runs"][1]["summary"], "Build is green; replied in #general.", "the earlier run keeps its own result");
 
     let seen = watches(&s, json!({"action":"seen","bot":kit_id})).await;
     assert!(seen["unseen"].get(&kit_id).is_none());

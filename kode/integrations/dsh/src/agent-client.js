@@ -1107,11 +1107,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const glyph = (d, size = 15) => h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
   const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
   // Use the same Kode wordmark in the standalone and embedded clients.
-  // A folded strip keeps its continuity through a change of direction.
+  // A stem and a code bracket read as both "K" and "|<"; the gap keeps the two strokes apart.
   function KodeBrandMark({ size = 24 }) {
     return h('svg', { width: size, height: size, viewBox: '0 0 24 24', className: 'kode-brand-mark-svg', 'aria-hidden': true },
-      h('path', { fill: 'currentColor', d: 'M3 8.5 12 3h9l-9 5.5z M6 15.5l9-5.5 6 3.5-12 7.3H3l6-3.6z' }),
-      h('path', { fill: '#ed3845', d: 'M3 8.5h9l4.5 2.7-5.4 3.3z' }))
+      h('rect', { x: 2, y: 2, width: 20, height: 20, rx: 6, fill: '#17171a', stroke: '#fff', strokeOpacity: .14 }),
+      h('path', { d: 'M7 6.5v11', stroke: '#fff', strokeWidth: 2.4, strokeLinecap: 'round' }),
+      h('path', { d: 'M17 6.5 11 12l6 5.5', fill: 'none', stroke: '#ed3845', strokeWidth: 2.4, strokeLinecap: 'round', strokeLinejoin: 'round' }))
   }
   function KodeBrandName() {
     return h('span', { className: 'kode-brand-name' }, h('span', { className: 'kode-brand-title' }, 'Kode Harness'), h('span', { className: 'kode-brand-subtitle' }, 'Powered by dsh'))
@@ -1260,6 +1261,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       }),
       h('button', { type: 'button', className: 'kode-bot-row kode-bot-new', onClick: () => start(null) }, h('span', { className: 'kode-bot-avatar' }, h(IconPlusOutlineRegular, { size: 12 })), h('span', { className: 'kode-bot-name' }, data.bots.length ? '新建伙伴' : '创建第一个伙伴')))
   }
+  function BotModelPicker({ profileId, model, disabled, onChange }) {
+    const store = directory(undefined, 'local', true, profileId)
+    const { data, error } = useSyncExternalStore(store.subscribe, store.getSnapshot)
+    useEffect(() => { if (profileId) void store.load() }, [store, profileId])
+    const models = profileId ? data?.models ?? [] : []
+    const options = [{ value: '', label: 'Agent 默认模型' }, ...models.filter(row => row.id !== 'default').map(row => ({ value: row.id, label: row.name ?? row.displayName ?? row.id }))]
+    if (model && !options.some(option => option.value === model)) options.push({ value: model, label: model })
+    const failure = profileId && (error || data?.modelError)
+    return h(React.Fragment, null,
+      h(SelectField, { label: '模型（可选）', value: model ?? '', options, disabled, onChange }),
+      profileId && !data && !error && h('span', { className: 'kode-config-note', role: 'status' }, '正在读取此 Agent 的模型…'),
+      profileId && data && !failure && !models.length && h('span', { className: 'kode-config-note' }, '此 Agent 未提供可选模型'),
+      failure && h('div', null, h(Failure, { text: failure }), h(Button, { type: 'button', onClick: () => void store.load(true) }, '重新读取模型')))
+  }
   function BotEditor({ draft, data, busy, onChange, onSave, onCancel }) {
     const agents = data.agents.map(agent => ({ value: agent.backend_key, label: agent.name }))
     if (draft.backend_key && !agents.some(agent => agent.value === draft.backend_key)) agents.push({ value: draft.backend_key, label: `${draft.backend_key}（此电脑不可用）` })
@@ -1270,8 +1285,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h('form', { className: 'kode-agent-editor', onSubmit: event => { event.preventDefault(); onSave() } },
       field('名字', 'name', { maxLength: 80, required: true }),
       h(BotAvatarPicker, { bot: draft.id ? data.bots.find(row => row.id === draft.id) : null, draft: { ...draft, agent_type: data.agents.find(agent => agent.backend_key === draft.backend_key)?.type ?? draft.agent_type }, busy, onChange: next => onChange({ ...draft, avatar: next.avatar }) }),
-      h(SelectField, { label: 'Agent', value: draft.backend_key, options: agents, disabled: busy, onChange: value => onChange({ ...draft, backend_key: value }) }),
-      field('模型（可选）', 'model', { placeholder: 'Agent 默认模型' }),
+      h(SelectField, { label: 'Agent', value: draft.backend_key, options: agents, disabled: busy, onChange: value => onChange({ ...draft, backend_key: value, model: null }) }),
+      h(BotModelPicker, { profileId: data.agents.find(agent => agent.backend_key === draft.backend_key)?.profile_id, model: draft.model, disabled: busy, onChange: value => onChange({ ...draft, model: value || null }) }),
       h(SelectField, { label: '权限上限', value: draft.permission_ceiling, options: BOT_CEILINGS, disabled: busy, onChange: value => onChange({ ...draft, permission_ceiling: value }) }),
       h(SelectField, { label: '默认工作区', value: draft.default_cwd ?? '', options: workspaces, disabled: busy, onChange: value => onChange({ ...draft, default_cwd: value || null }) }),
       field('角色说明', 'persona', { rows: 6, placeholder: '这个伙伴负责什么、按什么标准做事、什么时候问你' }),
@@ -3702,9 +3717,13 @@ html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:defa
 .kode-brand-title-dim{font-weight:400;color:var(--dsw-alias-label-secondary,#A8AEA7);letter-spacing:-0.01em}
 .kode-brand-subtitle{font-size:9.5px;font-weight:500;line-height:11px;letter-spacing:0.06em;color:var(--dsw-alias-label-tertiary,#8A928C);opacity:.85}
 /* Kode hosts the web layout. Reserve the traffic lights inside the existing chrome. */
-html[data-kode-platform=macos] [data-slot=sidebar] [data-window-drag] {
+html[data-kode-platform=macos] :has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-slot=sidebar] [data-window-drag] {
   box-sizing:border-box;
   padding-inline-start:var(--kode-traffic-lights-inset,78px);
+}
+/* The web rail is only 56px wide. Keep its native toggle below the window buttons. */
+html[data-kode-platform=macos] [data-sidebar-collapsed]:not([data-sidebar-drawer]) [data-slot=sidebar] [data-window-drag]:has([data-sidebar-toggle]) {
+  margin-block-start:32px;
 }
 html[data-kode-platform=macos] :has(> [data-shell-overlay]):is([data-sidebar-collapsed],[data-sidebar-drawer]) {
   --dsh-frame-leading-clearance:calc(var(--kode-traffic-lights-inset,78px) + 48px);

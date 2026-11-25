@@ -459,8 +459,22 @@ impl Store {
         Ok(())
     }
 
+    /// Runs of one watch share a session; the open one, else the latest.
     pub fn run_by_session(&self, session: u64) -> Result<Option<RunRecord>> {
-        Ok(self.db.lock().query_row(&format!("{RUN_SELECT} WHERE session_id=?1"), [session], run_row).optional()?)
+        Ok(self
+            .db
+            .lock()
+            .query_row(&format!("{RUN_SELECT} WHERE session_id=?1 ORDER BY finished IS NOT NULL, started DESC LIMIT 1"), [session], run_row)
+            .optional()?)
+    }
+
+    /// The latest run of a watch that got a session, for the next run to continue in.
+    pub fn last_session_run(&self, watch: &str) -> Result<Option<RunRecord>> {
+        Ok(self
+            .db
+            .lock()
+            .query_row(&format!("{RUN_SELECT} WHERE watch_id=?1 AND session_id IS NOT NULL ORDER BY started DESC LIMIT 1"), [watch], run_row)
+            .optional()?)
     }
 
     pub fn runs(&self, bot: Option<&str>, limit: usize) -> Result<Vec<RunRecord>> {
