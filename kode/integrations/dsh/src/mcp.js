@@ -3,7 +3,7 @@
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { BackendClient } from './backend-client.js'
-import { eventPage, messagePage } from './message-pages.js'
+import { eventPage, messagePage, messageTitleParameter } from './message-pages.js'
 import { searchSessions } from './session-search.js'
 const prefix = '/api/v1/messaging/'
 const readToken = async file => (await readFile(file, 'utf8')).trim()
@@ -21,10 +21,17 @@ else if (process.env.KODE_MESSAGING_ADMIN_TOKEN_FILE && /^\d+$/.test(process.env
 } else throw new Error('provide a session token file, or native KODE_SESSION_ID and an admin token file')
 await client.call(`${prefix}self`) // Refuse a broad admin token as an agent tool credential.
 const capabilities = await client.call(`${prefix}node`)
-const object = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) })
+const object = (properties, optional = {}) => ({ type: 'object', additionalProperties: false, properties: { ...properties, ...optional }, required: Object.keys(properties) })
 const tools = [
   { name: 'kode_sessions_list', description: 'Find local and SSH sessions by name or partial title. Inspect matches and disambiguate duplicate names, then send using the returned address; never guess an ID.', inputSchema: { type: 'object', additionalProperties: false, properties: { query: { type: 'string', description: 'Name or keywords from the user; omit to list all.' } } } },
-  { name: 'kode_sessions_send', description: 'Send to an agent; delivery is not task completion. Reuse idempotency_key only for a retry. Reply with in_reply_to.', inputSchema: { ...object({ node_id: { type: 'string' }, session_id: { type: 'string' }, content: { type: 'string' }, idempotency_key: { type: 'string' } }), properties: { node_id: { type: 'string' }, session_id: { type: 'string' }, content: { type: 'string' }, idempotency_key: { type: 'string' }, in_reply_to: { type: 'string' } } } },
+  { name: 'kode_sessions_send',
+    description: (capabilities.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Send to an agent; delivery is not task completion. Reuse idempotency_key only for a retry. Reply with in_reply_to.',
+    inputSchema: object({
+      node_id: { type: 'string' }, session_id: { type: 'string' }, content: { type: 'string' }, idempotency_key: { type: 'string' },
+    }, {
+      in_reply_to: { type: 'string' }, ...(capabilities.message_titles === true ? { title: messageTitleParameter } : {}),
+    }),
+  },
   { name: 'kode_sessions_message_read', description: 'Read full persisted messages in bounded pages. Offset counts Unicode code points; follow next until null. A preview is not proof of consumption.', inputSchema: { type: 'object', additionalProperties: false, properties: { message_id: { type: 'string' }, offset: { type: 'integer', minimum: 0 } }, required: ['message_id'] } },
   { name: 'kode_sessions_delivery_status', description: 'Read persisted input delivery evidence. Queued is not consumed; consumed is not task completion.', inputSchema: object({ message_id: { type: 'string' } }) },
   ...(capabilities.input_cancellation === true ? [
@@ -42,7 +49,11 @@ async function execute(name, args, signal) {
     return client.call(`${prefix}messages/${encodeURIComponent(args.message_id)}/${suffix}`, name === 'kode_sessions_cancel_input' ? {} : undefined, signal)
   }
   if (name === 'kode_sessions_list') return searchSessions(await client.call(`${prefix}sessions`, undefined, signal), args.query)
-  if (name === 'kode_sessions_send') return client.call(`${prefix}messages`, { target: { node_id: args.node_id, session_id: args.session_id }, content: args.content, idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null }, signal)
+  if (name === 'kode_sessions_send') return client.call(`${prefix}messages`, {
+    target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
+    idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null,
+    ...(capabilities.message_titles === true && args.title !== undefined ? { title: args.title } : {}),
+  }, signal)
   if (name === 'kode_sessions_message_read') return messagePage(await client.call(`${prefix}messages/${encodeURIComponent(args.message_id)}`, undefined, signal), args.offset ?? 0)
   if (name === 'kode_sessions_read' || name === 'kode_sessions_wait') {
     const until = Date.now() + (name.endsWith('wait') ? Math.min(30, Math.max(1, args.timeout_seconds ?? 15)) * 1000 : 0)

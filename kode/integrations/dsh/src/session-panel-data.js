@@ -1,15 +1,16 @@
 /** Project durable DSH messages, regardless of which Agent produced them. */
 import { z } from 'zod'
-import { readRelayEnvelope } from './message-pages.js'
+import { readRelayEnvelope, validMessageTitle } from './message-pages.js'
 
 const recentLimit = 24
 const reviewSchema = z.object({ url: z.string(), repo: z.string(), number: z.string(), kind: z.enum(['PR', 'MR']) })
 const relaySchema = z.object({
   id: z.string(), nodeId: z.string(), sessionId: z.string(), content: z.string(),
   direction: z.enum(['received', 'sent']), reply: z.boolean(), status: z.string().optional(),
+  title: z.string().optional(), replyTo: z.string().optional(), answered: z.literal(true).optional(),
 })
 const viewSchema = z.object({ reviews: z.array(reviewSchema), relays: z.array(relaySchema) })
-const stateSchema = viewSchema.extend({ pendingSends: z.array(z.string()) })
+const stateSchema = viewSchema.extend({ pendingTools: z.array(z.object({ callId: z.string(), kind: z.enum(['send', 'read', 'wait']) })) })
 const blocksText = (blocks, limit) => {
   if (!Array.isArray(blocks)) return ''
   let text = ''
@@ -49,25 +50,49 @@ function relayFor(message) {
 function parseJson(text) {
   try { return JSON.parse(text) } catch { return }
 }
-const sendTool = /(?:^|__)(?:kode_)?sessions_send$/
-function isRelaySend({ name, arguments: args }) {
-  if (sendTool.test(name)) return true
-  if (name !== 'kode_native_mcpToolCall' && name !== 'kode_native_commandExecution') return false
+const sessionTool = /(?:^|__)(?:kode_)?sessions_(send|read|wait)$/
+function relayTool({ name, arguments: args }) {
+  const direct = sessionTool.exec(name)?.[1]
+  if (direct) return direct
+  if (name !== 'kode_native_mcpToolCall' && name !== 'kode_native_commandExecution') return
   const native = parseJson(args)
-  return sendTool.test(native?.tool ?? native?.name ?? '') ||
-    /\b(?:kode_)?sessions_send\b/.test(native?.title ?? '')
+  return sessionTool.exec(native?.tool ?? native?.name ?? '')?.[1] ??
+    /\b(?:kode_)?sessions_(send|read|wait)\b/.exec(native?.title ?? '')?.[1]
 }
 
-function sentRelay(result) {
+function relayToolResult(result) {
   if (result.isError) return
   const value = parseJson(blocksText(result.content, 65536))
-  const wrapped = value?.result?.structuredContent ?? parseJson(blocksText(value?.result?.content, 65536)) ?? parseJson(value?.aggregatedOutput)
-  const row = wrapped?.message ?? wrapped ?? value?.message ?? value
-  const { id, target, content, status, in_reply_to } = row ?? {}
-  const nodeId = target?.node_id, sessionId = target?.session_id
+  return value?.result?.structuredContent ?? parseJson(blocksText(value?.result?.content, 65536)) ??
+    parseJson(value?.aggregatedOutput) ?? value
+}
+
+function relayFromRow(row, direction) {
+  const { id, content, status, in_reply_to, title } = row ?? {}
+  const peer = direction === 'sent' ? row?.target : row?.source
+  const nodeId = peer?.node_id, sessionId = peer?.session_id
   if (![id, nodeId, sessionId].every(value => typeof value === 'string' && value && value.length <= 256) || typeof content !== 'string') return
-  return { id, nodeId, sessionId, content: content.slice(0, 1200), direction: 'sent', reply: Boolean(in_reply_to),
+  const replyTo = typeof in_reply_to === 'string' && in_reply_to.length <= 160 ? in_reply_to : ''
+  return { id, nodeId, sessionId, content: content.slice(0, 1200), direction, reply: Boolean(replyTo),
+    ...(replyTo ? { replyTo } : {}),
+    ...(validMessageTitle(title) ? { title } : {}),
     ...(typeof status === 'string' ? { status: status.slice(0, 32) } : {}) }
+}
+
+function isReplyTo(reply, request) {
+  return request.direction === 'sent' && !request.reply && reply.direction === 'received' &&
+    reply.replyTo === request.id && reply.nodeId === request.nodeId && reply.sessionId === request.sessionId
+}
+
+function relayReplies(result, relays) {
+  if (!Array.isArray(result?.events)) return []
+  return result.events.flatMap(event => {
+    const reply = relayFromRow(event?.message, 'received')
+    if (!reply?.replyTo || relays.some(row => row.id === reply.id)) return []
+    // A read includes receipts for outgoing messages. Only an actual reply from
+    // the original peer can change the state of an outgoing request.
+    return relays.some(row => isReplyTo(reply, row)) ? [reply] : []
+  })
 }
 
 function addRecent(rows, items, key) {
@@ -76,24 +101,35 @@ function addRecent(rows, items, key) {
   return Array.from(byKey.values()).slice(-recentLimit)
 }
 
+function addRecentRelays(rows, items) {
+  const answered = new Set(rows.filter(row => row.answered).map(row => row.id))
+  const replies = [...rows, ...items].filter(row => row.direction === 'received' && row.replyTo)
+  return addRecent(rows, items, row => row.id).map(row =>
+    answered.has(row.id) || replies.some(reply => isReplyTo(reply, row)) ? { ...row, answered: true } : row)
+}
+
 export const sessionPanelProjection = {
   key: 'kodeSessionPanel',
-  stateVersion: 1,
+  stateVersion: 2,
   stateSchema,
-  init: () => ({ reviews: [], relays: [], pendingSends: [] }),
+  init: () => ({ reviews: [], relays: [], pendingTools: [] }),
   apply(state, event) {
-    if (event.type === 'tool/call' && isRelaySend(event.data)) {
+    if (event.type === 'tool/call') {
+      const kind = relayTool(event.data)
       const callId = event.data.callId
-      if (typeof callId !== 'string') return state
-      return { ...state, pendingSends: [...state.pendingSends.filter(id => id !== callId), callId].slice(-recentLimit) }
+      if (!kind || typeof callId !== 'string') return state
+      const pendingTools = addRecent(state.pendingTools, [{ callId, kind }], row => row.callId)
+      return { ...state, pendingTools }
     }
     if (event.type === 'tool/result') {
       const result = event.data.message
       const callId = result.source?.callId
-      if (!state.pendingSends.includes(callId)) return state
-      const pendingSends = state.pendingSends.filter(id => id !== callId)
-      const relay = sentRelay(result)
-      return { ...state, pendingSends, relays: relay ? addRecent(state.relays, [relay], row => row.id) : state.relays }
+      const tool = state.pendingTools.find(row => row.callId === callId)
+      if (!tool) return state
+      const pendingTools = state.pendingTools.filter(row => row.callId !== callId)
+      const value = relayToolResult(result)
+      const replies = tool.kind === 'send' ? [relayFromRow(value?.message ?? value, 'sent')].filter(Boolean) : relayReplies(value, state.relays)
+      return { ...state, pendingTools, relays: replies.length ? addRecentRelays(state.relays, replies) : state.relays }
     }
     const message = event.type === 'user/message' ? event.data : event.type === 'assistant/message' ? event.data.message : undefined
     if (!message || event.surfaceOp === 'replace') return state
@@ -102,7 +138,7 @@ export const sessionPanelProjection = {
     const reviews = reviewsIn(relay?.content ?? (visible ? blocksText(message.content, 65536) : ''))
     if (!reviews.length && !relay) return state
     return { ...state, reviews: reviews.length ? addRecent(state.reviews, reviews, row => row.url) : state.reviews,
-      relays: relay ? addRecent(state.relays, [relay], row => row.id) : state.relays }
+      relays: relay ? addRecentRelays(state.relays, [relay]) : state.relays }
   },
   wire: { viewSchema, view: ({ reviews, relays }) => ({ reviews, relays }) },
 }

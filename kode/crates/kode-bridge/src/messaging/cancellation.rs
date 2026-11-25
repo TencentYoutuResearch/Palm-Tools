@@ -154,6 +154,7 @@ mod tests {
                     session_id: "worker".into(),
                 },
                 content: "fixture".into(),
+                title: None,
                 idempotency_key: "control".into(),
                 in_reply_to: None,
                 hop_count: 0,

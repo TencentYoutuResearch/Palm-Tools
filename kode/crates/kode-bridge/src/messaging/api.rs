@@ -146,7 +146,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
 async fn node(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     auth(&hub, &h)?;
     let (executable, built_at) = server_binary();
-    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"delivery_tracking":true,"input_cancellation":true,"managed_peers":true,
+    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"delivery_tracking":true,"input_cancellation":true,"message_titles":true,"managed_peers":true,
         "pid":std::process::id(),"executable":executable,"built_at":built_at})))
 }
 /// Executable path and its modification time (Unix seconds), so a host app

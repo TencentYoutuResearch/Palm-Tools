@@ -660,6 +660,10 @@ archive and unarchive operations retain the original runtime identity.
 
 ### Session 通信的有界模型读取
 
+支持消息标题的 Hub 在 `GET /api/v1/messaging/node` 返回 `message_titles: true`。新客户端的 `kode_sessions_send` 提示 Agent 为请求和回复撰写单行短标题，并将完整描述放入原有 `content`。REST 请求、持久化消息、事件和续读页均可携带可选 `title`，最多 80 个 Unicode 码点。省略标题的旧请求继续有效。重试同一幂等键需使用相同标题。回复以 `in_reply_to` 关联原消息，投递回执不代表已回复。
+
+v2 链路双端通告 `message_title_v1` 时转发标题。v1 或缺少该能力的节点仍接收原正文。接收方跨版本重连时，相同消息 ID 因协商变化遗漏标题会沿用首次持久化的记录及投递状态。历史回放中的 relay 保留原有首行和模型指令，可在正文第一行附加 `[Kode message title: <JSON 字符串>]`，续读偏移仍只统计正文。
+
 现有消息持久化格式和参与者鉴权沿用 `/api/v1/messaging/messages/:id`。
 DSH Host、独立 JavaScript MCP 和桌面 Rust MCP 的 `kode_sessions_read` / `kode_sessions_wait`
 将事件投影为最多 16 条、序列化 JSON 不超过 8192 UTF-8 字节的页面。

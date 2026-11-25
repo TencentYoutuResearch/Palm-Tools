@@ -62,13 +62,25 @@ fn relay(id: &str, address: &str, reply_to: Option<&str>, content: &str) -> Opti
     {
         return None;
     }
-    Some(json!({
+    let (title, content) = content
+        .split_once('\n')
+        .and_then(|(line, rest)| {
+            let encoded = line.strip_prefix("[Kode message title: ")?.strip_suffix(']')?;
+            let title: String = serde_json::from_str(encoded).ok()?;
+            crate::messaging::model::valid_message_title(&title).then_some((title, rest))
+        })
+        .map_or((None, content), |(title, rest)| (Some(title), rest));
+    let mut row = json!({
         "message_id": id,
         "from_node": node,
         "from_session": session,
         "reply_to": reply_to,
         "content": cap(content.trim()),
-    }))
+    });
+    if let Some(title) = title {
+        row["title"] = json!(title);
+    }
+    Some(row)
 }
 
 /// `relay_tool` for a `kode_sessions_*` call (any MCP prefix), from its input.

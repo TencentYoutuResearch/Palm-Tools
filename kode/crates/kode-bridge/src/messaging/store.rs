@@ -262,9 +262,15 @@ impl Store {
         let previous: Option<String> = db.query_row("SELECT body FROM messages WHERE id=?1 OR (source_node=?2 AND source_session=?3 AND idem=?4)", params![m.id,m.source.node_id,m.source.session_id,m.idempotency_key], |r| r.get(0)).optional()?;
         if let Some(body) = previous {
             let p: Message = serde_json::from_str(&body)?;
+            // A peer reconnecting across a capability change may omit a title
+            // on replay. Keep the original record (and its delivery status).
+            let title_may_be_omitted = m.source.node_id != self.node_id
+                && p.id == m.id
+                && (p.title.is_none() || m.title.is_none());
             if p.source != m.source
                 || p.target != m.target
                 || p.content != m.content
+                || (p.title != m.title && !title_may_be_omitted)
                 || p.idempotency_key != m.idempotency_key
                 || p.in_reply_to != m.in_reply_to
                 || p.hop_count != m.hop_count
@@ -373,6 +379,7 @@ mod query_tests {
                 session_id: session.into(),
             },
             content: "fixture".into(),
+            title: None,
             idempotency_key: id.into(),
             in_reply_to: None,
             hop_count: 0,
@@ -432,6 +439,24 @@ mod query_tests {
             7,
             "polling must not delete history"
         );
+    }
+
+    #[test]
+    fn peer_replay_after_negotiating_title_keeps_the_original_delivery() {
+        let store = Store::init(Connection::open_in_memory().unwrap(), "local", None).unwrap();
+        let legacy = message("from-peer", "peer", "local", "worker", Status::Accepted);
+        store.insert(legacy.clone()).unwrap();
+        let mut replay = legacy.clone();
+        replay.title = Some("Review".into());
+        replay.status = Status::Received;
+        assert_eq!(store.insert(replay).unwrap(), legacy);
+        assert_eq!(store.events(0, None).unwrap().len(), 1);
+
+        let mut titled = message("titled-peer", "peer", "local", "worker", Status::Received);
+        titled.title = Some("Original".into());
+        store.insert(titled.clone()).unwrap();
+        titled.title = Some("Different".into());
+        assert!(store.insert(titled).is_err());
     }
 
     #[test]

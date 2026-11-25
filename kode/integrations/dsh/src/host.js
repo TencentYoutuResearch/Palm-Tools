@@ -1,6 +1,6 @@
 import { createDeliveryTracker, deliveryInputId, DeliveryEvidenceUnavailable } from './delivery-tracker.js'
 /** Kode Host integration: durable backend messaging and independently owned native Agent execution. */
-import { eventPage, messagePage, relayInput } from './message-pages.js'
+import { eventPage, messagePage, messageTitleParameter, relayInput } from './message-pages.js'
 import { retainClientBatches } from './client-asset-retention.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
@@ -177,10 +177,12 @@ export async function apply(ctx, config = {}) {
       node_id: { type: 'string', required: true }, session_id: { type: 'string', required: true },
       content: { type: 'string', required: true }, idempotency_key: { type: 'string', required: true, description: 'Stable key for one logical send; reuse only when retrying the same content.' },
       in_reply_to: { type: 'string' },
+      ...(node.message_titles === true ? { title: messageTitleParameter } : {}),
     }
-    add('kode_sessions_send', 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => ({ message: await client.call(`${PREFIX}messages`, {
+    add('kode_sessions_send', (node.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => ({ message: await client.call(`${PREFIX}messages`, {
       target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
       idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null,
+      ...(node.message_titles === true && args.title !== undefined ? { title: args.title } : {}),
     }, signal) }))
     const readEvents = async (after, signal) => {
       const cursor = Math.max(0, after ?? 0)

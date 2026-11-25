@@ -258,6 +258,7 @@ fn request(node: &str, target: &str, key: &str) -> SendRequest {
             session_id: target.into(),
         },
         content: "review this change".into(),
+        title: None,
         idempotency_key: key.into(),
         in_reply_to: None,
         ttl_seconds: 300,
@@ -343,7 +344,13 @@ async fn scoped_http_delivery_reply_dedup_and_access_control() {
     let a = register(&s, "alice").await;
     let b = register(&s, "bob").await;
     let c = register(&s, "charlie").await;
-    let req = request("local", "bob", "one");
+    let mut req = request("local", "bob", "one");
+    let title = "🦊".repeat(MAX_TITLE_CHARS);
+    for invalid_title in [" ".into(), "\nTitle".into(), "line\u{2028}break".into(), format!("{title}🦊")] {
+        req.title = Some(invalid_title);
+        assert_eq!(send(&s, &a.owner_token, &req).await.status(), 400);
+    }
+    req.title = Some(title);
     let m: Message = send(&s, &a.owner_token, &req)
         .await
         .error_for_status()
@@ -353,6 +360,10 @@ async fn scoped_http_delivery_reply_dedup_and_access_control() {
         .unwrap();
     let again: Message = send(&s, &a.owner_token, &req).await.json().await.unwrap();
     assert_eq!(m.id, again.id);
+    assert_eq!(again.title, req.title);
+    let mut changed_title = req.clone();
+    changed_title.title = Some("Different subject".into());
+    assert_eq!(send(&s, &a.owner_token, &changed_title).await.status(), 400);
     let mut changed = req.clone();
     changed.content = "different".into();
     assert_eq!(send(&s, &a.owner_token, &changed).await.status(), 400);
@@ -389,6 +400,7 @@ async fn scoped_http_delivery_reply_dedup_and_access_control() {
         .await
         .unwrap();
     assert_eq!(claim["messages"][0]["id"], m.id);
+    assert_eq!(claim["messages"][0]["title"], m.title.as_deref().unwrap());
     let empty: Value = client
         .post(format!("{}/api/v1/messaging/sessions/bob/claim", s.url))
         .bearer_auth(&b.owner_token)
@@ -440,7 +452,9 @@ async fn one_initiated_link_delivers_both_directions_and_replies() {
     let local = server("local", vec![peer("remote", Some(remote.url.clone()))]).await;
     let a = register(&local, "alice").await;
     let b = register(&remote, "bob").await;
-    let m: Message = send(&local, &a.owner_token, &request("remote", "bob", "cross"))
+    let mut req = request("remote", "bob", "cross");
+    req.title = Some("Review the request".into());
+    let m: Message = send(&local, &a.owner_token, &req)
         .await
         .json()
         .await
@@ -448,6 +462,7 @@ async fn one_initiated_link_delivers_both_directions_and_replies() {
     wait_status(&remote.hub, &m.id, Status::Received).await;
     let claimed = remote.hub.claim("bob").unwrap();
     assert_eq!(claimed[0].id, m.id);
+    assert_eq!(claimed[0].title, req.title);
     remote
         .hub
         .settle("bob", &m.id, Status::Accepted, None)
@@ -455,6 +470,7 @@ async fn one_initiated_link_delivers_both_directions_and_replies() {
     wait_status(&local.hub, &m.id, Status::Accepted).await;
     let mut reply = request("local", "alice", "back");
     reply.in_reply_to = Some(m.id);
+    reply.title = Some("Review complete".into());
     let r: Message = send(&remote, &b.owner_token, &reply)
         .await
         .json()
@@ -463,6 +479,8 @@ async fn one_initiated_link_delivers_both_directions_and_replies() {
     wait_status(&local.hub, &r.id, Status::Received).await;
     let claimed = local.hub.claim("alice").unwrap();
     assert_eq!(claimed[0].id, r.id);
+    assert_eq!(claimed[0].title, reply.title);
+    assert_eq!(claimed[0].in_reply_to, reply.in_reply_to);
     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
     assert!(local
         .hub
@@ -576,11 +594,9 @@ async fn ssh_link_delivers_messages_in_both_directions() {
     let local = server("local", vec![connection]).await;
     let alice = register(&local, "alice").await;
     let bob = register(&remote, "bob").await;
-    let m: Message = send(
-        &local,
-        &alice.owner_token,
-        &request("remote", "bob", "over-ssh"),
-    )
+    let mut req = request("remote", "bob", "over-ssh");
+    req.title = Some("SSH request".into());
+    let m: Message = send(&local, &alice.owner_token, &req)
     .await
     .error_for_status()
     .unwrap()
@@ -588,7 +604,9 @@ async fn ssh_link_delivers_messages_in_both_directions() {
     .await
     .unwrap();
     wait_status(&remote.hub, &m.id, Status::Received).await;
-    assert_eq!(remote.hub.claim("bob").unwrap()[0].id, m.id);
+    let claimed = remote.hub.claim("bob").unwrap();
+    assert_eq!(claimed[0].id, m.id);
+    assert_eq!(claimed[0].title, req.title);
     remote
         .hub
         .settle("bob", &m.id, Status::Accepted, None)
@@ -596,6 +614,7 @@ async fn ssh_link_delivers_messages_in_both_directions() {
     wait_status(&local.hub, &m.id, Status::Accepted).await;
     let mut reply = request("local", "alice", "ssh-reply");
     reply.in_reply_to = Some(m.id);
+    reply.title = Some("SSH result".into());
     let m: Message = send(&remote, &bob.owner_token, &reply)
         .await
         .error_for_status()
@@ -604,6 +623,9 @@ async fn ssh_link_delivers_messages_in_both_directions() {
         .await
         .unwrap();
     wait_status(&local.hub, &m.id, Status::Received).await;
+    let claimed = local.hub.claim("alice").unwrap();
+    assert_eq!(claimed[0].title, reply.title);
+    assert_eq!(claimed[0].in_reply_to, reply.in_reply_to);
 }
 
 #[cfg(not(windows))]

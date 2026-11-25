@@ -110,7 +110,7 @@ impl Client {
             .into_iter()
             .map(|tool| json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["inputSchema"],"x-kode-extension":true}))
             .collect();
-        let builtin: Vec<Value> = tool_definitions()
+        let builtin: Vec<Value> = tool_definitions(capabilities["message_titles"] == true)
             .into_iter()
             .filter(|tool| {
                 if matches!(tool["name"].as_str(), Some("kode_sessions_cancel_input" | "kode_sessions_cancellation_status")) && capabilities["input_cancellation"] != true { return false; }
@@ -154,7 +154,16 @@ impl Client {
                     if let Some(rows)=result["sessions"].as_array_mut(){rows.retain(|row|format!("{} {}",row["title"].as_str().unwrap_or_default(),row["address"]).to_lowercase().contains(&query));}
                 }Ok(result)
             },
-            "kode_sessions_send"=>self.call("messages",Some(json!({"target":{"node_id":args["node_id"],"session_id":args["session_id"]},"content":args["content"],"idempotency_key":args["idempotency_key"],"in_reply_to":args["in_reply_to"]}))).await,
+            "kode_sessions_send" => {
+                let mut body = json!({
+                    "target":{"node_id":args["node_id"],"session_id":args["session_id"]},
+                    "content":args["content"],"idempotency_key":args["idempotency_key"],"in_reply_to":args["in_reply_to"]
+                });
+                if let Some(title) = args.get("title").filter(|_| tool["inputSchema"]["properties"].get("title").is_some()) {
+                    body["title"] = title.clone();
+                }
+                self.call("messages", Some(body)).await
+            },
             "kode_sessions_delivery_status"|"kode_sessions_cancel_input"|"kode_sessions_cancellation_status"=>{
                 let id=args["message_id"].as_str().ok_or_else(||anyhow::anyhow!("Message ID required"))?;
                 if !crate::messaging::model::valid_id(id) { bail!("Invalid message ID") }
@@ -182,10 +191,22 @@ impl Client {
 fn definition(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required}})
 }
-fn tool_definitions() -> Vec<Value> {
+fn tool_definitions(message_titles: bool) -> Vec<Value> {
+    let mut send_properties = json!({
+        "node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},
+        "idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"}
+    });
+    let mut send_description = "Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to.".to_owned();
+    if message_titles {
+        send_description.push_str(" Write a concise title and put the description in content.");
+        send_properties["title"] = json!({
+            "type":"string","minLength":1,"maxLength":crate::messaging::model::MAX_TITLE_CHARS,
+            "description":"Write a concise, single-line subject for the request or reply. Put the details in content."
+        });
+    }
     vec![
     definition("kode_sessions_list","Find local and SSH conversations by name. Inspect matches before sending; never guess addresses.",json!({"query":{"type":"string"}}),&[]),
-    definition("kode_sessions_send","Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to.",json!({"node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},"idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"}}),&["node_id","session_id","content","idempotency_key"]),
+    definition("kode_sessions_send",&send_description,send_properties,&["node_id","session_id","content","idempotency_key"]),
     definition("kode_sessions_message_read","Read authenticated full-message pages. Offset counts Unicode code points; follow next until null. A preview is not proof of consumption.",json!({"message_id":{"type":"string"},"offset":{"type":"integer","minimum":0}}),&["message_id"]),
     definition("kode_sessions_delivery_status","Read persisted input delivery evidence. Queued is not consumed; consumed is not task completion.",json!({"message_id":{"type":"string"}}),&["message_id"]),
     definition("kode_sessions_cancel_input","Request cancellation of your own message. Queue removal is not proof of stopping execution; the result may remain cancel_unconfirmed.",json!({"message_id":{"type":"string"}}),&["message_id"]),

@@ -270,9 +270,9 @@ test('incoming session messages steer a ready native turn without losing durable
     const own = (await admin.call('/api/v1/messaging/sessions')).sessions.find(row => row.address.session_id === id)
     const other = await admin.call('/api/v1/messaging/sessions', { session_id: `peer-${randomUUID()}`, title: 'Reviewer', runtime: 'external' })
     const peer = admin.forSession(other.owner_token)
-    const send = content => peer.call('/api/v1/messaging/messages', { target: own.address, content, idempotency_key: randomUUID() })
+    const send = (content, title) => peer.call('/api/v1/messaging/messages', { target: own.address, content, title, idempotency_key: randomUUID() })
 
-    const active = await send('Adjust the running work using this review')
+    const active = await send('Adjust the running work using this review', 'Review feedback')
     await waitForGate(flushStarted, 'runtime never flushed queued message')
     const expectedId = deliveryInputId(active.id)
     const pending = await delivery(active)
@@ -282,7 +282,7 @@ test('incoming session messages steer a ready native turn without losing durable
     assert.equal(submitted.length, 1)
     assert.equal(submitted[0].target, 'next-step')
     assert.equal(submitted[0].message.id, expectedId)
-    assert.match(submitted[0].message.content[0].text, /Adjust the running work/)
+    assert.match(submitted[0].message.content[0].text, /\[Kode message title: "Review feedback"\]\nAdjust the running work/)
     releaseFlush.resolve()
 
     await until(() => admin.call(endpoint(active)), row => row.status === 'accepted')
@@ -312,8 +312,9 @@ test('incoming session messages steer a ready native turn without losing durable
     agent.status = 'running'
     steeringReady = true
     const requested = await tools.get('kode_sessions_send').execute({
-      ...other.session.address, content: 'Review the code', idempotency_key: randomUUID(),
+      ...other.session.address, title: 'Code review', content: 'Review the code', idempotency_key: randomUUID(),
     }, { agent })
+    assert.equal(requested.message.title, 'Code review')
     const { cursor } = await tools.get('kode_sessions_read').execute({ after: 0 }, { agent })
     BackendClient.prototype.call = async function (path, body, signal) {
       if (path === `/api/v1/messaging/events?after=${cursor}`) {
@@ -326,7 +327,7 @@ test('incoming session messages steer a ready native turn without losing durable
     void waiting.catch(() => {})
     await waitForGate(readStarted, 'agent did not begin waiting for replies')
     const reply = await peer.call('/api/v1/messaging/messages', {
-      target: own.address, content: 'Review completed', in_reply_to: requested.message.id, idempotency_key: randomUUID(),
+      target: own.address, title: 'Review result', content: 'Review completed', in_reply_to: requested.message.id, idempotency_key: randomUUID(),
     })
     await until(() => admin.call(endpoint(reply)), row => row.status === 'accepted')
     const replyId = deliveryInputId(reply.id)
@@ -337,6 +338,7 @@ test('incoming session messages steer a ready native turn without losing durable
     const read = await waiting
     const receivedReply = read.events.find(row => row.message.id === reply.id)?.message
     assert.equal(receivedReply?.content, 'Review completed')
+    assert.equal(receivedReply?.title, 'Review result')
     assert.ok(!queues['next-turn'].some(message => message.id === replyId), 'the full reply returned by wait must not start a duplicate turn')
     assert.equal(submitted.filter(row => row.message.id === replyId).length, 1)
   } finally {
