@@ -1,4 +1,23 @@
 /** Node-side client. Backend admin credentials never enter a browser bundle. */
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+
+// fetch has its own response-header deadline, even with a longer AbortSignal.
+// The CLI installer responds only after its download and verification finish.
+function fetchUpdate(url, { method, headers, body, signal }) {
+  const request = new URL(url).protocol === 'https:' ? httpsRequest : httpRequest
+  return new Promise((resolve, reject) => {
+    const req = request(url, { method, headers, signal }, res => {
+      const chunks = []
+      res.on('data', chunk => chunks.push(chunk))
+      res.once('error', reject)
+      res.once('end', () => resolve({ status: res.statusCode, ok: res.statusCode >= 200 && res.statusCode < 300, text: () => Buffer.concat(chunks).toString('utf8') }))
+    })
+    req.once('error', reject)
+    req.end(body)
+  })
+}
+
 export class BackendClient {
   constructor(url, token, { fetch: fetcher = globalThis.fetch } = {}) {
     const parsed = new URL(url)
@@ -11,10 +30,12 @@ export class BackendClient {
     if (!path.startsWith('/api/v1/messaging/')) throw new Error('unsupported backend path')
     const timeoutMs = path === '/api/v1/messaging/workbench/agent-hub' ? 600000
       : ['/api/v1/messaging/workbench/handoff', '/api/v1/messaging/workbench/handoff/skill'].includes(path) ? 75000
-      : path === '/api/v1/messaging/workbench/agent-versions' ? (body?.update_profile ? 240000 : 45000)
+      : path === '/api/v1/messaging/workbench/agent-versions' ? (body?.update_profile ? 3660000 : 45000)
       : path.startsWith('/api/v1/messaging/workbench/watches?after=') ? 40000
       : 15000
-    const response = await this.fetch(`${this.url}${path}`, {
+    const fetcher = body?.update_profile && path === '/api/v1/messaging/workbench/agent-versions' && this.fetch === globalThis.fetch
+      ? fetchUpdate : this.fetch
+    const response = await fetcher(`${this.url}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),

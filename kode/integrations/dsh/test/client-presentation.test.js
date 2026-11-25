@@ -920,9 +920,12 @@ test('avatar animation subscribes to native running and interaction facts indepe
  vm.runInNewContext(source.slice(source.indexOf('  const emptyAvatarStatuses'),source.indexOf('  async function stageAvatarPrompt')),scope)
  assert.equal(scope.useAvatarStatus('running'),'running');assert.equal(scope.useAvatarStatus('awaiting'),'awaiting');assert.equal(scope.useAvatarStatus('idle'),'idle');assert.equal(scope.useAvatarStatus('not-loaded'),undefined)
  Object.assign(scope,{transport:null,useState:value=>[value,()=>{}],useEffect(){},React:{useRef:value=>({current:value})},useAvatarLibrary:()=>({avatars:[{id:'person',animations:{idle:['idle-1'],running:['running-1','running-2'],awaiting:['awaiting-1','awaiting-2'],done:['done-1','done-2']}}]}),h:(type,props,...children)=>({type,props,children})})
- for(const status of ['running','awaiting','done']) assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status}).children[0].props.src,`${status==='running'?'awaiting':status}-1`,'reuse the original awaiting/done animations for every state')
- const nativeKode=scope.AgentAvatar({profile:{type:'dsh',avatar:{id:null,url:'/api/kode/avatars/media?type=dsh&state=idle'}}}).children[0]
+ const artOf=avatar=>avatar.children[0].children[0].children[0]
+ for(const status of ['running','awaiting','done']) assert.equal(artOf(scope.AgentAvatar({profile:{avatar:{id:'person'}},status})).props.src,`${status==='running'?'awaiting':status}-1`,'reuse the original awaiting/done animations for every state')
+ const nativeKode=artOf(scope.AgentAvatar({profile:{type:'dsh',avatar:{id:null,url:'/api/kode/avatars/media?type=dsh&state=idle'}}}))
  assert.equal(nativeKode.type,'img');assert.equal(nativeKode.props.src,'/api/kode/avatars/media?type=dsh&state=idle','native Kode conversations must render the packaged Kode icon')
+ for(const status of ['running','awaiting','done']) assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status}).children[1].props.className,'kode-agent-avatar-dot')
+ assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status:'idle'}).children[1],false,'idle avatars carry no dot')
  scope.avatarContext.sessions={list:{subscribe:()=>()=>{},getSnapshot:()=>({byId:{'not-loaded':{running:true}}})}}
  assert.equal(scope.useAvatarStatus('not-loaded'),'running','cold artwork directories must not delay the native running state')
 })
@@ -943,14 +946,22 @@ test('running sessions use one steady avatar marker for default and custom artwo
  vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
  const tree=scope.SessionStatusAvatars({root:{current:null},rows:{custom:{agent:{type:'codex',avatar:{id:'gallery/person'}}},default:{agent:{type:'claude'}},plain:{}}})
  assert.deepEqual(tree.children.map(overlay=>[overlay.children[0].props['data-status'],overlay.children[0].children[0].props.status]),[['ongoing','running'],['ongoing','running']])
- const css=source.slice(source.indexOf('/* Session state rides the avatar'),source.indexOf('.kode-tool-action{'))
- assert.match(css,/\[data-avatar-state=running\],[^{]*\[data-avatar-state=awaiting\],[^{]*\[data-avatar-state=done\]\{outline:2px solid var\(--kode-avatar-ring\);outline-offset:2px\}/,'the avatar outline carries every state')
- assert.match(css,/\[data-avatar-state=awaiting\]\{[^}]*outline-style:dashed\}/,'awaiting differs by stroke, not only by color')
- assert.match(css,/\[data-avatar-state=done\]\{[^}]*outline-style:double/)
- assert.doesNotMatch(css,/data-avatar-state=[a-z]+\]::(before|after)/,'no corner dots or overlays on the artwork')
- assert.doesNotMatch(css,/@keyframes kode-avatar-ring-breathe\{[^}]*opacity/,'the ring moves, the avatar never fades')
- assert.match(css,/prefers-reduced-motion:reduce\)\{[^}]*\.kode-agent-avatar\[data-avatar-state\]\{animation:none\}/)
+ const css=source.slice(source.indexOf('/* Session state: a 1.5px ring'),source.indexOf('.kode-tool-action{'))
+ assert.match(css,/\.kode-agent-avatar-face\{position:absolute;inset:-2\.5px;box-sizing:border-box;padding:1px;border:1\.5px solid transparent;border-radius:50%\}/,'1.5px ring over a fixed 1px gap around a circular face')
+ assert.match(css,/\.kode-agent-avatar-art\{[^}]*overflow:hidden;border-radius:50%\}/,'artwork is clipped to a circle inside the face')
+ assert.match(css,/\.kode-agent-avatar-face,\.kode-agent-avatar-art,\.kode-agent-avatar-art::after,\.kode-agent-avatar-dot\{corner-shape:round\}/,'circles opt out of the DSH superellipse corner-shape')
+ assert.match(css,/\[data-avatar-state=running\]>\.kode-agent-avatar-face,[^{]*\[data-avatar-state=awaiting\]>\.kode-agent-avatar-face,[^{]*\[data-avatar-state=done\]>\.kode-agent-avatar-face\{[^}]*border-color:var\(--kode-avatar-ring\);-webkit-mask:var\(--kode-avatar-notch\);mask:var\(--kode-avatar-notch\)\}/,'every state rings the face and notches it for the dot')
+ assert.match(css,/\[data-avatar-state=awaiting\]>\.kode-agent-avatar-face\{border-style:dashed\}/,'awaiting differs by stroke, not only by color')
+ assert.match(css,/\[data-avatar-state=awaiting\]>\.kode-agent-avatar-dot\{background:transparent;box-shadow:inset/,'awaiting dot is hollow')
+ assert.match(css,/\.kode-agent-avatar-dot\{position:absolute;right:-3px;bottom:-3px;/)
+ assert.match(css,/--kode-avatar-ring:var\(--dsw-alias-brand-primary-new-colorprimary-new-color/,'running uses the DSH brand token')
+ assert.doesNotMatch(css,/@keyframes kode-avatar-(ring|dot)-fade\{[^}]*(scale|inset|outline-offset|width)/,'running fades, nothing grows')
+ // The pause/reduced selectors must match the running rule's specificity or its animation shorthand wins.
+ assert.match(css,/prefers-reduced-motion:reduce\)\{[^}]*\.kode-agent-avatar\[data-avatar-state\]>\.kode-agent-avatar-face,\.kode-agent-avatar\[data-avatar-state\]>\.kode-agent-avatar-dot\{animation:none\}/)
+ assert.match(css,/\.kode-motion-paused \.kode-agent-avatar>\.kode-agent-avatar-face,\.kode-motion-paused \.kode-agent-avatar>\.kode-agent-avatar-dot\{animation-play-state:paused\}/)
  assert.match(css,/\.kode-status-avatar-body::after\{content:none\}/,'the sidebar overlay adds no second frame')
+ assert.match(css,/\.kode-workspace-status\[data-status=ongoing\]\{background:#3b82f6;/,'workspace summary dots keep their own semantics')
+ assert.match(source,/marked && h\('span', \{ className: 'kode-agent-avatar-dot' \}\)/,'the dot is a sibling of the clipped face, so the circle never hides it')
 })
 
 test('environment Git and folder rows are flat native-style rows with hover and focus feedback',()=>{
@@ -1564,8 +1575,8 @@ test('Kode review, subagent and communication rows stay one line and show three 
 })
 
 test('communication rows show only a title and tell waiting from answered by the projected flag or reply-to, never by delivery receipts', () => {
-  const scope = vm.createContext({ IconClockOutlineRegular: 'clock', IconCheckOutlineRegular: 'check', IconPaperPlaneOutlineRegular: 'plane' })
-  vm.runInContext(source.slice(source.indexOf('  const relayKinds = {'), source.indexOf('  function CommunicationRows(')), scope)
+  const scope = vm.createContext({ IconClockOutlineRegular: 'clock', IconCheckOutlineRegular: 'check', IconPaperPlaneOutlineRegular: 'plane', IconMailUnreadOutlineRegular: 'mail-unread', IconMailReadOutlineRegular: 'mail-read' })
+  vm.runInContext(source.slice(source.indexOf('  const relayKinds = {'), source.indexOf('  function CommunicationRows(')) + ';globalThis.relayKinds = relayKinds', scope)
   const ask = { nodeId: 'n', sessionId: 'peer', id: 'ask', direction: 'sent', reply: false, status: 'accepted', content: '请评审 PR' }
   const delivered = { nodeId: 'n', sessionId: 'peer', id: 'ask-2', direction: 'sent', reply: false, status: 'received', content: '另一个请求' }
   const answer = { nodeId: 'n', sessionId: 'peer', id: 'ans', direction: 'received', reply: true, replyTo: 'ask', content: '评审完成' }
@@ -1573,6 +1584,9 @@ test('communication rows show only a title and tell waiting from answered by the
   const request = { nodeId: 'n', sessionId: 'peer', id: 'theirs', direction: 'received', reply: false, content: '# 帮我看看\n细节' }
   const rows = [ask, delivered, answer, reply, request]
   assert.deepEqual(rows.map(row => scope.relayKind(row, rows)), ['answered', 'waiting', 'reply', 'replied', 'incoming'])
+  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].icon), ['check', 'clock', 'mail-read', 'plane', 'mail-unread'], 'sent, received requests and received replies each keep their own native glyph')
+  assert.deepEqual(Object.values(scope.relayKinds).map(kind => kind.label), ['等待对方回复', '已收到回复', '已发送', '已回复对方', '收到对方回复', '收到消息'])
+  assert.doesNotMatch(source, /data-inbound|scaleX\(-1\)/, 'no glyph is mirrored to fake a direction')
   assert.equal(scope.relayKind(ask, [ask]), 'waiting', 'an accepted receipt is not a reply')
   assert.equal(scope.relayKind(ask, [ask, { ...answer, sessionId: 'stranger' }]), 'waiting', 'only the asked peer can answer')
   assert.equal(scope.relayTitle({ title: ' 代码评审 ', content: 'body' }), '代码评审')
@@ -1582,6 +1596,38 @@ test('communication rows show only a title and tell waiting from answered by the
   const reordered = { ...ask, answered: true }
   assert.equal(scope.relayKind(reordered, [reordered]), 'answered', 'the projected answered flag wins even when the reply is not in view')
   assert.equal(scope.relayKind({ ...ask, answered: false }, rows), 'answered', 'without the flag the real reply-to still counts')
+})
+
+test('panel bodies render compact Markdown without remote images, while paths and code stay literal', () => {
+  const scope = vm.createContext({ h: (type, props, ...children) => ({ type, props: props ?? {}, children }), useMemo: make => make(), MarkdownText: 'MarkdownText', markdownLabels: { code: {} } })
+  vm.runInContext(source.slice(source.indexOf('  const fenceLine ='), source.indexOf('  // Collapsed relays show')) + ';globalThis.quietMarkdown = quietMarkdown', scope)
+  const quiet = scope.quietMarkdown
+  assert.equal(quiet('![追踪](https://tracker.example/p.png) 和 [文档](https://a.example)'), '[追踪](https://tracker.example/p.png) 和 [文档](https://a.example)', 'images become plain links so nothing remote loads')
+  assert.equal(quiet('改了 src/__init__.py 与 ./a_b/c_d.js'), String.raw`改了 src/\_\_init\_\_.py 与 ./a\_b/c\_d.js`, 'paths keep their underscores literal')
+  assert.equal(quiet('见 https://x.example/a_b_c 和 `x_y/![z]`'), '见 https://x.example/a_b_c 和 `x_y/![z]`', 'URLs and inline code are untouched')
+  assert.equal(quiet('状态：已完成\n下一步：合并'), '状态：已完成  \n下一步：合并', 'single newlines stay line breaks')
+  assert.equal(quiet('```md\n![x](https://e/i.png)\na_b/c_d\n```'), '```md\n![x](https://e/i.png)\na_b/c_d\n```', 'fenced code is never rewritten')
+  assert.equal(quiet('| a | b |\n|---|---|\n| 1 | 2 |').split('\n')[1], '|---|---|  ', 'tables still parse with trailing hard-break spaces')
+  assert.equal(quiet('a ``x` ![i](https://e/x.png)'), 'a ``x` [i](https://e/x.png)', 'unequal backtick runs are not code, so their images still become links')
+  assert.equal(quiet('x ``` ![i](u) `` y'), 'x ``` [i](u) `` y')
+  assert.equal(quiet('`a` ![i](u) `b`'), '`a` [i](u) `b`')
+  assert.equal(quiet('``code ` ![i](u) ``'), '``code ` ![i](u) ``', 'a matched run keeps its code text verbatim')
+  assert.equal(quiet('```x``` ![i](u)\n![j](v)'), '```x``` [i](u)  \n[j](v)', 'an inline triple-backtick span does not open a fence')
+  const started = performance.now()
+  for (const ticks of [28, 32, 5000]) quiet('`x ' + '`'.repeat(ticks) + ' ![i](u)')
+  assert.ok(performance.now() - started < 200, 'unclosed backtick runs scan in linear time')
+  assert.equal(scope.PanelMarkdown({ text: '  \n ' }), null, 'blank text renders nothing')
+  const body = scope.PanelMarkdown({ text: '**完成**', className: 'kode-relay-body' })
+  assert.equal(body.props.className, 'kode-panel-markdown kode-relay-body')
+  assert.deepEqual({ ...body.children[0].props, labels: undefined }, { text: '**完成**', labels: undefined, variant: 'compact', omitHtml: true }, 'raw HTML is dropped in the narrow panel')
+  assert.equal(body.children[0].props.labels, scope.markdownLabels, 'labels stay reference-stable for memoised MarkdownText')
+  const rows = source.slice(source.indexOf('  function NativeSubagentRows('), source.indexOf('  function relayKind('))
+  assert.match(rows, /h\(PanelMarkdown, \{ text: child\.task \}\)/)
+  assert.match(rows, /child\.output\?\.trim\(\) \? h\(PanelMarkdown, \{ text: child\.output \}\) : h\('p', null, '暂无输出记录。'\)/)
+  assert.match(rows, /h\('p', \{ className: 'kode-panel-meta' \}, \[childStatusLabel\(child\), child\.model\]/, 'the status line stays plain text')
+  assert.match(source, /h\(PanelMarkdown, \{ text: row\.content \}\)/, 'communication rows render their body as Markdown')
+  assert.match(source, /'已记录的输出'\),\n\s+child\.output\?\.trim\(\) \? h\(PanelMarkdown, \{ text: child\.output \}\)/, 'the subagent dialog output uses the same safe body')
+  assert.doesNotMatch(source, /\.kode-panel-detail p,\.kode-panel-detail pre\{[^}]*pre-wrap/, 'Markdown blocks are not forced into pre-wrap')
 })
 
 test('relay cards consume an optional title line and keep malformed ones as body text', () => {
@@ -1595,10 +1641,10 @@ test('relay cards consume an optional title line and keep malformed ones as body
 test('chat relay cards start collapsed to route and title, and reveal the body only when expanded', () => {
   let state = false
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children })
-  const scope = vm.createContext({ h, useState: initial => [state ?? initial, next => { state = next }], IconPaperPlaneOutlineRegular: 'plane', IconChevronDownOutlineRegular: 'chevron', IconWarningOutlineRegular: 'warning', RelayEchoVisibility: 'echo' })
+  const scope = vm.createContext({ h, useState: initial => [state ?? initial, next => { state = next }], useMemo: make => make(), MarkdownText: 'MarkdownText', markdownLabels: {}, IconPaperPlaneOutlineRegular: 'plane', IconMailReadOutlineRegular: 'mail-read', IconMailUnreadOutlineRegular: 'mail-unread', IconClockOutlineRegular: 'clock', IconCheckOutlineRegular: 'check', IconChevronDownOutlineRegular: 'chevron', IconWarningOutlineRegular: 'warning', RelayEchoVisibility: 'echo' })
   const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to))
-  vm.runInContext(slice('  function relayTitle(', '  function CommunicationRows') + slice('  // Collapsed relays show', '  function HistoricalRelay('), scope)
-  const text = node => node == null || node === false ? '' : typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : text(node.children)
+  vm.runInContext(slice('  function relayTitle(', '  function CommunicationRows') + slice("  // The projection's answered flag wins", '  function HistoricalRelay('), scope)
+  const text = node => node == null || node === false ? '' : typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : node.type === 'MarkdownText' ? node.props.text : text(node.children)
   const find = (node, test) => !node || typeof node !== 'object' ? undefined : Array.isArray(node) ? node.map(child => find(child, test)).find(Boolean) : test(node) ? node : find(node.children, test)
   const draw = relay => scope.RelayCard({ relay, time: Date.UTC(2026, 0, 1, 2, 42), nameOf: (node, id) => id === 'self' ? '当前会话' : '评审助手', sessionId: 'self' })
   const relay = { address: 'n/peer', replyTo: 'm1', title: '代码评审结论', content: '机密正文第一行\n第二行' }
@@ -1607,13 +1653,18 @@ test('chat relay cards start collapsed to route and title, and reveal the body o
   let card = render(relay)
   const toggle = find(card, node => node.type === 'button')
   assert.equal(toggle.props['aria-expanded'], false)
+  assert.equal(find(card, node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-read', 'a received reply arrives as opened mail')
+  assert.equal(find(render({ ...relay, replyTo: undefined }), node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-unread', 'a received request arrives as unread mail')
   assert.equal(text(card), '评审助手→当前会话代码评审结论')
   assert.equal(find(card, node => node.type === 'strong' && node.props.title === '当前会话（当前会话）') != null, true)
   assert.equal(find(card, node => node.type === 'time'), undefined)
   toggle.props.onClick()
   card = render(relay)
   assert.equal(find(card, node => node.type === 'button').props['aria-expanded'], true)
-  assert.match(text(card), /回复了这段对话 · \d\d:\d\d[^机]*机密正文第一行\n第二行/)
+  assert.match(text(card), /回复了这段对话 · \d\d:\d\d[^机]*机密正文第一行 {2}\n第二行/, 'the body keeps its line break as Markdown')
+  const body = find(card, node => node.type === 'MarkdownText')
+  assert.equal(body.props.variant, 'compact')
+  assert.equal(find(card, node => node.props?.className === 'kode-panel-markdown kode-relay-body') != null, true)
   state = false
   assert.match(text(render({ address: 'n/peer', content: '## 旧消息首行\n更多' })), /会话消息/)
   assert.doesNotMatch(text(render({ address: 'n/peer', content: '## 旧消息首行\n更多' })), /旧消息|更多/)
@@ -1623,7 +1674,7 @@ test('chat relay cards start collapsed to route and title, and reveal the body o
 
 test('sessions_send cards collapse to the two session names and title, with status, time and body only when expanded', () => {
   const c = client(), render = c.entry('tool.call.toolview', 'kode_sessions_send')
-  const text = node => node == null || node === false ? '' : typeof node !== 'object' ? String(node) : Array.isArray(node) ? node.map(text).join('') : typeof node.type === 'function' ? text(node.type(node.props)) : text(node.children ?? node.props?.children)
+  const text = node => node == null || node === false ? '' : typeof node !== 'object' ? String(node) : Array.isArray(node) ? node.map(text).join('') : typeof node.type === 'function' ? text(node.type(node.props)) : node.type === 'MarkdownText' ? node.props.text : text(node.children ?? node.props?.children)
   const card = (expanded, isError) => render({ sessions: c.ctx.sessions, sessionId: 'current', toolName: 'kode_sessions_send', phase: 'result', block: {
     isError, args: { text: key => ({ content: '机密正文', title: '代码评审', node_id: 'worker.example', session_id: 'peer' })[key] },
     content: [{ type: 'text', text: JSON.stringify({ message: { status: 'accepted' } }) }],
@@ -1692,4 +1743,26 @@ test('forking is single-flight, opens the child, and survives a failed title inc
     assert.equal(forks, 2, 'a later deliberate fork is still allowed')
     for (const dispose of c.disposers) dispose()
   }
+})
+
+test('settings controls use native Button variants, token focus rings and a fixed dialog action layer', () => {
+ assert.doesNotMatch(source, /variant: 'text'/, 'native Button has no text variant')
+ for (const rule of ['.kode-agent-edit{', '.kode-agent-add{', '.kode-source-actions>button{']) {
+  const at = source.indexOf(rule); assert.ok(at > 0, rule)
+  assert.doesNotMatch(source.slice(at, source.indexOf('}', at)), /!important/, rule)
+ }
+ assert.match(source, /\.kode-settings-nav button:focus-visible\{[^}]*var\(--dsw-focus-ring-width,2px\)/)
+ assert.match(source, /:is\(\.kode-project-dialog,\.kode-handoff-dialog,\.kode-subagent-dialog,\.kode-confirm-dialog\)\{[^}]*max-height:calc\(100dvh - 48px\)/)
+ assert.match(source, /overflow-y:auto;overscroll-behavior:contain/)
+ assert.match(source, /@media\(prefers-reduced-motion:reduce\)\{\.kode-settings-page \*[^{]*\{transition:none/)
+ assert.match(source, /className: 'kode-confirm-dialog'/)
+})
+
+test('subagent titles strip Markdown markers from the first task line', () => {
+ const line = source.match(/  const childTitle = [^\n]+/)[0]
+ const childTitle = vm.runInNewContext(`${line}; childTitle`)
+ assert.equal(childTitle({ task: '走查 **Kode 设置**各 tab：\n1. 字号' }), '走查 Kode 设置各 tab：')
+ assert.equal(childTitle({ task: '## 修复 `quietLine`' }), '修复 quietLine')
+ assert.equal(childTitle({ name: 'reviewer', task: '**x**' }), 'reviewer')
+ assert.equal(childTitle({ task: '**' }), '子 Agent')
 })

@@ -306,7 +306,10 @@ export class AgentRuntimeAdapter {
       const supersededThreads = binding.threadId && threadId !== binding.threadId
         ? [...new Set([...priorThreads, binding.threadId])] : priorThreads
       await this.profiles.patchBinding(agent.id, {
-        threadId, ...(!resumeId ? { nativeToolNames: tools.map(tool => tool.name) } : {}),
+        threadId, ...(!resumeId ? {
+          nativeToolNames: tools.map(tool => tool.name),
+          ...(runtime.nativeToolSchema ? { nativeToolSchema: runtime.nativeToolSchema } : {}),
+        } : {}),
         ...(edit ? { historyEditId: edit.data.id, historyEditBootstrap: bootstrap, supersededThreads } : {}),
         ...(forkInit ? { forkPending: false, forkBootstrap } : {}),
       })
