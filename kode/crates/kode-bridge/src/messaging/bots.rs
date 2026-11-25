@@ -23,7 +23,7 @@ pub struct Bot {
     pub name: String,
     #[serde(default)]
     pub avatar: Option<String>,
-    /// Discord-style sidebar/card background style (`auto`, `none`, `preset:<id>`, `color:#rrggbb`, etc.).
+    /// Sidebar/card background style (`auto`, `none`, `preset:<id>`, `color:#rrggbb`, etc.).
     #[serde(default)]
     pub banner: Option<String>,
     #[serde(default)]
