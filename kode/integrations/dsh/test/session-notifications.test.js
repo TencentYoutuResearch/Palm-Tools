@@ -108,10 +108,10 @@ test('visited SSH notification streams remain active after switching Hosts and a
 test('notification settings explain denied permission and expose independently named switches', async () => {
   const { readFile } = await import('node:fs/promises'), vm = await import('node:vm')
   const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
-  const fragment = source.slice(source.indexOf('  function NotificationSettingsBody()'), source.indexOf('  const settingsSections ='))
+  const fragment = source.slice(source.indexOf('  function notificationState('), source.indexOf('  const settingsSections ='))
   const h = (type, props, ...children) => ({ type, props, children: children.flat() })
   const state = { permission: 'denied', completed: true, waiting: false }, service = { subscribe() {}, getSnapshot: () => state }
-  const scope = { h, React: { Fragment: 'fragment', useCallback: fn => fn, useMemo: fn => fn() }, useSyncExternalStore: (_subscribe, get) => get(), useState: initial => [initial, () => {}], Button: 'button', Failure: 'failure', avatarContext: { get: () => service } }
+  const scope = { h, React: { Fragment: 'fragment', useCallback: fn => fn, useMemo: fn => fn() }, useSyncExternalStore: (_subscribe, get) => get(), useState: initial => [initial, () => {}], Button: 'button', Failure: 'failure', IconCheckOutlineRegular: 'check', IconWarningOutlineRegular: 'warning', IconLoadingOutlineRegular: 'loading', avatarContext: { get: () => service } }
   vm.runInNewContext(fragment, scope)
   const view = scope.NotificationSettingsBody(), nodes = []
   const visit = value => { if (!value || typeof value !== 'object') return; nodes.push(value); for (const child of value.children ?? []) visit(child) }; visit(view)
