@@ -13,6 +13,11 @@ export function validMessageTitle(value) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 2 * maxTitleCharacters
     && !/[\p{Cc}\u2028\u2029]/u.test(value) && Array.from(value).length <= maxTitleCharacters
 }
+export function sessionAssignmentTitle(sessionTitle) {
+  if (typeof sessionTitle !== 'string') return undefined
+  const title = Array.from(sessionTitle.trim()).slice(0, maxTitleCharacters).join('').trimEnd()
+  return validMessageTitle(title) ? title : undefined
+}
 const budget = {
   limit: PAGE_TOKEN_BUDGET,
   accounting: 'serialized_utf8_bytes',

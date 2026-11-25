@@ -267,10 +267,18 @@ impl Store {
             let title_may_be_omitted = m.source.node_id != self.node_id
                 && p.id == m.id
                 && (p.title.is_none() || m.title.is_none());
+            // A creation retried after upgrade now includes an automatic title.
+            // Preserve the already delivered legacy assignment.
+            let legacy_assignment = m.source.node_id == self.node_id
+                && m.in_reply_to.is_none()
+                && p.title.is_none()
+                && m.idempotency_key.strip_prefix("create:").is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                });
             if p.source != m.source
                 || p.target != m.target
                 || p.content != m.content
-                || (p.title != m.title && !title_may_be_omitted)
+                || (p.title != m.title && !title_may_be_omitted && !legacy_assignment)
                 || p.idempotency_key != m.idempotency_key
                 || p.in_reply_to != m.in_reply_to
                 || p.hop_count != m.hop_count

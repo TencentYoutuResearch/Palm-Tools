@@ -1,6 +1,6 @@
 import { createDeliveryTracker, deliveryInputId, DeliveryEvidenceUnavailable } from './delivery-tracker.js'
 /** Kode Host integration: durable backend messaging and independently owned native Agent execution. */
-import { eventPage, messagePage, messageTitleParameter, relayInput } from './message-pages.js'
+import { eventPage, messagePage, messageTitleParameter, relayInput, sessionAssignmentTitle } from './message-pages.js'
 import { retainClientBatches } from './client-asset-retention.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
@@ -161,7 +161,11 @@ export async function apply(ctx, config = {}) {
         if (!creator) throw new Error('Session creation service is unavailable')
         created = await creator.create(args, agent)
       }
-      const assignment = await client.call(`${PREFIX}messages`, { target: created.address, content: args.task, idempotency_key: `create:${createHash('sha256').update(args.idempotency_key).digest('hex')}`, in_reply_to: null }, signal)
+      const assignment = await client.call(`${PREFIX}messages`, {
+        target: created.address, content: args.task, in_reply_to: null,
+        idempotency_key: `create:${createHash('sha256').update(args.idempotency_key).digest('hex')}`,
+        ...(node.message_titles === true ? { title: sessionAssignmentTitle(created.title) } : {}),
+      }, signal)
       return { ...created, status: 'assigned', assignment }
     })
     if (entry.inputCancellation) add('kode_sessions_cancel_input', 'Request cancellation of your own message with a runtime input binding. Queue removal is distinct from stopping execution. Active/shared/unsupported execution may remain cancel_unconfirmed. Remote cancellation requires negotiated peer support; queued offline requests remain pending.', {

@@ -339,6 +339,41 @@ async fn pending_probe_is_scoped_read_only_and_excludes_expired_or_claimed_work(
 }
 
 #[tokio::test]
+async fn titled_creation_retry_keeps_the_untitled_legacy_assignment() {
+    let s = server("local", vec![]).await;
+    let a = register(&s, "alice").await;
+    let b = register(&s, "bob").await;
+    let mut req = request("local", "bob", &format!("create:{}", "a".repeat(64)));
+    let legacy: Message = send(&s, &a.owner_token, &req)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(s.hub.claim("bob").unwrap()[0].id, legacy.id);
+    req.title = Some("Feat-Review".into());
+    let retry: Message = send(&s, &a.owner_token, &req)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retry.id, legacy.id);
+    assert!(retry.title.is_none());
+    assert!(s.hub.claim("bob").unwrap().is_empty());
+
+    req.content = "Different task".into();
+    assert_eq!(send(&s, &a.owner_token, &req).await.status(), 400);
+    req.idempotency_key = format!("create:{}", "b".repeat(64));
+    assert!(send(&s, &a.owner_token, &req).await.status().is_success());
+    req.title = Some("Different subject".into());
+    assert_eq!(send(&s, &a.owner_token, &req).await.status(), 400);
+    assert!(s.hub.claim(&b.session.address.session_id).unwrap()[0].title.is_some());
+}
+
+#[tokio::test]
 async fn scoped_http_delivery_reply_dedup_and_access_control() {
     let s = server("local", vec![]).await;
     let a = register(&s, "alice").await;

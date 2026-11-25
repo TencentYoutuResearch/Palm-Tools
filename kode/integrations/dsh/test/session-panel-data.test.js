@@ -47,15 +47,15 @@ test('inbound and outbound Kode messages keep their real peer and transport stat
   ])
 })
 
-test('explicit wait records the peer reply once and ignores delivery receipts or unrelated rows', () => {
+test('explicit wait associates a reply with the creation assignment and ignores unrelated rows', () => {
   const local = { node_id: 'local.example', session_id: 'me' }
   const peer = { node_id: 'peer.example', session_id: 'reviewer' }
   const request = { id: 'request', source: local, target: peer, content: 'Please read the report', title: 'Report review' }
   const reply = { id: 'reply', source: peer, target: local, content: 'Reviewed it', title: 'Review result', in_reply_to: 'request' }
   const result = (callId, payload) => ({ type: 'tool/result', data: { message: { source: { callId }, content: text(JSON.stringify(payload)) } } })
   const state = project(
-    { type: 'tool/call', data: { callId: 'send', name: 'kode_sessions_send' } },
-    result('send', { message: request }),
+    { type: 'tool/call', data: { callId: 'create', name: 'kode_sessions_create' } },
+    result('create', { title: 'Feat-Report', assignment: request }),
     { type: 'tool/call', data: { callId: 'wait', name: 'kode_native_mcpToolCall', arguments: JSON.stringify({ tool: 'kode_sessions_wait' }) } },
     result('wait', { result: { structuredContent: { events: [
       { message: { ...request, status: 'accepted' } },

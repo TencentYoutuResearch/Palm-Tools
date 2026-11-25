@@ -17,6 +17,7 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
   const originalCall = BackendClient.prototype.call
   let releaseRecovery
   let flushed = false
+  let assignedAddress
   const id = `dsh-test-${randomUUID()}`
   const agent = { id, session: { header: { title: 'Implementation session' }, snapshotEvents: offset => events.filter(event => event.seq >= offset) }, followup: message => { received.push(message); events.push({ seq: events.length, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: received.length - 1, removedCount: 0, inserted: [message] } }) }, ctx: {
     tools: { register: tool => { tools.set(tool.name, tool); return () => tools.delete(tool.name) } },
@@ -26,9 +27,10 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
   const ctx = { agents: { list: () => [agent], get: target => target === id ? agent : undefined },
     logger: { warn() {} }, on: (event, callback) => { listeners.set(event, callback) },
     effect: callback => { const dispose = callback(); disposers.push(dispose) }, inject() {},
+    get: name => name === 'kodeSessionCreator' ? { create: async ({ title }) => ({ title, address: assignedAddress }) } : undefined,
   }
   try {
-    await apply(ctx, { url, tokenFile, stateFile: join(root, 'state.json'), pollMs: 20 })
+    await apply(ctx, { url, tokenFile, stateFile: join(root, 'state.json'), pollMs: 20, resumeInactive: false })
     const admin = new BackendClient(url, (await readFile(tokenFile, 'utf8')).trim())
     const creationSchema = tools.get('kode_sessions_create').parameters
     assert.equal(creationSchema.properties.model.type, 'string')
@@ -62,6 +64,16 @@ test('dsh host registers scoped tools, persists inbox before receipt and deliver
     }
     const other = await admin.call('/api/v1/messaging/sessions', { session_id: `peer-${randomUUID()}`, title: 'Reviewer', runtime: 'external' })
     const peer = admin.forSession(other.owner_token)
+    assignedAddress = other.session.address
+    const create = tools.get('kode_sessions_create')
+    const assignment = { title: `Feat-${'𐐀'.repeat(90)}`, task: 'Review the fixture', idempotency_key: randomUUID() }
+    const created = await create.execute(assignment, { agent })
+    assert.equal(created.assignment.title, `Feat-${'𐐀'.repeat(75)}`)
+    assert.equal(created.assignment.content, assignment.task)
+    assert.equal((await create.execute(assignment, { agent })).assignment.id, created.assignment.id)
+    const claimed = await peer.call(`/api/v1/messaging/sessions/${assignedAddress.session_id}/claim`, {})
+    assert.equal(claimed.messages.length, 1)
+    assert.equal(claimed.messages[0].title, created.assignment.title)
     const message = await peer.call('/api/v1/messaging/messages', { target: own.address, content: 'Please review the fixture', idempotency_key: randomUUID() })
     const deadline = Date.now() + 4000
     let settled

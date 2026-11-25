@@ -10,7 +10,7 @@ const relaySchema = z.object({
   title: z.string().optional(), replyTo: z.string().optional(), answered: z.literal(true).optional(),
 })
 const viewSchema = z.object({ reviews: z.array(reviewSchema), relays: z.array(relaySchema) })
-const stateSchema = viewSchema.extend({ pendingTools: z.array(z.object({ callId: z.string(), kind: z.enum(['send', 'read', 'wait']) })) })
+const stateSchema = viewSchema.extend({ pendingTools: z.array(z.object({ callId: z.string(), kind: z.enum(['create', 'send', 'read', 'wait']) })) })
 const blocksText = (blocks, limit) => {
   if (!Array.isArray(blocks)) return ''
   let text = ''
@@ -50,14 +50,14 @@ function relayFor(message) {
 function parseJson(text) {
   try { return JSON.parse(text) } catch { return }
 }
-const sessionTool = /(?:^|__)(?:kode_)?sessions_(send|read|wait)$/
+const sessionTool = /(?:^|__)(?:kode_)?sessions_(create|send|read|wait)$/
 function relayTool({ name, arguments: args }) {
   const direct = sessionTool.exec(name)?.[1]
   if (direct) return direct
   if (name !== 'kode_native_mcpToolCall' && name !== 'kode_native_commandExecution') return
   const native = parseJson(args)
   return sessionTool.exec(native?.tool ?? native?.name ?? '')?.[1] ??
-    /\b(?:kode_)?sessions_(send|read|wait)\b/.exec(native?.title ?? '')?.[1]
+    /\b(?:kode_)?sessions_(create|send|read|wait)\b/.exec(native?.title ?? '')?.[1]
 }
 
 function relayToolResult(result) {
@@ -110,7 +110,7 @@ function addRecentRelays(rows, items) {
 
 export const sessionPanelProjection = {
   key: 'kodeSessionPanel',
-  stateVersion: 2,
+  stateVersion: 3,
   stateSchema,
   init: () => ({ reviews: [], relays: [], pendingTools: [] }),
   apply(state, event) {
@@ -128,8 +128,11 @@ export const sessionPanelProjection = {
       if (!tool) return state
       const pendingTools = state.pendingTools.filter(row => row.callId !== callId)
       const value = relayToolResult(result)
-      const replies = tool.kind === 'send' ? [relayFromRow(value?.message ?? value, 'sent')].filter(Boolean) : relayReplies(value, state.relays)
-      return { ...state, pendingTools, relays: replies.length ? addRecentRelays(state.relays, replies) : state.relays }
+      const outgoing = tool.kind === 'create' ? value?.assignment : tool.kind === 'send' ? value?.message ?? value : undefined
+      const relays = tool.kind === 'create' || tool.kind === 'send'
+        ? [relayFromRow(outgoing, 'sent')].filter(Boolean)
+        : relayReplies(value, state.relays)
+      return { ...state, pendingTools, relays: relays.length ? addRecentRelays(state.relays, relays) : state.relays }
     }
     const message = event.type === 'user/message' ? event.data : event.type === 'assistant/message' ? event.data.message : undefined
     if (!message || event.surfaceOp === 'replace') return state
