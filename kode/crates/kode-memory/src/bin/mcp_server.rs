@@ -17,7 +17,8 @@
 use anyhow::{Context, Result};
 use kode_memory::{
     budget::{
-        BudgetError, BudgetStore, COST_PROPOSE, PENALTY_BLACKLIST, PENALTY_REJECT, REWARD_APPROVE,
+        BudgetError, BudgetStore, COST_PROPOSE, MAX_ENERGY, PENALTY_BLACKLIST, PENALTY_REJECT,
+        REWARD_APPROVE,
     },
     store::{ProposeResult, ReviewOutcome, Verdict},
     Kind, MemoryStore, Scope,
@@ -358,7 +359,7 @@ async fn call_tool(
                 .ok_or_else(|| anyhow::anyhow!("missing author"))?;
             let mut b = budget.lock().await;
             let energy = b.current_energy(author);
-            Ok(json!({ "author": author, "energy": energy, "max": 5.0 }).to_string())
+            Ok(json!({ "author": author, "energy": energy, "max": MAX_ENERGY }).to_string())
         }
         _ => Err(anyhow::anyhow!("unknown tool: {}", name)),
     }
@@ -438,11 +439,19 @@ async fn handle_propose(
     };
     drop(b); // 释放锁后再操作 store
 
-    // 2. 写 pending
+    // 2. 写 pending(若意外失败则退还预扣的能量)
     let mut s = store.lock().await;
-    let result = s.propose(
+    let result = match s.propose(
         author, session, scope, body, tags, supersedes, confidence, rationale, force, kind, title,
-    )?;
+    ) {
+        Ok(res) => res,
+        Err(err) => {
+            drop(s);
+            let mut b = budget.lock().await;
+            let _ = b.add(author, COST_PROPOSE);
+            return Err(err);
+        }
+    };
 
     Ok(match result {
         ProposeResult::Accepted { id } => json!({

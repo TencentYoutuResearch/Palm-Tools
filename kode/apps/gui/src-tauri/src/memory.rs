@@ -395,7 +395,7 @@ pub async fn memory_stats(handle: State<'_, Arc<MemoryHandle>>) -> Result<Memory
     })
 }
 
-/// 审一条 pending。同事务联动 budget(approve +0.5 / reject -1 / blacklist -2)。
+/// 审一条 pending。同事务联动 budget(approve 全额退还 / reject 额外 -0.5 / blacklist 额外 -2.0)。
 #[tauri::command]
 pub async fn memory_review(
     handle: State<'_, Arc<MemoryHandle>>,

@@ -4,7 +4,8 @@
 
 use kode_memory::{
     budget::{
-        BudgetError, BudgetStore, COST_PROPOSE, PENALTY_BLACKLIST, PENALTY_REJECT, REWARD_APPROVE,
+        BudgetError, BudgetStore, COST_PROPOSE, MAX_ENERGY, PENALTY_BLACKLIST, PENALTY_REJECT,
+        REWARD_APPROVE,
     },
     store::{ProposeResult, ReviewOutcome, Verdict},
     MemoryStore, Scope,
@@ -62,8 +63,8 @@ fn happy_path_propose_then_approve() {
     // pending 空
     assert_eq!(store.count_pending().unwrap(), 0);
 
-    // budget:5 - 1 + 0.5 = 4.5
-    assert!((budget.current_energy("codebuddy") - 4.5).abs() < 0.05);
+    // budget: approve 全额退还 propose 消耗, 恢复满血
+    assert!((budget.current_energy("codebuddy") - MAX_ENERGY).abs() < 0.05);
 }
 
 #[test]
@@ -116,8 +117,11 @@ fn reject_path_archives_and_penalizes() {
     assert_eq!(store.count_pending().unwrap(), 0);
     // facts 没
     assert_eq!(store.count().unwrap(), 0);
-    // budget:5 - 1 - 1 = 3
-    assert!((budget.current_energy("codebuddy") - 3.0).abs() < 0.05);
+    // budget: MAX - COST_PROPOSE - PENALTY_REJECT
+    assert!(
+        (budget.current_energy("codebuddy") - (MAX_ENERGY - COST_PROPOSE - PENALTY_REJECT)).abs()
+            < 0.05
+    );
 }
 
 #[test]
@@ -162,8 +166,13 @@ fn blacklist_path_heavy_penalty() {
         .penalize("low-quality-agent", PENALTY_BLACKLIST)
         .unwrap();
 
-    // budget:5 - 1 - 2 = 2
-    assert!((budget.current_energy("low-quality-agent") - 2.0).abs() < 0.05);
+    // budget: MAX - COST_PROPOSE - PENALTY_BLACKLIST
+    assert!(
+        (budget.current_energy("low-quality-agent")
+            - (MAX_ENERGY - COST_PROPOSE - PENALTY_BLACKLIST))
+            .abs()
+            < 0.05
+    );
 }
 
 #[test]
@@ -172,16 +181,17 @@ fn out_of_energy_blocks_further_proposals() {
     let store = MemoryStore::open(tmp.path()).unwrap();
     let mut budget = BudgetStore::open(tmp.path()).unwrap();
 
-    // 5 条全 reject:每条 -2,3 条后能量负
-    for i in 0..3 {
+    // 连续全 reject 直到能量耗尽
+    let cost_per_reject = COST_PROPOSE + PENALTY_REJECT;
+    let rounds = (MAX_ENERGY / cost_per_reject).ceil() as usize;
+    for _ in 0..rounds {
         budget.try_charge("greedy", COST_PROPOSE).unwrap();
         budget.penalize("greedy", PENALTY_REJECT).unwrap();
-        let _ = i;
     }
-    // 5 - 6 = -1,被 clamp 到 0
+    // 能量被 clamp 到 0
     assert!(budget.current_energy("greedy") <= 0.01);
 
-    // 第 4 次 propose 被拦
+    // 耗尽后的 propose 被拦
     let err = budget.try_charge("greedy", COST_PROPOSE).unwrap_err();
     match err {
         BudgetError::OutOfEnergy {
@@ -200,7 +210,7 @@ fn out_of_energy_blocks_further_proposals() {
     let _ = store; // 让编译器满意,store 没用上但展示 store/budget 解耦
     let mut budget = budget;
     let energy = budget.try_charge("fresh-agent", COST_PROPOSE).unwrap();
-    assert!((energy - 4.0).abs() < 0.01);
+    assert!((energy - (MAX_ENERGY - COST_PROPOSE)).abs() < 0.01);
 }
 
 #[test]
@@ -327,7 +337,7 @@ fn duplicate_does_not_charge_energy() {
     // 模拟 MCP 层逻辑:扣费 → propose → 若 duplicate 退还
     budget.try_charge("codebuddy", COST_PROPOSE).unwrap();
     let energy_after_charge = budget.current_energy("codebuddy");
-    assert!((energy_after_charge - 4.0).abs() < 0.05);
+    assert!((energy_after_charge - (MAX_ENERGY - COST_PROPOSE)).abs() < 0.05);
 
     let r = store
         .propose(
@@ -350,7 +360,7 @@ fn duplicate_does_not_charge_energy() {
     budget.add("codebuddy", COST_PROPOSE).unwrap();
     let energy_after_refund = budget.current_energy("codebuddy");
     assert!(
-        (energy_after_refund - 5.0).abs() < 0.05,
+        (energy_after_refund - MAX_ENERGY).abs() < 0.05,
         "got {}",
         energy_after_refund
     );
