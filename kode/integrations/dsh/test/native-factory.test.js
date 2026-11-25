@@ -635,46 +635,45 @@ test('bypassing native routing still rejects ordinary system prompt admission', 
 })
 
 
-test('history edits publish a balanced native branch before sending and retain the original session', async () => {
-  const { HistoryEditor, branchHistoryInput } = await import('../src/history-edit.js')
+test('historical edits survive disk restore in the original native session', async () => {
+  const { HistoryEditor } = await import('../src/history-edit.js')
   const { assertReleasedV4Relationships } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
-  const root = await mkdtemp(join(tmpdir(), 'kode-edit-native-')), requests = []
+  const requests = []
   const h = await host({
     async *stream(options) {
-      const agent = h.ctx.agents.get(options.sessionId)
-      requests.push({ messages: options.messages, history: await branchHistoryInput(agent.session, { historyBranch: true }, undefined, false) })
+      requests.push(options.messages)
       yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: 'Branch answer' }
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Branch answer' } }
+      yield { type: 'text-delta', index: 0, text: 'Replacement answer' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Replacement answer' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }, closeSession: async () => {},
   })
   try {
-    const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex' }])
-    Object.assign(h.ctx.kodeAgents, { profiles, recordBinding() {}, hasRuntime: () => true })
-    h.ctx.sessionPersistence.stat = async id => h.stored.has(id) ? {} : undefined
-    h.ctx.provide('sessionQuery', { observeSession: async id => { const row = h.stored.get(id); return { header: row.header, events: [...row.events], [Symbol.dispose]() {} } } })
-    h.ctx.provide('sessionController', { rename: async () => {}, resolveAgent: async id => ({ agent: h.ctx.agents.get(id) }) })
+    h.ctx.provide('sessionController', { resolveAgent: async id => ({ agent: h.ctx.agents.get(id) }) })
     const seed = buildHistorySeed({ timeline: [
       { kind: 'text', role: 'user', text: 'Prior question' }, { kind: 'text', role: 'agent', text: 'Prior answer' },
       { kind: 'text', role: 'user', text: 'Replace me' }, { kind: 'text', role: 'agent', text: 'Future answer' },
     ] }, options.agentOptions)
-    const { agent: source } = await h.ctx.agents.create({ ...options, seed })
-    await profiles.bind(source.id, 'fixture'); await profiles.patchBinding(source.id, { threadId: 'source-native-thread' })
-    const before = JSON.stringify(h.stored.get(source.id).events)
+    const opened = await h.ctx.agents.create({ ...options, seed })
+    const { agent: source } = opened
     const seq = seed.find(event => event.type === 'user/message' && event.data.content[0].text === 'Replace me').seq
-    const result = await new HistoryEditor(h.ctx, h.ctx.kodeAgents).edit({ sessionId: source.id, seq, text: 'Replacement', requestId: 'native-edit-request' })
-    const child = h.ctx.agents.get(result.sessionId); await child.whenIdle()
+    const edit = { sessionId: source.id, seq, text: 'Replacement', requestId: 'native-edit-request' }
+    assert.deepEqual(await new HistoryEditor(h.ctx).edit(edit), { sessionId: source.id })
+    await source.whenIdle()
+    assert.equal(h.stored.size, 1)
     assert.equal(requests.length, 1)
-    assert.equal(requests[0].messages[0].content[0].text, 'Replacement')
-    assert.match(JSON.stringify(requests[0].history), /Prior answer/)
-    assert.ok(!JSON.stringify(requests[0].history).includes('Future answer'))
-    assert.equal(JSON.stringify(h.stored.get(source.id).events), before)
-    assert.equal(profiles.binding(child.id).threadId, undefined)
-    const stored = h.stored.get(child.id)
-    assert.doesNotThrow(() => assertReleasedV4Relationships({ header: stored.header, events: stored.events, inheritedEventCount: seq }, KNOWN_SESSION_EVENT_TYPES))
-    assert.equal(child.status, 'idle')
-  } finally { await h.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
+    assert.equal(requests[0][0].content[0].text, 'Replacement')
+    await opened.dispose()
+    const stored = h.stored.get(source.id)
+    assert.doesNotThrow(() => assertReleasedV4Relationships({ header: stored.header, events: stored.events, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
+    const restored = await h.ctx.agents.resume({ resumeSessionId: source.id, agentOptions: options.agentOptions })
+    await new HistoryEditor(h.ctx).edit(edit)
+    assert.deepEqual(restored.agent.session.deriveMessages().map(message => message.content[0].text),
+      ['Prior question', 'Prior answer', 'Replacement', 'Replacement answer'])
+    assert.equal(restored.agent.session.header.cwd, source.session.header.cwd)
+    assert.equal(requests.length, 1)
+    await restored.dispose()
+  } finally { await h.fiber.dispose() }
 })
 
 for (const mode of ['cold', 'loaded', 'crash-loaded']) test(`restart recovery continues ${mode} native history exactly once`, async () => {

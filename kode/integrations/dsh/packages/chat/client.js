@@ -2792,18 +2792,25 @@ var module = { exports: {} };
 		* ordered business Node crosses the keyed renderer seat.
 		*/
 		function ChatView({ useSession, useChat, useConversation, useSessions, renderSlot, sessionId, openFile, openExternalLink, loadOlder, loadThrough, loadImage, inspectCall, chatScroll, forkAt, fileMentions, usePresentation, useProjection, t }) {
-			const order = useChat((s) => s.order);
-			const groupedEntries = useConversation((snapshot) => snapshot.views.grouped("chat")?.entries);
-			const entries = (0, react.useMemo)(() => groupedEntries ?? order.map((key) => ({
-				kind: "node",
-				key
-			})), [groupedEntries, order]);
+			const rawOrder = useChat((s) => s.order);
+			const groupedView = useConversation((snapshot) => snapshot.views.grouped("chat"));
 			const nodeStore = useChat((s) => s.nodes);
+			const historyEdits = useProjection("kodeHistoryEdits");
+			const visible = (key) => historySeqVisible(historyEdits, nodeStore.get(key)?.anchorSeq);
+			const order = (0, react.useMemo)(() => historyEdits?.length ? rawOrder.filter(visible) : rawOrder, [rawOrder, historyEdits, nodeStore]);
+			const entries = (0, react.useMemo)(() => {
+				if (!groupedView) return order.map(key => ({ kind: "node", key }));
+				if (!historyEdits?.length) return groupedView.entries;
+				return groupedView.entries.filter(entry => entry.kind === "node" ? visible(entry.key) :
+					groupedView.groupSource(entry.key)?.getSnapshot()?.members.some(member => visible(member.key)));
+			}, [groupedView, order, historyEdits, nodeStore]);
 			const deferCompletedTurns = usePresentation((policy) => policy.collapseTiming === "next-input");
 			const transcriptView = usePresentation((policy) => policy.mode);
-			const turnNavigationItems = useChat((s) => s.navigation.items());
+			const navigation = useChat((s) => s.navigation.items());
+			const turnNavigationItems = (0, react.useMemo)(() => historyEdits?.length ?
+				navigation.filter(item => visible(item.anchorKey)) : navigation, [navigation, historyEdits, nodeStore]);
 			const turnOutline = useProjection("turnOutline");
-			const railItems = (0, react.useMemo)(() => mergeTurnRailItems(turnNavigationItems, turnOutline), [turnNavigationItems, turnOutline]);
+			const railItems = (0, react.useMemo)(() => mergeTurnRailItems(turnNavigationItems, historyEdits?.length ? outlineEntries(turnOutline).filter(item => historySeqVisible(historyEdits, item?.seq)) : turnOutline), [turnNavigationItems, turnOutline, historyEdits]);
 			const inbox = useProjection("inbox");
 			const cwd = useSessions((s) => s.byId[sessionId]?.cwd);
 			const fileImages = (0, react.useMemo)(() => ({
@@ -2924,7 +2931,6 @@ var module = { exports: {} };
 						onNavigate: scroll.navigateToTurn,
 						t
 					}),
-					(0, react_jsx_runtime.jsx)("div", { "data-chat-aside": "", children: renderSlot("conversation.chat.aside", {}) }),
 					(0, react_jsx_runtime.jsx)("div", {
 						"data-chat-aside": "",
 						children: renderSlot("conversation.chat.aside", {})
@@ -2967,6 +2973,7 @@ var module = { exports: {} };
 										fileImages,
 										children: renderSlot("conversation.chat.flow", {
 											entries,
+											historyEdits,
 											pendingInputs,
 											lastInputTurn,
 											deferCollapse,
@@ -4196,8 +4203,11 @@ var module = { exports: {} };
 			});
 		});
 		/** Render a process group with local disclosure and the existing outer-Turn visibility. */
-		const ChatGroupSeat = (0, react.memo)(function ChatGroupSeat({ groupKey, useChatGroup, useGroupHeaderAction, ...props }) {
-			const members = useChatGroup(groupKey, (group) => group?.members);
+		const ChatGroupSeat = (0, react.memo)(function ChatGroupSeat({ groupKey, useChatGroup, useGroupHeaderAction, historyEdits, ...props }) {
+			const groupMembers = useChatGroup(groupKey, (group) => group?.members);
+			const members = (0, react.useMemo)(() => historyEdits?.length ? groupMembers?.filter(member =>
+				historySeqVisible(historyEdits, props.nodeStore.get(member.key)?.anchorSeq)) : groupMembers,
+				[groupMembers, historyEdits, props.nodeStore]);
 			const turn = useChatGroup(groupKey, (group) => group?.data.turn);
 			const closed = useChatGroup(groupKey, (group) => group?.data.closed);
 			const foldCompleted = props.usePresentation((policy) => policy.foldCompletedTurns);
@@ -5451,13 +5461,13 @@ function historyEditBinding(ctx, sessionId) {
     const transport = ctx.get('kodeTransport'), host = sourceHost ?? transport?.current ?? 'local'
     if ((transport?.current ?? 'local') !== host) throw new Error('执行主机已切换，请返回原主机后重新编辑。')
     const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'edit-message', sessionId, seq, text, requestId }) }
+      body: JSON.stringify({ action: 'edit-message-in-place', sessionId, seq, text, requestId }) }
     const response = await (transport ? transport.fetch('/api/kode/agents', init, host) : fetch('/api/kode/agents', init))
     if (response.status === 404) throw new Error('请更新此主机的 Kode 服务以支持历史消息编辑。')
     const result = await response.json()
+    if (result.error === 'unknown Agent operation') throw new Error('请更新此主机的 Kode 服务以使用原位编辑。')
     if (!response.ok) throw new Error(result.error ?? '编辑重发失败，请重试。')
-    if ((transport?.current ?? 'local') !== host) throw new Error('主机已切换，编辑分支保留在原主机，请返回查看。')
-    await ctx.get('uiWorkspace').openSession(result.sessionId)
+    if (result.sessionId !== sessionId) throw new Error('主机返回了不同的会话，请更新 Kode 服务。')
   } }
 }
 function HistoryEditableMessage({ native, editHistory, ...props }) {
@@ -5502,10 +5512,18 @@ function HistoryEditableMessage({ native, editHistory, ...props }) {
           else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send() }
         } }),
       h('div', { className: 'kode-history-edit-footer' },
-        h('span', { className: 'kode-history-edit-note' }, '从此处创建新分支，后续消息不参与上下文'),
+        h('span', { className: 'kode-history-edit-note' }, '在当前会话从此处继续，替换这条消息和之后的对话'),
         h(Button, { type: 'button', onClick: close, disabled: busy }, '取消'),
         h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.trim() }, busy ? '发送中…' : '重新发送')),
       error && h('p', { role: 'alert', className: 'kode-history-edit-error' }, error)))
+}
+
+function historySeqVisible(ranges, seq) {
+  return !ranges?.some(({ from, through }) => seq >= from && seq <= through)
+}
+function isResentHistoryMessage(event) {
+  return event.surfaceOp?.op === 'replace' && /^history-edit-\d+-[a-f0-9]{64}$/.test(event.data.id)
+    && ['user', 'human'].includes(event.data.source?.kind)
 }
 
 function installHistoryEditStyle(ctx) {
@@ -5517,7 +5535,7 @@ function installHistoryEditStyle(ctx) {
   }, 'kode.history-edit-style')
 }
 
-/** Workbench status: the application-wide token island and native jobs in the session header. */
+/** Workbench status: the application-wide token island and legacy header jobs. */
 const defaultIslandAppearance = { tokenIsland: true, tokenPeriod: 'today' }
 const idleIslandActivity = { state: 'idle', label: '全局：所有会话空闲' }
 
@@ -5540,7 +5558,6 @@ html[data-kode-menu-camera=true] .kode-token-notch>svg{position:absolute;right:8
 
 function placeWorkbenchJobs(ctx) {
   const actions = 'conversation.session.header.actions'
-  const utilities = 'conversation.session.header.utilities'
   const targets = new Map()
   const listeners = new Set()
   const subscribe = listener => {
@@ -5555,33 +5572,31 @@ function placeWorkbenchJobs(ctx) {
     }, [sessionId])
     return react.createElement('div', { ref, 'data-kode-header-jobs': '' })
   }
-  // Place between the subagents (-110) and the Agent avatar (-100).
+  // Older hosts only have the job-list header seat. The modern DSH session
+  // panel owns its toggle, indicator, roster, and output streaming.
   ctx.slots.inject(actions, () => ctx.slots.register({ name: actions, id: 'kode-header-jobs', order: -105 }, JobsAnchor))
 
-  // Keep the original slot bindings, including the newer toggle's indicator child slot.
-  for (const [seat, id] of [[actions, 'job-list'], [utilities, 'session-panel']]) {
-    ctx.slots.inject(seat, () => {
-      let entry, original, wrapper
-      const restore = () => { if (entry && entry.component === wrapper) entry.component = original }
-      const install = () => {
-        const next = ctx.slots.entries(seat).find(candidate => candidate.options.id === id)
-        if (next === entry) return
-        restore()
-        entry = next
-        if (!entry) return
-        const native = original = entry.component
-        wrapper = props => {
-          const target = react.useSyncExternalStore(subscribe, () => targets.get(props.sessionId))
-          const control = react.createElement(native, props)
-          return target ? react_dom.createPortal(control, target) : control
-        }
-        entry.component = wrapper
+  ctx.slots.inject(actions, () => {
+    let entry, original, wrapper
+    const restore = () => { if (entry && entry.component === wrapper) entry.component = original }
+    const install = () => {
+      const next = ctx.slots.entries(actions).find(candidate => candidate.options.id === 'job-list')
+      if (next === entry) return
+      restore()
+      entry = next
+      if (!entry) return
+      const native = original = entry.component
+      wrapper = props => {
+        const target = react.useSyncExternalStore(subscribe, () => targets.get(props.sessionId))
+        const control = react.createElement(native, props)
+        return target ? react_dom.createPortal(control, target) : control
       }
-      const unsubscribe = ctx.slots.subscribe(seat, install)
-      install()
-      return () => { unsubscribe(); restore() }
-    })
-  }
+      entry.component = wrapper
+    }
+    const unsubscribe = ctx.slots.subscribe(actions, install)
+    install()
+    return () => { unsubscribe(); restore() }
+  })
 }
 function usageNumber(value) {
   if (!Number.isFinite(value)) return '—'
@@ -6085,7 +6100,7 @@ function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pendi
 		//#region lib/types/client/chat/ChatFlow.js
 		/** Ordered Chat rows, local echoes, and running status share the flow slot's parent. */
 		/** Render the flow without adding a DOM parent or changing keyed row positions. */
-		const ChatFlow = (0, react.memo)(function ChatFlow({ entries, pendingInputs, lastInputTurn, deferCollapse, useSession, useChat, useChatNode, useChatNodeBottom, useChatNodeProcess, useChatGroup, usePresentation, useStore, actions, renderSlot, renderFactorySlot, t, useGroupAction, useGroupHeaderAction, cwd, openFile, inspectCall, forkAt, loadImage, fileMentions }) {
+		const ChatFlow = (0, react.memo)(function ChatFlow({ entries, historyEdits, pendingInputs, lastInputTurn, deferCollapse, useSession, useChat, useChatNode, useChatNodeBottom, useChatNodeProcess, useChatGroup, usePresentation, useStore, actions, renderSlot, renderFactorySlot, t, useGroupAction, useGroupHeaderAction, cwd, openFile, inspectCall, forkAt, loadImage, fileMentions }) {
 			const nodeStore = useChat((snapshot) => snapshot.nodes);
 			const running = useSession((snapshot) => snapshot.running);
 			const runningStartTime = useChatNode(useChat((snapshot) => snapshot.navigation.items().at(-1)?.anchorKey) ?? "", (node) => {
@@ -6094,6 +6109,7 @@ function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pendi
 			});
 			const seatProps = {
 				nodeStore,
+				historyEdits,
 				useChatNode,
 				useChatNodeBottom,
 				useChatNodeProcess,
@@ -7243,7 +7259,7 @@ if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus, { 
 		const PANEL_GAP = 8;
 		/**
 		* Unplaced portal panel: hidden but laid out so the clamp measures real
-		* dimensions before positioning.
+		* dimensions (the `useAnchoredPosition` measure pass).
 		*/
 		const MEASURE_STYLE = {
 			visibility: "hidden",
@@ -10368,7 +10384,7 @@ const icon = (0, react_jsx_runtime.jsxs)("svg", { width: 18, height: 18, viewBox
 			kind: "input-message",
 			target: "chat",
 			match: (event) => {
-				if (event.type === "user/message") return isAppendSurfaceEvent(event) && !isCompactionCheckpoint(event) ? {
+				if (event.type === "user/message") return (isAppendSurfaceEvent(event) || isResentHistoryMessage(event)) && !isCompactionCheckpoint(event) ? {
 					id: String(event.data.id),
 					role: "start"
 				} : null;

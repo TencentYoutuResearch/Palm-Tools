@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { enqueueCommand } from './native-commands.js'
 import { selectedModel } from './native-commands.js'
 import { parseGoalInput } from './codex-goal.js'
+import { prepareHandoffBrief } from './handoff-skill.js'
 async function harnessVersion() {
   const paths = []
   if (process.resourcesPath) paths.push(join(process.resourcesPath, 'app.asar', 'package.json'))
@@ -48,7 +49,7 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
         let body = ''
         for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) return send(res, 413, { error: 'Request too large' }) }
         input = JSON.parse(body)
-        if (!input || typeof input !== 'object' || Array.isArray(input) || !['power', 'save-source', 'sync-source', 'remove-source', 'goal', 'handoff', 'agent-versions', 'update-agent'].includes(input.action)) throw new Error('Unknown operation')
+        if (!input || typeof input !== 'object' || Array.isArray(input) || !['power', 'save-source', 'sync-source', 'remove-source', 'goal', 'handoff', 'handoff-skill', 'agent-versions', 'update-agent'].includes(input.action)) throw new Error('Unknown operation')
         if (input.action === 'agent-versions' || input.action === 'update-agent') {
           if (input.action === 'update-agent' && typeof input.profileId !== 'string') throw new Error('请选择要更新的 Agent。')
           const command = input.action === 'update-agent'
@@ -73,16 +74,29 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
       } else if (req.method !== 'GET') return send(res, 405, { error: 'GET or POST required' })
       const sessionId = input?.sessionId ?? query.get('session_id')
       const controller = ctx.get('sessionController')
-      const rows = (await controller.list({})).items
-      if (!rows.some(row => row.sessionId === sessionId)) throw new Error('会话不存在。')
-      if (input?.action === 'handoff') {
+      const session = (await controller.list({})).items.find(row => row.sessionId === sessionId)
+      if (!session) throw new Error('会话不存在。')
+      if (['handoff', 'handoff-skill'].includes(input?.action)) {
         const bridge = ctx.get('kodeRuntimeBridge')
         if (!bridge) throw new Error('会话同步服务尚未就绪，请稍后重试。')
-        await bridge.publish()
-        return send(res, 200, await backend.call('/api/v1/messaging/workbench/handoff', {
+        const request = {
           source_session_id: sessionId, source_runtime: 'dsh', profile_id: input.profileId,
           target_runtime: 'dsh', request_id: input.requestId,
-        }))
+        }
+        let endpoint = '/api/v1/messaging/workbench/handoff'
+        if (input.action === 'handoff-skill') {
+          if (session.blank) throw new Error('源会话尚未开始对话。')
+          if (typeof input.requestId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(input.requestId)) throw new Error('交接请求标识无效。')
+          const profile = service.profiles.list().find(row => row.id === input.profileId)
+          if (!profile || !service.hasRuntime(profile.type)) throw new Error('目标 Agent 不可用。')
+          const found = await controller.resolveAgent(sessionId)
+          if (found.error) throw new Error(found.error.message)
+          if (!found.agent) throw new Error('源会话不可用。')
+          request.brief = await prepareHandoffBrief(found.agent, input.requestId, input.profileId)
+          endpoint += '/skill'
+        }
+        await bridge.publish()
+        return send(res, 200, await backend.call(endpoint, request))
       }
       const binding = service.profiles.binding(sessionId)
       const supported = binding?.profile.type === 'codex' || binding?.profile.protocol === 'codex'

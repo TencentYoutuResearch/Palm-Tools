@@ -26,7 +26,8 @@ export async function runHumanShell(agent, command, signal) {
     throw error
   }
 }
-export function pendingShellContext(session) {
-  const events = session.snapshotEvents?.() ?? [], consumed = new Set(events.filter(event => event.type === 'plugin:kode/shell-context-consumed').flatMap(event => event.data.ids))
+export function pendingShellContext(session, discarded = []) {
+  const events = (session.snapshotEvents?.() ?? []).filter(event => !discarded.some(range => event.seq >= range.from && event.seq <= range.through))
+  const consumed = new Set(events.filter(event => event.type === 'plugin:kode/shell-context-consumed').flatMap(event => event.data.ids))
   return events.filter(event => event.type === 'plugin:kode/shell-context' && !consumed.has(event.data.id)).slice(-8).map(event => ({ id: event.data.id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: event.data.text }] }))
 }

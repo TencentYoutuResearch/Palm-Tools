@@ -10,7 +10,7 @@ import { assertReleasedV4Relationships } from '@deepseek-ai/dsh-session-format-v
 import { AgentProfiles } from '../src/agent-profiles.js'
 import { AgentRuntimeAdapter, profileRoute } from '../src/agent-runtime.js'
 import { buildHistorySeed } from '../src/native-history.js'
-import { HISTORY_EDIT, HistoryEditor, editedMessage, editBranchSeed, branchHistoryInput } from '../src/history-edit.js'
+import { HISTORY_EDIT, HISTORY_CONTEXT_BYTES, HistoryEditor, branchHistoryInput, editedHistoryInput, editedMessage, historyEditProjection, historyEditSurface } from '../src/history-edit.js'
 
 const selection = { provider: 'kode-agent-fixture', model: 'fixture' }
 const timeline = [
@@ -23,24 +23,51 @@ const timeline = [
 function history() { return buildHistorySeed({ timeline }, selection) }
 const targetSeq = events => events.find(event => event.type === 'user/message' && event.data.content[0].text === 'ORIGINAL_TO_EDIT').seq
 
-test('exact edit prefix survives the released reader, quotes prior context only, and cancels inherited queued inputs', async () => {
-  const events = history(), seq = targetSeq(events)
-  // Simulate a later prompt queued before the message being edited was admitted.
-  events.splice(seq - 1, 0, { type: 'agent/inbox/spliced', seq: 0, time: 0, data: { target: 'next-turn', start: 0, removedCount: 0, inserted: [{ id: 'queued', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'EXCLUDED_QUEUED' }] }] } })
-  events.forEach((event, index) => { event.seq = index })
-  const cut = targetSeq(events), before = JSON.stringify(events)
-  const seed = editBranchSeed(events, cut, { fingerprint: 'test', sourceId: 'source', editedSeq: cut }, selection)
-  assert.equal(JSON.stringify(events), before)
-  assert.deepEqual(seed.slice(0, cut), events.slice(0, cut))
-  const queues = []
-  for (const event of seed) if (event.type === 'agent/inbox/spliced') queues.splice(event.data.start, event.data.removedCount, ...event.data.inserted)
-  assert.deepEqual(queues, [])
-  const session = Session.create('edited', seed)
-  assert.doesNotThrow(() => assertReleasedV4Relationships({ header: session.header, events: session.snapshotEvents(), inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
-  const input = JSON.stringify(await branchHistoryInput(session, { historyBranch: true }, undefined, false))
-  assert.match(input, /EARLIER_QUESTION/); assert.match(input, /EARLIER_ANSWER/)
-  for (const value of ['ORIGINAL_TO_EDIT', 'EXCLUDED_ANSWER', 'EXCLUDED_FUTURE', 'EXCLUDED_QUEUED']) assert.ok(!input.includes(value), value)
-  assert.deepEqual(await branchHistoryInput(session, { historyBranch: true, historyBootstrapped: true }, undefined, false), [])
+function commitEdit(session, seq, text, hash = 'a') {
+  const turn = session.snapshotEvents().filter(event => event.type === 'turn/start').length + 1
+  const message = { ...editedMessage(session.snapshotEvents(), seq, text), id: 'history-edit-' + seq + '-' + hash.repeat(64) }
+  session.append('turn/start', { turn })
+  session.append('step/start', { turn, step: 1 })
+  const edit = session.append('user/message', message, historyEditSurface(session, message))
+  session.append('step/end', { turn, step: 1 })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
+  return edit
+}
+
+test('the released reader and surface retain the active prefix after repeated edits', () => {
+  const events = history(), session = Session.create('source', events)
+  const edit = commitEdit(session, targetSeq(events), 'replacement')
+  commitEdit(session, edit.seq, 'replacement again', 'b')
+  const stored = session.snapshotEvents()
+  assert.deepEqual(stored.slice(0, events.length), events)
+  assert.doesNotThrow(() => assertReleasedV4Relationships({ header: session.header, events: stored, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
+  const restored = Session.create('source', stored)
+  assert.deepEqual(restored.deriveMessages().map(message => message.content[0].text),
+    ['EARLIER_QUESTION', 'EARLIER_ANSWER', 'replacement again'])
+  assert.equal(restored.id, 'source')
+  const { ranges } = stored.reduce(historyEditProjection.apply, historyEditProjection.init())
+  assert.ok(ranges.some(range => range.from <= targetSeq(events) && range.through >= events.length - 1))
+  assert.ok(ranges.some(range => range.from <= edit.seq && range.through >= edit.seq))
+})
+
+test('a long fallback request contains a bounded prefix without historical attachment bodies', () => {
+  const prompts = Array.from({ length: 20 }, (_, n) => [
+    { kind: 'text', role: 'user', text: 'question ' + n },
+    { kind: 'text', role: 'agent', text: '回复'.repeat(9000) },
+  ]).flat()
+  const events = buildHistorySeed({ timeline: [...prompts, ...timeline] }, selection)
+  const session = Session.create('source', events), edit = commitEdit(session, targetSeq(events), 'replacement')
+  const result = editedHistoryInput(session, edit)[0].text
+  assert.ok(Buffer.byteLength(result) <= HISTORY_CONTEXT_BYTES)
+  assert.match(result, /EARLIER_QUESTION/)
+  assert.match(result, /EARLIER_ANSWER/)
+  assert.doesNotMatch(result, /ORIGINAL_TO_EDIT|EXCLUDED/)
+  // Branches created by previous Kode builds still deliver a pending prefix.
+  const seq = targetSeq(events), legacy = events.slice(0, seq)
+  legacy.push({ seq, time: 0, type: HISTORY_EDIT, data: {}, ignorable: true })
+  const oldBranch = Session.create('old-branch', legacy)
+  assert.equal(branchHistoryInput(oldBranch, { historyBranch: true })[0].text, result)
+  assert.deepEqual(branchHistoryInput(oldBranch, { historyBranch: true, historyBootstrapped: true }), [])
 })
 
 test('editing preserves attachments while refusing injected/replacement/non-user rows and blank text', () => {
@@ -59,76 +86,92 @@ test('editing preserves attachments while refusing injected/replacement/non-user
   assert.throws(() => editedMessage(events, seq, 'new'))
 })
 
-test('branch API deduplicates retries across restarts, retains workspace and profile, and never reuses the source native thread', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'kode-history-edit-'))
-  try {
-    const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex' }])
-    await profiles.bind('source', 'fixture'); await profiles.patchBinding('source', { threadId: 'SOURCE_WITH_FUTURE', seenInputs: ['old'], historyBootstrapped: true })
-    const events = history(), agents = new Map(), sent = [], workspace = { id: 'project', path: '/srv/project', sessionIds: ['source'], async attachSession(id) { this.sessionIds.push(id) } }
-    let creations = 0, disposed = 0, renames = 0, failAttach = true
-    const services = {
-      sessionTitle: { get: () => ({ title: 'Original name' }) },
-      sessionController: { rename: async () => { renames++ }, resolveAgent: async id => ({ agent: agents.get(id) }) },
-      workspaceRegistry: { list: () => [workspace], get: () => ({ attachSession: async id => { if (failAttach) { failAttach = false; throw new Error('attach interrupted') } await workspace.attachSession(id) } }) },
-    }
-    const ctx = { get: name => services[name], sessionPersistence: { stat: async id => agents.has(id) ? {} : undefined },
-      sessionQuery: { observeSession: async () => ({ header: { cwd: '/srv/project' }, events, [Symbol.dispose]() { disposed++ } }) },
-      agents: { get: id => agents.get(id), create: async options => {
-        creations++
-        const session = Session.create(options.sessionId, options.seed)
-        const agent = { id: options.sessionId, session, inbox: { nextTurn: [], nextStep: [] }, ctx: { sessions: { flush: async () => {} } },
-          followup(message) { sent.push(message); this.inbox.nextTurn.push(message) } }
-        agents.set(agent.id, agent); return { agent }
-      } } }
-    // Cordis rejects un-injected property access, while get() supports optional services.
-    services.sessionQuery = ctx.sessionQuery; services.sessionPersistence = ctx.sessionPersistence
-    for (const key of ['sessionQuery', 'sessionPersistence']) Object.defineProperty(ctx, key, { get() { throw new Error(`cannot get property ${key} without inject`) } })
-    const service = { profiles, hasRuntime: () => true }, input = { sessionId: 'source', requestId: 'same-request-001', seq: targetSeq(events), text: 'EDITED_REQUEST' }
-    const editor = new HistoryEditor(ctx, service)
-    const first = editor.edit(input); assert.equal(editor.edit(input), first)
-    await assert.rejects(first, /attach interrupted/)
-    const result = await new HistoryEditor(ctx, service).edit(input)
-    await new HistoryEditor(ctx, service).edit(input)
-    assert.equal(creations, 1); assert.equal(sent.length, 1); assert.equal(renames, 1)
-    assert.equal(sent[0].content[0].text, 'EDITED_REQUEST')
-    assert.equal(sent[0].source.kind, 'user')
-    assert.ok(workspace.sessionIds.includes(result.sessionId))
-    assert.equal(profiles.binding(result.sessionId).threadId, undefined)
-    assert.deepEqual(profiles.binding(result.sessionId).seenInputs, [])
-    assert.equal(profiles.binding('source').threadId, 'SOURCE_WITH_FUTURE')
-    await assert.rejects(new HistoryEditor(ctx, service).edit({ ...input, text: 'different' }), /其他内容/)
-    assert.equal(disposed, 4)
-  } finally { await rm(root, { recursive: true, force: true }) }
+test('edit requests deduplicate without creating or reopening a session', async () => {
+  const session = Session.create('source', history()), nextTurn = [], nextStep = []
+  let didFail = false, flushes = 0
+  const agent = { id: 'source', isKodeNativeAgent: true, status: 'idle', session, inbox: { nextTurn, nextStep }, runtime: { adapter: {} },
+    ctx: { sessionProjections: { stateOf: () => null }, sessions: { flush: async () => { flushes++; if (!didFail) { didFail = true; throw new Error('flush interrupted') } } } },
+    followup(message) { nextTurn.push(message) },
+  }
+  const controller = { resolveAgent: async id => { assert.equal(id, agent.id); return { agent } } }
+  const ctx = { get: name => name === 'sessionController' ? controller : undefined }
+  const editor = new HistoryEditor(ctx), input = { sessionId: 'source', requestId: 'same-request-001', seq: targetSeq(history()), text: 'EDITED_REQUEST' }
+  agent.status = 'running'
+  await assert.rejects(editor.edit(input), /当前任务/)
+  agent.status = 'idle'
+  const first = editor.edit(input); assert.equal(editor.edit(input), first)
+  await assert.rejects(first, /flush interrupted/)
+  assert.deepEqual(await new HistoryEditor(ctx).edit(input), { sessionId: 'source' })
+  assert.equal(nextTurn.length, 1)
+  assert.equal(nextTurn[0].content[0].text, 'EDITED_REQUEST')
+  assert.equal(flushes, 2)
+  await assert.rejects(editor.edit({ ...input, text: 'different' }), /其他内容/)
 })
 
-for (const type of ['codex', 'claude', 'cursor', 'codebuddy', 'custom', 'custom-codex', 'dsh']) test(`${type} receives branch context on a fresh protocol thread exactly once, including after restore`, async () => {
+for (const type of ['codex', 'legacy-codex', 'claude', 'cursor', 'codebuddy', 'custom', 'custom-codex', 'dsh']) test(type + ' continues the same edited conversation after runtime restore', async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-history-wire-')), log = join(root, 'rpc.jsonl')
-  const codex = ['codex', 'custom-codex'].includes(type), model = codex ? 'fixture' : 'fixture-fast'
+  const codex = ['codex', 'legacy-codex', 'custom-codex'].includes(type), model = codex ? 'fixture' : 'fixture-fast'
+  const nativeCodex = type === 'codex' || type === 'legacy-codex'
   const fixture = fileURLToPath(new URL(codex ? './fixture-codex-server.js' : './fixture-acp-server.js', import.meta.url))
-  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: type, type: type === 'custom-codex' ? 'custom' : type, ...(type === 'custom-codex' ? { protocol: 'codex' } : {}), executable: process.execPath, args: [fixture], env: { KODE_FIXTURE_RPC_LOG: log, KODE_ACP_FIXTURE_LOG: log } }])
-  await profiles.bind('branch', 'fixture'); await profiles.patchBinding('branch', { historyBranch: true })
-  const old = history(), seq = targetSeq(old), events = editBranchSeed(old, seq, { fingerprint: type }, { ...selection, model })
-  const session = { header: { cwd: root }, snapshotEvents: () => events, append: (type, data) => { const event = { type, seq: events.length, time: Date.now(), data }; events.push(event); return event } }
-  const agent = { id: 'branch', session, ctx: { parallel: async () => {}, get: () => undefined, tools: { execute: async () => { throw new Error('historical tools must not execute') } } } }
-  const ctx = { agents: { get: () => agent }, sessionProjections: { stateOf: () => ({ lastTurn: 3, lastStepBoundary: { kind: 'start', step: 1 } }) } }
-  const options = { recordNative: () => {}, resolveProfile: async profile => ['dsh', 'claude'].includes(type) ? { ...profile, type: 'custom', protocol: 'acp', executable: process.execPath, args: [fixture], env: { KODE_ACP_FIXTURE_LOG: log } } : profile }
+  const profile = { id: 'fixture', name: type, type: type === 'legacy-codex' ? 'codex' : type === 'custom-codex' ? 'custom' : type,
+    ...(type === 'custom-codex' ? { protocol: 'codex' } : {}), executable: process.execPath, args: [fixture],
+    env: { KODE_FIXTURE_RPC_LOG: log, KODE_ACP_FIXTURE_LOG: log,
+      KODE_FIXTURE_HISTORY_REVERT: type === 'legacy-codex' ? 'legacy' : 'current', KODE_ACP_FORK_AT: type === 'claude' ? '1' : '0' },
+  }
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([profile])
+  const events = history(), seq = targetSeq(events)
+  if (nativeCodex) {
+    events.splice(seq + 1, 0, { type: 'plugin:kode/native-event', ignorable: true, time: 0, data: { event: {
+      method: 'turn/started', params: { threadId: 'original-thread', turn: { id: 'original-turn' } },
+    } } })
+    events.forEach((event, index) => { event.seq = index })
+  }
+  const session = Session.create('source', events, { ...Session.create('source').header, cwd: root })
+  const edit = commitEdit(session, seq, 'EDITED_REQUEST')
+  await profiles.bind('source', 'fixture')
+  await profiles.patchBinding('source', { threadId: 'original-thread', seenInputs: events.filter(event => event.type === 'user/message').map(event => event.data.id) })
+  const agent = { id: 'source', session, ctx: { sessions: { flush: async () => {} }, parallel: async () => {}, get: () => undefined,
+    tools: { execute: async () => { throw new Error('historical tools must not execute') } } } }
+  const ctx = { agents: { get: id => id === agent.id ? agent : undefined }, sessionProjections: { stateOf: () => ({ lastTurn: 3, lastStepBoundary: { kind: 'start', step: 1 } }) } }
+  const options = { recordNative: () => {}, resolveProfile: async p => ['dsh', 'claude'].includes(type)
+    ? { ...profile, type: 'custom', protocol: 'acp' } : p }
   let adapter = new AgentRuntimeAdapter(ctx, profiles, options)
-  const send = async (id, text) => { for await (const _ of adapter.stream({ sessionId: 'branch', provider: profileRoute('fixture'), model, tools: [], messages: [{ id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }], signal: AbortSignal.timeout(10000) })) {} }
+  const send = async (id, text) => { for await (const _ of adapter.stream({ sessionId: 'source', provider: profileRoute('fixture'),
+    model, tools: [], messages: [{ id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }], signal: AbortSignal.timeout(10000) })) {} }
   try {
-    await send('new', 'EDITED_REQUEST')
+    await send(edit.data.id, 'EDITED_REQUEST')
     await adapter.close()
-    adapter = new AgentRuntimeAdapter(ctx, await new AgentProfiles(profiles.path).open(), options)
-    await send('later', 'BRANCH_FOLLOWUP')
+    const reopened = await new AgentProfiles(profiles.path).open()
+    adapter = new AgentRuntimeAdapter(ctx, reopened, options)
+    await send('later', 'FOLLOWUP')
     const rows = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
-    assert.equal(rows.filter(row => row.method === (codex ? 'thread/start' : 'session/new')).length, 1)
-    assert.equal(rows.filter(row => row.method === (codex ? 'thread/resume' : 'session/load')).length, 1)
     const requests = rows.filter(row => row.method === (codex ? 'turn/start' : 'session/prompt'))
     assert.equal(requests.length, 2)
     const first = JSON.stringify(requests[0])
-    for (const value of ['EARLIER_QUESTION', 'EARLIER_ANSWER', 'EDITED_REQUEST']) assert.ok(first.includes(value), value)
-    for (const value of ['ORIGINAL_TO_EDIT', 'EXCLUDED_ANSWER', 'EXCLUDED_FUTURE']) assert.ok(!first.includes(value), value)
-    assert.ok(!JSON.stringify(requests[1]).includes('EARLIER_QUESTION'))
-    assert.match(JSON.stringify(requests[1]), /BRANCH_FOLLOWUP/)
+    assert.match(first, /EDITED_REQUEST/)
+    assert.doesNotMatch(first, /ORIGINAL_TO_EDIT|EXCLUDED/)
+    assert.match(JSON.stringify(requests[1]), /FOLLOWUP/)
+    assert.doesNotMatch(JSON.stringify(requests[1]), /EARLIER_QUESTION/)
+    assert.equal(reopened.binding('source').historyEditId, edit.data.id)
+    assert.equal(reopened.binding('source').historyEditBootstrap, false)
+    if (nativeCodex) {
+      assert.equal(reopened.binding('source').threadId, 'original-thread')
+      assert.equal(rows.filter(row => row.method === 'thread/start').length, 0)
+      assert.equal(rows.find(row => row.method === 'thread/revert').params.beforeTurnId, 'original-turn')
+      if (type === 'legacy-codex') assert.equal(rows.find(row => row.method === 'thread/rollback').params.numTurns, 2)
+      assert.doesNotMatch(first, /EARLIER_QUESTION|EARLIER_ANSWER/)
+    } else if (type === 'claude') {
+      assert.equal(reopened.binding('source').threadId, 'fixture-checkpoint-thread')
+      assert.equal(rows.find(row => row.method === 'session/fork').params._meta.jetbrains.air.fork.messageId, 'prior-assistant')
+      assert.equal(rows.filter(row => row.method === 'session/new').length, 0)
+      assert.doesNotMatch(first, /EARLIER_QUESTION|EARLIER_ANSWER/)
+    } else {
+      assert.equal(rows.filter(row => row.method === (codex ? 'thread/start' : 'session/new')).length, 1)
+      assert.equal(rows.filter(row => row.method === (codex ? 'thread/resume' : 'session/load')).length, 1)
+      assert.deepEqual(reopened.binding('source').supersededThreads, ['original-thread'])
+      assert.match(first, /EARLIER_QUESTION/)
+      assert.match(first, /EARLIER_ANSWER/)
+    }
   } finally { await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
 
@@ -181,34 +224,10 @@ test('history editor shares native icon actions, edits inline, and retains draft
 })
 
 
-test('history transfer keeps image bytes, and a steering cut settles open tools without executing them', async () => {
-  const events = history(), seq = targetSeq(events), bytes = Buffer.from('image fixture')
-  const ref = { attachmentId: 'fixture', mediaType: 'image/png', bytes: bytes.length, width: 2, height: 2 }
-  events.find(event => event.type === 'user/message').data.content.push({ type: 'image', attachment: ref })
-  const attachments = { imageHostPath: () => undefined, readImage: async attachment => ({ ref: attachment, data: bytes }) }
-  const session = Session.create('images', editBranchSeed(events, seq, { fingerprint: 'image' }, selection))
-  const input = await branchHistoryInput(session, { historyBranch: true }, attachments, false)
-  assert.deepEqual(input.find(part => part.type === 'image'), { type: 'image', mimeType: 'image/png', data: bytes.toString('base64') })
-  await assert.rejects(branchHistoryInput(session, { historyBranch: true }, undefined, false), /附件服务/)
-  const source = Session.create('steering-source')
-  source.append('turn/start', { turn: 1 }); source.append('step/start', { turn: 1, step: 1 })
-  source.append('user/message', { id: 'first', role: 'user', source: { kind: 'human' }, content: [{ type: 'text', text: 'initial' }] }, { surfaceOp: 'append' })
-  source.append('assistant/message', { turn: 1, step: 1, message: { id: 'tool-message', role: 'assistant', source: { kind: 'model', ...selection }, content: [{ type: 'tool-call', id: 'call', name: 'fixture', arguments: '{}' }] }, stream: [] }, { surfaceOp: 'append' })
-  source.append('tool/call', { turn: 1, step: 1, callId: 'call', name: 'fixture', arguments: '{}' })
-  const steering = source.append('user/message', { id: 'steer', role: 'user', source: { kind: 'human' }, content: [{ type: 'text', text: 'change this' }] }, { surfaceOp: 'append' })
-  const seed = editBranchSeed(source.snapshotEvents(), steering.seq, { fingerprint: 'steer' }, selection)
-  assert.ok(seed.some(event => event.type === 'tool/result'))
-  const child = Session.create('steering-branch', seed)
-  assert.doesNotThrow(() => assertReleasedV4Relationships({ header: child.header, events: seed, inheritedEventCount: 0 }, KNOWN_SESSION_EVENT_TYPES))
-  const quoted = JSON.stringify(await branchHistoryInput(child, { historyBranch: true }, undefined, false))
-  assert.match(quoted, /tool-call/); assert.ok(!quoted.includes('change this'))
-})
-
-
 test('history edits keep the host selected when the editor opened and refuse a later host switch', async () => {
   const source = await readFile(new URL('../packages/chat/history-edit.js', import.meta.url), 'utf8')
   const bind = vm.runInNewContext(source + '\nhistoryEditBinding')
-  const requests = [], opened = [], transport = { current: 'remote:fixture.example', fetch: async (url, options, host) => { requests.push({ url, options, host }); return { ok: true, json: async () => ({ sessionId: 'child' }) } } }
+  const requests = [], opened = [], transport = { current: 'remote:fixture.example', fetch: async (url, options, host) => { requests.push({ url, options, host }); return { ok: true, json: async () => ({ sessionId: 'source' }) } } }
   const binding = bind({ get: name => name === 'kodeTransport' ? transport : { openSession: id => opened.push(id) } }, 'source')
   const host = binding.historyHost()
   transport.current = 'local'
@@ -216,9 +235,9 @@ test('history edits keep the host selected when the editor opened and refuse a l
   assert.equal(requests.length, 0)
   transport.current = host
   await binding.editHistory(5, 'edited', 'request', host)
-  assert.equal(requests[0].host, host); assert.deepEqual(opened, ['child'])
-  assert.deepEqual(JSON.parse(requests[0].options.body), { action: 'edit-message', sessionId: 'source', seq: 5, text: 'edited', requestId: 'request' })
+  assert.equal(requests[0].host, host); assert.deepEqual(opened, [])
+  assert.deepEqual(JSON.parse(requests[0].options.body), { action: 'edit-message-in-place', sessionId: 'source', seq: 5, text: 'edited', requestId: 'request' })
   transport.fetch = async () => { transport.current = 'local'; return { ok: true, json: async () => ({ sessionId: 'other-child' }) } }
-  await assert.rejects(binding.editHistory(5, 'edited', 'request', host), /主机已切换/)
-  assert.deepEqual(opened, ['child'])
+  await assert.rejects(binding.editHistory(5, 'edited', 'request', host), /不同的会话/)
+  assert.deepEqual(opened, [])
 })

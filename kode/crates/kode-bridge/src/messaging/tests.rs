@@ -1248,42 +1248,152 @@ async fn backend_extension_validation_rejects_escaping_paths_and_links(){
     }
 }
 #[tokio::test]
-async fn backend_handoff_routes_between_runtimes_and_retries_without_duplicate_work(){
-    backend_handoff_case("gui","dsh").await;
-    backend_handoff_case("dsh","gui").await;
+async fn backend_handoff_routes_between_runtimes_and_retries_without_duplicate_work() {
+    backend_handoff_case("gui", "dsh", None).await;
+    backend_handoff_case("dsh", "gui", None).await;
 }
-async fn backend_handoff_case(source_runtime:&str,target_runtime:&str){
-    let s=server_with_config("handoff-test",vec![],fixture_agent_config(&["codex"])).await;let client=reqwest::Client::new();let ctx=s._ctx.clone();
-    let publication=|runtime:&str,sid:&str,events:Vec<Value>|serde_json::from_value::<crate::runtime::Publication>(json!({"runtime":runtime,"boot_id":format!("{runtime}-boot"),"sessions":[{"session_id":sid,"dto":{"title":"Fixture conversation","cwd":s._root.path(),"status":"idle"},"events":events}]})).unwrap();
-    ctx.runtimes.publish(&ctx,publication(source_runtime,"original",vec![json!({"key":"one","kind":"message","payload":{"id":"u1","role":"user","text":"Do the fixture task","source_kind":"user"}}),json!({"key":"two","kind":"message","payload":{"id":"a1","role":"assistant","text":"Prior answer","content":[{"type":"reasoning","text":"HIDDEN REASONING"}]}}),json!({"key":"three","kind":"message","payload":{"id":"p1","role":"user","text":"PRIVATE PEER","source_kind":"agent-message"}})])).unwrap();
-    ctx.runtimes.publish(&ctx,publication(target_runtime,"existing",vec![])).unwrap();
-    let registry=s.hub.store.document("agents").unwrap();let profile=registry["value"]["profiles"].as_array().unwrap().iter().find(|profile|profile["type"]=="codex").unwrap();
-    let input=json!({"source_session_id":"original","source_runtime":source_runtime,"profile_id":profile["id"],"target_runtime":target_runtime,"request_id":"fixture-request"});let url=format!("{}/api/v1/messaging/workbench/handoff",s.url);
-    assert_eq!(client.post(&url).json(&input).send().await.unwrap().status(),401);
-    let agent=register(&s,"handoff-agent").await;assert_eq!(client.post(&url).bearer_auth(&agent.owner_token).json(&input).send().await.unwrap().status(),403);
-    let request={let client=client.clone();let url=url.clone();let input=input.clone();tokio::spawn(async move{client.post(url).bearer_auth("admin-test").json(&input).send().await.unwrap()})};
-    let mut operations=vec![];
-    tokio::time::timeout(std::time::Duration::from_secs(5),async{
-        while operations.len()<2{
-            let claimed=ctx.runtimes.claim(target_runtime,&format!("{target_runtime}-boot")).unwrap();
-            for command in claimed["commands"].as_array().unwrap(){
-                let kind=command["kind"].as_str().unwrap();operations.push(kind.to_string());
-                let value=if kind=="create_session"{
-                    assert_eq!(command["payload"]["cwd"],json!(s._root.path()));assert!(command["payload"]["backend_key"].as_str().unwrap().starts_with(&format!("{target_runtime}:")));
-                    let mapped=ctx.runtimes.publish(&ctx,publication(target_runtime,"target",vec![])).unwrap();let id=mapped["sessions"][0]["id"].as_u64().unwrap();json!({"id":id,"runtime_session_id":"target"})
-                }else{
-                    assert_eq!(kind,"input");let text=command["payload"]["text"].as_str().unwrap();assert!(text.contains("Do the fixture task")&&text.contains("Prior answer"));assert!(!text.contains("PRIVATE PEER")&&!text.contains("HIDDEN REASONING"));json!({"accepted":true})
+
+#[tokio::test]
+async fn backend_handoff_skill_delivers_only_the_brief_and_rejects_conflicting_retries() {
+    backend_handoff_case("dsh", "dsh", Some("# Handoff brief\n\nFinish the small fixture.")).await;
+}
+
+async fn backend_handoff_case(source_runtime: &str, target_runtime: &str, brief: Option<&str>) {
+    let s = server_with_config("handoff-test", vec![], fixture_agent_config(&["codex"])).await;
+    let client = reqwest::Client::new();
+    let ctx = s._ctx.clone();
+    let publication = |runtime: &str, sid: &str, events: Vec<Value>| {
+        serde_json::from_value::<crate::runtime::Publication>(json!({
+            "runtime": runtime,
+            "boot_id": format!("{runtime}-boot"),
+            "sessions": [{"session_id": sid, "dto": {
+                "title": "Fixture conversation", "cwd": s._root.path(), "status": "idle"
+            }, "events": events}]
+        }))
+        .unwrap()
+    };
+    let events = vec![
+        json!({"key": "one", "kind": "message", "payload": {
+            "id": "u1", "role": "user", "text": "Do the fixture task", "source_kind": "user"
+        }}),
+        json!({"key": "two", "kind": "message", "payload": {
+            "id": "a1", "role": "assistant", "text": "Prior answer",
+            "content": [{"type": "reasoning", "text": "HIDDEN REASONING"}]
+        }}),
+        json!({"key": "three", "kind": "message", "payload": {
+            "id": "p1", "role": "user", "text": "PRIVATE PEER", "source_kind": "agent-message"
+        }}),
+    ];
+    ctx.runtimes
+        .publish(&ctx, publication(source_runtime, "original", events))
+        .unwrap();
+    ctx.runtimes
+        .publish(&ctx, publication(target_runtime, "existing", vec![]))
+        .unwrap();
+    let registry = s.hub.store.document("agents").unwrap();
+    let profile = registry["value"]["profiles"]
+        .as_array().unwrap().iter().find(|profile| profile["type"] == "codex").unwrap();
+    let legacy_url = format!("{}/api/v1/messaging/workbench/handoff", s.url);
+    let mut input = json!({
+        "source_session_id": "original", "source_runtime": source_runtime,
+        "profile_id": profile["id"], "target_runtime": target_runtime,
+        "request_id": "fixture-request"
+    });
+    let url = if let Some(brief) = brief {
+        let url = format!("{legacy_url}/skill");
+        let missing_brief = client.post(&url).bearer_auth("admin-test").json(&input).send().await.unwrap();
+        assert_eq!(missing_brief.status(), 400);
+        for invalid in [json!(null), json!("  \n"), json!("长".repeat(4001))] {
+            input["brief"] = invalid;
+            let rejected = client.post(&url).bearer_auth("admin-test").json(&input).send().await.unwrap();
+            assert_eq!(rejected.status(), 400);
+        }
+        input["brief"] = json!(brief);
+        let legacy = client.post(&legacy_url).bearer_auth("admin-test").json(&input).send().await.unwrap();
+        assert_eq!(legacy.status(), 400);
+        url
+    } else {
+        legacy_url.clone()
+    };
+    assert_eq!(client.post(&url).json(&input).send().await.unwrap().status(), 401);
+    let agent = register(&s, "handoff-agent").await;
+    assert_eq!(
+        client.post(&url).bearer_auth(&agent.owner_token).json(&input).send().await.unwrap().status(),
+        403
+    );
+    let request = {
+        let client = client.clone();
+        let url = url.clone();
+        let input = input.clone();
+        tokio::spawn(async move {
+            client.post(url).bearer_auth("admin-test").json(&input).send().await.unwrap()
+        })
+    };
+    let boot = format!("{target_runtime}-boot");
+    let mut operations = vec![];
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while operations.len() < 2 {
+            let claimed = ctx.runtimes.claim(target_runtime, &boot).unwrap();
+            for command in claimed["commands"].as_array().unwrap() {
+                let kind = command["kind"].as_str().unwrap();
+                operations.push(kind.to_string());
+                let payload = &command["payload"];
+                let value = if kind == "create_session" {
+                    assert_eq!(payload["cwd"], json!(s._root.path()));
+                    assert!(payload["backend_key"].as_str().unwrap().starts_with(&format!("{target_runtime}:")));
+                    let mapped = ctx.runtimes.publish(&ctx, publication(target_runtime, "target", vec![])).unwrap();
+                    let id = mapped["sessions"][0]["id"].as_u64().unwrap();
+                    json!({"id": id, "runtime_session_id": "target"})
+                } else {
+                    assert_eq!(kind, "input");
+                    let text = payload["text"].as_str().unwrap();
+                    if let Some(brief) = brief {
+                        assert!(text.contains(brief));
+                        assert!(!text.contains("Do the fixture task") && !text.contains("Prior answer"));
+                    } else {
+                        assert!(text.contains("Do the fixture task") && text.contains("Prior answer"));
+                    }
+                    assert!(!text.contains("PRIVATE PEER") && !text.contains("HIDDEN REASONING"));
+                    json!({"accepted": true})
                 };
-                ctx.runtimes.settle(target_runtime,&format!("{target_runtime}-boot"),command["id"].as_str().unwrap(),json!({"value":value})).unwrap();
+                ctx.runtimes
+                    .settle(target_runtime, &boot, command["id"].as_str().unwrap(), json!({"value": value}))
+                    .unwrap();
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }).await.unwrap();
-    let response=request.await.unwrap();assert!(response.status().is_success(),"{}",response.text().await.unwrap());let result:Value=response.json().await.unwrap();assert_eq!(result["sessionId"],"target");
-    let repeated:Value=client.post(&url).bearer_auth("admin-test").json(&input).send().await.unwrap().json().await.unwrap();assert_eq!(result,repeated);
-    assert!(ctx.runtimes.claim(target_runtime,&format!("{target_runtime}-boot")).unwrap()["commands"].as_array().unwrap().is_empty());
-    let mut conflict=input.clone();conflict["source_session_id"]=json!("different");assert_eq!(client.post(&url).bearer_auth("admin-test").json(&conflict).send().await.unwrap().status(),400);
-    let record=s.hub.store.document("agent-handoffs").unwrap();assert!(record["value"]["fixture-request"]["task"].is_null());assert_eq!(record["value"]["fixture-request"]["result"],result);
+    assert_eq!(operations, ["create_session", "input"]);
+
+    let response = request.await.unwrap();
+    assert!(response.status().is_success(), "{}", response.text().await.unwrap());
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["sessionId"], "target");
+    let repeated: Value = client.post(&url).bearer_auth("admin-test").json(&input).send().await.unwrap().json().await.unwrap();
+    assert_eq!(result, repeated);
+    assert!(ctx.runtimes.claim(target_runtime, &boot).unwrap()["commands"].as_array().unwrap().is_empty());
+    let mut conflict = input.clone();
+    if brief.is_some() {
+        conflict["brief"] = json!("Another handoff brief");
+    } else {
+        conflict["source_session_id"] = json!("different");
+    }
+    assert_eq!(client.post(&url).bearer_auth("admin-test").json(&conflict).send().await.unwrap().status(), 400);
+    if brief.is_some() {
+        conflict.as_object_mut().unwrap().remove("brief");
+        assert_eq!(client.post(&legacy_url).bearer_auth("admin-test").json(&conflict).send().await.unwrap().status(), 400);
+    }
+
+    let records = s.hub.store.document("agent-handoffs").unwrap();
+    let record = &records["value"]["fixture-request"];
+    assert!(record.get("task").is_none());
+    assert_eq!(record["result"], result);
+    if let Some(brief) = brief {
+        assert_eq!(record["fingerprint"][4].as_str().unwrap().len(), 64);
+        assert!(!record.to_string().contains(brief));
+    } else {
+        assert_eq!(record["fingerprint"].as_array().unwrap().len(), 4);
+    }
 }
 #[test]
 #[cfg(unix)]

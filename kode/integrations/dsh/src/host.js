@@ -19,6 +19,7 @@ import { installSessionRecovery } from './session-recovery.js'
 import { installNativeStartupBarrier } from './native-startup.js'
 import { registerSessionNotifications, registerNotificationSettings } from './session-notifications.js'
 import { registerModelUsageApi } from './model-usage-api.js'
+import { installSessionCreator, sessionNamingPolicy } from './session-create.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -78,7 +79,6 @@ export async function apply(ctx, config = {}) {
     webCtx.effect(() => registerSessionNotifications(webCtx), 'kode.session-notifications')
     webCtx.effect(() => registerNotificationSettings(webCtx), 'kode.notification-settings')
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
-    const { installSessionCreator } = await import('./session-create.js')
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerBotsApi } = await import('./bots-api.js')
     webCtx.effect(() => registerBotsApi(webCtx, admin), 'kode.bots-api')
@@ -124,15 +124,22 @@ export async function apply(ctx, config = {}) {
     active.set(agent.id, entry)
     const add = (name, description, parameters, execute) => entry.tools.push(agent.ctx.tools.register({ name, description,
       parameters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(Object.entries(parameters).map(([key, value]) => { const { required, ...property } = value; return [key, property] })), required: Object.entries(parameters).filter(([, value]) => value.required).map(([key]) => key) }, output,
-      execute: async (args, exec) => { if (exec.agent !== agent) throw new Error('foreign agent'); if (name.startsWith('kode_sessions_')) { const settings = await client.call(`${PREFIX}integrations`, undefined, exec.signal); if (!settings.messaging_enabled) throw new Error('会话通信已在 Kode 设置中关闭。') }; return execute(args, exec.signal) },
+      execute: async (args, exec) => {
+        if (exec.agent !== agent) throw new Error('foreign agent')
+        if (!name.startsWith('kode_sessions_')) return execute(args, exec.signal)
+        const settings = await client.call(`${PREFIX}integrations`, undefined, exec.signal)
+        if (!settings.messaging_enabled) throw new Error('会话通信已在 Kode 设置中关闭。')
+        return execute(args, exec.signal, settings)
+      },
     }))
-    add('kode_sessions_list', 'Find local and SSH-connected conversations by human-readable title, and discover saved execution Hosts for creating a helper. Start with the user name or keywords. Inspect matches and disambiguate duplicate names before sending; never guess addresses. Use the address returned with the selected session.', { query: { type: 'string', description: 'Session name or partial title; omit to browse all.' } }, async (args, signal) => ({
+    add('kode_sessions_list', 'Find local and SSH-connected conversations by human-readable title, discover saved execution Hosts, and read the current sessionNaming prompt before creating a helper. Start with the user name or keywords. Inspect matches and disambiguate duplicate names before sending; never guess addresses. Use the address returned with the selected session.', { query: { type: 'string', description: 'Session name or partial title; omit to browse all.' } }, async (args, signal, settings) => ({
       ...searchSessions(await client.call(`${PREFIX}sessions`, undefined, signal), args.query),
       hosts: await (ctx.get?.('kodeProjectHosts')?.workspaceCatalog?.() ?? [{ name: '此计算机', kind: 'local', workspaces: [] }]),
       agentConfigurations: ctx.get?.('kodeAgents')?.profiles.list().filter(profile => ctx.get('kodeAgents').hasRuntime(profile.type)).map(profile => ({ name: profile.name, type: profile.type })) ?? [],
+      sessionNaming: sessionNamingPolicy(settings),
     }))
-    add('kode_sessions_create', 'Create a new local or SSH Agent conversation and give it a task. Use this when the user asks to open another conversation or delegate work to a new helper. Select an existing Host and Agent configuration by human name; omitted Host means this computer. Returns the new named session address for follow-up communication. Reuse the same creation key only when retrying this exact task.', {
-      title: { type: 'string', required: true, description: 'Human-readable name for the new conversation.' }, task: { type: 'string', required: true, description: 'Task to give the new helper, written as a normal request.' },
+    add('kode_sessions_create', 'Create a new local or SSH Agent conversation and give it a task. Use this when the user asks to open another conversation or delegate work to a new helper. First call kode_sessions_list and use its sessionNaming prompt when composing the title. Select an existing Host and Agent configuration by human name; omitted Host means this computer. Returns the new named session address for follow-up communication. Reuse the same creation key only when retrying this exact task.', {
+      title: { type: 'string', required: true, description: `Write a single line of at most ${sessionNamingPolicy().maxWords} words, counting the intent prefix. Follow the active naming prompt from kode_sessions_list. Default: ${sessionNamingPolicy().prompt}` }, task: { type: 'string', required: true, description: 'Task to give the new helper, written as a normal request.' },
       host: { type: 'string', description: 'Saved SSH Host name; omit to create on this Host.' }, agent: { type: 'string', description: 'An existing Agent configuration name, such as tcodex.' },
       model: { type: 'string', description: 'Exact model ID advertised by the selected Agent, e.g. deepseek-v4.1-flash. Omit to use its default. Included in creation identity; keep unchanged on retries.' },
       workspace: { type: 'string', description: 'Workspace name or path returned for the selected execution Host by kode_sessions_list. Required when more than one target workspace exists.' },

@@ -144,8 +144,37 @@ export class CodexSession {
       ? await this.resumeThread({ ...params, threadId: binding.threadId }, signal)
       : await this.rpc.request('thread/start', { ...params, dynamicTools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.parameters })), developerInstructions: 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.' }, { signal })
     this.threadId = result.thread.id
+    this.historyMode = result.thread.historyMode
     try { const { goal } = await this.rpc.request('thread/goal/get', { threadId: this.threadId }, { signal }); this.handlers.goal?.(goal) } catch (error) { if (signal?.aborted) throw error }
     return this.threadId
+  }
+  async revertHistory(beforeTurnId, signal) {
+    const params = { threadId: this.threadId }
+    if (this.historyMode !== 'legacy') {
+      try {
+        const { thread } = await this.rpc.request('thread/revert', { ...params, beforeTurnId }, { signal })
+        return thread?.id === this.threadId
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (!error.rpcRejected) throw error
+        if (error.rpcCode !== -32601 && !/unknown variant .*thread\/revert|legacy history/i.test(error.message)) return false
+      }
+    }
+    // Older app servers expose an end-relative rollback. Read the original
+    // turn IDs before calculating how many complete turns to remove.
+    try {
+      const { thread } = await this.rpc.request('thread/read', { ...params, includeTurns: true }, { signal })
+      const turns = thread?.turns ?? [], index = turns.findIndex(turn => turn.id === beforeTurnId)
+      if (thread?.id !== this.threadId || index < 0) return false
+      const result = await this.rpc.request('thread/rollback', { ...params, numTurns: turns.length - index }, { signal })
+      return result.thread?.id === this.threadId && result.thread.turns?.length === index
+    } catch (error) {
+      signal?.throwIfAborted()
+      // Legacy read and rollback can return a full transcript. An overlarge
+      // response cannot be used to certify a checkpoint.
+      if (!error.rpcRejected && !/protocol frame exceeds/.test(error.message)) throw error
+      return false
+    }
   }
   async listModels(signal) {
     await this.initialize(signal)

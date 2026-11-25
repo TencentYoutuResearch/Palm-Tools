@@ -864,16 +864,14 @@ adapter and holds no independent extension configuration.
   Outside Kode, the portable skill directories and installed Codex plugins are
   available normally; the other native plugin launch arguments apply in Kode.
   Existing processes may require a new session to discover changed packages.
-- **换 Agent 续接** in the conversation header creates a new conversation on the
-  same Host/workspace using the selected Agent and continues the latest user
-  request with its readable transcript as context. The original stays intact.
-  It transfers at most the latest 48,000 characters of user/assistant text,
-  excluding hidden reasoning, tool lifecycles, peer messages and attachments.
-  Backend-owned request identities and frozen source snapshots make network retries reuse the
-  same target instead of sending work twice. This is a context handoff, not a
-  conversion of proprietary native thread files. Existing shared directories,
-  native session imports and `kode_sessions_*` messaging remain the unified
-  discovery and collaboration paths across Agents and SSH Hosts.
+- **交接** in the DSH conversation panel runs the bundled `kode-handoff` skill
+  in the current Agent, inspired by [Matt Pocock's handoff](https://github.com/mattpocock/skills/blob/main/skills/productivity/handoff/SKILL.md).
+  The source Agent drafts a Markdown brief covering the task, decisions, progress
+  and next actions. Once the brief is ready, the backend sends it as the first
+  message of a new conversation with the chosen Agent on the same Host and workspace.
+  The brief is capped at 12,000 UTF-8 bytes. The source must be idle to start.
+  Retrying reuses the same source brief and target delivery. GUI and older callers
+  still use the bounded readable transcript route.
 
 Extension releases are kept while older runtime processes may still reference
 those snapshots. Native plugin packages must provide manifests compatible with
@@ -955,9 +953,9 @@ prefixes. It reports artifacts changing during a read and exits nonzero on
 validation failures. It never repairs a log or replays a prompt.
 
 
-Historical human messages (including admitted steering messages) have an **编辑并重发** action. Editing creates a new branch with the original name, Agent, model/effort/Fast selection, attachments, and project directory. The original conversation remains intact; the edited message and every later answer/input are excluded from the inherited prefix. Pending inputs inherited from that prefix are canceled before the new branch can run. This changes conversation context only; workspace files are not rolled back.
+Historical human messages (including admitted steering messages) have an **编辑并重发** action. Editing continues the same Kode conversation with its title, Agent, project, and attachments. The active transcript ends at the edited position and the replacement starts a new turn. The original events remain in the append-only log for validation and replay. The edit changes conversation context only. It does not roll back workspace files.
 
-All installed Agent runtimes (Codex, Claude, Cursor, CodeBuddy, custom ACP/Codex, and the built-in dsh ACP runtime) use a fresh native thread for the branch. Prior model-visible messages and tool results are transferred as a quoted, read-only transcript in its first request, with images/files retained; earlier requests and tools are not replayed. Subsequent requests resume that new thread normally. This shared transfer also works with runtimes that offer no native fork/rollback API. The Host validates the original durable user-message position and retains a retry identity so a repeated submission cannot create another branch or send it twice.
+When the native Codex turn can be identified, Kode reverts the existing thread to that boundary. Claude uses an Agent checkpoint before the edited prompt when its replay can identify an unambiguous checkpoint, keeping the Kode session ID even though the CLI assigns a new native ID. ACP Agents without a usable checkpoint receive a text-only excerpt of up to 12,000 UTF-8 bytes from the retained prefix once. The edited message retains its own attachments. Subsequent requests use the bound native thread. Retrying an edit request is idempotent, including after restarting the Host.
 
 The single application-wide top-edge token island reports CLI history totals on the selected Host, separately from the composer's context-pressure indicator. It refreshes every 30 seconds while visible and exposes today/month/all totals and selectable Agent/model breakdowns. The owner-only `/api/kode/model-usage` proxy uses the existing bridge collector through `/api/v1/messaging/model-usage`; it never exposes backend credentials. Remote calendar boundaries follow the viewer's timezone. Background jobs use the native output/stop panel above the composer. The Worktree branch dropdown contains its own search field for local/remote branches, retains the selected starting point when filtered out, and supports Escape/outside dismissal. The token island uses the Kode dark silhouette, green totals, per-Agent/model stacked bars, period-aligned activity cells and reduced-motion-aware unfold/fold animation. Inline history editing fills the conversation content column.
 

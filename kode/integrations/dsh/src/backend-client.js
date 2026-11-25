@@ -10,7 +10,7 @@ export class BackendClient {
   async call(path, body, signal) {
     if (!path.startsWith('/api/v1/messaging/')) throw new Error('unsupported backend path')
     const timeoutMs = path === '/api/v1/messaging/workbench/agent-hub' ? 600000
-      : path === '/api/v1/messaging/workbench/handoff' ? 75000
+      : ['/api/v1/messaging/workbench/handoff', '/api/v1/messaging/workbench/handoff/skill'].includes(path) ? 75000
       : path === '/api/v1/messaging/workbench/agent-versions' ? (body?.update_profile ? 240000 : 45000)
       : path.startsWith('/api/v1/messaging/workbench/watches?after=') ? 40000
       : 15000

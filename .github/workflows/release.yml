@@ -116,7 +116,7 @@ jobs:
 
       - name: Install bundled dsh extension dependencies
         working-directory: kode/integrations/dsh
-        run: npm ci --ignore-scripts --omit=optional
+        run: npm ci --ignore-scripts --omit=optional --no-audit --no-fund
 
       - uses: actions/download-artifact@v6
         with:

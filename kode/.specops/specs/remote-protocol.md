@@ -619,6 +619,13 @@ its existing administrator bearer; session-scoped agent credentials receive 403.
   operation is never automatically re-executed with another identity. Source
   history is preserved. Tools, hidden reasoning and peer-originated input are
   excluded; attachments are not transferred.
+- `POST /api/v1/messaging/workbench/handoff/skill` accepts the same fields
+  and a required nonblank Markdown `brief` of up to 12,000 UTF-8 bytes.
+  DSH runs the bundled handoff skill in the source session before calling this
+  endpoint. The backend stages only the brief and uses the same durable mailbox
+  commands as the transcript route. Retries with the same identity and brief
+  reuse the original target. The authenticated backend checks that the source
+  and target Agent belong to the current Host.
 
 Both GUI IPC and dsh owner HTTP routes are adapters to these same APIs. Native
 CLI execution remains owned by its attached runtime. A disconnected target

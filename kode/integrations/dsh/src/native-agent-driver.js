@@ -9,6 +9,7 @@ import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
 import { fastPreference, fastServiceTier } from './model-fast.js'
 import { AcpTurnCancelledError } from './acp-session.js'
+import { historyEditSurface, historyEditTarget } from './history-edit.js'
 
 export const boundaryProjection = {
   key: 'kodeTurnBoundary', stateVersion: 3,
@@ -204,7 +205,8 @@ export class NativeAgentDriver {
       const recovery = new ToolCallRecovery()
       const stop = this.ctx.on('session/event', (session, event) => { if (session === this.session) recovery.observe(event) })
       try {
-        const nativeContinuation = this.runtime.adapter.hasContinuation?.(this.id) ?? false
+        const editQueued = this.inbox.nextTurn[0] && historyEditTarget(this.inbox.nextTurn[0]) !== undefined
+        const nativeContinuation = !editQueued && (this.runtime.adapter.hasContinuation?.(this.id) ?? false)
         const messages = nativeContinuation ? [] : this.inbox.claim(turn)
         this.activeInputs = new Set(messages.map(message => message.id))
         if (!messages.length && !nativeContinuation) continue
@@ -216,7 +218,7 @@ export class NativeAgentDriver {
         const human = messages.length === 1 ? humanInput(messages[0]) : undefined
         if (human?.startsWith('!')) {
           this.session.append('step/start', { turn, step }); opened = true
-          for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
+          for (const message of messages) this.session.append('user/message', message, historyEditSurface(this.session, message))
           await runHumanShell(this, human.slice(1), signal)
           continue
         }
@@ -224,7 +226,7 @@ export class NativeAgentDriver {
         const previous = this.session.requestHeader()
         this.session.append('request/header', { header: { config: selection, ...(tools.length ? { tools } : {}) }, reason: previous ? 'resume' : 'initial' })
         this.session.append('step/start', { turn, step }); opened = true
-        for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
+        for (const message of messages) this.session.append('user/message', message, historyEditSurface(this.session, message))
         let stream = new AssistantStreamAccumulator(), assembler = new BlockAssembler(), chunkCount = 0, started = false
         let attemptId = `kode-native:${randomUUID()}`
         const prepareStep = () => {

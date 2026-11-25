@@ -128,7 +128,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const React = require('react'), h = React.createElement
   const { createPortal } = require('react-dom')
   const { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } = React
-  const { Menu, Modal, Button, Toast, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const CARD_SECTIONS = 'conversation.session.panel.section'
+  const CARD_ENVIRONMENT = 'conversation.session.panel.environment.row'
+  const { Menu, Modal, Button, Toast, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
   const startupRetryDelays = [250, 500, 1000, 2000, 4000, 8000]
@@ -343,13 +345,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }
     return capable ? tree : disableSteering(tree)
   }
-  function useDirectory(sessionId, sessions) {
+  function useDirectory(sessionId, sessions, host = transport?.current ?? 'local') {
     const listed = useSyncExternalStore(sessions.list.subscribe, sessions.list.getSnapshot)
     const id = sessionId ?? Object.values(listed.byId).find(s => s.blank && (s.retainedBy.mainView ?? 0) > 0)?.id
     const selection = listed.byId[id]?.projectionValues?.modelSelection
     const selected = selection?.pending ?? selection?.next ?? selection?.lastUsed
     const selectedKey = `${selected?.provider ?? ''}/${selected?.model ?? ''}/${selected?.reasoningEffort ?? ''}`
-    const store = directory(id), state = useSyncExternalStore(store.subscribe, store.getSnapshot)
+    const store = directory(id, host), state = useSyncExternalStore(store.subscribe, store.getSnapshot)
     useEffect(() => {
       let alive = true
       void (async () => {
@@ -740,15 +742,41 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots })),
       h(HubSettings, { key: hubHost, host: hubHost, hosts, sessions }))
   }
+  function SessionNamingSettings({ prompt, busy, update }) {
+    const [draft, setDraft] = useState(null), [saved, setSaved] = useState(false)
+    const value = draft ?? prompt, dirty = value.trim() !== prompt
+    const save = async next => {
+      setSaved(false)
+      if (await update({ action: 'configure', settings: { session_naming_prompt: next } })) {
+        setDraft(null)
+        setSaved(true)
+      }
+    }
+    const reset = () => { if (prompt) void save(''); else setDraft(null) }
+    return h('form', { className: 'kode-session-naming', onSubmit: event => { event.preventDefault(); if (dirty && !busy) void save(value.trim()) } },
+      h('label', { className: 'kode-field' },
+        h('strong', null, 'Agent 会话命名'),
+        h('span', { className: 'kode-config-note' }, '用自然语言描述命名偏好。标题最多 4 个词，意图前缀也计入。'),
+        h('textarea', { rows: 3, value, maxLength: 2000, disabled: busy,
+          placeholder: '留空使用默认规则，例如 Feat-Session Panel、Bug-SSH Workspace、MR-Review Sync',
+          onChange: event => { setDraft(event.target.value); setSaved(false) } })),
+      h('div', { className: 'kode-session-naming-actions' },
+        saved && h('span', { className: 'kode-saved', role: 'status' }, '已保存'),
+        (prompt || draft) && h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: reset }, '恢复默认'),
+        h(Button, { type: 'submit', variant: 'primary', disabled: busy || !dirty }, '保存提示词')))
+  }
   function SessionBehaviorSettings({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
+    const namingPrompt = data?.settings.session_naming_prompt
     return h(React.Fragment, null,
-      h('h3', { className: 'kode-settings-group-title' }, '会话恢复'),
+      h('h3', { className: 'kode-settings-group-title' }, '会话行为'),
       h('p', { className: 'kode-config-note' }, '此计算机的会话行为；远端主机保留各自的配置。'),
       !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取会话配置…'),
-      data && h('div', { className: 'kode-settings-card' }, h('label', { className: 'kode-integration-row' },
-        h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
-        h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) }))),
+      data && h('div', { className: 'kode-settings-card' },
+        h('label', { className: 'kode-integration-row' },
+          h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
+          h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) })),
+        typeof namingPrompt === 'string' && h(SessionNamingSettings, { prompt: namingPrompt, busy, update })),
       h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
   }
   function MobileSettingsBody({ host, slots }) {
@@ -801,7 +829,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
     }, host)
     const value = await parseHostJson(response)
-    if (!response.ok) throw new Error(value.error || '操作失败，请重试。')
+    if (!response.ok) {
+      if (body?.action === 'handoff-skill' && value.error === 'Unknown operation') throw new Error('更新此主机的 Kode 插件后即可执行技能交接。')
+      throw new Error(value.error || '操作失败，请重试。')
+    }
     return value
   }
   function PowerSettings({ host }) {
@@ -1536,26 +1567,45 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }, [])
     return h('div', { className: 'kode-leave-page' }, '正在返回 Kode…')
   }
-  function HandoffMenu({ sessionId, sessions }) {
-    const { data } = useDirectory(sessionId, sessions), [open, setOpen] = useState(false)
+  function HandoffAction({ sessionId, sessions, panel, dismissOverlay }) {
+    if (catalogBlank(sessions, sessionId)) return null
+    const open = () => {
+      dismissOverlay?.()
+      window.dispatchEvent(new CustomEvent('kode-handoff-dialog', { detail: { sessionId, host: transport?.current ?? 'local' } }))
+    }
+    const icon = h(IconPaperPlaneOutlineRegular, { size: 16, 'aria-hidden': true })
+    return panel ? h(SessionPanelRow, { icon, label: '交接给其他 Agent', onClick: open }) :
+      h(Button, { variant: 'outline', className: 'kode-handoff-trigger', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: open }, icon, '交接')
+  }
+  function HandoffOverlay({ sessions }) {
+    const [request, setRequest] = useState(null)
+    useEffect(() => {
+      const show = event => setRequest(event.detail)
+      window.addEventListener('kode-handoff-dialog', show)
+      return () => window.removeEventListener('kode-handoff-dialog', show)
+    }, [])
+    return request && h(HandoffDialog, { key: `${request.host}:${request.sessionId}`, ...request, sessions, close: () => setRequest(null) })
+  }
+  function HandoffDialog({ sessionId, sessions, host, close }) {
+    const { data, error: directoryError } = useDirectory(sessionId, sessions, host)
     const [target, setTarget] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
-    const requestId = React.useRef(null)
-    const profiles = (data?.profiles ?? []).filter(profile => profile.id !== data?.currentProfile?.id && data?.supportedTypes?.includes(profile.type))
-    return h(React.Fragment, null,
-      h(Button, { variant: 'outline', className: 'kode-handoff-trigger', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: () => { setOpen(true); setTarget(''); setError(''); requestId.current = null } }, h(IconPaperPlaneOutlineRegular, { size: 15 }), h('span', null, '交接')),
-      h(Modal, { open, title: '用其他 Agent 继续', className: 'kode-handoff-dialog', closeLabel: '关闭', onClose: () => { if (!busy) setOpen(false) },
-        description: '将文字历史带入目标 Agent 的新会话，并继续最近的请求。原会话保留；工具状态、审批和附件不会转移。长历史最多带入最近 48,000 字符。',
-        footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: () => setOpen(false) }, '取消'), h(Button, { disabled: busy || !target, variant: 'primary', onClick: async () => {
+    const requestId = useRef(null)
+    const current = data?.currentProfile?.id ?? data?.selectedProfileId
+    const profiles = (data?.profiles ?? []).filter(profile => profile.id !== current && data?.supportedTypes?.includes(profile.type))
+    return h(Modal, { open: true, title: '用其他 Agent 继续', className: 'kode-handoff-dialog', closeLabel: '关闭', onClose: () => { if (!busy) close() },
+        description: '当前 Agent 会用交接技能整理目标、进度和待办，目标 Agent 将在同一工作区根据交接稿继续。',
+        footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: close }, '取消'), h(Button, { disabled: busy || !target, variant: 'primary', onClick: async () => {
           setBusy(true); setError('')
           try {
             requestId.current ??= crypto.randomUUID()
-            const result = await hubCall({ action: 'handoff', sessionId, profileId: target, requestId: requestId.current }, transport?.current ?? 'local')
-            await sessions.refresh(); showShared(null); await avatarContext.get('uiWorkspace').openSession(result.sessionId); setOpen(false)
+            const result = await hubCall({ action: 'handoff-skill', sessionId, profileId: target, requestId: requestId.current }, host)
+            if ((transport?.current ?? 'local') !== host) throw new Error('交接已完成，请切回原主机查看目标会话。')
+            await sessions.refresh(); showShared(null); await avatarContext.get('uiWorkspace').openSession(result.sessionId); close()
           } catch (error) { setError(error.message) } finally { setBusy(false) }
         } }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
         h('div', { className: 'kode-handoff-body', 'aria-busy': busy },
-          h(SelectField, { label: '目标 Agent', value: target, disabled: busy, options: [{ value: '', label: profiles.length ? '选择 Agent' : '暂无可交接的 Agent' }, ...profiles.map(profile => ({ value: profile.id, label: profile.name }))], onChange: value => { setTarget(value); requestId.current = null } }),
-          h('p', { className: 'kode-config-note' }, '目标 Agent 会收到一份新的文字上下文，不会修改当前会话。'), h(Failure, { text: error }))))
+          h(SelectField, { label: '目标 Agent', value: target, disabled: busy || !profiles.length, options: [{ value: '', label: profiles.length ? '选择 Agent' : data ? '暂无可交接的 Agent' : '正在读取 Agent…' }, ...profiles.map(profile => ({ value: profile.id, label: profile.name }))], onChange: value => { setTarget(value); requestId.current = null } }),
+          h(Failure, { text: error || directoryError })))
   }
 
   function InterfaceSettingsBody() {
@@ -1940,15 +1990,37 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       h(Failure, { text: state.error }), notice && h('p', { className: 'kode-config-note', role: 'status' }, notice),
       (!current || profile) && h(AvatarChoices, { key: `${current?.id}:${revision}`, profile: profile ?? { type: 'dsh', name: 'DeepSeek Harness' }, sessionId: current?.id, host, canApply: Boolean(current?.id && profile), onChoose: async avatarId => { await saveAvatarChoice(target, avatarId); setNotice('已应用头像与背景') }, onCancel: () => { setRevision(value => value + 1); setNotice('') }, onGenerated: close }))
   }
-  function AgentIdentity({ sessionId, sessions, useSessionStatus }) {
+  function AgentIdentity({ sessionId, sessions, useSessionStatus, panel, dismissOverlay }) {
     const { data } = useDirectory(sessionId, sessions), status = useAvatarStatus(sessionId, useSessionStatus)
     const workspaceDirectory = useWorkspaceDirectory(), currentSession = workspaceDirectory.hosts.find(host => host.id === workspaceDirectory.current)?.sessions?.find(row => row.id === sessionId)
-    // A bot's sessions wear the bot: its name and avatar, edited on the 伙伴 page.
-    const roster = useBotsData(), bot = workspaceDirectory.current === 'local' ? botOfSession(roster, sessionId) : undefined
-    const base = data?.currentProfile && { ...data.currentProfile, avatar: currentSession?.agent?.avatar ?? data.currentProfile.avatar }
-    const profile = base && bot ? { ...base, name: bot.name, avatar: bot.avatar ? { id: bot.avatar } : base.avatar } : base
-    const choose = () => bot ? (requestedBotEdit = bot.id, openBotsPage?.(), window.dispatchEvent(new CustomEvent('kode-bot-edit'))) : openAvatarDialog({ sessionId, host: workspaceDirectory.current, profile })
-    return profile && !catalogBlank(sessions, sessionId) ? h('span', { className: 'kode-agent-identity', title: bot ? `${bot.name} · 伙伴（${base.name}）` : `${profile.name} · ${data.types[profile.type]?.name ?? profile.type}` }, h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': bot ? '编辑伙伴' : '设置会话头像与背景', onClick: choose }, h(AgentAvatar, { profile, size: 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })), h('span', null, profile.name)) : null
+    const host = workspaceDirectory.current
+    const roster = useBotsData(), bot = host === 'local' ? botOfSession(roster, sessionId) : undefined
+    const base = data?.currentProfile
+    if (!base || catalogBlank(sessions, sessionId)) return null
+    const sessionAvatar = currentSession?.agent?.avatar ?? base.avatar
+    const profile = { ...base, name: bot?.name ?? base.name, avatar: bot?.avatar ? { id: bot.avatar } : sessionAvatar }
+    const type = data.types?.[profile.type]?.name ?? profile.type
+    const choose = () => {
+      dismissOverlay?.()
+      if (bot) {
+        requestedBotEdit = bot.id
+        openBotsPage?.()
+        window.dispatchEvent(new CustomEvent('kode-bot-edit'))
+      } else {
+        openAvatarDialog({ sessionId, host, profile })
+      }
+    }
+    const avatar = h(AgentAvatar, { profile, host, size: panel ? 20 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
+    if (panel) {
+      const model = selectedCatalogModel(data.models ?? [], data.selection)
+      const modelId = model?.id ?? data.selection?.model
+      const modelName = modelId && modelId !== 'auto' && modelId !== 'default' ? model?.name ?? modelId : null
+      return h(SessionPanelRow, { icon: avatar, label: profile.name, detail: modelName ?? (profile.name === type ? undefined : type),
+        actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
+        trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose })
+    }
+    return h('span', { className: 'kode-agent-identity', title: bot ? `${bot.name} · 伙伴（${base.name}）` : `${profile.name} · ${type}` },
+      h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': bot ? '编辑伙伴' : '设置会话头像与背景', onClick: choose }, avatar), h('span', null, profile.name))
   }
   function SessionAvatarMenuItem({ sessionId, useMenuOpenState }) {
     const [, setOpen] = useMenuOpenState()
@@ -1974,7 +2046,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     useEffect(() => { setOpen(false); setPane('root') }, [id])
     const current = data?.currentProfile ?? data?.profiles.find(p => p.id === data.selectedProfileId)
     const models = data?.models ?? []
-    const selected = models.find(m => m.id === data?.selection?.model && (!m.provider || m.provider === data?.selection?.provider)) ?? (data?.selection?.model === 'default' ? models.find(m => m.isDefault) ?? models[0] : undefined)
+    const selected = selectedCatalogModel(models, data?.selection)
     const efforts = selected?.reasoningEfforts ?? [], effort = data?.selection?.reasoningEffort ?? selected?.defaultReasoningEffort
     const effortLabel = efforts.find(row => row.id === effort)?.name ?? effort
     const label = [selected?.name ?? selected?.id ?? (data ? '选择模型' : '正在读取模型…'), effortLabel, data?.fast && !/\bfast\b/i.test(selected?.name ?? '') ? 'Fast' : undefined].filter(Boolean).join(' · ')
@@ -2007,6 +2079,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       anchor: h(Trigger, { model: true, label, open, disabled: busy || !id || !current, onClick: () => { if (open) close(); else { setOpen(true); setPane('root') } } }),
       footer: error || data?.modelError ? [{ id: 'model-error', disabled: true, label: h('div', { className: 'kode-menu-note', role: 'alert' }, error || '请检查 Agent 的安装与登录状态。') }] : undefined,
     }), h(Failure, { text: error }))
+  }
+  function selectedCatalogModel(models, selection) {
+    const model = selection?.model
+    const selected = models.find(row => row.id === model && (!row.provider || row.provider === selection?.provider))
+    return selected ?? (model === 'default' ? models.find(row => row.isDefault) ?? models[0] : undefined)
   }
 
   async function projectCall(body) {
@@ -3113,6 +3190,123 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const childTitle = child => child.name || child.task?.split('\n')[0]?.slice(0, 120) || '子 Agent'
   const childStatusLabel = child => childStatusLabels[child.status] ?? childStatusLabels.unknown
   const childStateDot = child => h(StateDot, { state: childDotStates[child.status] ?? 'idle', size: 14 })
+  const deliveryStatusLabels = { queued: '已入队', received: '已到达目标节点', delivering: '正在投递', accepted: '已交给目标会话', uncertain: '投递结果待确认', rejected: '已拒绝', expired: '已过期' }
+  function useSlotEntry(slots, seat, id) {
+    const subscribe = useCallback(listener => slots.subscribe(seat, listener), [slots, seat])
+    return useSyncExternalStore(subscribe, () => slots.entries(seat).some(entry => entry.options.id === id))
+  }
+  function legacyHeader(Component) {
+    return function LegacyHeaderControl({ slots, ...props }) {
+      const hasPanel = useSlotEntry(slots, 'conversation.session.header.utilities', 'session-panel')
+      return hasPanel ? null : h(Component, props)
+    }
+  }
+  function SessionPanelRow({ icon, label, detail, trailing, actionLabel, onClick, expanded, href }) {
+    const body = [
+      h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true }, icon),
+      h('span', { key: 'label', 'data-row-part': 'lines' },
+        h('span', { 'data-row-part': 'content', title: label }, label),
+        detail && h('span', { 'data-row-part': 'detail', title: detail }, detail)),
+    ]
+    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '' },
+      href ? h('a', { 'data-row-part': 'body', className: 'kode-panel-link', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': actionLabel }, body) :
+        onClick ? h('button', { type: 'button', 'data-row-part': 'body', 'aria-label': actionLabel, 'aria-expanded': expanded, onClick }, body) :
+          h('span', { 'data-row-part': 'body' }, body),
+      trailing && h('span', { 'data-row-part': 'trailing' }, trailing))
+  }
+  function PanelList({ rows, renderFactorySlot, renderRow }) {
+    const [expanded, setExpanded] = useState(false)
+    const limit = 4, foldable = rows.length > limit
+    const label = expanded ? '收起' : `显示另外 ${rows.length - limit} 项`
+    return h(React.Fragment, null,
+      (expanded ? rows : rows.slice(0, limit)).map(renderRow),
+      foldable && renderFactorySlot('conversation.session.panel.fold', { expanded, label, name: label, onToggle: () => setExpanded(value => !value) }))
+  }
+  function DisclosurePanelRows({ rows, renderFactorySlot, rowProps, content }) {
+    const [selected, setSelected] = useState(null)
+    return h(PanelList, { rows, renderFactorySlot, renderRow: row => {
+      const expanded = selected === row.id
+      return h(React.Fragment, { key: row.id },
+        h(SessionPanelRow, { ...rowProps(row), expanded, onClick: () => setSelected(expanded ? null : row.id) }),
+        expanded && h('div', { className: 'kode-panel-detail' }, content(row)))
+    } })
+  }
+  const cardKey = sessionId => `${transport?.current ?? 'local'}:${sessionId}`
+  function NativeSubagentRows({ sessionId, useProjection, renderFactorySlot }) {
+    const state = useProjection('kodeNativeSubagents')
+    if (!Object.keys(state ?? {}).length) return null
+    const rank = { awaiting: 0, running: 1 }
+    const rows = Object.values(state).reverse().sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2))
+    return h(DisclosurePanelRows, { key: cardKey(sessionId), rows, renderFactorySlot,
+      rowProps: child => ({ label: childTitle(child), detail: [childStatusLabel(child), child.model].filter(Boolean).join(' · '), icon: childStateDot(child),
+        trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }),
+      content: child => h(React.Fragment, null,
+        child.task && h('p', null, child.task),
+        child.output ? h('pre', null, child.output) : h('p', null, '暂无输出记录。')),
+    })
+  }
+  function CommunicationRows({ sessionId, sessions, messages, renderFactorySlot }) {
+    const nameOf = useNames(sessions)
+    return h(DisclosurePanelRows, { key: cardKey(sessionId), rows: messages.toReversed(), renderFactorySlot,
+      rowProps: row => {
+        const sent = row.direction === 'sent', status = deliveryStatusLabels[row.status]
+        const direction = sent ? (row.reply ? '回复给' : '发往') : (row.reply ? '收到回复' : '收自')
+        return { icon: h(IconPaperPlaneOutlineRegular, { size: 16 }), label: row.content.trim().split('\n', 1)[0] || '会话消息',
+          detail: [`${direction} · ${nameOf(row.nodeId, row.sessionId)}`, sent && status ? `发送时${status}` : null].filter(Boolean).join(' · '),
+          trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }
+      },
+      content: row => h('p', null, row.content),
+    })
+  }
+  function KodeCommunication(props) {
+    const messages = props.useProjection('kodeSessionPanel', state => state?.relays)
+    return messages?.length ? h(CommunicationRows, { ...props, messages }) : null
+  }
+  function SessionReviewLinks({ sessionId, useProjection, renderFactorySlot, nativeChanges }) {
+    const reviews = useProjection('kodeSessionPanel', state => state?.reviews)
+    const tracked = new Set((nativeChanges ?? []).map(entry => entry.url?.split(/[?#]/)[0].replace(/\/$/, '')))
+    const rows = reviews?.filter(row => /^https?:\/\//i.test(row.url) && !tracked.has(row.url)).toReversed()
+    return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows, renderFactorySlot,
+      renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, icon: h(IconBranchOutlineRegular, { size: 16 }),
+        label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}`,
+        trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),
+    }) : null
+  }
+  function ForgeReviewLinks({ usePanel, ...props }) {
+    const nativeChanges = usePanel(state => state.state?.changeRequests)
+    return h(SessionReviewLinks, { ...props, nativeChanges })
+  }
+  function FallbackPanelSection({ slots, nativeId, component, ...props }) {
+    return useSlotEntry(slots, CARD_SECTIONS, nativeId) ? null : h(component, props)
+  }
+  function installSessionPanel(ctx) {
+    const session = sessionId => ({ sessionId, sessions: ctx.sessions, slots: ctx.slots })
+    ctx.slots.inject(CARD_ENVIRONMENT, function* () {
+      yield ctx.slots.register({ name: CARD_ENVIRONMENT, id: 'kode-agent-profile', order: -10, inject: session }, props => h(AgentIdentity, { ...props, panel: true }))
+      yield ctx.slots.register({ name: CARD_ENVIRONMENT, id: 'kode-agent-handoff', order: 50, inject: session }, props => h(HandoffAction, { ...props, panel: true }))
+    })
+    ctx.slots.inject(CARD_SECTIONS, function* () {
+      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-review-links', order: 100, label: () => 'PR / MR', inject: session },
+        props => h(FallbackPanelSection, { ...props, nativeId: 'change-requests', component: SessionReviewLinks }))
+      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-child-agents', order: 200, label: () => '子 Agent', inject: session },
+        props => h(FallbackPanelSection, { ...props, nativeId: 'subagents', component: NativeSubagentRows }))
+      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-communication', order: 250, label: () => '会话通信', inject: session }, KodeCommunication)
+    })
+    wrapSlot(ctx, CARD_SECTIONS, entry => entry.options.id === 'change-requests', native => props => h(React.Fragment, null,
+      h(native, props), props.usePanel ? h(ForgeReviewLinks, props) : h(SessionReviewLinks, props)))
+    wrapSlot(ctx, CARD_SECTIONS, entry => entry.options.id === 'subagents', native => props => h(React.Fragment, null,
+      h(FilteredSubagentCatalog, { ...props, native }), h(NativeSubagentRows, props)))
+    wrapSlot(ctx, 'conversation.session.panel.section.actions', entry => entry.options.key === 'subagents',
+      native => props => h(FilteredSubagentCatalog, { ...props, native }))
+    wrapSlot(ctx, 'conversation.session.panel.indicator', entry => entry.options.id === 'subagents.running',
+      native => props => h(FilteredSubagentCatalog, { ...props, native }))
+    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'kode-handoff-dialog', inject: () => ({ sessions: ctx.sessions }) }, HandoffOverlay))
+    ctx.slots.inject('conversation.session.header.actions', function* () {
+      yield ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-native-subagents', order: -110, inject: session }, legacyHeader(NativeSubagentActivity))
+      yield ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: session }, legacyHeader(AgentIdentity))
+      yield ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-handoff', order: 100, inject: session }, legacyHeader(HandoffAction))
+    })
+  }
   function NativeSubagentDetails({ child, onClose }) {
     return h(Modal, { open: true, title: childTitle(child), closeLabel: '关闭', onClose, className: 'kode-subagent-dialog' },
       h('div', { className: 'kode-subagent-status' }, childStateDot(child), childStatusLabel(child),
@@ -3228,9 +3422,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const raw = textContent(block.content)
     let result
     try { result = JSON.parse(raw) } catch {}
-    const statusNames = { queued: '已入队', received: '已到达目标节点', delivering: '正在投递', accepted: '已交给目标会话', uncertain: '投递结果待确认', rejected: '已拒绝', expired: '已过期' }
     const title = { kode_sessions_list: '查找会话', kode_sessions_create: '创建协作会话', kode_sessions_send: args?.text('in_reply_to') ? '回复会话' : '发送会话消息', kode_sessions_read: '读取会话消息', kode_sessions_wait: '等待会话回复' }[toolName]
-    const status = block.isError ? '调用失败' : phase !== 'result' ? '进行中' : result?.message ? `发送时：${statusNames[result.message.status] ?? result.message.status}` : result?.timed_out ? '暂未收到新消息' : '已返回'
+    const status = block.isError ? '调用失败' : phase !== 'result' ? '进行中' : result?.message ? `发送时：${deliveryStatusLabels[result.message.status] ?? result.message.status}` : result?.timed_out ? '暂未收到新消息' : '已返回'
     return h('section', { className: 'kode-message-tool' }, h('button', { type: 'button', className: 'kode-tool-heading', onClick: () => setOpen(!open), 'aria-expanded': open }, h(IconPaperPlaneOutlineRegular, { size: 14 }), h('span', null, title), h('span', { className: block.isError ? 'kode-error' : 'kode-secondary' }, status), h(IconChevronDownOutlineRegular, { size: 12 })),
       target && h('div', { className: 'kode-tool-target' }, `${nameOf(undefined, sessionId)}（当前） → `, nameOf(args?.text('node_id'), args?.text('session_id'))),
       toolName === 'kode_sessions_create' && h('div', { className: 'kode-tool-target' }, `新会话：${result?.title ?? args?.text('title') ?? '协作助手'}${args?.text('host') ? ` · ${args.text('host')}` : ''}`),
@@ -3296,7 +3489,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'kode-goal-bar', order: 100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, GoalBar))
     ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: 'kode-goal', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, GoalSidebar))
     ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'kode-goal' }, () => h(React.Fragment, null, h(IconGoalOutlineRegular, { size: 16 }), 'Goal')))
-    ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-handoff', order: 100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, HandoffMenu))
+    installSessionPanel(ctx)
     if (kodeEmbedded()) {
       // Kode's window buttons sit over the page; keep a titlebar strip for
       // them that also drags the window. dsh's own desktop layout
@@ -3306,10 +3499,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       document.body.append(titlebar)
       ctx.effect(() => () => titlebar.remove(), 'kode.embed-titlebar')
     }
-    ctx.slots.inject('conversation.session.header.actions', function* () {
-      yield ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-native-subagents', order: -110 }, NativeSubagentActivity)
-      yield ctx.slots.register({ name: 'conversation.session.header.actions', id: 'kode-agent-identity', order: -100, inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, AgentIdentity)
-    })
     wrapSlot(ctx, 'main.conversation', entry => typeof entry.component === 'function', native => props => h(ConversationNavigation, { ...props, native }))
     wrapSlot(ctx, 'shell.overlay', entry => entry.options.id === 'workspace.session-rename', native => props => h(RoutedRenameDialog, { ...props, native }))
     wrapSlot(ctx, 'conversation.session.header.actions', entry => entry.options.id === 'subagent-catalog', native => props => h(FilteredSubagentCatalog, { ...props, native }))
@@ -3391,6 +3580,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-conversation-loading>svg{animation:kode-loading-spin 850ms linear infinite}
 @keyframes kode-loading-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.kode-conversation-loading>svg{animation:none}}
+.kode-panel-link{color:inherit;text-decoration:none}
+@media(hover:hover){[data-session-panel-row]:has(>.kode-panel-link):hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.kode-panel-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:var(--dsw-radius-sm)}
+[data-kode-panel-row]:has(>button[aria-expanded=true])>[data-row-part=trailing]{transform:rotate(180deg)}
+.kode-panel-detail{display:grid;gap:6px;padding:4px 6px 8px 30px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12)}
+.kode-panel-detail p,.kode-panel-detail pre{margin:0;max-block-size:12rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.kode-panel-detail pre{padding:8px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-sm)}
 .kode-subagent-trigger{gap:5px;padding-inline:6px;font-variant-numeric:tabular-nums}
 .kode-subagent-menu-item{display:flex;flex-direction:column;gap:2px;min-width:0;max-width:220px}
 .kode-subagent-menu-item>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -3432,11 +3628,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 @media(max-width:600px){.kode-agent-row-head{flex-wrap:wrap}.kode-agent-editor{padding:12px}.kode-option{min-width:180px}.kode-trigger{max-width:180px}.kode-agent-identity{max-width:32px}.kode-agent-identity>span:last-child{display:none}.kode-mobile-pairing-actions{align-items:stretch;flex-direction:column}.kode-mobile-pairing-actions>.kode-service-status{margin:0}.kode-mobile-pairing-actions>button{width:100%}.kode-host-service-body{align-items:stretch;flex-direction:column}.kode-host-service-body>.kode-service-status{min-width:0}.kode-host-service-body>.kode-service-recovery{margin:0}.kode-host-service-body .kode-service-recovery-actions>button{flex:1}}
 `
     style.textContent += `
-[data-conversation-content][data-kode-scene]{background-image:linear-gradient(color-mix(in srgb,var(--dsw-alias-bg-base) 88%,transparent),color-mix(in srgb,var(--dsw-alias-bg-base) 88%,transparent)),var(--kode-scene-image);background-size:cover;background-position:center}
+[data-conversation-content][data-kode-scene]{
+  --kode-scene-opacity:24%;
+  --kode-scene-scrim:color-mix(in srgb,var(--dsw-alias-bg-base),transparent var(--kode-scene-opacity));
+  background-image:linear-gradient(var(--kode-scene-scrim),var(--kode-scene-scrim)),var(--kode-scene-image,none);
+  background-size:cover;
+  background-position:center;
+}
 [data-conversation-content]:has(>.kode-scene-video){position:relative;isolation:isolate}
 .kode-scene-video{position:absolute;inset:0;z-index:-1;overflow:hidden;pointer-events:none;background:var(--dsw-alias-bg-base);visibility:hidden}
 .kode-scene-video:has(video[data-frame-ready]){visibility:visible}
-.kode-scene-video>video{display:block;width:100%;height:100%;object-fit:cover;opacity:.12}
+.kode-scene-video>video{display:block;width:100%;height:100%;object-fit:cover;opacity:var(--kode-scene-opacity)}
 [data-kode-scene] [data-kode-user-bubble]{background:var(--dsw-specific-bubble,var(--dsw-alias-bg-module-platform));border:.5px solid var(--dsw-alias-border-l2)}
 .kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}.kode-avatar-content{display:flex;flex-direction:column;gap:12px}.kode-avatar-content>*{flex-shrink:0}.kode-avatar-content>.kode-config-note{margin:0}.kode-avatar-grid{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));max-height:min(240px,28vh);gap:8px}.kode-avatar-choice{gap:8px;padding:10px 6px}.kode-avatar-caption{display:flex;align-items:center;justify-content:center;gap:4px;max-width:100%;min-width:0;font-size:12px;line-height:16px;white-space:nowrap}.kode-avatar-caption>span{min-width:0;overflow:hidden;text-overflow:ellipsis}.kode-avatar-caption>svg{flex:none;color:var(--dsw-alias-label-secondary)}
 .kode-avatar-preview{display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-secondary);font-size:12px;min-height:112px;background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);overflow:hidden;flex:none}.kode-avatar-preview[data-has-background=true]{display:block;min-height:0}.kode-avatar-preview>img,.kode-avatar-preview>video{display:block;width:100%;aspect-ratio:16/9;max-height:min(240px,28vh);object-fit:cover}.kode-avatar-preview-identity{display:flex;align-items:center;gap:12px;color:var(--dsw-alias-label-primary);font-size:14px;min-width:0}.kode-avatar-preview-identity>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -3468,6 +3670,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-settings-card>.kode-integration-row+.kode-integration-row{border-top:.5px solid var(--dsw-alias-border-l2)}
 .kode-settings-card>.kode-config-note{margin:0 0 14px}
 .kode-settings-card>.kode-config-note:only-child{margin:14px 0}
+.kode-session-naming{display:grid;gap:12px;padding:14px 0;border-top:.5px solid var(--dsw-alias-border-l2)}
+.kode-session-naming>.kode-field,.kode-session-naming .kode-config-note{margin:0}
+.kode-session-naming>.kode-field strong{font-size:14px;font-weight:500}
+.kode-session-naming textarea{resize:vertical}
+.kode-session-naming-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}
 .kode-settings-page .kode-notification-permission{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}
 .kode-settings-page .kode-notification-permission>button{flex:none;margin-left:auto}
 .kode-settings-page .kode-settings-select-row{flex-wrap:wrap;gap:10px 20px}
