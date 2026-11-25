@@ -55,10 +55,21 @@ test('the partner sidebar collapses, remembers its state and keeps unseen activi
   const render = () => scope.BotsNavTrailing()
   const control = () => render().children.find(node => node?.props?.role === 'button')
   assert.equal(control().props['aria-expanded'], true)
-  control().props.onClick({ stopPropagation() {}, preventDefault() {} })
+  let stopped = 0, prevented = 0
+  const event = { stopPropagation() { stopped++ }, preventDefault() { prevented++ } }
+  control().props.onClick(event)
   assert.equal(storage.get('kode.dsh.botsCollapsed'), '1')
+  assert.deepEqual([stopped, prevented], [1, 1])
   assert.equal(control().props['aria-expanded'], false)
   assert.match(text(render()), /2/)
+  control().props.onKeyDown({ ...event, key: 'Enter' })
+  assert.equal(storage.get('kode.dsh.botsCollapsed'), '0')
+  control().props.onKeyDown({ ...event, key: ' ' })
+  assert.equal(storage.get('kode.dsh.botsCollapsed'), '1')
+  assert.deepEqual([stopped, prevented], [3, 3])
+  assert.match(source, /\[class\*="panelEntry"\]:has\(\.kode-bots-collapse\) \[class\*="panelRow"\]\{padding-right:38px\}/)
+  assert.match(source, /:is\(:hover,:has\(:focus-visible\)\) \[class\*="panelTrailing"\]:has\(>\.kode-bots-trailing\)\{opacity:1\}/)
+  assert.match(source, /\.kode-bots-collapse:focus-visible\{outline:/)
 
 })
 
@@ -105,6 +116,7 @@ test('Kode dialogs size to content between per-dialog bounds and go full width o
   assert.match(source, /:is\(\.kode-project-dialog,\.kode-handoff-dialog,\.kode-subagent-dialog,\.kode-confirm-dialog,\.kode-source-dialog,\.kode-avatar-dialog\)\{width:fit-content;min-width:min\(var\(--kode-dialog-min\),100%\);max-width:min\(var\(--kode-dialog-max\),100%\)\}/)
   for (const name of ['project', 'handoff', 'subagent', 'confirm', 'source', 'avatar']) assert.match(source, new RegExp(`\\.kode-${name}-dialog[,{][^}]*--kode-dialog-min:\\d+px`), name)
   assert.match(source, /@media\(min-width:1440px\)\{[^@]*\.kode-subagent-dialog\{--kode-dialog-max:960px\}/)
+  assert.match(source, /\.kode-source-dialog\{--kode-dialog-max:1080px;width:1080px;max-height:min\(760px,calc\(100dvh - 64px\)\)\}/)
   assert.match(source, /@media\(max-width:600px\)\{[^@]*:is\(\.kode-project-dialog,[^)]*\)\{width:100%;min-width:0\}/)
 })
 
