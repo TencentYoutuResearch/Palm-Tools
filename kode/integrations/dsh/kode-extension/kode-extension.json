@@ -33,7 +33,8 @@
           "claude-internal",
           "tclaude",
           "codebuddy",
-          "cursor"
+          "cursor",
+          "antigravity"
         ],
         "dragRegion": {
           "selector": "html[data-kode-platform=\"macos\"] [data-window-drag]",

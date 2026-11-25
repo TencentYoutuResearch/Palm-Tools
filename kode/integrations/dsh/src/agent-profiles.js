@@ -9,6 +9,7 @@ export const AGENT_TYPES = Object.freeze({
   claude: { name: 'Claude Code', executable: 'claude' },
   codebuddy: { name: 'CodeBuddy', executable: 'codebuddy' },
   cursor: { name: 'Cursor', executable: 'agent' },
+  antigravity: { name: 'Antigravity', executable: 'agy' },
   custom: { name: '自定义', executable: '' },
 })
 export const HOST_ONLY_ENV = new Set(['KODE_BRIDGE_TOKEN', 'KODE_MESSAGING_ADMIN_TOKEN_FILE', 'KODE_MESSAGING_TOKEN_FILE', 'KODE_SESSION_ID', 'KODE_HOOK_SOCK'])

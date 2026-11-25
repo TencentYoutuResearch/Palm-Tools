@@ -12,11 +12,11 @@ export async function findExecutable(command, path = process.env.PATH ?? '') {
 }
 export async function agentDefaults(path = process.env.PATH ?? '') {
   const types = structuredClone(AGENT_TYPES)
-  for (const [type, commands] of Object.entries({ codex: ['codex'], claude: ['claude'], codebuddy:['codebuddy'], cursor: ['agent', 'cursor-agent'] })) {
+  for (const [type, commands] of Object.entries({ codex: ['codex'], claude: ['claude'], codebuddy:['codebuddy'], cursor: ['agent', 'cursor-agent'], antigravity: ['agy'] })) {
     let resolved
     for (const command of commands) { resolved = await findExecutable(command, path); if (resolved) break }
     types[type] = { ...types[type], executable: resolved ?? commands[0], available: Boolean(resolved) }
   }
   return types
 }
-export const builtinProfiles = types => ['dsh', 'codex', 'cursor', 'claude','codebuddy'].map(type => ({ id: `builtin-${type}`, name: types[type].name, type, ...(type === 'dsh' ? {} : { executable: types[type].executable, args: [], env: {} }) }))
+export const builtinProfiles = types => ['dsh', 'codex', 'cursor', 'claude', 'codebuddy', 'antigravity'].map(type => ({ id: `builtin-${type}`, name: types[type].name, type, ...(type === 'dsh' ? {} : { executable: types[type].executable, args: [], env: {} }) }))
