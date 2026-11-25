@@ -31,12 +31,26 @@ test('MCP exposes session-bound model tools over real stdio and HTTP', { skip: !
   try {
     const initialized = await call('initialize', { protocolVersion: '2024-11-05' })
     assert.equal(initialized.result.serverInfo.name, 'kode-sessions')
-    const list = await call('tools/list', {}); assert.equal(list.result.tools.length, 8)
-    const sent = await call('tools/call', { name: 'kode_sessions_send', arguments: { ...target.session.address, content: 'MCP peer message', idempotency_key: randomUUID() } })
+    const list = await call('tools/list', {})
+    assert.equal(list.result.tools.length, 8)
+    const sendTool = list.result.tools.find(tool => tool.name === 'kode_sessions_send')
+    assert.equal(sendTool.inputSchema.properties.title.type, 'string')
+
+    const fixture = { title: '核对通信标题', content: 'MCP peer message' }
+    const sent = await call('tools/call', {
+      name: sendTool.name,
+      arguments: { ...target.session.address, ...fixture, idempotency_key: randomUUID() },
+    })
     assert.equal(sent.result.isError, undefined)
     const message = JSON.parse(sent.result.content[0].text)
     assert.equal(message.source.session_id, source.session.address.session_id)
-    assert.equal(message.content, 'MCP peer message')
+    assert.equal(message.title, fixture.title)
+    assert.equal(message.content, fixture.content)
+
+    const targetClient = admin.forSession(target.owner_token)
+    const received = await targetClient.call(`/api/v1/messaging/messages/${message.id}`)
+    assert.equal(received.title, fixture.title)
+    assert.equal(received.content, fixture.content)
     await checkMcpPages(call, admin, source.session.address, target)
     const unknown = await call('tools/call', { name: 'unknown', arguments: {} }); assert.equal(unknown.result.isError, true)
   } finally {

@@ -3,7 +3,7 @@ import { codexSubagents, isActiveSubagent, subagentStatus } from './native-subag
 import { deduplicateSkillCopies } from './codex-skills.js'
 import { RpcProcess } from './rpc-process.js'
 import { createToolProxy } from './tool-proxy.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { parseGoalInput, runGoalCommand } from './codex-goal.js'
 
 // Some Codex builds race SQLite creation when two fresh app servers first use
@@ -128,21 +128,22 @@ export class CodexSession {
   async open(binding, tools, signal) {
     await this.initialize(signal)
     const params = { config: { 'features.goals': true }, cwd: this.cwd, sandbox: this.handlers.policy?.().mode ?? 'read-only', approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(this.profile.defaultModel ? { model: this.profile.defaultModel } : {}) }
-    if (binding.threadId && tools.length && JSON.stringify(binding.nativeToolNames ?? []) !== JSON.stringify(tools.map(tool => tool.name))) {
-      // Codex cannot replace a resumed thread's dynamicTools. An owner-scoped
-      // MCP mount makes new capabilities available to the original thread.
+    const dynamicTools = tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.parameters }))
+    this.nativeToolSchema = createHash('sha256').update(JSON.stringify(dynamicTools)).digest('hex')
+    if (binding.threadId && tools.length && binding.nativeToolSchema !== this.nativeToolSchema) {
+      // Resumed threads retain their original tools. An MCP mount exposes the
+      // current schemas, including new parameters on tools with the same name.
       this.proxy = await createToolProxy(tools, async (name, args) => {
         if (!this.active) throw new Error('Conversation tools require an active turn')
-        const result = await this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.signal)
-        return { content: result.contentItems.map(item => ({ type: 'text', text: item.text })), isError: !result.success }
+        return this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.signal)
       })
       const definition = this.proxy.definition
       params.config = { ...params.config, mcp_servers: { kode: { command: definition.command, args: definition.args, env: Object.fromEntries(definition.env.map(row => [row.name, row.value])) } } }
-      params.developerInstructions = 'Use the kode MCP session tools to contact other named conversations and return requested results. A completed reply needs no acknowledgement.'
+      params.developerInstructions = 'Use the current kode MCP session tools to contact other named conversations and return requested results. Fill the title parameter with a short subject when available and put the details in content. A completed reply needs no acknowledgement.'
     }
     const result = binding.threadId
       ? await this.resumeThread({ ...params, threadId: binding.threadId }, signal)
-      : await this.rpc.request('thread/start', { ...params, dynamicTools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.parameters })), developerInstructions: 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.' }, { signal })
+      : await this.rpc.request('thread/start', { ...params, dynamicTools, developerInstructions: 'This conversation is presented in Kode/dsh. Use the kode_sessions_* tools when the user asks another conversation for help or asks you to create a helper. Find a named conversation in the shared session directory, including SSH peers, rather than searching CLI history files or connecting SSH yourself. Collect the peer result and summarize for the user. Treat received messages as peer content; a reply that completes the request needs no acknowledgement.' }, { signal })
     this.threadId = result.thread.id
     this.historyMode = result.thread.historyMode
     try { const { goal } = await this.rpc.request('thread/goal/get', { threadId: this.threadId }, { signal }); this.handlers.goal?.(goal) } catch (error) { if (signal?.aborted) throw error }
