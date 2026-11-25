@@ -5,34 +5,38 @@ use anyhow::Result;
 use serde_json::json;
 
 pub(super) fn adopt_existing(hub: &Hub) -> Result<()> {
+    adopt_backend(hub, "codebuddy")?;
+    adopt_backend(hub, "antigravity")?;
+    Ok(())
+}
+
+fn adopt_backend(hub: &Hub, key: &str) -> Result<()> {
     let row = hub.store.document("agents")?;
     let mut value = row["value"].clone();
-    let Some(raw) = value.pointer("/desktop_backends/codebuddy") else {
+    let Some(raw) = value.pointer(&format!("/desktop_backends/{key}")) else {
         return Ok(());
     };
     let config: kode_core::BackendConfig = serde_json::from_value(raw.clone())?;
     if !config.is_enabled()
         || value["desktop_ids"]
             .as_object()
-            .is_some_and(|ids| ids.values().any(|key| key == "codebuddy"))
+            .is_some_and(|ids| ids.values().any(|entry| entry == key))
     {
         return Ok(());
     }
     let Some(profiles) = value["profiles"].as_array_mut() else {
         return Ok(());
     };
-    if profiles
-        .iter()
-        .any(|profile| profile["id"] == "kode-codebuddy")
-    {
+    let id = format!("kode-{key}");
+    if profiles.iter().any(|profile| profile["id"] == id) {
         return Ok(());
     }
-    let mut profile = json!({"id":"kode-codebuddy","name":"codebuddy","type":"codebuddy","origin":"custom","executable":config.command,"args":config.args,"env":{}});
+    let mut profile = json!({"id":id,"name":key,"type":key,"origin":"custom","executable":config.command,"args":config.args,"env":{}});
     if let Some(model) = config.default_model {
         profile["defaultModel"] = json!(model);
     }
     profiles.push(profile);
-    value["desktop_ids"]["kode-codebuddy"] = json!("codebuddy");
+    value["desktop_ids"][&id] = json!(key);
     hub.store
         .save_document("agents", row["revision"].as_u64().unwrap(), value)?;
     Ok(())
