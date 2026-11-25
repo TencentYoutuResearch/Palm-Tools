@@ -50,6 +50,7 @@ fn profile(key: &str, config: &BackendConfig) -> Option<Value> {
         "claude" | "tclaude" | "claude-internal" => "claude",
         "cursor" => "cursor",
         "codebuddy" => "codebuddy",
+        "antigravity" | "agy" => "antigravity",
         _ => match config.mcp_setup {
             Some(McpSetupSpec::Codex { .. }) => "codex",
             Some(McpSetupSpec::Claude { .. }) => "claude",
@@ -116,6 +117,7 @@ fn backend(profile: &Value, previous: Option<&BackendConfig>) -> Result<BackendC
             }
             "cursor" => "cursor",
             "codebuddy" => "codebuddy",
+            "antigravity" => "antigravity",
             "custom" if profile["protocol"] == "codex" => "codex",
             "dsh" | "custom" => "raw",
             _ => bail!("unsupported Agent type"),
@@ -569,6 +571,7 @@ pub(super) fn change(hub: &Hub, command: Change) -> Result<Catalog> {
                     "claude-internal",
                     "codebuddy",
                     "cursor",
+                    "antigravity",
                     "raw",
                 ]
                 .contains(&protocol)

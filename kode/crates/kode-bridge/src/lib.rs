@@ -1322,7 +1322,7 @@ async fn get_transcript(
     let Some((backend, cwd, uuid)) = routing else {
         return Json(json!({ "messages": [] }));
     };
-    let Some(path) = kode_core::session::jsonl_tail::resolve_session_path(backend, &cwd, &uuid)
+    let Some(path) = kode_core::session::jsonl_tail::resolve_transcript_path(backend, &cwd, &uuid)
     else {
         return Json(json!({ "messages": [] }));
     };
@@ -1396,6 +1396,26 @@ fn parse_transcript_lines<S: AsRef<str>>(lines: impl IntoIterator<Item = S>) -> 
             let role=match message["role"].as_str(){Some("user")=>"user",Some("assistant")=>"agent",_=>continue};
             if let Some(text)=json_content_to_text(&message["content"]) {
                 if !is_control_line(role,text.trim()) {messages.push(json!({"role":role,"text":text.trim(),"kind":"text"}));}
+            }
+            continue;
+        }
+        // Cursor agent transcripts omit top-level `type` and store `role`
+        // alongside `message.content` (user prompts may wrap text in `<user_query>`).
+        if ty.is_empty() && v["message"].is_object() {
+            let role = match v.get("role").and_then(|r| r.as_str()) {
+                Some("user") => "user",
+                Some("assistant") => "agent",
+                _ => continue,
+            };
+            if let Some(raw) = json_content_to_text(&v["message"]["content"]) {
+                let text = if role == "user" {
+                    semantic::cursor_user_query(&raw)
+                } else {
+                    raw.trim().to_string()
+                };
+                if !is_control_line(role, &text) {
+                    messages.push(json!({ "role": role, "text": text, "kind": "text" }));
+                }
             }
             continue;
         }

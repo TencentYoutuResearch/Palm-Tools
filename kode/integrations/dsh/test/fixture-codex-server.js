@@ -32,7 +32,14 @@ async function receive(message) {
   }
   if (method === 'thread/name/set') return result(id,{})
   if (method === 'thread/resume' && archived) return send({id,error:{code:-32600,message:`session ${params.threadId} is archived. Run codex unarchive ${params.threadId} to unarchive it first.`}})
+  if (method === 'thread/fork' && archived) return send({id,error:{code:-32600,message:`session ${params.threadId} is archived. Run codex unarchive ${params.threadId} to unarchive it first.`}})
   if (method === 'thread/unarchive') { archived=false;return result(id,{thread:{id:params.threadId}}) }
+  if (method === 'thread/fork') {
+    if (process.env.KODE_FIXTURE_FORK_MODE === 'unsupported') return send({ id, error: { code: -32601, message: 'Method not found: thread/fork' } })
+    if (process.env.KODE_FIXTURE_FORK_MODE === 'no-last-turn-id' && params.lastTurnId) return send({ id, error: { code: -32602, message: 'unknown field `lastTurnId`' } })
+    const forkedId = process.env.KODE_FIXTURE_FORK_ID ?? `forked-${params.threadId}-${process.pid}`
+    return result(id, { thread: { id: forkedId, ...(process.env.KODE_FIXTURE_HISTORY_REVERT === 'legacy' ? { historyMode: 'legacy' } : {}) } })
+  }
   if (method === 'thread/resume' && process.env.KODE_FIXTURE_LARGE_RESUME === '1' && params.excludeTurns !== true) return result(id, { thread: { id: params.threadId, turns: [{ text: 'x'.repeat(9 * 1024 * 1024) }] } })
   if (method === 'thread/list') {
     const threadId = params.archived ? 'archived-thread' : params.cursor ? 'older-thread' : 'desktop-thread'

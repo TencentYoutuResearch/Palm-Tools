@@ -331,6 +331,25 @@ impl Default for Config {
                 enabled: None,
             },
         );
+        backends.insert(
+            "antigravity".into(),
+            BackendConfig {
+                protocol: None,
+                command: "agy".into(),
+                args: vec![],
+                default_model: None,
+                model_flag: Some("--model".into()),
+                permission_mode_flag: None,
+                mcp_setup: Some(McpSetupSpec::JsonMerge {
+                    config_path: "~/.gemini/config/mcp_config.json".into(),
+                }),
+                acp: Some(AcpSpec {
+                    args: vec!["acp".into()],
+                    model_flag: None,
+                }),
+                enabled: None,
+            },
+        );
         // 2026-06:预置一批常见 AI CLI(参考 kooky)。这些大多不是 codebuddy/claude
         // fork,没有兼容的 MCP 配置入口,所以 mcp_setup 一律 None。command = 二进制名。
         // enabled = None:GUI 首次启动按 PATH 探测落地(只开实际装了的)。
@@ -341,7 +360,6 @@ impl Default for Config {
             ("amp", "amp"),
             ("copilot", "copilot"),
             ("grok", "grok"),
-            ("antigravity", "agy"),
             ("kimi", "kimi"),
             ("pi", "pi"),
             ("kiro", "kiro-cli"),
@@ -712,6 +730,16 @@ permission_mode_flag = "--custom-permission"
             }
             other => panic!("cursor should use JsonMerge mcp_setup, got {:?}", other),
         }
+        let antigravity = cfg.backend("antigravity").expect("antigravity");
+        match &antigravity.mcp_setup {
+            Some(McpSetupSpec::JsonMerge { config_path }) => {
+                assert_eq!(config_path, "~/.gemini/config/mcp_config.json")
+            }
+            other => panic!(
+                "antigravity should use JsonMerge mcp_setup, got {:?}",
+                other
+            ),
+        }
     }
 
     /// 回归:2026-06 预置的一批常见 AI CLI 都在默认列表里,且出厂 enabled == None
@@ -725,7 +753,6 @@ permission_mode_flag = "--custom-permission"
             ("amp", "amp"),
             ("copilot", "copilot"),
             ("grok", "grok"),
-            ("antigravity", "agy"),
             ("kimi", "kimi"),
             ("pi", "pi"),
             ("kiro", "kiro-cli"),
@@ -742,7 +769,14 @@ permission_mode_flag = "--custom-permission"
         let cursor = cfg.backend("cursor").expect("cursor");
         assert_eq!(cursor.command, "cursor-agent");
         assert_eq!(cursor.enabled, None);
-        // 7 MCP-enabled + 10 other presets = 17。
+        let antigravity = cfg.backend("antigravity").expect("antigravity");
+        assert_eq!(antigravity.command, "agy");
+        assert_eq!(antigravity.enabled, None);
+        assert_eq!(
+            antigravity.acp.as_ref().map(|spec| spec.args.as_slice()),
+            Some(["acp".to_string()].as_slice())
+        );
+        // 8 MCP/built-in + 9 other presets = 17。
         assert_eq!(cfg.backends.len(), 17);
     }
 

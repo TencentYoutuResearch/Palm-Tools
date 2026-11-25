@@ -1,13 +1,13 @@
 //! 能量预算账本:防 agent 提议泛滥让用户疲劳。
 //!
-//! 设计参考 `.specops/specs/memory-design.md` §3.2:
-//! - propose 消耗 1 点
-//! - approve 退还 0.5 点(奖励高质量)
-//! - edit-then-approve 中性(不退不扣)
-//! - reject 额外 -1(总 -2)
-//! - blacklist 额外 -2(总 -3)
-//! - 0 点时 propose 直接拒绝(out_of_energy)
-//! - 24h 缓慢回血到上限(避免永久封禁)
+//! 设计参考 `.specops/specs/memory-design.md` §3.2（2026-11 调优）:
+//! - 上限 15 点（多 tab 共享同一 author 或高频开发期不易误触上限）
+//! - propose 消耗 1 点（挂起期间占用配额，防单轮刷屏）
+//! - approve / edit-then-approve 全额退还 1 点（高质量提议净消耗为 0，不再误伤好 agent）
+//! - reject 额外 -0.5（总 -1.5）
+//! - blacklist 额外 -2（总 -3）
+//! - 能量不足 1 点时 propose 直接拒绝(out_of_energy)
+//! - 6h 完整回血到上限（每 24 分钟恢复 1 点，避免被长时间卡死）
 //!
 //! 不变量(§8.6):事件驱动,每次变化立即落盘,**不要**批量异步。
 
@@ -17,13 +17,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAX_ENERGY: f32 = 5.0;
+pub const MAX_ENERGY: f32 = 15.0;
 pub const COST_PROPOSE: f32 = 1.0;
-pub const REWARD_APPROVE: f32 = 0.5;
-pub const PENALTY_REJECT: f32 = 1.0; // 额外,加上 propose 的 -1 共 -2
+pub const REWARD_APPROVE: f32 = 1.0;
+pub const PENALTY_REJECT: f32 = 0.5; // 额外,加上 propose 的 -1 共 -1.5
 pub const PENALTY_BLACKLIST: f32 = 2.0; // 额外,加上 propose 的 -1 共 -3
-/// 24h 完整回血一次(从 0 → MAX_ENERGY 需要 24 小时)
-const REFILL_FULL_SECS: f32 = 24.0 * 3600.0;
+/// 6h 完整回血一次(从 0 → MAX_ENERGY 需要 6 小时，即每 24 分钟恢复 1 点)
+pub const REFILL_FULL_SECS: f32 = 6.0 * 3600.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorBudget {
@@ -246,42 +246,45 @@ mod tests {
     fn try_charge_then_drain() {
         let tmp = TempDir::new().unwrap();
         let mut b = BudgetStore::open(tmp.path()).unwrap();
-        for _ in 0..5 {
-            b.try_charge("a", 1.0).unwrap();
+        let cap = MAX_ENERGY as usize;
+        for _ in 0..cap {
+            b.try_charge("a", COST_PROPOSE).unwrap();
         }
-        // 第 6 次应该失败
-        let err = b.try_charge("a", 1.0).unwrap_err();
+        // 打空后的下一次应该失败
+        let err = b.try_charge("a", COST_PROPOSE).unwrap_err();
         match err {
-            BudgetError::OutOfEnergy { current, .. } => assert!(current < 1.0),
+            BudgetError::OutOfEnergy { current, .. } => assert!(current < COST_PROPOSE),
             other => panic!("unexpected: {:?}", other),
         }
     }
 
     #[test]
-    fn approve_refunds_partial() {
+    fn approve_refunds_full_propose_cost() {
         let tmp = TempDir::new().unwrap();
         let mut b = BudgetStore::open(tmp.path()).unwrap();
-        b.try_charge("a", 1.0).unwrap(); // 5 → 4
-        b.add("a", REWARD_APPROVE).unwrap(); // 4 → 4.5
-        assert!((b.current_energy("a") - 4.5).abs() < 1e-3);
+        b.try_charge("a", COST_PROPOSE).unwrap();
+        b.add("a", REWARD_APPROVE).unwrap();
+        assert!((b.current_energy("a") - MAX_ENERGY).abs() < 1e-3);
     }
 
     #[test]
-    fn reject_total_minus_two() {
+    fn reject_applies_extra_penalty() {
         let tmp = TempDir::new().unwrap();
         let mut b = BudgetStore::open(tmp.path()).unwrap();
-        b.try_charge("a", COST_PROPOSE).unwrap(); // -1 → 4
-        b.penalize("a", PENALTY_REJECT).unwrap(); // -1 额外 → 3
-        assert!((b.current_energy("a") - 3.0).abs() < 1e-3);
+        b.try_charge("a", COST_PROPOSE).unwrap();
+        b.penalize("a", PENALTY_REJECT).unwrap();
+        let expected = MAX_ENERGY - COST_PROPOSE - PENALTY_REJECT;
+        assert!((b.current_energy("a") - expected).abs() < 1e-3);
     }
 
     #[test]
-    fn blacklist_total_minus_three() {
+    fn blacklist_applies_heavy_penalty() {
         let tmp = TempDir::new().unwrap();
         let mut b = BudgetStore::open(tmp.path()).unwrap();
-        b.try_charge("a", COST_PROPOSE).unwrap(); // -1 → 4
-        b.penalize("a", PENALTY_BLACKLIST).unwrap(); // -2 额外 → 2
-        assert!((b.current_energy("a") - 2.0).abs() < 1e-3);
+        b.try_charge("a", COST_PROPOSE).unwrap();
+        b.penalize("a", PENALTY_BLACKLIST).unwrap();
+        let expected = MAX_ENERGY - COST_PROPOSE - PENALTY_BLACKLIST;
+        assert!((b.current_energy("a") - expected).abs() < 1e-3);
     }
 
     #[test]
@@ -289,16 +292,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut b = BudgetStore::open(tmp.path()).unwrap();
         // 把能量打到 0
-        for _ in 0..5 {
-            b.try_charge("a", 1.0).unwrap();
+        for _ in 0..(MAX_ENERGY as usize) {
+            b.try_charge("a", COST_PROPOSE).unwrap();
         }
-        // 手工把 last_update_ts 往回拨 12 小时,应该回血一半
+        // 手工把 last_update_ts 往回拨半个回血周期,应该回血一半
         let now = now_secs();
-        b.file.authors.get_mut("a").unwrap().last_update_ts = now - 12 * 3600;
+        let half_secs = (REFILL_FULL_SECS / 2.0) as u64;
+        b.file.authors.get_mut("a").unwrap().last_update_ts = now - half_secs;
         let e = b.current_energy("a");
         assert!(
             (e - MAX_ENERGY / 2.0).abs() < 0.1,
-            "expected ~2.5 after 12h, got {}",
+            "expected ~{} after {}s, got {}",
+            MAX_ENERGY / 2.0,
+            half_secs,
             e
         );
     }
@@ -311,18 +317,24 @@ mod tests {
             b.try_charge("alice", 2.0).unwrap();
         }
         let mut b2 = BudgetStore::open(tmp.path()).unwrap();
-        // 重新打开,因时间差极短,energy 应仍约 3.0
+        // 重新打开,因时间差极短,energy 应仍约 MAX_ENERGY - 2.0
         let e = b2.current_energy("alice");
-        assert!((e - 3.0).abs() < 0.01, "expected ~3.0 persisted, got {}", e);
+        let expected = MAX_ENERGY - 2.0;
+        assert!(
+            (e - expected).abs() < 0.01,
+            "expected ~{} persisted, got {}",
+            expected,
+            e
+        );
     }
 
     #[test]
     fn iter_authors_returns_sorted_with_refilled_energy() {
         let tmp = TempDir::new().unwrap();
         let mut b = BudgetStore::open(tmp.path()).unwrap();
-        b.try_charge("zebra", 1.0).unwrap(); // → 4
-        b.try_charge("alpha", 2.0).unwrap(); // → 3
-        b.try_charge("middle", 1.5).unwrap(); // → 3.5
+        b.try_charge("zebra", 1.0).unwrap();
+        b.try_charge("alpha", 2.0).unwrap();
+        b.try_charge("middle", 1.5).unwrap();
 
         let listed = b.iter_authors();
         assert_eq!(listed.len(), 3);
@@ -331,8 +343,8 @@ mod tests {
         assert_eq!(listed[1].0, "middle");
         assert_eq!(listed[2].0, "zebra");
         // 能量值近似(允许微小回血)
-        assert!((listed[0].1 - 3.0).abs() < 0.01);
-        assert!((listed[1].1 - 3.5).abs() < 0.01);
-        assert!((listed[2].1 - 4.0).abs() < 0.01);
+        assert!((listed[0].1 - (MAX_ENERGY - 2.0)).abs() < 0.01);
+        assert!((listed[1].1 - (MAX_ENERGY - 1.5)).abs() < 0.01);
+        assert!((listed[2].1 - (MAX_ENERGY - 1.0)).abs() < 0.01);
     }
 }

@@ -918,7 +918,7 @@ fn parse_cursor(id: SessionId, line: &str) -> Vec<EventEnvelope> {
     events
 }
 
-fn cursor_user_query(text: &str) -> String {
+pub(crate) fn cursor_user_query(text: &str) -> String {
     if let Some(start) = text.find("<user_query>") {
         let rest = &text[start + "<user_query>".len()..];
         return rest

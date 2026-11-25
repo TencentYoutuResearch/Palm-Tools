@@ -473,6 +473,12 @@ async fn discover_models_with_args(
     command: &str,
     args: &[String],
 ) -> Result<ModelDiscoveryResult, String> {
+    if matches!(
+        protocol.to_ascii_lowercase().as_str(),
+        "antigravity" | "agy"
+    ) {
+        return discover_antigravity(backend, command).await;
+    }
     match Backend::from_backend_key(protocol) {
         Some(Backend::Codex | Backend::Tcodex) => discover_codex(backend, command, args).await,
         Some(Backend::Codebuddy) => discover_codebuddy(backend, command, args).await,
@@ -594,9 +600,89 @@ async fn discover_cursor(backend: &str, command: &str) -> Result<ModelDiscoveryR
     })
 }
 
+fn parse_antigravity_models(text: &str) -> Vec<DiscoveredModel> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (id, label) = match trimmed.split_once('\t') {
+                Some((id, label)) => (id.trim(), label.trim()),
+                None => (trimmed, trimmed),
+            };
+            if id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))
+            {
+                return None;
+            }
+            Some(DiscoveredModel {
+                id: id.into(),
+                label: if label.is_empty() {
+                    id.into()
+                } else {
+                    label.into()
+                },
+                description: None,
+                is_default: false,
+            })
+        })
+        .collect()
+}
+
+async fn discover_antigravity(
+    backend: &str,
+    command: &str,
+) -> Result<ModelDiscoveryResult, String> {
+    let output = timeout(
+        Duration::from_secs(20),
+        cli_command(command)
+            .arg("models")
+            .env("NO_COLOR", "1")
+            .env("FORCE_COLOR", "0")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Antigravity model discovery timed out".to_string())?
+    .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Antigravity could not load models; check its CLI login".into());
+    }
+    let models = parse_antigravity_models(&String::from_utf8_lossy(&output.stdout));
+    if models.is_empty() {
+        return Err("Antigravity returned no models".into());
+    }
+    Ok(ModelDiscoveryResult {
+        backend: backend.into(),
+        source: "antigravity-cli".into(),
+        version: None,
+        custom_allowed: true,
+        models,
+        warning: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_models_parser_handles_tab_separated_output() {
+        let sample = "\
+gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)
+claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)
+Fetching available models...
+";
+        let models = parse_antigravity_models(sample);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gemini-4-hydrogen-high");
+        assert_eq!(models[0].label, "Gemini 4 Hydrogen (High)");
+        assert_eq!(models[1].id, "claude-sonnet-4-6");
+        assert_eq!(models[1].label, "Claude Sonnet 4.6 (Thinking)");
+    }
 
     #[cfg(windows)]
     #[test]

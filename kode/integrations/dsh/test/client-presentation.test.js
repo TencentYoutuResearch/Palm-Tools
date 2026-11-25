@@ -1688,6 +1688,63 @@ test('sessions_send cards collapse to the two session names and title, with stat
   assert.match(JSON.stringify(expand(card(false, true))), /"role":"img","aria-label":"通信未成功"/)
 })
 
+test('shared memory approval page registers in sidebar panellist, trailing badge, and main slot', () => {
+  const selected = []
+  const c = client(undefined, undefined, { layout: { selectPanel(id) { selected.push(id) } } })
+  const navEntry = c.ctx.slots.entries('sidebar.panellist').find(entry => entry.options.id === 'kode-memory')
+  assert.ok(navEntry)
+  assert.equal(navEntry.options.label, '共享记忆')
+  assert.equal(navEntry.options.order, 5.5)
+  const trailingEntry = c.ctx.slots.entries('sidebar.panellist.trailing').find(entry => entry.options.id === 'kode-memory')
+  assert.ok(trailingEntry)
+  const mainEntry = c.entry('main', 'kode-memory')
+  assert.ok(mainEntry)
+  const page = mainEntry()
+  assert.equal(page.type.name, 'KodeMemoryPage')
+})
+
+test('bots sidebar registers collapsible trailing toggle, larger nameplate styling, and wecom watch source', () => {
+  const c = client(undefined, undefined, { layout: { selectPanel() {} } })
+  const navEntry = c.ctx.slots.entries('sidebar.panellist').find(entry => entry.options.id === 'kode-bots')
+  assert.ok(navEntry)
+  const trailingEntry = c.ctx.slots.entries('sidebar.panellist.trailing').find(entry => entry.options.id === 'kode-bots')
+  assert.ok(trailingEntry, 'bots panellist row should register a collapse toggle in trailing slot')
+  assert.match(source, /botsCollapseStore/)
+  assert.match(source, /kode-bots-collapse/)
+  assert.match(source, /BOT_BANNER_PRESETS/)
+  assert.match(source, /topic: 'wecom\/message'/)
+  assert.match(source, /WeComBridgeCard/)
+})
+
+test('forking is single-flight, opens the child, and survives a failed title increment', async () => {
+  for (const renameFails of [false, true]) {
+    const contributions = [], opened = [], notices = []
+    let forks = 0, release
+    const gate = new Promise(resolve => { release = resolve })
+    const sessions = {
+      list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { source: { title: 'Source' } } }) },
+      binding: () => ({ ctx: { get: () => ({ input: { for: () => ({ notify: (...args) => notices.push(args) }) } }) } }),
+      fork: async options => { forks++; await gate; options.onCreated?.('child'); if (renameFails) throw new Error('fork child rename failed'); return 'child' },
+    }
+    const uiWorkspace = { openSession: id => { opened.push(id) }, forkSession(sessionId) { return sessions.fork({ sessionId, increaseTitle: true }) } }
+    const c = client(undefined, {}, {
+      sessions, uiWorkspace, inputTriggers: { sessionOf: () => ({}), registerSource: () => () => {} },
+      commandUi: { candidates: async () => [], register: value => { contributions.push(value); return () => {} }, decorate: () => () => {} },
+      remote: { commands: { list: async () => ({ ok: true, value: [] }) } },
+      get: name => name === 'uiWorkspace' ? uiWorkspace : undefined,
+    })
+    const command = contributions.find(value => value.name === 'fork')
+    const runs = [command.ui.run({ sessionId: 'source' }), uiWorkspace.forkSession('source'), uiWorkspace.forkSession('source')]
+    release(); await Promise.all(runs)
+    assert.equal(forks, 1)
+    assert.deepEqual(opened, ['child', 'child', 'child'])
+    assert.deepEqual(notices, [])
+    await uiWorkspace.forkSession('source')
+    assert.equal(forks, 2, 'a later deliberate fork is still allowed')
+    for (const dispose of c.disposers) dispose()
+  }
+})
+
 test('settings controls use native Button variants, token focus rings and a fixed dialog action layer', () => {
  assert.doesNotMatch(source, /variant: 'text'/, 'native Button has no text variant')
  for (const rule of ['.kode-agent-edit{', '.kode-agent-add{', '.kode-source-actions>button{']) {

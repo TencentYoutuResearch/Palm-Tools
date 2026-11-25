@@ -9,6 +9,7 @@ export const AGENT_TYPES = Object.freeze({
   claude: { name: 'Claude Code', executable: 'claude' },
   codebuddy: { name: 'CodeBuddy', executable: 'codebuddy' },
   cursor: { name: 'Cursor', executable: 'agent' },
+  antigravity: { name: 'Antigravity', executable: 'agy' },
   custom: { name: '自定义', executable: '' },
 })
 export const HOST_ONLY_ENV = new Set(['KODE_BRIDGE_TOKEN', 'KODE_MESSAGING_ADMIN_TOKEN_FILE', 'KODE_MESSAGING_TOKEN_FILE', 'KODE_SESSION_ID', 'KODE_HOOK_SOCK'])
@@ -171,6 +172,27 @@ export class AgentProfiles {
       const profile = prior?.profile ?? existing?.profile ?? state.profiles.find(row => row.id === profileId)
       if (!profile) throw new Error('unknown Agent profile')
       const binding = { profile: structuredClone(profile), revision: profileRevision(profile), threadId, seenInputs: [] }
+      Object.defineProperty(state.bindings, sessionId, { value: binding, enumerable: true, configurable: true, writable: true })
+      return binding
+    })
+  }
+  bindFork(sessionId, profile, { seenInputs = [], forkSource = null } = {}) {
+    if (!profile) throw new Error('unknown Agent profile')
+    const snapshot = structuredClone(profile)
+    const inputs = [...new Set(seenInputs.filter(id => typeof id === 'string' && id))]
+    return this.update(state => {
+      const existing = Object.hasOwn(state.bindings, sessionId) ? state.bindings[sessionId] : undefined
+      if (existing) {
+        if (existing.profile.id !== snapshot.id) throw new Error('start a new conversation to change its Agent configuration')
+        return existing
+      }
+      const binding = {
+        profile: snapshot,
+        revision: profileRevision(snapshot),
+        seenInputs: inputs,
+        forkPending: true,
+        ...(forkSource ? { forkSource: structuredClone(forkSource) } : {}),
+      }
       Object.defineProperty(state.bindings, sessionId, { value: binding, enumerable: true, configurable: true, writable: true })
       return binding
     })

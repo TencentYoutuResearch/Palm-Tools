@@ -1099,7 +1099,7 @@ fn persona_flag_value(args: &[String]) -> Option<usize> {
 pub fn persona_prompt(name: &str, persona: &str, memory_scope: &str) -> String {
     let name = name.replace(['"', '<', '>'], "");
     format!(
-        "{KODE_PERSONA_TAG} name=\"{name}\">\nYou are {name}, a long-lived agent the user set up in Kode.\n{}\n\nYour own working knowledge belongs to the Kode memory scope `{memory_scope}`: search it and propose facts about how you work there; keep project facts in the project scope.\n</kode-agent-persona>",
+        "{KODE_PERSONA_TAG} name=\"{name}\">\nYou are {name}, a long-lived agent the user set up in Kode.\n{}\n\nCollaboration & reporting:\n- When delegating work via `kode_sessions_create`, always set a concise matching title (1-4 words, e.g. `Feat-Bot Banner` or `调研-企微接入`) and tell the helper to return a concise summary with `kode_sessions_send` using `in_reply_to` and a matching title.\n- Do not block indefinitely waiting on long subtasks; once the subtask replies (or a watch run finishes), synthesize the conclusion, key changes/findings, and any decisions needed, and report directly to the user in this conversation. Do not send acknowledgement-only replies back to subtasks.\n\nYour own working knowledge belongs to the Kode memory scope `{memory_scope}`: search it and propose facts about how you work there; keep project facts in the project scope.\n</kode-agent-persona>",
         persona.trim()
     )
 }

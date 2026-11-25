@@ -125,6 +125,18 @@ export class CodexSession {
       return this.rpc.request('thread/resume', params, { signal })
     }
   }
+  async mountToolProxy(tools) {
+    if (!tools.length) return undefined
+    this.proxy = await createToolProxy(tools, async (name, args) => {
+      if (!this.active) throw new Error('Conversation tools require an active turn')
+      return this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.signal)
+    })
+    const definition = this.proxy.definition
+    return {
+      mcp_servers: { kode: { command: definition.command, args: definition.args, env: Object.fromEntries(definition.env.map(row => [row.name, row.value])) } },
+      developerInstructions: 'Use the current kode MCP session tools to contact other named conversations and return requested results. Fill the title parameter with a short subject when available and put the details in content. A completed reply needs no acknowledgement.',
+    }
+  }
   async open(binding, tools, signal) {
     await this.initialize(signal)
     const params = { config: { 'features.goals': true }, cwd: this.cwd, sandbox: this.handlers.policy?.().mode ?? 'read-only', approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request', ...(this.profile.defaultModel ? { model: this.profile.defaultModel } : {}) }
@@ -133,13 +145,9 @@ export class CodexSession {
     if (binding.threadId && tools.length && binding.nativeToolSchema !== this.nativeToolSchema) {
       // Resumed threads retain their original tools. An MCP mount exposes the
       // current schemas, including new parameters on tools with the same name.
-      this.proxy = await createToolProxy(tools, async (name, args) => {
-        if (!this.active) throw new Error('Conversation tools require an active turn')
-        return this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.signal)
-      })
-      const definition = this.proxy.definition
-      params.config = { ...params.config, mcp_servers: { kode: { command: definition.command, args: definition.args, env: Object.fromEntries(definition.env.map(row => [row.name, row.value])) } } }
-      params.developerInstructions = 'Use the current kode MCP session tools to contact other named conversations and return requested results. Fill the title parameter with a short subject when available and put the details in content. A completed reply needs no acknowledgement.'
+      const mounted = await this.mountToolProxy(tools)
+      params.config = { ...params.config, mcp_servers: mounted.mcp_servers }
+      params.developerInstructions = mounted.developerInstructions
     }
     const result = binding.threadId
       ? await this.resumeThread({ ...params, threadId: binding.threadId }, signal)
@@ -148,6 +156,81 @@ export class CodexSession {
     this.historyMode = result.thread.historyMode
     try { const { goal } = await this.rpc.request('thread/goal/get', { threadId: this.threadId }, { signal }); this.handlers.goal?.(goal) } catch (error) { if (signal?.aborted) throw error }
     return this.threadId
+  }
+  async forkThread(sourceThreadId, { lastTurnId, nextTurnId, canUseLatest = false } = {}, tools = [], signal) {
+    if (!sourceThreadId || (!lastTurnId && !canUseLatest)) return undefined
+    await this.initialize(signal)
+    const params = {
+      threadId: sourceThreadId,
+      config: { 'features.goals': true },
+      cwd: this.cwd,
+      sandbox: this.handlers.policy?.().mode ?? 'read-only',
+      approvalPolicy: this.handlers.approvalPolicy?.() === 'never' ? 'never' : 'on-request',
+      excludeTurns: true,
+      ...(this.profile.defaultModel ? { model: this.profile.defaultModel } : {}),
+    }
+    const callFork = async forkParams => {
+      try { return await this.rpc.request('thread/fork', forkParams, { signal }) }
+      catch (error) {
+        const archived = /\b(?:session|thread) ["']?([0-9a-f-]+)["']? is archived\b/i.exec(error.message)
+        if (!error.rpcRejected || archived?.[1] !== sourceThreadId) throw error
+        signal?.throwIfAborted()
+        await this.rpc.request('thread/unarchive', { threadId: sourceThreadId }, { signal })
+        return this.rpc.request('thread/fork', forkParams, { signal })
+      }
+    }
+    const cleanup = async () => {
+      this.threadId = undefined
+      this.historyMode = undefined
+      await this.proxy?.close()
+      this.proxy = undefined
+    }
+    try {
+      if (tools.length) {
+        const mounted = await this.mountToolProxy(tools)
+        params.config = { ...params.config, mcp_servers: mounted.mcp_servers }
+        params.developerInstructions = mounted.developerInstructions
+      }
+      let result
+      if (lastTurnId) {
+        try {
+          result = await callFork({ ...params, lastTurnId })
+        } catch (error) {
+          signal?.throwIfAborted()
+          if (!error.rpcRejected) throw error
+          // Older Codex servers reject lastTurnId; fall back to full fork and
+          // revert only the newly forked child thread (never the parent).
+          const rejectedParam = error.rpcCode === -32602 || /unknown field .*lastTurnId|lastTurnId/i.test(error.message)
+          if (!rejectedParam) { await cleanup(); return undefined }
+          if (canUseLatest) {
+            result = await callFork(params)
+          } else if (nextTurnId) {
+            result = await callFork(params)
+            const forkedId = result?.thread?.id
+            if (typeof forkedId !== 'string' || !forkedId || forkedId === sourceThreadId) { await cleanup(); return undefined }
+            this.threadId = forkedId
+            this.historyMode = result.thread.historyMode
+            if (!await this.revertHistory(nextTurnId, signal)) { await cleanup(); return undefined }
+          } else {
+            await cleanup()
+            return undefined
+          }
+        }
+      } else {
+        result = await callFork(params)
+      }
+      const forkedId = result?.thread?.id
+      if (typeof forkedId !== 'string' || !forkedId || forkedId === sourceThreadId) { await cleanup(); return undefined }
+      this.threadId = forkedId
+      this.historyMode = result.thread.historyMode
+      try { const { goal } = await this.rpc.request('thread/goal/get', { threadId: this.threadId }, { signal }); this.handlers.goal?.(goal) } catch (error) { if (signal?.aborted) throw error }
+      return this.threadId
+    } catch (error) {
+      await cleanup()
+      signal?.throwIfAborted()
+      if (error.rpcRejected) return undefined
+      throw error
+    }
   }
   async revertHistory(beforeTurnId, signal) {
     const params = { threadId: this.threadId }

@@ -36,3 +36,12 @@ test('failed install leaves no success stamp and can retry', async () => {
   await assert.rejects(f.fn('dsh'), /install failed/)
   assert.equal(f.files.has('/data/plugin.stamp'), false)
 })
+
+test('start.mjs allows fallbackNode bootstrap on Node 18..24.8 instead of hard-failing', () => {
+  assert.doesNotMatch(
+    source,
+    /if \(major < 24 \|\| \(major === 24 && minor < 9\)\) fail\(/,
+    'start.mjs must not reject Node < 24.9 when fallbackNode can be installed',
+  )
+  assert.match(source, /--engine-strict=false/)
+})

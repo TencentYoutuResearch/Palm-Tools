@@ -23,7 +23,7 @@ fn records(line:&str)->Vec<Value>{
             rows.extend(crate::parse_transcript_lines([line]).into_iter().filter(|row|row["kind"]=="text"));
             if let Some(content)=value.pointer("/message/content").and_then(Value::as_array){for block in content{
                 match block["type"].as_str(){
-                    Some("tool_use")=>rows.push(json!({"kind":"tool_call","call_id":block["id"],"name":block["name"],"arguments":block["input"]})),
+                    Some("tool_use") if block.get("id").and_then(Value::as_str).is_some()=>rows.push(json!({"kind":"tool_call","call_id":block["id"],"name":block["name"],"arguments":block["input"]})),
                     Some("tool_result")=>rows.push(json!({"kind":"tool_result","call_id":block["tool_use_id"],"text":bounded(&block["content"],4096),"is_error":block["is_error"].as_bool().unwrap_or(false)})),
                     _=>{}
                 }
@@ -83,7 +83,8 @@ fn from_tail(bytes:&[u8],cut:bool,limit:usize,before:Option<i64>)->Result<Value>
     if first>0 {timeline.drain(..first);}
     let messages=timeline.iter().filter(|row|row["kind"]=="text").cloned().collect::<Vec<_>>();
     let count=messages.len();
-    Ok(json!({"messages":messages,"timeline":timeline,"available":true,"history_window":{"count":count,"truncated":cut||omitted>0}}))
+    let available=cut||before.is_some()||!timeline.is_empty();
+    Ok(json!({"messages":messages,"timeline":timeline,"available":available,"history_window":{"count":count,"truncated":cut||omitted>0}}))
 }
 
 #[cfg(test)]
@@ -119,5 +120,30 @@ mod tests {
         let result=recent(&path,80,4096).unwrap();let timeline=result["timeline"].as_array().unwrap();
         assert_eq!(timeline.iter().map(|row|row["kind"].as_str().unwrap()).collect::<Vec<_>>(),vec!["turn_start","text","tool_call","tool_result","turn_end"]);
         assert_eq!(timeline[2]["arguments"]["cmd"],"pwd");assert_eq!(timeline[4]["time"].as_i64().unwrap()-timeline[0]["time"].as_i64().unwrap(),20000);
+    }
+    #[test]
+    fn cursor_jsonl_transcripts_unwrap_user_query_and_ignore_unlinked_tool_calls() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("cursor.jsonl");
+        let rows=[
+            json!({"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wed</timestamp>\n<user_query>\n检查一下 dsh 切换\n</user_query>"}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"/tmp/a.rs"}}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"text","text":"已经定位到根因。"},{"type":"tool_use","name":"Grep","input":{"pattern":"cursor"}}]}}),
+        ];
+        std::fs::write(&path,rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let result=recent(&path,80,4096).unwrap();
+        assert_eq!(result["available"],true);
+        assert_eq!(result["history_window"],json!({"count":2,"truncated":false}));
+        assert_eq!(result["messages"][0],json!({"role":"user","text":"检查一下 dsh 切换","kind":"text"}));
+        assert_eq!(result["messages"][1],json!({"role":"agent","text":"已经定位到根因。","kind":"text"}));
+        assert_eq!(result["timeline"].as_array().unwrap().len(),2);
+    }
+    #[test]
+    fn non_conversational_files_report_unavailable() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("meta.json");
+        std::fs::write(&path,r#"{"cwd":"/tmp/project","title":"Cursor Chat"}"#).unwrap();
+        let result=recent(&path,80,4096).unwrap();
+        assert_eq!(result["available"],false);
+        assert_eq!(result["history_window"],json!({"count":0,"truncated":false}));
+        assert!(result["messages"].as_array().unwrap().is_empty());
     }
 }

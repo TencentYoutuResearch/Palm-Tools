@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { saveNativeTab, syncNativeTabs } from '../src/workbench-import.js'
+import { backendProfile, saveNativeTab, syncNativeTabs } from '../src/workbench-import.js'
 import { NativeSessionDirectory } from '../src/native-session-directory.js'
 import { buildHistorySeed } from '../src/native-history.js'
 
@@ -315,4 +315,169 @@ test('reopening a closed (archived) conversation unarchives its stored copy', as
  const result=await importSavedSession(h.ctx,h.client,h.tab)
  assert.equal(result.sessionId,h.id);assert.deepEqual(unarchived,[h.id])
  assert.ok(!h.calls.some(row=>row[0]==='seed'),'the stored copy is reused, not imported again')
+})
+
+test('concurrent imports sharing one unregistered workspace create it once and serialize session-index writes', async () => {
+  const cwd = '/srv/shared-project'
+  let workspace
+  let workspaceCreates = 0
+  const attached = []
+  const persistedIds = new Set()
+  const registry = {
+    list: () => workspace ? [{ ...workspace, path: cwd }] : [],
+    resolveByPath: async () => workspace,
+    create: async path => {
+      workspaceCreates++
+      await new Promise(resolve => setTimeout(resolve, 20))
+      workspace = { id: 'ws-shared', path, attachSession: async id => { attached.push(id) } }
+      return workspace
+    },
+  }
+  let revision = 0
+  let indexDoc = { version: 1, imports: {} }
+  const client = {
+    call: async (path, body) => {
+      if (path.endsWith('/runtime/sessions')) return { sessions: [] }
+      if (path.endsWith('/transcript')) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+        return { available: true, messages: [] }
+      }
+      if (path.endsWith('/documents/session-index')) {
+        if (body) {
+          if (body.expected_revision !== revision) throw new Error('configuration changed')
+          indexDoc = structuredClone(body.value)
+          revision++
+        }
+        return { revision, value: structuredClone(indexDoc) }
+      }
+      return { revision: 0, value: { version: 1 } }
+    },
+  }
+  const agent = { selectModel() {}, session: {}, ctx: { sessions: { flush: async () => {} } } }
+  const services = {
+    workspaceRegistry: registry,
+    kodeAgents: { profiles: { list: () => [{ id: 'kode-codex', name: 'codex' }], bindNative: async () => {} }, recordBinding() {} },
+    kodeNativeFactory: { importHistory: async () => {} },
+    sessionController: {
+      list: async () => ({ items: [...persistedIds].map(sessionId => ({ sessionId })) }),
+      create: async req => { persistedIds.add(req.sessionId); return { sessionId: req.sessionId } },
+      resolveAgent: async () => ({ agent }),
+      rename: async () => {},
+    },
+  }
+  const ctx = { get: key => services[key] }
+  const tabs = Array.from({ length: 6 }, (_, i) => ({
+    backend_key: 'codex',
+    session_id: `thread-${i}`,
+    cwd,
+    title: `Session ${i}`,
+  }))
+  const results = await Promise.all(tabs.map(tab => importSavedSession(ctx, client, tab, { fresh: true })))
+  assert.equal(workspaceCreates, 1, 'concurrent imports must register the shared workspace only once')
+  assert.equal(attached.length, 6)
+  assert.equal(Object.keys(indexDoc.imports).length, 6)
+  for (const result of results) assert.ok(indexDoc.imports[result.sessionId], `missing import marker for ${result.sessionId}`)
+})
+
+test('backendProfile recognizes cursor and antigravity desktop backends', () => {
+  const profile = backendProfile('cursor', { command: 'cursor-agent', args: [], enabled: true })
+  assert.deepEqual(profile, { id: 'kode-cursor', name: 'cursor', type: 'cursor', executable: 'cursor-agent', args: [] })
+  const custom = backendProfile('my-cursor', { command: 'agent', protocol: 'cursor', enabled: true })
+  assert.equal(custom?.type, 'cursor')
+  const agy = backendProfile('antigravity', { command: 'agy', args: [], enabled: true })
+  assert.deepEqual(agy, { id: 'kode-antigravity', name: 'antigravity', type: 'antigravity', executable: 'agy', args: [] })
+  const customAgy = backendProfile('my-agy', { command: 'agy', protocol: 'antigravity', enabled: true })
+  assert.equal(customAgy?.type, 'antigravity')
+})
+
+test('re-imports a fresh copy and retires an existing blank zombie copy of the same native thread', async () => {
+  const cwd = '/tmp/cursor-blank-heal'
+  const zombieId = 'session-kode-zombie-blank'
+  const archived = []
+  const bindings = { [zombieId]: { profile: { id: 'kode-cursor', name: 'cursor', type: 'cursor' }, threadId: 'cursor-thread-1' } }
+  const items = [{ sessionId: zombieId, blank: true, running: false, updatedAt: 10 }]
+  const workspace = { id: 'ws-1', path: cwd, attachSession: async () => {} }
+  const client = {
+    call: async (path, body) => {
+      if (path.endsWith('/runtime/sessions')) return { sessions: [] }
+      if (path.endsWith('/transcript')) {
+        return {
+          available: true,
+          timeline: [
+            { kind: 'text', role: 'user', text: 'hello' },
+            { kind: 'text', role: 'agent', text: 'hi there' },
+          ],
+          messages: [
+            { kind: 'text', role: 'user', text: 'hello' },
+            { kind: 'text', role: 'agent', text: 'hi there' },
+          ],
+          history_window: { count: 2, truncated: false },
+        }
+      }
+      return { revision: 1, value: body?.value ?? { version: 1 } }
+    },
+  }
+  const agent = { selectModel() {}, session: {}, ctx: { sessions: { flush: async () => {} } } }
+  let importedSeed = null
+  const services = {
+    workspaceRegistry: {
+      archivedSessionIds: archived,
+      list: () => [workspace],
+      resolveByPath: async () => workspace,
+      archiveSession: async id => { archived.push(id) },
+      unarchiveSession: async () => {},
+    },
+    kodeAgents: {
+      profiles: {
+        list: () => [{ id: 'kode-cursor', name: 'cursor', type: 'cursor' }],
+        bindings,
+        binding: id => bindings[id],
+        bindNative: async (id, profileId, threadId) => {
+          bindings[id] = { profile: { id: profileId, name: 'cursor', type: 'cursor' }, threadId }
+        },
+      },
+      recordBinding() {},
+    },
+    kodeNativeFactory: {
+      importHistory: async (id, seed) => { importedSeed = { id, seed } },
+      release: async () => {},
+    },
+    sessionController: {
+      list: async () => ({ items }),
+      create: async req => { items.push({ sessionId: req.sessionId, blank: false, running: false, updatedAt: 20 }); return { sessionId: req.sessionId } },
+      resolveAgent: async () => ({ agent }),
+      rename: async () => {},
+    },
+  }
+  const ctx = { get: key => services[key] }
+  const result = await importSavedSession(ctx, client, {
+    backend_key: 'cursor',
+    session_id: 'cursor-thread-1',
+    cwd,
+    title: 'Cursor Chat',
+  })
+  assert.equal(result.imported, true)
+  assert.notEqual(result.sessionId, zombieId)
+  assert.ok(importedSeed && importedSeed.seed.length > 0, 'fresh copy should receive real history seed')
+  assert.ok(archived.includes(zombieId), 'blank zombie copy should be archived')
+})
+
+test('reopening a blank copy of an empty native thread keeps its identity', async () => {
+  const cwd = '/tmp/cursor-empty', id = 'session-kode-empty'
+  const bindings = { [id]: { profile: { id: 'kode-cursor', name: 'cursor', type: 'cursor' }, threadId: 'empty-thread' } }
+  const workspace = { id: 'ws-1', path: cwd, attachSession: async () => {} }
+  const services = {
+    workspaceRegistry: { archivedSessionIds: [], list: () => [workspace], archiveSession: async () => assert.fail('nothing to retire') },
+    kodeAgents: { profiles: { list: () => [bindings[id].profile], bindings, binding: key => bindings[key] } },
+    kodeNativeFactory: { importHistory: async () => assert.fail('empty history must not create another copy') },
+    sessionController: { list: async () => ({ items: [{ sessionId: id, blank: true, running: false, updatedAt: 1 }] }) },
+  }
+  const client = { call: async path => path.endsWith('/runtime/sessions') ? { sessions: [] }
+    : path.endsWith('/transcript') ? { available: true, timeline: [], history_window: { count: 0, truncated: false } }
+      : { revision: 1, value: { version: 1 } } }
+  const tab = { backend_key: 'cursor', session_id: 'empty-thread', cwd, title: 'Empty' }
+  for (let i = 0; i < 2; i++) {
+    const result = await importSavedSession({ get: key => services[key] }, client, tab)
+    assert.equal(result.sessionId, id); assert.equal(result.imported, false)
+  }
 })

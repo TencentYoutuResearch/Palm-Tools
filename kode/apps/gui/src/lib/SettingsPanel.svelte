@@ -594,6 +594,7 @@
                 <option value="tclaude">Tclaude</option>
                 <option value="codebuddy">CodeBuddy</option>
                 <option value="cursor">Cursor</option>
+                <option value="antigravity">Antigravity</option>
                 <option value="raw">{tr('settings.agents.raw')}</option>
               </select>
             </div>

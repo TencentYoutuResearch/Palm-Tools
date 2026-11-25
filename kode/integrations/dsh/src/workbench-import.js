@@ -7,11 +7,35 @@ import { normalizeProfile, profileRevision, profileRoute } from './agent-profile
 // These Kode Codex entries do not require an MCP setup declaration. Custom
 // executable names still require an explicit protocol declaration.
 const pendingImports = new WeakMap()
+const pendingWorkspaces = new WeakMap()
+const documentChains = new WeakMap()
 const TRANSCRIPT = '/api/v1/messaging/workbench/transcript'
 const KODE_CODEX_BACKENDS = new Set(['codex', 'native-codex', 'gateway-codex', 'tcodex'])
+
+function ensureWorkspace(registry, cwd) {
+  const existing = registry.list().find(workspace => workspace.path === cwd)
+  if (existing) return Promise.resolve(existing)
+  let pending = pendingWorkspaces.get(registry)
+  if (!pending) pendingWorkspaces.set(registry, pending = new Map())
+  const inflight = pending.get(cwd)
+  if (inflight) return inflight
+  const task = Promise.resolve().then(() => registry.create(cwd))
+  pending.set(cwd, task)
+  return task.finally(() => { if (pending.get(cwd) === task) pending.delete(cwd) })
+}
+
+function serializeDocument(client, key, operation) {
+  let chains = documentChains.get(client)
+  if (!chains) documentChains.set(client, chains = new Map())
+  const previous = chains.get(key) ?? Promise.resolve()
+  const task = previous.catch(() => {}).then(operation)
+  chains.set(key, task)
+  return task.finally(() => { if (chains.get(key) === task) chains.delete(key) })
+}
 export function backendProfile(key, config) {
   const style = config.mcp_setup?.style
-  const type = style === 'codebuddy'||config.protocol==='codebuddy'?'codebuddy':style === 'codex' ? 'codex' : style === 'claude' ? 'claude' : !style && KODE_CODEX_BACKENDS.has(key.trim().toLowerCase()) ? 'codex' : undefined
+  const lower = key.trim().toLowerCase()
+  const type = style === 'codebuddy'||config.protocol==='codebuddy'?'codebuddy':config.protocol==='cursor'||lower==='cursor'?'cursor':config.protocol==='antigravity'||lower==='antigravity'||lower==='agy'?'antigravity':style === 'codex' ? 'codex' : style === 'claude' ? 'claude' : !style && KODE_CODEX_BACKENDS.has(lower) ? 'codex' : undefined
   if (!type || config.enabled === false) return undefined
   return { id: `kode-${key}`, name: key, type, executable: config.command, args: config.args ?? [], ...(config.default_model ? { defaultModel: config.default_model } : {}) }
 }
@@ -151,20 +175,23 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   if (fresh && update?.aligned) {
     // Kode archived it when the conversation moved to a terminal.
     await registry.unarchiveSession(reuse)
-    workspace ??= await registry.create(tab.cwd)
+    workspace ??= await ensureWorkspace(registry, tab.cwd)
     await workspace.attachSession(reuse)
     await retireStaleCopies(ctx, tab.session_id, reuse)
     return { sessionId: reuse, imported: true, reloaded: true }
   }
-  const id = fresh ? freshImportIdentity(tab) : reuse
+  // A blank copy is replaced only when there is history to put in the new one;
+  // otherwise every open would leave another empty copy behind.
+  const blankCopy = Boolean(existing?.blank) && !(stored && !fresh && await emptyTranscript(client, tab))
+  const id = fresh || blankCopy ? freshImportIdentity(tab) : reuse
   const priorBinding = runtime.profiles.binding?.(id)
   if (priorBinding?.threadId && (priorBinding.threadId !== tab.session_id || priorBinding.profile.id !== profile.id)) throw new Error('Saved session identity conflicts with an existing native conversation')
   const doc = new BackendDocument(client, 'session-index'), state = await doc.read() ?? { version: 1 }
   const locallyStored = (await controller.list({})).items.some(row => row.sessionId === id)
   // Archiving closed it; opening it again (resume, a saved tab) reopens it.
   if (locallyStored && registry.archivedSessionIds?.includes(id)) await registry.unarchiveSession(id)
-  if (locallyStored && priorBinding?.threadId === tab.session_id) {
-    workspace ??= await registry.create(tab.cwd)
+  if (locallyStored && priorBinding?.threadId === tab.session_id && !blankCopy) {
+    workspace ??= await ensureWorkspace(registry, tab.cwd)
     await workspace.attachSession(id)
     if (discovered && tab.title && existing?.projections?.values?.title !== tab.title && !existing?.running) {
       await controller.rename({ sessionId: id, title: tab.title }).catch(error => ctx.logger?.warn?.('Unable to refresh native title for %s: %s', id, error.message))
@@ -173,7 +200,7 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   }
   // Shared import markers may outlive the local artifact or come from another Host.
   if (locallyStored && state.imports?.[id]?.formatVersion >= 2) {
-    workspace ??= await registry.create(tab.cwd)
+    workspace ??= await ensureWorkspace(registry, tab.cwd)
     await workspace.attachSession(id)
     return { sessionId: id, imported: true, historyWindow: state.imports[id].historyWindow }
   }
@@ -191,7 +218,7 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   // Opening a saved, owner-selected conversation also restores its workspace
   // registration. create() canonicalizes and validates an existing directory;
   // it never creates a directory or starts an Agent, and retries reuse its ID.
-  workspace ??= await registry.create(tab.cwd)
+  workspace ??= await ensureWorkspace(registry, tab.cwd)
   await factory.importHistory(id, buildHistorySeed(transcript ?? {}, selection), tab.cwd, selection)
   const previous = await controller.list({})
   let sessionId = previous.items.find(row => row.sessionId === id)?.sessionId
@@ -206,12 +233,14 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
   await controller.rename({ sessionId: id, title: tab.title || '已保存的会话' })
   await agent.ctx.sessions.flush(agent.session)
   await workspace.attachSession(id)
-  for (let attempt=0;attempt<4;attempt++) {
-    const latest=await doc.read() ?? {version:1}
-    latest.imports ??= {}; latest.imports[id] = { formatVersion: 3, historyWindow: transcript?.history_window, nativeSessionId: tab.session_id, backendKey: tab.backend_key, cwd: tab.cwd }
-    try {await doc.write(latest);break} catch (error) {if(attempt===3 || !/configuration changed/.test(error.message))throw error}
-  }
-  if (fresh) await retireStaleCopies(ctx, tab.session_id, id)
+  await serializeDocument(client, 'session-index', async () => {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const latest = await doc.read() ?? { version: 1 }
+      latest.imports ??= {}; latest.imports[id] = { formatVersion: 3, historyWindow: transcript?.history_window, nativeSessionId: tab.session_id, backendKey: tab.backend_key, cwd: tab.cwd }
+      try { await doc.write(latest); break } catch (error) { if (attempt === 7 || !/configuration changed/.test(error.message)) throw error }
+    }
+  })
+  if (fresh || blankCopy) await retireStaleCopies(ctx, tab.session_id, id)
   return { sessionId: id, imported: true, historyPending: !transcript?.available, historyWindow: transcript?.history_window }
 }
 /** The stored dsh copy of a native thread updated last, preferring one not
@@ -223,7 +252,14 @@ async function latestCopy(controller, bindings, threadId, profileId, archivedIds
   const rows = new Map((await controller.list({})).items.map(row => [row.sessionId, row]))
   const archived = new Set(archivedIds)
   return ids.filter(id => rows.has(id)).sort((a, b) =>
-    Number(!archived.has(b)) - Number(!archived.has(a)) || (rows.get(b).updatedAt ?? 0) - (rows.get(a).updatedAt ?? 0))[0]
+    Number(!rows.get(b).blank) - Number(!rows.get(a).blank) ||
+    Number(!archived.has(b)) - Number(!archived.has(a)) ||
+    (rows.get(b).updatedAt ?? 0) - (rows.get(a).updatedAt ?? 0))[0]
+}
+/** An unreadable transcript is unknown, not empty. */
+async function emptyTranscript(client, tab) {
+  const transcript = await fetchTranscript(client, tab).catch(() => null)
+  return Boolean(transcript?.available) && !(transcript.timeline ?? transcript.messages ?? []).length
 }
 function fetchTranscript(client, tab, window = {}) {
   return client.call(TRANSCRIPT, { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd, ...window })

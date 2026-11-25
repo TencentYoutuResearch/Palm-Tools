@@ -37,7 +37,11 @@ const STEPS = 4
 const progress = (step, message) => process.stdout.write(JSON.stringify({ type: 'kode.extension.progress', step, total: STEPS, message }) + '\n')
 
 const [major, minor, patch] = process.versions.node.split('.').map(Number)
-if (major < 24 || (major === 24 && minor < 9)) fail(`dsh needs Node.js >= 24.9, found ${process.version}`)
+const fallbackNode = pkg.kodeNewUi?.fallbackNode
+if (major < 18) fail(`dsh launcher needs Node.js >= 18 (or >= 24.9 directly), found ${process.version}`)
+if (!fallbackNode && (major < 24 || (major === 24 && minor < 9))) {
+  fail(`dsh needs Node.js >= 24.9, found ${process.version}`)
+}
 if (!process.env.KODE_WORKBENCH_CONNECTION) fail('Kode did not pass KODE_WORKBENCH_CONNECTION')
 
 const runtime = join(data, 'runtime')
@@ -58,9 +62,18 @@ const dsh = await withInstallLock(data, async () => {
 }, { onWait: () => progress(1, '正在等待另一个 Kode 进程完成 dsh 安装') })
 serve()
 
+async function readPackageVersion(path) {
+  if (!existsSync(path)) return null
+  try {
+    return JSON.parse(await readFile(path, 'utf8')).version ?? null
+  } catch {
+    return null
+  }
+}
+
 async function ensureNode() {
-  // The launcher can run on an older Node than the pinned dsh runtime.
-  const fallbackNode = pkg.kodeNewUi.fallbackNode
+  // The launcher can run on an older Node (e.g. Node 18/20/22/24.0-24.22.2)
+  // than the pinned dsh runtime; download the private Node 24 binary when needed.
   const supportsDshNode = (major === 24 && (minor > 22 || (minor === 22 && patch >= 3)))
     || (major === 26 && (minor > 13 || (minor === 13 && patch >= 1))) || major > 26
   if (fallbackNode && !supportsDshNode) {
@@ -68,10 +81,11 @@ async function ensureNode() {
     const nodeBin = join(nodeHome, 'node_modules', 'node', 'bin')
     const nodeManifest = join(nodeHome, 'node_modules', 'node', 'package.json')
     const executable = process.platform === 'win32' ? 'node.exe' : 'node'
-    if (!existsSync(join(nodeBin, executable)) || !existsSync(nodeManifest)
-        || JSON.parse(await readFile(nodeManifest, 'utf8')).version !== fallbackNode) {
+    if (!existsSync(join(nodeBin, executable)) || (await readPackageVersion(nodeManifest)) !== fallbackNode) {
       progress(1, `正在安装 dsh 专用 Node.js ${fallbackNode}`)
-      run('npm', ['install', '--no-audit', '--no-fund', '--prefix', nodeHome, `node@${fallbackNode}`])
+      log(`current Node.js is ${process.version}; installing private node@${fallbackNode} into ${nodeHome}`)
+      await mkdir(nodeHome, { recursive: true })
+      run('npm', ['install', '--no-audit', '--no-fund', '--engine-strict=false', '--prefix', nodeHome, `node@${fallbackNode}`])
     }
     env.PATH = [nodeBin, env.PATH].filter(Boolean).join(delimiter)
   } else {
@@ -82,14 +96,14 @@ async function ensureNode() {
 async function ensureDsh() {
   const bin = join(runtime, 'node_modules/.bin/dsh')
   const installed = join(runtime, 'node_modules/@deepseek-ai/dsh/package.json')
-  const current = existsSync(installed) ? JSON.parse(await readFile(installed, 'utf8')).version : null
+  const current = await readPackageVersion(installed)
   if (current !== dshVersion || !existsSync(bin) || !existsSync(join(runtime, 'install.complete'))) {
     await rm(join(runtime, 'install.complete'), { force: true })
     await rm(join(data, 'plugin.stamp'), { force: true })
     progress(1, `正在安装 dsh ${dshVersion} 运行环境（仅首次，约 1–3 分钟）`)
     log(`installing @deepseek-ai/dsh@${dshVersion} (first start can take a few minutes)`)
     if (!existsSync(join(runtime, 'package.json'))) await writeFile(join(runtime, 'package.json'), '{"private":true}\n')
-    run('npm', ['install', '--no-audit', '--no-fund', '--prefix', runtime, `@deepseek-ai/dsh@${dshVersion}`])
+    run('npm', ['install', '--no-audit', '--no-fund', '--engine-strict=false', '--prefix', runtime, `@deepseek-ai/dsh@${dshVersion}`])
     await writeFile(join(runtime, 'install.complete'), dshVersion + '\n')
   }
   return bin

@@ -14,6 +14,7 @@ import { askAcpForm } from './acp-questions.js'
 import { acpToolItem } from './native-tools.js'
 import { resolveAdvertisedModel } from './model-alias.js'
 import { modeAllowed } from './native-commands.js'
+import { ensureCursorAcpSession, ensureCursorCliChat } from './cursor-storage.js'
 
 const flattenOptions = options => (options ?? []).flatMap(o => o.options ?? [o])
 const effortOption = state => state?.configOptions?.find(option => option.type === 'select' && (option.category === 'thought_level' || /(?:^|[_-])effort(?:$|[_-])/i.test(option.id)))
@@ -50,7 +51,7 @@ export class AcpSession {
       this.lifetime.signal.throwIfAborted()
       this.process = spawnAgent(process.execPath, [fileURLToPath(import.meta.resolve('@agentclientprotocol/claude-agent-acp/dist/index.js'))], this.cwd, { ...this.profile.env, CLAUDE_CODE_EXECUTABLE: launcher })
     } else {
-      this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
+      this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' || this.profile.type === 'antigravity' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
     }
     const app = client({ name: 'kode-dsh' })
     // Preserve native extension updates alongside the standard ACP updates.
@@ -90,7 +91,13 @@ export class AcpSession {
   request(method, params, signal = this.lifetime.signal, timeoutMs = 15000) {
     const fused = AbortSignal.any([this.lifetime.signal, signal, ...(timeoutMs ? [AbortSignal.timeout(timeoutMs)] : [])])
     fused.throwIfAborted()
-    return abortable(this.connection.agent.request(method, params, { cancellationSignal: fused }), fused)
+    return abortable(this.connection.agent.request(method, params, { cancellationSignal: fused }), fused).catch(error => {
+      const detail = typeof error?.data?.message === 'string' ? error.data.message.trim() : ''
+      if (detail && typeof error.message === 'string' && !error.message.includes(detail)) {
+        error.message = `${error.message}: ${detail}`
+      }
+      throw error
+    })
   }
   initialize(signal) {
     return this.initialized ??= (async () => {
@@ -129,6 +136,7 @@ export class AcpSession {
       }
     } }
     try {
+      if (this.profile.type === 'cursor') await ensureCursorAcpSession(threadId, this.cwd, { ...process.env, ...this.profile.env })
       await this.request('session/load', { sessionId: threadId, cwd: this.cwd, mcpServers: [] }, signal)
       return { available: true, timeline: messages, history_window: { count: messages.length, truncated } }
     } finally { this.replay = undefined }
@@ -174,6 +182,115 @@ export class AcpSession {
       if (this.rpc.closed) throw error
     } finally { this.replay = undefined }
   }
+  async forkBranch(sourceThreadId, { claudeBoundary, canUseLatest = false } = {}, tools = [], signal = this.lifetime.signal) {
+    if (!sourceThreadId) return undefined
+    signal.throwIfAborted()
+    await this.initialize(signal)
+    const capabilities = this.info.agentCapabilities
+    if (!capabilities?.sessionCapabilities?.fork) return undefined
+    let forkMeta
+    if (!canUseLatest) {
+      if (!claudeBoundary?.lastAssistantText || !capabilities.loadSession) return undefined
+      const { lastAssistantText, nextUserText, occurrence = 1, fingerprint } = claudeBoundary
+      const maxLen = Math.max(lastAssistantText.length, nextUserText?.length ?? 0)
+      const entries = []
+      let row
+      const settle = () => {
+        if (row) entries.push(row)
+        row = undefined
+      }
+      this.replay = { threadId: sourceThreadId, add: update => {
+        const role = update.sessionUpdate === 'user_message_chunk' ? 'user' : update.sessionUpdate === 'agent_message_chunk' ? 'agent' : undefined
+        if (!role) {
+          if (['tool_call', 'tool_call_update', 'plan'].includes(update.sessionUpdate)) { settle(); entries.push({ role: 'tool' }) }
+          return
+        }
+        const id = update.messageId
+        if (!id) { settle(); entries.push({ role: 'unknown' }); return }
+        if (id !== row?.id || role !== row.role) { settle(); row = { id, role, text: '' } }
+        if (update.content?.type !== 'text' || row.text === null || row.text.length + update.content.text.length > maxLen) row.text = null
+        else row.text += update.content.text
+      } }
+      try {
+        await this.request('session/load', { sessionId: sourceThreadId, cwd: this.cwd, mcpServers: [] }, signal)
+        settle()
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (this.rpc.closed) throw error
+        return undefined
+      } finally { this.replay = undefined }
+      let found
+      if (nextUserText) {
+        const paired = []
+        for (let i = 0; i < entries.length - 1; i++) {
+          if (entries[i].role === 'agent' && entries[i].text === lastAssistantText && entries[i + 1].role === 'user' && entries[i + 1].text === nextUserText) {
+            paired.push(entries[i].id)
+          }
+        }
+        if (paired.length === 1) found = paired[0]
+      }
+      if (!found) {
+        const matching = entries.filter(entry => entry.role === 'agent' && entry.text === lastAssistantText)
+        if (occurrence >= 1 && matching.length >= occurrence) found = matching[occurrence - 1].id
+      }
+      if (!found) return undefined
+      forkMeta = {
+        jetbrains: {
+          air: {
+            fork: {
+              version: 1,
+              messageId: found,
+              ...(fingerprint ? { messageFingerprint: fingerprint } : {}),
+              ...(occurrence ? { messageOccurrence: occurrence } : {}),
+            },
+          },
+        },
+      }
+    }
+    const mcpServers = []
+    if (tools.length) {
+      this.proxy = await createToolProxy(tools, async (name, args) => {
+        if (!this.active) throw new Error('Agent tools require an active conversation turn')
+        return this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.promptSignal ?? this.active.signal)
+      })
+      mcpServers.push(this.proxy.definition)
+    }
+    const claudeMeta = typeof this.profile.autoCompactEnabled === 'boolean'
+      ? { claudeCode: { options: { settings: { autoCompactEnabled: this.profile.autoCompactEnabled } } } }
+      : {}
+    const meta = { ...claudeMeta, ...(forkMeta ?? {}) }
+    this.opening = true
+    try {
+      const result = await this.request('session/fork', {
+        sessionId: sourceThreadId,
+        cwd: this.cwd,
+        mcpServers,
+        ...(Object.keys(meta).length ? { _meta: meta } : {}),
+      }, signal)
+      const forkedId = result?.sessionId
+      if (typeof forkedId !== 'string' || !forkedId || forkedId === sourceThreadId) {
+        this.setupUpdates.length = 0
+        await this.proxy?.close(); this.proxy = undefined
+        return undefined
+      }
+      if (result.modes || result.configOptions || result.models) {
+        this.tools = tools
+        this.threadId = forkedId
+        this.state = result
+        for (const update of this.setupUpdates.splice(0)) this.update(update)
+        return { sessionId: forkedId, opened: true }
+      }
+      this.setupUpdates.length = 0
+      await this.proxy?.close(); this.proxy = undefined
+      return { sessionId: forkedId, opened: false }
+    } catch (error) {
+      this.setupUpdates.length = 0
+      await this.proxy?.close(); this.proxy = undefined
+      signal?.throwIfAborted()
+      if (this.rpc.closed) throw error
+      return undefined
+    } finally { this.opening = false }
+  }
   async open(binding, tools, signal = this.lifetime.signal) {
     signal.throwIfAborted()
     await this.initialize(signal)
@@ -192,6 +309,7 @@ export class AcpSession {
       const resume = this.info.agentCapabilities?.sessionCapabilities?.resume
       if (!this.info.agentCapabilities?.loadSession && !resume) throw new Error('This ACP Agent cannot restore saved conversations; it will not silently start a new one')
       this.threadId = binding.threadId
+      if (this.profile.type === 'cursor') await ensureCursorAcpSession(this.threadId, this.cwd, { ...process.env, ...this.profile.env })
       this.state = await this.request(resume ? 'session/resume' : 'session/load', { sessionId: this.threadId, cwd: this.cwd, mcpServers, ...settings }, signal) ?? {}
     } else {
       this.state = await this.request('session/new', { cwd: this.cwd, mcpServers, ...settings }, signal)
@@ -224,7 +342,7 @@ export class AcpSession {
     const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
     if (this.profile.fixedPolicy && (policy.mode !== this.profile.fixedPolicy.mode || (this.handlers.approvalPolicy?.() ?? 'ask') !== this.profile.fixedPolicy.approval)) throw new Error('此 dsh ACP 版本不支持运行中修改权限，请新建会话应用新的权限。')
     const available = this.state.modes?.availableModes ?? []
-    const preferred = policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : policy.mode==='danger-full-access'?['bypassPermissions','fullAccess','yolo','default','agent','code']:['acceptEdits','default','agent','code']
+    const preferred = policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : policy.mode==='danger-full-access'?['bypassPermissions','fullAccess','yolo','auto','default','agent','code']:['acceptEdits','accept-edits','default','agent','code']
     const requestedMode = this.handlers.mode?.()
     const mode = requestedMode && modeAllowed(requestedMode, policy.mode) ? available.find(mode => mode.id === requestedMode) : preferred.map(id => available.find(m => m.id === id)).find(Boolean)
     if (policy.mode === 'read-only' && !mode && !this.profile.policyManagedByHost) throw new Error('This ACP Agent advertises no read-only mode; choose an Agent with one or explicitly change the session file policy')
@@ -460,6 +578,9 @@ export class AcpSession {
       yield { method: 'turn/completed', params: { threadId: this.threadId, turn: { id: active.turnId, status: 'completed' } } }
     } finally {
       abortSignal.removeEventListener('abort', abort)
+      if (this.profile.type === 'cursor' && this.threadId) {
+        await ensureCursorCliChat(this.threadId, this.cwd, { ...process.env, ...this.profile.env }).catch(() => {})
+      }
       if (!completed) await this.close()
       this.active = undefined
     }

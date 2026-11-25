@@ -195,6 +195,16 @@ pub fn resolve_session_path(backend: Backend, cwd: &Path, session_id: &str) -> O
     find_session_file_by_id(backend, session_id)
 }
 
+/// 解析可读取对话内容的 transcript JSONL 路径。
+/// Cursor 的 `resolve_session_path` 指向 `chats/**/meta.json` 供 meta watcher 使用，
+/// 真正的对话日志在 `projects/<slug>/agent-transcripts/<id>/<id>.jsonl`。
+pub fn resolve_transcript_path(backend: Backend, cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    if backend == Backend::Cursor {
+        return crate::session::cursor_tail::resolve_cursor_transcript_path(cwd, session_id);
+    }
+    resolve_session_path(backend, cwd, session_id)
+}
+
 /// 在 backend 的 projects 根目录下全局扫描 `{session_id}.jsonl`。
 /// 用于 resume 时 cwd 不确定的场景。
 fn find_session_file_by_id(backend: Backend, session_id: &str) -> Option<PathBuf> {

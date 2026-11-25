@@ -1403,15 +1403,21 @@
     if (modeTimer) clearTimeout(modeTimer)
     modeTimer = null
   })
+  function clearModeCover() {
+    modeTarget = null
+    if (modeTimer) clearTimeout(modeTimer)
+    modeTimer = null
+  }
   function switchMode(mode: UiMode) {
     if ($switchProgress || modeTarget) return
     terminalPeek = null
     coverModeSwitch(mode)
     modeMoving = true
     void setUiMode(mode)
-      .catch((e) =>
-        pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail: e instanceof Error ? e.message : String(e), durationMs: 8000 }),
-      )
+      .catch((e) => {
+        clearModeCover()
+        pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail: e instanceof Error ? e.message : String(e), durationMs: 8000 })
+      })
       .finally(() => (modeMoving = false))
   }
   function migrationFailed(tab: TabInfo, message: string) {
@@ -1818,7 +1824,11 @@
       const persisted = await ipc.getPersistedTabs()
       // Reopening in the view: its runtime comes up first, so conversations
       // open there directly instead of as terminals that then move over.
-      const viewBackends = $uiMode === 'view' ? await prepareViewRestore() : null
+      const viewBackends = $uiMode === 'view'
+        ? await prepareViewRestore((detail) =>
+            pushToast({ severity: 'error', title: tr('extensions.switch.failed'), detail, durationMs: 10_000 }),
+          )
+        : null
       if (persisted && !viewBackends) autostartRuntimeHosts(persisted)
       if (persisted && persisted.length > 0) {
         const localRestoredIds: SessionId[] = []
@@ -2911,7 +2921,7 @@
       <div class="term-wrapper" class:visible={isActive} inert={!isActive}>
         {#if extTarget}
           {#if isActive}
-            <ExtensionViewPort target={extTarget} sessionRef={tab?.dshSessionId} visible={isActive} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} />
+            <ExtensionViewPort target={extTarget} sessionRef={tab?.dshSessionId} visible={isActive} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} onFallbackToTui={() => switchMode('tui')} />
           {/if}
         {:else if tab?.sharedRuntime}
           <!-- TUI mode never opens the view: this conversation is still in
@@ -2944,7 +2954,7 @@
     {/each}
     {#if viewHome && dshView}
       <div class="term-wrapper visible">
-        <ExtensionViewPort target={dshView} sessionRef={undefined} visible={true} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} />
+        <ExtensionViewPort target={dshView} sessionRef={undefined} visible={true} blocked={overlayBlocked || !!$switchProgress} bind:phase={extPhase} onFallbackToTui={() => switchMode('tui')} />
       </div>
     {/if}
     {#if panelView}

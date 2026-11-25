@@ -13,6 +13,7 @@ import { humanInput, terminalOnlyCommands } from './native-commands.js'
 import { pendingShellContext } from './native-shell.js'
 import { classifyCommands } from './command-skills.js'
 import { branchHistoryInput, claudeHistoryBoundary, editedHistoryInput, latestHistoryEdit, nativeHistoryBoundary, rejectedLegacyHistory } from './history-edit.js'
+import { forkHistoryInput, isParentStillAtBoundary } from './session-fork.js'
 import { nativeInput } from './native-input.js'
 import { SessionAppearance } from './session-appearance.js'
 import { fastPreference, withModelVariantFast } from './model-fast.js'
@@ -250,11 +251,12 @@ export class AgentRuntimeAdapter {
     }
     let runtime = await createNativeSession(profile, cwd, handlers)
     try {
-      let openedId, resumeId = binding.threadId, bootstrap = false
+      let openedId, resumeId = binding.threadId, bootstrap = false, forkBootstrap = false
+      const forkInit = Boolean(binding.forkPending && !binding.threadId)
       if (edit) {
         const events = agent.session.snapshotEvents()
         resumeId = undefined
-        if (runtime.revertHistory) {
+        if (runtime.revertHistory && !forkInit) {
           const before = nativeHistoryBoundary(events, edit, binding.threadId)
           if (before) {
             openedId = await runtime.open(binding, tools, signal)
@@ -265,11 +267,39 @@ export class AgentRuntimeAdapter {
               openedId = undefined
             }
           }
-        } else if (binding.profile.type === 'claude' && binding.threadId) {
-          const boundary = claudeHistoryBoundary(agent.session, events, edit)
-          if (boundary) resumeId = await runtime.forkHistory(binding.threadId, boundary, signal)
+        } else if (binding.profile.type === 'claude') {
+          const sourceThreadId = binding.threadId ?? binding.forkSource?.threadId
+          if (sourceThreadId) {
+            const boundary = claudeHistoryBoundary(agent.session, events, edit)
+            if (boundary) resumeId = await runtime.forkHistory(sourceThreadId, boundary, signal)
+          }
         }
         bootstrap = !resumeId
+      } else if (forkInit) {
+        const forkSource = binding.forkSource
+        if (forkSource?.threadId) {
+          const canUseLatest = await isParentStillAtBoundary(this.ctx, forkSource, signal)
+          if (runtime.forkThread) {
+            openedId = await runtime.forkThread(forkSource.threadId, {
+              lastTurnId: forkSource.lastNativeTurnId,
+              nextTurnId: forkSource.nextNativeTurnId,
+              canUseLatest,
+            }, tools, signal)
+            if (openedId) resumeId = openedId
+          } else if (runtime.forkBranch) {
+            const forked = await runtime.forkBranch(forkSource.threadId, {
+              claudeBoundary: binding.profile.type === 'claude' ? forkSource.claudeBoundary : undefined,
+              canUseLatest,
+            }, tools, signal)
+            if (forked?.opened) {
+              openedId = forked.sessionId
+              resumeId = forked.sessionId
+            } else if (forked?.sessionId) {
+              resumeId = forked.sessionId
+            }
+          }
+        }
+        forkBootstrap = !resumeId
       }
       const threadId = openedId ?? await runtime.open({ ...binding, threadId: resumeId }, tools, signal)
       const priorThreads = binding.supersededThreads ?? []
@@ -281,6 +311,7 @@ export class AgentRuntimeAdapter {
           ...(runtime.nativeToolSchema ? { nativeToolSchema: runtime.nativeToolSchema } : {}),
         } : {}),
         ...(edit ? { historyEditId: edit.data.id, historyEditBootstrap: bootstrap, supersededThreads } : {}),
+        ...(forkInit ? { forkPending: false, forkBootstrap } : {}),
       })
       await this.onThread(agent)
       const closeNative = runtime.close.bind(runtime)
@@ -353,11 +384,15 @@ export class AgentRuntimeAdapter {
         this.live.set(agent.id, runtime)
         binding = this.profiles.binding(agent.id) ?? binding
       }
-      const history = edit ? binding.historyEditBootstrap ? editedHistoryInput(agent.session, edit) : [] : branchHistoryInput(agent.session, binding, messages.map(message => message.id))
+      const history = edit
+        ? binding.historyEditBootstrap ? editedHistoryInput(agent.session, edit) : []
+        : binding.forkBootstrap
+          ? forkHistoryInput(agent.session)
+          : branchHistoryInput(agent.session, binding, messages.map(message => message.id))
       // Slash commands can replace the entire native prompt, including the
       // retained prefix. Deliver edits requiring a bootstrap as plain input.
       if (history.length) command = undefined
-      const context = command || options.nativeContinuation || binding.historyEditBootstrap || binding.historyBranchRecovered && history.length
+      const context = command || options.nativeContinuation || binding.historyEditBootstrap || binding.forkBootstrap || binding.historyBranchRecovered && history.length
         ? [] : pendingShellContext(agent.session, editState?.ranges)
       const attachments = (agent.ctx.get ? agent.ctx.get('attachments') : agent.ctx.attachments) ?? (this.ctx.get ? this.ctx.get('attachments') : this.ctx.attachments)
       const input = [...history, ...await nativeInput([...context, ...messages], { attachments, codex: profile.type === 'codex' || profile.protocol === 'codex', signal })]
@@ -368,7 +403,7 @@ export class AgentRuntimeAdapter {
       const skillNames = messages.flatMap(message => [...(['user', 'human'].includes(message.source?.kind) ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '').matchAll(/(?:^|\s)\$([a-zA-Z][a-zA-Z0-9_:-]*)\b/g)].map(match => match[1]))
       // Commit admission before sending. A crash cannot automatically repeat a
       // native turn with potentially irreversible tools; the user may follow up.
-      await this.profiles.patchBinding(agent.id, { ...(binding.historyEditBootstrap ? { historyEditBootstrap: false } : {}), ...(!edit && history.length ? { historyBootstrapped: true } : {}), seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
+      await this.profiles.patchBinding(agent.id, { ...(binding.historyEditBootstrap ? { historyEditBootstrap: false } : {}), ...(binding.forkBootstrap ? { forkBootstrap: false } : {}), ...(!edit && !binding.forkBootstrap && history.length ? { historyBootstrapped: true } : {}), seenInputs: [...seen, ...messages.map(m => m.id)], inFlight: { inputIds: messages.map(m => m.id), startedAt: Date.now() } })
       if (context.length) appendPluginRecord(agent.session, 'plugin:kode/shell-context-consumed', { ids: context.map(row => row.id) })
       await agent.ctx.parallel('session/flush', agent.session)
       let text = '', reasoning = '', textIndex, reasoningIndex, textItemId, nextIndex = 0

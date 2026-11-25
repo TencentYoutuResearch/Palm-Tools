@@ -15,6 +15,18 @@ import { invoke } from '@tauri-apps/api/core'
 import { ENDPOINT_LOCAL, extensionIpc, ipc, type PersistedTab, type SessionId } from './ipc'
 import { activeId, closeTab, mountedIds, newTab, selectTab, syncSharedSessions, tabs, type TabInfo } from './sessions'
 import { sessionViews, viewForRuntime, type SessionViewTarget } from './extensions'
+import {
+  batchCurrentStep,
+  createLimiter,
+  partitionTuiTargets,
+  reorderAfterBatch,
+  runPool,
+  SnapshotPoller,
+  targetActiveAfterBatch,
+  type SwitchStep,
+} from './runtime_switch_batch'
+
+export type { SwitchStep }
 
 type RuntimeRow = {
   id: number
@@ -50,7 +62,6 @@ export async function loadUiMode(): Promise<void> {
   uiMode.set(stored === 'view' ? 'view' : 'tui')
 }
 
-export type SwitchStep = 'start' | 'stop' | 'import' | 'open' | 'resume'
 export type SwitchProgress = {
   to: 'view' | 'tui'
   title: string
@@ -64,7 +75,6 @@ export type SwitchProgress = {
 }
 /** The mode switch in flight, if any; drives the progress overlay. */
 export const switchProgress = writable<SwitchProgress | null>(null)
-const step = (current: SwitchStep) => switchProgress.update((p) => (p ? { ...p, current } : p))
 
 /**
  * Conversations caught half-way through a move. Kode keeps one list of open
@@ -89,9 +99,13 @@ function writeRoster(rows: RosterEntry[]) {
 function forget(sessionId: string) {
   writeRoster(readRoster().filter((row) => row.sessionId !== sessionId))
 }
-function remember(tab: TabInfo) {
-  const rows = readRoster().filter((row) => row.sessionId !== tab.sessionId)
-  rows.push({ backendKey: tab.backendKey, sessionId: tab.sessionId!, cwd: tab.cwd!, permissionMode: tab.permissionMode })
+function rememberAll(list: TabInfo[]) {
+  if (!list.length) return
+  const adding = new Set(list.map((tab) => tab.sessionId))
+  const rows = readRoster().filter((row) => !adding.has(row.sessionId))
+  for (const tab of list) {
+    rows.push({ backendKey: tab.backendKey, sessionId: tab.sessionId!, cwd: tab.cwd!, permissionMode: tab.permissionMode })
+  }
   writeRoster(rows)
 }
 
@@ -102,13 +116,17 @@ export const nativeKey = (tab: TabInfo) => `${tab.backendKey}:${tab.sessionId}`
 const runtimeSnapshot = () => invoke<RuntimeSnapshot>('shared_runtime_sessions')
 const dshTarget = () => viewForRuntime(get(sessionViews), 'dsh')
 
+const SNAPSHOT_POLL_MS = 150
+const VIEW_IMPORT_CONCURRENCY = 8
+const TUI_RESUME_CONCURRENCY = 4
+
 async function waitFor<T>(what: string, timeoutMs: number, probe: () => Promise<T | null | undefined | false>): Promise<T> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const value = await probe().catch(() => null)
     if (value) return value
     if (Date.now() > deadline) throw new Error(what)
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_POLL_MS))
   }
 }
 
@@ -125,23 +143,53 @@ export function movableToTui(tab: TabInfo, target: SessionViewTarget): boolean {
 /** Between turns, with nothing waiting on the user. */
 const settled = (tab: TabInfo) => tab.status === 'idle' && !tab.attention
 
-function placeAt(id: SessionId, index: number) {
-  tabs.update((list) => {
-    const from = list.findIndex((tab) => tab.id === id)
-    if (from < 0 || index < 0) return list
-    const next = [...list]
-    const [moved] = next.splice(from, 1)
-    next.splice(Math.min(index, next.length), 0, moved)
-    return next
-  })
+function restoreOrderAndFocus(
+  initialOrder: SessionId[],
+  previousActive: SessionId | null,
+  replacements: Map<SessionId, SessionId>,
+) {
+  tabs.update((list) => reorderAfterBatch(list, initialOrder, replacements))
+  const targetActive = targetActiveAfterBatch(previousActive, replacements, get(tabs))
+  if (targetActive != null) selectTab(targetActive)
 }
 
-/** Spawning a tab activates it; a background move must not steal focus. */
-function restoreFocus(previous: SessionId | null, moved: SessionId, replacement: SessionId | null) {
-  if (previous === moved) {
-    if (replacement != null) selectTab(replacement)
-  } else if (previous != null && get(tabs).some((tab) => tab.id === previous)) {
-    selectTab(previous)
+function createBatchProgress(
+  mode: UiMode,
+  announce: boolean,
+  target: SessionViewTarget,
+  items: TabInfo[],
+  steps: SwitchStep[],
+) {
+  const stages = new Map<SessionId, SwitchStep>(items.map((tab) => [tab.id, steps[0]]))
+  const total = items.length
+  let done = 0
+  let title = total === 1 ? (items[0]?.title ?? '') : ''
+  const emit = () => {
+    if (!announce) return
+    switchProgress.set({
+      to: mode,
+      title,
+      steps,
+      current: batchCurrentStep(steps, stages.values()),
+      count: total > 1 ? { current: done, total } : null,
+      extension: target.extension,
+      viewTitle: target.view.title,
+    })
+  }
+  emit()
+  return {
+    stage(id: SessionId, next: SwitchStep, tabTitle?: string) {
+      stages.set(id, next)
+      if (total === 1 || tabTitle) title = tabTitle ?? title
+      emit()
+    },
+    finish(id: SessionId, tabTitle?: string) {
+      if (!stages.has(id)) return
+      stages.delete(id)
+      done++
+      if (tabTitle) title = tabTitle
+      emit()
+    },
   }
 }
 
@@ -156,8 +204,10 @@ async function startHost(target: SessionViewTarget) {
  * Starting in the view mode: bring the view's runtime up before conversations
  * are restored, so they open there directly instead of as terminals first.
  * Resolves with the backends it hosts, or null to restore as terminals.
+ * If startup fails, self-heal back into TUI mode so the app is never stranded
+ * in a broken view mode across restarts.
  */
-export async function prepareViewRestore(): Promise<string[] | null> {
+export async function prepareViewRestore(onFallback?: (detail: string) => void): Promise<string[] | null> {
   const target = dshTarget()
   if (get(uiMode) !== 'view' || !target?.view.runtime) return null
   try {
@@ -165,7 +215,11 @@ export async function prepareViewRestore(): Promise<string[] | null> {
     await syncSharedSessions()
     return target.view.backends
   } catch (error) {
-    console.warn('view runtime unavailable; restoring terminals first:', error)
+    const detail = error instanceof Error ? error.message : String(error)
+    console.warn('view runtime unavailable; falling back to terminals:', error)
+    uiMode.set('tui')
+    void invoke('set_session_view', { mode: 'tui' }).catch((e) => console.warn('session view fallback not saved:', e))
+    onFallback?.(detail)
     return null
   }
 }
@@ -202,7 +256,7 @@ export async function alignSharedTabs(expected: OpenIdentity[]) {
   const open = new Set(expected.flatMap(identity))
   const extra = get(tabs).filter((tab) => tab.sharedRuntime && settled(tab)
     && !identity({ backend_key: tab.backendKey, session_id: tab.sessionId, dsh_session_id: tab.dshSessionId }).some((key) => open.has(key)))
-  for (const tab of extra) await closeTab(tab.id).catch((error) => console.warn('closing a session the open list no longer has failed:', error))
+  await Promise.all(extra.map((tab) => closeTab(tab.id).catch((error) => console.warn('closing a session the open list no longer has failed:', error))))
 }
 
 /** Align once the view's runtime comes online, for a start in the terminal
@@ -216,69 +270,122 @@ export function alignWhenOnline(expected: OpenIdentity[]) {
     .catch(() => {})
 }
 
-/** PTY → extension runtime. Resolves with the runtime-hosted tab id. */
-async function moveToView(tab: TabInfo, target: SessionViewTarget): Promise<SessionId> {
+/**
+ * Batch PTY → extension runtime.
+ * Stops all eligible terminals concurrently so the GUI bridge coalesces their
+ * exits, shares one snapshot poller for exit/open detection, runs imports with
+ * bounded concurrency, and restores original tab order & focus once done.
+ */
+async function moveBatchToView(activeDue: TabInfo[], target: SessionViewTarget, announce: boolean) {
   const runtime = target.view.runtime!
-  const native = tab.sessionId!
-  const index = get(tabs).findIndex((t) => t.id === tab.id)
-  const previous = get(activeId)
-  step('stop')
-  // Until the view holds it; closing it there later is final.
-  remember(tab)
-  await closeTab(tab.id)
-  try {
-    await waitFor('the terminal session did not stop', 15_000, async () =>
-      !(await runtimeSnapshot()).sessions.some((row) => row.runtime === 'gui' && row.session_uuid === native && row.status !== 'exited'),
-    )
-    step('import')
-    const imported = await extensionIpc.runtimeImport(runtime, {
-      backend_key: tab.backendKey,
-      session_id: native,
-      cwd: tab.cwd!,
-      title: tab.title || undefined,
-    })
-    step('open')
-    const id = await waitFor('the structured session did not appear', 15_000, async () => {
-      await syncSharedSessions()
-      const row = get(tabs).find((t) => t.sharedRuntime && (imported.id != null ? t.id === imported.id : t.dshSessionId === imported.runtime_session_id))
-      return row?.id
-    })
-    forget(native)
-    placeAt(id, index)
-    restoreFocus(previous, tab.id, id)
-    return id
-  } catch (error) {
-    // Hand the conversation back to a terminal rather than leave it nowhere.
-    const back = await newTab(tab.backendKey, { cwd: tab.cwd, resumeSessionId: native, permissionMode: tab.permissionMode, endpointId: ENDPOINT_LOCAL }).catch(() => null)
-    if (back) { forget(native); placeAt(back.id, index) }
-    restoreFocus(previous, tab.id, back?.id ?? null)
-    throw error
-  }
+  const initialOrder = get(tabs).map((t) => t.id)
+  const previousActive = get(activeId)
+  const replacements = new Map<SessionId, SessionId>()
+  const progress = createBatchProgress('view', announce, target, activeDue, ['stop', 'import', 'open'])
+  // Until the view holds them; closing them there later is final.
+  rememberAll(activeDue)
+  // Fire all terminal kills together so backend_runtime.rs coalesces exits into one publish.
+  await Promise.all(activeDue.map((tab) => closeTab(tab.id)))
+  const exitPoller = new SnapshotPoller(SNAPSHOT_POLL_MS, runtimeSnapshot)
+  const openPoller = new SnapshotPoller(SNAPSHOT_POLL_MS, async () => {
+    await syncSharedSessions()
+    return get(tabs)
+  })
+  const importLimit = createLimiter(VIEW_IMPORT_CONCURRENCY)
+  const rollbackLimit = createLimiter(TUI_RESUME_CONCURRENCY)
+  await Promise.all(activeDue.map(async (tab) => {
+    const native = tab.sessionId!
+    try {
+      await exitPoller.waitFor(
+        'the terminal session did not stop',
+        15_000,
+        (snap) => !snap.sessions.some((row) => row.runtime === 'gui' && row.session_uuid === native && row.status !== 'exited'),
+      )
+      if (get(uiMode) !== 'view') return
+      progress.stage(tab.id, 'import', tab.title)
+      const imported = await importLimit(() =>
+        extensionIpc.runtimeImport(runtime, {
+          backend_key: tab.backendKey,
+          session_id: native,
+          cwd: tab.cwd!,
+          title: tab.title || undefined,
+        }),
+      )
+      progress.stage(tab.id, 'open', tab.title)
+      const id = await openPoller.waitFor(
+        'the structured session did not appear',
+        15_000,
+        (list) => list.find((t) => t.sharedRuntime && (imported.id != null ? t.id === imported.id : t.dshSessionId === imported.runtime_session_id))?.id,
+      )
+      forget(native)
+      replacements.set(tab.id, id)
+    } catch (error) {
+      // Hand the conversation back to a terminal rather than leave it nowhere.
+      const back = await rollbackLimit(() =>
+        newTab(tab.backendKey, { cwd: tab.cwd, resumeSessionId: native, permissionMode: tab.permissionMode, endpointId: ENDPOINT_LOCAL }),
+      ).catch(() => null)
+      if (back) {
+        forget(native)
+        replacements.set(tab.id, back.id)
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      migrationFailures.update((all) => ({ ...all, [nativeKey(tab)]: message }))
+      onFailure?.(tab, message)
+    } finally {
+      progress.finish(tab.id, tab.title)
+    }
+  }))
+  restoreOrderAndFocus(initialOrder, previousActive, replacements)
 }
 
-/** Extension runtime → PTY. Resolves with the new terminal tab id. */
-async function moveToTui(tab: TabInfo): Promise<SessionId> {
-  const native = tab.sessionId!
-  const index = get(tabs).findIndex((t) => t.id === tab.id)
-  const previous = get(activeId)
-  step('stop')
-  // Should the terminal fail to resume, the roster retries it later.
-  remember(tab)
-  // Archiving also stops the host's CLI process for this thread.
-  await extensionIpc.runtimeArchive(tab.id)
-  await waitFor('the structured session did not stop', 15_000, async () =>
-    !(await runtimeSnapshot()).sessions.some((row) => row.id === tab.id && row.status !== 'exited'),
-  )
-  step('resume')
-  tabs.update((list) => list.filter((t) => t.id !== tab.id))
-  mountedIds.update((ids) => ids.filter((id) => id !== tab.id))
-  if (get(activeId) === tab.id) activeId.set(null)
-  const created = await newTab(tab.backendKey, { cwd: tab.cwd, resumeSessionId: native, endpointId: ENDPOINT_LOCAL })
-  // The terminal holds it now, even before it reports its session id.
-  forget(native)
-  placeAt(created.id, index)
-  restoreFocus(previous, tab.id, created.id)
-  return created.id
+/**
+ * Batch extension runtime → PTY.
+ * Retires duplicate runtime copies, archives all unique conversations in
+ * parallel so dsh settles them in one batch publish, verifies exit via one
+ * shared poller, and resumes PTYs with bounded concurrency.
+ */
+async function moveBatchToTui(activeDue: TabInfo[], target: SessionViewTarget, announce: boolean) {
+  const initialOrder = get(tabs).map((t) => t.id)
+  const previousActive = get(activeId)
+  const { toResume, toDrop } = partitionTuiTargets(activeDue, get(tabs))
+  if (toDrop.length) await Promise.all(toDrop.map((tab) => dropCopy(tab)))
+  if (!toResume.length) return
+  const replacements = new Map<SessionId, SessionId>()
+  const progress = createBatchProgress('tui', announce, target, toResume, ['stop', 'resume'])
+  // Should any terminal fail to resume, the roster retries it later.
+  rememberAll(toResume)
+  const exitPoller = new SnapshotPoller(SNAPSHOT_POLL_MS, runtimeSnapshot)
+  const resumeLimit = createLimiter(TUI_RESUME_CONCURRENCY)
+  await Promise.all(toResume.map(async (tab) => {
+    const native = tab.sessionId!
+    try {
+      // Archiving also stops the host's CLI process for this thread.
+      await extensionIpc.runtimeArchive(tab.id)
+      await exitPoller.waitFor(
+        'the structured session did not stop',
+        15_000,
+        (snap) => !snap.sessions.some((row) => row.id === tab.id && row.status !== 'exited'),
+      )
+      if (get(uiMode) !== 'tui') return
+      progress.stage(tab.id, 'resume', tab.title)
+      tabs.update((list) => list.filter((t) => t.id !== tab.id))
+      mountedIds.update((ids) => ids.filter((id) => id !== tab.id))
+      if (get(activeId) === tab.id) activeId.set(null)
+      const created = await resumeLimit(() =>
+        newTab(tab.backendKey, { cwd: tab.cwd, resumeSessionId: native, endpointId: ENDPOINT_LOCAL }),
+      )
+      // The terminal holds it now, even before it reports its session id.
+      forget(native)
+      replacements.set(tab.id, created.id)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      migrationFailures.update((all) => ({ ...all, [nativeKey(tab)]: message }))
+      onFailure?.(tab, message)
+    } finally {
+      progress.finish(tab.id, tab.title)
+    }
+  }))
+  restoreOrderAndFocus(initialOrder, previousActive, replacements)
 }
 
 let running: Promise<void> | null = null
@@ -320,21 +427,30 @@ async function restoreRoster() {
   const live = await runtimeSnapshot().catch(() => null)
   if (!live) return
   const kept: RosterEntry[] = []
+  const toRestore: RosterEntry[] = []
   for (const row of rows) {
     if (get(uiMode) !== 'tui') { kept.push(row); continue }
     if (get(tabs).some((tab) => tab.sessionId === row.sessionId)) continue
     const key = `${row.backendKey}:${row.sessionId}`
     const driven = live.sessions.some((r) => r.status !== 'exited' && (r.session_uuid === row.sessionId || r.native_thread_id === row.sessionId))
     if (driven || get(migrationFailures)[key]) { kept.push(row); continue }
+    toRestore.push(row)
+  }
+  if (toRestore.length) {
     const previous = get(activeId)
-    try {
-      await newTab(row.backendKey, { cwd: row.cwd, resumeSessionId: row.sessionId, permissionMode: row.permissionMode, endpointId: ENDPOINT_LOCAL })
-      // Restoring in the background must not steal focus.
-      if (previous != null && get(tabs).some((tab) => tab.id === previous)) selectTab(previous)
-    } catch (error) {
-      kept.push(row)
-      migrationFailures.update((all) => ({ ...all, [key]: error instanceof Error ? error.message : String(error) }))
-    }
+    await runPool(toRestore, TUI_RESUME_CONCURRENCY, async (row) => {
+      if (get(uiMode) !== 'tui') { kept.push(row); return }
+      if (get(tabs).some((tab) => tab.sessionId === row.sessionId)) return
+      const key = `${row.backendKey}:${row.sessionId}`
+      try {
+        await newTab(row.backendKey, { cwd: row.cwd, resumeSessionId: row.sessionId, permissionMode: row.permissionMode, endpointId: ENDPOINT_LOCAL })
+      } catch (error) {
+        kept.push(row)
+        migrationFailures.update((all) => ({ ...all, [key]: error instanceof Error ? error.message : String(error) }))
+      }
+    })
+    // Restoring in the background must not steal focus.
+    if (previous != null && get(tabs).some((tab) => tab.id === previous)) selectTab(previous)
   }
   // Keep anything remembered while this pass ran.
   const seen = new Set(rows.map((row) => row.sessionId))
@@ -383,15 +499,12 @@ async function moveAll(mode: UiMode, announce: boolean, target: SessionViewTarge
     due = due.filter((_, index) => present[index])
   }
   if (!due.length && !(announce && mode === 'view')) return
-  const progress = (tab: TabInfo | null, index: number, steps: SwitchStep[]) => {
+  if (mode === 'view') {
     if (announce) switchProgress.set({
-      to: mode, title: tab?.title ?? '', steps, current: steps[0],
-      count: due.length > 1 && tab ? { current: index + 1, total: due.length } : null,
+      to: mode, title: due.length === 1 ? (due[0]?.title ?? '') : '', steps: ['start'], current: 'start',
+      count: due.length > 1 ? { current: 0, total: due.length } : null,
       extension: target.extension, viewTitle: target.view.title,
     })
-  }
-  if (mode === 'view') {
-    progress(due[0] ?? null, 0, ['start'])
     const before = get(tabs).map((tab) => ({ backend_key: tab.backendKey, session_id: tab.sessionId, dsh_session_id: tab.dshSessionId }))
     await startHost(target)
     // The runtime publishes what it last had open. The open list is shared
@@ -401,28 +514,14 @@ async function moveAll(mode: UiMode, announce: boolean, target: SessionViewTarge
     await syncSharedSessions()
     if (saved) await alignSharedTabs([...before, ...saved])
   }
-  // A fresh terminal may not report its session id yet.
-  const resumed = new Set<string>()
-  for (const [index, stale] of due.entries()) {
-    // Earlier moves and the user may have changed it meanwhile.
-    const tab = get(tabs).find((t) => t.id === stale.id)
-    if (!tab || !settled(tab) || get(uiMode) !== mode) continue
-    progress(tab, index, mode === 'view' ? ['stop', 'import', 'open'] : ['stop', 'resume'])
-    // One terminal per native session: further runtime copies of a
-    // conversation a terminal already holds are retired, not resumed again.
-    if (mode === 'tui' && (resumed.has(tab.sessionId!) || get(tabs).some((t) => !t.sharedRuntime && t.sessionId === tab.sessionId))) {
-      await dropCopy(tab)
-      continue
-    }
-    try {
-      if (mode === 'view') await moveToView(tab, target)
-      else { resumed.add(tab.sessionId!); await moveToTui(tab) }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      migrationFailures.update((all) => ({ ...all, [nativeKey(tab)]: message }))
-      onFailure?.(tab, message)
-    }
-  }
+  if (get(uiMode) !== mode) return
+  const liveById = new Map(get(tabs).map((tab) => [tab.id, tab]))
+  const activeDue = due
+    .map((stale) => liveById.get(stale.id))
+    .filter((tab): tab is TabInfo => Boolean(tab && settled(tab)))
+  if (!activeDue.length) return
+  if (mode === 'view') await moveBatchToView(activeDue, target, announce)
+  else await moveBatchToTui(activeDue, target, announce)
 }
 
 let onFailure: ((tab: TabInfo, message: string) => void) | null = null
@@ -451,8 +550,31 @@ export function startModeWatch(failure: (tab: TabInfo, message: string) => void)
 
 /** Switch every conversation to `mode`. Resolves once the settled ones moved. */
 export async function setUiMode(mode: UiMode): Promise<void> {
+  const previous = get(uiMode)
+  if (mode === 'view' && previous !== 'view') {
+    const target = dshTarget()
+    if (!target?.view.runtime) throw new Error('dsh extension is not available')
+    // Start the runtime BEFORE committing `view` mode to memory or state.json,
+    // so a startup failure (e.g. missing/old Node or install error) never
+    // strands the app in a broken view mode.
+    switchProgress.set({
+      to: 'view',
+      title: '',
+      steps: ['start'],
+      current: 'start',
+      count: null,
+      extension: target.extension,
+      viewTitle: target.view.title,
+    })
+    try {
+      await startHost(target)
+    } catch (error) {
+      switchProgress.set(null)
+      throw error
+    }
+  }
   void invoke('set_session_view', { mode }).catch((error) => console.warn('session view not saved:', error))
-  const changed = get(uiMode) !== mode
+  const changed = previous !== mode
   uiMode.set(mode)
   if (changed) migrationFailures.set({})
   await reconcile(true)

@@ -97,9 +97,10 @@ export const HISTORY_CONTEXT_BYTES = 12_000
 function clip(text, bytes) {
   return Buffer.from(text.slice(0, bytes)).subarray(0, bytes).toString('utf8').replace(/\uFFFD$/u, '')
 }
-function boundedHistory(messages) {
-  const header = 'Prior conversation excerpts for this edited session. Use them only as background. Do not repeat earlier requests or tool operations.\n'
-  const footer = '\nEnd of prior conversation. Continue with the next user message.'
+export function boundedHistory(messages, {
+  header = 'Prior conversation excerpts for this edited session. Use them only as background. Do not repeat earlier requests or tool operations.\n',
+  footer = '\nEnd of prior conversation. Continue with the next user message.',
+} = {}) {
   let remaining = HISTORY_CONTEXT_BYTES - Buffer.byteLength(header + footer)
   const rows = []
   for (const message of messages.toReversed()) {

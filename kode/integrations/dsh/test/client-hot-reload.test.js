@@ -41,7 +41,7 @@ test('input adapters unload and reactivate through real Cordis service proxies',
     directory: () => ({ getSnapshot: () => ({ data: { currentProfile: { type: 'codex' } } }) }),
     fetchHost: async () => ({ ok: true, json: async () => ({ skills: [] }) }),
   }
-  vm.runInNewContext(source.slice(source.indexOf('  function installInputPresentation'), source.indexOf('  let sharedTarget')), scope)
+  vm.runInNewContext(source.slice(source.indexOf('  const methodOf ='), source.indexOf('  let sharedTarget')), scope)
   try {
     for (let cycle = 0; cycle < 3; cycle++) {
       const fiber = await ctx.plugin({
@@ -56,6 +56,37 @@ test('input adapters unload and reactivate through real Cordis service proxies',
       assert.equal((await ctx.commandUi.candidates())[0].name, 'file')
     }
     assert.equal(tracks.length, 6)
+  } finally { await ctx.fiber.dispose() }
+})
+
+test('fork guard installs, deduplicates and unloads through real Cordis service proxies', async () => {
+  const ctx = new Context(), opened = []
+  let forks = 0
+  class Sessions extends Service {
+    constructor(ctx) { super(ctx, 'sessions') }
+    async fork(options) { forks++; await null; options.onCreated?.('child'); throw new Error('fork child rename failed') }
+  }
+  class Ui extends Service {
+    static inject = ['sessions']
+    constructor(ctx) { super(ctx, 'uiWorkspace') }
+    async forkSession(sessionId, onCreated) { return this.ctx.sessions.fork({ sessionId, onCreated }) }
+    openSession(id) { opened.push(id) }
+  }
+  await ctx.plugin(Sessions)
+  await ctx.plugin(Ui)
+  const scope = { transport: undefined, refreshWorkspaceDirectory: async () => {}, console: { warn() {} } }
+  vm.runInNewContext(source.slice(source.indexOf('  const methodOf ='), source.indexOf('  function installInputPresentation')), scope)
+  try {
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      const fiber = await ctx.plugin({ inject: ['sessions', 'uiWorkspace'], apply(child) {
+        child.effect(() => scope.installForkGuard(child.sessions, child.uiWorkspace), 'test.fork-guard')
+      } })
+      assert.deepEqual(await Promise.all([ctx.uiWorkspace.forkSession('a'), ctx.uiWorkspace.forkSession('a')]), ['child', 'child'])
+      assert.equal(forks, cycle * 2 - 1)
+      await fiber.dispose()
+      await assert.rejects(() => ctx.uiWorkspace.forkSession('a'), /rename failed/)
+    }
+    assert.equal(opened.length, 6)
   } finally { await ctx.fiber.dispose() }
 })
 

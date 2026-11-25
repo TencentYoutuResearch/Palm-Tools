@@ -280,3 +280,225 @@ test('unchanged unloaded conversations are not re-read every pass, changed or un
  archived.push('cold');await bridge.publish()
  assert.deepEqual(index.gui.tabs,[])
 })
+
+test('tick executes consecutive delete commands concurrently with one batched publish', async () => {
+  const archived = [], released = [], settled = [], publishedExits = []
+  let activeArchives = 0, peakArchives = 0, publishSnapshots = 0
+  const services = {
+    sessionController: {
+      list: async () => ({
+        items: ['s1', 's2', 's3'].filter(id => !archived.includes(id)).map(sessionId => ({ sessionId, cwd: '/srv/project', title: sessionId })),
+      }),
+      inspect: async () => ({ events: [] }),
+    },
+    agents: { get: () => undefined },
+    kodeAgents: { profiles: { binding: () => undefined } },
+    workspaceRegistry: {
+      get archivedSessionIds() { return archived },
+      archiveSession: async id => {
+        activeArchives++
+        peakArchives = Math.max(peakArchives, activeArchives)
+        await new Promise(resolve => setTimeout(resolve, 25))
+        archived.push(id)
+        activeArchives--
+      },
+    },
+    kodeNativeFactory: { release: async id => { released.push(id) } },
+  }
+  const commands = [
+    { id: 'cmd-1', kind: 'delete', session_id: 's1', payload: {} },
+    { id: 'cmd-2', kind: 'delete', session_id: 's2', payload: {} },
+    { id: 'cmd-3', kind: 'delete', session_id: 's3', payload: {} },
+  ]
+  const claimBodies = []
+  const backend = {
+    call: async (path, body) => {
+      if (path.endsWith('/cloud/status')) return { sync_enabled: false, binding_count: 0 }
+      if (path.endsWith('/sessions')) return { sessions: [], runtimes: { gui: true } }
+      if (path.endsWith('/documents/session-index')) return { revision: 0, value: { version: 1, gui: { tabs: [] } } }
+      if (path.endsWith('/claim')) {
+        claimBodies.push(body)
+        return { commands: claimBodies.length === 1 ? commands : [] }
+      }
+      if (path.endsWith('/settle')) { settled.push(body); return { ok: true } }
+      if (path.endsWith('/publish')) {
+        publishSnapshots++
+        const exited = (body.sessions ?? []).filter(row => row.dto?.status === 'exited')
+        if (exited.length) publishedExits.push(exited.map(row => row.session_id))
+        return { sessions: (body.sessions ?? []).map((row, i) => ({ session_id: row.session_id, id: 100 + i })) }
+      }
+      return {}
+    },
+  }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, backend, { intervalMs: 500 })
+  await bridge.publish()
+  publishSnapshots = 0
+  const outcome = await bridge.tick()
+  assert.equal(outcome.hadCommands, true)
+  assert.equal(claimBodies[0].wait_ms, 500)
+  assert.ok(peakArchives >= 2, `expected parallel archive execution, peak=${peakArchives}`)
+  assert.deepEqual(released.sort(), ['s1', 's2', 's3'])
+  // All three archived sessions are published as exited in a single batched publish call.
+  assert.equal(publishedExits.length, 1)
+  assert.deepEqual(publishedExits[0].sort(), ['s1', 's2', 's3'])
+  assert.equal(settled.length, 3)
+  assert.ok(settled.every(entry => entry.result.value?.accepted === true))
+  // Single publish pass (1 exited-batch publish + 1 empty heartbeat for 0 remaining items), not 3 per-command publishes.
+  assert.equal(publishSnapshots, 2)
+})
+
+test('claimCommands falls back cleanly when an older backend rejects wait_ms', async () => {
+  const calls = []
+  const backend = {
+    call: async (path, body) => {
+      calls.push(body)
+      if ('wait_ms' in body) throw new Error('kode backend (422): unknown field `wait_ms`')
+      return { commands: [] }
+    },
+  }
+  const bridge = new RuntimeBridge({ get: () => undefined }, backend, { intervalMs: 500 })
+  assert.deepEqual(await bridge.claimCommands(), [])
+  assert.equal(bridge.longPoll, false)
+  assert.deepEqual(await bridge.claimCommands(), [])
+  assert.equal(calls.length, 3)
+  assert.equal(calls[0].wait_ms, 500)
+  assert.equal('wait_ms' in calls[1], false)
+  assert.equal('wait_ms' in calls[2], false)
+})
+
+test('tick preserves ordering across different command kinds and isolates batch failures', async () => {
+  const log = [], settled = []
+  const services = {
+    sessionController: {
+      list: async () => ({ items: [] }),
+      cancel: async ({ sessionId }) => { log.push(`interrupt:${sessionId}`); return { ok: true } },
+    },
+    workspaceRegistry: {
+      archivedSessionIds: [],
+      archiveSession: async id => {
+        if (id === 'bad') throw new Error('archive failed')
+        log.push(`delete:${id}`)
+      },
+    },
+    kodeNativeFactory: { release: async () => {} },
+  }
+  const commands = [
+    { id: 'c1', kind: 'delete', session_id: 's1', payload: {} },
+    { id: 'c2', kind: 'delete', session_id: 'bad', payload: {} },
+    { id: 'c3', kind: 'interrupt', session_id: 's2', payload: {} },
+    { id: 'c4', kind: 'delete', session_id: 's3', payload: {} },
+  ]
+  const backend = {
+    call: async (path, body) => {
+      if (path.endsWith('/cloud/status')) return { sync_enabled: false, binding_count: 0 }
+      if (path.endsWith('/sessions')) return { sessions: [], runtimes: { gui: true } }
+      if (path.endsWith('/claim')) return { commands }
+      if (path.endsWith('/settle')) { settled.push(body); return { ok: true } }
+      if (path.endsWith('/publish')) return { sessions: [] }
+      return {}
+    },
+  }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, backend, { intervalMs: 500 })
+  await bridge.publish()
+  await bridge.tick()
+  assert.deepEqual(log, ['delete:s1', 'interrupt:s2', 'delete:s3'])
+  const byId = new Map(settled.map(row => [row.id, row.result]))
+  assert.equal(byId.get('c1').value.accepted, true)
+  assert.equal(byId.get('c2').error, 'archive failed')
+  assert.equal(byId.get('c3').value.ok, true)
+  assert.equal(byId.get('c4').value.accepted, true)
+})
+
+test('tick executes consecutive import_session commands concurrently and publishes once before settling IDs', async () => {
+  const settled = [], persisted = new Set()
+  let activeImports = 0, peakImports = 0, publishCalls = 0, nextId = 500
+  const agent = { selectModel() {}, session: { header: { cwd: '/srv/project' }, snapshotEvents: () => [], requestHeader: () => ({ config: { model: 'm' } }) }, ctx: { sessions: { flush: async () => {} } } }
+  const bindings = {}
+  const services = {
+    workspaceRegistry: {
+      archivedSessionIds: [],
+      list: () => [{ id: 'ws', path: '/srv/project', attachSession: async () => {} }],
+      resolveByPath: async () => ({ id: 'ws', path: '/srv/project', attachSession: async () => {} }),
+    },
+    kodeAgents: {
+      profiles: {
+        list: () => [{ id: 'kode-codex', name: 'codex', type: 'codex', defaultModel: 'm' }],
+        bindings,
+        binding: id => bindings[id],
+        bindNative: async (id, profileId, threadId) => { bindings[id] = { profile: { id: profileId, name: 'codex', type: 'codex' }, threadId } },
+      },
+      recordBinding() {},
+    },
+    kodeNativeFactory: {
+      importHistory: async () => {
+        activeImports++
+        peakImports = Math.max(peakImports, activeImports)
+        await new Promise(resolve => setTimeout(resolve, 25))
+        activeImports--
+      },
+    },
+    sessionController: {
+      list: async () => ({ items: [...persisted].map(sessionId => ({ sessionId, cwd: '/srv/project', title: sessionId })) }),
+      create: async req => { persisted.add(req.sessionId); return { sessionId: req.sessionId } },
+      resolveAgent: async () => ({ agent }),
+      rename: async () => {},
+      inspect: async () => ({ events: [] }),
+    },
+    agents: { get: () => undefined },
+  }
+  const commands = [
+    { id: 'imp-1', kind: 'import_session', payload: { backend_key: 'codex', session_id: 'thread-1', cwd: '/srv/project', title: 'One' } },
+    { id: 'imp-2', kind: 'import_session', payload: { backend_key: 'codex', session_id: 'thread-2', cwd: '/srv/project', title: 'Two' } },
+    { id: 'imp-3', kind: 'import_session', payload: { backend_key: 'codex', session_id: 'thread-3', cwd: '/srv/project', title: 'Three' } },
+  ]
+  let revision = 0, indexDoc = { version: 1, imports: {} }
+  const backend = {
+    call: async (path, body) => {
+      if (path.endsWith('/cloud/status')) return { sync_enabled: false, binding_count: 0 }
+      if (path.endsWith('/sessions')) return { sessions: [], runtimes: { gui: true } }
+      if (path.endsWith('/transcript')) return { available: true, messages: [] }
+      if (path.endsWith('/documents/session-index')) {
+        if (body) { indexDoc = structuredClone(body.value); revision++ }
+        return { revision, value: structuredClone(indexDoc) }
+      }
+      if (path.endsWith('/claim')) return { commands }
+      if (path.endsWith('/settle')) { settled.push(body); return { ok: true } }
+      if (path.endsWith('/publish')) {
+        publishCalls++
+        return { sessions: (body.sessions ?? []).map(row => ({ session_id: row.session_id, id: nextId++ })) }
+      }
+      return {}
+    },
+  }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, backend, { intervalMs: 500 })
+  await bridge.publish()
+  publishCalls = 0
+  await bridge.tick()
+  assert.ok(peakImports >= 2, `expected parallel import_session execution, peak=${peakImports}`)
+  assert.equal(settled.length, 3)
+  for (const row of settled) {
+    assert.ok(Number.isSafeInteger(row.result.value?.id), `expected public id in settlement: ${JSON.stringify(row)}`)
+    assert.ok(row.result.value?.runtime_session_id)
+  }
+  // 3 newly imported sessions published once each in the single batch publishSnapshot pass (not 3 full passes).
+  assert.equal(publishCalls, 3)
+})
+
+test('bot_report command prompts the bot main session even when it is currently unloaded', async () => {
+  const prompted = []
+  const services = {
+    sessionController: {
+      prompt: async req => { prompted.push(req); return { accepted: true } },
+    },
+  }
+  const bridge = new RuntimeBridge({ get: key => services[key] }, {})
+  const result = await bridge.execute({
+    id: 'report-1',
+    kind: 'bot_report',
+    payload: { session_id: 'bot-main-1', text: '关注「企微群」完成，请汇报给用户。' },
+  })
+  assert.deepEqual(result, { accepted: true })
+  assert.equal(prompted.length, 1)
+  assert.equal(prompted[0].sessionId, 'bot-main-1')
+  assert.equal(prompted[0].content[0].text, '关注「企微群」完成，请汇报给用户。')
+})

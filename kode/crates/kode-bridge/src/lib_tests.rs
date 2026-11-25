@@ -27,6 +27,24 @@ fn native_transcripts_decode_codex_and_claude_envelopes_without_system_or_tool_n
 }
 
 #[test]
+fn cursor_transcripts_decode_role_messages_and_unwrap_user_query() {
+    let rows = [
+        json!({"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wed</timestamp>\n<user_query>\n修复 Cursor 切 dsh\n</user_query>"}]}}),
+        json!({"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"/tmp/x"}}]}}),
+        json!({"role":"assistant","message":{"content":[{"type":"text","text":"已完成修复"},{"type":"tool_use","name":"Grep","input":{}}]}}),
+        json!({"cwd":"/tmp/project","title":"meta.json"}),
+    ];
+    let messages = parse_transcript_lines(rows.iter().map(Value::to_string));
+    assert_eq!(
+        messages,
+        vec![
+            json!({"role":"user","text":"修复 Cursor 切 dsh","kind":"text"}),
+            json!({"role":"agent","text":"已完成修复","kind":"text"}),
+        ]
+    );
+}
+
+#[test]
 fn git_status_preserves_literal_paths_and_rename_records() {
     let mut summary = WsGitSummary::default();
     parse_git_status(

@@ -78,6 +78,8 @@ async fn publish(
         .filter_map(|row| row["local_id"].as_u64())
         .collect();
     let saved = call("/runtime/sessions", None).await?;
+    let mut exited_sessions = Vec::new();
+    let mut exited_keys = Vec::new();
     for row in saved["sessions"].as_array().into_iter().flatten() {
         if row["runtime"] != "gui" || row["status"] == "exited" {
             continue;
@@ -97,9 +99,19 @@ async fn publish(
         }
         let mut dto = row.clone();
         dto["status"] = json!("exited");
-        call("/runtime/publish", Some(json!({"runtime":"gui","boot_id":boot,"sessions":[{"session_id":row["runtime_session_id"],"dto":dto,"events":[]}]}))).await?;
+        exited_sessions.push(json!({"session_id":row["runtime_session_id"],"dto":dto,"events":[]}));
         if let Some(key) = row["runtime_session_id"].as_str() {
-            native.remove(key);
+            exited_keys.push(key.to_owned());
+        }
+    }
+    if !exited_sessions.is_empty() {
+        call(
+            "/runtime/publish",
+            Some(json!({"runtime":"gui","boot_id":boot,"sessions":exited_sessions})),
+        )
+        .await?;
+        for key in exited_keys {
+            native.remove(&key);
         }
     }
     if snapshots.is_empty() {
