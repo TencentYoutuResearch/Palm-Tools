@@ -2,7 +2,7 @@
 schema_version: 2
 id: fix-windows-terminal-link-direct-click
 document_class: design
-status: proposed
+status: completed
 ---
 
 # Design
@@ -62,3 +62,15 @@ Windows TCodex 当前已有自己的 mouse ownership 和 mouse-report filtering�
 ## Rollback
 
 将激活谓词恢复为 Windows `Ctrl+Click` 即可，不涉及数据、协议或持久化迁移。
+
+## Verification evidence
+
+Remote Windows Server 2025 host `21.130.222.251`, commit `65f8017`:
+
+- Windows Node tests: terminal links `9 passed`, terminal mouse `25 passed`.
+- Windows `pnpm check`: 0 errors; only two pre-existing CSS compatibility warnings.
+- Windows debug GUI build completed with the real Tauri/WebView2 stack.
+- A real TCodex session emitted
+  `https://copilot.tencent.com/login?platform=CLI&state=...`.
+- Existing Edge processes were cleared, then a direct terminal click launched exactly
+  one Edge main process with that URL in `--single-argument`.

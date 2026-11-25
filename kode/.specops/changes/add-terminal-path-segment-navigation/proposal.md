@@ -4,7 +4,7 @@ id: add-terminal-path-segment-navigation
 kind: feature
 work_type: feature
 title: 终端路径支持目录分段导航与文件打开
-status: proposed
+status: completed
 verifies:
   - typescript
   - rust
@@ -45,18 +45,18 @@ Kode 终端会输出大量绝对路径、相对路径和 `path:line:column` 形�
 
 ## Acceptance criteria
 
-- [ ] 点击 `/repo/src/lib/file.ts` 中的 `/repo/src` 时，打开 `/repo/src` 并选中
+- [x] 点击 `/repo/src/lib/file.ts` 中的 `/repo/src` 时，打开 `/repo/src` 并选中
       `lib`。
-- [ ] 点击 `/repo/src/lib/file.ts` 中的 `file.ts` 时，直接打开该文件。
-- [ ] 点击 Windows `F:\repo\src\main.rs` 中不同目录前缀时，Explorer 打开对应父
+- [x] 点击 `/repo/src/lib/file.ts` 中的 `file.ts` 时，直接打开该文件。
+- [x] 点击 Windows `F:\repo\src\main.rs` 中不同目录前缀时，Explorer 打开对应父
       目录并选中下一级目录或文件。
-- [ ] 点击相对路径和 `~/` 路径前，先按当前会话工作目录或用户主目录解析成绝对路径。
-- [ ] 点击最终目标为目录时直接打开该目录。
-- [ ] 行列号后缀不会传入 `open_path` 或文件管理器 reveal 目标。
-- [ ] URL 仍按 URL 规则整体打开，不拆成主机名或路径分段。
-- [ ] 非链接文本点击、拖拽选区和 TCodex 鼠标报告过滤行为不变。
-- [ ] 单元测试覆盖 Unix、Windows、相对路径、`~/`、行列号和多级父目录目标计算。
-- [ ] 远端 Windows 使用真实 TCodex 路径输出，验证父目录点击会打开 Explorer 并
+- [x] 点击相对路径和 `~/` 路径前，先按当前会话工作目录或用户主目录解析成绝对路径。
+- [x] 点击最终目标为目录时直接打开该目录。
+- [x] 行列号后缀不会传入 `open_path` 或文件管理器 reveal 目标。
+- [x] URL 仍按 URL 规则整体打开，不拆成主机名或路径分段。
+- [x] 非链接文本点击、拖拽选区和 TCodex 鼠标报告过滤行为不变。
+- [x] 单元测试覆盖 Unix、Windows、相对路径、`~/`、行列号和多级父目录目标计算。
+- [x] 远端 Windows 使用真实终端路径输出，验证父目录点击会打开 Explorer 并
       选中子项，文件名点击会启动对应文件打开程序。
 
 ## Out of scope

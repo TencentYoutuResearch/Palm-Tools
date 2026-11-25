@@ -5,7 +5,7 @@ kind: bug
 document_class: work_item
 work_type: bugfix
 title: Windows 终端链接改为单击直达
-status: proposed
+status: completed
 verifies:
   - typescript
 paths:
@@ -39,15 +39,15 @@ TCodex 自身的使用习惯不一致。
 
 ## Acceptance criteria
 
-- [ ] Windows 上不按任何修饰键，单击可识别的 URL 会调用现有 `open_path` 并打开
+- [x] Windows 上不按任何修饰键，单击可识别的 URL 会调用现有 `open_path` 并打开
       系统默认浏览器。
-- [ ] OSC 8 超链接与终端文本识别链接都支持 Windows 单击直达。
-- [ ] 链接点击仍通过现有 URL 白名单和系统打开命令，不新增任意协议执行能力。
-- [ ] 非链接区域单击、拖拽选区、复制和 TCodex 会话交互不发生回归。
-- [ ] macOS 仍只允许 `Cmd+Click` 激活链接，普通单击不会打开浏览器。
-- [ ] 单元测试覆盖 Windows 无修饰键、Windows 带修饰键、macOS `Cmd+Click` 和
+- [x] OSC 8 超链接与终端文本识别链接都支持 Windows 单击直达。
+- [x] 链接点击仍通过现有 URL 白名单和系统打开命令，不新增任意协议执行能力。
+- [x] 非链接区域单击、拖拽选区、复制和 TCodex 会话交互不发生回归。
+- [x] macOS 仍只允许 `Cmd+Click` 激活链接，普通单击不会打开浏览器。
+- [x] 单元测试覆盖 Windows 无修饰键、Windows 带修饰键、macOS `Cmd+Click` 和
       非链接路径。
-- [ ] 远端 Windows 在真实 TCodex 会话中无修饰键单击终端 URL，系统浏览器启动参数
+- [x] 远端 Windows 在真实 TCodex 会话中无修饰键单击终端 URL，系统浏览器启动参数
       与终端 URL 一致。
 
 ## Out of scope

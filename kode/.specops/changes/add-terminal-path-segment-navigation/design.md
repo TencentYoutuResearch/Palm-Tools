@@ -2,7 +2,7 @@
 schema_version: 2
 id: add-terminal-path-segment-navigation
 document_class: design
-status: proposed
+status: completed
 ---
 
 # Design
@@ -96,3 +96,17 @@ reveal_path(path)
 ## Rollback
 
 移除分段链接并让整个路径恢复调用 `open_path`；不涉及数据格式或持久化迁移。
+
+## Verification evidence
+
+Remote Windows Server 2025 host `21.130.222.251`, commit `65f8017`:
+
+- A real Kode terminal rendered
+  `F:\tmp\kode-path-verify\parent\child\sample.txt`.
+- A direct click on the `parent` component opened exactly one Explorer window at
+  `F:\tmp\kode-path-verify\parent`; its focused item was
+  `F:\tmp\kode-path-verify\parent\child`.
+- A direct click on `sample.txt` launched `NOTEPAD.EXE` with command line
+  `F:\tmp\kode-path-verify\parent\child\sample.txt`.
+- Windows terminal link tests passed `9/9`; terminal mouse tests passed `25/25`;
+  `pnpm check` and the Windows debug GUI build passed.
