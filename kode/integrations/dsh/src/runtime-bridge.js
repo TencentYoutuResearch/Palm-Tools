@@ -8,6 +8,7 @@ import { isAbsolute } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { profileRoute } from './agent-profiles.js'
 import { importSavedSession } from './workbench-import.js'
+import { ensureCursorCliChat } from './cursor-storage.js'
 import { updateOpenTabs } from './saved-session-state.js'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { installRuntimeInteractions, questionSchema, questionAnswer } from './runtime-interactions.js'
@@ -40,6 +41,7 @@ export class RuntimeBridge {
   constructor(ctx, backend, { runtime = 'dsh', intervalMs = 500 } = {}) {
     this.ctx = ctx; this.backend = backend; this.runtime = runtime; this.intervalMs = intervalMs
     this.bootId = randomUUID(); this.stop = new AbortController(); this.cursors = new Map(); this.ids = new Map(); this.pending = new Map(); this.extra = new Map(); this.results = new Map(); this.streams = new Map(); this.known = null; this.continued = new Map(); this.answeredContinued = new Set(); this.coldStamps = new Map()
+    this.longPoll = true; this.publishActive = null; this.publishQueued = null
   }
   service(name) { return this.ctx.get?.(name) ?? this.ctx[name] }
   call(name, body) { return this.backend.call(PREFIX + name, body, this.stop.signal) }
@@ -50,9 +52,20 @@ export class RuntimeBridge {
     return { runtime_backend_key: profile ? `dsh:${profile.id}` : undefined, ...permissionSnapshot(this.service('permissionPresets'), agent?.session, row), native_thread_id: binding?.threadId, backend_key: this.service('kodeAgents').profiles.sharedState?.desktop_ids?.[profile?.id] ?? profile?.name ?? 'dsh', title: row.projections?.values?.title ?? row.title ?? '未命名会话', model: selection.model ?? profile?.defaultModel ?? '', status: agent?.status === 'running' ? 'busy' : 'idle', cwd: row.cwd ?? agent?.session.header.cwd, session_uuid: row.sessionId, tokens: { total: 0, input: 0, output: 0, cached: 0 } }
   }
   publish() {
-    const task = (this.publishing ?? Promise.resolve()).then(() => this.publishSnapshot())
-    this.publishing = task.catch(() => {})
-    return task
+    if (this.publishActive) {
+      return this.publishQueued ??= this.publishActive
+        .catch(() => {})
+        .then(() => {
+          this.publishQueued = null
+          return this.runPublish()
+        })
+    }
+    return this.runPublish()
+  }
+  runPublish() {
+    const task = this.publishSnapshot()
+    this.publishActive = task
+    return task.finally(() => { if (this.publishActive === task) this.publishActive = null })
   }
   async publishSnapshot() {
     const controller = this.service('sessionController'), directory = await controller.list({}, this.stop.signal)
@@ -65,9 +78,13 @@ export class RuntimeBridge {
       this.known = new Map(saved.sessions.filter(row => row.runtime === this.runtime).map(row => [row.runtime_session_id, row]))
     }
     const listed = new Set(items.map(row => row.sessionId))
+    const exited = []
     for (const [sessionId, dto] of this.known) if (!listed.has(sessionId) && dto.status !== 'exited') {
-      await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [{ session_id: sessionId, dto: { ...dto, status: 'exited' }, events: [] }] })
-      this.known.set(sessionId, { ...dto, status: 'exited' })
+      exited.push({ session_id: sessionId, dto: { ...dto, status: 'exited' }, events: [] })
+    }
+    if (exited.length) {
+      await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: exited })
+      for (const row of exited) this.known.set(row.session_id, row.dto)
     }
     for (const row of items) {
       this.stop.signal.throwIfAborted()
@@ -164,7 +181,7 @@ export class RuntimeBridge {
     }
     this.openSeen = listed
   }
-  async execute(command) {
+  async execute(command, { deferPublish = false } = {}) {
     const { id, session_id: sessionId, kind, payload } = command, controller = this.service('sessionController')
     const runtime = this.service('kodeAgents')
     if (kind === 'backends') return { home: homedir(), backends: runtime.profiles.list().filter(profile => runtime.hasRuntime(profile.type)).map(profile => ({ key: `dsh:${profile.id}`, display_name: `${profile.name} · dsh`, enabled: true, model_flag: '--model' })) }
@@ -237,7 +254,7 @@ export class RuntimeBridge {
       const tab = { backend_key: payload.backend_key, session_id: payload.session_id, cwd: payload.cwd, title: payload.title, model: payload.model }
       const result = await importSavedSession(this.ctx, this.backend, tab, { fresh: true })
       if (result.sharedSession) throw new Error('This session is still running in another Kode runtime')
-      await this.publish()
+      if (!deferPublish) await this.publish()
       return { id: this.ids.get(result.sessionId) ?? null, runtime_session_id: result.sessionId }
     }
     if (!sessionId) throw new Error('Session identity required')
@@ -247,11 +264,20 @@ export class RuntimeBridge {
     }
     if (kind === 'interrupt') return controller.cancel({ sessionId })
     if (kind === 'delete') {
+      const binding = runtime?.profiles?.binding?.(sessionId)
+      const cwd = binding?.profile?.type === 'cursor' && binding.threadId
+        ? (this.service('agents')?.get(sessionId)?.session.header.cwd
+          ?? (await controller?.list?.({}))?.items?.find(row => row.sessionId === sessionId)?.cwd)
+        : null
       await this.service('workspaceRegistry').archiveSession(sessionId, { stopActivity: true })
       // An archived session must not keep its CLI writing the native thread:
       // Kode may resume that thread in a PTY right after.
       await this.service('kodeNativeFactory')?.release?.(sessionId)
-      await this.publish(); return { accepted: true }
+      if (binding?.profile?.type === 'cursor' && binding.threadId && cwd) {
+        await ensureCursorCliChat(binding.threadId, cwd, { ...process.env, ...binding.profile.env }).catch(() => {})
+      }
+      if (!deferPublish) await this.publish()
+      return { accepted: true }
     }
     if (kind === 'answer' || kind === 'plan_response') return this.answer(sessionId, payload, kind)
     const { agent, error } = await controller.resolveAgent(sessionId)
@@ -278,30 +304,93 @@ export class RuntimeBridge {
     if (!request || request.sessionId !== sessionId) throw new Error('This interaction has already settled or belongs to a different session')
     return request.answer(payload, kind)
   }
+  async settleOne(id, result) {
+    this.results.set(id, result)
+    await this.call('settle', { runtime: this.runtime, boot_id: this.bootId, id, result })
+    this.results.delete(id)
+  }
+  async claimCommands() {
+    const base = { runtime: this.runtime, boot_id: this.bootId }
+    if (!this.longPoll) return (await this.call('claim', base)).commands
+    try {
+      return (await this.call('claim', { ...base, wait_ms: this.intervalMs })).commands
+    } catch (error) {
+      if (!/wait_ms/.test(error.message)) throw error
+      this.longPoll = false
+      return (await this.call('claim', base)).commands
+    }
+  }
   async tick() {
+    if (!this.known) await this.publish()
     if (Date.now() - (this.lastPolicyCheck ?? 0) > 5000) {
       const [cloud, directory] = await Promise.all([this.backend.call('/api/v1/messaging/cloud/status', undefined, this.stop.signal), this.backend.call(PREFIX + 'sessions', undefined, this.stop.signal)])
       this.mobileEnabled = cloud.sync_enabled === true && cloud.binding_count > 0; this.guiEnabled = directory.runtimes?.gui === true; this.lastPolicyCheck = Date.now()
     }
-    // Commands first: Kode waits on them (a mode switch stops sessions one by
-    // one) and must not queue behind a publication pass.
-    // A lost settlement response is retried without re-executing the command.
-    for (const [id, result] of this.results) { await this.call('settle', { runtime: this.runtime, boot_id: this.bootId, id, result }); this.results.delete(id) }
-    const { commands } = await this.call('claim', { runtime: this.runtime, boot_id: this.bootId })
+    // Commands first: Kode waits on them during mode switches and must not
+    // queue behind a publication pass. A lost settlement response is retried
+    // without re-executing the command.
+    for (const [id, result] of [...this.results]) { await this.call('settle', { runtime: this.runtime, boot_id: this.bootId, id, result }); this.results.delete(id) }
+    const started = Date.now()
+    const commands = await this.claimCommands()
+    // Group consecutive batch-parallelizable commands of the same kind
+    // (`import_session` or `delete`) so a mode switch runs them concurrently
+    // and publishes once per batch while preserving strict order across kinds.
+    const runs = []
     for (const command of commands) {
-      let result
-      try { result = { value: await this.execute(command) } } catch (error) { result = { error: error.message } }
-      this.results.set(command.id, result)
-      await this.call('settle', { runtime: this.runtime, boot_id: this.bootId, id: command.id, result }); this.results.delete(command.id)
+      const batchable = command.kind === 'import_session' || command.kind === 'delete'
+      const prev = runs.at(-1)
+      if (batchable && prev && prev.kind === command.kind) prev.items.push(command)
+      else runs.push({ kind: batchable ? command.kind : null, items: [command] })
     }
-    await this.publish()
+    let lastPublished = false
+    for (const run of runs) {
+      if (run.kind && run.items.length > 1) {
+        const outcomes = await Promise.all(run.items.map(async command => {
+          try { return { command, result: { value: await this.execute(command, { deferPublish: true }) } } }
+          catch (error) { return { command, result: { error: error.message } } }
+        }))
+        if (outcomes.some(entry => 'value' in entry.result)) {
+          try {
+            await this.publish()
+            if (run.kind === 'import_session') {
+              for (const entry of outcomes) {
+                if ('value' in entry.result) entry.result.value.id = this.ids.get(entry.result.value.runtime_session_id) ?? null
+              }
+            }
+          } catch (error) {
+            for (const entry of outcomes) {
+              if ('value' in entry.result) entry.result = { error: error.message }
+            }
+          }
+          lastPublished = true
+        } else {
+          lastPublished = false
+        }
+        await Promise.all(outcomes.map(({ command, result }) => this.settleOne(command.id, result)))
+      } else {
+        for (const command of run.items) {
+          let result
+          try { result = { value: await this.execute(command) } } catch (error) { result = { error: error.message } }
+          await this.settleOne(command.id, result)
+          lastPublished = command.kind === 'import_session' || command.kind === 'delete' || command.kind === 'create_session'
+        }
+      }
+    }
+    if (!commands.length || !lastPublished) await this.publish()
+    return { hadCommands: commands.length > 0, elapsed: Date.now() - started }
   }
   start() {
     this.heartbeat = setInterval(() => { if (!this.heartbeatPending) this.heartbeatPending = this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [] }).catch(error => { if (!this.stop.signal.aborted) this.ctx.logger.warn('Kode runtime heartbeat: %s', error.message) }).finally(() => { this.heartbeatPending = null }) }, 4000)
     this.task = (async () => {
       while (!this.stop.signal.aborted) {
-        try { await this.tick() } catch (error) { if (!this.stop.signal.aborted) this.ctx.logger.warn('Kode runtime synchronization: %s', error.message) }
-        await new Promise(resolve => { const timer = setTimeout(done, this.intervalMs); const signal = this.stop.signal; function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve() }; signal.addEventListener('abort', done, { once: true }); if (signal.aborted) done() })
+        let delay = this.intervalMs
+        try {
+          const outcome = await this.tick()
+          delay = outcome?.hadCommands ? 0 : Math.max(0, this.intervalMs - (outcome?.elapsed ?? 0))
+        } catch (error) { if (!this.stop.signal.aborted) this.ctx.logger.warn('Kode runtime synchronization: %s', error.message) }
+        if (delay > 0 && !this.stop.signal.aborted) {
+          await new Promise(resolve => { const timer = setTimeout(done, delay); const signal = this.stop.signal; function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve() }; signal.addEventListener('abort', done, { once: true }); if (signal.aborted) done() })
+        }
       }
     })()
     return this
