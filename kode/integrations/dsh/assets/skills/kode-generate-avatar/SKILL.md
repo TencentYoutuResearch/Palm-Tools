@@ -226,6 +226,9 @@ directory. Preserve the 36 existing avatar frames.
   and UI out of the scene. Prefer 1920×1080 for the artwork or another supported landscape size.
 - Save a still or video poster as `background.png`, `background.jpg`, or `background.webp` in the avatar directory.
   Keep one still with the actual format's extension. Use the existing still as the poster when it matches.
+- Also generate a matching Discord-style sidebar/profile nameplate banner saved as `banner.png` (or `banner.webp` / `banner.jpg`)
+  in the same avatar directory: wide landscape (~1200×360 / 10:3 ratio), keeping the left side calm and low-contrast so the
+  bot's avatar and name stay crisp, with rich matching atmosphere/character motifs flowing toward the right side (no text or UI).
 - For a dynamic background, save `background.mp4` in the same directory. Use H.264 with `yuv420p`, no audio,
   and fast-start metadata. Prefer 6–10 seconds at 24 fps, 1280×720 or 1920×1080. Keep it under 100 MB.
 - Use a short video generator when available. Ask for a stationary composition with subtle environmental movement

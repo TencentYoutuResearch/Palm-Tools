@@ -59,12 +59,17 @@ export class SessionAppearance {
         const version = async path => { try { const info = await stat(path); return `${Math.trunc(info.mtimeMs)}-${info.size}` } catch { return '0' } }
         const animations = Object.fromEntries(await Promise.all([...states].map(async state => [state, await Promise.all((await this.animationPaths(id, state)).map(async (path, index) => `${prefix}&state=${state}&frame=${index + 1}&v=${await version(path)}`))])))
         const idle = await this.imagePath(id, 'idle')
-        const [still, video] = await Promise.all([this.backgroundPath(id, catalog), this.backgroundVideoPath(id, catalog)])
-        const [background, backgroundVideo] = await Promise.all([
+        const [still, video, bannerFile] = await Promise.all([
+          this.backgroundPath(id, catalog),
+          this.backgroundVideoPath(id, catalog),
+          this.bannerPath(id, catalog),
+        ])
+        const [background, backgroundVideo, banner] = await Promise.all([
           this.backgroundUrl(id, still),
           this.backgroundUrl(id, video, '&variant=video'),
+          this.backgroundUrl(id, bannerFile, '&variant=banner'),
         ])
-        result.push({ id, name: entry.name.replace(/^\d+-/, ''), aliases: Object.keys(catalog.renamed ?? {}).filter(alias => resolveGalleryId(alias, catalog) === id), url: `${prefix}&state=idle&v=${await version(idle)}`, animations, ...(background ? { background } : {}), ...(backgroundVideo ? { backgroundVideo } : {}) })
+        result.push({ id, name: entry.name.replace(/^\d+-/, ''), aliases: Object.keys(catalog.renamed ?? {}).filter(alias => resolveGalleryId(alias, catalog) === id), url: `${prefix}&state=idle&v=${await version(idle)}`, animations, ...(background ? { background } : {}), ...(backgroundVideo ? { backgroundVideo } : {}), ...(banner ? { banner } : {}) })
       }
     }
     return result
@@ -153,6 +158,14 @@ export class SessionAppearance {
       if (path) return path
     }
   }
+  async bannerPath(id, catalog) {
+    id = resolveGalleryId(id, catalog ?? await this.galleryCatalog())
+    if (!id) return
+    for (const name of ['banner.png', 'banner.jpg', 'banner.jpeg', 'banner.webp']) {
+      const path = await this.safeMedia(join(this.root, id, name), 8 * 1024 * 1024)
+      if (path) return path
+    }
+  }
   async backgroundVideoPath(id, catalog) {
     id = resolveGalleryId(id, catalog ?? await this.galleryCatalog())
     if (id) return this.safeMedia(join(this.root, id, 'background.mp4'), MAX_BACKGROUND_VIDEO_BYTES)
@@ -233,9 +246,11 @@ export function registerAvatarApi(ctx, appearance) {
       }
       if (req.method !== 'GET') return send(405, { error: 'GET required' })
       if (url.pathname === '/api/kode/avatars') return send(200, { avatars: await appearance.gallery(), canRename: true })
-      if (url.pathname === '/api/kode/avatars/generation-prompt') return send(200, await avatarGenerationPrompt(appearance, { avatarId: url.searchParams.get('avatar'), backgroundOnly: url.searchParams.get('mode') === 'background' }))
+      if (url.pathname === '/api/kode/avatars/generation-prompt') return send(200, await avatarGenerationPrompt(appearance, { avatarId: url.searchParams.get('avatar'), backgroundOnly: url.searchParams.get('mode') === 'background', botName: url.searchParams.get('bot_name') ?? '', botPersona: url.searchParams.get('bot_persona') ?? '' }))
       if (url.pathname === '/api/kode/avatars/background') {
-        const path = await appearance.backgroundPath(url.searchParams.get('avatar') ?? '')
+        const variant = url.searchParams.get('variant')
+        const id = url.searchParams.get('avatar') ?? ''
+        const path = variant === 'banner' ? (await appearance.bannerPath(id)) ?? (await appearance.backgroundPath(id)) : await appearance.backgroundPath(id)
         if (!path) return send(404, { error: 'Background unavailable' })
         const mime = path.endsWith('.webp') ? 'image/webp' : /\.jpe?g$/.test(path) ? 'image/jpeg' : 'image/png'
         res.writeHead(200, { 'content-type': mime, 'cache-control': 'private, max-age=60', 'x-content-type-options': 'nosniff' }); res.end(await readFile(path)); return
