@@ -114,9 +114,9 @@ jobs:
       - name: Install GUI dependencies
         run: pnpm --dir kode/apps/gui install --frozen-lockfile
 
-      - name: Install dsh integration dependencies
-        run: npm ci --no-audit --no-fund
+      - name: Install bundled dsh extension dependencies
         working-directory: kode/integrations/dsh
+        run: npm ci --ignore-scripts --omit=optional --no-audit --no-fund
 
       - uses: actions/download-artifact@v6
         with:
@@ -330,10 +330,8 @@ jobs:
         run: pnpm tauri build --bundles nsis
       - name: Collect Windows assets
         shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ github.ref_name }}
         run: |
-          $version = $env:RELEASE_VERSION.TrimStart('v')
+          $version = (Get-Content -Raw 'kode/apps/gui/src-tauri/tauri.conf.json' | ConvertFrom-Json).version
           $out = 'release-assets/windows'
           New-Item -ItemType Directory -Force $out | Out-Null
           # Tauri's NSIS updater signs the installer itself, not a .zip wrapper.

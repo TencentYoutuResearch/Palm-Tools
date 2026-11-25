@@ -37,17 +37,23 @@ pub(crate) async fn connection() -> anyhow::Result<(reqwest::Client, String, Str
     let url = reqwest::Url::parse(&config.url)?;
     if url.scheme() != "http" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1")) || !url.username().is_empty() { anyhow::bail!("workbench backend must use an authenticated loopback origin") }
     let token = tokio::fs::read_to_string(&config.token_file).await?;
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4)).redirect(reqwest::redirect::Policy::none()).build()?;
+    let client = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(4)).redirect(reqwest::redirect::Policy::none()).build()?;
     let node = format!("{}/api/v1/messaging/node",config.url.trim_end_matches('/'));
-    if managed {
-        if let Ok(response) = client.get(&node).bearer_auth(token.trim()).send().await {
-            let running: Value = response.json().await.unwrap_or_default();
+    let mut start_service = true;
+    if let Ok(response) = client.get(&node).bearer_auth(token.trim()).send().await {
+        // A listener returning an HTTP error is not a ready workbench. Surface
+        // its status instead of spawning a competing server on the same port.
+        anyhow::ensure!(response.status().is_success(), "Workbench health check failed: HTTP {}", response.status());
+        start_service = false;
+        if managed {
+            let running: Value = response.json().await?;
             if replace_running_service(&running, &own) {
                 stop_service(&client, &node, token.trim(), &running).await;
+                start_service = true;
             }
         }
     }
-    if client.get(&node).bearer_auth(token.trim()).send().await.is_err() {
+    if start_service {
         let command=config.server_command.as_ref().ok_or_else(||anyhow::anyhow!("Kode backend is not running; start its configured service"))?;
         let args=config.server_config.as_ref().ok_or_else(||anyhow::anyhow!("Kode backend service config is missing"))?;
         std::process::Command::new(command).hide_console().args(&config.server_args).args(["--config",&args.to_string_lossy(),"--token-file",&config.token_file.to_string_lossy(),"--bind",&format!("{}:{}",url.host_str().unwrap(),url.port().unwrap_or(80))]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
