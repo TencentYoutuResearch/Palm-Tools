@@ -1312,7 +1312,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const nameplateStyle = banner?.kind === 'image'
       ? { '--kode-bot-banner-img': `url(${JSON.stringify(banner.url)})` }
       : banner?.kind === 'gradient' ? { '--kode-bot-banner-bg': banner.css } : undefined
-    return h('div', { className: 'kode-field' }, h('span', null, '头像与背景（Discord 名片风格）'),
+    return h('div', { className: 'kode-field' }, h('span', null, '头像与背景'),
       h('div', { className: 'kode-bot-nameplate-preview-wrap' },
         h('div', { className: `kode-bot-row kode-bot-nameplate-preview${banner ? ` has-banner is-${banner.kind}` : ''}`, style: nameplateStyle },
           h('span', { className: 'kode-bot-avatar-frame' }, h(AgentAvatar, { profile, host: 'local', size: 32, preview: true })),
@@ -1342,9 +1342,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         h('button', { type: 'button', className: 'kode-avatar-choice', 'aria-pressed': !draft.avatar, disabled: busy, onClick: () => onChange({ ...draft, avatar: null }) }, h(AgentAvatar, { profile: { ...profile, avatar: null }, host: 'local', size: 36 }), h('span', { className: 'kode-avatar-caption' }, 'Agent 图标')),
         ...library.avatars.map(avatar => h('button', { type: 'button', key: avatar.id, className: 'kode-avatar-choice', 'aria-pressed': draft.avatar === avatar.id, disabled: busy, title: avatar.name, onClick: () => onChange({ ...draft, avatar: avatar.id }) }, h(AgentAvatar, { profile: { ...profile, avatar }, host: 'local', size: 36, preview: true }), h('span', { className: 'kode-avatar-caption' }, h('span', null, avatar.name))))),
       bot && h('div', { className: 'kode-bot-asset-actions' },
-        h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => void stageAvatarPrompt(undefined, 'local', false, null, bot).catch(error => setAssetError(error.message)) }, 'AI 生成头像与 Discord 背景'),
+        h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => void stageAvatarPrompt(undefined, 'local', false, null, bot).catch(error => setAssetError(error.message)) }, 'AI 生成头像与背景'),
         draft.avatar && h(Button, { type: 'button', variant: 'ghost', disabled: busy, onClick: () => void stageAvatarPrompt(undefined, 'local', true, draft.avatar, bot).catch(error => setAssetError(error.message)) }, '只生成背景与横幅'),
-        h('span', { className: 'kode-config-note' }, `在伙伴自己的文件夹里开一个会话，同步生成头像、会话背景和 Discord 横幅，完成后回来选`)),
+        h('span', { className: 'kode-config-note' }, `在伙伴自己的文件夹里开一个会话，同步生成头像、会话背景和横幅，完成后回来选`)),
       h(Failure, { text: assetError }),
       h('label', { className: 'kode-avatar-background-toggle' }, h('input', { type: 'checkbox', checked: showBackground, onChange: event => setDisplay(event.target.checked ? 'still' : 'off') }), '在对话里显示背景（所有会话共用这个开关）'),
       !library.avatars.length && h('span', { className: 'kode-config-note' }, library.loaded ? '还没有自定义头像。可以在 Kode 设置 → 个性化 里创建头像、动画和背景，回来就能选。' : '正在读取头像…'),
