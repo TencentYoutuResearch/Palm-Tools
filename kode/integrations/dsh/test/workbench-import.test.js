@@ -461,3 +461,23 @@ test('re-imports a fresh copy and retires an existing blank zombie copy of the s
   assert.ok(importedSeed && importedSeed.seed.length > 0, 'fresh copy should receive real history seed')
   assert.ok(archived.includes(zombieId), 'blank zombie copy should be archived')
 })
+
+test('reopening a blank copy of an empty native thread keeps its identity', async () => {
+  const cwd = '/tmp/cursor-empty', id = 'session-kode-empty'
+  const bindings = { [id]: { profile: { id: 'kode-cursor', name: 'cursor', type: 'cursor' }, threadId: 'empty-thread' } }
+  const workspace = { id: 'ws-1', path: cwd, attachSession: async () => {} }
+  const services = {
+    workspaceRegistry: { archivedSessionIds: [], list: () => [workspace], archiveSession: async () => assert.fail('nothing to retire') },
+    kodeAgents: { profiles: { list: () => [bindings[id].profile], bindings, binding: key => bindings[key] } },
+    kodeNativeFactory: { importHistory: async () => assert.fail('empty history must not create another copy') },
+    sessionController: { list: async () => ({ items: [{ sessionId: id, blank: true, running: false, updatedAt: 1 }] }) },
+  }
+  const client = { call: async path => path.endsWith('/runtime/sessions') ? { sessions: [] }
+    : path.endsWith('/transcript') ? { available: true, timeline: [], history_window: { count: 0, truncated: false } }
+      : { revision: 1, value: { version: 1 } } }
+  const tab = { backend_key: 'cursor', session_id: 'empty-thread', cwd, title: 'Empty' }
+  for (let i = 0; i < 2; i++) {
+    const result = await importSavedSession({ get: key => services[key] }, client, tab)
+    assert.equal(result.sessionId, id); assert.equal(result.imported, false)
+  }
+})

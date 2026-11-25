@@ -180,7 +180,9 @@ async function importSession(ctx, client, tab, { fresh = false, discovered = fal
     await retireStaleCopies(ctx, tab.session_id, reuse)
     return { sessionId: reuse, imported: true, reloaded: true }
   }
-  const blankCopy = Boolean(existing?.blank)
+  // A blank copy is replaced only when there is history to put in the new one;
+  // otherwise every open would leave another empty copy behind.
+  const blankCopy = Boolean(existing?.blank) && !(stored && !fresh && await emptyTranscript(client, tab))
   const id = fresh || blankCopy ? freshImportIdentity(tab) : reuse
   const priorBinding = runtime.profiles.binding?.(id)
   if (priorBinding?.threadId && (priorBinding.threadId !== tab.session_id || priorBinding.profile.id !== profile.id)) throw new Error('Saved session identity conflicts with an existing native conversation')
@@ -253,6 +255,11 @@ async function latestCopy(controller, bindings, threadId, profileId, archivedIds
     Number(!rows.get(b).blank) - Number(!rows.get(a).blank) ||
     Number(!archived.has(b)) - Number(!archived.has(a)) ||
     (rows.get(b).updatedAt ?? 0) - (rows.get(a).updatedAt ?? 0))[0]
+}
+/** An unreadable transcript is unknown, not empty. */
+async function emptyTranscript(client, tab) {
+  const transcript = await fetchTranscript(client, tab).catch(() => null)
+  return Boolean(transcript?.available) && !(transcript.timeline ?? transcript.messages ?? []).length
 }
 function fetchTranscript(client, tab, window = {}) {
   return client.call(TRANSCRIPT, { backend_key: tab.backend_key, session_id: tab.session_id, cwd: tab.cwd, ...window })

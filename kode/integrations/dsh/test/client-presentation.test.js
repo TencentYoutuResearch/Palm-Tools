@@ -1664,3 +1664,32 @@ test('bots sidebar registers collapsible trailing toggle, larger nameplate styli
   assert.match(source, /topic: 'wecom\/message'/)
   assert.match(source, /WeComBridgeCard/)
 })
+
+test('forking is single-flight, opens the child, and survives a failed title increment', async () => {
+  for (const renameFails of [false, true]) {
+    const contributions = [], opened = [], notices = []
+    let forks = 0, release
+    const gate = new Promise(resolve => { release = resolve })
+    const sessions = {
+      list: { subscribe: () => () => {}, getSnapshot: () => ({ byId: { source: { title: 'Source' } } }) },
+      binding: () => ({ ctx: { get: () => ({ input: { for: () => ({ notify: (...args) => notices.push(args) }) } }) } }),
+      fork: async options => { forks++; await gate; options.onCreated?.('child'); if (renameFails) throw new Error('fork child rename failed'); return 'child' },
+    }
+    const uiWorkspace = { openSession: id => { opened.push(id) }, forkSession(sessionId) { return sessions.fork({ sessionId, increaseTitle: true }) } }
+    const c = client(undefined, {}, {
+      sessions, uiWorkspace, inputTriggers: { sessionOf: () => ({}), registerSource: () => () => {} },
+      commandUi: { candidates: async () => [], register: value => { contributions.push(value); return () => {} }, decorate: () => () => {} },
+      remote: { commands: { list: async () => ({ ok: true, value: [] }) } },
+      get: name => name === 'uiWorkspace' ? uiWorkspace : undefined,
+    })
+    const command = contributions.find(value => value.name === 'fork')
+    const runs = [command.ui.run({ sessionId: 'source' }), uiWorkspace.forkSession('source'), uiWorkspace.forkSession('source')]
+    release(); await Promise.all(runs)
+    assert.equal(forks, 1)
+    assert.deepEqual(opened, ['child', 'child', 'child'])
+    assert.deepEqual(notices, [])
+    await uiWorkspace.forkSession('source')
+    assert.equal(forks, 2, 'a later deliberate fork is still allowed')
+    for (const dispose of c.disposers) dispose()
+  }
+})

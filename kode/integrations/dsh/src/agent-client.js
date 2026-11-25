@@ -3483,15 +3483,47 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     )
   }
   const textContent = content => (content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n')
-  function installInputPresentation(ctx) {
-    // Cordis returns a fresh context-bound Proxy on each method read. Compare
-    // and retain the underlying function, never a Proxy tied to this plugin.
-    const methodOf = (object, name) => {
-      for (let owner = object; owner; owner = Object.getPrototypeOf(owner)) {
-        const descriptor = Object.getOwnPropertyDescriptor(owner, name)
-        if (descriptor) return descriptor.value ?? object[name]
-      }
+  // Cordis returns a fresh context-bound Proxy on each method read. Compare
+  // and retain the underlying function, never a Proxy tied to this plugin.
+  const methodOf = (object, name) => {
+    for (let owner = object; owner; owner = Object.getPrototypeOf(owner)) {
+      const descriptor = Object.getOwnPropertyDescriptor(owner, name)
+      if (descriptor) return descriptor.value ?? object[name]
     }
+  }
+  /** One fork per source and cut at a time, and a created child is always
+   *  returned: upstream rejects when only the title increment fails, which hid
+   *  the new conversation and invited another click. */
+  function installForkGuard(sessions, ui) {
+    const originalFork = sessions && methodOf(sessions, 'fork'), originalForkSession = ui && methodOf(ui, 'forkSession'), pending = new Map()
+    if (!originalFork) return () => {}
+    const fork = function(options) {
+      const key = JSON.stringify([transport?.current ?? 'local', options.sessionId, options.atSeq ?? null])
+      if (pending.has(key)) return pending.get(key)
+      let childId
+      const task = Promise.resolve(originalFork.call(this, { ...options, onCreated: id => { childId = id; options.onCreated?.(id) } })).catch(error => {
+        if (childId === undefined) throw error
+        console.warn('session forked, but its title was not updated:', error)
+        return childId
+      }).finally(() => { if (pending.get(key) === task) pending.delete(key) })
+      pending.set(key, task)
+      return task
+    }
+    // The sidebar menu and shortcut leave the child unopened upstream.
+    const forkSession = originalForkSession && async function(...args) {
+      const childId = await originalForkSession.apply(this, args)
+      await this.openSession(childId)
+      void refreshWorkspaceDirectory()
+      return childId
+    }
+    sessions.fork = fork
+    if (forkSession) ui.forkSession = forkSession
+    return () => {
+      if (methodOf(sessions, 'fork') === fork) sessions.fork = originalFork
+      if (forkSession && methodOf(ui, 'forkSession') === forkSession) ui.forkSession = originalForkSession
+    }
+  }
+  function installInputPresentation(ctx) {
     ctx.inject(['inputTriggers', 'commandUi', 'remote.commands'], scope => {
       const input = scope.inputTriggers, commands = scope.commandUi
       if (!input?.sessionOf || typeof commands?.candidates !== 'function') return
@@ -3574,8 +3606,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         ui: { kind: 'action', run: session => {
           const binding = scope.sessions.binding(session.sessionId)
           return (async () => {
-            const forked = await scope.sessions.fork({ sessionId: session.sessionId, increaseTitle: true })
-            await scope.get('uiWorkspace')?.openSession(forked.sessionId)
+            const childId = await scope.sessions.fork({ sessionId: session.sessionId, increaseTitle: true })
+            await scope.get('uiWorkspace')?.openSession(childId)
             await refreshWorkspaceDirectory()
           })().catch(error => {
             const text = /fork-unavailable|no completed turn/i.test(error?.message ?? '')
@@ -4381,6 +4413,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       void face.load().then(loaded => { if (active) document.fonts.add(loaded) }).catch(() => {})
       return () => { active = false; document.fonts.delete(face) }
     }, 'kode.terminal-font')
+    ctx.inject(['sessions', 'uiWorkspace'], scope => { scope.effect(() => installForkGuard(scope.sessions, scope.uiWorkspace), 'kode.fork-guard') })
     ctx.inject(['workspaces', 'uiWorkspace', 'layout'], scope => {
       scope.slots.inject('conversation.hero.workspace', () => scope.slots.register({ name: 'conversation.hero.workspace', priority: -10, inject: sessionId => ({ sessionId, workspaces: scope.workspaces, slots: scope.slots, remote: scope.remote, uiWorkspace: scope.uiWorkspace }) }, WorkspacePicker))
       scope.slots.inject('sidebar.workspaces.directoryFlow', () => scope.slots.register({ name: 'sidebar.workspaces.directoryFlow', priority: -10, inject: () => ({ slots: scope.slots, workspaces: scope.workspaces }) }, ProjectFlow))
