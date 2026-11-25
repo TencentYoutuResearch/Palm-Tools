@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { CodexSession } from '../src/codex-session.js'
 const fixture = fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))
 const collect = async stream => { const events = []; for await (const event of stream) events.push(event); return events }
@@ -59,6 +61,48 @@ test('two Codex profiles run concurrently with independent environments, followu
   } finally {
     if (previousToken === undefined) delete process.env.KODE_BRIDGE_TOKEN; else process.env.KODE_BRIDGE_TOKEN = previousToken
     await Promise.all([a.close(), b.close(), resumed?.close()]); await rm(root, { recursive: true, force: true })
+  }
+})
+test('resumed Codex receives updated communication tools when only a parameter changed', async () => {
+  const profile = { executable: process.execPath, args: [fixture] }
+  const name = 'kode_sessions_send'
+  const oldTool = { name, description: 'Send a session message', parameters: { type: 'object', properties: { content: { type: 'string' } } } }
+  const newTool = { ...oldTool, parameters: { ...oldTool.parameters, properties: { ...oldTool.parameters.properties, title: { type: 'string' } } } }
+  const original = new CodexSession(profile, tmpdir())
+  const unchanged = new CodexSession(profile, tmpdir())
+  const legacy = new CodexSession(profile, tmpdir())
+  const calls = []
+  const resumed = new CodexSession(profile, tmpdir(), { tool: async (request, signal) => {
+    signal.throwIfAborted()
+    calls.push(request)
+    return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ message: request.arguments }) }] }
+  } })
+  const client = new Client({ name: 'resumed-codex-test', version: '1' })
+  try {
+    const threadId = await original.open({}, [oldTool])
+    const binding = { threadId, nativeToolNames: [name], nativeToolSchema: original.nativeToolSchema }
+    await original.close()
+    await unchanged.open(binding, [oldTool])
+    assert.equal(unchanged.proxy, undefined)
+    await legacy.open({ threadId, nativeToolNames: [name] }, [newTool])
+    assert.ok(legacy.proxy, 'a legacy binding with names alone must get the current tool')
+
+    assert.equal(await resumed.open(binding, [newTool]), threadId)
+    const token = await readFile(resumed.proxy.tokenFile, 'utf8')
+    await client.connect(new StreamableHTTPClientTransport(new URL(resumed.proxy.url), {
+      requestInit: { headers: { authorization: `Bearer ${token}` } },
+    }))
+    const tool = (await client.listTools()).tools.find(row => row.name === name)
+    assert.equal(tool.inputSchema.properties.title.type, 'string')
+    resumed.active = { turnId: 'fixture-turn', signal: AbortSignal.timeout(5000) }
+    const result = await client.callTool({ name, arguments: { title: 'Review result', content: 'Reviewed the fixtures' } })
+    assert.equal(result.isError, false)
+    assert.equal(JSON.parse(result.content[0].text).message.title, 'Review result')
+    assert.deepEqual(calls.map(({ threadId, turnId, tool }) => ({ threadId, turnId, tool })), [{ threadId, turnId: 'fixture-turn', tool: name }])
+  } finally {
+    resumed.active = undefined
+    await client.close()
+    await Promise.all([original.close(), unchanged.close(), legacy.close(), resumed.close()])
   }
 })
 test('cancellation closes the native process before another turn can execute', async () => {
