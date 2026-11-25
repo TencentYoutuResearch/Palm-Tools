@@ -19,6 +19,7 @@ import { AgentProfiles } from '../src/agent-profiles.js'
 import { mountNativeCommands } from '../src/native-commands.js'
 import { pendingShellContext } from '../src/native-shell.js'
 import { installQueueSteering } from '../src/queue-steering.js'
+import { relayInput } from '../src/message-pages.js'
 import { AcpTurnCancelledError } from '../src/acp-session.js'
 import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -159,6 +160,49 @@ for (const outcome of ['accepted', 'rejected', 'uncertain']) test(`Codex steerin
     assert.equal(h.stored.get(agent.id).events.filter(event => event.type === 'user/message' && event.data.id === 'steering-input').length, 1)
     assert.equal(agent.inbox.nextStep.length + agent.inbox.nextTurn.length, 0)
     assert.ok(profiles.binding(agent.id).seenInputs.includes('steering-input'))
+  } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a relay steers the active Codex turn, unless a human interaction is pending at admission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-relay-steering-')), wire = join(root, 'wire.jsonl')
+  const h = await host({ closeSession: async () => {} }, true)
+  const profiles = await new AgentProfiles(join(root, 'profiles.json')).open([{ id: 'fixture', name: 'Fixture', type: 'codex', executable: process.execPath, args: [fileURLToPath(new URL('./fixture-codex-server.js', import.meta.url))], env: { KODE_FIXTURE_RPC_LOG: wire } }])
+  const adapter = new AgentRuntimeAdapter(h.ctx, profiles, { recordNative() {} })
+  Object.assign(h.ctx.kodeAgents, { profiles, adapter, recordBinding() {} })
+  let pending = []
+  h.ctx.provide('typertGateway', { getPendingRemoteEvents: () => pending })
+  try {
+    const { agent } = await h.ctx.agents.create({ ...options, meta: { cwd: root } })
+    const relay = id => relayInput({ id, source: { node_id: 'worker.example', session_id: 'worker' }, content: id }, id)
+    assert.equal(agent.canSteerRelay(), false)
+    agent.followup(message('initial', 'WAIT'))
+    const readyBy = Date.now() + 5000
+    while (!adapter.canSteer(agent.id) && Date.now() < readyBy) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.ok(adapter.canSteer(agent.id))
+    pending = [{ event: 'approval/request', agentId: 'another-session' }]
+    assert.equal(agent.canSteerRelay(), true)
+    const steer = adapter.steer
+    adapter.steer = function (...args) {
+      pending = [{ event: 'approval/request', agentId: agent.id }]
+      return steer.apply(this, args)
+    }
+    agent.steer(relay('deferred'))
+    await agent.steeringTask
+    assert.equal(agent.canSteerRelay(), false)
+    assert.deepEqual(agent.inbox.nextTurn.map(row => row.id), ['deferred'])
+    assert.deepEqual(agent.inbox.nextStep, [])
+    adapter.steer = steer
+    pending = []
+    assert.equal(agent.canSteerRelay(), true)
+    agent.steer(relay('urgent'))
+    await agent.whenIdle()
+    const rows = (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse)
+    const requests = rows.filter(row => ['turn/start', 'turn/steer'].includes(row.method))
+    assert.deepEqual(requests.map(row => row.method), ['turn/start', 'turn/steer', 'turn/start'])
+    assert.match(JSON.stringify(requests[1].params), /urgent/)
+    assert.match(JSON.stringify(requests[2].params), /deferred/)
+    const inputs = h.stored.get(agent.id).events.filter(event => event.type === 'user/message').map(event => event.data.id)
+    assert.deepEqual(inputs, ['initial', 'urgent', 'deferred'])
   } finally { await h.fiber.dispose(); await adapter.close(); await rm(root, { recursive: true, force: true }) }
 })
 

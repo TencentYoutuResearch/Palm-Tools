@@ -92,6 +92,14 @@ export class NativeAgentDriver {
   }
   send(message, target, wakeup) { if (this.disposed) throw new Error('Agent runtime has been unplugged'); this.inbox.append(target, message); if (wakeup) { this.parked = false; this.wake() } }
   followup(message) { this.send(message, 'next-turn', true) }
+  canSteerRelay() {
+    if (this.status !== 'running' || this.disposed || this.abort?.signal.aborted || !this.runtime.adapter.supportsSteering?.(this)) return false
+    // Match the SessionController's check for pending human input. A relay
+    // never answers one, and ACP cancel/resume would dismiss the live request.
+    const pending = this.ctx.get?.('typertGateway')?.getPendingRemoteEvents?.() ?? []
+    for (const { agentId } of pending) if (String(agentId) === this.id) return false
+    return true
+  }
   assertSteeringAvailable(message) {
     if (this.disposed) throw new Error('Agent runtime has been unplugged')
     if (this.status === 'running' && ['user', 'human'].includes(message.source?.kind) && !this.runtime.adapter.supportsSteering?.(this)) throw new Error('当前 Agent 不支持原生中途插入，请选择排队发送。')
@@ -112,6 +120,11 @@ export class NativeAgentDriver {
         const result = await this.runtime.adapter.steer(this, message, this.abort.signal, {
           admit: async () => {
             if (this.inbox.nextStep[0] !== message) return false
+            if (message.source?.kind === 'agent-message' && message.source.form === 'relay' && !this.canSteerRelay()) {
+              this.inbox.splice('next-step', 0, 1, [])
+              this.inbox.append('next-turn', message)
+              return false
+            }
             this.inbox.splice('next-step', 0, 1, []); admitted = true
             this.activeInputs.add(message.id)
             this.events.emit('agent/inbox/claimed', { message, turn: this.turn })
