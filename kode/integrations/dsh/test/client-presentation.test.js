@@ -937,6 +937,28 @@ test('the sidebar status overlay preserves base avatars and maps running, awaiti
  assert.ok(avatars.every(avatar=>avatar.props.profile.avatar.id==='gallery/person'&&avatar.props.size===20))
 })
 
+test('running sessions use one steady avatar marker for default and custom artwork; rows without an Agent keep the native dot',()=>{
+ const h=(type,props,...children)=>({type,props,children}),targets=[{id:'custom',seat:{},state:'ongoing'},{id:'default',seat:{},state:'ongoing'},{id:'plain',seat:{},state:'ongoing'}]
+ const scope={React:{Fragment:'fragment'},h,AgentAvatar:'avatar',createPortal:element=>element,useState:()=>[targets.splice(0),()=>{}],useEffect:()=>{}}
+ vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
+ const tree=scope.SessionStatusAvatars({root:{current:null},rows:{custom:{agent:{type:'codex',avatar:{id:'gallery/person'}}},default:{agent:{type:'claude'}},plain:{}}})
+ assert.deepEqual(tree.children.map(overlay=>[overlay.children[0].props['data-status'],overlay.children[0].children[0].props.status]),[['ongoing','running'],['ongoing','running']])
+ const css=source.slice(source.indexOf('.kode-agent-avatar[data-avatar-state=awaiting]::after,'),source.indexOf('.kode-tool-action{'))
+ assert.match(css,/\[data-avatar-state=running\]::before\{[^}]*width:9px[^}]*background:#3b82f6;animation:none\}/,'the running core stays solid and does not fade')
+ assert.match(css,/\[data-avatar-state=running\]::after\{[^}]*animation:kode-avatar-running-halo/,'only the small halo moves')
+ assert.doesNotMatch(css,/\[data-avatar-state=running\]::after,/,'running no longer shares the large avatar frame')
+ assert.match(css,/prefers-reduced-motion:reduce\)\{\.kode-agent-avatar\[data-avatar-state=running\]::after\{content:none\}/)
+ assert.match(source,/\[data-kode-panel-row\] \.kode-agent-avatar\[data-avatar-state\]:not\(\[data-avatar-state=running\]\)::after\{content:none\}/)
+})
+
+test('environment Git and folder rows are flat native-style rows with hover and focus feedback',()=>{
+ assert.match(source,/\.kode-environment-project\[data-git\]\{display:grid;gap:0\}/)
+ assert.doesNotMatch(source,/\.kode-environment-project\[data-git\]\{[^}]*background/,'no always-visible gray block')
+ assert.match(source,/@media\(hover:hover\)\{\.kode-environment-git:hover\{background:var\(--dsw-alias-interactive-bg-hover\)\}\}/)
+ assert.match(source,/\.kode-environment-git:has\(code:focus-visible\)\{outline:/)
+ assert.match(source,/\.kode-environment-project\[data-git=worktree\] \.kode-environment-kind\{/,'the separate worktree badge stays')
+})
+
 test('workspace status gives awaiting highest priority, then completion, then running',()=>{
  const scope={};vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function SessionStatusAvatars')),scope)
  const collapsed=scope.sessionStateMap({busy:{running:false},done:{},review:{},idle:{}},new Map([['busy',{running:true}],['done',{running:true,completionUnread:true}],['review',{running:true,completionUnread:true,pendingInteraction:{kind:'approval'}}],['idle',{running:false}]]))
@@ -1515,4 +1537,25 @@ test('the session identity becomes a sibling before the native environment secti
   anchor = { current: { closest: () => null } }
   assert.equal(scope.SessionIdentitySection({ children: 'identity' }).children[1], 'identity', 'unknown hosts keep the identity inline')
   assert.equal(cleanup, undefined)
+})
+
+test('Kode review, subagent and communication rows stay one line and show three before folding', () => {
+  const h = (type, props, ...children) => ({ type, props, children })
+  const scope = vm.createContext({ h, React: { Fragment: 'fragment' }, useState: value => [value, () => {}] })
+  vm.runInContext(source.slice(source.indexOf('  function SessionPanelRow('), source.indexOf('  const cardKey =')), scope)
+  const row = scope.SessionPanelRow({ label: '验证 Agent', detail: '运行中', compact: true, onClick: () => {} })
+  assert.equal(row.props['data-kode-compact'], '')
+  assert.equal(scope.SessionPanelRow({ label: 'Codex' }).props['data-kode-compact'], undefined, 'identity keeps its two-line layout')
+  const folds = []
+  const list = scope.DisclosurePanelRows({ rows: [1, 2, 3, 4, 5].map(id => ({ id })), renderFactorySlot: (name, props) => folds.push(props) && name, rowProps: row => ({ label: `#${row.id}`, detail: '运行中' }), content: () => null })
+  const tree = list.type(list.props)
+  assert.equal(tree.children[0].length, 3)
+  assert.ok(tree.children[0].every(item => item.children[0].props.compact === true))
+  assert.equal(folds[0].label, '显示另外 2 项', 'the native fold still reveals every item')
+  assert.match(source, /\[data-kode-panel-row\]\[data-kode-compact\] \[data-row-part=lines\]\{flex-direction:row/)
+  assert.match(source, /renderRow: row => h\(SessionPanelRow, \{ key: row\.url, href: row\.url, compact: true,/)
+  const lines = scope.SessionPanelRow({ label: '一个很长的外部 CLI 子 Agent 标题', status: '等待操作', detail: 'gpt-5-codex', compact: true }).children[0].children[0][1]
+  assert.deepEqual(lines.children.filter(Boolean).map(part => [part.props['data-row-part'], part.children[0]]), [['content', '一个很长的外部 CLI 子 Agent 标题'], ['status', '等待操作'], ['detail', 'gpt-5-codex']])
+  assert.match(source, /\[data-kode-panel-row\] \[data-row-part=status\]\{flex:none;white-space:nowrap/, 'status never truncates; model then title give way')
+  assert.match(source, /rowProps: child => \(\{ label: childTitle\(child\), status: childStatusLabel\(child\), detail: child\.model,/)
 })

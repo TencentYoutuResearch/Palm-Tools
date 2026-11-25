@@ -3251,14 +3251,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       return hasPanel ? null : h(Component, props)
     }
   }
-  function SessionPanelRow({ icon, label, detail, trailing, actionLabel, onClick, expanded, href }) {
+  function SessionPanelRow({ icon, label, status, detail, trailing, actionLabel, onClick, expanded, href, compact }) {
     const body = [
       h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true }, icon),
       h('span', { key: 'label', 'data-row-part': 'lines' },
         h('span', { 'data-row-part': 'content', title: label }, label),
+        status && h('span', { 'data-row-part': 'status' }, status),
         detail && h('span', { 'data-row-part': 'detail', title: detail }, detail)),
     ]
-    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '' },
+    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined },
       href ? h('a', { 'data-row-part': 'body', className: 'kode-panel-link', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': actionLabel }, body) :
         onClick ? h('button', { type: 'button', 'data-row-part': 'body', 'aria-label': actionLabel, 'aria-expanded': expanded, onClick }, body) :
           h('span', { 'data-row-part': 'body' }, body),
@@ -3319,7 +3320,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function PanelList({ rows, renderFactorySlot, renderRow }) {
     const [expanded, setExpanded] = useState(false)
-    const limit = 4, foldable = rows.length > limit
+    const limit = 3, foldable = rows.length > limit
     const label = expanded ? '收起' : `显示另外 ${rows.length - limit} 项`
     return h(React.Fragment, null,
       (expanded ? rows : rows.slice(0, limit)).map(renderRow),
@@ -3330,7 +3331,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h(PanelList, { rows, renderFactorySlot, renderRow: row => {
       const expanded = selected === row.id
       return h(React.Fragment, { key: row.id },
-        h(SessionPanelRow, { ...rowProps(row), expanded, onClick: () => setSelected(expanded ? null : row.id) }),
+        h(SessionPanelRow, { ...rowProps(row), compact: true, expanded, onClick: () => setSelected(expanded ? null : row.id) }),
         expanded && h('div', { className: 'kode-panel-detail' }, content(row)))
     } })
   }
@@ -3341,7 +3342,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const rank = { awaiting: 0, running: 1 }
     const rows = Object.values(state).reverse().sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2))
     return h(DisclosurePanelRows, { key: cardKey(sessionId), rows, renderFactorySlot,
-      rowProps: child => ({ label: childTitle(child), detail: [childStatusLabel(child), child.model].filter(Boolean).join(' · '), icon: childStateDot(child),
+      rowProps: child => ({ label: childTitle(child), status: childStatusLabel(child), detail: child.model, icon: childStateDot(child),
         trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }),
       content: child => h(React.Fragment, null,
         child.task && h('p', null, child.task),
@@ -3370,7 +3371,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const tracked = new Set((nativeChanges ?? []).map(entry => entry.url?.split(/[?#]/)[0].replace(/\/$/, '')))
     const rows = reviews?.filter(row => /^https?:\/\//i.test(row.url) && !tracked.has(row.url)).toReversed()
     return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows, renderFactorySlot,
-      renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, icon: h(IconBranchOutlineRegular, { size: 16 }),
+      renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h(IconBranchOutlineRegular, { size: 16 }),
         label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}`,
         trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),
     }) : null
@@ -3688,11 +3689,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 @media(hover:hover){[data-session-panel-row]:has(>.kode-panel-link):hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .kode-panel-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:var(--dsw-radius-sm)}
 [data-kode-panel-row]:has(>button[aria-expanded=true])>[data-row-part=trailing]{transform:rotate(180deg)}
+/* Kode's own card lists keep one line per item: the detail trails the title and the disclosure still shows everything. */
+[data-kode-panel-row][data-kode-compact] [data-row-part=lines]{flex-direction:row;align-items:baseline;gap:6px}
+[data-kode-panel-row][data-kode-compact] [data-row-part=content]{flex:0 1 auto}
+[data-kode-panel-row] [data-row-part=status]{flex:none;white-space:nowrap;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:17px}
+[data-kode-panel-row][data-kode-compact]:has([data-row-part=status]) [data-row-part=content]{min-width:2em}
+[data-kode-panel-row][data-kode-compact]:has([data-row-part=status]) [data-row-part=detail]{min-width:0}
+[data-kode-panel-row][data-kode-compact] [data-row-part=detail]{flex:1 1 0;min-width:3em}
 .kode-panel-detail{display:grid;gap:6px;padding:2px 8px 8px 32px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);min-width:0}
 [data-kode-panel-row] [data-row-part=icon]:has(>.kode-agent-avatar){width:auto;height:auto;flex:none}
 [data-kode-panel-row] .kode-agent-avatar{position:relative;overflow:visible}
 [data-kode-panel-row] .kode-agent-avatar img{border-radius:6px}
-[data-kode-panel-row] .kode-agent-avatar[data-avatar-state]::after{content:none}
+[data-kode-panel-row] .kode-agent-avatar[data-avatar-state]:not([data-avatar-state=running])::after{content:none}
 [data-kode-panel-row] [data-row-part=lines]{min-width:0}
 [data-kode-panel-row] [data-row-part=content],[data-kode-panel-row] [data-row-part=detail]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kode-session-identity{display:grid;min-width:0;padding:4px 0 8px;border-bottom:.5px solid var(--dsw-alias-border-l2);margin-bottom:2px}
@@ -3702,13 +3710,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-environment-handoff{flex:none}
 @container(max-width:256px){.kode-environment-handoff-label{display:none}}
 .kode-environment-project{min-width:0;margin-top:4px}
-.kode-environment-project[data-git]{padding:6px 2px 2px;background:var(--dsw-alias-interactive-bg-hover);border-radius:var(--dsw-radius-md)}
+.kode-environment-project[data-git]{display:grid;gap:0}
 .kode-environment-project[data-git] [data-session-panel-project] [data-row-part=content]{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.kode-environment-git{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:start;gap:8px;padding:2px 6px 2px;color:var(--dsw-alias-label-secondary)}
-.kode-environment-git>svg{margin-top:2px}
+.kode-environment-git{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:center;gap:8px;min-height:28px;padding:2px 6px;box-sizing:border-box;border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-secondary)}
+@media(hover:hover){.kode-environment-git:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.kode-environment-git:has(code:focus-visible){outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}
+.kode-environment-git>svg{margin:0 auto}
 .kode-environment-ref{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px;min-width:0}
 .kode-environment-ref code{display:block;flex:1 1 10ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;line-height:18px}
-.kode-environment-ref code:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color);outline-offset:1px}
+.kode-environment-ref code:focus-visible{outline:none}
 .kode-environment-kind{padding:0 4px;border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .kode-environment-project[data-git=worktree] .kode-environment-kind{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 13%,transparent);color:var(--dsw-alias-label-primary)}
 
@@ -3736,7 +3746,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-trigger{border-radius:var(--dsw-radius-sm);min-width:0;max-width:240px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:0;align-items:center;gap:4px;padding:0 4px 0 8px;font:inherit;font-size:13px;line-height:20px;display:inline-flex}
 .kode-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-trigger svg{flex:none}.kode-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.kode-trigger:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}.kode-agent-trigger{color:var(--dsw-alias-label-primary)}.kode-chevron-open{transform:rotate(180deg)}
 .kode-deployment-progress{height:4px;width:100%;overflow:hidden;border-radius:2px;background:var(--dsw-alias-border-l2)}.kode-deployment-progress>span{display:block;width:100%;height:100%;background:var(--dsw-alias-label-primary);transform-origin:left center;transition:transform 280ms cubic-bezier(.16,1,.3,1)}.kode-deployment-steps{list-style:none;padding:0;margin:20px 0;display:flex;flex-direction:column;gap:12px}.kode-deployment-steps li{display:flex;gap:12px;align-items:flex-start;font-size:13px;line-height:1.5}.kode-deployment-state{display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:20px}.kode-deployment-steps li[data-status=pending]{color:var(--dsw-alias-label-tertiary)}.kode-deployment-steps small{display:block;font-size:12px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
-.kode-unified-workspaces [data-kode-status-avatar]{position:relative;width:20px;height:20px;flex:0 0 20px}.kode-unified-workspaces [data-kode-status-avatar]>[data-state]{visibility:hidden}.kode-unified-workspaces [data-kode-status-avatar]>[data-state] *{animation:none}.kode-status-avatar-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}.kode-status-avatar-body{display:inline-flex;position:relative;width:20px;height:20px;flex:none}.kode-agent-avatar[data-avatar-state=running]::after,.kode-agent-avatar[data-avatar-state=awaiting]::after,.kode-agent-avatar[data-avatar-state=done]::after{content:"";position:absolute;inset:-2px;border:1.5px solid;border-radius:7px;pointer-events:none;opacity:.85;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-agent-avatar[data-avatar-state=running]::after{border-color:#5b8def}.kode-agent-avatar[data-avatar-state=awaiting]::after{border-color:#f0bd55}.kode-agent-avatar[data-avatar-state=done]::after{border-color:#65c799}.kode-agent-avatar[data-avatar-state=running]::before,.kode-agent-avatar[data-avatar-state=awaiting]::before,.kode-agent-avatar[data-avatar-state=done]::before{content:"";position:absolute;right:-1px;bottom:-1px;z-index:2;box-sizing:border-box;width:6px;height:6px;border:1px solid var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));border-radius:50%;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-agent-avatar[data-avatar-state=running]::before{background:#5b8def}.kode-agent-avatar[data-avatar-state=awaiting]::before{background:#f0bd55}.kode-agent-avatar[data-avatar-state=done]::before{background:#65c799}.kode-status-avatar-body::after{content:"";position:absolute;inset:-2px;border:1.5px solid;border-radius:7px;pointer-events:none;opacity:.85}.kode-status-avatar-body[data-status=ongoing]::after,.kode-status-avatar-body[data-status=awaiting]::after{display:none}.kode-status-avatar-body[data-status=done]::after{border-color:#65c799;opacity:.8;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-motion-paused .kode-status-avatar-body::after{animation-play-state:paused}@keyframes kode-avatar-status-pulse{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:.45;transform:scale(1.04)}}.kode-unified-workspaces [data-kode-workspace-status]{position:relative}.kode-workspace-status{position:absolute;right:-3px;bottom:-2px;z-index:2;box-sizing:border-box;width:10px;height:10px;border:2px solid var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));border-radius:50%}.kode-workspace-status[data-status=ongoing]{background:#5b8def;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=awaiting]{background:#f0bd55;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=done]{background:#65c799;opacity:.85;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-motion-paused .kode-workspace-status{animation-play-state:paused}@keyframes kode-workspace-status-pulse{0%,100%{opacity:1}50%{opacity:.55}}@media(prefers-reduced-motion:reduce){.kode-status-avatar-body::after,.kode-workspace-status,.kode-agent-avatar[data-avatar-state=running]::after,.kode-agent-avatar[data-avatar-state=running]::before,.kode-agent-avatar[data-avatar-state=awaiting]::after,.kode-agent-avatar[data-avatar-state=awaiting]::before,.kode-agent-avatar[data-avatar-state=done]::after,.kode-agent-avatar[data-avatar-state=done]::before{animation:none;opacity:.85}}
+.kode-unified-workspaces [data-kode-status-avatar]{position:relative;width:20px;height:20px;flex:0 0 20px}.kode-unified-workspaces [data-kode-status-avatar]>[data-state]{visibility:hidden}.kode-unified-workspaces [data-kode-status-avatar]>[data-state] *{animation:none}.kode-status-avatar-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}.kode-status-avatar-body{display:inline-flex;position:relative;width:20px;height:20px;flex:none}.kode-agent-avatar[data-avatar-state=awaiting]::after,.kode-agent-avatar[data-avatar-state=done]::after{content:"";position:absolute;inset:-2px;border:1.5px solid;border-radius:7px;pointer-events:none;opacity:.85;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}/* Running: a steady core stays legible on light and dark; only a small halo moves, never the avatar frame. */
+.kode-agent-avatar[data-avatar-state=running]::after{content:"";position:absolute;right:-2px;bottom:-2px;z-index:1;box-sizing:border-box;width:9px;height:9px;border-radius:50%;background:#3b82f6;pointer-events:none;animation:kode-avatar-running-halo 1600ms cubic-bezier(.2,.6,.4,1) infinite}
+@keyframes kode-avatar-running-halo{0%{opacity:.55;transform:scale(1)}80%,100%{opacity:0;transform:scale(2.3)}}.kode-agent-avatar[data-avatar-state=awaiting]::after{border-color:#f0bd55}.kode-agent-avatar[data-avatar-state=done]::after{border-color:#65c799}.kode-agent-avatar[data-avatar-state=running]::before,.kode-agent-avatar[data-avatar-state=awaiting]::before,.kode-agent-avatar[data-avatar-state=done]::before{content:"";position:absolute;right:-1px;bottom:-1px;z-index:2;box-sizing:border-box;width:6px;height:6px;border:1px solid var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));border-radius:50%;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-agent-avatar[data-avatar-state=running]::before{right:-2px;bottom:-2px;width:9px;height:9px;border-width:2px;background:#3b82f6;animation:none}.kode-agent-avatar[data-avatar-state=awaiting]::before{background:#f0bd55}.kode-agent-avatar[data-avatar-state=done]::before{background:#65c799}.kode-status-avatar-body::after{content:"";position:absolute;inset:-2px;border:1.5px solid;border-radius:7px;pointer-events:none;opacity:.85}.kode-status-avatar-body[data-status=ongoing]::after,.kode-status-avatar-body[data-status=awaiting]::after{display:none}.kode-status-avatar-body[data-status=done]::after{border-color:#65c799;opacity:.8;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-motion-paused .kode-status-avatar-body::after{animation-play-state:paused}@keyframes kode-avatar-status-pulse{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:.45;transform:scale(1.04)}}.kode-unified-workspaces [data-kode-workspace-status]{position:relative}.kode-workspace-status{position:absolute;right:-3px;bottom:-2px;z-index:2;box-sizing:border-box;width:10px;height:10px;border:2px solid var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));border-radius:50%}.kode-workspace-status[data-status=ongoing]{background:#3b82f6;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=awaiting]{background:#f0bd55;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=done]{background:#65c799;opacity:.85;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-motion-paused .kode-workspace-status{animation-play-state:paused}.kode-motion-paused .kode-agent-avatar::after{animation-play-state:paused}@keyframes kode-workspace-status-pulse{0%,100%{opacity:1}50%{opacity:.55}}@media(prefers-reduced-motion:reduce){.kode-agent-avatar[data-avatar-state=running]::after{content:none}.kode-status-avatar-body::after,.kode-workspace-status,.kode-agent-avatar[data-avatar-state=awaiting]::after,.kode-agent-avatar[data-avatar-state=awaiting]::before,.kode-agent-avatar[data-avatar-state=done]::after,.kode-agent-avatar[data-avatar-state=done]::before{animation:none;opacity:.85}}
 .kode-tool-action{flex:none;white-space:nowrap}.kode-tool-heading{width:100%;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px}.kode-tool-heading>svg{flex:none}.kode-tool-terminal{--dsh-content-font-size-secondary:12px;--dsh-content-font-delta-secondary:0px;font-size:12px}.kode-tool-terminal pre,.kode-tool-terminal code{font-size:12px;line-height:1.5}
 .kode-tool-summary{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .kode-status-dot{display:block;flex:none}.kode-deployment-steps li[data-status=running]>div>span{font-weight:500}.kode-deployment-steps li[data-status=done] .kode-deployment-state{animation:kode-step-complete 220ms cubic-bezier(.16,1,.3,1)}.kode-motion-paused .kode-status-dot *{animation-play-state:paused}@keyframes kode-step-complete{from{opacity:.35;transform:scale(.75)}to{opacity:1;transform:scale(1)}}
