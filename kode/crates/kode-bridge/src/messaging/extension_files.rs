@@ -375,6 +375,16 @@ fn referenced_json(path: &Path, reference: &str) -> Option<Value> {
     }
     optional_json(&file)
 }
+// Match a plugin MCP with the actual CLI registry without exposing its URL or headers.
+pub(super) fn mcp_endpoint(path: &Path, kind: &str, name: &str) -> Option<String> {
+    let manifest = referenced_json(path, &format!(".{kind}-plugin/plugin.json"))?;
+    let config = match manifest.get("mcpServers") {
+        Some(Value::String(file)) => referenced_json(path, file)?,
+        Some(servers) => servers.clone(),
+        None => referenced_json(path, ".mcp.json").or_else(|| referenced_json(path, "mcp.json"))?,
+    };
+    config.get("mcpServers").unwrap_or(&config)[name]["url"].as_str().map(str::to_owned)
+}
 fn mcp_preview(path: &Path, manifests: &[Value]) -> Value {
     let mut rows = BTreeMap::new();
     let mut referenced = false;
@@ -711,6 +721,13 @@ pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Optio
         copy_tree(&origin, &package, &mut 0, 0)?;
         None
     };
+    inspect_release(root, source, &release_id, revision)
+}
+
+pub fn inspect_release(root: &Path, source: &Value, release_id: &str, revision: Option<String>) -> Result<(Vec<Value>, Value, Option<String>, String, Vec<Value>)> {
+    let name = source["id"].as_str().filter(|s| id(s)).context("invalid source id")?;
+    uuid::Uuid::parse_str(release_id).context("invalid release")?;
+    let package = root.join("sources").join(name).join("releases").join(release_id).join("package");
     let package = fs::canonicalize(package)?;
     validate_tree(&package, &package, &mut 0, 0)?;
     let selected = fs::canonicalize(package.join(source["subdir"].as_str().unwrap_or(".")))?;
@@ -730,13 +747,31 @@ pub fn snapshot(root: &Path, source: &Value) -> Result<(Vec<Value>, Value, Optio
     {
         bail!("未找到 SKILL.md 或原生插件清单")
     }
+    let disabled = source["disabledPackages"].as_array();
+    let mut owners = Vec::new();
+    for pkg in &mut packages {
+        let path = PathBuf::from(pkg["path"].as_str().context("package path missing")?);
+        let key = safe_relative(path.strip_prefix(&package)?).context("invalid package path")?;
+        let enabled = !disabled.is_some_and(|rows| rows.iter().any(|s| s.as_str() == Some(&key)));
+        pkg["key"] = json!(key);
+        pkg["enabled"] = json!(enabled);
+        owners.push((path, enabled));
+    }
+    // Nested packages independently own their contents.
+    owners.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
+    let enabled = |row: &Value| row["path"].as_str().is_some_and(|p|
+        owners.iter().find(|(dir, _)| Path::new(p).starts_with(dir)).is_none_or(|(_, on)| *on));
+    skills.retain(enabled);
+    for entries in plugins.as_object_mut().unwrap().values_mut() {
+        entries.as_array_mut().unwrap().retain(enabled);
+    }
     for row in &mut packages {
         let path = PathBuf::from(row["path"].as_str().context("package preview path missing")?);
         row["path"] = json!(safe_relative(path.strip_prefix(&package)?).context("invalid package preview path")?);
         row["skills"].as_array_mut().unwrap().sort_by_key(|skill| skill["name"].as_str().unwrap_or("").to_string());
     }
     packages.sort_by_key(|row| row["path"].as_str().unwrap_or("").to_string());
-    Ok((skills, plugins, revision, release_id, packages))
+    Ok((skills, plugins, revision, release_id.to_string(), packages))
 }
 fn link_path(link: &Value, key: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(

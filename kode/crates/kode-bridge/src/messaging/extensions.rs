@@ -167,7 +167,7 @@ impl Extensions {
                 }
                 save(hub, &value)?;
             }
-            "sync-source" => {
+            action @ ("sync-source" | "set-package-enabled") => {
                 let id = input["id"].as_str().context("source identity required")?;
                 let index = value["sources"]
                     .as_array()
@@ -178,10 +178,26 @@ impl Extensions {
                 let before = value["sources"][index].clone();
                 let operation = (|| -> Result<()> {
                     let catalog = extension_targets::catalog(hub)?;
-                    let (skills, plugins, revision, release, packages) =
-                        files::snapshot(&self.root, &before)?;
+                    let mut config = before.clone();
+                    let (skills, plugins, revision, release, packages) = if action == "set-package-enabled" {
+                        let release = before["release"].as_str().context("sync this source first")?;
+                        if input["release"].as_str() != Some(release) { bail!("来源已更新，请刷新后重试。"); }
+                        let key = input["packageKey"].as_str().context("package key required")?;
+                        let enabled = input["enabled"].as_bool().context("enabled must be boolean")?;
+                        if !before["packages"].as_array().is_some_and(|rows| rows.iter().any(|p| p["path"].as_str() == Some(key))) {
+                            bail!("unknown package");
+                        }
+                        let mut disabled = before["disabledPackages"].as_array().cloned().unwrap_or_default();
+                        disabled.retain(|v| v.as_str() != Some(key));
+                        if !enabled { disabled.push(json!(key)); }
+                        config["disabledPackages"] = json!(disabled);
+                        files::inspect_release(&self.root, &config, release, before["revision"].as_str().map(str::to_owned))?
+                    } else {
+                        files::snapshot(&self.root, &config)?
+                    };
                     let (previous, next) =
                         files::plan_links(&self.root, &self.home, &before, &skills, &catalog.paths)?;
+                    value["sources"][index]["disabledPackages"] = config["disabledPackages"].clone();
                     value["sources"][index]["syncedTargets"] = before["targets"].clone();
                     value["sources"][index]["links"] = json!(next);
                     value["sources"][index]["skills"] =

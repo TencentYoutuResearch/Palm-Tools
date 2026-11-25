@@ -984,6 +984,9 @@ async fn agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Query(query):Query<A
 }
 async fn change_agent_hub(State(hub):State<Arc<Hub>>, h:HeaderMap, Json(input):Json<serde_json::Value>)->Result<Json<serde_json::Value>>{
     admin(&hub,&h)?;
+    if matches!(input["action"].as_str(), Some("mcp-status" | "mcp-login")) {
+        return Ok(Json(super::extension_auth::execute(&hub, &input).await?));
+    }
     Ok(Json(tokio::task::spawn_blocking(move||hub.extensions.change(&hub,input)).await.map_err(anyhow::Error::from)??))
 }
 async fn handoff(
