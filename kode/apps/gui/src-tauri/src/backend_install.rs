@@ -64,6 +64,10 @@ fn unix_recipes(key: &str) -> &'static [InstallRecipe] {
         "amp" => &[r!("npm", "npm install -g @sourcegraph/amp")],
         "cursor" => &[r!("curl", "curl https://cursor.com/install -fsS | bash")],
         "copilot" => &[r!("npm", "npm install -g @github/copilot")],
+        "antigravity" => &[r!(
+            "curl",
+            "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+        )],
         "kimi" => &[r!("curl", "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash")],
         "pi" => &[r!("npm", "npm install -g @mariozechner/pi-coding-agent")],
         "kiro" => &[r!("curl", "curl -fsSL https://cli.kiro.dev/install | bash")],
@@ -90,6 +94,10 @@ fn windows_recipes(key: &str) -> &'static [InstallRecipe] {
             "irm 'https://cursor.com/install?win32=true' | iex",
         )],
         "copilot" => &[r!("npm", "npm install -g @github/copilot")],
+        "antigravity" => &[r!(
+            "powershell",
+            "irm https://antigravity.google/cli/install.ps1 | iex"
+        )],
         "kimi" => &[r!("powershell", "irm https://code.kimi.com/kimi-code/install.ps1 | iex")],
         "pi" => &[r!("npm", "npm install -g @mariozechner/pi-coding-agent")],
         "droid" => &[r!(
@@ -479,6 +487,7 @@ mod tests {
             "amp",
             "cursor",
             "copilot",
+            "antigravity",
             "kimi",
             "pi",
             "kiro",
@@ -554,6 +563,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn antigravity_uses_official_installer_scripts() {
+        let unix = unix_recipes("antigravity");
+        assert_eq!(unix.len(), 1, "antigravity should have one unix recipe");
+        assert_eq!(unix[0].requires, "curl");
+        assert_eq!(
+            unix[0].script,
+            "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+        );
+
+        let windows = windows_recipes("antigravity");
+        assert_eq!(windows.len(), 1, "antigravity should have one windows recipe");
+        assert_eq!(windows[0].requires, "powershell");
+        assert_eq!(
+            windows[0].script,
+            "irm https://antigravity.google/cli/install.ps1 | iex"
+        );
+    }
+
     /// gui 层矩阵：PATH 探测白名单必须恰好覆盖 `Config::default()` 的 17 个
     /// 内置 backend(数据源一致,新增 backend 忘记登记立刻失败)。
     #[test]
@@ -573,8 +601,8 @@ mod tests {
         assert_eq!(candidates.len(), 17);
     }
 
-    /// gui 层矩阵：安装配方只给有官方安装器的 12 个 key;其余 5 个
-    /// (claude-internal / tcodex / tclaude / grok / antigravity)两个平台都
+    /// gui 层矩阵：安装配方只给有官方安装器的 13 个 key;其余 4 个
+    /// (claude-internal / tcodex / tclaude / grok)两个平台都
     /// 留空 → UI 提示手动安装。与 kode-core 的能力分组呼应。
     #[test]
     fn install_recipes_cover_exactly_the_official_installers() {
@@ -584,7 +612,6 @@ mod tests {
             "tcodex",
             "tclaude",
             "grok",
-            "antigravity",
         ]
         .into_iter()
         .collect();
@@ -603,9 +630,9 @@ mod tests {
             .collect();
         let expected: BTreeSet<&str> = candidates.difference(&manual).copied().collect();
         assert_eq!(with_recipe, expected);
-        assert_eq!(with_recipe.len(), 12);
+        assert_eq!(with_recipe.len(), 13);
         // ACP-capable backends have an official installer on every platform.
-        for key in ["codebuddy", "opencode"] {
+        for key in ["antigravity", "codebuddy", "opencode"] {
             assert!(!unix_recipes(key).is_empty(), "{key} unix installer");
             assert!(!windows_recipes(key).is_empty(), "{key} windows installer");
         }

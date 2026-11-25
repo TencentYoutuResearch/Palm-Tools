@@ -106,9 +106,9 @@ pub(crate) const KNOWN_CANDIDATES: &[KnownBackend] = &[
     KnownBackend {
         key: "antigravity",
         command: "agy",
-        suggested_setup_style: "none",
+        suggested_setup_style: "json-merge",
         suggested_setup_cli: "",
-        suggested_json_path: None,
+        suggested_json_path: Some("~/.gemini/config/mcp_config.json"),
     },
     KnownBackend {
         key: "kimi",
@@ -600,6 +600,21 @@ mod tests {
         assert_eq!(cursor.suggested_setup_style, "json-merge");
         assert_eq!(cursor.suggested_setup_cli, "");
         assert_eq!(cursor.suggested_json_path, Some("~/.cursor/mcp.json"));
+    }
+
+    #[test]
+    fn antigravity_candidate_uses_global_json_mcp_config() {
+        let agy = KNOWN_CANDIDATES
+            .iter()
+            .find(|candidate| candidate.key == "antigravity")
+            .expect("antigravity candidate");
+        assert_eq!(agy.command, "agy");
+        assert_eq!(agy.suggested_setup_style, "json-merge");
+        assert_eq!(agy.suggested_setup_cli, "");
+        assert_eq!(
+            agy.suggested_json_path,
+            Some("~/.gemini/config/mcp_config.json")
+        );
     }
 
     #[test]
